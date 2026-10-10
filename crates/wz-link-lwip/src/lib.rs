@@ -872,10 +872,37 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     /// Takes `&self`: a send reads the pcb and touches nothing the socket
     /// owns, so it can run while a received datagram is lent out of the
     /// queue ([`peek_recv`](Self::peek_recv)).
+    ///
+    /// The bytes are copied once, into the buffer lwIP sends from. With a
+    /// transmit pool installed ([`tx_pool`], the `tx-pool` feature) that buffer
+    /// is a slot of the pool when the datagram fits one, so a MAC that reads in
+    /// place reads it there, as it reads a frame encoded into a lent slot
+    /// ([`alloc_tx_payload`](Self::alloc_tx_payload)): a sender that has its
+    /// bytes already (a session's keep-alive, close and handshake, a flushed
+    /// batch, a fragment) costs the one copy here and no second one into the
+    /// MAC's ring. A datagram past a slot, or a dry pool, or none, takes a pbuf
+    /// of lwIP's heap as before.
     pub fn send_to(&self, dst_addr: u32, dst_port: u16, payload: &[u8]) -> Result<(), LinkError> {
-        let len = payload.len().min(N);
+        let payload = &payload[..payload.len().min(N)];
+        #[cfg(feature = "tx-pool")]
+        if let Some(slot) = u16::try_from(payload.len())
+            .ok()
+            .filter(|len| *len > 0)
+            .and_then(TxPayload::from_pool)
+        {
+            let (at, capacity) = slot.storage();
+            debug_assert!(
+                capacity == payload.len(),
+                "a slot is lent at the length asked"
+            );
+            // SAFETY: the slot was lent for exactly `payload.len()` writable bytes
+            // at `at`, which nothing else touches until it is sent or dropped, and
+            // `payload` is a separate borrow.
+            unsafe { core::ptr::copy_nonoverlapping(payload.as_ptr(), at, payload.len()) };
+            return self.send_tx_payload(slot, payload.len(), dst_addr, dst_port);
+        }
         // SAFETY: the pcb is valid for the socket's life (removed in Drop).
-        unsafe { send_datagram(self.inner.pcb.as_ptr(), dst_addr, dst_port, &payload[..len]) }
+        unsafe { send_datagram(self.inner.pcb.as_ptr(), dst_addr, dst_port, payload) }
     }
 
     /// ARCHITECTURE section 9.1 — a payload buffer for a sender to write the
@@ -897,12 +924,8 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     pub fn alloc_tx_payload(&self, want: usize) -> Option<TxPayload> {
         #[cfg(feature = "tx-pool")]
         if let Ok(len @ 1..) = u16::try_from(want.min(N).min(tx_pool::capacity())) {
-            if let Some((p, lent)) = tx_pool::lend(len) {
-                return Some(TxPayload {
-                    p,
-                    capacity: usize::from(len),
-                    origin: Origin::Slot(Some(lent)),
-                });
+            if let Some(slot) = TxPayload::from_pool(len) {
+                return Some(slot);
             }
         }
         let len = u16::try_from(want.min(N)).ok()?;
@@ -1116,6 +1139,21 @@ enum Origin {
 }
 
 impl TxPayload {
+    /// A slot of the installed transmit pool, as a payload of exactly `len`
+    /// bytes, or `None` when no pool is installed, every slot is out, or `len`
+    /// does not fit a slot. The one place a payload is lent from the pool, for
+    /// both of the socket's sends: the lend a sender encodes into and the bytes a
+    /// sender hands over.
+    #[cfg(feature = "tx-pool")]
+    fn from_pool(len: u16) -> Option<Self> {
+        let (p, lent) = tx_pool::lend(len)?;
+        Some(Self {
+            p,
+            capacity: usize::from(len),
+            origin: Origin::Slot(Some(lent)),
+        })
+    }
+
     /// The first byte of the payload area and how many bytes it holds. Valid until
     /// this value is sent or dropped; the caller writes into it and nothing else
     /// touches it meanwhile.

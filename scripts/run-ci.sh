@@ -10982,6 +10982,15 @@ layer_c1m_session_lwip() {
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
             --quiet -- -D warnings) || return 1
+    # ARCHITECTURE section 9.1 — the keep-alive cadence with both handshake
+    # halves, the combination an MCU node that keeps a session up is built with,
+    # and the only one here that compiles `tx_pool_session_tests`: two sessions
+    # over the lwIP loopback, every frame counted against a transmit pool. 10 =
+    # the default leg's 9 + that one, the number this command PRINTED.
+    _runci_guarded_test "C1m keep-alive tx pool" 10 \
+        cargo test -p wz-session-lwip \
+        --features transport-keepalive,session-unicast-open,session-unicast-accept \
+        --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-mcu --all-targets \
@@ -11014,6 +11023,9 @@ layer_c1m_session_lwip() {
             --features transport-multicast,transport-fragmentation,codec-push --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features transport-keepalive,session-unicast-open,session-unicast-accept \
             --quiet -- -D warnings)
 }
 

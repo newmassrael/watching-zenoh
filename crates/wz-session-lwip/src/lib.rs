@@ -80,6 +80,16 @@ pub mod session_drive;
     feature = "codec-push"
 ))]
 mod two_session_tests;
+// ARCHITECTURE section 9.1 — which frames of an established session leave from a
+// transmit pool slot: the handshake and the keep-alive cadence, over the real
+// lwIP loopback, counted by the pool against the sessions' own traces.
+#[cfg(all(
+    test,
+    feature = "transport-keepalive",
+    feature = "session-unicast-open",
+    feature = "session-unicast-accept"
+))]
+mod tx_pool_session_tests;
 
 pub use driver::LwipUdpDriver;
 pub use links::LwipLinks;

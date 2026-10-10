@@ -270,12 +270,22 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # multicast_drive) share ONE process-global lwip_init + multicast-netif
 # setup. Dev-only: the production lib build (which already deps wz-link-lwip
 # above without this feature) never pulls the harness.
-wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support"] }
+#
+# ARCHITECTURE section 9.1 — and the transmit pool (`tx-pool`), so a test can
+# install one and count which of a session's frames leave from its slots
+# (`tx_pool_session_tests`). With no pool installed, which is every other test,
+# the feature changes nothing.
+wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support", "tx-pool"] }
 # Round 3170 follow-up — this crate's lend tests (driver.rs, session_drive.rs)
 # drive a session that must TRY a lend, which wz-session-core compiles only
 # with `transport-tx-lend`. A dev-dependency turns it on for the test build
 # alone: the library a multicast image links carries no lend attempt.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend"] }
+#
+# ARCHITECTURE section 9.1 — and `codec-keep-alive`, so a test that runs two
+# sessions through their keep-alive cadence (`tx_pool_session_tests`) decodes the
+# keep-alive the other side sends, as every image that turns `transport-keepalive`
+# on also does. It implies nothing else, and no other test here sends one.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend", "codec-keep-alive"] }
 
 # The inbound frame path counted with a counting allocator: a real lwIP session
 # pair, a frame of N Puts to a subscriber. It needs both handshake halves and

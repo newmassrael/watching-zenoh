@@ -24,6 +24,16 @@
 //! | it left by a copy, or reached no MAC | `un_arm_tx` then `pool_return` |
 //! | it was lent and never sent | `pool_return` (cpu-mut to free) |
 //!
+//! A datagram a sender hands over as bytes
+//! ([`LwipUdpSocket::send_to`](crate::LwipUdpSocket::send_to)) is lent a slot
+//! the same way and copied into it: a session encodes only its data frames into
+//! a lent slot, and its keep-alives, closes, handshake frames, flushed batches
+//! and fragments arrive as bytes. Before that send drew on the pool, each of
+//! them left from a pbuf of lwIP's heap and the MAC copied it into its ring, so
+//! the steady traffic of an idle session never touched the pool. What still
+//! leaves from lwIP's heap is what lwIP sends itself (ARP, ICMP), a datagram past
+//! a slot, and anything sent while the pool is dry.
+//!
 //! The address a MAC is handed is checked against the pool's own answer
 //! (`dma_armed_tx_ptr`), so a slot is started only when a piece of the frame the
 //! MAC queued lies inside it.

@@ -1076,6 +1076,96 @@ mod tests {
         drop(pool);
     }
 
+    /// A datagram handed over as BYTES (`send_to`, the send every frame takes that
+    /// the session did not encode into a lent slot: the keep-alive, the close, the
+    /// handshake, a flushed batch, a fragment) leaves from a pool slot too, and the
+    /// MAC reads it in place. Before, it went out of a pbuf of lwIP's heap, which
+    /// the MAC cannot read in place and copied into its ring: on the kit every
+    /// keep-alive of an idle session was a copy while the pool sat free.
+    #[cfg(feature = "tx-pool")]
+    #[test]
+    fn a_datagram_sent_as_bytes_leaves_from_a_pool_slot_read_in_place() {
+        use crate::tx_pool::{slot_of, stats, SlotState, TestPool};
+
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Queued);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+        let pool = TestPool::install();
+        let before = rig.gathered.borrow().len();
+
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, &[0x04])
+            .expect("send");
+
+        let gathered = rig.gathered.borrow();
+        let frame = gathered.get(before).expect("the datagram reached the MAC");
+        std::assert_eq!(udp_of(&frame.joined), Some((7601, &[0x04u8][..])));
+        std::assert_eq!(frame.pieces.len(), 1, "headers and payload are one piece");
+        let (start, len) = frame.pieces[0];
+        let (idx, state) = slot_of(start as *const u8).expect("the piece lies in a slot");
+        std::assert_eq!(
+            slot_of((start + len - 1) as *const u8).map(|(i, _)| i),
+            Some(idx),
+            "the whole frame lies in that one slot"
+        );
+        std::assert_eq!(state, SlotState::DmaBusyTx, "the bus master's while queued");
+        let cookie = frame.cookie;
+        drop(gathered);
+        let s = stats().expect("installed");
+        std::assert_eq!((s.lent, s.started, s.completed, s.unarmed), (1, 1, 0, 0));
+
+        rig.released.borrow_mut().push(cookie);
+        rig.node.reap_tx();
+        let s = stats().expect("installed");
+        std::assert_eq!((s.completed, s.unarmed), (1, 0));
+        std::assert_eq!(s.free as usize, crate::session_tx_pool_mcu::SLOT_COUNT);
+        std::assert!(
+            rig.flat.borrow().is_empty(),
+            "nothing took the copying door"
+        );
+        drop(pool);
+    }
+
+    /// A datagram larger than a slot carries is not cut to fit one: it leaves from
+    /// lwIP's heap whole, as it did before there was a pool, and takes no slot.
+    #[cfg(feature = "tx-pool")]
+    #[test]
+    fn a_datagram_past_a_slot_leaves_whole_from_lwips_heap() {
+        use crate::tx_pool::{stats, TestPool};
+
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Queued);
+        // A socket wider than a slot whatever the session socket's build-time
+        // width is (the slim profile's is narrower than a slot).
+        let mut socket = crate::LwipUdpSocket::<2048, 4>::bind(&link, 7602).expect("bind");
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+        let pool = TestPool::install();
+        let before = rig.gathered.borrow().len();
+        let past = crate::tx_pool::capacity() + 1;
+        let big: Vec<u8> = (0..past).map(|i| i as u8).collect();
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, &big)
+            .expect("send");
+        let s = stats().expect("installed");
+        std::assert_eq!(s.lent, 0, "a datagram no slot holds takes none");
+        let gathered = rig.gathered.borrow();
+        let frame = gathered.get(before).expect("the datagram reached the MAC");
+        std::assert_eq!(
+            udp_of(&frame.joined),
+            Some((7601, &big[..])),
+            "whole, not cut to a slot"
+        );
+        drop(gathered);
+        drop(pool);
+    }
+
     /// A frame the MAC sent from a COPY never had its slot read by the bus master:
     /// the slot is un-armed and back on the freelist as soon as lwIP lets go, and
     /// the pool counts it as such and not as a transfer.
