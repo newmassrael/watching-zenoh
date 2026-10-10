@@ -44,6 +44,11 @@ use wz_integration_tests::common::{
     zenoh_pico_library_dir, ChildGuard,
 };
 
+/// How long a demo holds its burst after Established, in milliseconds, so the driver's
+/// subscription is declared first (see `spawn_demo`). The driver waits up to ~8 s for its five
+/// samples, so a one-second hold leaves the wait nearly untouched.
+const PUBLISH_HOLD_MS: &str = "1000";
+
 /// The driver. `argv[1]` is the endpoint it listens at and `argv[2]` the endpoint it dials.
 ///
 /// Every line is one observation, and nothing random is printed.
@@ -185,6 +190,16 @@ fn wait_for_any_marker<'n>(
 /// A wz-ap-demo that publishes five Puts of `value` under `demo/rt/<value>` and subscribes to
 /// `demo/tx/**`. `mode_args` carries the role: `--connect <ep>` to dial the driver, `--listen
 /// <host:port>` to be dialled. Its stderr is the caller's, so what it received can be counted.
+///
+/// The burst is HELD (`--publish-after-ms`, a pure delay) so the driver's subscription is declared
+/// before the first Put leaves. Without it the demo bursts the instant it reaches Established,
+/// which can precede the driver's `z_declare_subscriber`; a Put that reaches a peer with no
+/// subscription yet is dropped, and the driver's count reads 4 where it waits for 5. Measured on
+/// this test before the hold: 7 of 12 runs on one tree and 4 of 10 on the tree before it failed
+/// with exactly `from-the-dialled samples=4`, and the real zenoh-pico arm read 5 only because its
+/// open returns later. The hold is generous and not tight (it costs a second and removes a
+/// race), the way `wz_matching_status_driven_by_pico_zsub.rs` holds its own burst for the same
+/// reason.
 fn spawn_demo(demo: &Path, mode_args: &[&str], value: &str, stderr: File, arm: &str) -> ChildGuard {
     ChildGuard::wrap(
         format!("{arm} demo {value}"),
@@ -192,6 +207,7 @@ fn spawn_demo(demo: &Path, mode_args: &[&str], value: &str, stderr: File, arm: &
             .args(mode_args)
             .args(["--key", "demo/tx/**"])
             .args(["--publish", &format!("demo/rt/{value}"), "--value", value])
+            .args(["--publish-after-ms", PUBLISH_HOLD_MS])
             .env("RUST_LOG", demo_log_filter())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
