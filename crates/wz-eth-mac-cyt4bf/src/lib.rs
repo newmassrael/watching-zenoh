@@ -262,14 +262,20 @@ pub enum MdcDiv {
     By224 = 7,
 }
 
-/// The AMBA burst the DMA attempts.
+/// The AMBA burst the DMA attempts: `DMA_CONFIG.AMBA_BURST_LENGTH`, bits 4:0.
+///
+/// The values are the PDL core driver's encodings of the field (`edd_int.h`,
+/// `CEDI_AMBD_BURST_LEN_*`); `cy_ethif.h` documents what each one asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum DmaBurst {
-    /// Always single beats: slowest, and valid on any bus.
+    /// Always single beats.
     Single = 0x01,
+    /// Bursts of up to four beats: the field's reset value.
     Incr4 = 0x04,
+    /// Bursts of up to eight beats.
     Incr8 = 0x08,
+    /// Bursts of up to sixteen beats.
     Incr16 = 0x10,
 }
 
@@ -282,6 +288,15 @@ pub struct Config {
     /// The default is the slowest divider, which is under 2.5 MHz for any bus
     /// clock up to 560 MHz; a board that wants faster scans names its own.
     pub mdc_div: MdcDiv,
+    /// The default is [`DmaBurst::Incr4`], the value the block resets to, so the
+    /// default leaves the field as the hardware holds it. Three sources agree on
+    /// that value and none recommends another for this chip: the PDL core driver
+    /// states it as the field's reset (`emac_regs_macro.h`), a CYT4BF8CEE kit read
+    /// `DMA_CONFIG` as `0x0018_0704` before any driver code ran, and Infineon's
+    /// Ethernet connection manager for KIT_T2G-B-H_LITE configures it
+    /// (`CY_ETHIF_DMA_DBUR_LEN_4`). The kit has run this driver with
+    /// [`DmaBurst::Single`]; INCR4 has not yet run on silicon under it. Single
+    /// beats stay selectable for a board that has a reason to want them.
     pub dma_burst: DmaBurst,
     /// Accept every multicast frame (the hash filter all ones). A node that does
     /// zenoh multicast scouting needs it; a unicast-only node can refuse it.
@@ -291,14 +306,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// External reference clock, the slowest MDC, single-beat DMA, all
-    /// multicast accepted, PHY found by scan.
+    /// External reference clock, the slowest MDC, the reset DMA burst (INCR4),
+    /// all multicast accepted, PHY found by scan.
     pub const fn new(mac_address: [u8; 6]) -> Self {
         Self {
             mac_address,
             ref_clock: RefClock::External,
             mdc_div: MdcDiv::By224,
-            dma_burst: DmaBurst::Single,
+            dma_burst: DmaBurst::Incr4,
             accept_all_multicast: true,
             phy_address: None,
         }

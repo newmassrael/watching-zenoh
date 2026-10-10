@@ -646,7 +646,7 @@ fn init_programs_the_block_in_order_and_points_the_dma_at_the_rings() {
     );
 
     let dma = log[position(log, DMA_CONFIG, 0)].1;
-    assert_eq!(dma & 0x1F, DmaBurst::Single as u32);
+    assert_eq!(dma & 0x1F, DmaBurst::Incr4 as u32, "the reset burst");
     assert_eq!(
         (dma >> DMACFG_RX_BUF_SIZE_POS) & 0xFF,
         24,
@@ -2424,8 +2424,8 @@ fn new_replaces_only_the_fields_it_names_in_the_registers_it_writes_whole() {
     let mut multicast_refused = Config::new(MAC);
     multicast_refused.accept_all_multicast = false;
     multicast_refused.mdc_div = MdcDiv::By64;
-    // INCR4 is the kit's reset burst: naming it changes nothing.
-    multicast_refused.dma_burst = DmaBurst::Incr4;
+    // Single beats stay selectable: they replace the reset burst, a named field.
+    multicast_refused.dma_burst = DmaBurst::Single;
     let mut wide_burst = Config::new(MAC);
     wide_burst.dma_burst = DmaBurst::Incr16;
     wide_burst.mdc_div = MdcDiv::By32;
@@ -2506,4 +2506,28 @@ fn new_replaces_only_the_fields_it_names_in_the_registers_it_writes_whole() {
             );
         }
     }
+}
+
+/// `Config::new` asks for the burst the kit's `DMA_CONFIG` held before the driver
+/// ran, so the default changes one field of that register: errored frames are
+/// discarded by the controller, which the driver names on purpose. Every other
+/// value it writes there (both packet buffer sizes and the receive buffer size)
+/// is the reset value already, so a default burst other than the reset's shows
+/// here as a second changed field.
+#[test]
+fn the_default_dma_config_differs_from_the_reset_only_in_discard_on_error() {
+    let config = Config::new(MAC);
+    assert_eq!(
+        config.dma_burst as u32,
+        (RESET_DMA_CONFIG >> DMACFG_AMBA_BURST_POS) & 0x1F,
+        "the default burst is the reset burst"
+    );
+    let (mac, model) = rig_with::<RX, TX>(&config);
+    let _mac = mac.expect("a valid configuration");
+    let written = model.borrow().reg(DMA_CONFIG);
+    assert_eq!(
+        written ^ RESET_DMA_CONFIG,
+        DMACFG_FORCE_DISCARD_ON_ERR,
+        "DMA_CONFIG {written:#010x} against the reset {RESET_DMA_CONFIG:#010x}"
+    );
 }
