@@ -102,14 +102,12 @@ CLASSES = ("listen-picker", "not-a-port", "bind-probe", "held-elsewhere")
 # nine members, three of them dial targets that must refuse -- R2778's missed
 # replay site, and a reconnect test whose peer went away and came back -- now
 # holding their number through `refusing_port`, and so no longer members.
+#
+# The drive.rs registry test's own probe left this table when the test moved
+# to `free_port`: its reason said a loser of the race for a number is retried,
+# and on Windows there is no loser, because a wz listener sets SO_REUSEADDR and
+# both binds succeed (hosted Platform run 38013268899).
 CLASSIFIED: dict[str, tuple[str, str]] = {
-    "crates/wz-capi-core/src/drive.rs::an_open_that_dialled_a_peer_returns_with_its_face_in_the_registry::probe": (
-        "listen-picker",
-        "the number is picked for a LISTEN-role peer opened in the same call to "
-        "bind itself; a loser of the race for it is retried (an open that failed "
-        "to bind loops to a fresh number), and the dialler only ever dials a "
-        "peer that did bind, so no dial depends on the number staying refused",
-    ),
     "crates/wz-integration-tests/src/lib.rs::pick::listener": (
         "listen-picker",
         "PortGuard::pick reserves a number for a CHILD to `--listen` on (zenohd, "

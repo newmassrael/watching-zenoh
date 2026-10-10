@@ -178,5 +178,16 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 wz-codecs = { path = "../wz-codecs", default-features = false }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 
+[dev-dependencies]
+# For `free_port()`, the workspace's one source of a loopback port no other caller in the
+# process has been given. The drive tests' own bind-read-drop probe let two of their threads be
+# handed one number; on Windows both listeners then bind it, because a wz listener sets
+# SO_REUSEADDR as upstream's does and that option lets a second socket bind a port a live
+# listener holds there. A dial can then be accepted by the other thread's listener, whose
+# teardown takes the face down before the test reads it: the reading of the 1 of 1200 empty
+# registries hosted Platform run 38013268899 counted. Already in the graph of both C ABI crates'
+# tests; it adds no new crate and no wz-runtime-tokio feature to `cargo test -p wz-capi-core`.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+
 [lints]
 workspace = true

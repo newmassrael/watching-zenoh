@@ -2823,6 +2823,7 @@ dependencies = [
  "wz-routing-graph",
  "wz-runtime-core",
  "wz-runtime-tokio",
+ "wz-runtime-tokio-test-support",
 ]
 
 [[package]]

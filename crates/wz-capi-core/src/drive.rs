@@ -3470,6 +3470,17 @@ mod tests {
     /// registration it read an empty registry on 1160 of 1200 opens. A C caller's own
     /// thread starts and its own calls take longer than that read, which is why the hang it
     /// caused was one run in a hundred and not one in one.
+    ///
+    /// Each round's port is one no other round in this process was given, and the face is
+    /// checked to be to THIS round's listener. A port picked by binding and letting go can be
+    /// handed to two rounds at once. Where the second listener's bind is refused (Linux) that
+    /// round retries; on Windows both binds succeed, because a wz listener sets SO_REUSEADDR as
+    /// upstream's does and that option lets a second socket bind a port a live listener holds.
+    /// A dial can then be accepted by the other round's listener, whose teardown takes the face
+    /// down before this round reads. The open is released only once its face is registered, so
+    /// a face that left the registry is the route to an empty read, and that is the reading of
+    /// the 1 of 1200 hosted Platform run 38013268899 counted on Windows. A face to another
+    /// listener is counted apart, so a shared port that survives is reported as what it is.
     #[test]
     fn an_open_that_dialled_a_peer_returns_with_its_face_in_the_registry() {
         const THREADS: usize = 8;
@@ -3477,43 +3488,50 @@ mod tests {
         let workers: Vec<_> = (0..THREADS)
             .map(|_| {
                 std::thread::spawn(|| {
-                    let mut empty = 0usize;
+                    let (mut empty, mut foreign) = (0usize, 0usize);
                     for _ in 0..ROUNDS_PER_THREAD {
                         // A port the listener's own bind chooses would need the listen role to
-                        // report it; this one is picked and let go, and a loser of the race for it
-                        // is retried, which is not what is under test.
+                        // report it. This one no other caller in the process was given; a process
+                        // outside this one can still take it first, and that round is retried.
                         let (listener, endpoint) = loop {
-                            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
                             let endpoint = format!(
                                 "tcp/127.0.0.1:{}",
-                                probe.local_addr().expect("addr").port()
+                                wz_runtime_tokio_test_support::free_port()
                             );
-                            drop(probe);
                             if let Ok(listener) = open_peer(Vec::new(), vec![endpoint.clone()]) {
                                 break (listener, endpoint);
                             }
                         };
                         let dialler =
                             open_peer(vec![endpoint], Vec::new()).expect("the dial opens");
-                        if dialler.shared.face_sessions_with_wake().is_empty() {
+                        let faces = dialler.shared.face_sessions_with_wake();
+                        let ours = listener.zid();
+                        if faces.is_empty() {
                             empty += 1;
+                        } else if !faces.iter().any(|(session, _)| {
+                            session.actions().peer_zid().as_deref() == Some(&ours[..])
+                        }) {
+                            foreign += 1;
                         }
                         drop(dialler);
                         drop(listener);
                     }
-                    empty
+                    (empty, foreign)
                 })
             })
             .collect();
-        let empty: usize = workers
+        let (empty, foreign) = workers
             .into_iter()
             .map(|worker| worker.join().expect("a worker panicked"))
-            .sum();
+            .fold((0, 0), |(e, f), (we, wf)| (e + we, f + wf));
+        let opens = THREADS * ROUNDS_PER_THREAD;
         assert_eq!(
-            empty,
-            0,
-            "{empty} of {} opens returned before the face they dialled was in the registry",
-            THREADS * ROUNDS_PER_THREAD
+            empty, 0,
+            "{empty} of {opens} opens returned before the face they dialled was in the registry"
+        );
+        assert_eq!(
+            foreign, 0,
+            "{foreign} of {opens} dials were accepted by another round's listener on the same port"
         );
     }
 }
