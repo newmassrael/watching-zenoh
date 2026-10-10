@@ -11023,6 +11023,22 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation,wz-session-core/bounded-heapless \
         --test rx_frame_allocations --quiet || return 1
+    # B3 — the query and reply planes read in place (`mod query_and_reply`,
+    # gated on `query-queryable`): a Response costs the heap nothing, a Request
+    # only the queryable matcher's growable scratch; the copying leg is the
+    # instrument's control. 6, 6 and 5 = what each command PRINTED.
+    _runci_guarded_test "C1m rx query in place" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx query in place fixed" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable,wz-session-core/bounded-heapless \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx query copying" 5 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,query-queryable \
+        --test rx_frame_allocations --quiet || return 1
     # Clause (4) of runtime-zero-copy -- the library's own tests on `rx-in-place`,
     # which hold a lent frame in the session socket: one of them reads the
     # datagram the dispatch is handed in the MAC's own buffer, and no leg above
@@ -11042,6 +11058,9 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable \
             --quiet -- -D warnings) || return 1
     # ARCHITECTURE section 9.1 — the keep-alive cadence with both handshake
     # halves, the combination an MCU node that keeps a session up is built with,

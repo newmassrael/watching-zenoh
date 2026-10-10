@@ -277,20 +277,14 @@ impl NetworkMessage {
             #[cfg(feature = "codec-request")]
             Self::Request(request) => {
                 use wz_codecs::request::RequestOwnedVariant as B;
-                then_judge(
-                    judge_chain(C::Network(N::Request), request.extensions.as_deref()),
-                    || match &request.body {
-                        B::CodecZenohMsgPut(put) => {
-                            judge_chain(C::Zenoh(Z::Put), put.extensions.as_deref())
-                        }
-                        B::CodecZenohMsgDel(del) => {
-                            judge_chain(C::Zenoh(Z::Del), del.extensions.as_deref())
-                        }
-                        B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
-                            judge_chain(C::Zenoh(Z::Query), query.extensions.as_deref())
-                        }
-                    },
-                )
+                let body = match &request.body {
+                    B::CodecZenohMsgPut(put) => RequestBodyChain::Put(put.extensions.as_deref()),
+                    B::CodecZenohMsgDel(del) => RequestBodyChain::Del(del.extensions.as_deref()),
+                    B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
+                        RequestBodyChain::Query(query.extensions.as_deref())
+                    }
+                };
+                judge_request_chains(request.extensions.as_deref(), body)
             }
             #[cfg(feature = "codec-push")]
             Self::Push(push) => {
@@ -307,25 +301,23 @@ impl NetworkMessage {
             Self::Response(response) => {
                 use wz_codecs::reply::ReplyOwnedVariant as R;
                 use wz_codecs::response::ResponseOwnedVariant as B;
-                then_judge(
-                    judge_chain(C::Network(N::Response), response.extensions.as_deref()),
-                    || match &response.body {
-                        B::CodecZenohReply(reply) | B::Default { body: reply, .. } => then_judge(
-                            judge_chain(C::Zenoh(Z::Reply), reply.extensions.as_deref()),
-                            || match &reply.body {
-                                R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
-                                    judge_chain(C::Zenoh(Z::Put), put.extensions.as_deref())
-                                }
-                                R::CodecZenohMsgDel(del) => {
-                                    judge_chain(C::Zenoh(Z::Del), del.extensions.as_deref())
-                                }
-                            },
-                        ),
-                        B::CodecZenohErr(err) => {
-                            judge_chain(C::Zenoh(Z::Err), err.extensions.as_deref())
+                let body = match &response.body {
+                    B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
+                        let (data, chain) = match &reply.body {
+                            R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
+                                (Z::Put, put.extensions.as_deref())
+                            }
+                            R::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+                        };
+                        ResponseBodyChain::Reply {
+                            reply: reply.extensions.as_deref(),
+                            data,
+                            chain,
                         }
-                    },
-                )
+                    }
+                    B::CodecZenohErr(err) => ResponseBodyChain::Err(err.extensions.as_deref()),
+                };
+                judge_response_chains(response.extensions.as_deref(), body)
             }
             #[cfg(feature = "codec-response-final")]
             Self::ResponseFinal(done) => {
@@ -409,6 +401,113 @@ fn push_view_admission(push: &wz_codecs::push::Push<'_>) -> crate::ext_admit::Ex
         B::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
     };
     judge_push_chains(push.extensions.as_deref(), body, chain)
+}
+
+/// The chain a Request's body carries, for [`judge_request_chains`]: a Put's or a
+/// Del's (generic entries, `E`) or a Query's (the Query's own entries, `Q`).
+#[cfg(feature = "codec-request")]
+enum RequestBodyChain<'c, E, Q> {
+    Put(Option<&'c [E]>),
+    Del(Option<&'c [E]>),
+    Query(Option<&'c [Q]>),
+}
+
+/// The verdict on a Request: its own chain, then its body's. One rule for the
+/// owned message ([`NetworkMessage::ext_admission`]) and the Request read where
+/// its frame lies (`request_view_admission`).
+#[cfg(feature = "codec-request")]
+fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::ExtEntryView>(
+    outer: Option<&[E]>,
+    body: RequestBodyChain<'_, E, Q>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
+    then_judge(judge_chain(C::Network(N::Request), outer), || match body {
+        RequestBodyChain::Put(chain) => judge_chain(C::Zenoh(Z::Put), chain),
+        RequestBodyChain::Del(chain) => judge_chain(C::Zenoh(Z::Del), chain),
+        RequestBodyChain::Query(chain) => judge_chain(C::Zenoh(Z::Query), chain),
+    })
+}
+
+/// The chains a Response's body carries, for [`judge_response_chains`]: a
+/// Reply's own and its data body's (a Put's or a Del's), or an Err's.
+#[cfg(feature = "codec-response")]
+enum ResponseBodyChain<'c, E> {
+    Reply {
+        reply: Option<&'c [E]>,
+        data: crate::ext_admit::ZenohBody,
+        chain: Option<&'c [E]>,
+    },
+    Err(Option<&'c [E]>),
+}
+
+/// The verdict on a Response: its own chain, then its body's, a Reply's own
+/// before its data's. One rule for the owned message and the Response read
+/// where its frame lies (`response_view_admission`).
+#[cfg(feature = "codec-response")]
+fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
+    outer: Option<&[E]>,
+    body: ResponseBodyChain<'_, E>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
+    then_judge(judge_chain(C::Network(N::Response), outer), || match body {
+        ResponseBodyChain::Reply { reply, data, chain } => {
+            then_judge(judge_chain(C::Zenoh(Z::Reply), reply), || {
+                judge_chain(C::Zenoh(data), chain)
+            })
+        }
+        ResponseBodyChain::Err(chain) => judge_chain(C::Zenoh(Z::Err), chain),
+    })
+}
+
+/// [`NetworkMessage::ext_admission`] for a Request read where its frame lies.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-request",
+    any(test, feature = "session-unicast")
+))]
+fn request_view_admission(
+    request: &wz_codecs::request::Request<'_>,
+) -> crate::ext_admit::ExtAdmission {
+    use wz_codecs::request::RequestVariant as B;
+    let body = match &request.body {
+        B::CodecZenohMsgPut(put) => RequestBodyChain::Put(put.extensions.as_deref()),
+        B::CodecZenohMsgDel(del) => RequestBodyChain::Del(del.extensions.as_deref()),
+        B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
+            RequestBodyChain::Query(query.extensions.as_deref())
+        }
+    };
+    judge_request_chains(request.extensions.as_deref(), body)
+}
+
+/// [`NetworkMessage::ext_admission`] for a Response read where its frame lies.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-response",
+    any(test, feature = "session-unicast")
+))]
+fn response_view_admission(
+    response: &wz_codecs::response::Response<'_>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::ZenohBody as Z;
+    use wz_codecs::reply::ReplyVariant as R;
+    use wz_codecs::response::ResponseVariant as B;
+    let body = match &response.body {
+        B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
+            let (data, chain) = match &reply.body {
+                R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
+                    (Z::Put, put.extensions.as_deref())
+                }
+                R::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+            };
+            ResponseBodyChain::Reply {
+                reply: reply.extensions.as_deref(),
+                data,
+                chain,
+            }
+        }
+        B::CodecZenohErr(err) => ResponseBodyChain::Err(err.extensions.as_deref()),
+    };
+    judge_response_chains(response.extensions.as_deref(), body)
 }
 
 /// The batch a participant may act on: `messages` itself, or the refusal of the
@@ -584,23 +683,29 @@ fn absorb_unknown(
 /// decode.
 ///
 /// How the walk hands a record over ([`WalkedRecord`]). With
-/// [`PushForm::Lent`], a Push is not projected into its owned message at all: it
-/// is decoded where the payload lies and lent for the call, so nothing of it is
-/// copied (ARCHITECTURE section 9.2). Every other record is the build's
-/// [`WireStorage`] copy of the payload's bytes either way, and so is a Push with
-/// [`PushForm::Owned`]: the payload need only outlive the walk.
+/// [`RecordForm::Lent`], a Push, a Request and a Response are not projected into
+/// their owned messages at all: each is decoded where the payload lies and lent
+/// for the call, so nothing of it is copied (ARCHITECTURE section 9.2). Every
+/// other record is the build's [`WireStorage`] copy of the payload's bytes either
+/// way, and so is every record with [`RecordForm::Owned`]: the payload need only
+/// outlive the walk.
 #[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PushForm {
+pub(crate) enum RecordForm {
     /// Every record is decoded into its owned message.
     Owned,
-    /// A Push is decoded where the payload lies and lent.
-    #[cfg(feature = "codec-push")]
+    /// A Push, a Request and a Response are decoded where the payload lies and
+    /// lent.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    ))]
     Lent,
 }
 
 /// One record the walk hands over: the one owned message in the caller's
-/// buffer, or a Push read where the payload lies ([`PushForm::Lent`]).
+/// buffer, or a record read where the payload lies ([`RecordForm::Lent`]).
 #[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
 pub(crate) enum WalkedRecord<'r> {
     /// The record's owned message, the one entry of the buffer.
@@ -608,20 +713,27 @@ pub(crate) enum WalkedRecord<'r> {
     /// A Push decoded where the payload lies, valid for the call.
     #[cfg(feature = "codec-push")]
     Push(&'r wz_codecs::push::Push<'r>),
+    /// A Request decoded where the payload lies, valid for the call.
+    #[cfg(feature = "codec-request")]
+    Request(&'r wz_codecs::request::Request<'r>),
+    /// A Response decoded where the payload lies, valid for the call.
+    #[cfg(feature = "codec-response")]
+    Response(&'r wz_codecs::response::Response<'r>),
 }
 
 /// The records are copies of the payload's bytes (the build's [`WireStorage`])
-/// except a Push lent under [`PushForm::Lent`], which is the payload's own
+/// except one lent under [`RecordForm::Lent`], which is the payload's own
 /// bytes. Either way the payload need only outlive the walk.
 ///
-/// A lent Push is judged by the same rule as an owned one
-/// (`judge_push_chains`), so an extension a participant must refuse ends the
-/// walk at the same record on both forms.
+/// A lent record is judged by the same rule as an owned one
+/// (`judge_push_chains`, `judge_request_chains`, `judge_response_chains`), so an
+/// extension a participant must refuse ends the walk at the same record on both
+/// forms.
 #[cfg(all(feature = "codec-frame", test))]
 pub(crate) fn for_each_record(
     payload: &[u8],
     record: &mut Vec<NetworkMessage>,
-    form: PushForm,
+    form: RecordForm,
     mut each: impl FnMut(WalkedRecord<'_>),
 ) -> Result<(), crate::parse_error::InboundParseError> {
     try_for_each_record(payload, record, form, |one| {
@@ -638,30 +750,30 @@ pub(crate) fn for_each_record(
 pub(crate) fn try_for_each_record(
     payload: &[u8],
     record: &mut Vec<NetworkMessage>,
-    form: PushForm,
+    form: RecordForm,
     mut each: impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     use crate::parse_error::InboundParseError;
-    // Without a Push codec there is nothing to lend, and every form is owned.
-    #[cfg(not(feature = "codec-push"))]
+    // Without a lendable codec there is nothing to lend, and every form is owned.
+    #[cfg(not(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )))]
     let _ = form;
     let mut cursor = SceCursor::new(payload);
     while cursor.remaining() > 0 {
         record.clear();
-        #[cfg(feature = "codec-push")]
-        if form == PushForm::Lent
-            && cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F
-                == wire_const::N_MID_PUSH
-        {
-            let push =
-                wz_codecs::push::Push::decode(&mut cursor).map_err(InboundParseError::Codec)?;
-            if let crate::ext_admit::ExtAdmission::UnknownMandatory { eid } =
-                push_view_admission(&push)
-            {
-                return Err(InboundParseError::UnknownMandatoryExt { eid });
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        ))]
+        if form == RecordForm::Lent {
+            let mid = cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F;
+            if lend_record(mid, &mut cursor, &mut each)? {
+                continue;
             }
-            each(WalkedRecord::Push(&push))?;
-            continue;
         }
         let known =
             decode_one_record(&mut cursor, record, NO_ORIGIN).map_err(InboundParseError::Codec)?;
@@ -682,6 +794,109 @@ pub(crate) fn try_for_each_record(
     }
     record.clear();
     Ok(())
+}
+
+/// The lent half of [`try_for_each_record`]: when the record at the cursor is of
+/// a kind the walk lends (`mid`), decode it where the payload lies, judge it by
+/// the owned rule, hand it to `each`, and answer `true`; `false` for any other
+/// kind, which the caller decodes owned.
+///
+/// Each kind is decoded in a function of its own, never inlined: a decoded
+/// Request or Response is a wide value (inline extension chains), and kept out of
+/// line it occupies the stack only while that one record is handed over, not
+/// for the whole walk.
+#[cfg(all(
+    feature = "codec-frame",
+    any(test, feature = "session-unicast"),
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn lend_record(
+    mid: u8,
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<bool, crate::parse_error::InboundParseError> {
+    match mid {
+        #[cfg(feature = "codec-push")]
+        wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| true),
+        #[cfg(feature = "codec-request")]
+        wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| true),
+        #[cfg(feature = "codec-response")]
+        wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| true),
+        _ => Ok(false),
+    }
+}
+
+/// The refusal a lent record's admission makes, as the owned walk makes it.
+#[cfg(all(
+    feature = "codec-frame",
+    any(test, feature = "session-unicast"),
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn admit_lent(
+    admission: crate::ext_admit::ExtAdmission,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    match admission {
+        crate::ext_admit::ExtAdmission::UnknownMandatory { eid } => {
+            Err(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid })
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-push",
+    any(test, feature = "session-unicast")
+))]
+#[inline(never)]
+fn lend_push(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let push = wz_codecs::push::Push::decode(cursor)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(push_view_admission(&push))?;
+    each(WalkedRecord::Push(&push))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-request",
+    any(test, feature = "session-unicast")
+))]
+#[inline(never)]
+fn lend_request(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let request = wz_codecs::request::Request::decode(cursor)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(request_view_admission(&request))?;
+    each(WalkedRecord::Request(&request))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-response",
+    any(test, feature = "session-unicast")
+))]
+#[inline(never)]
+fn lend_response(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let response = wz_codecs::response::Response::decode(cursor)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(response_view_admission(&response))?;
+    each(WalkedRecord::Response(&response))
 }
 
 /// R311y578 — why a batch parse stopped short of the payload's end.
@@ -1512,14 +1727,22 @@ mod record_walk_tests {
     ) {
         let mut record = Vec::new();
         let mut seen = Vec::new();
-        let result = for_each_record(payload, &mut record, PushForm::Owned, |one| {
-            // Without a Push codec the owned form is the only one there is.
-            #[cfg(feature = "codec-push")]
+        let result = for_each_record(payload, &mut record, RecordForm::Owned, |one| {
+            // Without a lendable codec the owned form is the only one there is.
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response"
+            ))]
             let WalkedRecord::Owned(one) = one
             else {
                 panic!("an owned walk lends nothing");
             };
-            #[cfg(not(feature = "codec-push"))]
+            #[cfg(not(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response"
+            )))]
             let WalkedRecord::Owned(one) = one;
             assert_eq!(one.len(), 1, "one record per call");
             seen.push(match &one[0] {
@@ -1586,7 +1809,7 @@ mod record_walk_tests {
         let payload = [push_record("a/1"), oam_record(2), push_record("a/3")].concat();
         let mut record = Vec::new();
         let mut seen: Vec<(char, alloc::string::String)> = Vec::new();
-        let result = for_each_record(&payload, &mut record, PushForm::Lent, |one| match one {
+        let result = for_each_record(&payload, &mut record, RecordForm::Lent, |one| match one {
             WalkedRecord::Push(push) => {
                 let (_, suffix) = crate::wireexpr_resolve::id_and_suffix_view(&push.keyexpr.body);
                 seen.push(('p', suffix.expect("a key").into()));
@@ -1595,6 +1818,8 @@ mod record_walk_tests {
                 NetworkMessage::Oam(o) => seen.push(('o', alloc::format!("{}", o.id))),
                 other => panic!("only the OAM is owned: {other:?}"),
             },
+            #[allow(unreachable_patterns)]
+            _ => panic!("only Pushes and an OAM were encoded"),
         });
         assert!(result.is_ok());
         assert_eq!(
@@ -1603,9 +1828,9 @@ mod record_walk_tests {
         );
         // The owned walk owns all three, the Pushes included.
         let mut owned = 0;
-        let result = for_each_record(&payload, &mut record, PushForm::Owned, |one| match one {
+        let result = for_each_record(&payload, &mut record, RecordForm::Owned, |one| match one {
             WalkedRecord::Owned(_) => owned += 1,
-            WalkedRecord::Push(_) => panic!("an owned walk lends nothing"),
+            _ => panic!("an owned walk lends nothing"),
         });
         assert!(result.is_ok());
         assert_eq!(owned, 3);
@@ -1635,10 +1860,84 @@ mod record_walk_tests {
             let result = for_each_record(&payload, &mut record, form, |_| handed += 1);
             (handed, alloc::format!("{result:?}"))
         };
-        let lent = walk(PushForm::Lent);
+        let lent = walk(RecordForm::Lent);
         assert_eq!(lent.0, 1, "the record before it was handed over");
         assert!(lent.1.contains("UnknownMandatoryExt"), "{}", lent.1);
-        assert_eq!(lent, walk(PushForm::Owned), "the owned walk stops alike");
+        assert_eq!(lent, walk(RecordForm::Owned), "the owned walk stops alike");
+    }
+
+    /// The lent walk lends a Request and a Response where the payload lies and
+    /// owns the rest, in wire order, and the owned walk owns all of them; a
+    /// Request or a Response a participant must refuse ends both walks at the
+    /// same record, after the records before it.
+    #[cfg(all(feature = "codec-request", feature = "codec-response"))]
+    #[test]
+    fn the_lent_walk_lends_requests_and_responses_and_refuses_them_alike() {
+        let request = crate::request_build::RequestQueryBuilder::new(3, 0, Some("q/1"))
+            .build()
+            .expect("build");
+        let response = crate::response_build::ResponseReplyBuilder::new(3, 0, Some("q/1"), b"v")
+            .build()
+            .expect("build");
+        let rq = request.try_as_borrowed().expect("a view").encode_to_vec();
+        let rs = response.try_as_borrowed().expect("a view").encode_to_vec();
+        let payload = [rq.clone(), oam_record(2), rs.clone()].concat();
+        let mut record = Vec::new();
+        let mut seen: Vec<char> = Vec::new();
+        let result = for_each_record(&payload, &mut record, RecordForm::Lent, |one| match one {
+            WalkedRecord::Request(request) => {
+                assert_eq!(request.rid, 3);
+                seen.push('q');
+            }
+            WalkedRecord::Response(response) => {
+                assert_eq!(response.request_id, 3);
+                seen.push('r');
+            }
+            WalkedRecord::Owned(one) => match &one[0] {
+                NetworkMessage::Oam(_) => seen.push('o'),
+                other => panic!("only the OAM is owned: {other:?}"),
+            },
+            #[allow(unreachable_patterns)]
+            _ => panic!("no Push was encoded"),
+        });
+        assert!(result.is_ok());
+        assert_eq!(seen, vec!['q', 'o', 'r']);
+        let mut owned = 0;
+        let result = for_each_record(&payload, &mut record, RecordForm::Owned, |one| match one {
+            WalkedRecord::Owned(_) => owned += 1,
+            _ => panic!("an owned walk lends nothing"),
+        });
+        assert!(result.is_ok());
+        assert_eq!(owned, 3);
+
+        // Id 0xF, mandatory (0x10), unit encoding: defined by no network message.
+        let unknown = || {
+            let mut chain = sce_forge_runtime::heapless::Vec::new();
+            let _ = chain.push(wz_codecs::ext_entry::ExtEntry {
+                header: 0x10 | 0x0F,
+                body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(Default::default()),
+            });
+            chain
+        };
+        let mut bad_request = request.try_as_borrowed().expect("a view");
+        bad_request.extensions = Some(unknown());
+        bad_request.header |= 0x80;
+        let mut bad_response = response.try_as_borrowed().expect("a view");
+        bad_response.extensions = Some(unknown());
+        bad_response.header |= 0x80;
+        for bad in [bad_request.encode_to_vec(), bad_response.encode_to_vec()] {
+            let payload = [rq.clone(), bad, rs.clone()].concat();
+            let walk = |form| {
+                let mut record = Vec::new();
+                let mut handed = 0;
+                let result = for_each_record(&payload, &mut record, form, |_| handed += 1);
+                (handed, alloc::format!("{result:?}"))
+            };
+            let lent = walk(RecordForm::Lent);
+            assert_eq!(lent.0, 1, "the record before it was handed over");
+            assert!(lent.1.contains("UnknownMandatoryExt"), "{}", lent.1);
+            assert_eq!(lent, walk(RecordForm::Owned), "the owned walk stops alike");
+        }
     }
 
     #[test]

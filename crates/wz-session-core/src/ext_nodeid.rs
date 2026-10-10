@@ -104,15 +104,23 @@ pub fn read_z64_ext<S: CodecStorage>(
     exts: Option<&Vec<ExtEntryOwned<S>>>,
     header: u8,
 ) -> Option<u64> {
+    read_z64_in(exts.map(Vec::as_slice), header)
+}
+
+/// [`read_z64_ext`] over any chain a reader can ask ([`ExtEntryView`]): the owned
+/// one, or one read where its message lies. The one scan both use: the first
+/// entry of that identity whose body is a `Z64` zint.
+///
+/// [`ExtEntryView`]: crate::ext_view::ExtEntryView
+pub fn read_z64_in<E: crate::ext_view::ExtEntryView>(
+    exts: Option<&[E]>,
+    header: u8,
+) -> Option<u64> {
     let want = ext_eid(header);
-    for ext in exts? {
-        if ext_eid(ext.header) == want {
-            if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
-                return Some(z.value);
-            }
-        }
-    }
-    None
+    exts?
+        .iter()
+        .filter(|ext| ext.eid() == want)
+        .find_map(crate::ext_view::ExtEntryView::zint)
 }
 
 /// Insert / replace / remove a `Z64`-bodied extension in a chain, by the

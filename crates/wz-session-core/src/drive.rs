@@ -1018,35 +1018,49 @@ pub enum CopyReason {
     FrameHeadUndecodable,
 }
 
-/// How [`dispatch_datagram`] hands over a Push record: lent where the frame
-/// lies when this build can deliver it so, owned otherwise.
+/// How [`dispatch_datagram`] hands over a Push, a Request or a Response record:
+/// lent where the frame lies when this build can deliver it so, owned otherwise.
 ///
 /// `transport-stats` keeps the owned form: its counters classify a received
 /// message by reading the owned message (`network_message::stats_class`), and
 /// that profile is the AP's, which never takes this path. A counter that
-/// silently skipped the Puts of an in-place frame would be a wrong number, so
-/// the build that has the counters does not lend.
-#[cfg(all(feature = "codec-frame", feature = "codec-push"))]
-const PUSH_FORM: crate::network_message::PushForm = if cfg!(feature = "transport-stats") {
-    crate::network_message::PushForm::Owned
+/// silently skipped the records of an in-place frame would be a wrong number,
+/// so the build that has the counters does not lend.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+const RECORD_FORM: crate::network_message::RecordForm = if cfg!(feature = "transport-stats") {
+    crate::network_message::RecordForm::Owned
 } else {
-    crate::network_message::PushForm::Lent
+    crate::network_message::RecordForm::Lent
 };
-/// Without a Push codec there is no Push to lend.
-#[cfg(all(feature = "codec-frame", not(feature = "codec-push")))]
-const PUSH_FORM: crate::network_message::PushForm = crate::network_message::PushForm::Owned;
+/// Without a lendable codec there is no record to lend.
+#[cfg(all(
+    feature = "codec-frame",
+    not(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    ))
+))]
+const RECORD_FORM: crate::network_message::RecordForm = crate::network_message::RecordForm::Owned;
 
-/// How [`dispatch_datagram_reassembling`] hands over a Push record of a message
-/// it reassembled: as a `Frame`'s, except under `routing-namespace`, whose
-/// copying path strips the namespace off the reassembled message's owned
-/// outcome before the fan-out. A lent Push has no owned outcome to strip, so
+/// How [`dispatch_datagram_reassembling`] hands over a lendable record of a
+/// message it reassembled: as a `Frame`'s, except under `routing-namespace`,
+/// whose copying path strips the namespace off the reassembled message's owned
+/// outcome before the fan-out. A lent record has no owned outcome to strip, so
 /// that build keeps the owned form here and the strip is not skipped.
 #[cfg(feature = "reassembly")]
-const REASSEMBLED_PUSH_FORM: crate::network_message::PushForm =
+const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm =
     if cfg!(feature = "routing-namespace") {
-        crate::network_message::PushForm::Owned
+        crate::network_message::RecordForm::Owned
     } else {
-        PUSH_FORM
+        RECORD_FORM
     };
 
 /// Dispatch one inbound datagram that the link LENDS, where it lies, and hand
@@ -1062,11 +1076,13 @@ const REASSEMBLED_PUSH_FORM: crate::network_message::PushForm =
 /// records are decoded and dispatched one at a time
 /// (`network_message::for_each_record`), in wire order:
 ///
-/// - a Push is decoded where the payload lies and lent as
-///   the [`InPlace` event](crate::driver_loop::IterationEvent::InPlace):
-///   its keyexpr, extensions and payload are ranges of the datagram, and
-///   nothing is built on the heap for it (ARCHITECTURE section 9.2). The
-///   subscriber registry delivers it as a borrowed sample;
+/// - a Push, a Request or a Response is decoded where the payload lies and
+///   lent as the [`InPlace` event](crate::driver_loop::IterationEvent::InPlace):
+///   its keyexpr, extensions and body are ranges of the datagram, and nothing
+///   is built on the heap for it (ARCHITECTURE section 9.2). The subscriber
+///   registry delivers a Push as a borrowed sample, the queryable registry a
+///   Request as a borrowed query, the reply registry a Response as a borrowed
+///   reply;
 /// - any other record is decoded into its owned message in `record`, a
 ///   one-record buffer the caller keeps across datagrams, and reported as a
 ///   [`DriverLoopOutcome::FramePayload`] of that one message.
@@ -1304,7 +1320,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
         unit,
         carrier,
         &mut || Ok(alloc::vec::Vec::new()),
-        PUSH_FORM,
+        RECORD_FORM,
         RecordSource::Frame,
         actions,
         record,
@@ -1365,7 +1381,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         &unit[payload_at..],
         carrier,
         &mut || chain.owned(unit, payload_at),
-        PUSH_FORM,
+        RECORD_FORM,
         RecordSource::Frame,
         actions,
         record,
@@ -1423,7 +1439,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
         alloc::vec::Vec<wz_codecs::ext_entry::ExtEntryOwned>,
         crate::parse_error::InboundParseError,
     >,
-    form: crate::network_message::PushForm,
+    form: crate::network_message::RecordForm,
     source: RecordSource,
     actions: &SessionLinkActions<R, T>,
     record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
@@ -1474,6 +1490,18 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             #[cfg(feature = "codec-push")]
             WalkedRecord::Push(push) => on_event(IterationEvent::InPlace(
                 crate::driver_loop::InPlaceRecord::push_of_frame(push, reliable, sn, priority),
+            )),
+            #[cfg(feature = "codec-request")]
+            WalkedRecord::Request(request) => on_event(IterationEvent::InPlace(
+                crate::driver_loop::InPlaceRecord::request_of_frame(
+                    request, reliable, sn, priority,
+                ),
+            )),
+            #[cfg(feature = "codec-response")]
+            WalkedRecord::Response(response) => on_event(IterationEvent::InPlace(
+                crate::driver_loop::InPlaceRecord::response_of_frame(
+                    response, reliable, sn, priority,
+                ),
             )),
         }
         dispatched = true;
@@ -1567,7 +1595,7 @@ where
                 message,
                 carrier,
                 &mut || Ok(alloc::vec::Vec::new()),
-                REASSEMBLED_PUSH_FORM,
+                REASSEMBLED_RECORD_FORM,
                 RecordSource::Reassembled,
                 actions,
                 record,

@@ -311,6 +311,10 @@ struct Pair {
     /// before anything is measured, so recording a delivery does not itself
     /// allocate.
     delivered: Arc<Mutex<Vec<Delivery>>>,
+    /// The acceptor's application layer: where a test registers the queryable
+    /// or the pending get it measures.
+    #[cfg_attr(not(feature = "query-queryable"), allow(dead_code))]
+    observer: Rc<RefCell<ApplicationLayerObserver>>,
 }
 
 impl Pair {
@@ -383,7 +387,7 @@ impl Pair {
                 }),
             )
             .expect("register the subscriber");
-        let mut dispatch = app_layer::dispatch_to(observer, acceptor_actions.clone());
+        let mut dispatch = app_layer::dispatch_to(observer.clone(), acceptor_actions.clone());
         let polls = Rc::new(Cell::new(PollTally::default()));
         let tally = polls.clone();
         let frame_exts = Rc::new(Cell::new(FrameExts::default()));
@@ -441,6 +445,7 @@ impl Pair {
             initiator: initiator_actions,
             initiator_sink,
             delivered,
+            observer,
         }
     }
 
@@ -662,6 +667,265 @@ fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
         "the copying loop pays per frame (datagram copy, payload copy, record list): \
          frame part {frame_part}, frame of 8 {eight} against 8 records of {per_record}"
     );
+}
+
+/// The query and reply planes on the same loop: a frame of Responses to a
+/// pending get, and a frame of Requests to a queryable, each against the
+/// copying loop (the control) and in place.
+///
+/// - A Response read in place is handed to its pending get as a view over the
+///   frame (ARCHITECTURE section 9.2): it costs the heap NOTHING, on either
+///   backing, against the copying loop's per-frame copies and per-Response
+///   owned record (the boxed Response, its keyexpr and payload copies, the
+///   resolved keyexpr `String` and the reply the registry builds).
+/// - A Request read in place reaches its queryable as a view too, through a
+///   responder that borrows the query's keyexpr until a reply is staged (a
+///   staged reply is an owned record, on both loops): it costs the heap only
+///   the queryable matcher's growable scratch, and nothing on the fixed backing.
+///   The copying loop pays its frame and record copies besides.
+///
+/// Either way each Response's payload and keyexpr reach the get, and each
+/// Request's keyexpr and rid reach the queryable, exactly as the shared batch
+/// decoder reads them out of the same frame.
+#[cfg(feature = "query-queryable")]
+mod query_and_reply {
+    use super::*;
+    use wz_session_core::reply_sink::ReplyView;
+
+    /// Rids the pending get waits on and the queries carry.
+    const RID: u64 = 0x31;
+
+    /// What a get or a queryable was handed, in fixed storage: the payload (a
+    /// reply's; a query carries none here), the keyexpr, and the rid.
+    type Handed = ([u8; 8], [u8; 16], usize, u64);
+
+    fn handed_of((payload, key, len, rid): &Handed) -> (Vec<u8>, String, u64) {
+        (
+            payload.to_vec(),
+            String::from_utf8(key[..*len].to_vec()).expect("a UTF-8 keyexpr"),
+            *rid,
+        )
+    }
+
+    fn record(payload: &[u8], keyexpr: &str, rid: u64) -> Handed {
+        let mut bytes = [0u8; 8];
+        bytes[..payload.len()].copy_from_slice(payload);
+        let mut key = [0u8; 16];
+        key[..keyexpr.len()].copy_from_slice(keyexpr.as_bytes());
+        (bytes, key, keyexpr.len(), rid)
+    }
+
+    /// A frame at `sn` carrying `records` back to back, and its payload.
+    fn frame_of_records(sn: u64, records: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+        let payload = records.concat();
+        (frame_wire(sn, &[], &payload), payload)
+    }
+
+    fn response(i: usize) -> Vec<u8> {
+        wz_session_core::response_build::ResponseReplyBuilder::new(
+            RID,
+            0,
+            Some(KEY),
+            &payload_of(i),
+        )
+        .build()
+        .expect("a reply")
+        .try_as_borrowed()
+        .expect("a borrowed view")
+        .encode_to_vec()
+    }
+
+    fn request(rid: u64) -> Vec<u8> {
+        wz_session_core::request_build::RequestQueryBuilder::new(rid, 0, Some(KEY))
+            .build()
+            .expect("a query")
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec()
+    }
+
+    /// What the shared batch decoder reads out of a payload of Responses: each
+    /// one's payload, keyexpr and rid.
+    fn decoded_replies(payload: &[u8]) -> Vec<(Vec<u8>, String, u64)> {
+        parse_frame_payload(payload)
+            .expect("the frame decodes")
+            .iter()
+            .map(|message| {
+                let NetworkMessage::Response(response) = message else {
+                    panic!("only Responses were encoded");
+                };
+                let wz_codecs::response::ResponseOwnedVariant::CodecZenohReply(reply) =
+                    &response.body
+                else {
+                    panic!("only replies were encoded");
+                };
+                let wz_codecs::reply::ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body else {
+                    panic!("only Put replies were encoded");
+                };
+                let (_, suffix) =
+                    wz_session_core::wireexpr_resolve::id_and_suffix(&response.keyexpr.body);
+                (
+                    wz_session_core::put_payload::inline_bytes(put)
+                        .expect("an inline payload")
+                        .to_vec(),
+                    String::from(suffix.expect("a keyexpr")),
+                    response.request_id,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reply_read_in_place_reaches_its_get_and_costs_the_heap_nothing() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let mut pair = Pair::establish(&link, 7505);
+        let got: Arc<Mutex<Vec<Handed>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
+        let into = got.clone();
+        // Through the sink form, which both backings have.
+        pair.observer
+            .borrow_mut()
+            .replies
+            .register_sink(
+                RID,
+                1,
+                None,
+                wz_session_core::reply_acceptance::ReplyAcceptance::Any,
+                wz_session_core::reply_sink::ConsolidatingSink::passthrough(
+                    wz_session_core::reply_sink::BoxedReplySink::new(
+                        move |view: &dyn ReplyView| {
+                            into.lock().expect("not poisoned").push(record(
+                                view.payload(),
+                                view.keyexpr(),
+                                view.rid(),
+                            ));
+                        },
+                        |_| {},
+                    ),
+                ),
+            )
+            .expect("register the get");
+        let mut costs = Vec::new();
+        for n in [1usize, 2, 8] {
+            let records: Vec<Vec<u8>> = (0..n).map(response).collect();
+            let (wire, payload) = frame_of_records(pair.next_sn(), &records);
+            let expected = decoded_replies(&payload);
+            got.lock().expect("not poisoned").clear();
+            let (cost, polls, _) = pair.turn(&wire);
+            let handed: Vec<_> = got
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .map(handed_of)
+                .collect();
+            assert_eq!(
+                handed, expected,
+                "{n} replies (the turn reported {polls:?})"
+            );
+            costs.push(cost);
+        }
+        std::println!(
+            "replies: frame of 1 {}, of 2 {}, of 8 {}",
+            costs[0],
+            costs[1],
+            costs[2]
+        );
+        #[cfg(feature = "rx-in-place")]
+        assert_eq!(
+            costs,
+            [0, 0, 0],
+            "a Response read in place costs the heap nothing, per frame or per reply"
+        );
+        #[cfg(not(feature = "rx-in-place"))]
+        assert!(
+            costs[2] > costs[1] && costs[1] > costs[0] && costs[0] > 0,
+            "the copying loop pays per frame and per reply (the instrument's control): \
+             {costs:?}"
+        );
+    }
+
+    #[test]
+    fn a_query_read_in_place_reaches_its_queryable_and_costs_only_the_matchers_scratch() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let mut pair = Pair::establish(&link, 7507);
+        let got: Arc<Mutex<Vec<Handed>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
+        let into = got.clone();
+        // Through the sink form, which both backings have.
+        pair.observer
+            .borrow_mut()
+            .queryables
+            .register_sink(
+                KEY,
+                Locality::Any,
+                false,
+                wz_session_core::query_sink::BoxedQuerySink::new(move |view, _out| {
+                    into.lock().expect("not poisoned").push(record(
+                        &[],
+                        view.keyexpr(),
+                        view.rid(),
+                    ));
+                }),
+            )
+            .expect("register the queryable");
+        // A frame as wide as the widest measured one, first: the observer's
+        // staging buffers for replies and Finals keep the capacity they grew
+        // to, so what follows measures queries and not a first growth.
+        let warm: Vec<Vec<u8>> = (0..8).map(|i| request(RID + 100 + i)).collect();
+        let (wire, _) = frame_of_records(pair.next_sn(), &warm);
+        let _ = pair.turn(&wire);
+        let mut costs = Vec::new();
+        for n in [1u64, 2, 8] {
+            let records: Vec<Vec<u8>> = (0..n).map(|i| request(RID + i)).collect();
+            let (wire, _) = frame_of_records(pair.next_sn(), &records);
+            let expected: Vec<(Vec<u8>, String, u64)> = (0..n)
+                .map(|i| (vec![0u8; 8], String::from(KEY), RID + i))
+                .collect();
+            got.lock().expect("not poisoned").clear();
+            let (cost, polls, _) = pair.turn(&wire);
+            let handed: Vec<_> = got
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .map(handed_of)
+                .collect();
+            assert_eq!(
+                handed, expected,
+                "{n} queries (the turn reported {polls:?})"
+            );
+            costs.push(cost);
+        }
+        std::println!(
+            "queries: frame of 1 {}, of 2 {}, of 8 {}",
+            costs[0],
+            costs[1],
+            costs[2]
+        );
+        // In place a query costs what the queryable matcher's growable scratch
+        // costs (its two chunk lists, as the subscriber matcher's), and on the
+        // fixed backing nothing: not its decode, not its keyexpr, and not the
+        // responder the matched queryable is handed. Its Final is staged into
+        // capacity already there and sent through the session's own path.
+        #[cfg(feature = "rx-in-place")]
+        {
+            let scratch = if wz_session_core::bounded::ENFORCES_CAPACITY {
+                0
+            } else {
+                2
+            };
+            assert_eq!(
+                costs,
+                [scratch, 2 * scratch, 8 * scratch],
+                "a Request read in place costs the heap only the matcher's growable scratch"
+            );
+        }
+        #[cfg(not(feature = "rx-in-place"))]
+        assert!(
+            costs[2] > costs[1] && costs[1] > costs[0] && costs[0] > 0,
+            "the copying loop pays per frame and per query (the instrument's control): \
+             {costs:?}"
+        );
+    }
 }
 
 /// A Frame carrying an extension chain of its own: two unit extensions this

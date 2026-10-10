@@ -460,13 +460,13 @@ mod alloc_impl {
                 // matters here is that the Put is not MISSED on that path.
                 IterationEvent::InPlace(record) => {
                     let reliability = Reliability::from_reliable_bool(record.reliable());
+                    // A lent Request or Response is not the switchboard's.
+                    let Some(push) = record.push() else {
+                        return 0;
+                    };
                     // The projection consumes its view; the clone is of the
                     // view (ranges of the frame), not of the bytes.
-                    match record
-                        .push()
-                        .clone()
-                        .try_into_owned_in::<crate::wire::WireStorage>()
-                    {
+                    match push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
                         Ok(push) => self.dispatch_push(&push, reliability, peer_table, injector),
                         Err(_) => 0,
                     }

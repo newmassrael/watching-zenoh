@@ -166,6 +166,41 @@ mod query {
         }
     }
 
+    /// A Query's entry as it is decoded, where its frame lies: what the receive
+    /// path that dispatches a Request without copying it reads the Query's chain
+    /// through. It answers every question exactly as the owned entry projected
+    /// from it does; a plain ZBuf body is the frame's own bytes.
+    impl ExtEntryView for wz_codecs::query_ext_entry::QueryExtEntry<'_> {
+        fn header(&self) -> u8 {
+            self.header
+        }
+
+        fn ext_id(&self) -> u8 {
+            wz_codecs::query_ext_entry::QueryExtEntry::ext_id(self)
+        }
+
+        fn enc(&self) -> u8 {
+            wz_codecs::query_ext_entry::QueryExtEntry::enc(self)
+        }
+
+        fn plain_zbuf(&self) -> Option<&[u8]> {
+            use wz_codecs::query_ext_entry::QueryExtEntryVariant;
+            match &self.body {
+                // As on the owned entry: only the plain shape has `value`.
+                QueryExtEntryVariant::CodecZenohQueryValueZbuf(z) => z.value,
+                _ => None,
+            }
+        }
+
+        fn zint(&self) -> Option<u64> {
+            use wz_codecs::query_ext_entry::QueryExtEntryVariant;
+            match &self.body {
+                QueryExtEntryVariant::CodecZenohExtZint(z) => Some(z.value),
+                _ => None,
+            }
+        }
+    }
+
     /// How many payload bytes the VALUE of a Query carries, as upstream counts
     /// them (`commons/zenoh-protocol/src/network/request.rs` @
     /// `q.ext_body.as_ref().map_or(0, |b| b.payload.len())`), and `0` for a

@@ -407,10 +407,10 @@ pub enum IterationEvent<'a> {
     /// "Event emitted with `&slot` borrow") — ONE record of an inbound `Frame`,
     /// decoded where the frame lies and handed over borrowed: the receive path
     /// of the fixed-memory MCU profile (`drive::dispatch_datagram`, reached
-    /// under `wz-runtime-coop`'s `rx-in-place`) emits it for every Push record,
-    /// in place of a `Poll(FramePayload)` carrying the owned message, so a
-    /// subscriber is handed the frame's own bytes and nothing is built on the
-    /// heap for the record.
+    /// under `wz-runtime-coop`'s `rx-in-place`) emits it for every Push, Request
+    /// and Response record, in place of a `Poll(FramePayload)` carrying the
+    /// owned message, so a subscriber, a queryable or a pending get is handed
+    /// the frame's own bytes and nothing is built on the heap for the record.
     ///
     /// The record is valid for the call only; its bytes go when the link takes
     /// its buffer back. A consumer that keeps something copies it, which is what
@@ -418,11 +418,12 @@ pub enum IterationEvent<'a> {
     /// subscriber. Every other record of the same frame still arrives as a
     /// `Poll(FramePayload)` of one owned message, in wire order with these.
     ///
-    /// A consumer that reads Push data out of `Poll(FramePayload)` must read
-    /// this variant too, or it misses every Put on that path: the subscriber
-    /// registry and the switchboard do, through the observer fan. Ungated like
-    /// the other variants, so every consumer's match stays feature-independent;
-    /// only the producer is gated. `Copy`.
+    /// A consumer that reads Push, Request or Response data out of
+    /// `Poll(FramePayload)` must read this variant too, or it misses every such
+    /// record on that path: the subscriber registry, the queryable registry, the
+    /// reply registry and the switchboard do, through the observer fan. Ungated
+    /// like the other variants, so every consumer's match stays
+    /// feature-independent; only the producer is gated. `Copy`.
     InPlace(InPlaceRecord<'a>),
     /// ARCHITECTURE section 9.3 — one inbound `Fragment` read where its unit
     /// lies, its payload staged into its reassembly slot straight from there:
@@ -543,28 +544,55 @@ impl<'a> InPlaceFragment<'a> {
 /// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
 /// carries.
 ///
-/// Only a Push travels this way today ([`Self::push`]); a record of any other
-/// kind is decoded into its owned message and reported as
-/// `Poll(FramePayload)`. A further kind joins as a further accessor beside
-/// [`Self::push`], read by the registry that consumes it.
+/// Three kinds travel this way: a Push ([`Self::push`]), a Request
+/// ([`Self::request`]) and a Response ([`Self::response`]), each read by the
+/// registry that consumes it (the subscribers, the queryables, the pending
+/// gets); a record of any other kind is decoded into its owned message and
+/// reported as `Poll(FramePayload)`. Exactly one accessor answers `Some`.
 #[derive(Clone, Copy, Debug)]
 pub struct InPlaceRecord<'a> {
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
-    #[cfg(feature = "codec-push")]
-    push: &'a wz_codecs::push::Push<'a>,
-    #[cfg(not(feature = "codec-push"))]
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    ))]
+    record: LentRecord<'a>,
     _frame: core::marker::PhantomData<&'a [u8]>,
 }
 
+/// The record an [`InPlaceRecord`] lends, by kind.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response"
+))]
+#[derive(Clone, Copy, Debug)]
+enum LentRecord<'a> {
+    #[cfg(feature = "codec-push")]
+    Push(&'a wz_codecs::push::Push<'a>),
+    #[cfg(feature = "codec-request")]
+    Request(&'a wz_codecs::request::Request<'a>),
+    #[cfg(feature = "codec-response")]
+    Response(&'a wz_codecs::response::Response<'a>),
+}
+
 impl<'a> InPlaceRecord<'a> {
-    /// A Push record of a frame at `sn` on the `reliable` channel and
-    /// `priority` band. Built by the unicast receive path alone (and the tests
-    /// that stand in for it).
-    #[cfg(all(feature = "codec-push", any(test, feature = "session-unicast")))]
-    pub(crate) fn push_of_frame(
-        push: &'a wz_codecs::push::Push<'a>,
+    /// The record of a frame at `sn` on the `reliable` channel and `priority`
+    /// band. Built by the unicast receive path alone (and the tests that stand
+    /// in for it).
+    #[cfg(all(
+        any(test, feature = "session-unicast"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        )
+    ))]
+    fn of_frame(
+        record: LentRecord<'a>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -573,8 +601,42 @@ impl<'a> InPlaceRecord<'a> {
             reliable,
             sn,
             priority,
-            push,
+            record,
+            _frame: core::marker::PhantomData,
         }
+    }
+
+    /// A Push record of a frame (see [`Self::reliable`] and its siblings).
+    #[cfg(all(feature = "codec-push", any(test, feature = "session-unicast")))]
+    pub(crate) fn push_of_frame(
+        push: &'a wz_codecs::push::Push<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Push(push), reliable, sn, priority)
+    }
+
+    /// A Request record of a frame.
+    #[cfg(all(feature = "codec-request", any(test, feature = "session-unicast")))]
+    pub(crate) fn request_of_frame(
+        request: &'a wz_codecs::request::Request<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Request(request), reliable, sn, priority)
+    }
+
+    /// A Response record of a frame.
+    #[cfg(all(feature = "codec-response", any(test, feature = "session-unicast")))]
+    pub(crate) fn response_of_frame(
+        response: &'a wz_codecs::response::Response<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Response(response), reliable, sn, priority)
     }
 
     /// Whether the carrying frame rode the reliable channel.
@@ -593,10 +655,36 @@ impl<'a> InPlaceRecord<'a> {
     }
 
     /// The Push, as it is decoded: its keyexpr, extensions and payload are
-    /// ranges of the frame.
+    /// ranges of the frame. `None` when the record is of another kind.
     #[cfg(feature = "codec-push")]
-    pub fn push(&self) -> &'a wz_codecs::push::Push<'a> {
-        self.push
+    pub fn push(&self) -> Option<&'a wz_codecs::push::Push<'a>> {
+        match self.record {
+            LentRecord::Push(push) => Some(push),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Request, as it is decoded, its keyexpr, extensions and body ranges
+    /// of the frame. `None` when the record is of another kind.
+    #[cfg(feature = "codec-request")]
+    pub fn request(&self) -> Option<&'a wz_codecs::request::Request<'a>> {
+        match self.record {
+            LentRecord::Request(request) => Some(request),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Response, as it is decoded, its keyexpr, extensions and body ranges
+    /// of the frame. `None` when the record is of another kind.
+    #[cfg(feature = "codec-response")]
+    pub fn response(&self) -> Option<&'a wz_codecs::response::Response<'a>> {
+        match self.record {
+            LentRecord::Response(response) => Some(response),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
     }
 }
 

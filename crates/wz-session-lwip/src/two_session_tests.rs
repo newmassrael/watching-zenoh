@@ -149,8 +149,9 @@ fn put_payloads(event: &IterationEvent<'_>) -> Vec<Vec<u8>> {
         }
         IterationEvent::InPlace(record) => {
             use wz_codecs::push::PushVariant;
-            if let PushVariant::CodecZenohMsgPut(put) | PushVariant::Default { body: put, .. } =
-                &record.push().body
+            if let Some(
+                PushVariant::CodecZenohMsgPut(put) | PushVariant::Default { body: put, .. },
+            ) = record.push().map(|push| &push.body)
             {
                 assert!(put.slices.is_none(), "an inline payload");
                 out.push(put.payload.unwrap_or(&[]).to_vec());

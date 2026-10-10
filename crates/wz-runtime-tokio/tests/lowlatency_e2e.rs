@@ -409,7 +409,11 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             &mut engine,
             &mut record,
             &mut |event| match event {
-                IterationEvent::InPlace(lent) => got.push(lent.push().encode_to_vec()),
+                IterationEvent::InPlace(lent) => got.push(
+                    lent.push()
+                        .expect("only Puts and an OAM were encoded")
+                        .encode_to_vec(),
+                ),
                 IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                     messages,
                     reliable,

@@ -206,7 +206,10 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// See the module docs for what it delivers and what it hands to the owned
     /// projection.
     pub(super) fn dispatch_in_place(&mut self, record: &InPlaceRecord<'_>) {
-        let push = record.push();
+        // A lent Request or Response is the queryables' or the pending gets'.
+        let Some(push) = record.push() else {
+            return;
+        };
         let reliability = Reliability::from_reliable_bool(record.reliable());
         match self.deliver_lent(push, reliability) {
             Ok(()) => {}
@@ -513,9 +516,21 @@ mod tests {
         put.slice_count = Some(2);
         put.slices = Some(slices);
         let (lent, owned, fallbacks) = both_ways(&push, "demo/s", |_| {});
-        assert_eq!(owned.len(), 1);
         assert_eq!(lent, owned);
-        assert_eq!(lent[0].payload, b"abcd");
+        // Without the shared-memory transport the owned projection joins the
+        // plain slices. With it, a list of slices goes through the un-swap, which
+        // refuses it (and counts it) on a session that negotiated no shared
+        // memory, as this one has not: dropped on both paths alike.
+        #[cfg(not(feature = "transport-shm"))]
+        {
+            assert_eq!(owned.len(), 1);
+            assert_eq!(lent[0].payload, b"abcd");
+        }
+        #[cfg(feature = "transport-shm")]
+        assert!(
+            owned.is_empty(),
+            "an unnegotiated list of slices is dropped"
+        );
         assert_eq!(
             fallbacks,
             InPlaceFallbacks {
