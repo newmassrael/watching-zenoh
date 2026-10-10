@@ -49,9 +49,11 @@ use tokio_tungstenite::{accept_async, client_async, WebSocketStream};
 use crate::link_interfaces::ip_link_subject;
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+use bytes::Bytes;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::link::{LinkKind, LinkSubject};
+use wz_session_core::link::{RxBytes, RxStorage};
 
 /// Dial a WebSocket-over-TCP connection — TCP-connect to `addr`, then run the
 /// RFC6455 client handshake ([`client_async`]) over it, returning the
@@ -110,6 +112,25 @@ pub fn wire_ws_stream(
     (inbound, outbound, writer_handle)
 }
 
+/// R3250 — a received binary message, which tungstenite 0.26 and later hands
+/// over as refcounted `Bytes`, as the frame's lent storage: the frame (and every
+/// sample taken from it) is a range of the library's own buffer, as a QUIC
+/// datagram's is (`quic_datagram_pipeline::frame_of_datagram`). The one `Arc`
+/// the storage needs replaces the vector 0.24 handed over.
+struct WsMessage(Bytes);
+
+impl RxStorage for WsMessage {
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+fn frame_of_message(bytes: Bytes) -> RxFrame {
+    let len = bytes.len();
+    let storage: Arc<dyn RxStorage> = Arc::new(WsMessage(bytes));
+    RxFrame::new(RxBytes::shared(storage, 0..len).expect("a message is a range of itself"))
+}
+
 /// Inbound read side of the split WebSocket — owns the read half and impls
 /// [`LinkDriver`] with `poll_event` receiving one `Message::Binary` as one
 /// [`RxFrame`] (no envelope strip — the WS message boundary is the frame
@@ -155,7 +176,7 @@ impl LinkDriver for WsReadDriver {
         // peer closing; a transport error is an OS-level loss.
         loop {
             match self.read.next().await {
-                Some(Ok(Message::Binary(bytes))) => return LinkEvent::Rx(RxFrame::new(bytes)),
+                Some(Ok(Message::Binary(bytes))) => return LinkEvent::Rx(frame_of_message(bytes)),
                 Some(Ok(Message::Close(_))) | None => {
                     return LinkEvent::Lost {
                         cause: LostCause::PeerClosed,
@@ -264,11 +285,24 @@ impl BoxedLinkDriver for WsWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // R3240 — the byte door keeps its vector even on a pooled queue, on
-        // purpose: tungstenite 0.24's `Message::Binary` takes an owned
-        // `Vec<u8>`, so a frame reaches the library as a vector whatever the
-        // queue holds, and copying it into a slot first would add a copy and
-        // save nothing. The one allocation and copy here IS that seam's.
+        // R3250 — a pooled queue takes the message by COPYING it into a slot of
+        // its own (one copy, which a byte door cannot avoid, and no allocation);
+        // the writer hands the slot to tungstenite as the message's `Bytes`.
+        #[cfg(feature = "runtime-zero-copy")]
+        if self.tx.is_pooled() {
+            return match self.tx.send_framed(priority, &[], bytes) {
+                Ok(()) => LinkSendOutcome::Sent,
+                Err(crate::writer_queue::PooledSendError::TooLarge) => {
+                    LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "wz-runtime-tokio: outbound ws channel closed; dropping frame ({e})"
+                    );
+                    LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+                }
+            };
+        }
         if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound ws channel closed; dropping frame ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
@@ -277,8 +311,8 @@ impl BoxedLinkDriver for WsWriteDriver {
     }
 
     // R3240 — lend the session a slot of the link's transmit pool to encode one
-    // message into. The session's own heap encode is saved; the library seam
-    // still takes a vector (`ws_writer_task`).
+    // message into. The session's own heap encode is saved, and (R3250) the
+    // library takes the slot itself as the message's `Bytes` (`ws_writer_task`).
     #[cfg(feature = "runtime-zero-copy")]
     fn tx_slot_acquire(
         &self,
@@ -335,15 +369,16 @@ pub async fn ws_writer_task(
     mut sink: SplitSink<WebSocketStream<TcpStream>, Message>,
     mut queue: OutboundQueue,
 ) {
-    // R3240 — THE ONE COPY AT THIS SEAM, explicit: tungstenite 0.24's
-    // `Message::Binary` owns a `Vec<u8>`, so a frame in a slot of the link's
-    // transmit pool is copied into one here (one allocation and one copy per
-    // lent message, `WireFrame::into_vec`), and the slot goes home un-armed once
-    // its bytes are copied out. A byte-door frame is already a vector and moves in
-    // without a copy. Removing it needs a library that takes a borrowed or
-    // refcounted buffer (tungstenite's later `Bytes` payloads).
+    // R3250 — the frame is handed to tungstenite AS ITS BUFFER: since 0.26
+    // `Message::Binary` holds `Bytes`, and a pooled frame's slot becomes the
+    // `Bytes`' owner (`WireFrame::into_bytes`), so no copy is made at this seam
+    // and the slot goes home when tungstenite has written and dropped the
+    // message. `Bytes::from_owner` boxes its owner: one small allocation per
+    // message, the same as the QUIC datagram link's. (tungstenite then frames
+    // the message into its own write buffer, as the kernel copies a socket
+    // write; that is the library's framing and not a copy of ours.)
     while let Some(payload) = queue.next_wire().await {
-        let message = Message::Binary(payload.into_vec());
+        let message = Message::Binary(payload.into_bytes());
         match queue.guarded(sink.send(message)).await {
             Some(Ok(())) => {}
             Some(Err(e)) => {

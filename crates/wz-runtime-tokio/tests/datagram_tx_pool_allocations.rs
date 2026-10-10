@@ -20,10 +20,11 @@
 //!   `bytes::Bytes`, and the slot becomes the `Bytes`' owner with no copy of its
 //!   bytes. `Bytes::from_owner` boxes its owner, so each datagram costs exactly
 //!   ONE allocation there, which is counted here and stated at the seam.
-//! - Websocket, at the library seam: tungstenite 0.24's `Message::Binary` owns a
-//!   `Vec<u8>`, so a lent message is copied into one there (one allocation and
-//!   one copy), and the byte door hands its vector straight in (one
-//!   allocation); exactly one per message either way, counted here.
+//! - Websocket, at the library seam: since the bump to tungstenite 0.29
+//!   `Message::Binary` holds `Bytes`, so the slot is handed over as the
+//!   `Bytes`' owner with no copy, and the one allocation per message is the
+//!   owner box, as for QUIC. (Under 0.24 it held a `Vec<u8>` and a lent message
+//!   was copied into one at the seam.)
 //!
 //! R3247 — the count is ATTRIBUTED to the measurement's own threads, not
 //! process-wide: a [`Measurement`] counts what its test thread allocates and
@@ -417,11 +418,15 @@ mod seam {
         );
     }
 
-    /// tungstenite 0.24 takes a `Vec<u8>`: a lent message is copied into one at
-    /// the seam (one allocation per message, counted), and its slot goes home.
+    /// tungstenite 0.29 takes `Message::Binary(Bytes)`: a lent message's slot
+    /// becomes the `Bytes`' owner with NO copy (same address), the one
+    /// allocation per message is `from_owner`'s box, and the slot goes home
+    /// when the message is dropped. Under tungstenite 0.24 this was a copy into
+    /// a vector at the seam (one allocation and one copy per message).
     #[cfg(feature = "transport-link-ws")]
     #[test]
-    fn a_pooled_ws_message_costs_one_allocation_at_the_library_seam() {
+    fn a_pooled_ws_message_is_its_slot_with_one_allocation_and_no_copy() {
+        use tokio_tungstenite::tungstenite::Message;
         let measurement = Measurement::new();
         let (tx, mut rx) = outbound_channel_datagram();
         let payload = [0x33u8; 300];
@@ -429,31 +434,38 @@ mod seam {
             lend_one(&tx, &payload);
         }
         let mut messages = Vec::with_capacity(12);
+        let mut addresses = Vec::with_capacity(12);
         let count = measurement.count(|| {
             for _ in 0..12 {
-                messages.push(take(&mut rx).into_vec());
+                let wire = take(&mut rx);
+                let at = wire.as_ptr() as usize;
+                let message = Message::Binary(wire.into_bytes());
+                addresses.push(at);
+                messages.push(message);
             }
         });
-        assert_eq!(
-            count, 12,
-            "the seam's one copy per message, and nothing else"
-        );
-        for message in &messages {
-            assert_eq!(&message[..], &payload[..]);
+        assert_eq!(count, 12, "one owner box per message, and nothing else");
+        for (message, at) in messages.iter().zip(&addresses) {
+            let Message::Binary(bytes) = message else {
+                unreachable!("built as Binary above");
+            };
+            assert_eq!(&bytes[..], &payload[..]);
+            assert_eq!(bytes.as_ptr() as usize, *at, "the message reads the slot");
         }
+        drop(messages);
         assert_eq!(
             tx.tx_pool_stats().expect("pooled").1,
             tx.tx_pool_capacity().expect("pooled"),
-            "every slot came home once copied"
+            "every slot came home with its message"
         );
     }
 
-    /// The byte door keeps its vector on a pooled websocket queue: the one
-    /// allocation per message is the vector the library takes, and it moves to
-    /// the seam with no second copy.
+    /// The byte door copies a message into a slot (no allocation) and the
+    /// slot reaches tungstenite as the message's `Bytes` (one box): one
+    /// allocation per message, the same bytes.
     #[cfg(feature = "transport-link-ws")]
     #[test]
-    fn the_ws_byte_door_costs_one_allocation_and_moves_it_to_the_seam() {
+    fn the_ws_byte_door_costs_one_allocation_per_message() {
         use wz_runtime_tokio::ws_pipeline::WsWriteDriver;
         use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, LinkSubject};
         use wz_session_core::reliability::Reliability;
@@ -474,13 +486,10 @@ mod seam {
                     driver.send_blocking(&payload, Reliability::Reliable),
                     LinkSendOutcome::Sent
                 );
-                messages.push(take(&mut rx).into_vec());
+                messages.push(take(&mut rx).into_bytes());
             }
         });
-        assert_eq!(
-            count, 12,
-            "one vector per message, handed to the seam as it is"
-        );
+        assert_eq!(count, 12, "one owner box per message, and nothing else");
         for message in &messages {
             assert_eq!(&message[..], &payload[..]);
         }

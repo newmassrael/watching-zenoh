@@ -1662,8 +1662,9 @@ impl WireFrame {
         }
     }
 
-    /// R3240 — the frame as `bytes::Bytes` for a library that takes ownership
-    /// of the buffer it sends (quinn's `send_datagram`). A heap frame's vector
+    /// R3240 / R3250 — the frame as `bytes::Bytes` for a library that takes
+    /// ownership of the buffer it sends (quinn's `send_datagram`, tungstenite's
+    /// `Message::Binary`). A heap frame's vector
     /// moves in; a pooled frame's SLOT moves in as the `Bytes`' owner
     /// (`Bytes::from_owner`), so the library reads the slot in place and the
     /// slot goes home through the completion edge when the library drops the
@@ -1674,7 +1675,10 @@ impl WireFrame {
     /// The one allocation this costs is the library's, not a copy: `from_owner`
     /// boxes its owner (bytes 1.11 `Bytes::from_owner`), one small allocation
     /// per frame and no copy of the frame's bytes.
-    #[cfg(feature = "transport-link-quic-datagram")]
+    #[cfg(any(
+        feature = "transport-link-quic-datagram",
+        feature = "transport-link-ws"
+    ))]
     pub fn into_bytes(mut self) -> bytes::Bytes {
         self.begin_write();
         match self.0 {
@@ -1691,13 +1695,19 @@ impl WireFrame {
 /// R3240 — a writer's slot as the owner of a `bytes::Bytes`.
 #[cfg(all(
     feature = "runtime-zero-copy",
-    feature = "transport-link-quic-datagram"
+    any(
+        feature = "transport-link-quic-datagram",
+        feature = "transport-link-ws"
+    )
 ))]
 struct SlotBytes(SlotWire);
 
 #[cfg(all(
     feature = "runtime-zero-copy",
-    feature = "transport-link-quic-datagram"
+    any(
+        feature = "transport-link-quic-datagram",
+        feature = "transport-link-ws"
+    )
 ))]
 impl AsRef<[u8]> for SlotBytes {
     fn as_ref(&self) -> &[u8] {

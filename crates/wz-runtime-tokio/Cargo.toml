@@ -965,7 +965,7 @@ transport-link-tls-keylog = []
 # protocol layer) split via `futures_util`. No tcp forward (the session-open
 # Ws arm rides the tcp+unicast-gated `session_open` like the udp arm). NOT
 # default — pico ships WS as an optional link (Z_FEATURE_LINK_WS).
-transport-link-ws = ["link-interfaces", "dep:tokio-tungstenite", "dep:futures-util"]
+transport-link-ws = ["link-interfaces", "dep:tokio-tungstenite", "dep:futures-util", "dep:bytes"]
 # R311xi — host Unix-domain-stream link backend. Like TLS (and UNLIKE WS), it
 # forwards `transport-link-tcp` because a unix socket is a reliable byte STREAM
 # (zenoh's `unixsock_stream` link: `is_streamed() = true`, MTU 65535) that
@@ -1939,7 +1939,12 @@ rcgen = { version = "0.13", default-features = false, features = ["ring"], optio
 # read-driver / writer-task halves (a WebSocketStream needs `&mut` for both
 # directions, so unlike the UDP socket it cannot be shared by `Arc` — it is
 # split instead) plus `SinkExt::send` for the writer task.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
+# R3250 — 0.29, for `Message::Binary(Bytes)` (0.26 and later): a message the
+# writer sends can be a slot of the link's transmit pool as the `Bytes`' owner,
+# where 0.24's `Binary(Vec<u8>)` forced a copy into a vector at the seam. 0.29
+# is the newest whose MSRV (tungstenite 1.71) is within this crate's 1.81;
+# 0.30 asks for 1.85. Same licence (MIT, and MIT OR Apache-2.0 for tungstenite).
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"], optional = true }
 # R311qa — `futures-util` is OPTIONAL, activated by exactly its two consumers so a
 # profile selecting neither never pays for it (kconfig footprint invariant; the
 # R311qa review caught an unconditional base dep leaking into the multicast-only
