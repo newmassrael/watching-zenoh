@@ -269502,6 +269502,78 @@
         "3. The QoS ext_qos variant of the lent chain is proved at the writer level (frame_encode unit test); the session-level sweep runs on a session that negotiated no QoS."
       ]
     },
+    "Round 3252": {
+      "decision_summary": "B7, re-measured: REAL on the AP. A completed chain was handed to the receive loop as a borrow of its staging and copied whole (to_vec, then a shared buffer) before decoding; the payload the application got lay outside the pool slot. Counted through the production caller: the completion allocated 47, two of them the copy. Built: the Router can LEND a completed chain (ChainStaging::lend, ingest_lending, ChainBytes Borrowed or Lent); the unicast and multicast receive loops take it lent and decode it in place (reassembled_chain_outcome). The pooled arena lends its slot through one shared view per slot, made once and reused (no allocation per lend); the slot goes home through the pool's pool_return once the arena holds the view's only reference (checked at every acquire), and a slot the application keeps counts against the Router's dims, so a held pool runs dry and is refused. The heap arena moves its buffer. On the MCU the chain is delivered borrowed as before; no second copy was there.",
+      "changes_bullets": [
+        "Commit 38dfd212 feat(runtime-tokio): a reassembled message is delivered from its slot",
+        "crates/wz-session-core/src/reassembly_dispatch.rs: ChainBytes (Borrowed for the delivery call, or Lent shared storage under rx-shared-bytes); ingest_lending; one ingest walk (ingest_delivering) and one completion helper (complete) that lends when asked and the arena can, else delivers borrowed; ingest/ingest_in_ring keep their borrowed contract.",
+        "crates/wz-session-core/src/chain_staging.rs: ChainStaging::lend (provided answer Err, the borrowed delivery); HeapStaging moves its buffer into shared storage.",
+        "crates/wz-session-core/src/bounded.rs: BoundedVec<u8>::into_vec on the growable backing.",
+        "crates/wz-session-core/src/driver_loop.rs: reassembled_chain_outcome (decode a lent chain in place, a borrowed one through the copying lend as before); reassembled_frame_outcome delegates.",
+        "crates/wz-session-core/src/drive.rs (report_outcome_reassembling only) and multicast_dispatch.rs: the receive loops use ingest_lending + reassembled_chain_outcome.",
+        "crates/wz-runtime-tokio/src/zero_copy.rs: PooledStaging over a shared slot table (Arc + Mutex, the link-RX arena's shape); chains stage through the slot pointer the pool's write accessor gave; lend hands the slot up as LentSlot storage through one reused view per slot; reclaim returns slots whose view is the arena's alone via pool_return (run at every acquire); staged + held slots enforce the Router's SLOTS; free_count, slot_state, slot_of (an interior address of a lent slot, base confirmed by the pool), lent_out. Five new unit tests (slot by address until the last range drops, reuse, dry pool refused, every terminal path of the lending ingest, both arenas lend the same bytes).",
+        "crates/wz-runtime-tokio/tests/reassembly_lend_allocations.rs (new): through report_outcome_reassembling over TokioReassembly: the delivered payload lies in the pool slot and the completion allocates the Router's own work plus a lent frame's decode and nothing more; the slot stays out while the application keeps the payload and goes home after.",
+        "scripts/run-ci.sh: Layer C1bq runs the two new allocation suites (guarded on a non-zero pass count).",
+        "docs/reason-review-pins.md: runtime-zero-copy / zero_copy.rs re-pinned to the new blob with round R3250 (placeholder round id). The reason's clause citing this file (\"delivers the reassembled message as a borrow of the pool slot\") still holds and is now true past the caller too."
+      ],
+      "verification_bullets": [
+        "Host-level only; no hardware.",
+        "RED before the fix (reassembly_lend_allocations through the production caller over the pooled Router): the delivered payload was NOT in the pool slot; the completion allocated 47.",
+        "GREEN after: payload in the slot (address checked against the pool's own slot base), completion allocates 45 = the Router's own completion work (42, measured on the same Router type delivering to a no-op) + the decode of the same batch from a lent frame (3); the lifecycle test passes. 2 passed.",
+        "Mutation checks: never lending (lend path disabled) turned both tests red; a reclaim that ignores live ranges turned the lifecycle test red; both reverted.",
+        "wz-runtime-tokio --lib zero_copy:: 14 passed (runtime-zero-copy); final run with transport-unicast,transport-multicast,transport-fragmentation,runtime-zero-copy,codec-push: lib 647, fragment_tx_lend_allocations 2, reassembly_lend_allocations 2, lent_slot_send 26, layer3_reassembly_rx 4, layer3_reassembly_tx 2, all passed.",
+        "wz-runtime-tokio full suites with transport-unicast,transport-multicast,transport-fragmentation,transport-link-udp,routing-namespace (heap arena): all passed. With runtime-zero-copy added: all passed except datagram_tx_pool_allocations udp burst (1 allocation), which FAILS THE SAME WAY ON THE UNTOUCHED BASE a48e1e88 (measured in a throwaway worktree): pre-existing on this build host, not this change.",
+        "wz-session-core --lib (fragmentation,batching,push,qos,session-multicast,rx-shared-bytes) passed; wz-runtime-coop --features rx-in-place,reassembly passed; wz-session-lwip multicast+fragmentation+push passed.",
+        "clippy -D warnings clean: wz-session-core (no default features; reassembly no-alloc lib; reassembly+multicast+shared-bytes+push+fragmentation; full set), wz-runtime-tokio (C1bq composition), wz-runtime-coop (rx-in-place,reassembly), wz-session-lwip (rx-in-place lane).",
+        "C1bz pass; A4 pass; guarded_count_gate --range origin/main..HEAD rc 0; feature_public_surface_census --check OK; store_reason_citation_gate OK; reason_review_pin_gate OK after the re-pin; bash -n run-ci.sh OK.",
+        "NOT run: the whole C1bq lane as one command (its two new invocations were run as their own command), the hook gate array, C0, hosted CI."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "1. The generated buffer-pool lifecycle has no edge from cpu-mut to the shared-read state for a slot the CPU wrote, so a lent reassembly slot stays in cpu-mut while shared (read-only by type, not by the FSM). Adding a freeze edge is the buffer-pool template's (SCE's) decision; ask SCE if the FSM should say it.",
+        "2. A lent slot goes home at the next acquire after its last range drops (lazy reclaim), not at the drop itself; that is what keeps a lend free of allocation. If drop-time return is wanted it costs one allocation per message (a fresh shared owner) or an intrusive refcount; owner call.",
+        "3. NEW FINDING (not B7): the reassembly Router allocates about twenty times per fragment on the host build (measured: 21-22 per continuation, 42 at completion, delivery excluded). It is the slot engine's own work (events through the std sce-rust-runtime), independent of staging. Next step: measure where (event queue or per-event storage) and whether the MCU heapless build pays it.",
+        "4. AP fragments are still copied out of the unit into an owned vector per fragment before staging (inbound.rs Fragment arm `.to_vec()`, DriverLoopOutcome::Fragment payload: Vec<u8>), so the AP stages with two copies where 9.3 allows one. Same seam as B3 (below)."
+      ],
+      "publishable_decision_summary": "B7, re-measured: REAL on the AP. A completed chain was handed to the receive loop as a borrow of its staging and copied whole (to_vec, then a shared buffer) before decoding; the payload the application got lay outside the pool slot. Counted through the production caller: the completion allocated 47, two of them the copy. Built: the Router can LEND a completed chain (ChainStaging::lend, ingest_lending, ChainBytes Borrowed or Lent); the unicast and multicast receive loops take it lent and decode it in place (reassembled_chain_outcome). The pooled arena lends its slot through one shared view per slot, made once and reused (no allocation per lend); the slot goes home through the pool's pool_return once the arena holds the view's only reference (checked at every acquire), and a slot the application keeps counts against the Router's dims, so a held pool runs dry and is refused. The heap arena moves its buffer. On the MCU the chain is delivered borrowed as before; no second copy was there.",
+      "publishable_changes_bullets": [
+        "Commit 38dfd212 feat(runtime-tokio): a reassembled message is delivered from its slot",
+        "crates/wz-session-core/src/reassembly_dispatch.rs: ChainBytes (Borrowed for the delivery call, or Lent shared storage under rx-shared-bytes); ingest_lending; one ingest walk (ingest_delivering) and one completion helper (complete) that lends when asked and the arena can, else delivers borrowed; ingest/ingest_in_ring keep their borrowed contract.",
+        "crates/wz-session-core/src/chain_staging.rs: ChainStaging::lend (provided answer Err, the borrowed delivery); HeapStaging moves its buffer into shared storage.",
+        "crates/wz-session-core/src/bounded.rs: BoundedVec<u8>::into_vec on the growable backing.",
+        "crates/wz-session-core/src/driver_loop.rs: reassembled_chain_outcome (decode a lent chain in place, a borrowed one through the copying lend as before); reassembled_frame_outcome delegates.",
+        "crates/wz-session-core/src/drive.rs (report_outcome_reassembling only) and multicast_dispatch.rs: the receive loops use ingest_lending + reassembled_chain_outcome.",
+        "crates/wz-runtime-tokio/src/zero_copy.rs: PooledStaging over a shared slot table (Arc + Mutex, the link-RX arena's shape); chains stage through the slot pointer the pool's write accessor gave; lend hands the slot up as LentSlot storage through one reused view per slot; reclaim returns slots whose view is the arena's alone via pool_return (run at every acquire); staged + held slots enforce the Router's SLOTS; free_count, slot_state, slot_of (an interior address of a lent slot, base confirmed by the pool), lent_out. Five new unit tests (slot by address until the last range drops, reuse, dry pool refused, every terminal path of the lending ingest, both arenas lend the same bytes).",
+        "crates/wz-runtime-tokio/tests/reassembly_lend_allocations.rs (new): through report_outcome_reassembling over TokioReassembly: the delivered payload lies in the pool slot and the completion allocates the Router's own work plus a lent frame's decode and nothing more; the slot stays out while the application keeps the payload and goes home after.",
+        "scripts/run-ci.sh: Layer C1bq runs the two new allocation suites (guarded on a non-zero pass count).",
+        "docs/reason-review-pins.md: runtime-zero-copy / zero_copy.rs re-pinned to the new blob with round R3250 (placeholder round id). The reason's clause citing this file (\"delivers the reassembled message as a borrow of the pool slot\") still holds and is now true past the caller too."
+      ],
+      "publishable_verification_bullets": [
+        "Host-level only; no hardware.",
+        "RED before the fix (reassembly_lend_allocations through the production caller over the pooled Router): the delivered payload was NOT in the pool slot; the completion allocated 47.",
+        "GREEN after: payload in the slot (address checked against the pool's own slot base), completion allocates 45 = the Router's own completion work (42, measured on the same Router type delivering to a no-op) + the decode of the same batch from a lent frame (3); the lifecycle test passes. 2 passed.",
+        "Mutation checks: never lending (lend path disabled) turned both tests red; a reclaim that ignores live ranges turned the lifecycle test red; both reverted.",
+        "wz-runtime-tokio --lib zero_copy:: 14 passed (runtime-zero-copy); final run with transport-unicast,transport-multicast,transport-fragmentation,runtime-zero-copy,codec-push: lib 647, fragment_tx_lend_allocations 2, reassembly_lend_allocations 2, lent_slot_send 26, layer3_reassembly_rx 4, layer3_reassembly_tx 2, all passed.",
+        "wz-runtime-tokio full suites with transport-unicast,transport-multicast,transport-fragmentation,transport-link-udp,routing-namespace (heap arena): all passed. With runtime-zero-copy added: all passed except datagram_tx_pool_allocations udp burst (1 allocation), which FAILS THE SAME WAY ON THE UNTOUCHED BASE a48e1e88 (measured in a throwaway worktree): pre-existing on this build host, not this change.",
+        "wz-session-core --lib (fragmentation,batching,push,qos,session-multicast,rx-shared-bytes) passed; wz-runtime-coop --features rx-in-place,reassembly passed; wz-session-lwip multicast+fragmentation+push passed.",
+        "clippy -D warnings clean: wz-session-core (no default features; reassembly no-alloc lib; reassembly+multicast+shared-bytes+push+fragmentation; full set), wz-runtime-tokio (C1bq composition), wz-runtime-coop (rx-in-place,reassembly), wz-session-lwip (rx-in-place lane).",
+        "C1bz pass; A4 pass; guarded_count_gate --range origin/main..HEAD rc 0; feature_public_surface_census --check OK; store_reason_citation_gate OK; reason_review_pin_gate OK after the re-pin; bash -n run-ci.sh OK.",
+        "NOT run: the whole C1bq lane as one command (its two new invocations were run as their own command), the hook gate array, C0, hosted CI."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "1. The generated buffer-pool lifecycle has no edge from cpu-mut to the shared-read state for a slot the CPU wrote, so a lent reassembly slot stays in cpu-mut while shared (read-only by type, not by the FSM). Adding a freeze edge is the buffer-pool template's (SCE's) decision; ask SCE if the FSM should say it.",
+        "2. A lent slot goes home at the next acquire after its last range drops (lazy reclaim), not at the drop itself; that is what keeps a lend free of allocation. If drop-time return is wanted it costs one allocation per message (a fresh shared owner) or an intrusive refcount; owner call.",
+        "3. NEW FINDING (not B7): the reassembly Router allocates about twenty times per fragment on the host build (measured: 21-22 per continuation, 42 at completion, delivery excluded). It is the slot engine's own work (events through the std sce-rust-runtime), independent of staging. Next step: measure where (event queue or per-event storage) and whether the MCU heapless build pays it.",
+        "4. AP fragments are still copied out of the unit into an owned vector per fragment before staging (inbound.rs Fragment arm `.to_vec()`, DriverLoopOutcome::Fragment payload: Vec<u8>), so the AP stages with two copies where 9.3 allows one. Same seam as B3 (below)."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
