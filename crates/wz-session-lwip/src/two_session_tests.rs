@@ -128,19 +128,36 @@ fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
 const GROUP_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
 const MEMBER_ZID: &[u8] = &[0x01, 0x02, 0x03, 0x04];
 
-/// The payloads of every Put a drive event carries, in order.
+/// The payloads of every Put a drive event carries, in order: the owned ones of
+/// a `FramePayload`, and the one a Push lent where its frame lies carries (the
+/// `IterationEvent::InPlace` a session that reads its units in place reports
+/// for each Push, under `rx-in-place`). A log that read only the first would
+/// miss every Put on that path.
 fn put_payloads(event: &IterationEvent<'_>) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-        for m in messages.iter() {
-            if let NetworkMessage::Push(p) = m {
-                if let PushOwnedVariant::CodecZenohMsgPut(put) = &p.body {
-                    let bytes =
-                        wz_session_core::put_payload::inline_bytes(put).expect("an inline payload");
-                    out.push(bytes.to_vec());
+    match event {
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+            for m in messages.iter() {
+                if let NetworkMessage::Push(p) = m {
+                    if let PushOwnedVariant::CodecZenohMsgPut(put) = &p.body {
+                        let bytes = wz_session_core::put_payload::inline_bytes(put)
+                            .expect("an inline payload");
+                        out.push(bytes.to_vec());
+                    }
                 }
             }
         }
+        IterationEvent::InPlace(record) => {
+            use wz_codecs::push::PushVariant;
+            if let Some(
+                PushVariant::CodecZenohMsgPut(put) | PushVariant::Default { body: put, .. },
+            ) = record.push().map(|push| &push.body)
+            {
+                assert!(put.slices.is_none(), "an inline payload");
+                out.push(put.payload.unwrap_or(&[]).to_vec());
+            }
+        }
+        _ => {}
     }
     out
 }

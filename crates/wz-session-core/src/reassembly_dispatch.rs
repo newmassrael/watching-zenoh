@@ -66,7 +66,7 @@
 //! one `--no-std` codegen emit drives both the std (AP) and heapless (MCU)
 //! `sce-rust-runtime`.
 
-use crate::chain_staging::{ChainStaging, HeapStaging};
+use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
 use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
@@ -79,13 +79,44 @@ use sce_rust_runtime::Engine;
 #[cfg(feature = "alloc")]
 use crate::driver_loop::IterationEvent;
 
+/// A completed chain's bytes, as the Router delivers them (ARCHITECTURE
+/// section 9.3: the event carries the stage buffer).
+///
+/// - [`ChainBytes::Borrowed`] is the chain where it was staged, BORROWED for
+///   the length of the delivery call: the staging is reclaimed the moment the
+///   call returns, so nothing decoded out of it may keep pointing there. This
+///   is the synchronous dispatch's contract, and every arena can answer it.
+/// - [`ChainBytes::Lent`] (only where frames can be shared, `rx-shared-bytes`)
+///   is the staging itself handed up as shared storage: what is decoded out of
+///   it is a range of it, and it goes home when the last range drops. An arena
+///   answers it when it can ([`ChainStaging::lend`]); the pooled arena lends
+///   its slot, the heap arena moves its buffer, so neither copies the chain.
+pub enum ChainBytes<'a> {
+    /// Borrowed from the staging for the delivery call only.
+    Borrowed(&'a [u8]),
+    /// The staging itself, shared; it outlives the call.
+    #[cfg(feature = "rx-shared-bytes")]
+    Lent(crate::link::RxBytes),
+}
+
+impl ChainBytes<'_> {
+    /// The chain's bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            ChainBytes::Borrowed(bytes) => bytes,
+            #[cfg(feature = "rx-shared-bytes")]
+            ChainBytes::Lent(bytes) => bytes.as_slice(),
+        }
+    }
+}
+
 /// Maximum peer-key byte length: sized to the widest key a transport
 /// feeds the chain key — the unicast peer ZID (a zenoh ZID is up to 16
 /// bytes; the wire form is length-prefixed); the multicast pool-slot key
 /// ([`crate::multicast_dispatch::multicast_chain_key`]) is 4 bytes. The
 /// chain key copies the peer key into a fixed buffer so the Router holds
 /// no allocation per chain.
-const PEER_KEY_MAX: usize = 16;
+pub(crate) const PEER_KEY_MAX: usize = 16;
 
 /// Deploy-sourced reassembly runtime knobs (§4 `buffer_pools.reassembly_pool`).
 ///
@@ -497,12 +528,25 @@ impl<const SLOTS: usize, const CAP: usize, S> ReassemblyDispatcher<SLOTS, CAP, S
 where
     S: ChainStaging<SLOTS, CAP>,
 {
-    /// Build a Router with `SLOTS` empty slots over `config`.
-    pub fn new(config: ReassemblyConfig) -> Self {
+    /// Build a Router with `SLOTS` empty slots over `config`, staging into an
+    /// arena that makes its own storage.
+    pub fn new(config: ReassemblyConfig) -> Self
+    where
+        S: BuildsOwnStorage<SLOTS, CAP>,
+    {
+        Self::with_staging(config, S::new())
+    }
+
+    /// Build a Router with `SLOTS` empty slots over `config`, staging into
+    /// `staging`: an arena built by its caller, which is how an arena whose
+    /// storage is handed in (a slot table the image placed) reaches a Router.
+    /// The arena must be EMPTY, with no chain of its own outstanding; the
+    /// Router's accounting starts from all of `SLOTS` free.
+    pub fn with_staging(config: ReassemblyConfig, staging: S) -> Self {
         Self {
             slots: core::array::from_fn(|_| Slot::new()),
             config,
-            staging: S::new(),
+            staging,
         }
     }
 
@@ -588,15 +632,82 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
+        self.ingest_delivering(frag, ring, now_ms, false, |chain: ChainBytes<'_>| {
+            deliver(chain.as_slice())
+        })
+    }
+
+    /// [`Self::ingest`], delivering the completed chain as [`ChainBytes`]: lent
+    /// out of the arena when the arena can lend it ([`ChainStaging::lend`]),
+    /// so the bytes the application is handed ARE the staging and no copy of
+    /// it is made, and borrowed for the call when it cannot. What the receive
+    /// loops call; `ingest` stays the borrowed-only form for a reader that
+    /// copies what it keeps.
+    pub fn ingest_lending<F: FnOnce(ChainBytes<'_>)>(
+        &mut self,
+        frag: Fragment<'_>,
+        sn_mask: u64,
+        now_ms: u64,
+        deliver: F,
+    ) -> IngestOutcome {
+        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, true, deliver)
+    }
+
+    /// The one ingest walk. `lend` asks the arena to hand a completed chain up
+    /// as shared storage; without it the chain is always delivered borrowed.
+    fn ingest_delivering<F: FnOnce(ChainBytes<'_>)>(
+        &mut self,
+        frag: Fragment<'_>,
+        ring: SnRing,
+        now_ms: u64,
+        lend: bool,
+        deliver: F,
+    ) -> IngestOutcome {
         if self.config.fragmentation_markers {
             if let Some(outcome) = self.apply_chain_boundary_markers(&frag) {
                 return outcome;
             }
         }
         match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
-            Some(idx) => self.ingest_continuation(idx, frag, ring, deliver),
-            None => self.ingest_chain_start(frag, now_ms, deliver),
+            Some(idx) => self.ingest_continuation(idx, frag, ring, lend, deliver),
+            None => self.ingest_chain_start(frag, now_ms, lend, deliver),
         }
+    }
+
+    /// Hand the completed chain in `idx` to `deliver` and reclaim the slot.
+    ///
+    /// Lent when `lend` and the arena can: the Router slot is released first
+    /// (the chain's staging is no longer the Router's), then the shared bytes
+    /// are delivered. Otherwise borrowed: delivered while the staging is still
+    /// held, and released after, which is the only order a borrow allows.
+    fn complete<F: FnOnce(ChainBytes<'_>)>(&mut self, idx: usize, lend: bool, deliver: F) {
+        #[cfg(feature = "rx-shared-bytes")]
+        if lend {
+            let chain = self.slots[idx]
+                .chain
+                .take()
+                .expect("a completed chain has staging");
+            match self.staging.lend(chain) {
+                Ok(bytes) => {
+                    let Self { slots, staging, .. } = self;
+                    slots[idx].release(staging);
+                    deliver(ChainBytes::Lent(bytes));
+                    return;
+                }
+                Err(chain) => self.slots[idx].chain = Some(chain),
+            }
+        }
+        #[cfg(not(feature = "rx-shared-bytes"))]
+        let _ = lend;
+        {
+            let chain = self.slots[idx]
+                .chain
+                .as_ref()
+                .expect("a completed chain has staging");
+            deliver(ChainBytes::Borrowed(self.staging.bytes(chain)));
+        }
+        let Self { slots, staging, .. } = self;
+        slots[idx].release(staging);
     }
 
     /// R311y578 — the `0x2 First` / `0x3 Drop` chain-boundary rules, run
@@ -749,10 +860,11 @@ where
             .count() as u16
     }
 
-    fn ingest_chain_start<F: FnOnce(&[u8])>(
+    fn ingest_chain_start<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         frag: Fragment<'_>,
         now_ms: u64,
+        lend: bool,
         deliver: F,
     ) -> IngestOutcome {
         // §5.M quota-first: the per-peer cap is checked before slot
@@ -815,26 +927,19 @@ where
 
         match self.slots[idx].engine.get_current_state() {
             ReassemblySlotState::Complete => {
-                {
-                    let chain = self.slots[idx]
-                        .chain
-                        .as_ref()
-                        .expect("a completed chain has staging");
-                    deliver(self.staging.bytes(chain));
-                }
-                let Self { slots, staging, .. } = self;
-                slots[idx].release(staging);
+                self.complete(idx, lend, deliver);
                 IngestOutcome::Reassembled
             }
             _ => IngestOutcome::Begun,
         }
     }
 
-    fn ingest_continuation<F: FnOnce(&[u8])>(
+    fn ingest_continuation<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         idx: usize,
         frag: Fragment<'_>,
         ring: SnRing,
+        lend: bool,
         deliver: F,
     ) -> IngestOutcome {
         // Strict in-order (§2.5): a non-consecutive continuation (a
@@ -874,15 +979,7 @@ where
         // The slot FSM's `more` guard decided Continue vs Final.
         match self.slots[idx].engine.get_current_state() {
             ReassemblySlotState::Complete => {
-                {
-                    let chain = self.slots[idx]
-                        .chain
-                        .as_ref()
-                        .expect("a completed chain has staging");
-                    deliver(self.staging.bytes(chain));
-                }
-                let Self { slots, staging, .. } = self;
-                slots[idx].release(staging);
+                self.complete(idx, lend, deliver);
                 IngestOutcome::Reassembled
             }
             _ => IngestOutcome::Continued,

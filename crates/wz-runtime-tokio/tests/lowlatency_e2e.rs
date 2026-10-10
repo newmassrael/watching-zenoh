@@ -266,3 +266,191 @@ async fn lowlatency_put_rides_a_bare_network_message_not_a_frame() {
         "the responder never offered, so it stays universal"
     );
 }
+
+/// Counts the allocations made BY THE CURRENT THREAD, so the parallel tests of
+/// this binary (each on its own runtime) cannot move each other's numbers.
+struct CountingAllocator;
+
+thread_local! {
+    static ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// SAFETY: every call forwards to `System` unchanged; the only addition is a
+// thread-local counter bump, which neither allocates nor unwinds.
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        // SAFETY: same contract as the caller's.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        // SAFETY: same contract as the caller's.
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        // SAFETY: same contract as the caller's.
+        unsafe { std::alloc::System.realloc(ptr, layout, size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: same contract as the caller's.
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+fn allocations_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
+    let before = ALLOCATIONS.with(std::cell::Cell::get);
+    let out = f();
+    (out, ALLOCATIONS.with(std::cell::Cell::get) - before)
+}
+
+/// Test 3 — runtime-zero-copy B3: a lean lowlatency unit is read WHERE IT LIES
+/// by the in-place receive path (`wz_session_core::drive::dispatch_datagram`,
+/// the MCU loop's under `rx-in-place`), as a `Frame`'s payload is: a Push is
+/// lent as an `IterationEvent::InPlace`, any other record arrives as a
+/// `Poll(FramePayload)` of the one message, and nothing about the unit is
+/// copied. Before, a lean unit took the copying path whole (copied onto the
+/// heap, decoded into a list of owned messages).
+///
+/// Measured on the established acceptor of a lowlatency pair, under a counting
+/// allocator, against the copying path's dispatch of the same bytes (the
+/// control: it must SEE the copies). And byte for byte: each record handed over
+/// in place is the record the copying decode reads out of the same unit. The
+/// generic in-place path runs here over the AP runtime because no MCU crate
+/// forwards `transport-lowlatency`; the function is the one the MCU pump calls.
+#[tokio::test(flavor = "current_thread")]
+async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_it() {
+    use wz_session_core::drive::{dispatch_datagram, dispatch_link_event, DatagramPath};
+    use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use wz_session_core::link::{LinkEvent, RxFrame};
+    use wz_session_core::network_message::NetworkMessage;
+
+    let pair = establish_capability_pair(true, true, |a: &Arc<SessionLinkActions>| {
+        a.set_lowlatency_offer(true);
+    })
+    .await;
+    let actions = pair.resp_actions;
+    assert!(actions.is_lowlatency() && actions.is_established());
+    let mut engine = wz_runtime_tokio::session_glue::new_session_engine(&actions);
+    let mut record: Vec<NetworkMessage> = Vec::with_capacity(1);
+
+    let push = |payload: &[u8]| {
+        wz_session_core::push_build::build_push_literal(KEYEXPR, payload)
+            .expect("a literal Put")
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec()
+    };
+    let oam = wz_codecs::oam::Oam {
+        id: 7,
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let one_put = push(b"lean");
+    let two_puts = [push(b"one"), push(b"two")].concat();
+    let put_then_oam = [push(b"three"), oam.clone()].concat();
+
+    for unit in [&one_put, &two_puts, &put_then_oam] {
+        // What the copying lean path decodes out of the same unit.
+        let copied = dispatch_link_event(
+            LinkEvent::Rx(RxFrame::new(unit.clone())),
+            &actions,
+            &mut engine,
+        );
+        let DriverLoopOutcome::FramePayload { messages, .. } = &copied else {
+            panic!("the copying lean path reads a batch: {copied:?}");
+        };
+        let expected: Vec<Vec<u8>> = messages.iter().map(record_bytes).collect();
+
+        // In place, with an observer that keeps nothing: what the path costs.
+        let mut handed = 0usize;
+        let (path, in_place_cost) = allocations_during(|| {
+            dispatch_datagram(unit, &actions, &mut engine, &mut record, &mut |event| {
+                if matches!(event, IterationEvent::InPlace(_) | IterationEvent::Poll(_)) {
+                    handed += 1;
+                }
+            })
+        });
+        assert_eq!(path, DatagramPath::LowLatencyInPlace);
+        assert_eq!(handed, expected.len(), "one event per record");
+        let lent = unit.len() == one_put.len() || unit.len() == two_puts.len();
+        if lent {
+            assert_eq!(
+                in_place_cost, 0,
+                "a lean unit of Puts read in place costs the heap nothing"
+            );
+        }
+
+        // The copying control sees what in place does not make.
+        let (_, copied_cost) = allocations_during(|| {
+            dispatch_link_event(
+                LinkEvent::Rx(RxFrame::new(unit.clone())),
+                &actions,
+                &mut engine,
+            )
+        });
+        assert!(
+            copied_cost > in_place_cost,
+            "copying {copied_cost} against in place {in_place_cost}"
+        );
+
+        // Byte for byte, in wire order.
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        dispatch_datagram(
+            unit,
+            &actions,
+            &mut engine,
+            &mut record,
+            &mut |event| match event {
+                IterationEvent::InPlace(lent) => got.push(
+                    lent.push()
+                        .expect("only Puts and an OAM were encoded")
+                        .encode_to_vec(),
+                ),
+                IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                    messages,
+                    reliable,
+                    sn,
+                    has_ext,
+                    ..
+                }) => {
+                    assert_eq!((*reliable, *sn, *has_ext), (true, 0, false));
+                    got.extend(messages.iter().map(record_bytes));
+                }
+                other => panic!("only records are reported: {other:?}"),
+            },
+        );
+        assert_eq!(got, expected, "the records the copying decode reads");
+    }
+
+    // A KeepAlive is not a lean batch: the copying path decodes it.
+    let keep_alive = [wire_const::T_MID_KEEP_ALIVE];
+    let path = dispatch_datagram(&keep_alive, &actions, &mut engine, &mut record, &mut |_| {});
+    assert_eq!(
+        path,
+        DatagramPath::Copied(wz_session_core::drive::CopyReason::NotAFrame)
+    );
+}
+
+/// A decoded record's wire bytes: what both paths are compared by.
+fn record_bytes(message: &wz_session_core::network_message::NetworkMessage) -> Vec<u8> {
+    use wz_session_core::network_message::NetworkMessage;
+    match message {
+        NetworkMessage::Push(push) => push
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec(),
+        NetworkMessage::Oam(oam) => oam
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec(),
+        other => panic!("only Puts and an OAM were encoded: {other:?}"),
+    }
+}

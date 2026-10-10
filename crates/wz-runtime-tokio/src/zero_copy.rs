@@ -49,9 +49,46 @@
 //! master and the table's no-op edge action. What this module says about ITS OWN
 //! consumer, the reassembly staging, is unchanged: it writes by CPU.
 
-use wz_session_core::chain_staging::{ChainStaging, StagingError};
+//!
+//! ## A completed chain is DELIVERED FROM its slot (ARCHITECTURE section 9.3)
+//!
+//! The Router used to hand a completed chain to its caller as a borrow of the
+//! slot and reclaim the slot as the call returned, so the receive loop copied
+//! the whole message out before decoding it. The arena now LENDS the slot
+//! (`ChainStaging::lend`): the reassembled bytes are handed up as shared storage
+//! that IS the slot, every message decoded out of them is a range of it, and the
+//! slot stays out of the pool until the last range drops.
+//!
+//! The slot goes home LAZILY, and that is what keeps the steady state free of
+//! allocation. Each pool slot has one shared view, made the first time the slot
+//! is lent and kept by the arena; lending again reuses it, so a chain costs a
+//! reference count and not an allocation. The arena knows a view has been let
+//! go of when it holds the only reference to it, and it looks at the next
+//! acquire (and whenever it is asked how much it has left): a slot whose view
+//! is the arena's alone is returned to the pool then, through the generated
+//! lifecycle's own `pool_return`. `PooledStaging::reclaim` does the same on
+//! demand.
+//!
+//! The generated lifecycle offers no edge from `cpu-mut` to the shared-read
+//! state for a slot the CPU wrote (its `cpu-ref` is reached only from a bus
+//! master's completion), so a lent chain's slot stays in `cpu-mut` while it is
+//! shared; what makes it read-only is that the arena keeps the handle and the
+//! shared view has no way to write. Adding that edge is the buffer-pool
+//! template's to decide (SCE owns it).
+
+use std::sync::{Arc, Mutex};
+
+use wz_session_core::chain_staging::{BuildsOwnStorage, ChainStaging, StagingError};
+use wz_session_core::link::{RxBytes, RxStorage};
 
 use crate::reassembly_pool_ap::{CpuMut, ReassemblyPoolAp, Slot, SLOT_COUNT, SLOT_SIZE};
+
+/// The arena's slot table, behind the lock that serialises acquire and return.
+/// Shared with the views of lent slots, which keep the storage alive (and at
+/// its address) for as long as any range of them lives.
+struct PoolHome {
+    slots: Mutex<Box<ReassemblyPoolAp>>,
+}
 
 /// One chain's reservation: a pool slot plus how much of it is written.
 ///
@@ -59,8 +96,14 @@ use crate::reassembly_pool_ap::{CpuMut, ReassemblyPoolAp, Slot, SLOT_COUNT, SLOT
 /// `#[must_use]` and its transitions consume `self`, so a chain cannot hand its
 /// slot to the link's TX path and keep staging into it. Rust rejects that at
 /// compile time here, where the pre-seam `BoundedVec` had nothing to reject.
+///
+/// `data` is the slot's first byte, taken from the generated `write` accessor
+/// when the slot was acquired, so staging into the chain needs no lock: the
+/// handle is this chain's alone, and nothing else reads or writes the slot
+/// until it is released or lent.
 pub struct PooledChain {
     slot: Slot<CpuMut>,
+    data: *mut u8,
     len: usize,
     /// Bytes lent out by the most recent [`ChainStaging::buf`] and not yet
     /// resolved by [`ChainStaging::commit`].
@@ -72,6 +115,13 @@ pub struct PooledChain {
     /// same.
     reserved: usize,
 }
+
+// SAFETY: the only reason this is not automatic is the raw pointer, and it
+// names a slot this chain's handle reserved exclusively. A chain is only ever
+// passed back to the arena that produced it, and that arena keeps the slot table
+// (its `PoolHome`) alive and unmoved, so moving the chain between threads moves
+// an exclusive, live reference and nothing else.
+unsafe impl Send for PooledChain {}
 
 impl PooledChain {
     /// Pool index of this chain's slot. Tracing / test observability, and the
@@ -86,27 +136,157 @@ impl PooledChain {
     }
 }
 
+/// A completed chain's slot as shared storage: what [`ChainStaging::lend`]
+/// hands up. Read-only by construction (it has no way to write), and the slot
+/// table it points into is kept alive by `home` for as long as any range of it
+/// lives.
+struct LentSlot {
+    /// Held, never read: it is what keeps `data` pointing at live storage.
+    _home: Arc<PoolHome>,
+    /// First byte of the slot; valid for `SLOT_SIZE` bytes while `home` lives.
+    data: *const u8,
+    /// The chain's length, set by the arena each time it lends the slot, which
+    /// it can do only while it holds the view's one reference.
+    len: usize,
+}
+
+// SAFETY: the raw pointer names a slot the arena lent and does not write while
+// any range of this view exists: the arena writes a slot again only after it has
+// reacquired it, which it does only once it holds the only reference to this
+// view (`Arc::get_mut` succeeds), so no reader can see a write. Every method
+// here reads. `home` keeps the boxed table alive and at its address.
+unsafe impl Send for LentSlot {}
+// SAFETY: as for `Send`; shared readers only ever read.
+unsafe impl Sync for LentSlot {}
+
+impl RxStorage for LentSlot {
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: see the `Send` impl: `data` is the first byte of a slot of the
+        // table `_home` keeps alive, `len <= CAP <= SLOT_SIZE` was checked when
+        // the chain was staged, and no one writes the slot while this exists.
+        unsafe { std::slice::from_raw_parts(self.data, self.len) }
+    }
+}
+
+/// One pool slot's lend state, kept by the arena.
+#[derive(Default)]
+struct Lent {
+    /// The slot's shared view, made the first time the slot is lent and reused
+    /// on every lend after, so a lend costs no allocation.
+    view: Option<Arc<LentSlot>>,
+    /// The slot's handle while the slot is lent out and not yet home.
+    handle: Option<Slot<CpuMut>>,
+}
+
+impl Lent {
+    /// The slot is lent out and every range of it has been dropped: the view is
+    /// the arena's alone again.
+    fn is_home(&self) -> bool {
+        self.handle.is_some()
+            && self
+                .view
+                .as_ref()
+                .is_some_and(|v| Arc::strong_count(v) == 1)
+    }
+}
+
 /// The reserved arena: the SCE-generated pool, heap-placed, vending one slot
 /// per in-flight chain.
 ///
 /// `SLOTS` / `CAP` are the Router's dims and are checked against the pool's own
-/// in [`ChainStaging::new`], so a Router asking for more than the SCXML
+/// in [`BuildsOwnStorage::new`], so a Router asking for more than the SCXML
 /// declares fails at construction rather than by refusing chains at runtime.
 pub struct PooledStaging<const SLOTS: usize, const CAP: usize> {
-    pool: Box<ReassemblyPoolAp>,
-    /// Slots currently out. The pool has `free_count()` of its own, but it
-    /// counts the whole table; this counts what THIS arena handed out, so the
-    /// two disagreeing is a bug rather than a configuration.
-    outstanding: usize,
+    home: Arc<PoolHome>,
+    /// Per pool slot, indexed by the slot's own index: what the arena keeps of
+    /// a slot it lent.
+    lent: [Lent; SLOT_COUNT],
+    /// Chains being staged (acquired, neither released nor lent). With the lent
+    /// slots still held, this is what the arena holds against the Router's
+    /// `SLOTS`: the table may be larger, and a lent slot is no longer the
+    /// Router's to count, so the arena enforces the dims itself.
+    staged: usize,
 }
 
 impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
-    /// Read-only view of the generated pool, for tests that assert on the
-    /// lifecycle FSM's own state (`slot_state` / `free_count`) rather than on
-    /// this arena's bookkeeping. Asserting only on `available()` would pass
-    /// while the FSM went untouched, which is the whole thing being proved.
-    pub fn pool(&self) -> &ReassemblyPoolAp {
-        &self.pool
+    /// Slots on the generated pool's own freelist: the lifecycle FSM's answer,
+    /// not this arena's bookkeeping. A lent slot whose last range has dropped is
+    /// counted here only once it has been reclaimed ([`Self::reclaim`]).
+    pub fn free_count(&self) -> usize {
+        self.home
+            .slots
+            .lock()
+            .map(|pool| pool.free_count())
+            .unwrap_or(0)
+    }
+
+    /// The lifecycle state the generated pool records for slot `idx`.
+    pub fn slot_state(&self, idx: usize) -> Option<crate::reassembly_pool_ap::SlotState> {
+        self.home
+            .slots
+            .lock()
+            .ok()
+            .and_then(|pool| pool.slot_state(idx))
+    }
+
+    /// Which LENT slot an address lies inside, if any: the witness that bytes
+    /// handed up are the slot and not a copy of it.
+    ///
+    /// The pool resolves only a slot's exact base (an interior pointer is
+    /// refused rather than rounded down), and a decoded payload is interior. So
+    /// the base is taken from the slot's view, the address is tested against
+    /// `[base, base + SLOT_SIZE)`, and the base itself is then confirmed by the
+    /// pool's own `slot_index_of_ptr`, so the answer is the pool's and not this
+    /// arena's arithmetic.
+    pub fn slot_of(&self, addr: *const u8) -> Option<usize> {
+        let addr = addr as usize;
+        let (idx, base) = self.lent.iter().enumerate().find_map(|(idx, lent)| {
+            let base = lent.view.as_ref()?.data;
+            let start = base as usize;
+            (start <= addr && addr < start + SLOT_SIZE).then_some((idx, base))
+        })?;
+        let pool = self.home.slots.lock().ok()?;
+        (pool.slot_index_of_ptr(base) == Some(idx)).then_some(idx)
+    }
+
+    /// Slots lent out (a completed chain handed up) and not yet home.
+    pub fn lent_out(&self) -> usize {
+        self.lent.iter().filter(|l| l.handle.is_some()).count()
+    }
+
+    /// Lent slots some range of which is still alive: out of the pool for good
+    /// reason, unlike a lent slot only waiting to be reclaimed.
+    fn held_by_the_application(&self) -> usize {
+        self.lent
+            .iter()
+            .filter(|l| l.handle.is_some() && !l.is_home())
+            .count()
+    }
+
+    /// Return to the pool every lent slot whose last range has dropped, through
+    /// the generated lifecycle's `pool_return`. Run at every acquire; callable
+    /// on its own so the pool's free count can be read settled. Returns how
+    /// many slots went home.
+    pub fn reclaim(&mut self) -> usize {
+        if !self.lent.iter().any(Lent::is_home) {
+            return 0;
+        }
+        // A poisoned lock forfeits the slots until a later call finds it whole
+        // again; the only code that holds it does freelist bookkeeping.
+        let Ok(mut guard) = self.home.slots.lock() else {
+            return 0;
+        };
+        let pool: &mut ReassemblyPoolAp = &mut guard;
+        let mut home = 0;
+        for lent in self.lent.iter_mut() {
+            if lent.is_home() {
+                if let Some(handle) = lent.handle.take() {
+                    handle.pool_return(pool);
+                    home += 1;
+                }
+            }
+        }
+        home
     }
 
     // R311y589's `acquire_raw`, `release_raw` and `slot_ptr` STOOD HERE and
@@ -141,9 +321,9 @@ impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
     // arithmetic on the slot.
 }
 
-impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledStaging<SLOTS, CAP> {
-    type Chain = PooledChain;
-
+impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
+    for PooledStaging<SLOTS, CAP>
+{
     fn new() -> Self {
         assert!(
             SLOTS <= SLOT_COUNT,
@@ -154,24 +334,47 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
             "the Router's per-chain cap exceeds the pool's slot width"
         );
         Self {
-            pool: heap_pool(),
-            outstanding: 0,
+            home: Arc::new(PoolHome {
+                slots: Mutex::new(heap_pool()),
+            }),
+            lent: core::array::from_fn(|_| Lent::default()),
+            staged: 0,
         }
     }
+}
+
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledStaging<SLOTS, CAP> {
+    type Chain = PooledChain;
 
     fn acquire(&mut self) -> Option<Self::Chain> {
-        let slot = self.pool.pool_acquire_for_encode()?;
-        self.outstanding += 1;
+        // A slot whose last range dropped since the previous acquire is the
+        // pool's again before this one looks.
+        self.reclaim();
+        // The Router's dims, held here: a slot the application keeps is one of
+        // them as surely as a chain being staged is.
+        if self.staged + self.lent_out() >= SLOTS {
+            return None;
+        }
+        let mut guard = self.home.slots.lock().ok()?;
+        let pool: &mut ReassemblyPoolAp = &mut guard;
+        let mut slot = pool.pool_acquire_for_encode()?;
+        let data = slot.write(pool).as_mut_ptr();
+        self.staged += 1;
         Some(PooledChain {
             slot,
+            data,
             len: 0,
             reserved: 0,
         })
     }
 
     fn release(&mut self, chain: Self::Chain) {
-        chain.slot.pool_return(&mut self.pool);
-        self.outstanding = self.outstanding.saturating_sub(1);
+        self.staged = self.staged.saturating_sub(1);
+        // A poisoned lock forfeits the slot rather than panicking on a path a
+        // peer can drive; the only code that holds it does freelist bookkeeping.
+        if let Ok(mut guard) = self.home.slots.lock() {
+            chain.slot.pool_return(&mut guard);
+        }
     }
 
     fn append(&mut self, chain: &mut Self::Chain, payload: &[u8]) -> Result<(), StagingError> {
@@ -182,13 +385,24 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         if end > CAP {
             return Err(StagingError::ChainCapExceeded);
         }
-        chain.slot.write(&mut self.pool)[chain.len..end].copy_from_slice(payload);
+        // SAFETY: `[len, end)` lies in the slot (`end <= CAP <= SLOT_SIZE`), the
+        // slot is this chain's alone (its handle), and `payload` is a borrow of
+        // the caller's, which cannot overlap a slot the pool reserved.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                payload.as_ptr(),
+                chain.data.add(chain.len),
+                payload.len(),
+            );
+        }
         chain.len = end;
         Ok(())
     }
 
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
-        &chain.slot.read(&self.pool)[..chain.len]
+        // SAFETY: the first `len` bytes of the chain's own slot, which only
+        // this chain writes and which the arena's table keeps alive.
+        unsafe { std::slice::from_raw_parts(chain.data, chain.len) }
     }
 
     fn buf<'a>(
@@ -211,7 +425,10 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         // filler actually used. Keeping the two apart is why a short read
         // cannot stage bytes nobody wrote.
         chain.reserved = want;
-        Ok(&mut chain.slot.write(&mut self.pool)[start..end])
+        // SAFETY: `[start, end)` lies in the slot (`end <= CAP <= SLOT_SIZE`)
+        // and the slot is this chain's alone; the returned borrow is tied to
+        // `&mut chain`, so nothing else can reach the bytes while it lives.
+        Ok(unsafe { std::slice::from_raw_parts_mut(chain.data.add(start), want) })
     }
 
     fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
@@ -233,8 +450,55 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         Ok(())
     }
 
+    /// The live figure: the Router's `SLOTS` less the chains being staged and
+    /// the lent slots some range of which still lives. A lent slot whose last
+    /// range has dropped counts as available (it goes home at the next
+    /// acquire); one the application still holds does not, which is what makes
+    /// a pool the application keeps hold of run dry, and the Router refuse.
     fn available(&self) -> usize {
-        SLOTS.saturating_sub(self.outstanding)
+        SLOTS.saturating_sub(self.staged + self.held_by_the_application())
+    }
+
+    /// ARCHITECTURE section 9.3 -- the completed chain handed up AS its slot.
+    /// The slot's shared view is reused when the slot has been lent before
+    /// (no allocation), and made once otherwise; the handle is kept here until
+    /// the last range of the view drops and the slot is reclaimed.
+    fn lend(&mut self, chain: Self::Chain) -> Result<RxBytes, Self::Chain> {
+        let PooledChain {
+            slot, data, len, ..
+        } = chain;
+        let lent = &mut self.lent[slot.idx()];
+        debug_assert!(lent.handle.is_none(), "a slot is lent once at a time");
+        let view = match lent.view.as_mut() {
+            Some(view) => {
+                // The slot came out of the pool, so it was reclaimed, so this
+                // arena holds the view's only reference.
+                let Some(unique) = Arc::get_mut(view) else {
+                    // Unreachable by the argument above; giving the chain back
+                    // keeps the bytes correct (it is delivered borrowed).
+                    return Err(PooledChain {
+                        slot,
+                        data,
+                        len,
+                        reserved: 0,
+                    });
+                };
+                unique.len = len;
+                view.clone()
+            }
+            None => lent
+                .view
+                .insert(Arc::new(LentSlot {
+                    _home: self.home.clone(),
+                    data,
+                    len,
+                }))
+                .clone(),
+        };
+        lent.handle = Some(slot);
+        self.staged = self.staged.saturating_sub(1);
+        let storage: Arc<dyn RxStorage> = view;
+        Ok(RxBytes::shared(storage, 0..len).expect("the chain lies in its slot"))
     }
 }
 
@@ -347,8 +611,8 @@ mod tests {
     /// one-liner it looks like it should be.
     #[test]
     fn a_debug_build_can_construct_the_ap_pool() {
-        let arena: PooledStaging<SLOT_COUNT, SLOT_SIZE> = ChainStaging::new();
-        assert_eq!(arena.pool().free_count(), SLOT_COUNT);
+        let arena: PooledStaging<SLOT_COUNT, SLOT_SIZE> = BuildsOwnStorage::new();
+        assert_eq!(arena.free_count(), SLOT_COUNT);
         assert_eq!(
             ChainStaging::<SLOT_COUNT, SLOT_SIZE>::available(&arena),
             SLOT_COUNT
@@ -382,7 +646,7 @@ mod tests {
     /// The address is the one observable the copy cannot reproduce.
     #[test]
     fn a_pooled_buf_is_the_chains_own_bytes_rather_than_a_copy() {
-        let mut arena: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut arena: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut chain = ChainStaging::<SLOTS, CAP>::acquire(&mut arena).expect("slots");
 
         let lent = ChainStaging::<SLOTS, CAP>::buf(&mut arena, &mut chain, 8).expect("room for 8");
@@ -417,14 +681,14 @@ mod tests {
     /// separate tests could each pass while the arenas disagreed.
     #[test]
     fn a_short_fill_stages_only_what_was_written_on_both_arenas() {
-        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut pooled_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
         let lent = ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut pooled_chain, 8).expect("8");
         lent[..3].copy_from_slice(b"abc");
         ChainStaging::<SLOTS, CAP>::commit(&mut pooled, &mut pooled_chain, 3).expect("3 of 8");
         let from_pool = ChainStaging::<SLOTS, CAP>::bytes(&pooled, &pooled_chain).to_vec();
 
-        let mut heaped: HeapStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut heaped: HeapStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut heap_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut heaped).expect("slots");
         let lent = ChainStaging::<SLOTS, CAP>::buf(&mut heaped, &mut heap_chain, 8).expect("8");
         lent[..3].copy_from_slice(b"abc");
@@ -446,12 +710,12 @@ mod tests {
     /// started; the pooled one would stage slot bytes nobody wrote.
     #[test]
     fn commit_refuses_more_than_was_lent_on_both_arenas() {
-        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut pooled_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
         ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut pooled_chain, 4).expect("4");
         assert!(ChainStaging::<SLOTS, CAP>::commit(&mut pooled, &mut pooled_chain, 5).is_err());
 
-        let mut heaped: HeapStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut heaped: HeapStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut heap_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut heaped).expect("slots");
         ChainStaging::<SLOTS, CAP>::buf(&mut heaped, &mut heap_chain, 4).expect("4");
         assert!(ChainStaging::<SLOTS, CAP>::commit(&mut heaped, &mut heap_chain, 5).is_err());
@@ -475,7 +739,7 @@ mod tests {
     /// rule and would pass for the wrong reason.
     #[test]
     fn a_reservation_past_the_cap_is_refused() {
-        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
 
         ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut chain, CAP)
@@ -498,18 +762,18 @@ mod tests {
     #[test]
     fn a_live_chain_holds_its_pool_slot_in_cpu_mut() {
         let mut router: Pooled = ReassemblyDispatcher::new(ReassemblyConfig::new(4, 5_000));
-        assert_eq!(router.staging().pool().free_count(), SLOT_COUNT);
+        assert_eq!(router.staging().free_count(), SLOT_COUNT);
 
         router.ingest(frag(b"peer-a", 0, 1, b"part"), MASK, 0, |_| {});
         assert_eq!(router.active_chains(), 1);
         assert_eq!(
-            router.staging().pool().free_count(),
+            router.staging().free_count(),
             SLOT_COUNT - 1,
             "a live chain must hold a pool slot"
         );
         assert_eq!(
             (0..SLOT_COUNT)
-                .filter(|i| router.staging().pool().slot_state(*i) == Some(SlotState::CpuMut))
+                .filter(|i| router.staging().slot_state(*i) == Some(SlotState::CpuMut))
                 .count(),
             1,
             "exactly one slot must be in cpu-mut while one chain is live"
@@ -518,7 +782,7 @@ mod tests {
         router.ingest(frag(b"peer-a", 1, 0, b"-end"), MASK, 0, |_| {});
         assert_eq!(router.active_chains(), 0);
         assert_eq!(
-            router.staging().pool().free_count(),
+            router.staging().free_count(),
             SLOT_COUNT,
             "a completed chain must return its pool slot"
         );
@@ -564,7 +828,7 @@ mod tests {
         assert!(quiescent(&router), "the sweep leaked staging");
 
         assert_eq!(
-            router.staging().pool().free_count(),
+            router.staging().free_count(),
             SLOT_COUNT,
             "the generated pool must agree that every slot came back"
         );
@@ -589,7 +853,7 @@ mod tests {
             );
         }
         assert_eq!(router.staging_available(), 0);
-        assert_eq!(router.staging().pool().free_count(), SLOT_COUNT - SLOTS);
+        assert_eq!(router.staging().free_count(), SLOT_COUNT - SLOTS);
 
         assert!(
             matches!(
@@ -598,5 +862,194 @@ mod tests {
             ),
             "a full arena must refuse, not grow"
         );
+    }
+
+    // ARCHITECTURE section 9.3 -- the completed chain LENT out of the arena.
+
+    use wz_session_core::link::RxBytes;
+    use wz_session_core::reassembly_dispatch::ChainBytes;
+
+    /// Drive a three-fragment chain through the lending ingest and keep what
+    /// was delivered.
+    fn lend_one_chain<S>(router: &mut ReassemblyDispatcher<SLOTS, CAP, S>, peer: &[u8]) -> RxBytes
+    where
+        S: ChainStaging<SLOTS, CAP>,
+    {
+        let mut got: Option<RxBytes> = None;
+        for (sn, more, part) in [
+            (0u64, 1u8, b"hello ".as_slice()),
+            (1, 1, b"pooled ".as_slice()),
+            (2, 0, b"world".as_slice()),
+        ] {
+            let outcome = router.ingest_lending(frag(peer, sn, more, part), MASK, 0, |chain| {
+                got = Some(match chain {
+                    ChainBytes::Lent(bytes) => bytes,
+                    ChainBytes::Borrowed(_) => panic!("both arenas lend a completed chain"),
+                })
+            });
+            assert!(!matches!(
+                outcome,
+                IngestOutcome::Aborted(_) | IngestOutcome::Refused(_)
+            ));
+        }
+        got.expect("the chain completed")
+    }
+
+    /// THE CLAIM: the delivered bytes ARE the slot, by address, and the slot
+    /// stays out of the pool while any range of it lives -- a clone or a
+    /// sub-range included -- and goes home once the last one drops.
+    #[test]
+    fn a_lent_chain_is_its_slot_until_its_last_range_drops() {
+        let mut router: Pooled = ReassemblyDispatcher::new(ReassemblyConfig::new(4, 5_000));
+        let bytes = lend_one_chain(&mut router, b"peer-a");
+        assert_eq!(bytes.as_slice(), b"hello pooled world");
+        let idx = router
+            .staging()
+            .slot_of(bytes.as_ptr())
+            .expect("the delivered bytes lie in a pool slot, not in a copy");
+        assert!(bytes.is_shared(), "shared storage, not an owned vector");
+        assert_eq!(router.active_chains(), 0, "the Router's own slot is free");
+        assert_eq!(router.staging().lent_out(), 1);
+        assert_eq!(router.staging_available(), SLOTS - 1);
+        assert_eq!(router.staging().slot_state(idx), Some(SlotState::CpuMut));
+
+        let world = bytes.subslice(13..18).expect("a range of it");
+        let copy = bytes.clone();
+        drop(bytes);
+        drop(copy);
+        assert_eq!(world.as_slice(), b"world");
+        assert_eq!(
+            router.staging_available(),
+            SLOTS - 1,
+            "a range of the chain still holds its slot"
+        );
+        drop(world);
+        assert_eq!(
+            router.staging_available(),
+            SLOTS,
+            "the last range dropped: the slot is available"
+        );
+        assert_eq!(
+            router.staging_mut_reclaim(),
+            1,
+            "and goes home through the pool"
+        );
+        assert_eq!(router.staging().slot_state(idx), Some(SlotState::Free));
+        assert_eq!(router.staging().free_count(), SLOT_COUNT);
+        assert_eq!(router.staging().lent_out(), 0);
+    }
+
+    /// Lending again reuses the slot's view: a steady stream of chains through
+    /// one slot keeps arriving in the same slot, and the bytes of each are its
+    /// own (the previous chain's are never read back).
+    #[test]
+    fn a_slot_lent_again_delivers_the_new_chain_where_the_old_one_was() {
+        let mut router: Pooled = ReassemblyDispatcher::new(ReassemblyConfig::new(4, 5_000));
+        let first = lend_one_chain(&mut router, b"peer-a");
+        let at = first.as_ptr();
+        drop(first);
+        let second = lend_one_chain(&mut router, b"peer-b");
+        assert_eq!(second.as_slice(), b"hello pooled world");
+        assert_eq!(
+            router.staging().lent_out(),
+            1,
+            "the first slot went home first"
+        );
+        assert_eq!(
+            router.staging().slot_of(second.as_ptr()),
+            router.staging().slot_of(at),
+            "the reclaimed slot is the one reused"
+        );
+    }
+
+    /// A pool the application keeps hold of runs DRY: the Router refuses the
+    /// next chain, counted as pool exhaustion, rather than allocating; and once
+    /// one held chain is dropped the next chain is admitted.
+    #[test]
+    fn a_pool_the_application_holds_runs_dry_and_the_router_refuses_the_next_chain() {
+        let mut router: Pooled =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(SLOTS as u16, 5_000));
+        let held: Vec<RxBytes> = (0..SLOTS)
+            .map(|i| lend_one_chain(&mut router, &[b'p', b'0' + i as u8]))
+            .collect();
+        assert_eq!(router.staging_available(), 0);
+        assert_eq!(
+            router.ingest(frag(b"pz", 0, 1, b"x"), MASK, 0, |_| {}),
+            IngestOutcome::Refused(
+                wz_session_core::reassembly_dispatch::RefuseReason::PoolExhausted
+            ),
+            "a dry pool is an explicit refusal"
+        );
+        assert_eq!(router.active_chains(), 0, "the refusal left nothing staged");
+        drop(held);
+        assert!(matches!(
+            router.ingest(frag(b"pz", 0, 1, b"x"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        ));
+    }
+
+    /// THE LEAK CHECK on the lending path: completion lent then dropped,
+    /// capacity overflow, out-of-order abort and the sweep all leave the arena
+    /// whole, and the generated pool agrees once reclaimed.
+    #[test]
+    fn every_terminal_path_of_the_lending_ingest_returns_the_slot() {
+        let mut router: Pooled = ReassemblyDispatcher::new(ReassemblyConfig::new(4, 5_000));
+        fn quiescent(r: &Pooled) -> bool {
+            r.active_chains() + r.staging_available() == SLOTS
+        }
+        drop(lend_one_chain(&mut router, b"peer-a"));
+        assert!(quiescent(&router), "a lent completion leaked its slot");
+        let big = [0xABu8; 100];
+        assert!(matches!(
+            router.ingest_lending(frag(b"peer-b", 0, 1, &big), MASK, 0, |_| {}),
+            IngestOutcome::Aborted(_)
+        ));
+        assert!(quiescent(&router), "capacity overflow leaked staging");
+        router.ingest_lending(frag(b"peer-c", 0, 1, b"a"), MASK, 0, |_| {});
+        assert!(matches!(
+            router.ingest_lending(frag(b"peer-c", 9, 1, b"b"), MASK, 0, |_| {}),
+            IngestOutcome::Aborted(_)
+        ));
+        assert!(quiescent(&router), "out-of-order abort leaked staging");
+        router.ingest_lending(frag(b"peer-d", 0, 1, b"a"), MASK, 0, |_| {});
+        assert_eq!(router.sweep(1_000_000), 1);
+        assert!(quiescent(&router), "the sweep leaked staging");
+        router.staging_mut_reclaim();
+        assert_eq!(router.staging().free_count(), SLOT_COUNT);
+    }
+
+    /// THE COMPARISON on the lending path: both arenas lend, and they lend the
+    /// same bytes. The heap arena's are its buffer moved, the pooled arena's
+    /// its slot; neither is a copy made at completion.
+    #[test]
+    fn the_two_arenas_lend_the_same_bytes() {
+        let mut heap: Heaped = ReassemblyDispatcher::new(ReassemblyConfig::new(4, 5_000));
+        let mut pooled: Pooled = ReassemblyDispatcher::new(ReassemblyConfig::new(4, 5_000));
+        let from_heap = lend_one_chain(&mut heap, b"peer-a");
+        let from_pool = lend_one_chain(&mut pooled, b"peer-a");
+        assert_eq!(from_heap.as_slice(), from_pool.as_slice());
+        assert!(from_heap.is_shared() && from_pool.is_shared());
+        assert_eq!(
+            heap.active_chains() + heap.staging_available(),
+            SLOTS,
+            "the heap arena counts a lent buffer back at once"
+        );
+    }
+
+    /// The Router's reach to its arena for a reclaim, for these tests: the
+    /// dispatcher hands out only a shared borrow of its staging.
+    trait ReclaimThroughRouter {
+        fn staging_mut_reclaim(&mut self) -> usize;
+    }
+
+    impl ReclaimThroughRouter for Pooled {
+        fn staging_mut_reclaim(&mut self) -> usize {
+            // A chain start reclaims; a refused one stages nothing. A peer key
+            // no test uses and a fragment that completes at once leave the
+            // Router as they found it.
+            let before = self.staging().lent_out();
+            self.ingest(frag(b"reclaim", 0, 0, b""), MASK, 0, |_| {});
+            before - self.staging().lent_out()
+        }
     }
 }

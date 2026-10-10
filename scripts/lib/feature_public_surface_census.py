@@ -337,10 +337,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # of the §5.20 ingress port, the same shape `scouting-static` already
         # has here, and it arrived with the facade forward that made
         # `wz --features runtime-coop,switchboard` activate anything at all.
+        # B3 (runtime-zero-copy) — `rx-in-place` joins: it gates the pump's
+        # per-path counts (`session_drive::RxPathCounts`, `rx_path_counts`) and
+        # the session's own reassembly arena (`reassembly_rx::ReassemblyArena`
+        # and its re-exports, `SessionPump::reassembly`). No site is at the
+        # crate root; each sits in a `pub mod` or an `impl`, the shape
+        # `AXIS_REACHABLE`'s second clause reads off the sites.
         frozenset(
             {
                 "alloc",
                 "reassembly",
+                "rx-in-place",
                 "scouting-static",
                 "session-unicast",
                 "switchboard",
@@ -732,7 +739,14 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # in the same commit as the OFF_AXIS row above, so the row never states a
     # reach the axis does not have.
     "wz-runtime-coop": frozenset(
-        {"alloc", "reassembly", "scouting-static", "session-unicast", "switchboard"}
+        {
+            "alloc",
+            "reassembly",
+            "rx-in-place",
+            "scouting-static",
+            "session-unicast",
+            "switchboard",
+        }
     ),
     # R2298 — the last three, and they failed R2297's first clause on ONE
     # feature each for the SAME derivable reason. See the second clause of

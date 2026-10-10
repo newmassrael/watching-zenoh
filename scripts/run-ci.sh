@@ -5572,10 +5572,13 @@ layer_c1ac_cargo_test_quic() {
 # R311y414 — the two test steps were BARE, so an `extlowlatency` rename or a
 # cfg-out of the e2e cases would have gone green by silence. Both now carry
 # anchored count guards with the MEASURED counts (4 unit / 2 e2e).
+# B3 (runtime-zero-copy) moved the e2e count 2 -> 3: a lean unit read in place
+# by the in-place receive path, against the copying path's dispatch of the same
+# bytes. 3 = what the command PRINTED.
 layer_c1ad_cargo_test_lowlatency() {
     _runci_guarded_test C1ad 4 cargo test -p wz-session-core --features transport-lowlatency --lib extlowlatency --quiet \
         || return 1
-    _runci_guarded_test C1ad 2 cargo test -p wz-runtime-tokio --features transport-lowlatency,transport-unicast,transport-link-tcp --test lowlatency_e2e --quiet \
+    _runci_guarded_test C1ad 3 cargo test -p wz-runtime-tokio --features transport-lowlatency,transport-unicast,transport-link-tcp --test lowlatency_e2e --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,transport-unicast,transport-link-tcp --quiet -- -D warnings \
@@ -5679,7 +5682,12 @@ layer_c1bb_cargo_test_qos() {
     # `extqos::tests::peer_offer_absent_for_a_qoslink_of_body_zero`. The
     # passive-fold and `session-extqos` cases that carry `qos` in their names
     # are not compiled by this feature set, so they add nothing here.
-    _runci_guarded_test C1bb 37 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    #
+    # 37 -> 39, READ off the command, which printed 39: the two lent-chain
+    # writer tests in `frame_encode::qos_wire_tests` (a chain encoded into
+    # fixed buffers is the heap chain, with and without ext_qos; a fragment
+    # one byte past its slot is refused).
+    _runci_guarded_test C1bb 39 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
@@ -10977,13 +10985,59 @@ layer_c1m_session_lwip() {
     # copying loop, where the count must SEE the per-frame copies (the
     # instrument's control), once on `rx-in-place`, where the per-frame part
     # must be zero. 2 = the file's two tests, the number each command PRINTED.
-    _runci_guarded_test "C1m rx frame copying" 2 \
+    # B3 (runtime-zero-copy) moved every leg of this file up one: a Frame with
+    # its own extension chain owns it only for an owned record
+    # (`a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it`,
+    # ungated; on the copying loop it is the control). 3 = what this PRINTED.
+    _runci_guarded_test "C1m rx frame copying" 3 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put \
         --test rx_frame_allocations --quiet || return 1
-    _runci_guarded_test "C1m rx frame in place" 2 \
+    # Fixed-memory step S3 moved the in-place leg 2 -> 3: a Fragment taking the
+    # copying path, counted (`a_fragment_takes_the_copying_path_and_is_counted`,
+    # gated on `rx-in-place`). The same file runs again on the FIXED bounded
+    # backing (`bounded-heapless`, the MCU profile's), the one leg where a Put
+    # delivered in place must cost the heap NOTHING; on the growable backing
+    # above it costs the matcher's two scratch lists. 3 = what each PRINTED.
+    # B3 moved both 3 -> 4 (the extension-chain test above). 4 = what each
+    # PRINTED.
+    _runci_guarded_test "C1m rx frame in place" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx frame in place fixed" 4 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,wz-session-core/bounded-heapless \
+        --test rx_frame_allocations --quiet || return 1
+    # B3 — a session that reassembles reads a Fragment in place too: its
+    # payload staged into its slot of the session's own reassembly table
+    # straight from the socket, the completed message read in that slot
+    # (`mod fragments`, gated on `rx-in-place` + `transport-fragmentation`).
+    # The copying-path fragment test gives way to the three fragment tests, on
+    # both backings. 6 = what each PRINTED.
+    _runci_guarded_test "C1m rx fragment in place" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx fragment in place fixed" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation,wz-session-core/bounded-heapless \
+        --test rx_frame_allocations --quiet || return 1
+    # B3 — the query and reply planes read in place (`mod query_and_reply`,
+    # gated on `query-queryable`): a Response costs the heap nothing, a Request
+    # only the queryable matcher's growable scratch; the copying leg is the
+    # instrument's control. 6, 6 and 5 = what each command PRINTED.
+    _runci_guarded_test "C1m rx query in place" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx query in place fixed" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable,wz-session-core/bounded-heapless \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx query copying" 5 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,query-queryable \
         --test rx_frame_allocations --quiet || return 1
     # Clause (4) of runtime-zero-copy -- the library's own tests on `rx-in-place`,
     # which hold a lent frame in the session socket: one of them reads the
@@ -11001,6 +11055,12 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,query-queryable \
             --quiet -- -D warnings) || return 1
     # ARCHITECTURE section 9.1 — the keep-alive cadence with both handshake
     # halves, the combination an MCU node that keeps a session up is built with,
@@ -12590,6 +12650,17 @@ layer_c1bq_zero_copy_arena() {
     (( n > 0 )) || {
         echo "  C1bq FAIL: the datagram transmit allocation suite ran no test"; echo "$out"; return 1; }
     tests=$((tests + n))
+    # ARCHITECTURE 9.1 and 9.3 -- the fragmented transmit (each fragment
+    # encoded into its own lent slot) and the reassembled receive (delivered
+    # from its pool slot), each counted by the allocator and read by address.
+    out="$(cd crates && cargo test -p wz-runtime-tokio \
+        --features runtime-zero-copy,codec-push,transport-unicast,transport-fragmentation \
+        --test fragment_tx_lend_allocations --test reassembly_lend_allocations --quiet 2>&1)" \
+        || { echo "$out"; return 1; }
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
+        echo "  C1bq FAIL: the fragment / reassembly allocation suites ran no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
 
     # The DEFAULT arena, which every other Router in the tree runs. The seam
     # moved `reassembly_dispatch`'s staging out from under all of them.
@@ -12609,7 +12680,7 @@ layer_c1bq_zero_copy_arena() {
 
     # The facade arm the preset actually ships.
     (cd crates && cargo build -p wz --features preset-ap-full --quiet) || return 1
-    _runci_lane_did C1bq "$tests" "arena test(s) over 8 suite(s), plus 2 clippy + 1 preset build"
+    _runci_lane_did C1bq "$tests" "arena test(s) over 10 suite(s), plus 2 clippy + 1 preset build"
 }
 
 layer_c1cj_replay_c_abi() {

@@ -403,6 +403,299 @@ pub enum IterationEvent<'a> {
     /// not care ignores this event, as it ignores the other multicast ones.
     /// Carries the same ungated [`MulticastPeerId`] the departure does. `Copy`.
     MulticastSource(MulticastPeerId),
+    /// ARCHITECTURE section 9.2 ("Codec::decode parses in place from slot",
+    /// "Event emitted with `&slot` borrow") — ONE record of an inbound `Frame`,
+    /// decoded where the frame lies and handed over borrowed: the receive path
+    /// of the fixed-memory MCU profile (`drive::dispatch_datagram`, reached
+    /// under `wz-runtime-coop`'s `rx-in-place`) emits it for every Push, Request
+    /// and Response record, in place of a `Poll(FramePayload)` carrying the
+    /// owned message, so a subscriber, a queryable or a pending get is handed
+    /// the frame's own bytes and nothing is built on the heap for the record.
+    ///
+    /// The record is valid for the call only; its bytes go when the link takes
+    /// its buffer back. A consumer that keeps something copies it, which is what
+    /// [`Sample::from_view`](crate::sample::Sample::from_view) does for a
+    /// subscriber. Every other record of the same frame still arrives as a
+    /// `Poll(FramePayload)` of one owned message, in wire order with these.
+    ///
+    /// A consumer that reads Push, Request or Response data out of
+    /// `Poll(FramePayload)` must read this variant too, or it misses every such
+    /// record on that path: the subscriber registry, the queryable registry, the
+    /// reply registry and the switchboard do, through the observer fan. Ungated
+    /// like the other variants, so every consumer's match stays
+    /// feature-independent; only the producer is gated. `Copy`.
+    InPlace(InPlaceRecord<'a>),
+    /// ARCHITECTURE section 9.3 — one inbound `Fragment` read where its unit
+    /// lies, its payload staged into its reassembly slot straight from there:
+    /// what the reassembling in-place receive path
+    /// (`drive::dispatch_datagram_reassembling`, reached under
+    /// `wz-runtime-coop`'s `rx-in-place` with `reassembly`) reports in place of
+    /// `Poll(DriverLoopOutcome::Fragment)`, whose payload is an owned copy.
+    ///
+    /// Carries a borrowed descriptor, not the payload's bytes: the unit and
+    /// where in it the payload starts, valid for the call only. A consumer that
+    /// counts or inspects fragments reads this variant as it reads
+    /// `Poll(Fragment)` on the copying path. A chain the fragment completes
+    /// arrives after it, as `InPlace` and `Poll(FramePayload)` events read in
+    /// the slot. Ungated, like the other variants; only the producer is gated.
+    /// `Copy`.
+    InPlaceFragment(InPlaceFragment<'a>),
+}
+
+/// One inbound `Fragment` read where its unit lies: what
+/// [`IterationEvent::InPlaceFragment`] carries. The fields of
+/// `DriverLoopOutcome::Fragment` but the extension chain (its two facts a
+/// participant acts on, the priority and the chain-boundary markers, are
+/// here), with the payload as a range of the unit instead of a copy of it.
+#[derive(Clone, Copy, Debug)]
+pub struct InPlaceFragment<'a> {
+    unit: &'a [u8],
+    payload_at: usize,
+    reliable: bool,
+    sn: u64,
+    more: bool,
+    has_ext: bool,
+    priority: crate::qos::Priority,
+    /// Only a build that reassembles reads a fragment at all.
+    #[cfg(feature = "reassembly")]
+    markers: crate::extfragment::FragmentMarkers,
+}
+
+impl<'a> InPlaceFragment<'a> {
+    /// The fragment at the front of `unit`, whose payload starts at
+    /// `payload_at`. Built by the reassembling in-place receive path alone.
+    #[cfg(all(feature = "reassembly", feature = "session-unicast"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        unit: &'a [u8],
+        payload_at: usize,
+        reliable: bool,
+        sn: u64,
+        more: bool,
+        has_ext: bool,
+        priority: crate::qos::Priority,
+        markers: crate::extfragment::FragmentMarkers,
+    ) -> Self {
+        debug_assert!(
+            payload_at <= unit.len(),
+            "the payload starts inside the unit"
+        );
+        Self {
+            unit,
+            payload_at,
+            reliable,
+            sn,
+            more,
+            has_ext,
+            priority,
+            markers,
+        }
+    }
+
+    /// The whole unit the fragment was read from.
+    pub fn unit(&self) -> &'a [u8] {
+        self.unit
+    }
+
+    /// Where in [`Self::unit`] the payload lies: from the end of the head to
+    /// the end of the unit (a `Fragment` consumes the rest of its unit).
+    pub fn payload_range(&self) -> core::ops::Range<usize> {
+        self.payload_at..self.unit.len()
+    }
+
+    /// The payload: the bytes staged into the chain's slot.
+    pub fn payload(&self) -> &'a [u8] {
+        &self.unit[self.payload_at..]
+    }
+
+    /// Whether the fragment rode the reliable channel (the R bit).
+    pub fn reliable(&self) -> bool {
+        self.reliable
+    }
+
+    /// The fragment's sequence number.
+    pub fn sn(&self) -> u64 {
+        self.sn
+    }
+
+    /// Whether more fragments follow (the M bit).
+    pub fn more(&self) -> bool {
+        self.more
+    }
+
+    /// Whether the fragment carried an extension chain of its own.
+    pub fn has_ext(&self) -> bool {
+        self.has_ext
+    }
+
+    /// The priority its QoS extension carries, `Priority::DEFAULT` without one.
+    pub fn priority(&self) -> crate::qos::Priority {
+        self.priority
+    }
+
+    /// The chain-boundary markers it carries.
+    #[cfg(feature = "reassembly")]
+    pub fn markers(&self) -> crate::extfragment::FragmentMarkers {
+        self.markers
+    }
+}
+
+/// One record of an inbound `Frame` decoded where the frame lies, with the
+/// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
+/// carries.
+///
+/// Three kinds travel this way: a Push ([`Self::push`]), a Request
+/// ([`Self::request`]) and a Response ([`Self::response`]), each read by the
+/// registry that consumes it (the subscribers, the queryables, the pending
+/// gets); a record of any other kind is decoded into its owned message and
+/// reported as `Poll(FramePayload)`. Exactly one accessor answers `Some`.
+#[derive(Clone, Copy, Debug)]
+pub struct InPlaceRecord<'a> {
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    ))]
+    record: LentRecord<'a>,
+    _frame: core::marker::PhantomData<&'a [u8]>,
+}
+
+/// The record an [`InPlaceRecord`] lends, by kind.
+///
+/// Only the unicast receive path builds one (and the tests that stand in for
+/// it, each under its own registry's features); a build without it still has
+/// the type, so that the record's accessors are the same API in every build,
+/// and may construct no variant.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response"
+))]
+#[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+#[derive(Clone, Copy, Debug)]
+enum LentRecord<'a> {
+    #[cfg(feature = "codec-push")]
+    Push(&'a wz_codecs::push::Push<'a>),
+    #[cfg(feature = "codec-request")]
+    Request(&'a wz_codecs::request::Request<'a>),
+    #[cfg(feature = "codec-response")]
+    Response(&'a wz_codecs::response::Response<'a>),
+}
+
+impl<'a> InPlaceRecord<'a> {
+    /// The record of a frame at `sn` on the `reliable` channel and `priority`
+    /// band. Built by the unicast receive path alone (and the tests that stand
+    /// in for it).
+    #[cfg(all(
+        any(test, feature = "session-unicast"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        )
+    ))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    fn of_frame(
+        record: LentRecord<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self {
+            reliable,
+            sn,
+            priority,
+            record,
+            _frame: core::marker::PhantomData,
+        }
+    }
+
+    /// A Push record of a frame (see [`Self::reliable`] and its siblings).
+    #[cfg(all(feature = "codec-push", any(test, feature = "session-unicast")))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    pub(crate) fn push_of_frame(
+        push: &'a wz_codecs::push::Push<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Push(push), reliable, sn, priority)
+    }
+
+    /// A Request record of a frame.
+    #[cfg(all(feature = "codec-request", any(test, feature = "session-unicast")))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    pub(crate) fn request_of_frame(
+        request: &'a wz_codecs::request::Request<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Request(request), reliable, sn, priority)
+    }
+
+    /// A Response record of a frame.
+    #[cfg(all(feature = "codec-response", any(test, feature = "session-unicast")))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    pub(crate) fn response_of_frame(
+        response: &'a wz_codecs::response::Response<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Response(response), reliable, sn, priority)
+    }
+
+    /// Whether the carrying frame rode the reliable channel.
+    pub fn reliable(&self) -> bool {
+        self.reliable
+    }
+
+    /// The carrying frame's sequence number.
+    pub fn sn(&self) -> u64 {
+        self.sn
+    }
+
+    /// The carrying frame's priority band.
+    pub fn priority(&self) -> crate::qos::Priority {
+        self.priority
+    }
+
+    /// The Push, as it is decoded: its keyexpr, extensions and payload are
+    /// ranges of the frame. `None` when the record is of another kind.
+    #[cfg(feature = "codec-push")]
+    pub fn push(&self) -> Option<&'a wz_codecs::push::Push<'a>> {
+        match self.record {
+            LentRecord::Push(push) => Some(push),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Request, as it is decoded, its keyexpr, extensions and body ranges
+    /// of the frame. `None` when the record is of another kind.
+    #[cfg(feature = "codec-request")]
+    pub fn request(&self) -> Option<&'a wz_codecs::request::Request<'a>> {
+        match self.record {
+            LentRecord::Request(request) => Some(request),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Response, as it is decoded, its keyexpr, extensions and body ranges
+    /// of the frame. `None` when the record is of another kind.
+    #[cfg(feature = "codec-response")]
+    pub fn response(&self) -> Option<&'a wz_codecs::response::Response<'a>> {
+        match self.record {
+            LentRecord::Response(response) => Some(response),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
 }
 
 /// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters
@@ -430,13 +723,47 @@ pub fn reassembled_frame_outcome(
     priority: crate::qos::Priority,
     msg: &[u8],
 ) -> DriverLoopOutcome {
+    reassembled_chain_outcome(
+        reliable,
+        sn,
+        priority,
+        crate::reassembly_dispatch::ChainBytes::Borrowed(msg),
+    )
+}
+
+/// [`reassembled_frame_outcome`] over the chain as the Router delivers it
+/// ([`ChainBytes`](crate::reassembly_dispatch::ChainBytes)), which is what the
+/// receive loops call.
+///
+/// ARCHITECTURE section 9.3 -- a LENT chain is decoded where it lies: every
+/// message is a range of the reassembly staging itself (the pooled arena's
+/// slot, or the heap arena's buffer moved, not copied), so the payload the
+/// application is handed IS the bytes the fragments were staged into, and the
+/// staging goes home when the last of those ranges drops. A BORROWED chain is
+/// the arena that cannot lend: its bytes are valid for this call only, and they
+/// are copied once into a buffer the messages share
+/// ([`parse_frame_payload_lending`](crate::network_message::parse_frame_payload_lending)),
+/// as before.
+#[cfg(feature = "reassembly")]
+pub fn reassembled_chain_outcome(
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    chain: crate::reassembly_dispatch::ChainBytes<'_>,
+) -> DriverLoopOutcome {
+    use crate::reassembly_dispatch::ChainBytes;
     // The participant refuses a batch whose chains hold an extension the message
     // does not define, with the M bit set, as the unfragmented path does. The
     // refusal is reported and the batch dropped, as upstream drops a reassembled
     // message it cannot read without closing the link
     // (`io/zenoh-transport/src/common/defragmentation.rs` @
     // `let res: Option<NetworkMessage> = rcodec.read(&mut reader).ok();`).
-    let parsed = crate::network_message::parse_frame_payload_lending(msg)
+    let decoded = match &chain {
+        ChainBytes::Borrowed(msg) => crate::network_message::parse_frame_payload_lending(msg),
+        #[cfg(feature = "rx-shared-bytes")]
+        ChainBytes::Lent(bytes) => crate::network_message::parse_frame_payload_in(bytes),
+    };
+    let parsed = decoded
         .map_err(InboundParseError::Codec)
         .and_then(crate::network_message::refuse_unknown_mandatory_ext);
     match parsed {

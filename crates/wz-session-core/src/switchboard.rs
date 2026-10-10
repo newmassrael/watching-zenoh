@@ -432,50 +432,88 @@ mod alloc_impl {
             injector: &mut dyn EventInjector,
         ) -> usize {
             let peer_table = peer_table.into();
-            let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-                messages, reliable, ..
-            }) = event
-            else {
+            match event {
+                IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                    messages,
+                    reliable,
+                    ..
+                }) => {
+                    let reliability = Reliability::from_reliable_bool(*reliable);
+                    let mut injected: usize = 0;
+                    for message in messages {
+                        let NetworkMessage::Push(push) = message else {
+                            continue;
+                        };
+                        injected = injected.saturating_add(self.dispatch_push(
+                            push,
+                            reliability,
+                            peer_table,
+                            injector,
+                        ));
+                    }
+                    injected
+                }
+                // ARCHITECTURE section 9.2 — a Push the in-place receive path
+                // lent. The switchboard is the AP's dynamic table and composes
+                // its keyexpr on the heap anyway, so the lent Push is projected
+                // into the owned form and takes the one body rule below: what
+                // matters here is that the Put is not MISSED on that path.
+                IterationEvent::InPlace(record) => {
+                    let reliability = Reliability::from_reliable_bool(record.reliable());
+                    // A lent Request or Response is not the switchboard's.
+                    let Some(push) = record.push() else {
+                        return 0;
+                    };
+                    // The projection consumes its view; the clone is of the
+                    // view (ranges of the frame), not of the bytes.
+                    match push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
+                        Ok(push) => self.dispatch_push(&push, reliability, peer_table, injector),
+                        Err(_) => 0,
+                    }
+                }
+                _ => 0,
+            }
+        }
+
+        /// One received Push through the switchboard: its keyexpr resolved,
+        /// its kind and payload projected, then [`Self::dispatch`].
+        fn dispatch_push(
+            &self,
+            push: &crate::wire::PushOwned,
+            reliability: Reliability,
+            peer_table: MappingSpaces<'_>,
+            injector: &mut dyn EventInjector,
+        ) -> usize {
+            let Some(resolved) = resolve_wireexpr_in(&push.keyexpr.body, peer_table) else {
                 return 0;
             };
-            let reliability = Reliability::from_reliable_bool(*reliable);
-            let mut injected: usize = 0;
-            for message in messages {
-                let NetworkMessage::Push(push) = message else {
-                    continue;
-                };
-                let Some(resolved) = resolve_wireexpr_in(&push.keyexpr.body, peer_table) else {
-                    continue;
-                };
-                // kind + payload are extracted faithfully: a signal row reads
-                // only the keyexpr, but a value row decodes the payload into a
-                // typed `_event.data`, so the SampleView must already carry it.
-                // Mirrors SubscriberRegistry::dispatch_push's body arm.
-                let (kind, payload): (SampleKind, &[u8]) = match &push.body {
-                    // A sliced Put carries a shared-memory descriptor, not
-                    // bytes, and turning one into bytes needs the platform's
-                    // resolver, which this registry does not hold. Dropping it
-                    // is the same answer an ambiguous body gets below.
-                    PushOwnedVariant::CodecZenohMsgPut(put) => {
-                        match crate::put_payload::inline_bytes(put) {
-                            Some(bytes) => (SampleKind::Put, bytes),
-                            None => continue,
-                        }
+            // kind + payload are extracted faithfully: a signal row reads
+            // only the keyexpr, but a value row decodes the payload into a
+            // typed `_event.data`, so the SampleView must already carry it.
+            // Mirrors SubscriberRegistry::dispatch_push's body arm.
+            let (kind, payload): (SampleKind, &[u8]) = match &push.body {
+                // A sliced Put carries a shared-memory descriptor, not
+                // bytes, and turning one into bytes needs the platform's
+                // resolver, which this registry does not hold. Dropping it
+                // is the same answer an ambiguous body gets below.
+                PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    match crate::put_payload::inline_bytes(put) {
+                        Some(bytes) => (SampleKind::Put, bytes),
+                        None => return 0,
                     }
-                    PushOwnedVariant::CodecZenohMsgDel(_) => (SampleKind::Del, &[]),
-                    // Unknown/Default body tag: neither a confirmed Put nor
-                    // Del — drop rather than inject on an ambiguous sample.
-                    _ => continue,
-                };
-                let sample = BorrowedSample {
-                    keyexpr: resolved.as_str(),
-                    payload,
-                    kind,
-                    reliability,
-                };
-                injected = injected.saturating_add(self.dispatch(&sample, injector));
-            }
-            injected
+                }
+                PushOwnedVariant::CodecZenohMsgDel(_) => (SampleKind::Del, &[]),
+                // Unknown/Default body tag: neither a confirmed Put nor
+                // Del — drop rather than inject on an ambiguous sample.
+                _ => return 0,
+            };
+            let sample = BorrowedSample {
+                keyexpr: resolved.as_str(),
+                payload,
+                kind,
+                reliability,
+            };
+            self.dispatch(&sample, injector)
         }
     }
 }

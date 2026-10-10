@@ -269,6 +269,15 @@ impl<const N: usize> BoundedVec<u8, N> {
         self.inner.resize(end, 0).map_err(|()| CapacityFull(()))?;
         Ok(&mut self.inner[start..end])
     }
+
+    /// The growable backing's own buffer, moved out: no copy. What lets a
+    /// collection that was filled in place be handed on as storage of its own
+    /// (a completed reassembly chain, lent up to the application). Only the
+    /// growable backing has a `Vec` to give; the fixed one's bytes are inline.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.inner
+    }
 }
 
 impl<T, const N: usize> Default for BoundedVec<T, N> {

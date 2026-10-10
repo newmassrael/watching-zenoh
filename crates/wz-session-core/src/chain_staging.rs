@@ -67,9 +67,15 @@ pub enum StagingError {
 /// The arena a reassembly Router stages its chains into.
 ///
 /// `SLOTS` and `CAP` are the Router's own dims, restated here so an
-/// implementation can refuse dims it cannot serve (see
-/// [`ChainStaging::new`]) rather than silently serving fewer chains than the
-/// Router will ask for.
+/// implementation can refuse dims it cannot serve (at construction, see
+/// [`BuildsOwnStorage::new`]) rather than silently serving fewer chains than
+/// the Router will ask for.
+///
+/// How an arena is BUILT is not part of this trait. An arena that makes its own
+/// storage says so with [`BuildsOwnStorage`]; one whose storage is handed to it
+/// (a slot table the image placed, which only the image can name) is built by
+/// its own constructor and given to the Router with
+/// [`ReassemblyDispatcher::with_staging`](crate::reassembly_dispatch::ReassemblyDispatcher::with_staging).
 pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// One chain's staging handle. Opaque to the Router, which only ever
     /// passes it back to the arena that produced it.
@@ -78,14 +84,6 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// IS the reservation, and duplicating it would let two chains write the
     /// same bytes.
     type Chain;
-
-    /// Build the arena.
-    ///
-    /// An implementation that cannot serve `SLOTS` chains of `CAP` bytes must
-    /// fail here — at construction, where a deploy can see it — rather than by
-    /// returning `None` from [`Self::acquire`] later, which the Router would
-    /// report as ordinary pool exhaustion and a peer could trigger at will.
-    fn new() -> Self;
 
     /// Reserve staging for a chain that is starting. `None` = the arena is
     /// full.
@@ -170,6 +168,44 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// the DEFAULT backing that most needs the leak check, because it is the one
     /// every Router in the tree runs.
     fn available(&self) -> usize;
+
+    /// Hand a COMPLETED chain's staging up as shared storage, consuming the
+    /// handle, or give the handle back (`Err`) when this arena cannot.
+    ///
+    /// ARCHITECTURE section 9.3: the event carries the stage buffer. An arena
+    /// that answers `Ok` hands up the bytes where they were staged -- the
+    /// pooled arena its slot, which goes home once the last range of it has
+    /// dropped; the heap arena its buffer, moved -- so the reassembled message
+    /// is not copied a second time. The Router releases its own slot either
+    /// way; on `Ok` the handle is no longer the Router's to release, so the
+    /// arena accounts for it itself: a pooled slot stays out of
+    /// [`Self::available`] for as long as the shared storage lives, a heap
+    /// buffer owes the arena nothing.
+    ///
+    /// The provided answer is `Err`: the chain is then delivered borrowed and
+    /// released, as before this existed.
+    #[cfg(feature = "rx-shared-bytes")]
+    fn lend(&mut self, chain: Self::Chain) -> Result<crate::link::RxBytes, Self::Chain> {
+        Err(chain)
+    }
+}
+
+/// An arena that makes its own storage, so a Router can build it unasked
+/// ([`ReassemblyDispatcher::new`](crate::reassembly_dispatch::ReassemblyDispatcher::new)).
+///
+/// Split from [`ChainStaging`] because not every arena can: one whose slot
+/// table the image places and hands in has nothing to build it from, and a
+/// constructor it could not honour would have to invent storage, which is the
+/// hidden table the handing-in exists to avoid.
+pub trait BuildsOwnStorage<const SLOTS: usize, const CAP: usize>: ChainStaging<SLOTS, CAP> {
+    /// Build the arena.
+    ///
+    /// An implementation that cannot serve `SLOTS` chains of `CAP` bytes must
+    /// fail here — at construction, where a deploy can see it — rather than by
+    /// returning `None` from [`ChainStaging::acquire`] later, which the Router
+    /// would report as ordinary pool exhaustion and a peer could trigger at
+    /// will.
+    fn new() -> Self;
 }
 
 /// The default arena: one growable heap buffer per chain, allocated on demand.
@@ -209,12 +245,16 @@ pub struct HeapChain<const CAP: usize> {
     reserved: usize,
 }
 
-impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStaging<SLOTS, CAP> {
-    type Chain = HeapChain<CAP>;
-
+impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
+    for HeapStaging<SLOTS, CAP>
+{
     fn new() -> Self {
         Self { outstanding: 0 }
     }
+}
+
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStaging<SLOTS, CAP> {
+    type Chain = HeapChain<CAP>;
 
     fn acquire(&mut self) -> Option<Self::Chain> {
         if self.outstanding >= SLOTS {
@@ -283,5 +323,15 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
 
     fn available(&self) -> usize {
         SLOTS.saturating_sub(self.outstanding)
+    }
+
+    /// The chain's buffer, MOVED into shared storage: the reassembled bytes
+    /// are the buffer the fragments were appended to, with no copy. The handle
+    /// is spent, so it is counted back here; the buffer owes this arena
+    /// nothing once it is the application's.
+    #[cfg(all(feature = "rx-shared-bytes", not(feature = "bounded-heapless")))]
+    fn lend(&mut self, chain: Self::Chain) -> Result<crate::link::RxBytes, Self::Chain> {
+        self.outstanding = self.outstanding.saturating_sub(1);
+        Ok(crate::link::RxBytes::lend(chain.buf.into_vec()))
     }
 }

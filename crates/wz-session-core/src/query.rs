@@ -836,7 +836,12 @@ impl QueryReply {
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 pub struct QueryResponder<'a> {
     rid: u64,
-    keyexpr_literal: String,
+    /// The query's keyexpr. Borrowed when the responder is built over the
+    /// keyexpr the dispatch already holds (`QueryableRegistry::fire_projection`),
+    /// so a matched queryable that stages nothing costs the heap nothing for it;
+    /// owned when a caller hands one in ([`Self::new`]). A staged reply owns its
+    /// copy either way.
+    keyexpr_literal: alloc::borrow::Cow<'a, str>,
     replies: &'a mut Vec<QueryReply>,
     /// R121j-3c — optional responder identity attached to every
     /// subsequent send_reply / send_reply_del / send_err. `None`
@@ -898,7 +903,26 @@ impl<'a> QueryResponder<'a> {
     ) -> Self {
         Self {
             rid,
-            keyexpr_literal,
+            keyexpr_literal: alloc::borrow::Cow::Owned(keyexpr_literal),
+            replies,
+            responder: None,
+            accept,
+            qos,
+        }
+    }
+
+    /// [`Self::new`] over a keyexpr borrowed for as long as the responder is:
+    /// what the registry's own fan-out builds, once per matched queryable.
+    fn over(
+        rid: u64,
+        keyexpr: &'a str,
+        accept: ReplyKeyExpr,
+        qos: QosLevel,
+        replies: &'a mut Vec<QueryReply>,
+    ) -> Self {
+        Self {
+            rid,
+            keyexpr_literal: alloc::borrow::Cow::Borrowed(keyexpr),
             replies,
             responder: None,
             accept,
@@ -937,7 +961,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_reply(&mut self, payload: &[u8]) {
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
-            keyexpr_literal: self.keyexpr_literal.clone(),
+            keyexpr_literal: String::from(&*self.keyexpr_literal),
             body: ReplyBody::Put(payload.to_vec()),
             encoding: None,
             timestamp: None,
@@ -1117,7 +1141,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_reply_del(&mut self) {
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
-            keyexpr_literal: self.keyexpr_literal.clone(),
+            keyexpr_literal: String::from(&*self.keyexpr_literal),
             body: ReplyBody::Del,
             encoding: None,
             timestamp: None,
@@ -1182,7 +1206,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_reply_del_sourced(&mut self, source_info: Option<&SourceInfo>) {
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
-            keyexpr_literal: self.keyexpr_literal.clone(),
+            keyexpr_literal: String::from(&*self.keyexpr_literal),
             body: ReplyBody::Del,
             encoding: None,
             timestamp: None,
@@ -1339,7 +1363,7 @@ impl<'a> QueryResponder<'a> {
         let encoding = encoding_id.map(|id| (id, schema.map(str::to_string)));
         self.replies.push(QueryReply::Err {
             rid: self.rid,
-            keyexpr_literal: self.keyexpr_literal.clone(),
+            keyexpr_literal: String::from(&*self.keyexpr_literal),
             encoding,
             payload: payload.to_vec(),
             responder: self.responder.clone(),
@@ -1578,6 +1602,11 @@ impl<C: QuerySink> Default for QueryableRegistry<C> {
         Self::with_sink_backing()
     }
 }
+
+/// ARCHITECTURE section 9.2 -- the dispatch of a Request the in-place receive
+/// path lends ([`IterationEvent::InPlace`]).
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+mod in_place;
 
 impl<C: QuerySink> QueryableRegistry<C> {
     /// New empty registry over an explicit sink backing `C`. Queryable
@@ -1913,6 +1942,29 @@ pub struct QueryEnvelope {
     pub qos: QosLevel,
 }
 
+/// What a queryable is shown of one inbound query beside its keyexpr: each
+/// field already under the feature gate that decides whether a queryable may
+/// see it. Built from the owned query
+/// (`QueryableRegistry::fire_matching_queryables`) or from a Request read where
+/// its frame lies (`dispatch_request_in_place`), and fired by one body
+/// (`QueryableRegistry::fire_projection`).
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+struct QueryProjection<'q> {
+    /// The selector parameters.
+    parameters: Option<&'q [u8]>,
+    /// The attachment's bytes.
+    attachment: Option<&'q [u8]>,
+    /// The querier's source info.
+    source_info: Option<crate::sample::SourceInfo>,
+    /// The value in its plain shape, read off the chain.
+    plain_value: Option<(crate::sample::EncodingHint, &'q [u8])>,
+    /// The value held as shareable bytes: un-swapped out of shared memory, or a
+    /// range of a frame the link lent. Preferred over `plain_value` when present.
+    shared_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+    /// The attachment held as shareable bytes, beside `attachment`.
+    attachment_shared: Option<crate::link::RxBytes>,
+}
+
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchOutcome {
@@ -2244,6 +2296,9 @@ impl<C: QuerySink> QueryableRegistry<C> {
         is_remote: bool,
     ) -> usize {
         let QueryEnvelope { rid, target, qos } = envelope;
+        // The projection inputs, extracted ONCE; the fan-out is
+        // `fire_projection`.
+        //
         // R311gb-3b-cleanup — extract the projection inputs ONCE per
         // matched queryable (the parameters byte slice and attachment
         // view are stable across all matched handlers for a single
@@ -2290,6 +2345,45 @@ impl<C: QuerySink> QueryableRegistry<C> {
         let unswapped_value = unswapped_value.or_else(|| extract_query_value_shared(query));
         // The attachment likewise: the range of the frame, lent beside the value.
         let attachment_shared = extract_query_attachment_shared(query);
+        self.fire_projection(
+            QueryEnvelope { rid, target, qos },
+            keyexpr,
+            QueryProjection {
+                parameters: parameters_view,
+                attachment: attachment_view,
+                source_info: source_info_view,
+                plain_value,
+                shared_value: unswapped_value,
+                attachment_shared,
+            },
+            replies,
+            is_remote,
+        )
+    }
+
+    /// The fan-out itself, over a query already projected into what a
+    /// queryable is shown ([`QueryProjection`]): the owned query's projection
+    /// ([`Self::fire_matching_queryables`]) and the one a Request read where its
+    /// frame lies makes (`dispatch_request_in_place`) are fired through this
+    /// one body, so the match, the responder and the view a handler gets cannot
+    /// differ between the two.
+    fn fire_projection(
+        &mut self,
+        envelope: QueryEnvelope,
+        keyexpr: &str,
+        projection: QueryProjection<'_>,
+        replies: &mut Vec<QueryReply>,
+        is_remote: bool,
+    ) -> usize {
+        let QueryEnvelope { rid, target, qos } = envelope;
+        let QueryProjection {
+            parameters: parameters_view,
+            attachment: attachment_view,
+            source_info: source_info_view,
+            plain_value,
+            shared_value: unswapped_value,
+            attachment_shared,
+        } = projection;
         #[cfg(feature = "query-value")]
         let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
             Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
@@ -2325,14 +2419,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                 // `query-selector-parameters`-gated projection, so a build that
                 // cannot see parameters reads `MatchingQuery` — the guarantee,
                 // never the opt-out — which is the safe direction.
-                let mut responder = QueryResponder {
-                    rid,
-                    keyexpr_literal: keyexpr.to_string(),
-                    replies,
-                    responder: None,
-                    accept: accept_mode,
-                    qos,
-                };
+                let mut responder = QueryResponder::over(rid, keyexpr, accept_mode, qos, replies);
                 // R311gb-3b-cleanup — dispatch through the QuerySink seam
                 // with no intermediate wrapper: `QueryResponder` impls
                 // `ReplyOut` directly, and the inbound view is a
@@ -2474,8 +2561,10 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// [`IterationEvent::Poll(DriverLoopOutcome::FramePayload)`]
     /// surface and forwards to [`Self::dispatch_messages`]. Mirror
     /// of [`crate::pubsub::SubscriberRegistry::dispatch_iteration_event`]
-    /// for the queryable side. Other `IterationEvent` variants
-    /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
+    /// for the queryable side. A Request the in-place receive path lends
+    /// ([`IterationEvent::InPlace`]) is dispatched as a view over its frame.
+    /// Other `IterationEvent` variants (`Lease`, non-FramePayload Poll
+    /// outcomes) are no-ops.
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -2484,13 +2573,28 @@ impl<C: QuerySink> QueryableRegistry<C> {
         pending_final_rids: &mut Vec<(u64, QosLevel)>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(
-                messages,
-                peer_keyexpr_table,
-                pending_replies,
-                pending_final_rids,
-            );
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages(
+                    messages,
+                    peer_keyexpr_table,
+                    pending_replies,
+                    pending_final_rids,
+                );
+            }
+            // A Request the in-place receive path lends: dispatched as a view
+            // over the frame, owing its Final on the same rule.
+            IterationEvent::InPlace(record) => {
+                if let Some(request) = record.request() {
+                    self.dispatch_request_in_place(
+                        request,
+                        peer_keyexpr_table,
+                        pending_replies,
+                        pending_final_rids,
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -5130,7 +5234,7 @@ mod tests {
         let mut replies: Vec<QueryReply> = Vec::new();
         let mut responder = QueryResponder {
             rid: 7,
-            keyexpr_literal: "a/b".to_string(),
+            keyexpr_literal: "a/b".into(),
             replies: &mut replies,
             responder: None,
             accept: ReplyKeyExpr::MatchingQuery,

@@ -911,6 +911,11 @@ impl<C: ReplySink> Default for ReplyRegistry<C> {
     }
 }
 
+/// ARCHITECTURE section 9.2 -- the delivery of a Response the in-place receive
+/// path lends ([`IterationEvent::InPlace`]).
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
+mod in_place;
+
 impl<C: ReplySink> ReplyRegistry<C> {
     /// New empty registry over an explicit sink backing `C`. Pending
     /// entries are stored in a `Vec` so duplicate-rid registrations (an
@@ -1536,6 +1541,11 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// of [`crate::query::QueryableRegistry::dispatch_iteration_event`]
     /// for the z_get-side. Other `IterationEvent` variants
     /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
+    ///
+    /// A Response the in-place receive path lends
+    /// ([`IterationEvent::InPlace`]) is delivered as a view over the frame
+    /// (`dispatch_response_in_place`); every other lent record is not this
+    /// registry's.
     #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
@@ -1543,8 +1553,17 @@ impl<C: ReplySink> ReplyRegistry<C> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table);
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages(messages, peer_keyexpr_table);
+            }
+            #[cfg(feature = "codec-response")]
+            IterationEvent::InPlace(record) => {
+                if let Some(response) = record.response() {
+                    self.dispatch_response_in_place(response, peer_keyexpr_table);
+                }
+            }
+            _ => {}
         }
     }
 }

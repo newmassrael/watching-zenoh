@@ -66,8 +66,15 @@ pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
 /// over [`TARGET_EXT_HEADER`], mapped through [`QueryTarget::from_wire_byte`] — no
 /// target-specific decoder.
 pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
-    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TARGET_EXT_HEADER)
-        .and_then(QueryTarget::from_wire_byte)
+    read_target_in(request.extensions.as_deref())
+}
+
+/// [`read_request_target`] over any chain a reader can ask, the owned one or a
+/// Request's read where its frame lies: the one rule both read the target by.
+pub(crate) fn read_target_in<E: crate::ext_view::ExtEntryView>(
+    exts: Option<&[E]>,
+) -> Option<QueryTarget> {
+    ext_nodeid::read_z64_in(exts, TARGET_EXT_HEADER).and_then(QueryTarget::from_wire_byte)
 }
 
 /// The Request `ext_timeout` extension id — zenoh-pico's

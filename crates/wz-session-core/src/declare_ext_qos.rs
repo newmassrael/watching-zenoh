@@ -166,7 +166,14 @@ pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
 /// Carrier-agnostic because the chain is: the two public readers below differ
 /// only in which struct's field they hand over.
 fn read_qos_chain<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosLevel {
-    ext_nodeid::read_z64_ext(exts, QOS_EXT_HEADER)
+    read_qos_in(exts.map(Vec::as_slice))
+}
+
+/// [`read_qos_chain`] over any chain a reader can ask, the owned one or one
+/// read where its message lies (a Request the in-place receive path lends):
+/// the one rule both read the `ext_qos` by.
+pub(crate) fn read_qos_in<E: crate::ext_view::ExtEntryView>(exts: Option<&[E]>) -> QosLevel {
+    ext_nodeid::read_z64_in(exts, QOS_EXT_HEADER)
         .map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)
 }

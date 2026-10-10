@@ -1,0 +1,613 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! ARCHITECTURE section 9.2 -- a Push delivered where its frame lies.
+//!
+//! The fixed-memory MCU profile's receive path (`drive::dispatch_datagram`,
+//! `wz-runtime-coop`'s `rx-in-place`) decodes a Push record over the datagram
+//! the link lends and hands it over as
+//! [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace)
+//! instead of projecting it into
+//! a boxed owned message. This module is the subscriber side of that: the
+//! keyexpr is resolved without a `String`
+//! ([`resolve_wireexpr_view`]), the payload, attachment and every
+//! extension are read where they lie, and the subscribers are handed a
+//! [`SampleView`] over those bytes ([`LentSample`]) through the same matcher
+//! and the same sinks the owned path uses. A subscriber's contract was already
+//! a view borrowed for the call ([`SampleSink::deliver`]), so no subscriber
+//! changes; one that keeps the sample copies it
+//! ([`Sample::from_view`](crate::sample::Sample::from_view)).
+//!
+//! What it delivers is what [`SubscriberRegistry::dispatch_push`] delivers for
+//! the owned projection of the same record, field for field: the keyexpr by
+//! the same resolution rule, the kind, the payload, the reliability, and under
+//! the same features the QoS, attachment, source info, timestamp and encoding,
+//! with the same self-echo rule. The two timestamp and encoding hints own heap
+//! fields (a zid vector, a schema string), so they are built only when a
+//! subscriber asks for them, once per delivery.
+//!
+//! Two kinds of Put are not represented lent and take the owned projection
+//! instead, counted in [`InPlaceFallbacks`]: a Put whose payload is a list of
+//! slices (joined or resolved into a buffer of its own by
+//! `put_payload::collect_wire_payload`), and a Put whose resolved keyexpr is
+//! longer than [`KeyexprBuf`](crate::wireexpr_resolve::KeyexprBuf), which only
+//! the fixed bounded backing refuses. Each is still delivered, as the copying
+//! path delivers it.
+
+use core::cell::OnceCell;
+
+use wz_codecs::encoding::Encoding;
+use wz_codecs::push::{Push, PushVariant};
+use wz_codecs::timestamp::Timestamp;
+
+use super::{fire_into, spaces_of, SubscriberRegistry};
+use crate::driver_loop::InPlaceRecord;
+use crate::reliability::Reliability;
+use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+use crate::sample_kind::SampleKind;
+use crate::sink::{SampleSink, SampleView};
+use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound};
+
+/// The sample a Push read in place is delivered as: every field a range of the
+/// frame or a value read off it, valid for the delivery call.
+struct LentSample<'s> {
+    keyexpr: &'s str,
+    payload: &'s [u8],
+    kind: SampleKind,
+    reliability: Reliability,
+    qos: Option<QosLevel>,
+    attachment: Option<&'s [u8]>,
+    source_info: Option<SourceInfo>,
+    timestamp: Option<&'s Timestamp<'s>>,
+    timestamp_hint: OnceCell<TimestampHint>,
+    encoding: Option<&'s Encoding<'s>>,
+    encoding_hint: OnceCell<EncodingHint>,
+}
+
+impl SampleView for LentSample<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn payload(&self) -> &[u8] {
+        self.payload
+    }
+    fn kind(&self) -> SampleKind {
+        self.kind
+    }
+    fn reliability(&self) -> Reliability {
+        self.reliability
+    }
+    fn qos(&self) -> Option<QosLevel> {
+        self.qos
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.attachment
+    }
+    fn timestamp(&self) -> Option<&TimestampHint> {
+        let ts = self.timestamp?;
+        Some(
+            self.timestamp_hint
+                .get_or_init(|| TimestampHint::from_view(ts)),
+        )
+    }
+    fn encoding(&self) -> Option<&EncodingHint> {
+        let encoding = self.encoding?;
+        Some(
+            self.encoding_hint
+                .get_or_init(|| EncodingHint::from_view(encoding)),
+        )
+    }
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.source_info.as_ref()
+    }
+    // `attachment_shared` and `payload_shared` keep their `None` defaults: the
+    // bytes are the link's, lent for the call, and a subscriber that keeps them
+    // copies them, as it does a `BorrowedSample`.
+}
+
+/// The body-level fields of a Put or a Del read in place, before the keyexpr is
+/// known: what `dispatch_push`'s body match projects, on the lent form.
+struct LentBody<'s> {
+    kind: SampleKind,
+    payload: &'s [u8],
+    timestamp: Option<&'s Timestamp<'s>>,
+    encoding: Option<&'s Encoding<'s>>,
+    attachment: Option<&'s [u8]>,
+    source_info: Option<SourceInfo>,
+}
+
+/// Why a Push read in place is delivered through its owned projection instead.
+enum Fallback {
+    /// Its payload is a list of slices. Only a Put has one.
+    #[cfg(feature = "pubsub-put")]
+    Sliced,
+    /// Its keyexpr does not fit the bounded buffer.
+    KeyexprPastBound,
+}
+
+/// The body of `push` as a lent sample delivers it, `Ok(None)` for a body the
+/// owned path drops too (an unknown body tag, or a kind this build does not
+/// deliver), and the fallback for a Put whose payload is sliced.
+fn lent_body<'s>(push: &'s Push<'s>) -> Result<Option<LentBody<'s>>, Fallback> {
+    match &push.body {
+        #[cfg(feature = "pubsub-put")]
+        PushVariant::CodecZenohMsgPut(put) => {
+            if put.slices.is_some() {
+                return Err(Fallback::Sliced);
+            }
+            let exts: &[wz_codecs::ext_entry::ExtEntry<'s>] =
+                put.extensions.as_deref().unwrap_or(&[]);
+            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
+            let _ = exts;
+            Ok(Some(LentBody {
+                kind: SampleKind::Put,
+                // A Put with neither layout populated is an empty inline payload,
+                // as `put_payload::layout` reads it.
+                payload: put.payload.unwrap_or(&[]),
+                #[cfg(feature = "pubsub-timestamp")]
+                timestamp: put.timestamp.as_ref(),
+                #[cfg(not(feature = "pubsub-timestamp"))]
+                timestamp: None,
+                #[cfg(feature = "pubsub-encoding")]
+                encoding: put.encoding.as_ref(),
+                #[cfg(not(feature = "pubsub-encoding"))]
+                encoding: None,
+                #[cfg(feature = "pubsub-attachment")]
+                attachment: crate::attachment::decode_attachment_ext(
+                    exts,
+                    crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+                ),
+                #[cfg(not(feature = "pubsub-attachment"))]
+                attachment: None,
+                #[cfg(feature = "pubsub-source-info")]
+                source_info: crate::sample::extract_source_info(exts),
+                #[cfg(not(feature = "pubsub-source-info"))]
+                source_info: None,
+            }))
+        }
+        #[cfg(feature = "pubsub-delete")]
+        PushVariant::CodecZenohMsgDel(del) => {
+            let exts: &[wz_codecs::ext_entry::ExtEntry<'s>] =
+                del.extensions.as_deref().unwrap_or(&[]);
+            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
+            let _ = exts;
+            Ok(Some(LentBody {
+                kind: SampleKind::Del,
+                payload: &[],
+                #[cfg(feature = "pubsub-timestamp")]
+                timestamp: del.timestamp.as_ref(),
+                #[cfg(not(feature = "pubsub-timestamp"))]
+                timestamp: None,
+                // Encoding is Put-only on the wire.
+                encoding: None,
+                #[cfg(feature = "pubsub-attachment")]
+                attachment: crate::attachment::decode_attachment_ext(
+                    exts,
+                    crate::attachment::ATTACHMENT_EXT_ID_DEL,
+                ),
+                #[cfg(not(feature = "pubsub-attachment"))]
+                attachment: None,
+                #[cfg(feature = "pubsub-source-info")]
+                source_info: crate::sample::extract_source_info(exts),
+                #[cfg(not(feature = "pubsub-source-info"))]
+                source_info: None,
+            }))
+        }
+        // An unknown body tag is neither a confirmed Put nor a confirmed Del,
+        // and a kind this build does not deliver is dropped, as the owned path
+        // drops both.
+        _ => Ok(None),
+    }
+}
+
+impl<C: SampleSink> SubscriberRegistry<C> {
+    /// Deliver a Push the in-place receive path lent: the subscriber side of
+    /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
+    /// See the module docs for what it delivers and what it hands to the owned
+    /// projection.
+    pub(super) fn dispatch_in_place(&mut self, record: &InPlaceRecord<'_>) {
+        // A lent Request or Response is the queryables' or the pending gets'.
+        let Some(push) = record.push() else {
+            return;
+        };
+        let reliability = Reliability::from_reliable_bool(record.reliable());
+        match self.deliver_lent(push, reliability) {
+            Ok(()) => {}
+            #[cfg(feature = "pubsub-put")]
+            Err(Fallback::Sliced) => {
+                self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
+                self.dispatch_owned_projection(push, reliability);
+            }
+            Err(Fallback::KeyexprPastBound) => {
+                self.in_place_fallbacks.keyexpr_past_bound =
+                    self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
+                self.dispatch_owned_projection(push, reliability);
+            }
+        }
+    }
+
+    /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
+    /// fits, short of a timestamp or encoding hint a subscriber asks for.
+    fn deliver_lent(&mut self, push: &Push<'_>, reliability: Reliability) -> Result<(), Fallback> {
+        let Some(body) = lent_body(push)? else {
+            return Ok(());
+        };
+        // The keyexpr may be the peer table's own literal, so the table stays
+        // borrowed through the delivery; the subscribers are a field of their
+        // own (`fire_into`). A composed keyexpr lies in `composed`, in this
+        // frame: fixed on the fixed backing, an empty string until written on
+        // the growable one.
+        let spaces = spaces_of(&self.peer_keyexpr_table, &self.own_mapping_space);
+        let mut composed = KeyexprBuf::new();
+        let keyexpr = match resolve_wireexpr_view(&push.keyexpr.body, spaces, &mut composed) {
+            Ok(Some(keyexpr)) => keyexpr,
+            // The empty keyexpr, or an id the space does not hold: dropped, as
+            // the owned path drops it. A sliced Put never reaches here, so
+            // there are no shared-memory slices to settle.
+            Ok(None) => return Ok(()),
+            Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
+        };
+        let outer: &[wz_codecs::ext_entry::ExtEntry<'_>] =
+            push.extensions.as_deref().unwrap_or(&[]);
+        #[cfg(feature = "pubsub-qos")]
+        let qos = crate::sample::extract_qos_in(outer);
+        #[cfg(not(feature = "pubsub-qos"))]
+        let qos: Option<QosLevel> = {
+            let _ = outer;
+            None
+        };
+        let sample = LentSample {
+            keyexpr,
+            payload: body.payload,
+            kind: body.kind,
+            reliability,
+            qos,
+            attachment: body.attachment,
+            source_info: body.source_info,
+            timestamp: body.timestamp,
+            timestamp_hint: OnceCell::new(),
+            encoding: body.encoding,
+            encoding_hint: OnceCell::new(),
+        };
+        // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
+        // wire-arrived sample whose source names this session is not fired.
+        if let (Some(own), Some(info)) = (self.own_zid.as_deref(), sample.source_info.as_ref()) {
+            let prefix = info.zid_prefix();
+            if !prefix.is_empty() && prefix == own {
+                return Ok(());
+            }
+        }
+        fire_into(&mut self.subscribers, &sample, true);
+        Ok(())
+    }
+
+    /// The fallback: the owned projection of `push`, delivered by the path the
+    /// copying receive takes ([`Self::dispatch_push`]), so a Put the lent form
+    /// cannot represent is delivered exactly as it always was.
+    fn dispatch_owned_projection(&mut self, push: &Push<'_>, reliability: Reliability) {
+        // The wire profile is unbounded (`Heap`, or the AP's shared frame
+        // ranges), so this projection cannot refuse a decoded Push. It
+        // consumes its view; the clone is of the view, not of the bytes.
+        if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
+            self.dispatch_push(&owned, reliability, true);
+        }
+    }
+}
+
+// The lent delivery against the owned one on the same record: every field a
+// subscriber can read through `SampleView` must be the same, the fallbacks must
+// deliver what the copying path delivers and be counted, and the self-echo rule
+// must hold on both. The allocation count of the path is the lwIP harness's
+// (`wz-session-lwip/tests/rx_frame_allocations.rs`), which runs it end to end.
+#[cfg(all(test, feature = "pubsub-put"))]
+mod tests {
+    use super::*;
+    use crate::driver_loop::IterationEvent;
+    use crate::locality::Locality;
+    use crate::network_message::NetworkMessage;
+    use crate::pubsub::InPlaceFallbacks;
+    use crate::sink::BoxedSink;
+    use alloc::boxed::Box;
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+    use sce_forge_runtime::codec::SceCursor;
+    use std::sync::{Arc, Mutex};
+
+    /// The registry over the AP's closure sink, which records what it is handed.
+    type SubscriberRegistry = super::SubscriberRegistry<BoxedSink>;
+
+    /// Everything a subscriber can read through the view, as owned values.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Seen {
+        keyexpr: String,
+        payload: Vec<u8>,
+        kind: SampleKind,
+        reliability: Reliability,
+        qos: Option<QosLevel>,
+        attachment: Option<Vec<u8>>,
+        timestamp: Option<TimestampHint>,
+        encoding: Option<EncodingHint>,
+        source_info: Option<SourceInfo>,
+    }
+
+    fn recording(pattern: &str) -> (SubscriberRegistry, Arc<Mutex<Vec<Seen>>>) {
+        let mut registry = SubscriberRegistry::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let into = seen.clone();
+        registry
+            .register_sink(
+                pattern,
+                Locality::Any,
+                BoxedSink::new(move |s: &dyn SampleView| {
+                    into.lock().unwrap().push(Seen {
+                        keyexpr: s.keyexpr().to_string(),
+                        payload: s.payload().to_vec(),
+                        kind: s.kind(),
+                        reliability: s.reliability(),
+                        qos: s.qos(),
+                        attachment: s.attachment().map(<[u8]>::to_vec),
+                        timestamp: s.timestamp().cloned(),
+                        encoding: s.encoding().cloned(),
+                        source_info: s.source_info().cloned(),
+                    });
+                }),
+            )
+            .expect("register");
+        (registry, seen)
+    }
+
+    /// The wire bytes of `push`, as a peer sends them.
+    fn wire_of(push: &crate::wire::PushOwned) -> Vec<u8> {
+        push.try_as_borrowed().expect("a view").encode_to_vec()
+    }
+
+    /// `push` delivered lent (the in-place path) and owned (the copying path)
+    /// to two registries prepared alike: what each subscriber saw, and the
+    /// lent registry's fallbacks.
+    fn both_ways(
+        push: &Push<'_>,
+        pattern: &str,
+        prepare: impl Fn(&mut SubscriberRegistry),
+    ) -> (Vec<Seen>, Vec<Seen>, InPlaceFallbacks) {
+        let (mut lent, lent_seen) = recording(pattern);
+        prepare(&mut lent);
+        let record = InPlaceRecord::push_of_frame(push, false, 7, crate::qos::Priority::DEFAULT);
+        lent.dispatch_iteration_event(IterationEvent::InPlace(record));
+
+        let (mut owned, owned_seen) = recording(pattern);
+        prepare(&mut owned);
+        let message = NetworkMessage::Push(Box::new(
+            push.clone()
+                .try_into_owned_in::<crate::wire::WireStorage>()
+                .expect("an owned projection"),
+        ));
+        owned.dispatch(&message, Reliability::BestEffort);
+
+        let lent_seen = lent_seen.lock().unwrap().clone();
+        let owned_seen = owned_seen.lock().unwrap().clone();
+        (lent_seen, owned_seen, lent.in_place_fallbacks())
+    }
+
+    fn meta() -> crate::metadata::PushMetadata {
+        crate::metadata::PushMetadata {
+            timestamp: Some(TimestampHint {
+                time: 0x0102_0304_0506_0708,
+                zid: alloc::vec![0xa1, 0xa2, 0xa3],
+            }),
+            encoding: Some(EncodingHint {
+                packed_id: 0x0b,
+                schema: Some("schema/x".to_string()),
+            }),
+            source_info: Some(SourceInfo::new(&[0x51, 0x52, 0x53, 0x54], 9, 41)),
+            attachment: Some(alloc::vec![1, 2, 3, 4, 5]),
+            qos: Some(QosLevel::from_raw(0x05)),
+        }
+    }
+
+    #[test]
+    fn a_literal_put_with_every_field_is_delivered_lent_as_the_owned_path_delivers_it() {
+        let built = crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta())
+            .expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let (lent, owned, fallbacks) = both_ways(&push, "demo/*", |_| {});
+        assert_eq!(owned.len(), 1, "the owned path delivers it");
+        assert_eq!(
+            lent, owned,
+            "the lent delivery is the owned one, field for field"
+        );
+        assert_eq!(lent[0].reliability, Reliability::BestEffort);
+        assert_eq!(fallbacks, InPlaceFallbacks::default(), "nothing fell back");
+    }
+
+    #[cfg(feature = "pubsub-delete")]
+    #[test]
+    fn a_del_is_delivered_lent_as_the_owned_path_delivers_it() {
+        let built =
+            crate::push_build::build_push_del_literal_with_meta("demo/a", &meta()).expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let (lent, owned, _) = both_ways(&push, "demo/a", |_| {});
+        assert_eq!(owned.len(), 1);
+        assert_eq!(lent, owned);
+        assert_eq!(lent[0].kind, SampleKind::Del);
+    }
+
+    /// An `M=1` alias is the peer's literal, lent from its table when there is
+    /// no suffix and composed when there is one; an id the peer never declared
+    /// is dropped on both paths.
+    #[test]
+    fn a_peer_alias_resolves_as_the_owned_path_resolves_it() {
+        let peer = |r: &mut SubscriberRegistry| {
+            r.peer_keyexpr_table.insert(5, "demo/a".to_string());
+        };
+        for suffix in [None, Some("/b")] {
+            let built = crate::push_build::build_push_aliased(5, suffix, b"v").expect("build");
+            let wire = wire_of(&built);
+            let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+            let (lent, owned, fallbacks) = both_ways(&push, "demo/**", peer);
+            assert_eq!(owned.len(), 1, "suffix {suffix:?}");
+            assert_eq!(lent, owned, "suffix {suffix:?}");
+            assert_eq!(fallbacks, InPlaceFallbacks::default());
+        }
+        let built = crate::push_build::build_push_aliased(6, None, b"v").expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let (lent, owned, _) = both_ways(&push, "**", peer);
+        assert_eq!(
+            (lent.len(), owned.len()),
+            (0, 0),
+            "an undeclared id is dropped"
+        );
+    }
+
+    /// An `M=0` alias names OUR space, which the lent path reads into its
+    /// buffer through `OwnMappingSpace::append_own_mapping`.
+    #[test]
+    fn an_own_space_alias_resolves_as_the_owned_path_resolves_it() {
+        let built = crate::push_build::build_push_aliased(3, Some("x"), b"v").expect("build");
+        let wire = wire_of(&built);
+        let mut push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let wz_codecs::wireexpr::WireexprVariant::WireexprLocal(local) = &push.keyexpr.body else {
+            panic!("the builder writes the peer-space form");
+        };
+        push.keyexpr.body = wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(
+            wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+                id: local.id,
+                suffix_len: local.suffix_len,
+                suffix: local.suffix,
+            },
+        );
+        let own = |r: &mut SubscriberRegistry| {
+            let mut table = hashbrown::HashMap::new();
+            table.insert(3u64, "mine/".to_string());
+            let space: crate::wireexpr_resolve::SharedOwnMappingSpace = Arc::new(table);
+            r.set_own_mapping_space(space);
+        };
+        let (lent, owned, _) = both_ways(&push, "mine/*", own);
+        assert_eq!(owned.len(), 1);
+        assert_eq!(lent, owned);
+        assert_eq!(lent[0].keyexpr, "mine/x");
+        // Without an own space the alias refuses on both paths.
+        let (lent, owned, _) = both_ways(&push, "**", |_| {});
+        assert_eq!((lent.len(), owned.len()), (0, 0));
+    }
+
+    /// A sliced Put is not delivered lent: it takes the owned projection, which
+    /// joins its plain slices, and is counted.
+    #[test]
+    fn a_sliced_put_takes_the_owned_projection_and_is_counted() {
+        let built = crate::push_build::build_push_literal("demo/s", b"").expect("build");
+        let wire = wire_of(&built);
+        let mut push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let PushVariant::CodecZenohMsgPut(put) = &mut push.body else {
+            panic!("a Put");
+        };
+        let mut slices = sce_forge_runtime::heapless::Vec::new();
+        for bytes in [&b"ab"[..], &b"cd"[..]] {
+            let _ = slices.push(wz_codecs::zbuf_slice::ZbufSlice {
+                kind: u32::from(crate::put_payload::SLICE_KIND_RAW),
+                len: bytes.len() as u64,
+                bytes,
+            });
+        }
+        put.payload = None;
+        put.payload_len = None;
+        put.slice_count = Some(2);
+        put.slices = Some(slices);
+        let (lent, owned, fallbacks) = both_ways(&push, "demo/s", |_| {});
+        assert_eq!(lent, owned);
+        // Without the shared-memory transport the owned projection joins the
+        // plain slices. With it, a list of slices goes through the un-swap, which
+        // refuses it (and counts it) on a session that negotiated no shared
+        // memory, as this one has not: dropped on both paths alike.
+        #[cfg(not(feature = "transport-shm"))]
+        {
+            assert_eq!(owned.len(), 1);
+            assert_eq!(lent[0].payload, b"abcd");
+        }
+        #[cfg(feature = "transport-shm")]
+        assert!(
+            owned.is_empty(),
+            "an unnegotiated list of slices is dropped"
+        );
+        assert_eq!(
+            fallbacks,
+            InPlaceFallbacks {
+                sliced: 1,
+                ..InPlaceFallbacks::default()
+            }
+        );
+    }
+
+    /// A keyexpr past the bounded buffer: refused by the fixed backing, which
+    /// counts it and delivers it through the owned projection; composed in a
+    /// growable string on the growable backing, which never refuses.
+    #[test]
+    fn a_keyexpr_past_the_bound_is_counted_and_still_delivered() {
+        let long_base = "a".repeat(crate::caps::MAX_KEYEXPR_BYTES);
+        let base = alloc::format!("big/{long_base}/");
+        let peer = |r: &mut SubscriberRegistry| {
+            r.peer_keyexpr_table.insert(9, base.clone());
+        };
+        let built = crate::push_build::build_push_aliased(9, Some("tail"), b"v").expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let (lent, owned, fallbacks) = both_ways(&push, "big/**", peer);
+        assert_eq!(owned.len(), 1);
+        assert_eq!(lent, owned);
+        let refused = u32::from(crate::bounded::ENFORCES_CAPACITY);
+        assert_eq!(
+            fallbacks,
+            InPlaceFallbacks {
+                keyexpr_past_bound: refused,
+                ..InPlaceFallbacks::default()
+            }
+        );
+    }
+
+    /// A sample whose source names this session is not fired, lent or owned.
+    #[cfg(feature = "pubsub-source-info")]
+    #[test]
+    fn a_self_echo_is_suppressed_on_both_paths() {
+        let built = crate::push_build::build_push_literal_with_meta("demo/a", b"p", &meta())
+            .expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let own = |r: &mut SubscriberRegistry| {
+            assert!(r.set_own_zid(alloc::vec![0x51, 0x52, 0x53, 0x54]));
+        };
+        let (lent, owned, _) = both_ways(&push, "demo/a", own);
+        assert_eq!((lent.len(), owned.len()), (0, 0));
+    }
+
+    /// A hint that owns heap is built only when a subscriber asks for it.
+    #[test]
+    fn the_timestamp_and_encoding_hints_are_built_only_when_asked() {
+        let ts = Timestamp {
+            time: 1,
+            zid_len: 1,
+            zid: &[7],
+        };
+        let sample = LentSample {
+            keyexpr: "k",
+            payload: &[],
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+            qos: None,
+            attachment: None,
+            source_info: None,
+            timestamp: Some(&ts),
+            timestamp_hint: OnceCell::new(),
+            encoding: None,
+            encoding_hint: OnceCell::new(),
+        };
+        assert!(
+            sample.timestamp_hint.get().is_none(),
+            "not built before asked"
+        );
+        assert_eq!(sample.timestamp().map(|t| t.time), Some(1));
+        assert!(sample.timestamp_hint.get().is_some(), "built once asked");
+        assert!(sample.encoding().is_none());
+    }
+}

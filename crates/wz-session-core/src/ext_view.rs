@@ -21,7 +21,7 @@
 //! handed the descriptor of a shared-memory buffer as though it were them.
 
 use sce_forge_runtime::codec::{CodecStorage, SceByteBuf};
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_entry::{ExtEntry, ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryVariant};
 
 /// An entry of an extension chain, as a reader of the chain sees it.
 pub trait ExtEntryView {
@@ -50,6 +50,11 @@ pub trait ExtEntryView {
     /// The bytes of a ZBuf-encoded entry whose body is a plain run of bytes.
     /// `None` for any other entry, and for a ZBuf body that is a list of slices.
     fn plain_zbuf(&self) -> Option<&[u8]>;
+
+    /// The value of a z64-encoded entry, `None` for any other entry. What the
+    /// QoS reader of a received chain needs (`crate::sample::extract_qos_in`),
+    /// on the owned chain and on one read where its frame lies alike.
+    fn zint(&self) -> Option<u64>;
 }
 
 /// The first entry of `extensions` whose identity is `eid`.
@@ -82,6 +87,45 @@ impl<S: CodecStorage> ExtEntryView for ExtEntryOwned<S> {
             _ => None,
         }
     }
+
+    fn zint(&self) -> Option<u64> {
+        match &self.body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(z) => Some(z.value),
+            _ => None,
+        }
+    }
+}
+
+/// The entry as it is decoded, where its frame lies: what the receive path that
+/// dispatches a record without copying it (`drive::dispatch_datagram`) reads the
+/// chains of a record through. It answers every question exactly as the owned
+/// entry projected from it does; a ZBuf body is the frame's own bytes.
+impl ExtEntryView for ExtEntry<'_> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+
+    fn ext_id(&self) -> u8 {
+        ExtEntry::ext_id(self)
+    }
+
+    fn enc(&self) -> u8 {
+        ExtEntry::enc(self)
+    }
+
+    fn plain_zbuf(&self) -> Option<&[u8]> {
+        match &self.body {
+            ExtEntryVariant::CodecZenohExtZbuf(z) => Some(z.value),
+            _ => None,
+        }
+    }
+
+    fn zint(&self) -> Option<u64> {
+        match &self.body {
+            ExtEntryVariant::CodecZenohExtZint(z) => Some(z.value),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(feature = "codec-request")]
@@ -110,6 +154,48 @@ mod query {
                 QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => {
                     z.value.as_ref().map(SceByteBuf::as_slice)
                 }
+                _ => None,
+            }
+        }
+
+        fn zint(&self) -> Option<u64> {
+            match &self.body {
+                QueryExtEntryOwnedVariant::CodecZenohExtZint(z) => Some(z.value),
+                _ => None,
+            }
+        }
+    }
+
+    /// A Query's entry as it is decoded, where its frame lies: what the receive
+    /// path that dispatches a Request without copying it reads the Query's chain
+    /// through. It answers every question exactly as the owned entry projected
+    /// from it does; a plain ZBuf body is the frame's own bytes.
+    impl ExtEntryView for wz_codecs::query_ext_entry::QueryExtEntry<'_> {
+        fn header(&self) -> u8 {
+            self.header
+        }
+
+        fn ext_id(&self) -> u8 {
+            wz_codecs::query_ext_entry::QueryExtEntry::ext_id(self)
+        }
+
+        fn enc(&self) -> u8 {
+            wz_codecs::query_ext_entry::QueryExtEntry::enc(self)
+        }
+
+        fn plain_zbuf(&self) -> Option<&[u8]> {
+            use wz_codecs::query_ext_entry::QueryExtEntryVariant;
+            match &self.body {
+                // As on the owned entry: only the plain shape has `value`.
+                QueryExtEntryVariant::CodecZenohQueryValueZbuf(z) => z.value,
+                _ => None,
+            }
+        }
+
+        fn zint(&self) -> Option<u64> {
+            use wz_codecs::query_ext_entry::QueryExtEntryVariant;
+            match &self.body {
+                QueryExtEntryVariant::CodecZenohExtZint(z) => Some(z.value),
                 _ => None,
             }
         }

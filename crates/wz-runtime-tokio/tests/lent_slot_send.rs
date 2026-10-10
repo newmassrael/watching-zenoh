@@ -16,8 +16,10 @@
 //! * the lend is the DEFAULT-OFF seam it claims to be: a link that lends
 //!   nothing, or has no free slot, or whose slot is too small, gets the heap
 //!   frame, never an error and never a lost frame;
-//! * a frame past the MTU is fragmented from the heap, and the slot it had
-//!   already been lent is given back;
+//! * a frame past the MTU leaves as a chain whose fragments are each written
+//!   straight into a slot of their own, the heap chain byte for byte, the stop
+//!   fragment of an abandoned chain included; a fragment the link has no
+//!   usable slot for is written on the heap, counted, with the same bytes;
 //! * no path leaks a slot.
 
 use std::cell::UnsafeCell;
@@ -58,12 +60,16 @@ struct LendingLink {
     doors: Mutex<Vec<(bool, Vec<u8>)>>,
     grants: AtomicUsize,
     aborts: AtomicUsize,
+    /// Grants left before the link stops lending (a pool that runs dry part
+    /// way through a send); `usize::MAX` for a link that never does.
+    grants_left: AtomicUsize,
 }
 
 impl LendingLink {
     fn new(lends: bool, n_slots: usize, slot_len: usize, headroom: usize) -> Arc<Self> {
         Arc::new(Self {
             lends,
+            grants_left: AtomicUsize::new(usize::MAX),
             headroom,
             slots: (0..n_slots)
                 .map(|_| SlotMem(UnsafeCell::new(vec![0u8; slot_len].into_boxed_slice())))
@@ -94,7 +100,7 @@ impl LendingLink {
     fn aborts(&self) -> usize {
         self.aborts.load(Ordering::SeqCst)
     }
-    #[cfg(feature = "transport-batching")]
+    #[cfg(any(feature = "transport-batching", feature = "transport-fragmentation"))]
     fn doors(&self) -> Vec<(bool, Vec<u8>)> {
         self.doors.lock().expect("doors").clone()
     }
@@ -131,6 +137,13 @@ impl BoxedLinkDriver for LendingLink {
         // this link has one slot size and lends it whatever is asked, so a frame
         // that does not fit is found out by the encode, as it is on a real link.
         if !self.lends {
+            return None;
+        }
+        if self
+            .grants_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_err()
+        {
             return None;
         }
         let mut taken = self.taken.lock().expect("taken");
@@ -514,30 +527,160 @@ fn a_swap_to_a_link_that_lends_nothing_takes_the_heap_afterwards() {
     assert!(plain.lent().is_empty());
 }
 
+// ARCHITECTURE section 9.1 on the FRAGMENTED send. Every test runs the same push
+// over a link that lends nothing (the heap chain, the control) and compares the
+// wire frame by frame.
+
+/// The batch budget the chains below are cut at.
+#[cfg(feature = "transport-fragmentation")]
+const FRAG_BUDGET: u16 = 64;
+
+/// What a push of `payload` puts on the wire over `link`, frame by frame and in
+/// order whichever door each frame came through, with the session's answer.
+/// `fragment_budget` is the session's fragment TX budget (`usize::MAX` for
+/// none).
+#[cfg(feature = "transport-fragmentation")]
+fn chain_over(
+    link: Arc<LendingLink>,
+    payload: &[u8],
+    fragment_budget: usize,
+) -> (
+    Vec<Vec<u8>>,
+    Result<(), wz_session_core::send_wire_error::SendWireError>,
+    wz_session_core::session_actions::FragmentLendCounts,
+) {
+    let actions = new_session_actions(
+        link.clone(),
+        params_with_sn_7(Some(FRAG_BUDGET)),
+        TokioTime::new(),
+    );
+    actions.set_fragment_tx_budget(fragment_budget);
+    let sent = actions.send_push_literal("home/lent", payload, true);
+    let wire = link.doors().into_iter().map(|(_, frame)| frame).collect();
+    (wire, sent, actions.fragment_lend_counts())
+}
+
+/// THE CLAIM: a message past the budget leaves as a chain whose every fragment
+/// is a lent slot, and the chain is the heap chain byte for byte. Swept over
+/// every payload length across the budget, so the frame that exactly fits, the
+/// first that does not, a last fragment that is full and one that is a single
+/// byte are all among the cases.
 #[cfg(feature = "transport-fragmentation")]
 #[test]
-fn a_frame_past_the_mtu_is_fragmented_from_the_heap_and_its_slot_comes_back() {
-    // A 64-byte batch budget: a 300-byte push cannot be one frame.
-    let link = LendingLink::new(true, 1, 1024, HEADROOM);
-    let actions = new_session_actions(link.clone(), params_with_sn_7(Some(64)), TokioTime::new());
-    actions
-        .send_push_literal("home/lent", &[0x5Au8; 300], true)
-        .expect("push");
+fn a_frame_past_the_mtu_leaves_as_a_chain_of_lent_slots_the_heap_chain_byte_for_byte() {
+    let mut chains = 0;
+    for len in 20..=200usize {
+        let payload: Vec<u8> = (0..len).map(|i| i as u8).collect();
+        let (control, sent, _) = chain_over(LendingLink::new(false, 0, 0, 0), &payload, usize::MAX);
+        sent.expect("the heap chain is sent");
+
+        let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
+        let (wire, sent, counts) = chain_over(link.clone(), &payload, usize::MAX);
+        sent.expect("the lent chain is sent");
+        assert_eq!(wire, control, "payload of {len} bytes");
+        assert!(link.heap().is_empty(), "nothing crossed the byte door");
+        link.assert_every_slot_home();
+        if control.len() > 1 {
+            chains += 1;
+            // The one slot given back is the whole frame's: it was lent before
+            // the frame was known to be past the budget, and returned at the
+            // write that crossed it.
+            assert_eq!(link.aborts(), 1, "only the whole frame's slot came back");
+            assert_eq!(
+                counts,
+                wz_session_core::session_actions::FragmentLendCounts {
+                    slot_fragments: control.len() as u32,
+                    ..Default::default()
+                },
+                "payload of {len} bytes"
+            );
+        }
+    }
     assert!(
-        link.lent().is_empty(),
-        "a fragment chain is built from bytes, not from the slot"
+        chains > 100,
+        "CONTROL: the sweep crossed the budget: {chains} chains"
     );
-    assert!(
-        link.heap().len() >= 4,
-        "300 bytes over a 64-byte budget is a chain: {}",
-        link.heap().len()
+}
+
+/// A pool that runs dry part way through a chain: the fragments it lent for
+/// leave as slots, the rest leave through the byte door, the wire is the heap
+/// chain's in order, and each heap fragment is counted with its reason.
+#[cfg(feature = "transport-fragmentation")]
+#[test]
+fn a_pool_that_runs_dry_mid_chain_sends_the_rest_from_the_heap_and_counts_it() {
+    let payload = [0x5Au8; 300];
+    let (control, _, _) = chain_over(LendingLink::new(false, 0, 0, 0), &payload, usize::MAX);
+    assert!(control.len() > 3, "CONTROL: a chain of {}", control.len());
+
+    let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
+    // One grant for the whole frame (given back once it crosses the budget),
+    // then two fragments.
+    link.grants_left.store(3, Ordering::SeqCst);
+    let (wire, sent, counts) = chain_over(link.clone(), &payload, usize::MAX);
+    sent.expect("a dry pool is a fallback, not an error");
+    assert_eq!(wire, control);
+    let doors: Vec<bool> = link.doors().into_iter().map(|(lent, _)| lent).collect();
+    let mut expected = vec![true, true];
+    expected.resize(control.len(), false);
+    assert_eq!(doors, expected, "two lent, then the heap");
+    assert_eq!(
+        counts,
+        wz_session_core::session_actions::FragmentLendCounts {
+            slot_fragments: 2,
+            heap_no_slot: control.len() as u32 - 2,
+            heap_short_slot: 0,
+        }
     );
+    link.assert_every_slot_home();
+}
+
+/// A slot too short for a fragment is given back and the fragment written on
+/// the heap: the same bytes, every slot home, each refusal counted.
+#[cfg(feature = "transport-fragmentation")]
+#[test]
+fn a_slot_too_short_for_a_fragment_is_given_back_and_the_fragment_sent_from_the_heap() {
+    let payload = [0xC3u8; 300];
+    let (control, _, _) = chain_over(LendingLink::new(false, 0, 0, 0), &payload, usize::MAX);
+    // Holds a fragment's head and not its chunk.
+    let link = LendingLink::new(true, 1, HEADROOM + 24, HEADROOM);
+    let (wire, sent, counts) = chain_over(link.clone(), &payload, usize::MAX);
+    sent.expect("push");
+    assert_eq!(wire, control);
+    assert!(link.lent().is_empty());
+    assert_eq!(counts.heap_short_slot as usize, control.len());
     assert_eq!(
         link.aborts(),
-        1,
-        "the slot lent for the whole frame came back"
+        control.len() + 1,
+        "each lent slot came back unsent: the whole frame's and one per fragment"
     );
-    assert_eq!(link.free(), 1);
+    link.assert_every_slot_home();
+}
+
+/// The abandoned chain: a fragment budget spent mid-chain stops it with the
+/// `0x3 Drop` stop fragment, which is lent like any other fragment and is the
+/// heap path's stop fragment byte for byte, and the send is refused alike.
+#[cfg(feature = "transport-fragmentation")]
+#[test]
+fn an_abandoned_chain_ends_in_the_heap_paths_stop_fragment_written_into_a_slot() {
+    let payload = [0x7Eu8; 300];
+    let (control, refused, _) = chain_over(LendingLink::new(false, 0, 0, 0), &payload, 2);
+    assert_eq!(
+        refused,
+        Err(wz_session_core::send_wire_error::SendWireError::FragmentTxBudgetExhausted)
+    );
+    assert_eq!(
+        control.len(),
+        3,
+        "CONTROL: two fragments and the stop fragment"
+    );
+
+    let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
+    let (wire, sent, counts) = chain_over(link.clone(), &payload, 2);
+    assert_eq!(sent, refused);
+    assert_eq!(wire, control);
+    assert_eq!(counts.slot_fragments, 3, "the stop fragment was lent too");
+    assert!(link.heap().is_empty());
+    link.assert_every_slot_home();
 }
 
 // The batching window. Its frame stays open across the calls that fill it, so
@@ -688,6 +831,19 @@ fn a_message_past_the_budget_mid_window_leaves_no_frame_half_built() {
         (Some(&true), Some(&true)),
         "the two small frames left as slots"
     );
+    // ARCHITECTURE section 9.1 -- and so did the oversize message's chain: it is
+    // never staged whole on the heap, each fragment is written into a slot.
+    #[cfg(feature = "transport-fragmentation")]
+    {
+        assert!(
+            link.heap().is_empty(),
+            "every frame of the window, the chain included, left as a slot"
+        );
+        assert!(
+            actions.fragment_lend_counts().slot_fragments >= 2,
+            "the 300-byte message left as a lent chain over a 200-byte budget"
+        );
+    }
     assert!(
         link.aborts() >= 1,
         "the slot lent for the oversize message came back"

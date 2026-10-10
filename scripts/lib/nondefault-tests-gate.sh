@@ -293,6 +293,11 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # reaped at the bridge's own `QUERY_TIMEOUT_MS`. Upstream's plugin issues its
     # GET the same way; the cost is the shape of a REST admin GET, not a stall.
     "wz-rest|hook|rest-sse-subscribe,adminspace-plugins-handlers|"
+    # `rx-in-place` joins: B3 (runtime-zero-copy) added the MCU reassembly arena
+    # over the generated `reassembly_pool_mcu` table and its six tests
+    # (`reassembly_rx::in_place_tests`), which only that feature builds.
+    # MEASURED before widening: this row's listing with it passes 29 of 29 in
+    # 16s, where it ran 23 without it.
     "wz-runtime-coop|hook|\
         alloc,\
         codec-close,\
@@ -305,6 +310,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         keyexpr-wildcard-double,\
         keyexpr-wildcard-single,\
         reassembly,\
+        rx-in-place,\
         scouting-static,\
         session-unicast,\
         session-unicast-accept,\

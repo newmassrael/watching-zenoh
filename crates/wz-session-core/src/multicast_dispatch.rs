@@ -80,7 +80,7 @@
 // no-alloc MCU composition keeps them).
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 use crate::driver_loop::{
-    reassembled_frame_outcome, DriverLoopOutcome, IterationEvent, ReassemblyDropReason,
+    reassembled_chain_outcome, DriverLoopOutcome, IterationEvent, ReassemblyDropReason,
 };
 use crate::multicast_peer::{
     MulticastPeerActions, MulticastPeerEvent, MulticastPeerPolicy, MulticastPeerState,
@@ -1517,7 +1517,7 @@ pub fn multicast_chain_key(peer_idx: usize) -> [u8; 4] {
 /// -> on out-of-order, abort the channel's chain (pico dbuf clear) -> on
 /// admission, feed the reassembly Router under the slot-index chain key;
 /// a completed chain re-enters the frame-payload decode
-/// ([`reassembled_frame_outcome`]) and fans to `on_event` as a
+/// ([`reassembled_chain_outcome`]) and fans to `on_event` as a
 /// [`DriverLoopOutcome::FramePayload`] `Poll` — the SAME event shape the
 /// admitted-Frame arm fans, so one observer routes whole and reassembled
 /// messages alike. A terminal non-completion ingest surfaces as
@@ -1681,7 +1681,9 @@ pub(crate) fn ingest_multicast_fragment_counted<
     // @ `_Z_PATCH_HAS_FRAGMENT_MARKERS(entry->common._patch)`.
     reasm.set_fragmentation_markers(dispatcher.peer_honours_fragment_markers(peer_idx));
     let mut completed: Option<DriverLoopOutcome> = None;
-    let ingest_outcome = reasm.ingest(
+    // ARCHITECTURE section 9.3 -- lent out of the arena when it can be, as the
+    // unicast completion is.
+    let ingest_outcome = reasm.ingest_lending(
         ReassemblyFragment {
             peer_key: &key,
             reliable,
@@ -1713,11 +1715,11 @@ pub(crate) fn ingest_multicast_fragment_counted<
         },
         sn_mask,
         now_ms,
-        |msg| {
+        |chain| {
             // R311y227 — the reassembled outcome carries the chain's priority (the
             // same band the fragments rode), surfaced to the delivery outcome just
             // like the whole-frame path. DEFAULT for a non-qos chain.
-            completed = Some(reassembled_frame_outcome(reliable, sn, priority, msg));
+            completed = Some(reassembled_chain_outcome(reliable, sn, priority, chain));
         },
     );
     if let Some(o) = completed {

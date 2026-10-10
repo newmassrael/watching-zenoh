@@ -359,6 +359,37 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// push fails; see [`SubInterestRefusals`].
     #[cfg(feature = "declare-subscriber")]
     interest_refusals: SubInterestRefusals,
+    /// The Puts the in-place receive path could not deliver lent and delivered
+    /// through the owned projection instead, by why; see [`InPlaceFallbacks`].
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    in_place_fallbacks: InPlaceFallbacks,
+}
+
+/// The Push records the in-place receive path (`drive::dispatch_datagram`, the
+/// MCU profile's `rx-in-place`) handed this registry lent, and that it then
+/// delivered through the owned projection ([`SubscriberRegistry::dispatch`]'s
+/// path) because a lent delivery could not represent them. Each is still
+/// delivered, exactly as the copying path delivers it; what it costs is the heap
+/// the owned projection takes. Counted so a profile can see how much of its
+/// traffic pays that.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InPlaceFallbacks {
+    /// A Put whose payload is a list of slices (the shared-memory layout): the
+    /// slices are joined or resolved into a buffer of their own, which is the
+    /// owned path's (`put_payload::collect_wire_payload`).
+    pub sliced: u32,
+    /// A Put whose resolved keyexpr is longer than
+    /// [`KeyexprBuf`](crate::wireexpr_resolve::KeyexprBuf) holds. Only the
+    /// fixed bounded backing refuses one; the owned path resolves it into a
+    /// `String`.
+    pub keyexpr_past_bound: u32,
 }
 
 /// The counted refusals of the session-local subscriber-interest staging, by
@@ -387,6 +418,29 @@ pub struct SubInterestRefusals {
     /// buffer was full.
     pub announcements: u32,
 }
+
+/// The two id spaces as the registry holds them: [`SubscriberRegistry::mapping_spaces`]
+/// over the two fields alone, so a caller that must also borrow the subscriber
+/// table mutably (the in-place delivery, which fires while the keyexpr it
+/// resolved still borrows the peer's table) can take both borrows apart.
+#[cfg(feature = "alloc")]
+fn spaces_of<'a>(
+    peer: &'a HashMap<u64, String>,
+    own: &'a Option<SharedOwnMappingSpace>,
+) -> MappingSpaces<'a> {
+    match own {
+        Some(own) => MappingSpaces::with_own(peer, &**own),
+        None => MappingSpaces::peer_only(peer),
+    }
+}
+
+/// ARCHITECTURE section 9.2 -- the delivery of a Push the in-place receive path
+/// lends ([`IterationEvent::InPlace`]).
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+mod in_place;
 
 /// R3040 (transport-shm) -- the priority band a received Push was sent at: the
 /// shared [`priority_band`](crate::put_payload::priority_band) over the push's own
@@ -559,7 +613,22 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             pending_sub_interest_replies: BoundedVec::new(),
             #[cfg(feature = "declare-subscriber")]
             interest_refusals: SubInterestRefusals::default(),
+            #[cfg(all(
+                feature = "alloc",
+                any(feature = "pubsub-put", feature = "pubsub-delete")
+            ))]
+            in_place_fallbacks: InPlaceFallbacks::default(),
         }
+    }
+
+    /// What the in-place receive path's Puts cost in owned fallbacks since this
+    /// registry was built; see [`InPlaceFallbacks`].
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    pub fn in_place_fallbacks(&self) -> InPlaceFallbacks {
+        self.in_place_fallbacks
     }
 
     /// R231 — install this session's own zid (1..=16 bytes) so
@@ -964,10 +1033,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// without first holding the pair.
     #[cfg(feature = "alloc")]
     pub fn mapping_spaces(&self) -> MappingSpaces<'_> {
-        match &self.own_mapping_space {
-            Some(own) => MappingSpaces::with_own(&self.peer_keyexpr_table, &**own),
-            None => MappingSpaces::peer_only(&self.peer_keyexpr_table),
-        }
+        spaces_of(&self.peer_keyexpr_table, &self.own_mapping_space)
     }
 
     /// R237 — single-id resolver mirroring R234
@@ -1010,16 +1076,25 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// no-ops. Callers use this as the registry's observer callback so
     /// they need not hand-write the `if let Poll(FramePayload { ... })`
     /// matcher at the integration site.
+    ///
+    /// A Push the in-place receive path lends ([`IterationEvent::InPlace`]) is
+    /// delivered here too, as a borrowed sample over the frame's own bytes: the
+    /// same subscribers, the same projection, the same self-echo rule, and no
+    /// heap for a Put whose keyexpr fits (see `pubsub::in_place`).
     #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event(&mut self, event: IterationEvent<'_>) {
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-            messages, reliable, ..
-        }) = event
-        {
-            let reliability = Reliability::from_reliable_bool(*reliable);
-            for message in messages {
-                self.dispatch(message, reliability);
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                messages, reliable, ..
+            }) => {
+                let reliability = Reliability::from_reliable_bool(*reliable);
+                for message in messages {
+                    self.dispatch(message, reliability);
+                }
             }
+            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+            IterationEvent::InPlace(record) => self.dispatch_in_place(&record),
+            _ => {}
         }
     }
 
@@ -1778,61 +1853,75 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     }
 
     fn fire_to_subscribers(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
-        let mut fired: usize = 0;
-        let keyexpr = view.keyexpr();
-        // R2662 (open-debt item 763) — THE ARRIVING KEYEXPR MAY ITSELF BE A
-        // PATTERN, so it is split ONCE here and each subscriber is INTERSECTED
-        // against it. The prior `keyexpr_pattern_matches(&chunks, keyexpr)`
-        // compared a subscriber pattern against the arriving key as a LITERAL,
-        // so a `demo/*` Put matched the subscriber `demo/*` character-for-
-        // character and missed `demo/a` — upstream's subscriber rule is
-        // intersection, and a real zenoh-pico client does send such keys
-        // (`wz_storage_wildcard_update_pico_interop` fires `demo/**` and the
-        // storage plane applies it, so they ARRIVE; only local delivery dropped
-        // them).
-        //
-        // ⛔ FOR A CONCRETE ARRIVING KEY THIS IS IDENTICAL TO THE PRIOR MATCH —
-        // the argument `query.rs` @ `fn matches` already recorded when the QUERY
-        // plane made this same move. So this widens delivery to the wildcard
-        // case and changes nothing about the concrete one.
-        //
-        // The split is hoisted OUT of the loop because the target is one value
-        // for the whole scan, which is also the shape
-        // `crate::declare::declared_intersects` uses: split the target once,
-        // then ask per candidate.
-        let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-        for c in keyexpr.split('/') {
-            // Over-depth arriving key: conservatively deliver to nobody, the
-            // same direction `keyexpr_intersects_target` takes for an
-            // over-depth candidate on the no-alloc backing.
-            if target.push(c).is_err() {
-                return 0;
-            }
-        }
-        for subscriber in self.subscribers.iter_mut() {
-            let pass = if is_remote {
-                subscriber.allowed_origin.allows_remote()
-            } else {
-                subscriber.allowed_origin.allows_local()
-            };
-            if !pass {
-                continue;
-            }
-            // R2662 — the subscriber's pattern is the CANDIDATE now, and
-            // `keyexpr_intersects_target` does its own bounded split (the same
-            // defensive over-depth skip the hand-rolled loop here used to do,
-            // moved behind the one seam so every scan inherits it).
-            if keyexpr_intersects_target(&subscriber.pattern, &target) {
-                // R311gb-2b — deliver via the DIP seam (borrowed view,
-                // no projection step). On MCU `C` is a closed `enum`
-                // whose `deliver` injects; on AP a `BoxedSink` closure.
-                subscriber.sink.deliver(view);
-                fired = fired.saturating_add(1);
-            }
-        }
-        fired
+        fire_into(&mut self.subscribers, view, is_remote)
     }
+}
 
+/// [`SubscriberRegistry::fire_to_subscribers`] over the subscriber table alone,
+/// so a caller that holds other fields of the registry borrowed (the in-place
+/// delivery, whose keyexpr may be the peer table's own literal) can fire with
+/// them still borrowed. The one matcher both reach.
+fn fire_into<C: SampleSink>(
+    subscribers: &mut BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
+    view: &dyn SampleView,
+    is_remote: bool,
+) -> usize {
+    let mut fired: usize = 0;
+    let keyexpr = view.keyexpr();
+    // R2662 (open-debt item 763) — THE ARRIVING KEYEXPR MAY ITSELF BE A
+    // PATTERN, so it is split ONCE here and each subscriber is INTERSECTED
+    // against it. The prior `keyexpr_pattern_matches(&chunks, keyexpr)`
+    // compared a subscriber pattern against the arriving key as a LITERAL,
+    // so a `demo/*` Put matched the subscriber `demo/*` character-for-
+    // character and missed `demo/a` — upstream's subscriber rule is
+    // intersection, and a real zenoh-pico client does send such keys
+    // (`wz_storage_wildcard_update_pico_interop` fires `demo/**` and the
+    // storage plane applies it, so they ARRIVE; only local delivery dropped
+    // them).
+    //
+    // ⛔ FOR A CONCRETE ARRIVING KEY THIS IS IDENTICAL TO THE PRIOR MATCH —
+    // the argument `query.rs` @ `fn matches` already recorded when the QUERY
+    // plane made this same move. So this widens delivery to the wildcard
+    // case and changes nothing about the concrete one.
+    //
+    // The split is hoisted OUT of the loop because the target is one value
+    // for the whole scan, which is also the shape
+    // `crate::declare::declared_intersects` uses: split the target once,
+    // then ask per candidate.
+    let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+    for c in keyexpr.split('/') {
+        // Over-depth arriving key: conservatively deliver to nobody, the
+        // same direction `keyexpr_intersects_target` takes for an
+        // over-depth candidate on the no-alloc backing.
+        if target.push(c).is_err() {
+            return 0;
+        }
+    }
+    for subscriber in subscribers.iter_mut() {
+        let pass = if is_remote {
+            subscriber.allowed_origin.allows_remote()
+        } else {
+            subscriber.allowed_origin.allows_local()
+        };
+        if !pass {
+            continue;
+        }
+        // R2662 — the subscriber's pattern is the CANDIDATE now, and
+        // `keyexpr_intersects_target` does its own bounded split (the same
+        // defensive over-depth skip the hand-rolled loop here used to do,
+        // moved behind the one seam so every scan inherits it).
+        if keyexpr_intersects_target(&subscriber.pattern, &target) {
+            // R311gb-2b — deliver via the DIP seam (borrowed view,
+            // no projection step). On MCU `C` is a closed `enum`
+            // whose `deliver` injects; on AP a `BoxedSink` closure.
+            subscriber.sink.deliver(view);
+            fired = fired.saturating_add(1);
+        }
+    }
+    fired
+}
+
+impl<C: SampleSink> SubscriberRegistry<C> {
     /// R311y788 — the SESSION-LOCAL half of a publisher's matching
     /// status: `true` iff at least one subscriber registered on THIS
     /// session would receive a local publish on `publish_keyexpr`.
