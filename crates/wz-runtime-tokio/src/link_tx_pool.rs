@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ARCHITECTURE section 9.1 on the AP stream links: the TRANSMIT POOL a link's
-//! outbound frames live in, and the generated lifecycle that governs each slot.
+//! ARCHITECTURE section 9.1 on the AP stream links and the serial link: the
+//! TRANSMIT POOL a link's outbound frames live in, and the generated lifecycle
+//! that governs each slot. (The serial link writes its COBS frames into the same
+//! slots, back to back; a COBS frame ends at its `0x00`, so the run is the wire.)
 //!
 //! ## What this replaces
 //!
@@ -444,6 +446,7 @@ mod queue {
 
     /// Through the real writer task: written slots come home through the
     /// completion edge counted as written, and the peer reads the frames.
+    #[cfg(feature = "transport-link-tcp")]
     #[tokio::test]
     async fn the_writer_task_completes_every_slot_it_writes() {
         use tokio::io::AsyncReadExt;
@@ -473,6 +476,7 @@ mod queue {
 
     /// A write that FAILS has ended too: its slot goes home through the
     /// completion edge, counted as failed, and nothing is left out.
+    #[cfg(feature = "transport-link-tcp")]
     #[tokio::test]
     async fn a_failed_write_returns_its_slot() {
         struct Broken;
@@ -675,6 +679,35 @@ mod queue {
             tx.send_framed(P, &[], &vec![0u8; SLOT_SIZE + 1]),
             Err(PooledSendError::TooLarge)
         );
+    }
+
+    /// A frame the link encodes in place takes the bytes it wrote and no more,
+    /// so the next frame packs behind it; an encoder that fails queues nothing
+    /// and gives back the slot it was handed.
+    #[test]
+    fn a_link_encoded_frame_takes_what_it_wrote_and_a_failed_one_nothing() {
+        let (tx, mut rx) = outbound_channel_pooled();
+        tx.send_encoded(P, 1516, |dst| {
+            dst[..3].copy_from_slice(b"abc");
+            Some(3)
+        })
+        .expect("queued");
+        tx.send_framed(P, &[], b"de").expect("packed behind it");
+        assert_eq!(
+            tx.send_encoded(P, 1516, |_| None),
+            Err(PooledSendError::Unencodable)
+        );
+        let (_, wire) = rx.try_recv_wire_tagged().expect("one run");
+        assert_eq!(wire, *b"abcde");
+        drop(wire);
+        assert_eq!(free(&tx), SLOT_COUNT);
+        // A failing encoder handed a FRESH slot gives it back.
+        assert_eq!(
+            tx.send_encoded(P, 1516, |_| None),
+            Err(PooledSendError::Unencodable)
+        );
+        assert_eq!(free(&tx), SLOT_COUNT);
+        assert!(rx.try_recv_wire_tagged().is_none());
     }
 
     /// A heap queue is untouched by all of this: it lends nothing from a pool and

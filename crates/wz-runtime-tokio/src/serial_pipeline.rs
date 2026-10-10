@@ -121,7 +121,7 @@ use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
-    encode_frame, pending_init_header, DecodedFrame, HandshakeStep, SerialFrameReader,
+    encode_frame_into, pending_init_header, DecodedFrame, HandshakeStep, SerialFrameReader,
     SerialHandshake, SerialRole, SERIAL_MAX_COBS_BUF, SERIAL_MTU,
 };
 
@@ -938,7 +938,7 @@ pub fn wire_serial_stream(
     let retain = guard.as_ref().map(SerialLinkGuard::liveness);
     let (reader, writer) = split(stream);
     let inbound = SerialReadDriver::new(reader, guard);
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = serial_outbound_channel();
     let writer_handle =
         WriterHandle::spawn(rx, move |queue| serial_writer_task(writer, queue, retain));
     // R311y474 — the adminspace `{src,dst}` pair. BOTH ends are this tty's own
@@ -1126,8 +1126,17 @@ impl LinkDriver for SerialReadDriver {
 /// owns. Impls [`BoxedLinkDriver`] with a NON-blocking enqueue, the same
 /// sync-action / async-runtime decoupling
 /// [`crate::link_pipeline::TcpWriteDriver`] uses (a nested `block_on` from a
-/// sync FSM action handler would trip the runtime-reentrancy check). The
-/// channel carries the RAW payload; the writer task does the serial framing.
+/// sync FSM action handler would trip the runtime-reentrancy check).
+///
+/// R3250 — the channel carries the FRAMED wire: this driver COBS-frames each
+/// payload as it enqueues it ([`encode_frame_into`]), and the writer writes the
+/// bytes as they are. It used to carry the raw payload and leave the framing to
+/// the writer, which cost a copy of the payload into a vector of its own and
+/// two more vectors in the encoder for every frame. Under `runtime-zero-copy`
+/// the frame is encoded straight into a slot of the link's transmit pool
+/// ([`serial_outbound_channel`]), back to back with the frames queued before it
+/// (COBS frames end at their `0x00`, so the concatenation is the wire), and a
+/// frame costs no allocation; otherwise it is one vector.
 pub struct SerialWriteDriver {
     tx: crate::writer_queue::OutboundTx,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
@@ -1136,8 +1145,29 @@ pub struct SerialWriteDriver {
     endpoints: Option<LinkEndpoints>,
 }
 
+/// R3250 — the outbound queue a serial link's write half and its
+/// [`serial_writer_task`] share: under `runtime-zero-copy` one that owns the
+/// link's transmit pool (`crate::writer_queue::outbound_channel_pooled`), so a
+/// frame lies in a pool slot from its encode to the end of its write; without
+/// it, the heap queue.
+pub fn serial_outbound_channel() -> (
+    crate::writer_queue::OutboundTx,
+    crate::writer_queue::OutboundRx,
+) {
+    #[cfg(feature = "runtime-zero-copy")]
+    {
+        crate::writer_queue::outbound_channel_pooled()
+    }
+    #[cfg(not(feature = "runtime-zero-copy"))]
+    {
+        crate::writer_queue::outbound_channel()
+    }
+}
+
 impl SerialWriteDriver {
-    fn new(
+    /// A write half over `tx`, the sending side of the queue its
+    /// [`serial_writer_task`] drains (built by [`serial_outbound_channel`]).
+    pub fn new(
         tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
         endpoints: Option<LinkEndpoints>,
@@ -1209,11 +1239,49 @@ impl BoxedLinkDriver for SerialWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
-            log::warn!("wz-runtime-tokio: outbound serial channel closed; dropping frame ({e})");
-            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+        // R3250 — framed here, into the queue's own storage: a slot of the
+        // link's transmit pool on a pooled queue, a vector of its own otherwise.
+        #[cfg(feature = "runtime-zero-copy")]
+        {
+            use crate::writer_queue::PooledSendError;
+            match self.tx.send_encoded(priority, SERIAL_MAX_COBS_BUF, |dst| {
+                encode_frame_into(SERIAL_DATA_HEADER, bytes, dst).ok()
+            }) {
+                Ok(()) => LinkSendOutcome::Sent,
+                Err(PooledSendError::Closed) => {
+                    log::warn!("wz-runtime-tokio: outbound serial channel closed; dropping frame");
+                    LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "wz-runtime-tokio: outbound serial frame of {} bytes not framed ({e}); dropping",
+                        bytes.len()
+                    );
+                    LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+                }
+            }
         }
-        LinkSendOutcome::Sent
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        {
+            let mut wire = vec![0u8; SERIAL_MAX_COBS_BUF];
+            match encode_frame_into(SERIAL_DATA_HEADER, bytes, &mut wire) {
+                Ok(len) => wire.truncate(len),
+                Err(e) => {
+                    log::warn!(
+                        "wz-runtime-tokio: outbound serial frame of {} bytes not framed ({e:?}); dropping",
+                        bytes.len()
+                    );
+                    return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+                }
+            }
+            if let Err(e) = self.tx.send(priority, wire) {
+                log::warn!(
+                    "wz-runtime-tokio: outbound serial channel closed; dropping frame ({e})"
+                );
+                return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+            }
+            LinkSendOutcome::Sent
+        }
     }
 
     fn open_blocking(&self) {
@@ -1239,10 +1307,11 @@ impl BoxedLinkDriver for SerialWriteDriver {
     }
 }
 
-/// Async writer task. Owns the [`WriteHalf`] and drains the outbound channel
-/// one payload at a time, COBS-framing each through [`encode_frame`] (header
-/// [`SERIAL_DATA_HEADER`] + len + payload + crc32 -> COBS -> `0x00` EOP) and
-/// writing + flushing. Exits when the queue is SEALED and drained, when every
+/// Async writer task. Owns the [`WriteHalf`] and drains the outbound channel,
+/// writing + flushing the frames as they are: [`SerialWriteDriver`] has already
+/// COBS-framed each one through [`encode_frame_into`] (header
+/// [`SERIAL_DATA_HEADER`] + len + payload + crc32 -> COBS -> `0x00` EOP) when it
+/// enqueued it (R3250). Exits when the queue is SEALED and drained, when every
 /// [`SerialWriteDriver`] clone has dropped, or when a write fails / stalls past
 /// [`WRITER_STALL_MS`](crate::writer_queue::WRITER_STALL_MS) on a sealed queue
 /// (logged + bail) — see [`crate::writer_queue`] for why the seal, and not
@@ -1277,25 +1346,18 @@ async fn drain_serial_writes(
     mut writer: WriteHalf<BoxedSerialStream>,
     mut queue: OutboundQueue,
 ) -> WriteHalf<BoxedSerialStream> {
-    while let Some(payload) = queue.next().await {
-        // Defensive: send_blocking already rejects oversize, but a future
-        // caller could bypass it. encode_frame rejects > SERIAL_MTU.
-        let wire = match encode_frame(SERIAL_DATA_HEADER, &payload) {
-            Ok(wire) => wire,
-            Err(e) => {
-                log::warn!(
-                    "wz-runtime-tokio: serial_writer_task encode failed for {} bytes ({e:?}); dropping",
-                    payload.len()
-                );
-                continue;
-            }
-        };
+    // R3250 — what the queue holds is the FRAMED wire (the write half encodes it
+    // as it enqueues), so the bytes are written as they are. On a pooled queue a
+    // run of frames is one slot of the link's transmit pool: started here, and
+    // home through the completion edge when the write has ended.
+    while let Some(mut wire) = queue.next_wire().await {
+        wire.begin_write();
         let write = async {
             writer.write_all(&wire).await?;
             writer.flush().await
         };
         match queue.guarded(write).await {
-            Some(Ok(())) => {}
+            Some(Ok(())) => queue.recycle_wire(wire),
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: serial_writer_task write failed: {e}; closing");
                 return writer;
@@ -1334,6 +1396,38 @@ async fn drain_serial_writes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::serial_link::encode_frame;
+
+    /// R3250 — the write half frames the payload as it enqueues it: what the
+    /// queue holds is the codec's frame, byte for byte, in a pool slot under
+    /// `runtime-zero-copy`, and frames enqueued together pack into one run.
+    #[tokio::test]
+    async fn the_write_half_enqueues_the_framed_wire() {
+        let (tx, mut rx) = serial_outbound_channel();
+        let driver = SerialWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
+        assert_eq!(
+            driver.send_blocking(b"one", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            driver.send_blocking(b"two", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        let mut want = encode_frame(SERIAL_DATA_HEADER, b"one").expect("frame");
+        want.extend(encode_frame(SERIAL_DATA_HEADER, b"two").expect("frame"));
+        let first = rx.recv_wire().await.expect("a frame");
+        // Pooled: both frames are one run in one slot. Heap: a vector each.
+        assert_eq!(first.is_pooled(), cfg!(feature = "runtime-zero-copy"));
+        let mut got = first.into_vec();
+        while got.len() < want.len() {
+            got.extend(rx.recv_wire().await.expect("the next frame").into_vec());
+        }
+        assert_eq!(got, want);
+        assert_eq!(
+            driver.send_blocking(&[0u8; SERIAL_MTU + 1], Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+        );
+    }
 
     /// Two connected ends of an in-memory serial link: what a host with no tty
     /// pair runs these witnesses over.

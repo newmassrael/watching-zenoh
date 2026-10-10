@@ -5148,7 +5148,10 @@ layer_c1t_cargo_test_serial() {
     # marker has not arrived is not kept) and e2e 13 -> 14 / 15 -> 16 (the same
     # glued INIT over a pty, on a fresh and on a retained device). READ off what
     # the commands PRINTED (21, 14, 16); the e2e deltas are equal.
-    _runci_guarded_test C1t 21 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
+    #
+    # R3250 -- lib 21 -> 22 (the write half enqueues the framed wire, which is
+    # what the serial queue now carries). READ off what the command PRINTED (22).
+    _runci_guarded_test C1t 22 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
         || return 1
     # R2725 — 5 -> 7 and 6 -> 8. R2722 split
     # serial_listener_yields_one_link_then_parks into a parks-while-live arm
@@ -12562,6 +12565,14 @@ layer_c1bq_zero_copy_arena() {
     (( n > 0 )) || {
         echo "  C1bq FAIL: the transmit allocation suite ran no test"; echo "$out"; return 1; }
     tests=$((tests + n))
+    # The serial link's write half over the same pool (its own feature).
+    out="$(cd crates && cargo test -p wz-runtime-tokio \
+        --features runtime-zero-copy,transport-link-serial \
+        --test serial_tx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
+        echo "  C1bq FAIL: the serial transmit allocation suite ran no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
 
     # The DEFAULT arena, which every other Router in the tree runs. The seam
     # moved `reassembly_dispatch`'s staging out from under all of them.
@@ -12581,7 +12592,7 @@ layer_c1bq_zero_copy_arena() {
 
     # The facade arm the preset actually ships.
     (cd crates && cargo build -p wz --features preset-ap-full --quiet) || return 1
-    _runci_lane_did C1bq "$tests" "arena test(s) over 6 suite(s), plus 2 clippy + 1 preset build"
+    _runci_lane_did C1bq "$tests" "arena test(s) over 7 suite(s), plus 2 clippy + 1 preset build"
 }
 
 layer_c1cj_replay_c_abi() {

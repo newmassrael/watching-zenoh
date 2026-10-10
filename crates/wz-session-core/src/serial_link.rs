@@ -13,10 +13,13 @@
 //! bytes, so the SAME logic is reusable by both the AP (tty) and MCU
 //! (UART HAL) link drivers. The current form takes `alloc` (owned `Vec`
 //! frame buffers + a growable reader accumulator) — the AP staging,
-//! matching `transport-fragmentation` / `session-reconnect`; a bounded
-//! no-alloc variant for the heap-less MCU profile is a follow-up (it
-//! needs a no-alloc `serial_envelope` encode, which the codec does not
-//! expose yet — only `encode_to_vec`). The host tty backend
+//! matching `transport-fragmentation` / `session-reconnect`. R3250 — the
+//! ENCODE side no longer needs it:
+//! [`encode_frame_into`](crate::serial_link::encode_frame_into) writes a frame
+//! into a buffer the caller owns (the codec's `encode` over a slice sink, which
+//! this paragraph used to say the codec did not expose; it does), and
+//! `encode_frame` is that over a vector. The decode side and the reader
+//! accumulator still allocate. The host tty backend
 //! (`tokio-serial`) and the `LinkDriver` impl that drives this logic are
 //! a separate concern (the runtime-tokio side), exactly as `TcpDriver` /
 //! `UdpDriver` sit above the stream/datagram codecs.
@@ -131,6 +134,27 @@ pub enum SerialFrameError {
 /// serial.c:28-68). The returned bytes are exactly what the link writes
 /// to the wire.
 pub fn encode_frame(header: u8, payload: &[u8]) -> Result<Vec<u8>, SerialFrameError> {
+    let mut out = alloc::vec![0u8; SERIAL_MAX_COBS_BUF];
+    let len = encode_frame_into(header, payload, &mut out)?;
+    out.truncate(len);
+    Ok(out)
+}
+
+/// R3250 — [`encode_frame`] into `out`, a buffer the caller owns, returning
+/// how many bytes of it the frame took. Allocates nothing: the pre-COBS frame
+/// is encoded on the stack by the codec's own encoder over a slice sink, and
+/// the COBS body is the generated stuffer's bounded return. This is what lets a
+/// link write a serial frame straight into a transmit slot.
+///
+/// A frame is at most [`SERIAL_MAX_COBS_BUF`] bytes; an `out` too short for the
+/// one being encoded is refused as [`SerialFrameError::Cobs`] (the stuffed body
+/// overran the room it was given) and nothing in `out` is to be read.
+pub fn encode_frame_into(
+    header: u8,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, SerialFrameError> {
+    use sce_forge_runtime::codec::SliceSink;
     if payload.len() > SERIAL_MTU {
         return Err(SerialFrameError::TooLarge);
     }
@@ -140,13 +164,20 @@ pub fn encode_frame(header: u8, payload: &[u8]) -> Result<Vec<u8>, SerialFrameEr
         payload,
         crc32: crc32(payload),
     };
-    let pre_cobs = env.encode_to_vec();
-    let cobs = cobs_encode(&pre_cobs).map_err(|_| SerialFrameError::Cobs)?;
+    let mut pre_cobs = [0u8; SERIAL_MFS];
+    let mut sink = SliceSink::new(&mut pre_cobs);
+    env.encode(&mut sink)
+        .map_err(|_| SerialFrameError::TooLarge)?;
+    let pre_len = sink.position();
+    let cobs = cobs_encode(&pre_cobs[..pre_len]).map_err(|_| SerialFrameError::Cobs)?;
     let stuffed = cobs.as_slice();
-    let mut out = Vec::with_capacity(stuffed.len() + 1);
-    out.extend_from_slice(stuffed);
-    out.push(SERIAL_EOP);
-    Ok(out)
+    let len = stuffed.len() + 1;
+    if out.len() < len {
+        return Err(SerialFrameError::Cobs);
+    }
+    out[..stuffed.len()].copy_from_slice(stuffed);
+    out[stuffed.len()] = SERIAL_EOP;
+    Ok(len)
 }
 
 /// Decode one serial on-wire frame (mirror of `_z_serial_msg_deserialize`,
@@ -486,6 +517,47 @@ mod tests {
         assert_eq!(
             wire,
             vec![0x01, 0x02, 0x03, 0x08, 0xAB, 0xCD, 0xEF, 0x77, 0x20, 0xA7, 0xFB, 0x00]
+        );
+    }
+
+    /// R3250 — the frame written into a caller's buffer is the pico frame, the
+    /// same bytes for the byte-parity payload above, for an empty INIT, and for
+    /// a full MTU payload of zeroes (the COBS worst case: every byte stuffed);
+    /// the largest one fills no more than `SERIAL_MAX_COBS_BUF`.
+    #[test]
+    fn encode_frame_into_writes_the_pico_frame_in_place() {
+        let mut out = [0u8; SERIAL_MAX_COBS_BUF];
+        let n = encode_frame_into(0x00, &[0xAB, 0xCD, 0xEF], &mut out).expect("encode");
+        assert_eq!(
+            &out[..n],
+            [0x01, 0x02, 0x03, 0x08, 0xAB, 0xCD, 0xEF, 0x77, 0x20, 0xA7, 0xFB, 0x00]
+        );
+        let zeroes = vec![0u8; SERIAL_MTU];
+        let n = encode_frame_into(0x00, &zeroes, &mut out).expect("the largest frame fits");
+        assert!(n <= SERIAL_MAX_COBS_BUF);
+        let decoded = decode_frame(&out[..n]).expect("round trips");
+        assert_eq!(decoded.payload, zeroes);
+        let n = encode_frame_into(SERIAL_FLAG_INIT, &[], &mut out).expect("INIT");
+        assert_eq!(
+            &out[..n],
+            &encode_frame(SERIAL_FLAG_INIT, &[]).expect("INIT")[..]
+        );
+    }
+
+    /// R3250 — a buffer too short for the frame is refused, and a payload past
+    /// the MTU is refused as it is by `encode_frame`.
+    #[test]
+    fn encode_frame_into_refuses_a_short_buffer_and_an_oversize_payload() {
+        let mut short = [0u8; 11];
+        assert_eq!(
+            encode_frame_into(0x00, &[0xAB, 0xCD, 0xEF], &mut short),
+            Err(SerialFrameError::Cobs),
+            "the frame is 12 bytes"
+        );
+        let mut out = [0u8; SERIAL_MAX_COBS_BUF];
+        assert_eq!(
+            encode_frame_into(0x00, &vec![1u8; SERIAL_MTU + 1], &mut out),
+            Err(SerialFrameError::TooLarge)
         );
     }
 

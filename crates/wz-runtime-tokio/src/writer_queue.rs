@@ -72,9 +72,15 @@ use wz_session_core::qos::Priority;
 use crate::runtime_impl::TokioJoinHandle;
 use crate::runtime_pool::WzRuntime;
 
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 use crate::link_tx_pool::{TxPool, TxPoolStats};
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 use crate::session_tx_pool_ap::{CpuMut, Slot, SlotState, SLOT_SIZE};
 
 /// R2919 — the outbound channel between a session's emit and its link's
@@ -154,11 +160,20 @@ pub fn outbound_channel_with_capacity(
             closed: false,
             senders: 1,
             spare: Vec::new(),
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             pool: None,
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             next_batch: 0,
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             receiver_gone: false,
         }),
         ready: Notify::new(),
@@ -182,14 +197,20 @@ pub fn outbound_channel_with_capacity(
 /// marks are [`outbound_channel`]'s, unchanged; the pool adds one condition to
 /// "room" (a free slot) and is back-pressure when it is dry. The pool is
 /// allocated once here, zeroed, about 1 MiB of address space per link.
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 pub fn outbound_channel_pooled() -> (OutboundTx, OutboundRx) {
     outbound_channel_pooled_with_capacity([DEFAULT_QUEUE_SIZE; Priority::NUM], BATCH_BYTES)
 }
 
 /// R3250 — [`outbound_channel_pooled`] with each lane's bound, as
 /// [`outbound_channel_with_capacity`].
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 pub fn outbound_channel_pooled_with_capacity(
     queue_size: [usize; Priority::NUM],
     batch_bytes: usize,
@@ -254,15 +275,24 @@ struct LaneState {
     /// transmit pool, on a queue built by [`outbound_channel_pooled`]. While it
     /// is here every frame a sender hands this queue lies in one of its slots
     /// ([`Entry::Batch`]), and a dry pool is back-pressure.
-    #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-zero-copy",
+        any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    ))]
     pool: Option<TxPool>,
     /// The id the next batch is given, so a lend can find its batch again.
-    #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-zero-copy",
+        any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    ))]
     next_batch: u64,
     /// The receiving half has been DROPPED (not merely sealed): nothing will
     /// ever write what is queued, so a batch a lend gives back goes home
     /// whatever it holds.
-    #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-zero-copy",
+        any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    ))]
     receiver_gone: bool,
 }
 
@@ -271,7 +301,10 @@ enum Entry {
     /// A frame in a vector of its own, with the priority it was sent at.
     Heap(Priority, Vec<u8>),
     /// R3250 — a slot of the link's transmit pool holding frames back to back.
-    #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-zero-copy",
+        any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    ))]
     Batch(Batch),
 }
 
@@ -283,7 +316,10 @@ enum Entry {
 /// a byte stream the concatenation is the wire. The slot is cpu-mut for as long
 /// as it is here, which is the state the generated lifecycle gives a slot the
 /// CPU is still writing.
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 struct Batch {
     /// The priority of the first frame in it (all of them, on a QoS lane).
     priority: Priority,
@@ -303,7 +339,10 @@ enum Taken {
     /// A frame (or a batch of frames) for the writer, with its priority.
     Frame(Priority, Out),
     /// The highest lane with anything in it is waiting on a lend in progress.
-    #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-zero-copy",
+        any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    ))]
     Blocked,
     /// Nothing is queued.
     Empty,
@@ -312,7 +351,10 @@ enum Taken {
 /// The parts of a taken item; [`OutboundRx`] makes the [`WireFrame`].
 enum Out {
     Heap(Vec<u8>),
-    #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-zero-copy",
+        any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    ))]
     Slot {
         idx: usize,
         base: usize,
@@ -407,7 +449,10 @@ impl LaneState {
     /// already holds frames is waited for, because a later item of the lane may
     /// be a later frame of a conduit whose earlier one is in it.
     fn take_from(&mut self, lane: usize) -> Taken {
-        #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+        #[cfg(all(
+            feature = "runtime-zero-copy",
+            any(feature = "transport-link-tcp", feature = "transport-link-serial")
+        ))]
         let at = {
             let mut at = None;
             for (i, entry) in self.lanes[lane].iter().enumerate() {
@@ -425,7 +470,10 @@ impl LaneState {
                 None => return Taken::Empty,
             }
         };
-        #[cfg(not(all(feature = "runtime-zero-copy", feature = "transport-link-tcp")))]
+        #[cfg(not(all(
+            feature = "runtime-zero-copy",
+            any(feature = "transport-link-tcp", feature = "transport-link-serial")
+        )))]
         let at = 0;
         let Some(entry) = self.lanes[lane].remove(at) else {
             return Taken::Empty;
@@ -435,7 +483,10 @@ impl LaneState {
                 self.in_flight = Some((lane, frame.len()));
                 Taken::Frame(priority, Out::Heap(frame))
             }
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             Entry::Batch(batch) => {
                 let pool = self
                     .pool
@@ -464,7 +515,10 @@ impl LaneState {
     /// "no room" too when the pool is dry, because the answer is given before
     /// the frame's size is known.
     fn slot_room(&self) -> bool {
-        #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+        #[cfg(all(
+            feature = "runtime-zero-copy",
+            any(feature = "transport-link-tcp", feature = "transport-link-serial")
+        ))]
         if let Some(pool) = self.pool.as_ref() {
             return pool.free_count() > 0;
         }
@@ -754,7 +808,10 @@ impl OutboundTx {
 }
 
 /// R3250 — why a pooled queue refused a frame.
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PooledSendError {
     /// The queue is closed (sealed or its receiver gone): nothing more is
@@ -764,14 +821,21 @@ pub enum PooledSendError {
     /// the largest one, `link_tx_pool::MAX_STREAM_FRAME`), so this is a caller
     /// that bypassed the write half's own length guard.
     TooLarge,
+    /// The link's encoder could not write the frame (`OutboundTx::send_encoded`);
+    /// nothing was queued.
+    Unencodable,
 }
 
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 impl std::fmt::Display for PooledSendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "outbound queue closed"),
             Self::TooLarge => write!(f, "frame larger than a transmit slot"),
+            Self::Unencodable => write!(f, "frame could not be encoded"),
         }
     }
 }
@@ -780,7 +844,10 @@ impl std::fmt::Display for PooledSendError {
 /// one frame into. Consumed by [`OutboundTx::commit`] or
 /// [`OutboundTx::abort_lend`]; until one of them runs, nothing else writes those
 /// bytes and the writer does not take the slot.
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 #[derive(Debug)]
 pub struct TxLend {
     lane: usize,
@@ -789,7 +856,10 @@ pub struct TxLend {
     cap: usize,
 }
 
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 impl TxLend {
     /// The first byte the frame may be written at.
     pub fn base(&self) -> *mut u8 {
@@ -802,28 +872,13 @@ impl TxLend {
     }
 }
 
-/// Write `prefix` then `payload` at `at`.
-///
-/// # Safety
-/// `[at, at + prefix.len() + payload.len())` must lie in a slot the caller's
-/// lane holds and no one else writes, and neither source may overlap it.
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
-unsafe fn write_frame_at(at: usize, prefix: &[u8], payload: &[u8]) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        std::ptr::copy_nonoverlapping(prefix.as_ptr(), at as *mut u8, prefix.len());
-        std::ptr::copy_nonoverlapping(
-            payload.as_ptr(),
-            (at + prefix.len()) as *mut u8,
-            payload.len(),
-        );
-    }
-}
-
 /// R3250 — the pooled queue's sender side. Every method here is for a queue
 /// built by [`outbound_channel_pooled`]; on a heap queue they answer as a link
 /// that lends nothing.
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 impl OutboundTx {
     /// Whether this queue keeps its frames in a transmit pool.
     pub fn is_pooled(&self) -> bool {
@@ -865,9 +920,31 @@ impl OutboundTx {
         payload: &[u8],
     ) -> Result<(), PooledSendError> {
         let need = prefix.len() + payload.len();
-        if need > SLOT_SIZE {
+        self.send_encoded(priority, need, |dst| {
+            dst[..prefix.len()].copy_from_slice(prefix);
+            dst[prefix.len()..need].copy_from_slice(payload);
+            Some(need)
+        })
+    }
+
+    /// R3250 — [`Self::send_framed`] for a frame the LINK encodes: `encode` is
+    /// handed `room` bytes of a slot (behind the lane's newest batch when they
+    /// are free, else a fresh slot) and answers how many it wrote, or `None` when
+    /// the frame cannot be encoded, which queues nothing and gives back a slot
+    /// taken for it. The serial link's COBS framing is the case: the stuffed
+    /// length is known only once it is written, and is at most `room`.
+    ///
+    /// On a heap queue the frame is encoded into a vector of its own.
+    pub fn send_encoded(
+        &self,
+        priority: Priority,
+        room: usize,
+        encode: impl FnOnce(&mut [u8]) -> Option<usize>,
+    ) -> Result<(), PooledSendError> {
+        if room > SLOT_SIZE {
             return Err(PooledSendError::TooLarge);
         }
+        let mut encode = Some(encode);
         loop {
             {
                 let mut guard = self.shared.state.lock().expect("outbound lanes poisoned");
@@ -877,28 +954,35 @@ impl OutboundTx {
                 let lane = guard.lane_of(priority);
                 let st = &mut *guard;
                 let Some(pool) = st.pool.as_mut() else {
-                    // A heap queue: the frame becomes a vector of its own.
                     drop(guard);
-                    let mut frame = Vec::with_capacity(need);
-                    frame.extend_from_slice(prefix);
-                    frame.extend_from_slice(payload);
+                    let encode = encode.take().expect("encoded once");
+                    let mut frame = vec![0u8; room];
+                    let written = encode(&mut frame).ok_or(PooledSendError::Unencodable)?;
+                    frame.truncate(written.min(room));
                     return self
                         .send(priority, frame)
                         .map_err(|_| PooledSendError::Closed);
                 };
-                let appended = match st.lanes[lane].back_mut() {
-                    Some(Entry::Batch(batch)) if !batch.lent && SLOT_SIZE - batch.fill >= need => {
-                        // SAFETY: `[fill, fill + need)` lies in this batch's slot
-                        // (checked), the batch is cpu-mut on its lane with no lend
-                        // in it, so nothing else writes it, and the sources are
-                        // the caller's slices, which no slot of this lane is.
-                        unsafe { write_frame_at(batch.base + batch.fill, prefix, payload) };
-                        batch.fill += need;
-                        true
-                    }
-                    _ => false,
-                };
-                if !appended {
+                let behind = matches!(
+                    st.lanes[lane].back(),
+                    Some(Entry::Batch(batch)) if !batch.lent && SLOT_SIZE - batch.fill >= room
+                );
+                let written = if behind {
+                    let Some(Entry::Batch(batch)) = st.lanes[lane].back_mut() else {
+                        unreachable!("checked directly above");
+                    };
+                    // SAFETY: `[fill, fill + room)` lies in this batch's slot
+                    // (checked), and the batch is cpu-mut on its lane with no lend
+                    // in it, so nothing else reads or writes those bytes while the
+                    // lanes are locked here.
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut((batch.base + batch.fill) as *mut u8, room)
+                    };
+                    let encode = encode.take().expect("encoded once");
+                    let written = encode(dst).ok_or(PooledSendError::Unencodable)?.min(room);
+                    batch.fill += written;
+                    written
+                } else {
                     let Some(mut slot) = pool.acquire() else {
                         drop(guard);
                         if !self.wait_for_slot() {
@@ -907,9 +991,17 @@ impl OutboundTx {
                         continue;
                     };
                     let base = pool.base_of(&mut slot) as usize;
-                    // SAFETY: a fresh slot of SLOT_SIZE >= need bytes, held by
-                    // this call alone until it is on the lane.
-                    unsafe { write_frame_at(base, prefix, payload) };
+                    // SAFETY: a fresh slot of SLOT_SIZE >= room bytes, held by this
+                    // call alone until it is on the lane.
+                    let dst = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, room) };
+                    let encode = encode.take().expect("encoded once");
+                    let Some(written) = encode(dst) else {
+                        pool.give_back(slot);
+                        drop(guard);
+                        self.shared.room.notify_all();
+                        return Err(PooledSendError::Unencodable);
+                    };
+                    let written = written.min(room);
                     let id = st.next_batch;
                     st.next_batch += 1;
                     st.lanes[lane].push_back(Entry::Batch(Batch {
@@ -917,12 +1009,15 @@ impl OutboundTx {
                         id,
                         slot,
                         base,
-                        fill: need,
+                        fill: written,
                         lent: false,
                     }));
+                    written
+                };
+                if let Some(pool) = st.pool.as_mut() {
+                    pool.note_copied();
                 }
-                pool.note_copied();
-                st.occupied[lane] += need;
+                st.occupied[lane] += written;
             }
             self.shared.ready.notify_one();
             return Ok(());
@@ -1088,7 +1183,10 @@ impl OutboundTx {
     }
 }
 
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 impl LaneState {
     /// Where batch `id` is on `lane`.
     fn find_batch(&self, lane: usize, id: u64) -> Option<usize> {
@@ -1257,7 +1355,10 @@ impl OutboundRx {
     fn wire(&self, out: Out) -> WireFrame {
         match out {
             Out::Heap(bytes) => WireFrame(Wire::Heap(bytes)),
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             Out::Slot { idx, base, len } => WireFrame(Wire::Slot(SlotWire {
                 home: Arc::clone(&self.shared),
                 idx,
@@ -1292,7 +1393,10 @@ impl Drop for OutboundRx {
         // R3250 — nothing will write what is still queued, so a pooled queue's
         // slots go home now rather than when the last sender lets go: a closing
         // connection returns its slots.
-        #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+        #[cfg(all(
+            feature = "runtime-zero-copy",
+            any(feature = "transport-link-tcp", feature = "transport-link-serial")
+        ))]
         {
             if let Ok(mut st) = self.shared.state.lock() {
                 st.release_unwritten();
@@ -1315,7 +1419,10 @@ pub struct WireFrame(Wire);
 
 enum Wire {
     Heap(Vec<u8>),
-    #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-zero-copy",
+        any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    ))]
     Slot(SlotWire),
 }
 
@@ -1327,7 +1434,10 @@ impl WireFrame {
     pub fn into_vec(self) -> Vec<u8> {
         match self.0 {
             Wire::Heap(bytes) => bytes,
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             Wire::Slot(slot) => slot.as_bytes().to_vec(),
         }
     }
@@ -1341,7 +1451,10 @@ impl WireFrame {
     pub fn slot_index(&self) -> Option<usize> {
         match &self.0 {
             Wire::Heap(_) => None,
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             Wire::Slot(slot) => Some(slot.idx),
         }
     }
@@ -1349,7 +1462,10 @@ impl WireFrame {
     /// The writer is about to write this frame: a pooled slot moves from armed
     /// to busy. Idempotent, and a no-op for a heap frame.
     pub fn begin_write(&mut self) {
-        #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+        #[cfg(all(
+            feature = "runtime-zero-copy",
+            any(feature = "transport-link-tcp", feature = "transport-link-serial")
+        ))]
         if let Wire::Slot(slot) = &mut self.0 {
             slot.begin();
         }
@@ -1361,7 +1477,10 @@ impl std::ops::Deref for WireFrame {
     fn deref(&self) -> &[u8] {
         match &self.0 {
             Wire::Heap(bytes) => bytes,
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             Wire::Slot(slot) => slot.as_bytes(),
         }
     }
@@ -1420,7 +1539,10 @@ impl<const N: usize> PartialEq<[u8; N]> for WireFrame {
 /// it), so it takes the completion edge; an armed one was never started, so it
 /// is un-armed and returned. Holding the queue's shared state is what keeps the
 /// pool, and so the slot's bytes, alive while the writer reads them.
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 struct SlotWire {
     home: Arc<Lanes>,
     idx: usize,
@@ -1433,7 +1555,10 @@ struct SlotWire {
     written: bool,
 }
 
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 impl SlotWire {
     fn as_bytes(&self) -> &[u8] {
         // SAFETY: `base` is the first byte of a slot of the pool `home` owns,
@@ -1458,7 +1583,10 @@ impl SlotWire {
     }
 }
 
-#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+))]
 impl Drop for SlotWire {
     fn drop(&mut self) {
         // A poisoned lock forfeits the slot, as `LinkRxFrame` forfeits one: the
@@ -1529,7 +1657,10 @@ impl OutboundQueue {
     pub fn recycle_wire(&self, wire: WireFrame) {
         match wire.0 {
             Wire::Heap(bytes) => self.rx.recycle(bytes),
-            #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-zero-copy",
+                any(feature = "transport-link-tcp", feature = "transport-link-serial")
+            ))]
             Wire::Slot(mut slot) => slot.written = true,
         }
     }
