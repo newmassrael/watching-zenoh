@@ -10965,6 +10965,14 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
         --test rx_frame_allocations --quiet || return 1
+    # Clause (4) of runtime-zero-copy -- the library's own tests on `rx-in-place`,
+    # which hold a lent frame in the session socket: one of them reads the
+    # datagram the dispatch is handed in the MAC's own buffer, and no leg above
+    # builds the library with this feature. 10 = what the command PRINTED.
+    _runci_guarded_test "C1m lib in place" 10 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
+        --lib --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-coop --all-targets --features rx-in-place,reassembly \
             --quiet -- -D warnings \
