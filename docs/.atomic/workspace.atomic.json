@@ -269438,6 +269438,70 @@
         "7. Hosted only: the new C1m leg \"rx frame in place fixed\" and the moved count (3) are first judged by hosted CI; the Zephyr rx-pool image build (rx-in-place on) was not built here."
       ]
     },
+    "Round 3251": {
+      "decision_summary": "B6 of the runtime-zero-copy reason analysis, re-measured first: REAL. A push past the batch budget over a lending link was encoded whole into a heap vector, then each fragment was built as a vector of its own and entered a slot through the byte door. Counted on the host: a chain of 14 fragments allocated 17 against 2 for the same message sent whole. Built behind transport-tx-lend: a fragment plan (FragmentPlan/FragmentSpan) shared by the heap chain and the lent chain, one fragment head writer, and each fragment encoded straight into its own lent slot by re-running the body encoder through a window that keeps only that fragment's range, so the message is never written out whole. The whole-frame lend is capped at the budget so a past-budget frame is found at the write that crosses it. A fragment with no usable slot is written on the heap, same bytes, counted (FragmentLendCounts). Multicast TX fragmentation is untouched: its queue lends nothing yet (B1).",
+      "changes_bullets": [
+        "Commit 5204a339 feat(session-core): fragments are encoded straight into lent slots",
+        "crates/wz-session-core/src/frame_encode.rs: FragmentPlan and FragmentSpan (where each fragment lies, its SN, more, first, stop), FragmentChain now walks the plan; write_fragment_head (the one producer of a fragment's head; build_fragment_wire = head + payload); FragmentBody (Bytes or Encoded), BodyEncoder, write_fragment (the one producer of a fragment's bytes for heap and lent chains), encoded_body_len (measures the body without writing it), private BodyWindow (keeps only a window of what an encoder writes). Unit tests: an encoded chain written into fixed buffers is the heap chain at every length 1..150 with and without ext_qos, the stop fragment included; a fragment one byte past its slot is refused.",
+        "crates/wz-session-core/src/tx_buf.rs: CappedTxBuf, a TxBuf held to a byte cap (unconditional, no allocation).",
+        "crates/wz-session-core/src/session_actions.rs: send_lent generalised to one lend seam returning Lend<E> (Sent / NoSlot / Refused(why)); send_frame_lent encodes through a cap at the budget and answers FrameLend (Sent / PastMtu / Heap); a past-budget frame (immediate path, and the batching arm's PastBudget) goes to emit_fragments_encoded; the chain walk moved into emit_fragment_chain (cap check, fragment budget, room per further fragment, stop fragment all unchanged) and each fragment goes through send_fragment (lent slot first, heap through the byte door otherwise, counted); FragmentLendCounts per conduit and fragment_lend_counts().",
+        "crates/wz-runtime-tokio/tests/fragment_tx_lend_allocations.rs (new): counting-allocator proof (chain over a lending link allocates exactly what the whole frame does; control over a link that lends nothing sees the heap chain).",
+        "crates/wz-runtime-tokio/tests/lent_slot_send.rs: the test that pinned the defect (\"a fragment chain is built from bytes, not from the slot\") replaced by byte identity of the lent chain with the heap chain over every payload length 20..200 at a 64-byte budget, a pool that runs dry mid-chain, a slot too short for a fragment, the abandoned chain's stop fragment; the batching past-budget test also asserts the chain left as slots. Fake link gained a grant limit.",
+        "scripts/run-ci.sh: C1bb qos guard 37 -> 39 (the two new frame_encode tests, read off the command)."
+      ],
+      "verification_bullets": [
+        "Host-level only; no hardware. All builds through bx on the build machine.",
+        "RED before the fix: fragment_tx_lend_allocations, chain over a lending link: 17 allocations against 2 for the whole frame (a chain of 14 fragments, 15 extra); the control test passed (the counter sees the heap chain).",
+        "GREEN after: wz-runtime-tokio --test fragment_tx_lend_allocations 2 passed; --test lent_slot_send 26 passed (with transport-fragmentation,transport-batching); layer3_reassembly_tx 2, fragment_markers_e2e 2 passed.",
+        "Mutation checks: BodyWindow window end +1 and window start +1 each turned the byte-identity sweep red (start +1: payload of 49 bytes differed); reverted.",
+        "wz-session-core --lib with transport-fragmentation,transport-batching,codec-push,transport-qos: 656 passed; frame_encode filter 22 passed.",
+        "wz-runtime-tokio full test suite with transport-unicast,transport-fragmentation,transport-link-udp,runtime-zero-copy: 93 suites ok.",
+        "wz-session-lwip --features transport-multicast,transport-fragmentation,codec-push: passed.",
+        "clippy -D warnings: wz-session-core (fragmentation+batching+push+qos+lowlatency; --no-default-features; alloc+fragmentation+push+tx-lend; fragmentation alone; extshm+push+batching), wz-runtime-tokio (runtime-zero-copy,transport-unicast,transport-multicast,transport-fragmentation), wz-session-lwip (multicast+fragmentation+push+tx-lend+both handshake halves; rx-in-place lane): all clean.",
+        "C1bz (wz-session-core wz-runtime-tokio) pass; A4 pass; guarded_count_gate --range origin/main..HEAD rc 0 (36 reached guards measured); feature_public_surface_census --check OK; store_reason_citation_gate --check OK; reason_review_pin_gate --check OK.",
+        "NOT run: the hook gate array, Layer C0 family, the whole C1bq/C1bb lanes, hosted CI."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "1. Multicast TX fragmentation (frame_encode::multicast_frame_or_fragments) still builds the frame and each fragment as vectors: it waits on B1 (the multicast queue gets a lend). Next step: once MulticastTxQueue lends, route its oversize push through FragmentPlan + write_fragment into lent slots exactly as SessionLinkActions::send_fragment does.",
+        "2. A frame past the budget still costs one probe: a whole-frame slot is lent, the capped encode stops at the byte that crosses the budget (at most one budget of copying), and the slot is given back before the chain is lent. Pinned by the tests (one abort per chain). Removing it needs the body length before the lend, which costs every unfragmented send an extra encoder walk; left as is.",
+        "3. The QoS ext_qos variant of the lent chain is proved at the writer level (frame_encode unit test); the session-level sweep runs on a session that negotiated no QoS."
+      ],
+      "publishable_decision_summary": "B6 of the runtime-zero-copy reason analysis, re-measured first: REAL. A push past the batch budget over a lending link was encoded whole into a heap vector, then each fragment was built as a vector of its own and entered a slot through the byte door. Counted on the host: a chain of 14 fragments allocated 17 against 2 for the same message sent whole. Built behind transport-tx-lend: a fragment plan (FragmentPlan/FragmentSpan) shared by the heap chain and the lent chain, one fragment head writer, and each fragment encoded straight into its own lent slot by re-running the body encoder through a window that keeps only that fragment's range, so the message is never written out whole. The whole-frame lend is capped at the budget so a past-budget frame is found at the write that crosses it. A fragment with no usable slot is written on the heap, same bytes, counted (FragmentLendCounts). Multicast TX fragmentation is untouched: its queue lends nothing yet (B1).",
+      "publishable_changes_bullets": [
+        "Commit 5204a339 feat(session-core): fragments are encoded straight into lent slots",
+        "crates/wz-session-core/src/frame_encode.rs: FragmentPlan and FragmentSpan (where each fragment lies, its SN, more, first, stop), FragmentChain now walks the plan; write_fragment_head (the one producer of a fragment's head; build_fragment_wire = head + payload); FragmentBody (Bytes or Encoded), BodyEncoder, write_fragment (the one producer of a fragment's bytes for heap and lent chains), encoded_body_len (measures the body without writing it), private BodyWindow (keeps only a window of what an encoder writes). Unit tests: an encoded chain written into fixed buffers is the heap chain at every length 1..150 with and without ext_qos, the stop fragment included; a fragment one byte past its slot is refused.",
+        "crates/wz-session-core/src/tx_buf.rs: CappedTxBuf, a TxBuf held to a byte cap (unconditional, no allocation).",
+        "crates/wz-session-core/src/session_actions.rs: send_lent generalised to one lend seam returning Lend<E> (Sent / NoSlot / Refused(why)); send_frame_lent encodes through a cap at the budget and answers FrameLend (Sent / PastMtu / Heap); a past-budget frame (immediate path, and the batching arm's PastBudget) goes to emit_fragments_encoded; the chain walk moved into emit_fragment_chain (cap check, fragment budget, room per further fragment, stop fragment all unchanged) and each fragment goes through send_fragment (lent slot first, heap through the byte door otherwise, counted); FragmentLendCounts per conduit and fragment_lend_counts().",
+        "crates/wz-runtime-tokio/tests/fragment_tx_lend_allocations.rs (new): counting-allocator proof (chain over a lending link allocates exactly what the whole frame does; control over a link that lends nothing sees the heap chain).",
+        "crates/wz-runtime-tokio/tests/lent_slot_send.rs: the test that pinned the defect (\"a fragment chain is built from bytes, not from the slot\") replaced by byte identity of the lent chain with the heap chain over every payload length 20..200 at a 64-byte budget, a pool that runs dry mid-chain, a slot too short for a fragment, the abandoned chain's stop fragment; the batching past-budget test also asserts the chain left as slots. Fake link gained a grant limit.",
+        "scripts/run-ci.sh: C1bb qos guard 37 -> 39 (the two new frame_encode tests, read off the command)."
+      ],
+      "publishable_verification_bullets": [
+        "Host-level only; no hardware. All builds through bx on the build machine.",
+        "RED before the fix: fragment_tx_lend_allocations, chain over a lending link: 17 allocations against 2 for the whole frame (a chain of 14 fragments, 15 extra); the control test passed (the counter sees the heap chain).",
+        "GREEN after: wz-runtime-tokio --test fragment_tx_lend_allocations 2 passed; --test lent_slot_send 26 passed (with transport-fragmentation,transport-batching); layer3_reassembly_tx 2, fragment_markers_e2e 2 passed.",
+        "Mutation checks: BodyWindow window end +1 and window start +1 each turned the byte-identity sweep red (start +1: payload of 49 bytes differed); reverted.",
+        "wz-session-core --lib with transport-fragmentation,transport-batching,codec-push,transport-qos: 656 passed; frame_encode filter 22 passed.",
+        "wz-runtime-tokio full test suite with transport-unicast,transport-fragmentation,transport-link-udp,runtime-zero-copy: 93 suites ok.",
+        "wz-session-lwip --features transport-multicast,transport-fragmentation,codec-push: passed.",
+        "clippy -D warnings: wz-session-core (fragmentation+batching+push+qos+lowlatency; --no-default-features; alloc+fragmentation+push+tx-lend; fragmentation alone; extshm+push+batching), wz-runtime-tokio (runtime-zero-copy,transport-unicast,transport-multicast,transport-fragmentation), wz-session-lwip (multicast+fragmentation+push+tx-lend+both handshake halves; rx-in-place lane): all clean.",
+        "C1bz (wz-session-core wz-runtime-tokio) pass; A4 pass; guarded_count_gate --range origin/main..HEAD rc 0 (36 reached guards measured); feature_public_surface_census --check OK; store_reason_citation_gate --check OK; reason_review_pin_gate --check OK.",
+        "NOT run: the hook gate array, Layer C0 family, the whole C1bq/C1bb lanes, hosted CI."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "1. Multicast TX fragmentation (frame_encode::multicast_frame_or_fragments) still builds the frame and each fragment as vectors: it waits on B1 (the multicast queue gets a lend). Next step: once MulticastTxQueue lends, route its oversize push through FragmentPlan + write_fragment into lent slots exactly as SessionLinkActions::send_fragment does.",
+        "2. A frame past the budget still costs one probe: a whole-frame slot is lent, the capped encode stops at the byte that crosses the budget (at most one budget of copying), and the slot is given back before the chain is lent. Pinned by the tests (one abort per chain). Removing it needs the body length before the lend, which costs every unfragmented send an extra encoder walk; left as is.",
+        "3. The QoS ext_qos variant of the lent chain is proved at the writer level (frame_encode unit test); the session-level sweep runs on a session that negotiated no QoS."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
