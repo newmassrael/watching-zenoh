@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use tokio::net::{TcpStream, UdpSocket};
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, spawn_zenohd_on_ephemeral_tcp, wz_ap_demo_binary,
 };
@@ -346,7 +347,7 @@ async fn a_sessions_file_runs_a_zenohd_client_and_a_group_peer_in_one_demo() {
     // (4) A per-session close.
     let status = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
-        .status()
+        .status_bounded()
         .expect("kill runs");
     assert!(status.success());
     let until = Instant::now() + DEADLINE;
