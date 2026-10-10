@@ -48,7 +48,8 @@ machines.<m>.sessions[i]
                 `io/zenoh-links/zenoh-link-udp/src/lib.rs` @ `pub const UDP_MULTICAST_IFACE: &str = "iface";`
                 No tail means upstream's default, the first non-loopback
                 multicast interface:
-                `io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `get_unicast_addresses_of_multicast_interfaces()` `auto` is not a word on a locator. On an MCU machine
+                `io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.join_multicast_v4(&dst_ip4, &src_ip4)`
+                `auto` is not a word on a locator. On an MCU machine
                 the tail is honoured only when the session's link declares the
                 same `netif:`; lwIP joins on every IGMP interface and cannot be
                 told one otherwise, so any other tail is refused.

@@ -7,8 +7,8 @@ holds a run that printed every step below that the row names, and
 names. A row names all of them unless its `verdict_steps` says otherwise, as the
 onboard port's row does for the steps it was recorded against (HW.0 to HW.7); the
 steps for the second interface follow them (HW.8 to HW.25, which that row names as
-HW.0 to HW.25), and the steps for the transmit pool image are at the end of this
-file (HW.26 to HW.30, which that row names alone).
+the range HW.0 to HW.25), and the steps for the transmit pool image are at the end
+of this file (HW.26 to HW.30, which that row names alone).
 
 The steps are run by one program, `scripts/lib/admin_node_verdict.py`. Layer Qza
 runs it in its `qemu` mode against the emulated node, labelled `Qza`; a lab runs

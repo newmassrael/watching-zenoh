@@ -1113,6 +1113,11 @@ round_fed_gates=(
     # gate's record reader, so a round that edits either feeds it.
     # MEASURED: about 5s, fake routers and a fake QEMU, no build.
     "admin_node_verdict.py --selftest"
+    # Open-debt item 900 — the `sessions:` list of a deploy machine, read by
+    # `scripts/validate-deploy.sh` over every deploy manifest; its selftest names
+    # each refusal. Round-fed: it reads `deploy/*.yaml` and the scxml sources a
+    # pool `ref:` names. MEASURED: 0.05s, a parse with no build.
+    "deploy_sessions.py --selftest"
     # R3188 (item 747) — the upstream version CLAUDE.md states, against the pin
     # the tree enforces. Round-fed: it names CLAUDE.md and the census module.
     # MEASURED: well under a second, a parse with no build.

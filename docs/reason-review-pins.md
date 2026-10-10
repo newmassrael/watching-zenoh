@@ -41,7 +41,7 @@ normal state once nothing remains.
 |---|---|---|---|
 | runtime-zero-copy | crates/wz-link-lwip/src/lib.rs | ad5239bf1d6026e73397d9fcd0e60b9ab8b051ab | R3218 |
 | runtime-zero-copy | crates/wz-link-lwip/src/rx_ring.rs | 7837f3664ca67b01b10786ad397ed192cd480240 | seed |
-| runtime-zero-copy | crates/wz-runtime-tokio/src/lib.rs | 89b1a160d79a74828fc0f345b07be05e734aaa75 | R3213 |
+| runtime-zero-copy | crates/wz-runtime-tokio/src/lib.rs | ffc08ee5063a8ec4d46fb80e151240c0d377f40a | R3222 |
 | runtime-zero-copy | crates/wz-runtime-tokio/src/link_rx_arena.rs | b55db327c31bf8efa58020441a09ec572d5f7efa | seed |
 | runtime-zero-copy | crates/wz-runtime-tokio/src/uring_reactor.rs | 17a3e106991e8e08899800efe2128f91a7975728 | seed |
 | runtime-zero-copy | crates/wz-runtime-tokio/src/zero_copy.rs | 8e135a6dffe4c7f7490faaa2d9642feaf3ea5726 | seed |
