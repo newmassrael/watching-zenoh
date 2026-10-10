@@ -5679,7 +5679,12 @@ layer_c1bb_cargo_test_qos() {
     # `extqos::tests::peer_offer_absent_for_a_qoslink_of_body_zero`. The
     # passive-fold and `session-extqos` cases that carry `qos` in their names
     # are not compiled by this feature set, so they add nothing here.
-    _runci_guarded_test C1bb 37 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    #
+    # 37 -> 39, READ off the command, which printed 39: the two lent-chain
+    # writer tests in `frame_encode::qos_wire_tests` (a chain encoded into
+    # fixed buffers is the heap chain, with and without ext_qos; a fragment
+    # one byte past its slot is refused).
+    _runci_guarded_test C1bb 39 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \

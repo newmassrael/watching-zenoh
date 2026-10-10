@@ -148,6 +148,51 @@ impl TxBuf for SliceTxBuf<'_> {
     }
 }
 
+/// A [`TxBuf`] that refuses to hold more than `cap` bytes, over another one.
+///
+/// What a sender encodes a frame through when the frame must not pass the batch
+/// budget: a write that would carry it past the cap is refused whole, so a frame
+/// that turns out to be too long is found out as soon as it is, and the payload
+/// write that would have crossed the cap is never copied at all. Over a lent
+/// slot at least `cap` long, a refusal therefore says the frame is past the
+/// budget and must be cut into fragments, which is how the send path tells that
+/// case from the others.
+///
+/// Like [`SliceTxBuf`] it needs no allocation and no runtime, so it is
+/// unconditional; its caller in the session is the lending send path.
+pub struct CappedTxBuf<'a, 'b> {
+    inner: &'a mut (dyn TxBuf + 'b),
+    cap: usize,
+}
+
+impl<'a, 'b> CappedTxBuf<'a, 'b> {
+    /// `inner`, held to `cap` bytes in all (what it already holds included).
+    pub fn new(inner: &'a mut (dyn TxBuf + 'b), cap: usize) -> Self {
+        Self { inner, cap }
+    }
+}
+
+impl TxBuf for CappedTxBuf<'_, '_> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.inner.as_slice()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.inner.truncate(len);
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+        if self.inner.len().saturating_add(bytes.len()) > self.cap {
+            return Err(CodecError::BufferOverflow);
+        }
+        self.inner.append(bytes)
+    }
+}
+
 /// Adapts a [`TxBuf`] to the codec's [`SceSink`].
 ///
 /// Like `VecSink`, it reports the bytes written by THIS sink since it wrapped
