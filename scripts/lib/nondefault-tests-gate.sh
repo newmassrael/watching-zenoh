@@ -466,6 +466,18 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # MEASURED before widening: this row's listing went 16 -> 20 of the 20, and
     # the whole leg ran green over one loopback lwIP instance (no network).
     # `transport-tx-lend` stays out: no test is reached only through it.
+    #
+    # `rx-in-place` joins. The receive-in-place work added
+    # `driver::tests::the_in_place_receive_reads_a_lent_frame_in_the_macs_buffer`
+    # behind it and no leg named the feature, which the census said, hosted:
+    #
+    #   nondefault-tests: FAIL -- wz-session-lwip has 24 test(s) only a feature
+    #     build reaches; legs run 23 and SKIPS excuses 0, leaving 1 claimed by
+    #     NOTHING.
+    #
+    # MEASURED before widening: the whole crate over this row's listing passes
+    # without the feature (30 tests) and with it (31), so the feature adds that
+    # one test and nothing else changes.
     "wz-session-lwip|hook|\
         adminspace-core,\
         adminspace-write,\
@@ -478,6 +490,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         pubsub-put,\
         query-queryable,\
         reassembly,\
+        rx-in-place,\
         session-unicast-accept,\
         session-unicast-open,\
         transport-fragmentation,\
