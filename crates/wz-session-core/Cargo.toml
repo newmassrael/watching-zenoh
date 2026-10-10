@@ -1084,7 +1084,16 @@ dissect-serde = ["dissect", "dep:serde"]
 # so no type reachable from the session proves that a slot is never lent;
 # the composition says so. A profile whose link lends (the AP stream writer,
 # the lwIP unicast driver) turns it on; one whose links never lend leaves it.
-transport-tx-lend = ["alloc"]
+#
+# It implies NOTHING, and `alloc` least of all. The first form said
+# `["alloc"]` and a hosted count guard caught what that does: this crate's own
+# test build turns the feature on through a dev-dependency on itself, and an
+# implied `alloc` made the `--no-default-features` build, which exists to test
+# the no-allocation profile, an allocating one (Layer C1ak expects 3 `stats`
+# tests there and read 12). Nothing needs it implied: the buffer alias already
+# names `dyn TxBuf` without `alloc`, and each lend call site is gated on the
+# data-path codec features, which bring `alloc` with them.
+transport-tx-lend = []
 
 # Item 895 — `transport_compose`: transport messages WRITTEN from explicit
 # fields, for a caller that says every field itself (the transport build door
