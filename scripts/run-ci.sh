@@ -5149,7 +5149,7 @@ layer_c1t_cargo_test_serial() {
     # glued INIT over a pty, on a fresh and on a retained device). READ off what
     # the commands PRINTED (21, 14, 16); the e2e deltas are equal.
     #
-    # R3250 -- lib 21 -> 22 (the write half enqueues the framed wire, which is
+    # R3239 -- lib 21 -> 22 (the write half enqueues the framed wire, which is
     # what the serial queue now carries). READ off what the command PRINTED (22).
     _runci_guarded_test C1t 22 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
         || return 1
@@ -12542,7 +12542,7 @@ layer_c1bq_zero_copy_arena() {
         echo "  C1bq FAIL: the link_rx filter matched no test"; echo "$out"; return 1; }
     tests=$((tests + n))
 
-    # R3250 — the TRANSMIT half of the same feature: the stream link's pool
+    # R3239 — the TRANSMIT half of the same feature: the stream link's pool
     # (`link_tx_pool::`, which also holds the pooled queue's lifecycle tests),
     # the write half over it (`stream_link::`, its pooled byte-identity legs),
     # and the counting-allocator proof that a frame costs no allocation. Each a

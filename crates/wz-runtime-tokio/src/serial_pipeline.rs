@@ -1128,7 +1128,7 @@ impl LinkDriver for SerialReadDriver {
 /// [`crate::link_pipeline::TcpWriteDriver`] uses (a nested `block_on` from a
 /// sync FSM action handler would trip the runtime-reentrancy check).
 ///
-/// R3250 — the channel carries the FRAMED wire: this driver COBS-frames each
+/// R3239 — the channel carries the FRAMED wire: this driver COBS-frames each
 /// payload as it enqueues it ([`encode_frame_into`]), and the writer writes the
 /// bytes as they are. It used to carry the raw payload and leave the framing to
 /// the writer, which cost a copy of the payload into a vector of its own and
@@ -1145,7 +1145,7 @@ pub struct SerialWriteDriver {
     endpoints: Option<LinkEndpoints>,
 }
 
-/// R3250 — the outbound queue a serial link's write half and its
+/// R3239 — the outbound queue a serial link's write half and its
 /// [`serial_writer_task`] share: under `runtime-zero-copy` one that owns the
 /// link's transmit pool (`crate::writer_queue::outbound_channel_pooled`), so a
 /// frame lies in a pool slot from its encode to the end of its write; without
@@ -1239,7 +1239,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // R3250 — framed here, into the queue's own storage: a slot of the
+        // R3239 — framed here, into the queue's own storage: a slot of the
         // link's transmit pool on a pooled queue, a vector of its own otherwise.
         #[cfg(feature = "runtime-zero-copy")]
         {
@@ -1311,7 +1311,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
 /// writing + flushing the frames as they are: [`SerialWriteDriver`] has already
 /// COBS-framed each one through [`encode_frame_into`] (header
 /// [`SERIAL_DATA_HEADER`] + len + payload + crc32 -> COBS -> `0x00` EOP) when it
-/// enqueued it (R3250). Exits when the queue is SEALED and drained, when every
+/// enqueued it (R3239). Exits when the queue is SEALED and drained, when every
 /// [`SerialWriteDriver`] clone has dropped, or when a write fails / stalls past
 /// [`WRITER_STALL_MS`](crate::writer_queue::WRITER_STALL_MS) on a sealed queue
 /// (logged + bail) — see [`crate::writer_queue`] for why the seal, and not
@@ -1346,7 +1346,7 @@ async fn drain_serial_writes(
     mut writer: WriteHalf<BoxedSerialStream>,
     mut queue: OutboundQueue,
 ) -> WriteHalf<BoxedSerialStream> {
-    // R3250 — what the queue holds is the FRAMED wire (the write half encodes it
+    // R3239 — what the queue holds is the FRAMED wire (the write half encodes it
     // as it enqueues), so the bytes are written as they are. On a pooled queue a
     // run of frames is one slot of the link's transmit pool: started here, and
     // home through the completion edge when the write has ended.
@@ -1398,7 +1398,7 @@ mod tests {
     use super::*;
     use wz_session_core::serial_link::encode_frame;
 
-    /// R3250 — the write half frames the payload as it enqueues it: what the
+    /// R3239 — the write half frames the payload as it enqueues it: what the
     /// queue holds is the codec's frame, byte for byte, in a pool slot under
     /// `runtime-zero-copy`, and frames enqueued together pack into one run.
     #[tokio::test]

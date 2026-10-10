@@ -165,7 +165,7 @@ pub mod link_rx_pool;
 #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
 pub mod link_rx_arena;
 
-/// R3250 — `sources/network/session_tx_pool_ap.scxml`, the AP link's TRANSMIT
+/// R3239 — `sources/network/session_tx_pool_ap.scxml`, the AP link's TRANSMIT
 /// slot table (the stream links' one class, and a datagram link's large one):
 /// one instance per link, owned by that link's writer queue, so an outbound
 /// frame lives in a slot from the lend to the end of the write. Gated like its
@@ -199,7 +199,7 @@ pub mod session_tx_pool_ap {
     ));
 }
 
-/// R3250 — `sources/network/session_tx_pool_ap_small.scxml`, a DATAGRAM link's
+/// R3240 — `sources/network/session_tx_pool_ap_small.scxml`, a DATAGRAM link's
 /// small transmit class, sized for the datagrams the sessions send. Gated like
 /// the table above.
 #[cfg(all(
@@ -230,7 +230,7 @@ pub mod session_tx_pool_ap_small {
     ));
 }
 
-// R3250 — the transmit tables above with their lifecycle walked by edge and
+// R3239 — the transmit tables above with their lifecycle walked by edge and
 // counted. No `///` here: rustdoc would merge it with the module's `//!` block
 // and resolve the result in this outer scope (see `link_rx_window`).
 #[cfg(all(

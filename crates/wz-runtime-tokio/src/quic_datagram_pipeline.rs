@@ -176,7 +176,7 @@ pub struct QuicDatagramWriteDriver {
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
     endpoints: Option<LinkEndpoints>,
-    /// R3250 — the slots of the link's transmit pool lent to the session, under
+    /// R3240 — the slots of the link's transmit pool lent to the session, under
     /// `runtime-zero-copy`.
     #[cfg(feature = "runtime-zero-copy")]
     lent: crate::writer_queue::LendTable,
@@ -261,7 +261,7 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // R3250 — a pooled queue takes the datagram by COPYING it into a slot of
+        // R3240 — a pooled queue takes the datagram by COPYING it into a slot of
         // its own (one copy, which a byte door cannot avoid, and no allocation).
         #[cfg(feature = "runtime-zero-copy")]
         if self.tx.is_pooled() {
@@ -285,7 +285,7 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
         LinkSendOutcome::Sent
     }
 
-    // R3250 — lend the session a slot of the link's transmit pool for one
+    // R3240 — lend the session a slot of the link's transmit pool for one
     // datagram of at most this link's mtu; the writer hands that very slot to
     // quinn as the datagram's buffer (`WireFrame::into_bytes`).
     #[cfg(feature = "runtime-zero-copy")]
@@ -352,7 +352,7 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
 /// one writer with no per-write bound to arm, because `send_datagram` queues
 /// synchronously and cannot block on the peer.
 ///
-/// R3250 — the frame is handed to quinn AS ITS BUFFER: a pooled frame's slot
+/// R3240 — the frame is handed to quinn AS ITS BUFFER: a pooled frame's slot
 /// becomes the `Bytes`' owner (`WireFrame::into_bytes`), so quinn reads the slot
 /// in place and the slot goes home when quinn drops the datagram. quinn's API
 /// takes `Bytes`, and `Bytes::from_owner` boxes its owner, so each datagram

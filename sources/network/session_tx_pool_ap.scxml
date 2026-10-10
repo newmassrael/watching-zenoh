@@ -16,7 +16,7 @@
   scxml SSOT and no emit, so nothing consumed it and nothing graded its
   values; the deploy entry is now `{ ref: session_tx_pool_ap }`.
 
-  R3250 — this is also the LARGE class of a DATAGRAM link's pool: a UDP,
+  R3239 — this is also the LARGE class of a DATAGRAM link's pool: a UDP,
   QUIC-datagram, websocket or multicast link owns one instance of this and one
   of `session_tx_pool_ap_small.scxml`, a frame takes the smallest class it
   fits, and there a slot carries one datagram. The per-link budget of the class

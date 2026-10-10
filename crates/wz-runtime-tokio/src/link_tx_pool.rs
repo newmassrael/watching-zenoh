@@ -481,7 +481,7 @@ impl TxPools {
             .fold(TxPoolStats::default(), |sum, c| sum + c.stats())
     }
 
-    /// R3250 — size each class's per-link BUDGET from the queue's lanes, the
+    /// R3239 — size each class's per-link BUDGET from the queue's lanes, the
     /// rule `sources/network/session_tx_pool_ap_small.scxml` derives: per lane,
     /// `ceil(bound / slot_size) + 1` (the lane's byte bound filled with frames
     /// of the slot's size, plus the one frame that may take the lane past its

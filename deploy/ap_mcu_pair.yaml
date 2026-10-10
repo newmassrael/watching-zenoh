@@ -228,7 +228,7 @@ machines:
       # path's own bound (prefix width 4 + `u16::MAX` payload = 65539, rounded
       # to this node's 64-byte alignment). slot_count 64 carries over unchanged.
       session_rx_pool:  { ref: session_rx_pool_ap }
-      # R3250 — the transmit pool made the same move, born with its consumer
+      # R3239 — the transmit pool made the same move, born with its consumer
       # (the pooled stream writer queue under `runtime-zero-copy`). The inline
       # block said 64 x 4096: a slot too small for one frame (a stream frame is
       # up to 4 + 65535 bytes) and a count no consumer read. The SSOT derives

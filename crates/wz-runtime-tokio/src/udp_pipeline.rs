@@ -626,7 +626,7 @@ pub struct UdpWriteDriver {
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
     endpoints: Option<LinkEndpoints>,
-    /// R3250 — the slots of the link's transmit pool lent to the session, under
+    /// R3240 — the slots of the link's transmit pool lent to the session, under
     /// `runtime-zero-copy` (ARCHITECTURE section 9.1: the session encodes a
     /// datagram straight into the slot the writer sends).
     #[cfg(feature = "runtime-zero-copy")]
@@ -710,7 +710,7 @@ impl BoxedLinkDriver for UdpWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // R3250 — a pooled queue takes the datagram by COPYING it into a slot of
+        // R3240 — a pooled queue takes the datagram by COPYING it into a slot of
         // its own (one copy, which a byte door cannot avoid, and no allocation).
         #[cfg(feature = "runtime-zero-copy")]
         if self.tx.is_pooled() {
@@ -734,7 +734,7 @@ impl BoxedLinkDriver for UdpWriteDriver {
         LinkSendOutcome::Sent
     }
 
-    // R3250 — ARCHITECTURE section 9.1: lend the session a slot of the link's
+    // R3240 — ARCHITECTURE section 9.1: lend the session a slot of the link's
     // transmit pool to encode one datagram into, with no headroom (a datagram's
     // boundary is its framing), and queue that very slot.
     #[cfg(feature = "runtime-zero-copy")]
@@ -814,7 +814,7 @@ pub async fn udp_writer_task(socket: Arc<UdpSocket>, peer: SocketAddr, mut queue
     // but returns EISCONN on macOS/BSD, so an unconditional `send_to` would make
     // every udp dial fail on a platform §5.20 carries as an atom.
     let connected = socket.peer_addr().is_ok();
-    // R3250 — on a pooled queue each datagram is a slot of the link's transmit
+    // R3240 — on a pooled queue each datagram is a slot of the link's transmit
     // pool: started as the send begins, home through the completion edge when
     // the send has returned (`recycle_wire`, or the drop on every other way out).
     while let Some(mut payload) = queue.next_wire().await {

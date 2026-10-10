@@ -13,7 +13,7 @@
 //! bytes, so the SAME logic is reusable by both the AP (tty) and MCU
 //! (UART HAL) link drivers. The current form takes `alloc` (owned `Vec`
 //! frame buffers + a growable reader accumulator) — the AP staging,
-//! matching `transport-fragmentation` / `session-reconnect`. R3250 — the
+//! matching `transport-fragmentation` / `session-reconnect`. R3239 — the
 //! ENCODE side no longer needs it:
 //! [`encode_frame_into`](crate::serial_link::encode_frame_into) writes a frame
 //! into a buffer the caller owns (the codec's `encode` over a slice sink, which
@@ -140,7 +140,7 @@ pub fn encode_frame(header: u8, payload: &[u8]) -> Result<Vec<u8>, SerialFrameEr
     Ok(out)
 }
 
-/// R3250 — [`encode_frame`] into `out`, a buffer the caller owns, returning
+/// R3239 — [`encode_frame`] into `out`, a buffer the caller owns, returning
 /// how many bytes of it the frame took. Allocates nothing: the pre-COBS frame
 /// is encoded on the stack by the codec's own encoder over a slice sink, and
 /// the COBS body is the generated stuffer's bounded return. This is what lets a
@@ -520,7 +520,7 @@ mod tests {
         );
     }
 
-    /// R3250 — the frame written into a caller's buffer is the pico frame, the
+    /// R3239 — the frame written into a caller's buffer is the pico frame, the
     /// same bytes for the byte-parity payload above, for an empty INIT, and for
     /// a full MTU payload of zeroes (the COBS worst case: every byte stuffed);
     /// the largest one fills no more than `SERIAL_MAX_COBS_BUF`.
@@ -544,7 +544,7 @@ mod tests {
         );
     }
 
-    /// R3250 — a buffer too short for the frame is refused, and a payload past
+    /// R3239 — a buffer too short for the frame is refused, and a payload past
     /// the MTU is refused as it is by `encode_frame`.
     #[test]
     fn encode_frame_into_refuses_a_short_buffer_and_an_oversize_payload() {

@@ -629,7 +629,7 @@ pub struct StreamWriteDriver {
     /// ARCHITECTURE section 9.1 — the frame buffers this link has LENT the
     /// session and not yet taken back (`BoxedLinkDriver::tx_slot_acquire`).
     lent: Mutex<LentFrames>,
-    /// R3250 — the queue keeps its frames in the link's transmit pool, read
+    /// R3239 — the queue keeps its frames in the link's transmit pool, read
     /// once at construction (a queue does not change kind).
     #[cfg(feature = "runtime-zero-copy")]
     pooled: bool,
@@ -643,7 +643,7 @@ struct LentFrames {
     free: Vec<u32>,
 }
 
-/// One lent buffer: a vector of the heap queue's spare list, or (R3250) a part
+/// One lent buffer: a vector of the heap queue's spare list, or (R3239) a part
 /// of a slot of the link's transmit pool.
 enum Lent {
     Heap(Vec<u8>),
@@ -654,7 +654,7 @@ enum Lent {
 /// The outbound queue a stream link's write half and its [`writer_task`] share,
 /// and the one every stream pipeline builds its write half over.
 ///
-/// R3250 — under `runtime-zero-copy` the queue owns the link's transmit pool
+/// R3239 — under `runtime-zero-copy` the queue owns the link's transmit pool
 /// (`crate::writer_queue::outbound_channel_pooled`), so every outbound byte of the
 /// link lies in a pool slot from the lend to the end of the write and the
 /// transmit path allocates nothing per frame; without it, the heap queue and its
@@ -716,7 +716,7 @@ impl StreamWriteDriver {
         ((len as u32).to_le_bytes(), self.frame_prefix_len())
     }
 
-    /// R3250 — send a frame the session encoded into a part of a pool slot.
+    /// R3239 — send a frame the session encoded into a part of a pool slot.
     #[cfg(feature = "runtime-zero-copy")]
     fn send_slot_lent(
         &self,
@@ -851,7 +851,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // R3250 — a pooled queue takes the frame by COPYING it into a slot of the
+        // R3239 — a pooled queue takes the frame by COPYING it into a slot of the
         // link's transmit pool, behind the frames already in its lane's newest
         // slot when they leave room: one copy, which a byte door cannot avoid,
         // and no allocation.
@@ -906,7 +906,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // gives the buffer back once it has written it, so the next frame is built in
     // the same memory and a link in steady state allocates none.
     //
-    // R3250 — under `runtime-zero-copy` the buffer is a part of a slot of the
+    // R3239 — under `runtime-zero-copy` the buffer is a part of a slot of the
     // link's transmit pool instead, and the frame never leaves the slot: the
     // writer writes it from there and the slot goes home through the pool's
     // completion edge. See `crate::link_tx_pool`.
@@ -1055,7 +1055,7 @@ where
     W: AsyncWrite + Unpin,
 {
     while let Some(mut wire) = queue.next_wire().await {
-        // R3250 — on a pooled queue the frame is a slot of the link's transmit
+        // R3239 — on a pooled queue the frame is a slot of the link's transmit
         // pool, armed when it was taken off its lane: the write that begins here
         // is the bus master this row has, so the slot is started now and goes
         // home through the completion edge when the write has ended, by
@@ -1636,7 +1636,7 @@ mod tests {
         driver.tx_slot_abort(next.slot);
     }
 
-    /// R3250 — a driver over a POOLED queue (the one `stream_outbound_channel`
+    /// R3239 — a driver over a POOLED queue (the one `stream_outbound_channel`
     /// builds under `runtime-zero-copy`), and the receiving half.
     #[cfg(feature = "runtime-zero-copy")]
     fn pooled_driver(
@@ -1652,7 +1652,7 @@ mod tests {
         (driver, rx, flag)
     }
 
-    /// R3250 — on the pooled queue, a frame lent from a pool slot, the same
+    /// R3239 — on the pooled queue, a frame lent from a pool slot, the same
     /// frame through the byte door, and the heap queue's frame are one wire, in
     /// both framings; and the u16 one is the codec's envelope.
     #[cfg(feature = "runtime-zero-copy")]
@@ -1704,7 +1704,7 @@ mod tests {
         }
     }
 
-    /// R3250 — the session encodes INTO the pool slot the writer is handed: the
+    /// R3239 — the session encodes INTO the pool slot the writer is handed: the
     /// address the lease wrote is the slot the frame leaves from, and the pool
     /// records it armed for the write.
     #[cfg(feature = "runtime-zero-copy")]
@@ -1731,7 +1731,7 @@ mod tests {
         );
     }
 
-    /// R3250 — the framing flag flipping between the grant and the send is
+    /// R3239 — the framing flag flipping between the grant and the send is
     /// handled IN the slot (the payload moves behind the wider prefix), and the
     /// frame is the byte door's for the same payload.
     #[cfg(feature = "runtime-zero-copy")]
@@ -1757,7 +1757,7 @@ mod tests {
         assert_eq!(lent[..4], [4, 0, 0, 0], "lowlatency's u32 prefix");
     }
 
-    /// R3250 — a pooled queue whose receiver is gone lends nothing and refuses
+    /// R3239 — a pooled queue whose receiver is gone lends nothing and refuses
     /// the byte door as the heap one does, and no slot is left out.
     #[cfg(feature = "runtime-zero-copy")]
     #[tokio::test]
@@ -1773,7 +1773,7 @@ mod tests {
         assert_eq!(free, crate::session_tx_pool_ap::SLOT_COUNT);
     }
 
-    /// R3250 — the session's push over the POOLED stream driver goes through the
+    /// R3239 — the session's push over the POOLED stream driver goes through the
     /// lend, and leaves as the u16 envelope of the frame a link that lends
     /// nothing is handed.
     #[cfg(all(feature = "runtime-zero-copy", feature = "codec-push"))]

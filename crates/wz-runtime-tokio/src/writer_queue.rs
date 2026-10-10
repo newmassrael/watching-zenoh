@@ -72,7 +72,7 @@ use wz_session_core::qos::Priority;
 use crate::runtime_impl::TokioJoinHandle;
 use crate::runtime_pool::WzRuntime;
 
-// R3250 — every pooled item below is gated on `runtime-zero-copy` alone: this
+// R3239 — every pooled item below is gated on `runtime-zero-copy` alone: this
 // module exists only where some link has a writer queue, and every such link
 // owns a pool under the feature (a stream, the serial link, or a datagram link).
 #[cfg(feature = "runtime-zero-copy")]
@@ -173,7 +173,7 @@ pub fn outbound_channel_with_capacity(
     )
 }
 
-/// R3250 — [`outbound_channel`] over the link's own TRANSMIT POOL
+/// R3239 — [`outbound_channel`] over the link's own TRANSMIT POOL
 /// (`sources/network/session_tx_pool_ap.scxml`), ARCHITECTURE section 9.1, for a
 /// BYTE-STREAM link (and the serial link): every frame a sender hands this
 /// queue, lent or copied, lies in a slot of the pool until the writer has
@@ -190,7 +190,7 @@ pub fn outbound_channel_pooled() -> (OutboundTx, OutboundRx) {
     outbound_channel_pooled_with_capacity([DEFAULT_QUEUE_SIZE; Priority::NUM], BATCH_BYTES)
 }
 
-/// R3250 — [`outbound_channel_pooled`] with each lane's bound, as
+/// R3239 — [`outbound_channel_pooled`] with each lane's bound, as
 /// [`outbound_channel_with_capacity`].
 #[cfg(feature = "runtime-zero-copy")]
 pub fn outbound_channel_pooled_with_capacity(
@@ -203,7 +203,7 @@ pub fn outbound_channel_pooled_with_capacity(
     )
 }
 
-/// R3250 — [`outbound_channel_pooled`] for a DATAGRAM link (UDP, QUIC
+/// R3240 — [`outbound_channel_pooled`] for a DATAGRAM link (UDP, QUIC
 /// datagram, websocket, multicast): a datagram is its own boundary, so a slot
 /// carries ONE frame and nothing is packed, and the pool has two size classes
 /// (`session_tx_pool_ap_small` for the datagrams the sessions send,
@@ -216,7 +216,7 @@ pub fn outbound_channel_datagram() -> (OutboundTx, OutboundRx) {
     outbound_channel_datagram_with_capacity([DEFAULT_QUEUE_SIZE; Priority::NUM], BATCH_BYTES)
 }
 
-/// R3250 — the queue every DATAGRAM write half builds: [`outbound_channel_datagram`]
+/// R3240 — the queue every DATAGRAM write half builds: [`outbound_channel_datagram`]
 /// under `runtime-zero-copy`, the heap [`outbound_channel`] otherwise. One
 /// constructor, so a datagram pipeline cannot pick the wrong one.
 pub fn datagram_outbound_channel() -> (OutboundTx, OutboundRx) {
@@ -230,7 +230,7 @@ pub fn datagram_outbound_channel() -> (OutboundTx, OutboundRx) {
     }
 }
 
-/// R3250 — [`outbound_channel_datagram`] with each lane's bound.
+/// R3240 — [`outbound_channel_datagram`] with each lane's bound.
 #[cfg(feature = "runtime-zero-copy")]
 pub fn outbound_channel_datagram_with_capacity(
     queue_size: [usize; Priority::NUM],
@@ -305,7 +305,7 @@ struct LaneState {
     /// and in size ([`SPARE_MAX`], [`SPARE_CAPACITY_MAX`]) so a burst of large
     /// frames cannot make a link hoard memory.
     spare: Vec<Vec<u8>>,
-    /// R3250 — ARCHITECTURE section 9.1 under `runtime-zero-copy`: the link's
+    /// R3239 — ARCHITECTURE section 9.1 under `runtime-zero-copy`: the link's
     /// transmit pool, on a queue built by [`outbound_channel_pooled`] or
     /// [`outbound_channel_datagram`]. While it is here every frame a sender
     /// hands this queue lies in one of its slots ([`Entry::Batch`]), and a dry
@@ -326,13 +326,13 @@ struct LaneState {
 enum Entry {
     /// A frame in a vector of its own, with the priority it was sent at.
     Heap(Priority, Vec<u8>),
-    /// R3250 — a slot of the link's transmit pool: frames back to back on a
+    /// R3239 — a slot of the link's transmit pool: frames back to back on a
     /// stream link, one datagram on a datagram link.
     #[cfg(feature = "runtime-zero-copy")]
     Batch(Batch),
 }
 
-/// R3250 — a slot of a pooled queue while it is on its lane: the frames
+/// R3239 — a slot of a pooled queue while it is on its lane: the frames
 /// written into it so far, and whether a lend is writing the next one.
 ///
 /// On a stream link a sender appends to its lane's NEWEST batch while it has
@@ -446,7 +446,7 @@ impl LaneState {
         self.size_budgets();
     }
 
-    /// R3250 — size the pool's per-link slot budgets from the lanes this queue
+    /// R3239 — size the pool's per-link slot budgets from the lanes this queue
     /// has now: one lane's bound when the session runs no QoS, every lane's
     /// otherwise (`link_tx_pool::TxPools::size_budgets` has the rule).
     #[cfg(feature = "runtime-zero-copy")]
@@ -485,7 +485,7 @@ impl LaneState {
 
     /// The next item of `lane`, made the writer's.
     ///
-    /// R3250 — on a pooled queue a batch a lend is writing into is not the
+    /// R3239 — on a pooled queue a batch a lend is writing into is not the
     /// writer's yet. One with nothing committed holds no frame, so the items
     /// behind it are taken past it (they are other conduits' frames: the lend's
     /// own conduit cannot have a later frame while its lend is open). One that
@@ -547,7 +547,7 @@ impl LaneState {
         }
     }
 
-    /// R3250 — whether a frame could be given a slot: always on a heap queue;
+    /// R3239 — whether a frame could be given a slot: always on a heap queue;
     /// on a pooled one, while some class of the pool has a slot this link may
     /// take (free, and under its budget). Conservative by design: a frame that
     /// would have fit behind the newest batch is told "no room" too when the
@@ -842,7 +842,7 @@ impl OutboundTx {
     }
 }
 
-/// R3250 — why a pooled queue refused a frame.
+/// R3239 — why a pooled queue refused a frame.
 #[cfg(feature = "runtime-zero-copy")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PooledSendError {
@@ -870,7 +870,7 @@ impl std::fmt::Display for PooledSendError {
     }
 }
 
-/// R3250 — the part of a pooled lane's slot a sender has been lent to encode
+/// R3239 — the part of a pooled lane's slot a sender has been lent to encode
 /// one frame into. Consumed by [`OutboundTx::commit`] or
 /// [`OutboundTx::abort_lend`]; until one of them runs, nothing else writes those
 /// bytes and the writer does not take the slot.
@@ -896,7 +896,7 @@ impl TxLend {
     }
 }
 
-/// R3250 — the pooled queue's sender side. Every method here is for a queue
+/// R3239 — the pooled queue's sender side. Every method here is for a queue
 /// built by [`outbound_channel_pooled`]; on a heap queue they answer as a link
 /// that lends nothing.
 #[cfg(feature = "runtime-zero-copy")]
@@ -970,7 +970,7 @@ impl OutboundTx {
         })
     }
 
-    /// R3250 — [`Self::send_framed`] for a frame the LINK encodes: `encode` is
+    /// R3239 — [`Self::send_framed`] for a frame the LINK encodes: `encode` is
     /// handed `room` bytes of a slot (behind the lane's newest batch when they
     /// are free, else a fresh slot) and answers how many it wrote, or `None` when
     /// the frame cannot be encoded, which queues nothing and gives back a slot
@@ -1243,7 +1243,7 @@ impl OutboundTx {
     }
 }
 
-/// R3250 — the slots a write half has LENT the session and not yet taken back
+/// R3240 — the slots a write half has LENT the session and not yet taken back
 /// (`BoxedLinkDriver::tx_slot_acquire`), by slot number: an occupied entry is a
 /// lend the session is encoding into, and a free number is reused. Shared by the
 /// datagram write halves, which lend with no headroom (a datagram has no
@@ -1437,14 +1437,14 @@ impl OutboundRx {
             .map(|(priority, wire)| (priority, wire.into_vec()))
     }
 
-    /// R3250 — [`Self::recv`] as the [`WireFrame`] the queue holds: on a pooled
+    /// R3239 — [`Self::recv`] as the [`WireFrame`] the queue holds: on a pooled
     /// queue, a slot of the link's transmit pool armed for the write, which the
     /// writer starts, writes and hands back ([`OutboundQueue::recycle_wire`]).
     pub async fn recv_wire(&mut self) -> Option<WireFrame> {
         self.recv_wire_tagged().await.map(|(_, wire)| wire)
     }
 
-    /// R3250 — [`Self::recv_wire`], with the priority the frame was sent at (a
+    /// R3239 — [`Self::recv_wire`], with the priority the frame was sent at (a
     /// batch's: the priority of the first frame in it).
     pub async fn recv_wire_tagged(&mut self) -> Option<(Priority, WireFrame)> {
         loop {
@@ -1483,7 +1483,7 @@ impl OutboundRx {
             .map(|(priority, wire)| (priority, wire.into_vec()))
     }
 
-    /// R3250 — [`Self::try_recv_tagged`] as the [`WireFrame`] the queue holds.
+    /// R3239 — [`Self::try_recv_tagged`] as the [`WireFrame`] the queue holds.
     pub fn try_recv_wire_tagged(&mut self) -> Option<(Priority, WireFrame)> {
         let (taken, freed) = self
             .shared
@@ -1542,7 +1542,7 @@ impl Drop for OutboundRx {
             st.closed = true;
         }
         self.shared.room.notify_all();
-        // R3250 — nothing will write what is still queued, so a pooled queue's
+        // R3239 — nothing will write what is still queued, so a pooled queue's
         // slots go home now rather than when the last sender lets go: a closing
         // connection returns its slots.
         #[cfg(feature = "runtime-zero-copy")]
@@ -1555,7 +1555,7 @@ impl Drop for OutboundRx {
     }
 }
 
-/// R3250 — what the writer is handed: a frame (or, on a pooled queue, a run of
+/// R3239 — what the writer is handed: a frame (or, on a pooled queue, a run of
 /// frames packed into one slot), readable as bytes.
 ///
 /// A heap queue hands over the vector the sender enqueued, as it always did. A
@@ -1608,7 +1608,7 @@ impl WireFrame {
         }
     }
 
-    /// R3250 — the frame as `bytes::Bytes` for a library that takes ownership
+    /// R3240 — the frame as `bytes::Bytes` for a library that takes ownership
     /// of the buffer it sends (quinn's `send_datagram`). A heap frame's vector
     /// moves in; a pooled frame's SLOT moves in as the `Bytes`' owner
     /// (`Bytes::from_owner`), so the library reads the slot in place and the
@@ -1634,7 +1634,7 @@ impl WireFrame {
     }
 }
 
-/// R3250 — a writer's slot as the owner of a `bytes::Bytes`.
+/// R3240 — a writer's slot as the owner of a `bytes::Bytes`.
 #[cfg(all(
     feature = "runtime-zero-copy",
     feature = "transport-link-quic-datagram"
@@ -1718,7 +1718,7 @@ impl<const N: usize> PartialEq<[u8; N]> for WireFrame {
     }
 }
 
-/// R3250 — one slot of a pooled queue, in the writer's hands.
+/// R3239 — one slot of a pooled queue, in the writer's hands.
 ///
 /// Armed when the writer took it off its lane; busy once [`Self::begin`] ran.
 /// Its `Drop` is the way home in every case, by the edge the state names: a
@@ -1835,7 +1835,7 @@ impl OutboundQueue {
         self.rx.recycle(frame);
     }
 
-    /// R3250 — the writer has written `wire` out: a heap frame's buffer is kept
+    /// R3239 — the writer has written `wire` out: a heap frame's buffer is kept
     /// to be lent again ([`Self::recycle`]); a pooled frame's slot goes home
     /// through the completion edge, counted as written.
     pub fn recycle_wire(&self, wire: WireFrame) {
@@ -1856,7 +1856,7 @@ impl OutboundQueue {
         self.next_wire().await.map(WireFrame::into_vec)
     }
 
-    /// R3250 — [`Self::next`] as the [`WireFrame`] the queue holds, which is
+    /// R3239 — [`Self::next`] as the [`WireFrame`] the queue holds, which is
     /// what a writer of a pooled queue takes: it starts the frame
     /// ([`WireFrame::begin_write`]), writes it, and hands it back
     /// ([`Self::recycle_wire`]) or drops it.

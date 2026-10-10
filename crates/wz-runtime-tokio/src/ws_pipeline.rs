@@ -186,7 +186,7 @@ pub struct WsWriteDriver {
     subject: LinkSubject,
     /// R311y473 — this link's `{src,dst}` locator pair for the adminspace.
     endpoints: Option<wz_session_core::link::LinkEndpoints>,
-    /// R3250 — the slots of the link's transmit pool lent to the session, under
+    /// R3240 — the slots of the link's transmit pool lent to the session, under
     /// `runtime-zero-copy`.
     #[cfg(feature = "runtime-zero-copy")]
     lent: crate::writer_queue::LendTable,
@@ -264,7 +264,7 @@ impl BoxedLinkDriver for WsWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // R3250 — the byte door keeps its vector even on a pooled queue, on
+        // R3240 — the byte door keeps its vector even on a pooled queue, on
         // purpose: tungstenite 0.24's `Message::Binary` takes an owned
         // `Vec<u8>`, so a frame reaches the library as a vector whatever the
         // queue holds, and copying it into a slot first would add a copy and
@@ -276,7 +276,7 @@ impl BoxedLinkDriver for WsWriteDriver {
         LinkSendOutcome::Sent
     }
 
-    // R3250 — lend the session a slot of the link's transmit pool to encode one
+    // R3240 — lend the session a slot of the link's transmit pool to encode one
     // message into. The session's own heap encode is saved; the library seam
     // still takes a vector (`ws_writer_task`).
     #[cfg(feature = "runtime-zero-copy")]
@@ -335,7 +335,7 @@ pub async fn ws_writer_task(
     mut sink: SplitSink<WebSocketStream<TcpStream>, Message>,
     mut queue: OutboundQueue,
 ) {
-    // R3250 — THE ONE COPY AT THIS SEAM, explicit: tungstenite 0.24's
+    // R3240 — THE ONE COPY AT THIS SEAM, explicit: tungstenite 0.24's
     // `Message::Binary` owns a `Vec<u8>`, so a frame in a slot of the link's
     // transmit pool is copied into one here (one allocation and one copy per
     // lent message, `WireFrame::into_vec`), and the slot goes home un-armed once
