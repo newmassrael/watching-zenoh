@@ -87,6 +87,15 @@ pub trait Board {
     /// Drop the cache lines covering `[ptr, ptr + len)`, before the CPU reads what
     /// the controller wrote. A no-op for non-cacheable memory.
     fn invalidate(&mut self, _ptr: *const u8, _len: usize) {}
+    /// Whether the controller may be handed `[ptr, ptr + len)` to read IN PLACE,
+    /// as a piece of a frame sent by [`EthernetMac::transmit_gather`]: memory its
+    /// DMA master reaches, and that [`clean`](Self::clean) makes coherent with
+    /// what the CPU wrote. A piece outside it is copied into the ring's own buffer
+    /// instead, which is always correct.
+    ///
+    /// No default, because the answer is the board's alone and a wrong `true` is
+    /// a frame sent with stale bytes from a cache the controller cannot see.
+    fn reads_in_place(&self, ptr: *const u8, len: usize) -> bool;
     /// Wait AT LEAST `us` microseconds. A wait promises no upper bound, and on a
     /// board whose time base runs slow it lasts many times what was asked, so the
     /// driver never adds up the waits it asked for to measure how long it has
@@ -104,10 +113,19 @@ pub trait Board {
 /// The board of a running chip: volatile MMIO at `base`, identity bus addresses,
 /// no cache maintenance (the area lives in non-cacheable memory), a delay and a
 /// monotonic clock the firmware provides.
+///
+/// Because it does no cache maintenance, the controller is handed caller memory to
+/// read in place only inside the one window the firmware names
+/// ([`with_in_place_window`](Self::with_in_place_window)): memory the firmware has
+/// placed, like the [`DmaArea`], where the DMA master reaches and the CPU does not
+/// cache. A board given no window reads nothing in place, and every gathered frame
+/// is copied into the ring.
 pub struct Cyt4bfBoard {
     base: usize,
     delay: fn(u32),
     now: fn() -> u64,
+    /// `[start, end)` of the memory the controller may read in place.
+    in_place: Option<(usize, usize)>,
 }
 
 impl Cyt4bfBoard {
@@ -117,7 +135,27 @@ impl Cyt4bfBoard {
     /// microseconds it is given, and `now` must return microseconds on a clock
     /// that never goes backwards.
     pub const unsafe fn new(base: usize, delay: fn(u32), now: fn() -> u64) -> Self {
-        Self { base, delay, now }
+        Self {
+            base,
+            delay,
+            now,
+            in_place: None,
+        }
+    }
+
+    /// Let the controller read caller memory in place inside `[start, start + len)`
+    /// and nowhere else.
+    ///
+    /// # Safety
+    /// The window must be memory the Ethernet DMA master reaches (system SRAM, not
+    /// a tightly coupled memory) and that the CPU does not cache, such as Zephyr's
+    /// `.nocache` section with `CONFIG_NOCACHE_MEMORY`: this board cleans no cache,
+    /// so a cached line the CPU wrote would reach the wire as whatever memory held
+    /// before.
+    pub unsafe fn with_in_place_window(mut self, start: *const u8, len: usize) -> Self {
+        let start = start as usize;
+        self.in_place = start.checked_add(len).map(|end| (start, end));
+        self
     }
 }
 
@@ -134,6 +172,14 @@ impl Board for Cyt4bfBoard {
 
     fn bus_address(&self, ptr: *const u8) -> u32 {
         ptr as usize as u32
+    }
+
+    fn reads_in_place(&self, ptr: *const u8, len: usize) -> bool {
+        let Some((start, end)) = self.in_place else {
+            return false;
+        };
+        let at = ptr as usize;
+        at >= start && at.checked_add(len).is_some_and(|last| last <= end)
     }
 
     fn delay_us(&mut self, us: u32) {
@@ -309,6 +355,23 @@ pub struct Cyt4bfMac<B: Board, const RX: usize, const TX: usize> {
     link: LinkState,
     next_link_poll_ms: u64,
     tx_recoveries: u32,
+    tx_counts: TxCounts,
+}
+
+/// How the frames this MAC queued were sent ([`Cyt4bfMac::tx_counts`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TxCounts {
+    /// Frames the controller was handed to read IN PLACE, from the caller's
+    /// memory, one descriptor per piece.
+    pub in_place: u32,
+    /// Frames sent from a copy in the ring's own buffer: every
+    /// [`EthernetMac::transmit`], and every gathered frame that could not be read
+    /// in place (more pieces than descriptors, or a piece outside the memory the
+    /// board lets the controller read).
+    pub copied: u32,
+    /// The bus address the FIRST descriptor of the last frame read in place was
+    /// written with: where the controller was told that frame begins.
+    pub last_in_place_bus: Option<u32>,
 }
 
 /// One frame in the transmit ring.
@@ -388,6 +451,7 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
             link: LinkState::Unknown,
             next_link_poll_ms: 0,
             tx_recoveries: 0,
+            tx_counts: TxCounts::default(),
         };
 
         // 2. Quiesce: nothing runs while the registers are set up.
@@ -554,6 +618,7 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         };
         self.tx_head = (self.tx_head + 1) % TX;
         self.tx_inflight += 1;
+        self.tx_counts.copied = self.tx_counts.copied.wrapping_add(1);
         // The descriptor must be visible before the kick that makes the DMA read it.
         fence(Ordering::Release);
         self.board
@@ -731,6 +796,12 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         self.tx_recoveries
     }
 
+    /// How the frames queued so far were sent: in place or from a copy, and where
+    /// the last one sent in place began.
+    pub fn tx_counts(&self) -> TxCounts {
+        self.tx_counts
+    }
+
     // ---- management port (MDIO) -------------------------------------------
 
     /// Wait for the management shift register to go idle, for at most
@@ -903,8 +974,11 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
     /// are in place, which is the release of the whole frame.
     ///
     /// Frames that cannot be queued in place are copied instead, through the
-    /// one-buffer path: more pieces than the ring has descriptors (it could never
-    /// fit), which the caller sees as [`TxGather::Copied`].
+    /// one-buffer path, which the caller sees as [`TxGather::Copied`]: more pieces
+    /// than the ring has descriptors (it could never fit), or a piece the board
+    /// does not let the controller read where it lies ([`Board::reads_in_place`]:
+    /// memory the DMA master cannot reach, or that the CPU caches and the board
+    /// cannot clean).
     unsafe fn transmit_gather(&mut self, segments: &[TxSegment], cookie: u32) -> TxGather {
         let n = segments.len();
         let mut total = 0usize;
@@ -919,7 +993,10 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
         if n == 0 || total > BUF_LEN {
             return TxGather::Refused;
         }
-        if n > TX {
+        let in_place = segments
+            .iter()
+            .all(|s| self.board.reads_in_place(s.ptr, s.len));
+        if n > TX || !in_place {
             // Joined straight into the ring slot's own buffer, so a frame this
             // long costs no stack.
             let sent = self.send_copied(total, |buf| {
@@ -976,6 +1053,8 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
         };
         self.tx_head = (first_index + n) % TX;
         self.tx_inflight += n;
+        self.tx_counts.in_place = self.tx_counts.in_place.wrapping_add(1);
+        self.tx_counts.last_in_place_bus = Some(self.tx_slot(first_index).word0());
         fence(Ordering::Release);
         self.board
             .write(NETWORK_CONTROL, self.network_control | NWCTRL_TX_START);

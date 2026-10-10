@@ -180,6 +180,15 @@ impl Model {
         self.ext.push((buf.as_ptr() as usize, buf.len()));
     }
 
+    /// Whether `[ptr, ptr + len)` lies inside one window the test exposed: caller
+    /// memory the controller reaches. Anything else it cannot read in place.
+    fn exposed(&self, ptr: *const u8, len: usize) -> bool {
+        let at = ptr as usize;
+        self.ext
+            .iter()
+            .any(|(start, n)| at >= *start && at + len <= start + n)
+    }
+
     fn rx_desc(&self, i: usize) -> Slot {
         // SAFETY: inside the leaked area.
         unsafe { Slot((addr_of_mut!((*self.area()).rx_desc) as *mut Descriptor).add(i)) }
@@ -505,6 +514,10 @@ impl Board for Gem {
 
     fn bus_address(&self, ptr: *const u8) -> u32 {
         self.0.borrow().bus(ptr)
+    }
+
+    fn reads_in_place(&self, ptr: *const u8, len: usize) -> bool {
+        self.0.borrow().exposed(ptr, len)
     }
 
     /// Cache maintenance on a transmit descriptor is the moment the driver
@@ -968,6 +981,100 @@ fn more_pieces_than_descriptors_are_copied_and_nothing_is_held() {
 
     assert_eq!(model.borrow().wire, vec![parts.concat()]);
     assert_eq!(reaped(&mut mac), Vec::<u32>::new());
+}
+
+/// A piece the board does not let the controller read where it lies (memory its DMA
+/// master cannot reach, or that the CPU caches) is never handed over in place: the
+/// whole frame is copied into the ring's own buffer, the descriptor points THERE,
+/// and nothing is held. One piece outside is enough, since a frame is read whole.
+#[test]
+fn a_gathered_frame_with_a_piece_the_board_does_not_reach_is_copied_into_the_ring() {
+    let (mut mac, model) = rig();
+    let (header, payload) = (frame(0x10, 14), frame(0x40, 100));
+    model.borrow_mut().expose(&header);
+    // The payload is NOT exposed: on the board, cached or unreachable memory.
+
+    // SAFETY: both buffers outlive the call; being copied, nothing outlives it.
+    let outcome = unsafe { mac.transmit_gather(&[seg(&header), seg(&payload)], 21) };
+
+    assert_eq!(outcome, TxGather::Copied);
+    let m = model.borrow();
+    assert_eq!(m.wire, vec![[header.clone(), payload.clone()].concat()]);
+    assert_eq!(
+        m.tx_desc(0).word0(),
+        m.bus(mac.tx_buf(0)),
+        "the descriptor points at the ring's own buffer, not the caller's"
+    );
+    drop(m);
+    assert_eq!(
+        reaped(&mut mac),
+        Vec::<u32>::new(),
+        "a copy reports no cookie"
+    );
+    let counts = mac.tx_counts();
+    assert_eq!((counts.in_place, counts.copied), (0, 1));
+    assert_eq!(counts.last_in_place_bus, None);
+}
+
+/// The counts a bench reads off a running node: a frame read in place counts as
+/// such, and the address its first descriptor was written with is the caller's
+/// first byte, as the controller sees it; a copied frame counts apart.
+#[test]
+fn the_counts_say_which_frames_were_read_in_place_and_where_the_last_began() {
+    let (mut mac, model) = rig();
+    let (header, payload) = (frame(0x20, 14), frame(0x50, 60));
+    model.borrow_mut().expose(&header);
+    model.borrow_mut().expose(&payload);
+
+    assert!(mac.transmit(&frame(0x01, 60)), "one from a copy first");
+    // SAFETY: both buffers outlive the test and are not touched until it is over.
+    let outcome = unsafe { mac.transmit_gather(&[seg(&header), seg(&payload)], 3) };
+    assert_eq!(outcome, TxGather::Queued);
+
+    let counts = mac.tx_counts();
+    assert_eq!((counts.in_place, counts.copied), (1, 1));
+    assert_eq!(
+        counts.last_in_place_bus,
+        Some(model.borrow().bus(header.as_ptr())),
+        "the first descriptor of the frame read in place names the caller's header"
+    );
+}
+
+/// The real board reads in place only inside the window the firmware names, and a
+/// board with no window reads nothing in place: it cleans no cache, so memory it has
+/// not been told is uncached is memory it must not hand the controller.
+#[test]
+fn the_chip_board_reads_in_place_only_inside_its_window() {
+    fn delay(_: u32) {}
+    fn now() -> u64 {
+        0
+    }
+    let window = [0u8; 64];
+    let start = window.as_ptr();
+    // SAFETY: neither board is used for MMIO here; only its in-place predicate is
+    // asked, which reads no register.
+    let bare = unsafe { Cyt4bfBoard::new(0, delay, now) };
+    assert!(
+        !bare.reads_in_place(start, 8),
+        "no window, nothing in place"
+    );
+    // SAFETY: as above; the window is only compared against.
+    let board = unsafe { Cyt4bfBoard::new(0, delay, now).with_in_place_window(start, 64) };
+    assert!(board.reads_in_place(start, 64), "the whole window");
+    // SAFETY: pointer arithmetic inside and one past `window`.
+    let (inside, last, past) = unsafe { (start.add(10), start.add(63), start.add(64)) };
+    assert!(board.reads_in_place(inside, 20));
+    assert!(board.reads_in_place(last, 1));
+    assert!(
+        !board.reads_in_place(last, 2),
+        "a piece that runs past the end"
+    );
+    assert!(!board.reads_in_place(past, 1), "a piece after it");
+    let before = (start as usize - 1) as *const u8;
+    assert!(
+        !board.reads_in_place(before, 2),
+        "a piece that starts before it"
+    );
 }
 
 /// While a gathered frame's cookie has not been taken, the ring is held in order
