@@ -821,13 +821,9 @@ pub fn fragment_body(
 #[cfg(feature = "transport-fragmentation")]
 pub struct FragmentChain<'a> {
     body: &'a [u8],
-    off: usize,
-    chunk: usize,
-    sn: u64,
-    sn_mask: u64,
+    plan: FragmentPlan,
     reliable: bool,
     ext_qos: Option<Priority>,
-    done: bool,
 }
 
 #[cfg(feature = "transport-fragmentation")]
@@ -838,6 +834,137 @@ impl<'a> FragmentChain<'a> {
     pub fn new(
         body: &'a [u8],
         reliable: bool,
+        mtu: usize,
+        base_sn: u64,
+        sn_mask: u64,
+        ext_qos: Option<Priority>,
+    ) -> Self {
+        Self {
+            body,
+            plan: FragmentPlan::new(body.len(), mtu, base_sn, sn_mask, ext_qos),
+            reliable,
+            ext_qos,
+        }
+    }
+
+    /// Fragments this chain has NOT yet yielded — `fragment_count` of the
+    /// unwalked tail, so `fragment_body`'s `Vec` reserves exactly what the
+    /// pre-R2238 code did.
+    pub fn remaining_fragments(&self) -> usize {
+        self.plan.remaining_fragments()
+    }
+
+    /// The SN the NEXT emitted transport message on this conduit carries.
+    ///
+    /// This is the abandon marker's SN when a sender stops here: upstream
+    /// stamps its stop fragment with exactly this value (`fragment.sn =
+    /// tch.sn.get()` after the last successful encode). ⚠ The marker must
+    /// then CONSUME that SN rather than leave it for the next chain —
+    /// zenoh's receive-side `SeqNum::roll` (`common/seq_num.rs:145-155`)
+    /// advances on every accepted transport message and rejects a repeat
+    /// (`gap == 0` → `Ok(false)` → dropped), so a marker that did not spend
+    /// its SN would make the NEXT message unreadable to a real zenohd. That
+    /// divergence from upstream is invisible there only because upstream's
+    /// marker never reaches the wire at all (item 575).
+    pub fn next_sn(&self) -> u64 {
+        self.plan.next_sn()
+    }
+}
+
+#[cfg(feature = "transport-fragmentation")]
+impl Iterator for FragmentChain<'_> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        let span = self.plan.next_span()?;
+        Some(build_fragment_wire(
+            span.sn,
+            &self.body[span.start..span.end],
+            self.reliable,
+            span.more,
+            span.first,
+            false,
+            self.ext_qos,
+        ))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.remaining_fragments();
+        (n, Some(n))
+    }
+}
+
+/// ARCHITECTURE section 9.1 -- WHERE each fragment of a chain lies in the
+/// message it is cut from, and which SN it carries, without the bytes.
+///
+/// [`FragmentChain`] walks a body that already exists as bytes and builds each
+/// fragment as a vector. A sender that encodes each fragment straight into a
+/// slot its link lends has no such body: the message is encoded once per
+/// fragment, and only the part of it inside that fragment's window is written
+/// (see `write_fragment`). Both walk this plan, so the chunking, the SN walk,
+/// the `more` flag and the first-fragment marker are decided in one place and
+/// a lent chain is the heap chain byte for byte.
+#[cfg(feature = "transport-fragmentation")]
+pub struct FragmentPlan {
+    len: usize,
+    off: usize,
+    chunk: usize,
+    sn: u64,
+    sn_mask: u64,
+    done: bool,
+}
+
+/// One fragment of a [`FragmentPlan`]: its SN, the byte range of the message it
+/// carries, whether more follow, and whether it opens the chain. `drop_marker`
+/// is set only on the payload-less stop fragment that announces an abandoned
+/// chain ([`FragmentSpan::stop`]), which no plan yields.
+#[cfg(feature = "transport-fragmentation")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentSpan {
+    /// The fragment's SN.
+    pub sn: u64,
+    /// First byte of the message this fragment carries.
+    pub start: usize,
+    /// One past its last byte.
+    pub end: usize,
+    /// More fragments follow (the M flag).
+    pub more: bool,
+    /// It opens the chain (the `0x2 First` marker).
+    pub first: bool,
+    /// It is the stop fragment (the `0x3 Drop` marker).
+    pub drop_marker: bool,
+}
+
+#[cfg(feature = "transport-fragmentation")]
+impl FragmentSpan {
+    /// The stop fragment at `sn`: no payload, M set, the `0x3 Drop` marker
+    /// (the shape `build_fragment_drop_wire` writes).
+    pub fn stop(sn: u64) -> Self {
+        Self {
+            sn,
+            start: 0,
+            end: 0,
+            more: true,
+            first: false,
+            drop_marker: true,
+        }
+    }
+
+    /// The most bytes this fragment can take on the wire: the conservative
+    /// header budget, the two one-byte markers, a possible `ext_qos`, and the
+    /// chunk. What a slot is asked for before the fragment is written into it.
+    pub fn wire_bound(&self) -> usize {
+        FRAG_HEADER_BUDGET + 2 + QOS_EXT_WIRE_BYTES + (self.end - self.start)
+    }
+}
+
+#[cfg(feature = "transport-fragmentation")]
+impl FragmentPlan {
+    /// The plan for a `len`-byte message at `mtu`, from `base_sn` on the ring
+    /// of `sn_mask`; `ext_qos` decides the per-fragment budget as it decides
+    /// whether each fragment carries the extension.
+    pub fn new(
+        len: usize,
         mtu: usize,
         base_sn: u64,
         sn_mask: u64,
@@ -854,63 +981,44 @@ impl<'a> FragmentChain<'a> {
             false
         };
         Self {
-            body,
+            len,
             off: 0,
             chunk: fragment_chunk_size(mtu, qos),
             sn: base_sn & sn_mask,
             sn_mask,
-            reliable,
-            ext_qos,
             done: false,
         }
     }
 
-    /// Fragments this chain has NOT yet yielded — `fragment_count` of the
-    /// unwalked tail, so `fragment_body`'s `Vec` reserves exactly what the
-    /// pre-R2238 code did.
+    /// Fragments not yet yielded.
     pub fn remaining_fragments(&self) -> usize {
         if self.done {
             return 0;
         }
-        (self.body.len() - self.off).div_ceil(self.chunk).max(1)
+        (self.len - self.off).div_ceil(self.chunk).max(1)
     }
 
-    /// The SN the NEXT emitted transport message on this conduit carries.
-    ///
-    /// This is the abandon marker's SN when a sender stops here: upstream
-    /// stamps its stop fragment with exactly this value (`fragment.sn =
-    /// tch.sn.get()` after the last successful encode). ⚠ The marker must
-    /// then CONSUME that SN rather than leave it for the next chain —
-    /// zenoh's receive-side `SeqNum::roll` (`common/seq_num.rs:145-155`)
-    /// advances on every accepted transport message and rejects a repeat
-    /// (`gap == 0` → `Ok(false)` → dropped), so a marker that did not spend
-    /// its SN would make the NEXT message unreadable to a real zenohd. That
-    /// divergence from upstream is invisible there only because upstream's
-    /// marker never reaches the wire at all (item 575).
+    /// The SN the next transport message on this conduit carries (see
+    /// [`FragmentChain::next_sn`]).
     pub fn next_sn(&self) -> u64 {
         self.sn
     }
-}
 
-#[cfg(feature = "transport-fragmentation")]
-impl Iterator for FragmentChain<'_> {
-    type Item = Vec<u8>;
-
-    fn next(&mut self) -> Option<Vec<u8>> {
+    /// The next fragment, or `None` once the last has been yielded.
+    pub fn next_span(&mut self) -> Option<FragmentSpan> {
         if self.done {
             return None;
         }
-        let end = core::cmp::min(self.off + self.chunk, self.body.len());
-        let more = end < self.body.len();
-        let wire = build_fragment_wire(
-            self.sn,
-            &self.body[self.off..end],
-            self.reliable,
+        let end = core::cmp::min(self.off + self.chunk, self.len);
+        let more = end < self.len;
+        let span = FragmentSpan {
+            sn: self.sn,
+            start: self.off,
+            end,
             more,
-            self.off == 0,
-            false,
-            self.ext_qos,
-        );
+            first: self.off == 0,
+            drop_marker: false,
+        };
         self.off = end;
         // The SN advances past EVERY emitted fragment, the last one included,
         // so `next_sn` names the conduit's next value whether the walk ran to
@@ -919,12 +1027,156 @@ impl Iterator for FragmentChain<'_> {
         if !more {
             self.done = true;
         }
-        Some(wire)
+        Some(span)
+    }
+}
+
+/// The message a fragment chain is cut from, in one of the two forms a sender
+/// has it in.
+#[cfg(feature = "transport-fragmentation")]
+#[derive(Clone, Copy)]
+pub enum FragmentBody<'a> {
+    /// Already bytes: the body of a frame encoded on the heap.
+    Bytes(&'a [u8]),
+    /// Not yet bytes: the encoder that writes it. Each fragment runs it once
+    /// and keeps only the bytes inside its own range, so the message is never
+    /// written out whole anywhere (ARCHITECTURE section 9.1).
+    #[cfg(feature = "transport-tx-lend")]
+    Encoded(&'a BodyEncoder<'a>),
+}
+
+/// The body encoder a lent chain re-runs per fragment, as a trait object so a
+/// chain over any message type is one function and not one per message type.
+#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+pub type BodyEncoder<'f> = dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError> + 'f;
+
+/// Write ONE fragment of `body` (the range `span` names) into `buf`: the header
+/// `write_fragment_head` writes, then the payload. The one producer of a
+/// fragment's bytes for the heap chain and the lent chain alike, so the two put
+/// the same bytes on the wire.
+///
+/// On a fixed buffer (a lent slot) a fragment that does not fit is an
+/// `Err(CodecError::BufferOverflow)` and the caller gives the slot back.
+#[cfg(feature = "transport-fragmentation")]
+pub fn write_fragment(
+    buf: &mut EncodeBuf<'_>,
+    span: &FragmentSpan,
+    body: FragmentBody<'_>,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+) -> Result<(), CodecError> {
+    write_fragment_head(
+        buf,
+        span.sn,
+        reliable,
+        span.more,
+        span.first,
+        span.drop_marker,
+        ext_qos,
+    )?;
+    match body {
+        FragmentBody::Bytes(bytes) => TxBuf::append(buf, &bytes[span.start..span.end]),
+        #[cfg(feature = "transport-tx-lend")]
+        FragmentBody::Encoded(encode) => {
+            if span.start == span.end {
+                return Ok(());
+            }
+            let mut window = BodyWindow::new(&mut *buf, span.start, span.end);
+            {
+                let mut sink = TxSink::new(&mut window);
+                encode(&mut sink)?;
+            }
+            // An encoder that wrote less than the plan was cut from is not the
+            // message the plan measured: refuse rather than send a short
+            // fragment.
+            if window.reached() < span.end {
+                return Err(CodecError::BufferOverflow);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// How many bytes `encode` writes: the length a lent chain is planned over.
+/// Nothing is written anywhere -- the encoder runs into a window of no bytes,
+/// so its payload writes are counted and skipped, not copied.
+#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+pub fn encoded_body_len(encode: &BodyEncoder<'_>) -> Result<usize, CodecError> {
+    let mut none = crate::tx_buf::SliceTxBuf::new(&mut []);
+    let mut window = BodyWindow::new(&mut none, 0, 0);
+    {
+        let mut sink = TxSink::new(&mut window);
+        encode(&mut sink)?;
+    }
+    Ok(window.reached())
+}
+
+/// A destination that keeps only the bytes of `[start, end)` of what is written
+/// through it and forwards them to `inner`; every other byte is counted and
+/// dropped. What lets one fragment of a message be encoded straight into its
+/// slot: the encoder runs as it always does, and the slot receives exactly its
+/// fragment's range of the message, with no copy of the message in between.
+///
+/// Its length is the MESSAGE position, not the bytes kept, because that is what
+/// an encoder reads back through its sink (`SceSink::position`) and the two must
+/// agree for the encoder to behave as it does over a whole buffer. It is only
+/// ever written through a `TxSink`, which neither reads the written bytes back
+/// nor rolls them back, so `as_slice` answers the bytes forwarded so far and
+/// `truncate` cannot un-forward them.
+#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+struct BodyWindow<'w, 'i> {
+    inner: &'w mut (dyn TxBuf + 'i),
+    /// Where `inner` stood when the window opened.
+    inner_at: usize,
+    start: usize,
+    end: usize,
+    /// Message bytes written through the window so far.
+    pos: usize,
+}
+
+#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+impl<'w, 'i> BodyWindow<'w, 'i> {
+    fn new(inner: &'w mut (dyn TxBuf + 'i), start: usize, end: usize) -> Self {
+        let inner_at = inner.len();
+        Self {
+            inner,
+            inner_at,
+            start,
+            end,
+            pos: 0,
+        }
     }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let n = self.remaining_fragments();
-        (n, Some(n))
+    /// The message length written through the window.
+    fn reached(&self) -> usize {
+        self.pos
+    }
+}
+
+#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+impl TxBuf for BodyWindow<'_, '_> {
+    fn len(&self) -> usize {
+        self.pos
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.inner.as_slice()[self.inner_at..]
+    }
+
+    fn truncate(&mut self, _len: usize) {}
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+        let from = self.pos;
+        let to = from
+            .checked_add(bytes.len())
+            .ok_or(CodecError::BufferOverflow)?;
+        let lo = core::cmp::max(from, self.start);
+        let hi = core::cmp::min(to, self.end);
+        if lo < hi {
+            self.inner.append(&bytes[lo - from..hi - from])?;
+        }
+        self.pos = to;
+        Ok(())
     }
 }
 
@@ -1029,6 +1281,46 @@ pub fn build_fragment_wire(
     drop_marker: bool,
     ext_qos: Option<Priority>,
 ) -> Vec<u8> {
+    #[cfg(feature = "transport-qos")]
+    let has_qos = ext_qos.is_some();
+    #[cfg(not(feature = "transport-qos"))]
+    let has_qos = false;
+    let qos_reserve = if has_qos { QOS_EXT_WIRE_BYTES } else { 0 };
+    let mut wire = Vec::with_capacity(
+        FRAG_HEADER_BUDGET
+            + payload.len()
+            + usize::from(first)
+            + usize::from(drop_marker)
+            + qos_reserve,
+    );
+    write_fragment_head(&mut wire, sn, reliable, more, first, drop_marker, ext_qos)
+        .expect("a Vec grows, so its sink is infallible");
+    // The payload is the codec's raw tail (`Fragment::encode` is
+    // `write_vle_u64 + write_bytes`, no length prefix), so appending it after
+    // the head is the bytes the codec writes for the two together.
+    TxBuf::append(&mut wire, payload).expect("a Vec grows, so its sink is infallible");
+    wire
+}
+
+/// Everything of one `T_MID_FRAGMENT` before its payload: the header byte
+/// (R / M / Z), `VLE(sn)` written by the `wz_codecs::fragment` codec, and the
+/// extension chain in id-ascending order (`0x1` QoS, `0x2` First, `0x3` Drop).
+/// [`build_fragment_wire`] appends the payload to it on the heap; a lent chain
+/// writes the same head into a slot and the payload after it, so the head has
+/// one producer.
+///
+/// On a fixed buffer a head that does not fit is an
+/// `Err(CodecError::BufferOverflow)`.
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
+pub fn write_fragment_head(
+    buf: &mut EncodeBuf<'_>,
+    sn: u64,
+    reliable: bool,
+    more: bool,
+    first: bool,
+    drop_marker: bool,
+    ext_qos: Option<Priority>,
+) -> Result<(), CodecError> {
     let mut flags = 0u8;
     if reliable {
         flags |= wire_const::FLAG_T_FRAGMENT_R;
@@ -1049,50 +1341,29 @@ pub fn build_fragment_wire(
     if has_ext {
         flags |= wire_const::FLAG_T_Z;
     }
-    let qos_reserve = if has_qos { QOS_EXT_WIRE_BYTES } else { 0 };
-    let mut wire = Vec::with_capacity(
-        FRAG_HEADER_BUDGET
-            + payload.len()
-            + usize::from(first)
-            + usize::from(drop_marker)
-            + qos_reserve,
-    );
-    wire.push(flags | wire_const::T_MID_FRAGMENT);
-    if has_ext {
-        // Wire body: VLE(sn) + [ext_qos] + [FRAGMENT_FIRST] + payload. The codec
-        // writes VLE(sn) with an empty payload (raw tail, no length prefix —
-        // `Fragment::encode` is `write_vle_u64 + write_bytes`) so the SN wire
-        // form stays the byte-verified SSOT; the ext chain + the real payload are
-        // appended after, in id-ascending order.
-        {
-            let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
-            wz_codecs::fragment::Fragment { sn, payload: &[] }
-                .encode(&mut sink)
-                .expect("VecSink is infallible");
-        }
-        #[cfg(feature = "transport-qos")]
-        if let Some(priority) = ext_qos {
-            // The QoS ext chains to whichever marker follows it, if any.
-            write_qos_ext(&mut wire, priority, first || drop_marker)
-                .expect("a Vec grows, so its sink is infallible");
-        }
-        if first {
-            // ...and First chains to Drop when both ride the same fragment.
-            let chained = if drop_marker { wire_const::FLAG_T_Z } else { 0 };
-            wire.push(FRAGMENT_FIRST_EXT_HEADER | chained);
-        }
-        if drop_marker {
-            // Last in id order, so it never carries the continuation bit.
-            wire.push(FRAGMENT_DROP_EXT_HEADER);
-        }
-        wire.extend_from_slice(payload);
-    } else {
-        let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
-        wz_codecs::fragment::Fragment { sn, payload }
-            .encode(&mut sink)
-            .expect("VecSink is infallible");
+    buf.append_byte(flags | wire_const::T_MID_FRAGMENT)?;
+    // The codec writes VLE(sn) with an empty payload so the SN wire form stays
+    // the byte-verified SSOT; the ext chain follows it, and the caller appends
+    // the payload after that.
+    {
+        let mut sink = TxSink::new(buf);
+        wz_codecs::fragment::Fragment { sn, payload: &[] }.encode(&mut sink)?;
     }
-    wire
+    #[cfg(feature = "transport-qos")]
+    if let Some(priority) = ext_qos {
+        // The QoS ext chains to whichever marker follows it, if any.
+        write_qos_ext(buf, priority, first || drop_marker)?;
+    }
+    if first {
+        // ...and First chains to Drop when both ride the same fragment.
+        let chained = if drop_marker { wire_const::FLAG_T_Z } else { 0 };
+        buf.append_byte(FRAGMENT_FIRST_EXT_HEADER | chained)?;
+    }
+    if drop_marker {
+        // Last in id order, so it never carries the continuation bit.
+        buf.append_byte(FRAGMENT_DROP_EXT_HEADER)?;
+    }
+    Ok(())
 }
 
 /// Encode one `T_MID_FRAME` wire frame from its explicit fields: the header
@@ -2284,6 +2555,99 @@ mod qos_wire_tests {
         assert_eq!(
             reassembled, body,
             "QoS fragment payloads (both exts stripped by the decoder) reassemble to the body"
+        );
+    }
+
+    /// ARCHITECTURE section 9.1 -- a chain whose fragments are ENCODED straight
+    /// into fixed buffers (the body encoder run once per fragment through its
+    /// window) is the heap chain byte for byte, with and without `ext_qos`, at
+    /// every body length across several chunks, and the stop fragment is the
+    /// heap stop fragment. The encoder writes the body as several writes of
+    /// different sizes, so a window boundary falls inside a write, on a write's
+    /// edge and between writes.
+    #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+    #[test]
+    fn an_encoded_chain_written_into_fixed_buffers_is_the_heap_chain() {
+        use crate::tx_buf::SliceTxBuf;
+        let mtu = 40usize;
+        let mask = crate::sn::mask_from_res(0x02);
+        for ext_qos in [None, Some(Priority::InteractiveHigh)] {
+            for len in 1..=150usize {
+                let body: Vec<u8> = (0..len).map(|i| (i * 13 + 5) as u8).collect();
+                // Writes of 1, 2, 3, ... bytes until the body is spent.
+                let encode = |sink: &mut TxSink<'_>| {
+                    let (mut at, mut step) = (0usize, 1usize);
+                    while at < body.len() {
+                        let end = core::cmp::min(at + step, body.len());
+                        sink.write_bytes(&body[at..end])?;
+                        at = end;
+                        step += 1;
+                    }
+                    Ok(())
+                };
+                let encode: &BodyEncoder<'_> = &encode;
+                assert_eq!(encoded_body_len(encode), Ok(len));
+                let heap: Vec<Vec<u8>> =
+                    FragmentChain::new(&body, true, mtu, 9, mask, ext_qos).collect();
+                let mut plan = FragmentPlan::new(len, mtu, 9, mask, ext_qos);
+                let mut lent = Vec::new();
+                while let Some(span) = plan.next_span() {
+                    let mut storage = [0u8; 64];
+                    let mut slot = SliceTxBuf::new(&mut storage);
+                    write_fragment(
+                        &mut slot,
+                        &span,
+                        FragmentBody::Encoded(encode),
+                        true,
+                        ext_qos,
+                    )
+                    .expect("a fragment fits its slot");
+                    assert!(slot.len() <= span.wire_bound(), "the bound holds");
+                    lent.push(slot.as_slice().to_vec());
+                }
+                assert_eq!(lent, heap, "body of {len} bytes, ext_qos {ext_qos:?}");
+                let mut storage = [0u8; 64];
+                let mut slot = SliceTxBuf::new(&mut storage);
+                write_fragment(
+                    &mut slot,
+                    &FragmentSpan::stop(3),
+                    FragmentBody::Encoded(encode),
+                    true,
+                    ext_qos,
+                )
+                .expect("the stop fragment fits");
+                assert_eq!(
+                    slot.as_slice(),
+                    build_fragment_drop_wire(3, true, ext_qos).as_slice()
+                );
+            }
+        }
+    }
+
+    /// A fragment whose slot is one byte short is refused, not truncated: the
+    /// caller gives the slot back and writes the fragment on the heap.
+    #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+    #[test]
+    fn an_encoded_fragment_one_byte_past_its_slot_is_refused() {
+        use crate::tx_buf::SliceTxBuf;
+        let body = [0xA5u8; 100];
+        let encode = |sink: &mut TxSink<'_>| sink.write_bytes(&body);
+        let encode: &BodyEncoder<'_> = &encode;
+        let mut plan = FragmentPlan::new(body.len(), 40, 0, crate::sn::mask_from_res(0x02), None);
+        let span = plan.next_span().expect("a first fragment");
+        let want = FragmentChain::new(&body, true, 40, 0, crate::sn::mask_from_res(0x02), None)
+            .next()
+            .expect("a first fragment");
+        let mut exact = alloc::vec![0u8; want.len()];
+        let mut slot = SliceTxBuf::new(&mut exact);
+        write_fragment(&mut slot, &span, FragmentBody::Encoded(encode), true, None)
+            .expect("a slot of exactly the fragment's length takes it");
+        assert_eq!(slot.as_slice(), want.as_slice());
+        let mut short = alloc::vec![0u8; want.len() - 1];
+        let mut slot = SliceTxBuf::new(&mut short);
+        assert_eq!(
+            write_fragment(&mut slot, &span, FragmentBody::Encoded(encode), true, None),
+            Err(CodecError::BufferOverflow)
         );
     }
 
