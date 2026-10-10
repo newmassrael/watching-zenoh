@@ -415,6 +415,19 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-shm,\
         transport-stats\
         |"
+    # Open-debt item 900 — `session-unicast-open` and `session-unicast-accept`
+    # join. 88fe33b9 added both features and the four `two_session_tests::`
+    # (gated on them with `transport-multicast` and `codec-push`) and widened
+    # only Layer C1m, which this table cannot see. The census arm said so,
+    # hosted:
+    #
+    #   nondefault-tests: FAIL -- wz-session-lwip has 20 test(s) only a feature
+    #     build reaches; legs run 16 and SKIPS excuses 0, leaving 4 claimed by
+    #     NOTHING (all four in `two_session_tests`).
+    #
+    # MEASURED before widening: this row's listing went 16 -> 20 of the 20, and
+    # the whole leg ran green over one loopback lwIP instance (no network).
+    # `transport-tx-lend` stays out: no test is reached only through it.
     "wz-session-lwip|hook|\
         adminspace-core,\
         adminspace-write,\
@@ -427,6 +440,8 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         pubsub-put,\
         query-queryable,\
         reassembly,\
+        session-unicast-accept,\
+        session-unicast-open,\
         transport-fragmentation,\
         transport-keepalive,\
         transport-multicast\
