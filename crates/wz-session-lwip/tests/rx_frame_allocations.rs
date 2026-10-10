@@ -184,17 +184,29 @@ fn frame_of(sn: u64, n: usize) -> (Vec<u8>, Vec<u8>) {
         let view = push.try_as_borrowed().expect("a borrowed view");
         payload.extend_from_slice(&view.encode_to_vec());
     }
-    // A reliable Frame with no extensions: the header, the SN as a VLE (seven
-    // bits a byte, low first, the top bit saying another follows), the payload.
-    let mut wire = vec![wire_const::T_MID_FRAME | wire_const::FLAG_T_FRAME_R];
+    (frame_wire(sn, &[], &payload), payload)
+}
+
+/// A reliable Frame at `sn` carrying `payload`, with `chain` as its own
+/// extension chain (the Z flag set when there is one): the header, the SN as a
+/// VLE (seven bits a byte, low first, the top bit saying another follows), the
+/// chain, the payload.
+fn frame_wire(sn: u64, chain: &[u8], payload: &[u8]) -> Vec<u8> {
+    let z = if chain.is_empty() {
+        0
+    } else {
+        wire_const::FLAG_T_Z
+    };
+    let mut wire = vec![wire_const::T_MID_FRAME | wire_const::FLAG_T_FRAME_R | z];
     let mut rest = sn;
     while rest >= 0x80 {
         wire.push((rest as u8 & 0x7f) | 0x80);
         rest >>= 7;
     }
     wire.push(rest as u8);
-    wire.extend_from_slice(&payload);
-    (wire, payload)
+    wire.extend_from_slice(chain);
+    wire.extend_from_slice(payload);
+    wire
 }
 
 /// The Puts the shared batch decoder reads out of `payload`, in order: each
@@ -232,18 +244,50 @@ struct PollTally {
     frame_payload: usize,
     /// Push records lent where the datagram lies (`IterationEvent::InPlace`).
     in_place: usize,
+    /// Fragments read where the datagram lies
+    /// (`IterationEvent::InPlaceFragment`).
+    fragment_in_place: usize,
+    /// Fragments the copying path decoded (`Poll(Fragment)`).
+    fragment: usize,
+    /// Chains the Router aborted or refused (`ReassemblyDropped`).
+    dropped: usize,
     sn_rejected: usize,
     parse_error: usize,
     other: usize,
 }
 
+/// The transport extension chain a `FramePayload` reported, kept in fixed
+/// storage: whether the frame said it had one, how many entries it handed
+/// over, and their header bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FrameExts {
+    has_ext: bool,
+    len: usize,
+    headers: [u8; 8],
+}
+
+impl FrameExts {
+    fn of(has_ext: bool, extensions: &[wz_codecs::ext_entry::ExtEntryOwned]) -> Self {
+        let mut headers = [0u8; 8];
+        for (slot, ext) in headers.iter_mut().zip(extensions) {
+            *slot = ext.header;
+        }
+        Self {
+            has_ext,
+            len: extensions.len(),
+            headers,
+        }
+    }
+}
+
 /// What the subscriber was handed for one Put, recorded into fixed storage so
 /// that recording it allocates nothing inside the measured window: the payload,
-/// and the keyexpr's bytes with their length.
-type Delivery = ([u8; 8], [u8; 16], usize);
+/// the keyexpr's bytes with their length, and the address the payload was
+/// handed at (where the sample's bytes lie, which says whether they are a copy).
+type Delivery = ([u8; 8], [u8; 16], usize, usize);
 
 /// A delivery as comparable values: the payload and the keyexpr.
-fn delivery_of((payload, key, len): &Delivery) -> (Vec<u8>, String) {
+fn delivery_of((payload, key, len, _): &Delivery) -> (Vec<u8>, String) {
     (
         payload.to_vec(),
         String::from_utf8(key[..*len].to_vec()).expect("a UTF-8 keyexpr"),
@@ -256,6 +300,8 @@ struct Pair {
     on_event: Box<dyn FnMut(IterationEvent<'_>)>,
     /// What the acceptor's drive reported, by kind, since the last frame turn.
     polls: Rc<Cell<PollTally>>,
+    /// The transport extension chain the latest `FramePayload` reported.
+    frame_exts: Rc<Cell<FrameExts>>,
     /// The initiator's session: whose transmit SN each measured frame takes,
     /// so the acceptor's SN gate admits it as the initiator's next frame.
     initiator: Rc<SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>>,
@@ -313,7 +359,9 @@ impl Pair {
             config(SessionRole::Initiator),
         );
 
-        let delivered: Arc<Mutex<Vec<Delivery>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
+        // Room for the most Puts one message carries here: a reassembled one
+        // fills a whole reassembly slot.
+        let delivered: Arc<Mutex<Vec<Delivery>>> = Arc::new(Mutex::new(Vec::with_capacity(512)));
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let seen = delivered.clone();
         observer
@@ -328,25 +376,39 @@ impl Pair {
                     let key = sample.keyexpr().as_bytes();
                     let mut key_bytes = [0u8; 16];
                     key_bytes[..key.len()].copy_from_slice(key);
+                    let at = sample.payload().as_ptr() as usize;
                     seen.lock()
                         .expect("not poisoned")
-                        .push((bytes, key_bytes, key.len()));
+                        .push((bytes, key_bytes, key.len(), at));
                 }),
             )
             .expect("register the subscriber");
         let mut dispatch = app_layer::dispatch_to(observer, acceptor_actions.clone());
         let polls = Rc::new(Cell::new(PollTally::default()));
         let tally = polls.clone();
+        let frame_exts = Rc::new(Cell::new(FrameExts::default()));
+        let exts = frame_exts.clone();
         let mut on_event: Box<dyn FnMut(IterationEvent<'_>)> = Box::new(move |event| {
             let mut t = tally.get();
             match &event {
                 IterationEvent::Poll(outcome) => match outcome {
-                    DriverLoopOutcome::FramePayload { .. } => t.frame_payload += 1,
+                    DriverLoopOutcome::FramePayload {
+                        has_ext,
+                        extensions,
+                        ..
+                    } => {
+                        t.frame_payload += 1;
+                        exts.set(FrameExts::of(*has_ext, extensions));
+                    }
                     DriverLoopOutcome::RxSnRejected { .. } => t.sn_rejected += 1,
                     DriverLoopOutcome::ParseError(_) => t.parse_error += 1,
+                    #[cfg(feature = "reassembly")]
+                    DriverLoopOutcome::Fragment { .. } => t.fragment += 1,
                     _ => t.other += 1,
                 },
                 IterationEvent::InPlace(_) => t.in_place += 1,
+                IterationEvent::InPlaceFragment(_) => t.fragment_in_place += 1,
+                IterationEvent::ReassemblyDropped(_) => t.dropped += 1,
                 _ => {}
             }
             tally.set(t);
@@ -375,6 +437,7 @@ impl Pair {
             acceptor,
             on_event,
             polls,
+            frame_exts,
             initiator: initiator_actions,
             initiator_sink,
             delivered,
@@ -512,9 +575,11 @@ fn a_frame_that_breaks_after_two_records_is_reported_after_what_was_dispatched()
 }
 
 /// A unit the in-place path does not read in place goes down the copying path
-/// and is COUNTED, by why: here a `Fragment`, whose payload belongs to the
-/// reassembly staging. The pump's counts say so; the unit is not read in place.
-#[cfg(feature = "rx-in-place")]
+/// and is COUNTED, by why: here a `Fragment` on a session that does not
+/// reassemble, so has no slot to stage it into. The pump's counts say so; the
+/// unit is not read in place. (A session that reassembles reads it in place:
+/// `fragments` below.)
+#[cfg(all(feature = "rx-in-place", not(feature = "reassembly")))]
 #[test]
 fn a_fragment_takes_the_copying_path_and_is_counted() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
@@ -597,4 +662,314 @@ fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
         "the copying loop pays per frame (datagram copy, payload copy, record list): \
          frame part {frame_part}, frame of 8 {eight} against 8 records of {per_record}"
     );
+}
+
+/// A Frame carrying an extension chain of its own: two unit extensions this
+/// side does not define, neither mandatory, which a participant reads past.
+///
+/// In place, the chain is read and judged where the frame lies and handed over
+/// OWNED only with an owned record, so a frame of Puts with a chain costs the
+/// heap exactly what the same frame without one costs (before, the chain was
+/// owned for every frame: one allocation per frame and one per entry). On both
+/// loops a record handed over owned comes in a `FramePayload` carrying the
+/// chain the copying decode reads, entry for entry.
+#[test]
+fn a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it() {
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let mut pair = Pair::establish(&link, 7503);
+    // Ids 5 and 6, unit encoded, M clear; the first carries the chain flag.
+    const CHAIN: [u8; 2] = [0x80 | 0x05, 0x06];
+
+    let (_, payload) = frame_of(0, 2);
+    let expected = decoded_puts(&payload);
+    let plain = frame_wire(pair.next_sn(), &[], &payload);
+    let (plain_cost, _, got) = pair.turn(&plain);
+    assert_eq!(got, expected);
+    let chained = frame_wire(pair.next_sn(), &CHAIN, &payload);
+    let (chained_cost, _, got) = pair.turn(&chained);
+    assert_eq!(
+        got, expected,
+        "the chain changes nothing the subscriber sees"
+    );
+    std::println!("frame of 2 Puts: {plain_cost} without a chain, {chained_cost} with one");
+    #[cfg(feature = "rx-in-place")]
+    assert_eq!(
+        chained_cost, plain_cost,
+        "in place, a frame whose every record is lent never owns its chain"
+    );
+    #[cfg(not(feature = "rx-in-place"))]
+    assert!(
+        chained_cost > plain_cost,
+        "the copying loop owns the chain of every frame (the instrument's control)"
+    );
+
+    let oam = wz_codecs::oam::Oam {
+        id: 7,
+        ..Default::default()
+    }
+    .encode_to_vec();
+    pair.frame_exts.set(FrameExts::default());
+    let chained = frame_wire(pair.next_sn(), &CHAIN, &oam);
+    let (_, polls, _) = pair.turn(&chained);
+    assert_eq!(
+        polls.frame_payload, 1,
+        "the OAM record is handed over owned"
+    );
+    assert_eq!(
+        pair.frame_exts.get(),
+        FrameExts {
+            has_ext: true,
+            len: 2,
+            headers: [CHAIN[0], CHAIN[1], 0, 0, 0, 0, 0, 0],
+        },
+        "the owned record's FramePayload carries the frame's chain"
+    );
+}
+
+/// ARCHITECTURE section 9.3 on the MCU loop: a fragmented message is copied
+/// ONCE, each fragment's payload from where the socket holds the datagram into
+/// its chain's slot of the session's own `reassembly_pool_mcu` table, and the
+/// completed message is read in that slot.
+///
+/// Measured per fragment turn under the counting allocator: a fragment that
+/// does not complete its chain costs the heap NOTHING, and the turn that
+/// completes it costs exactly what a whole frame of the same Puts costs (the
+/// matcher's growable scratch on the AP backing, nothing on the fixed one).
+/// Before this, each fragment was copied onto the heap, its payload copied
+/// again out of that copy and staged into a growable buffer, and the completed
+/// message copied into a list of owned messages before the first Put reached a
+/// subscriber.
+///
+/// Each delivered payload lies INSIDE the table's slots (the pool's own
+/// `slot_index_of_ptr` confirms the slot), which is the witness that nothing
+/// copied the message out of its slot on the way. What the subscriber is handed
+/// is what the shared batch decoder reads out of the same message, in order.
+#[cfg(all(feature = "rx-in-place", feature = "transport-fragmentation"))]
+mod fragments {
+    use super::*;
+
+    /// The fragmenter's own per-fragment head budget: one header byte and the
+    /// widest SN (`frame_encode`'s `FRAG_HEADER_BUDGET`). A chunk of `c` bytes
+    /// takes an `mtu` of `c` plus this.
+    const HEAD_BUDGET: usize = 1 + 10;
+
+    impl PollTally {
+        fn plus(self, other: Self) -> Self {
+            Self {
+                frame_payload: self.frame_payload + other.frame_payload,
+                in_place: self.in_place + other.in_place,
+                fragment_in_place: self.fragment_in_place + other.fragment_in_place,
+                fragment: self.fragment + other.fragment,
+                dropped: self.dropped + other.dropped,
+                sn_rejected: self.sn_rejected + other.sn_rejected,
+                parse_error: self.parse_error + other.parse_error,
+                other: self.other + other.other,
+            }
+        }
+    }
+
+    /// The fragments the session's own fragmenter writes for `body` (a frame
+    /// payload) in chunks of `chunk` bytes, reliable, on the initiator's next
+    /// SNs, so the acceptor's SN gate admits each as the next.
+    fn chain_of(pair: &Pair, body: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+        let count = body.len().div_ceil(chunk);
+        let base = pair.next_sn();
+        for _ in 1..count {
+            pair.next_sn();
+        }
+        let chain = wz_session_core::frame_encode::fragment_body(
+            body,
+            true,
+            chunk + HEAD_BUDGET,
+            base,
+            pair.initiator.negotiated_sn_mask(),
+            None,
+        );
+        assert_eq!(chain.len(), count, "the fragmenter cut {chunk}-byte chunks");
+        chain
+    }
+
+    /// What [`send`] measured: every turn's allocations, what the turns
+    /// reported summed, what the subscriber was handed on the last turn, and
+    /// the addresses it was handed at.
+    type Sent = (Vec<usize>, PollTally, Vec<(Vec<u8>, String)>, Vec<usize>);
+
+    /// Send `fragments` one turn each, and what that measured ([`Sent`]).
+    fn send(pair: &mut Pair, fragments: &[Vec<u8>]) -> Sent {
+        let mut costs = Vec::with_capacity(fragments.len());
+        let mut tally = PollTally::default();
+        let mut delivered = Vec::new();
+        for fragment in fragments {
+            let (cost, polls, got) = pair.turn(fragment);
+            costs.push(cost);
+            tally = tally.plus(polls);
+            delivered = got;
+        }
+        let at = pair
+            .delivered
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .map(|d| d.3)
+            .collect();
+        (costs, tally, delivered, at)
+    }
+
+    /// The table's slots are all home and the Router holds no chain: the slot
+    /// accounting identity at a quiescent point.
+    fn all_slots_home(pair: &Pair) {
+        let router = pair.acceptor.reassembly();
+        let arena = router.staging();
+        assert_eq!(
+            (
+                router.active_chains(),
+                arena.free_count(),
+                router.staging_available()
+            ),
+            (0, 4, 4),
+            "(chains open, slots on the pool's freelist, slots the arena serves)"
+        );
+    }
+
+    #[test]
+    fn a_fragmented_message_is_staged_once_and_read_in_its_slot() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let mut pair = Pair::establish(&link, 7497);
+        let fixed = wz_session_core::bounded::ENFORCES_CAPACITY;
+        let matcher_scratch = if fixed { 0 } else { 2 };
+        for puts in [1usize, 2, 8] {
+            let (_, body) = frame_of(0, puts);
+            let expected = decoded_puts(&body);
+            // Chains from two fragments (the last one byte) to one per byte.
+            for chunk in [body.len() - 1, body.len() / 2, 7, 3, 2, 1] {
+                let chain = chain_of(&pair, &body, chunk);
+                let before = pair.acceptor.rx_path_counts();
+                let (costs, tally, delivered, at) = send(&mut pair, &chain);
+                let after = pair.acceptor.rx_path_counts();
+                std::println!(
+                    "{puts} Put(s) in {} fragment(s) of {chunk}: allocations per turn {costs:?}",
+                    chain.len()
+                );
+                let (last, staged) = costs.split_last().expect("a chain");
+                assert!(
+                    staged.iter().all(|cost| *cost == 0),
+                    "a fragment that does not complete its chain costs the heap nothing: \
+                     {costs:?} ({puts} Puts, chunk {chunk})"
+                );
+                assert_eq!(
+                    *last,
+                    puts * matcher_scratch,
+                    "the completing turn costs what a whole frame of the same Puts does \
+                     ({puts} Puts, chunk {chunk})"
+                );
+                assert_eq!(delivered, expected, "{puts} Puts, chunk {chunk}");
+                let arena = pair.acceptor.reassembly().staging();
+                assert!(
+                    at.iter()
+                        .all(|addr| arena.slot_of(*addr as *const u8).is_some()),
+                    "every payload was handed over inside a reassembly slot"
+                );
+                assert_eq!(
+                    tally,
+                    PollTally {
+                        in_place: puts,
+                        fragment_in_place: chain.len(),
+                        ..PollTally::default()
+                    },
+                    "{puts} Puts, chunk {chunk}"
+                );
+                assert_eq!(
+                    (
+                        after.fragment_in_place - before.fragment_in_place,
+                        after.copied() - before.copied()
+                    ),
+                    (chain.len() as u32, 0),
+                    "(fragments read in place, units copied)"
+                );
+                all_slots_home(&pair);
+            }
+        }
+    }
+
+    /// The largest message one slot holds is reassembled; one Put more is
+    /// refused at the fragment that crosses the slot, COUNTED, and its slot goes
+    /// home; the next message is reassembled as if nothing had happened.
+    #[test]
+    fn a_message_past_its_slot_is_refused_and_counted() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let mut pair = Pair::establish(&link, 7499);
+        let put_len = frame_of(0, 1).1.len();
+        let fits = 4096 / put_len;
+        // The widest fragment the session socket takes whole: its receive slot
+        // less the fragmenter's head budget (the slim profile's slot is 256).
+        let chunk = wz_link_lwip::rx_sockets::SESSION_RX_SLOT_SIZE - HEAD_BUDGET;
+
+        let (_, body) = frame_of(0, fits);
+        let chain = chain_of(&pair, &body, chunk);
+        let (_, tally, delivered, _) = send(&mut pair, &chain);
+        assert_eq!(delivered.len(), fits, "the fullest slot is reassembled");
+        assert_eq!(tally.dropped, 0);
+        all_slots_home(&pair);
+
+        let (_, body) = frame_of(0, fits + 1);
+        assert!(body.len() > 4096, "one Put more does not fit a slot");
+        let chain = chain_of(&pair, &body, chunk);
+        // Up to the fragment that crosses the slot's end.
+        let crossing = 4096 / chunk + 1;
+        let (_, tally, delivered, _) = send(&mut pair, &chain[..crossing]);
+        assert_eq!(
+            (delivered.len(), tally.dropped),
+            (0, 1),
+            "(Puts delivered, chains dropped)"
+        );
+        all_slots_home(&pair);
+
+        let (_, body) = frame_of(0, 2);
+        let chain = chain_of(&pair, &body, 7);
+        let (_, _, delivered, _) = send(&mut pair, &chain);
+        assert_eq!(delivered, decoded_puts(&body));
+        all_slots_home(&pair);
+    }
+
+    /// A duplicate fragment is refused by the channel's SN gate and CLEARS the
+    /// chain it would have joined (the dbuf-clear both references make); a
+    /// skipped fragment passes the gate and the Router aborts the chain,
+    /// counted. Either way the slot goes home and the next message reassembles.
+    #[test]
+    fn a_duplicate_or_a_gap_ends_the_chain_and_gives_its_slot_back() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let link = Rc::new(link);
+        let mut pair = Pair::establish(&link, 7501);
+        let (_, body) = frame_of(0, 2);
+        let expected = decoded_puts(&body);
+
+        let chain = chain_of(&pair, &body, 7);
+        assert!(chain.len() >= 3);
+        let resent = [chain[0].clone(), chain[1].clone(), chain[1].clone()];
+        let (_, tally, delivered, _) = send(&mut pair, &resent);
+        assert_eq!(
+            (delivered.len(), tally.sn_rejected, tally.fragment_in_place),
+            (0, 1, 2),
+            "(Puts delivered, SN rejections, fragments staged)"
+        );
+        all_slots_home(&pair);
+
+        let chain = chain_of(&pair, &body, 7);
+        let gapped = [chain[0].clone(), chain[2].clone()];
+        let (_, tally, delivered, _) = send(&mut pair, &gapped);
+        assert_eq!(
+            (delivered.len(), tally.dropped),
+            (0, 1),
+            "(Puts delivered, chains dropped)"
+        );
+        all_slots_home(&pair);
+
+        let chain = chain_of(&pair, &body, 7);
+        let (_, _, delivered, _) = send(&mut pair, &chain);
+        assert_eq!(delivered, expected);
+        all_slots_home(&pair);
+    }
 }

@@ -10982,7 +10982,11 @@ layer_c1m_session_lwip() {
     # copying loop, where the count must SEE the per-frame copies (the
     # instrument's control), once on `rx-in-place`, where the per-frame part
     # must be zero. 2 = the file's two tests, the number each command PRINTED.
-    _runci_guarded_test "C1m rx frame copying" 2 \
+    # B3 (runtime-zero-copy) moved every leg of this file up one: a Frame with
+    # its own extension chain owns it only for an owned record
+    # (`a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it`,
+    # ungated; on the copying loop it is the control). 3 = what this PRINTED.
+    _runci_guarded_test "C1m rx frame copying" 3 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put \
         --test rx_frame_allocations --quiet || return 1
@@ -10992,13 +10996,29 @@ layer_c1m_session_lwip() {
     # backing (`bounded-heapless`, the MCU profile's), the one leg where a Put
     # delivered in place must cost the heap NOTHING; on the growable backing
     # above it costs the matcher's two scratch lists. 3 = what each PRINTED.
-    _runci_guarded_test "C1m rx frame in place" 3 \
+    # B3 moved both 3 -> 4 (the extension-chain test above). 4 = what each
+    # PRINTED.
+    _runci_guarded_test "C1m rx frame in place" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
         --test rx_frame_allocations --quiet || return 1
-    _runci_guarded_test "C1m rx frame in place fixed" 3 \
+    _runci_guarded_test "C1m rx frame in place fixed" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,wz-session-core/bounded-heapless \
+        --test rx_frame_allocations --quiet || return 1
+    # B3 — a session that reassembles reads a Fragment in place too: its
+    # payload staged into its slot of the session's own reassembly table
+    # straight from the socket, the completed message read in that slot
+    # (`mod fragments`, gated on `rx-in-place` + `transport-fragmentation`).
+    # The copying-path fragment test gives way to the three fragment tests, on
+    # both backings. 6 = what each PRINTED.
+    _runci_guarded_test "C1m rx fragment in place" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx fragment in place fixed" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation,wz-session-core/bounded-heapless \
         --test rx_frame_allocations --quiet || return 1
     # Clause (4) of runtime-zero-copy -- the library's own tests on `rx-in-place`,
     # which hold a lent frame in the session socket: one of them reads the
@@ -11016,6 +11036,9 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,transport-fragmentation \
             --quiet -- -D warnings) || return 1
     # ARCHITECTURE section 9.1 — the keep-alive cadence with both handshake
     # halves, the combination an MCU node that keeps a session up is built with,

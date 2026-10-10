@@ -67,9 +67,15 @@ pub enum StagingError {
 /// The arena a reassembly Router stages its chains into.
 ///
 /// `SLOTS` and `CAP` are the Router's own dims, restated here so an
-/// implementation can refuse dims it cannot serve (see
-/// [`ChainStaging::new`]) rather than silently serving fewer chains than the
-/// Router will ask for.
+/// implementation can refuse dims it cannot serve (at construction, see
+/// [`BuildsOwnStorage::new`]) rather than silently serving fewer chains than
+/// the Router will ask for.
+///
+/// How an arena is BUILT is not part of this trait. An arena that makes its own
+/// storage says so with [`BuildsOwnStorage`]; one whose storage is handed to it
+/// (a slot table the image placed, which only the image can name) is built by
+/// its own constructor and given to the Router with
+/// [`ReassemblyDispatcher::with_staging`](crate::reassembly_dispatch::ReassemblyDispatcher::with_staging).
 pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// One chain's staging handle. Opaque to the Router, which only ever
     /// passes it back to the arena that produced it.
@@ -78,14 +84,6 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// IS the reservation, and duplicating it would let two chains write the
     /// same bytes.
     type Chain;
-
-    /// Build the arena.
-    ///
-    /// An implementation that cannot serve `SLOTS` chains of `CAP` bytes must
-    /// fail here — at construction, where a deploy can see it — rather than by
-    /// returning `None` from [`Self::acquire`] later, which the Router would
-    /// report as ordinary pool exhaustion and a peer could trigger at will.
-    fn new() -> Self;
 
     /// Reserve staging for a chain that is starting. `None` = the arena is
     /// full.
@@ -192,6 +190,24 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     }
 }
 
+/// An arena that makes its own storage, so a Router can build it unasked
+/// ([`ReassemblyDispatcher::new`](crate::reassembly_dispatch::ReassemblyDispatcher::new)).
+///
+/// Split from [`ChainStaging`] because not every arena can: one whose slot
+/// table the image places and hands in has nothing to build it from, and a
+/// constructor it could not honour would have to invent storage, which is the
+/// hidden table the handing-in exists to avoid.
+pub trait BuildsOwnStorage<const SLOTS: usize, const CAP: usize>: ChainStaging<SLOTS, CAP> {
+    /// Build the arena.
+    ///
+    /// An implementation that cannot serve `SLOTS` chains of `CAP` bytes must
+    /// fail here — at construction, where a deploy can see it — rather than by
+    /// returning `None` from [`ChainStaging::acquire`] later, which the Router
+    /// would report as ordinary pool exhaustion and a peer could trigger at
+    /// will.
+    fn new() -> Self;
+}
+
 /// The default arena: one growable heap buffer per chain, allocated on demand.
 ///
 /// This is what every Router did before the seam existed, preserved exactly —
@@ -229,12 +245,16 @@ pub struct HeapChain<const CAP: usize> {
     reserved: usize,
 }
 
-impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStaging<SLOTS, CAP> {
-    type Chain = HeapChain<CAP>;
-
+impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
+    for HeapStaging<SLOTS, CAP>
+{
     fn new() -> Self {
         Self { outstanding: 0 }
     }
+}
+
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStaging<SLOTS, CAP> {
+    type Chain = HeapChain<CAP>;
 
     fn acquire(&mut self) -> Option<Self::Chain> {
         if self.outstanding >= SLOTS {

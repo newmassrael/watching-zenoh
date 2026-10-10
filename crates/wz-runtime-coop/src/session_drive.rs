@@ -37,6 +37,8 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use wz_runtime_core::TimeSource;
+#[cfg(all(feature = "rx-in-place", not(feature = "reassembly")))]
+use wz_session_core::drive::dispatch_datagram;
 #[cfg(not(feature = "rx-in-place"))]
 use wz_session_core::drive::dispatch_link_event;
 use wz_session_core::drive::SessionEngine;
@@ -46,7 +48,7 @@ use wz_session_core::drive::{
     check_lease_deadline, dispatch_pending, lease_wake_deadline, new_session_engine,
 };
 #[cfg(feature = "rx-in-place")]
-use wz_session_core::drive::{dispatch_datagram, CopyReason, DatagramPath};
+use wz_session_core::drive::{CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 #[cfg(not(feature = "rx-in-place"))]
 use wz_session_core::link::LinkEvent;
@@ -57,8 +59,12 @@ use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
-#[cfg(feature = "reassembly")]
+#[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, ReassemblyArena};
+#[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
 use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
+#[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+use wz_session_core::drive::dispatch_datagram_reassembling;
 #[cfg(feature = "reassembly")]
 use wz_session_core::drive::report_outcome_reassembling;
 // R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
@@ -300,8 +306,14 @@ pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
     clock: CoopTime<C>,
     engine: SessionEngine<CoopRuntime<C>, CoopTime<C>>,
     deadline_tracker: HandshakeDeadlineTracker,
-    #[cfg(feature = "reassembly")]
+    #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
     reasm: CoopReassembly,
+    /// `rx-in-place` — the session's own reassembly Router, staging into the
+    /// slots of a `reassembly_pool_mcu` table this session owns
+    /// ([`ReassemblyArena`]): a fragment is read where the link holds it and
+    /// copied once, into its slot.
+    #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+    reasm: InPlaceReassembly,
     /// `rx-in-place` — the one-record buffer each inbound record is decoded
     /// into and dispatched from. Allocated once, with the pump, for one
     /// record; a datagram costs it nothing however many records it carries.
@@ -325,12 +337,19 @@ pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
 pub struct RxPathCounts {
     /// Units that began with an admissible `Frame`, read in place.
     pub in_place: u32,
+    /// Admissible `Fragment`s, staged into their reassembly slots from where
+    /// the link held them (`reassembly`).
+    pub fragment_in_place: u32,
     /// Compressed batches.
     pub compressed: u32,
     /// Lean lowlatency units.
     pub low_latency: u32,
-    /// `Fragment`s, which go to the reassembly staging.
+    /// `Fragment`s on a session that does not reassemble.
     pub fragment: u32,
+    /// `Fragment`s whose own extension chain a participant must refuse.
+    pub fragment_ext_refused: u32,
+    /// `Fragment`s whose head does not decode.
+    pub fragment_head_undecodable: u32,
     /// Handshake, KeepAlive, Close and every other non-`Frame` unit.
     pub not_a_frame: u32,
     /// `Frame`s whose own extension chain a participant must refuse.
@@ -344,9 +363,14 @@ impl RxPathCounts {
     fn count(&mut self, path: DatagramPath) {
         let slot = match path {
             DatagramPath::InPlace => &mut self.in_place,
+            DatagramPath::FragmentInPlace => &mut self.fragment_in_place,
             DatagramPath::Copied(CopyReason::Compressed) => &mut self.compressed,
             DatagramPath::Copied(CopyReason::LowLatency) => &mut self.low_latency,
             DatagramPath::Copied(CopyReason::Fragment) => &mut self.fragment,
+            DatagramPath::Copied(CopyReason::FragmentExtRefused) => &mut self.fragment_ext_refused,
+            DatagramPath::Copied(CopyReason::FragmentHeadUndecodable) => {
+                &mut self.fragment_head_undecodable
+            }
             DatagramPath::Copied(CopyReason::NotAFrame) => &mut self.not_a_frame,
             DatagramPath::Copied(CopyReason::FrameExtRefused) => &mut self.frame_ext_refused,
             DatagramPath::Copied(CopyReason::FrameHeadUndecodable) => {
@@ -362,6 +386,8 @@ impl RxPathCounts {
             self.compressed,
             self.low_latency,
             self.fragment,
+            self.fragment_ext_refused,
+            self.fragment_head_undecodable,
             self.not_a_frame,
             self.frame_ext_refused,
             self.frame_head_undecodable,
@@ -387,6 +413,11 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// frame for the life of the session, because ARMv6-M codegen does not
     /// overlay a dead temporary. Out of line, the temporary is this function's
     /// and is gone when it returns.
+    ///
+    /// `rx-in-place` with `reassembly`: the session stages its fragments into a
+    /// reassembly table of its OWN, allocated here once
+    /// ([`PoolStorage::owned`]); [`Self::with_reassembly_arena`] takes one the
+    /// image placed instead.
     #[inline(never)]
     pub fn new(
         runtime: CoopRuntime<C>,
@@ -394,6 +425,61 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
+    ) -> Self {
+        Self::build(
+            runtime,
+            link,
+            actions,
+            clock,
+            config,
+            #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
+            mcu_reassembly(),
+            #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+            in_place_reassembly(ReassemblyArena::new(PoolStorage::owned())),
+        )
+    }
+
+    /// [`Self::new`] over a reassembly arena the caller built: the image hands
+    /// the session the table it placed ([`PoolStorage::Static`]), one per
+    /// session, so two sessions in one program each stage into their own.
+    #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+    #[inline(never)]
+    pub fn with_reassembly_arena(
+        runtime: CoopRuntime<C>,
+        link: L,
+        actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+        clock: CoopTime<C>,
+        config: SessionDriveConfig,
+        arena: ReassemblyArena,
+    ) -> Self {
+        Self::build(
+            runtime,
+            link,
+            actions,
+            clock,
+            config,
+            in_place_reassembly(arena),
+        )
+    }
+
+    /// `rx-in-place` with `reassembly` — the session's reassembly Router, and
+    /// through it the arena and its table (slot accounting, the address
+    /// witness of a delivered payload).
+    #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
+    pub fn reassembly(&self) -> &InPlaceReassembly {
+        &self.reasm
+    }
+
+    /// What [`Self::new`] and [`Self::with_reassembly_arena`] share.
+    #[inline(always)]
+    fn build(
+        runtime: CoopRuntime<C>,
+        link: L,
+        actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+        clock: CoopTime<C>,
+        config: SessionDriveConfig,
+        #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
+        #[cfg(all(feature = "reassembly", feature = "rx-in-place"))] reasm: InPlaceReassembly,
     ) -> Self {
         let SessionDriveConfig {
             timeouts,
@@ -421,7 +507,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             engine,
             deadline_tracker: HandshakeDeadlineTracker::new(timeouts),
             #[cfg(feature = "reassembly")]
-            reasm: mcu_reassembly(),
+            reasm,
             #[cfg(feature = "rx-in-place")]
             record: Vec::with_capacity(1),
             #[cfg(feature = "rx-in-place")]
@@ -519,19 +605,23 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             let paths = &mut self.rx_paths;
             #[cfg(feature = "reassembly")]
             let reasm = &mut self.reasm;
+            // With `reassembly` a Fragment is read in place too: its payload is
+            // staged into its slot from where the link holds it, and a chain
+            // it completes is read in that slot; every outcome goes through
+            // the reassembly hand-off.
             let received = link.recv_with(&mut |unit| {
-                let path =
-                    dispatch_datagram(unit, actions, engine, record, &mut |event| match event {
-                        #[cfg(feature = "reassembly")]
-                        IterationEvent::Poll(outcome) => report_outcome_reassembling(
-                            outcome,
-                            reasm,
-                            actions,
-                            now_ms,
-                            &mut *on_event,
-                        ),
-                        other => on_event(other),
-                    });
+                #[cfg(feature = "reassembly")]
+                let path = dispatch_datagram_reassembling(
+                    unit,
+                    actions,
+                    engine,
+                    record,
+                    reasm,
+                    now_ms,
+                    &mut *on_event,
+                );
+                #[cfg(not(feature = "reassembly"))]
+                let path = dispatch_datagram(unit, actions, engine, record, &mut *on_event);
                 paths.count(path);
             });
             if received {

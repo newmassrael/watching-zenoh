@@ -964,6 +964,11 @@ fn refuse_frame<R: SessionRuntime, T: TimeSource>(
 pub enum DatagramPath {
     /// The unit began with an admissible `Frame` and was read where it lies.
     InPlace,
+    /// The unit was an admissible `Fragment` and its payload was staged into
+    /// its reassembly slot from where the unit lies
+    /// ([`dispatch_datagram_reassembling`]); a chain it completed was read in
+    /// that slot.
+    FragmentInPlace,
     /// The unit was copied onto the heap and dispatched by
     /// [`dispatch_link_event`], for the reason given.
     Copied(CopyReason),
@@ -981,8 +986,16 @@ pub enum CopyReason {
     Compressed,
     /// A lean lowlatency unit, which carries no `Frame` envelope.
     LowLatency,
-    /// A `Fragment`, whose payload goes to the reassembly staging.
+    /// A `Fragment` on a path that holds no reassembly Router
+    /// ([`dispatch_datagram`]); [`dispatch_datagram_reassembling`] stages one
+    /// in place.
     Fragment,
+    /// A `Fragment` whose own extension chain a participant must refuse: the
+    /// FSM's `framing.error` arm is the copying path's.
+    FragmentExtRefused,
+    /// A `Fragment` whose head does not decode: the copying path decodes it
+    /// again and reports the error the way it always has.
+    FragmentHeadUndecodable,
     /// A handshake, KeepAlive or Close, or any other unit that does not begin
     /// with a `Frame`: its state changes and residue parking are the copying
     /// path's.
@@ -1012,6 +1025,19 @@ const PUSH_FORM: crate::network_message::PushForm = if cfg!(feature = "transport
 /// Without a Push codec there is no Push to lend.
 #[cfg(all(feature = "codec-frame", not(feature = "codec-push")))]
 const PUSH_FORM: crate::network_message::PushForm = crate::network_message::PushForm::Owned;
+
+/// How [`dispatch_datagram_reassembling`] hands over a Push record of a message
+/// it reassembled: as a `Frame`'s, except under `routing-namespace`, whose
+/// copying path strips the namespace off the reassembled message's owned
+/// outcome before the fan-out. A lent Push has no owned outcome to strip, so
+/// that build keeps the owned form here and the strip is not skipped.
+#[cfg(feature = "reassembly")]
+const REASSEMBLED_PUSH_FORM: crate::network_message::PushForm =
+    if cfg!(feature = "routing-namespace") {
+        crate::network_message::PushForm::Owned
+    } else {
+        PUSH_FORM
+    };
 
 /// Dispatch one inbound datagram that the link LENDS, where it lies, and hand
 /// every event to `on_event` as it happens.
@@ -1069,23 +1095,137 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
     on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
 ) -> DatagramPath {
-    use crate::driver_loop::IterationEvent;
-    use crate::network_message::WalkedRecord;
-    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let (head, payload_at) = match in_place_frame(unit, actions) {
-        Ok(found) => found,
-        Err(reason) => {
-            let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
-            on_event(IterationEvent::Poll(&dispatch_link_event(
-                LinkEvent::Rx(frame),
-                actions,
-                engine,
-            )));
-            return DatagramPath::Copied(reason);
+    match in_place_unit(unit, actions, false) {
+        Ok(InPlaceUnit::Frame(head, payload_at)) => {
+            frame_in_place(unit, head, payload_at, actions, engine, record, on_event)
         }
-    };
-    // The accounting `dispatch_link_event` and `dispatch_unit` do for a unit
-    // and the one transport message decoded off its front.
+        // Not produced when fragments are not asked for; were it, a path with
+        // no Router to stage it into copies it, which is the answer below.
+        #[cfg(feature = "reassembly")]
+        Ok(InPlaceUnit::Fragment(..)) => {
+            dispatch_copied(unit, CopyReason::Fragment, actions, engine, on_event)
+        }
+        Err(reason) => dispatch_copied(unit, reason, actions, engine, on_event),
+    }
+}
+
+/// [`dispatch_datagram`] for a session that reassembles: the same path for
+/// every unit, and a `Fragment` is read where it lies too, its payload staged
+/// into its chain's slot in `reasm` straight from the unit. ARCHITECTURE
+/// section 9.3 allows that one copy and this path makes no other:
+///
+/// - the head (SN, extension chain, R and M bits) is decoded where the unit
+///   lies, and its chain is kept as header bytes, so reading it allocates
+///   nothing;
+/// - the fragment passes the gates the copying path's `Fragment` arm runs, in
+///   its order: a prioritized fragment on a session that negotiated no QoS is
+///   link-fatal, and a stale, duplicate or reordered SN is dropped and clears
+///   its channel's chain (the dbuf-clear [`report_outcome_reassembling`] makes);
+/// - it is reported to `on_event` as
+///   [`IterationEvent::InPlaceFragment`], a borrowed descriptor of the unit and where its payload starts, in place of
+///   the copying path's `Poll(Fragment)`, whose payload is an owned copy;
+/// - its payload goes to the Router, which copies it into the chain's slot;
+/// - a chain it completes is read IN ITS SLOT, borrowed for the delivery call,
+///   record by record as a `Frame`'s payload is: a Push is lent where the slot
+///   holds it, any other record decoded into `record`. The copying path decodes
+///   the whole message into a list first, out of a copy of the slot.
+///
+/// Every other unit takes the path [`dispatch_datagram`] takes, and every
+/// `Poll` it reports goes through [`report_outcome_reassembling`], as the
+/// copying loop's outcomes do, so an SN rejection on a `Frame` clears its
+/// channel's chain too.
+///
+/// One difference from the copying path is deliberate, and it is the frame
+/// path's: a completed message's records are dispatched as they are decoded, so
+/// a record that does not decode is reported after the records before it. The
+/// copying path refuses the whole reassembled message first. Neither takes
+/// `framing.error` for a reassembled message that does not decode; both report
+/// the error and drop it, as upstream drops a reassembled message it cannot
+/// read.
+#[cfg(feature = "reassembly")]
+pub fn dispatch_datagram_reassembling<R, T, const SLOTS: usize, const CAP: usize, S>(
+    unit: &[u8],
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    now_ms: u64,
+    on_event: &mut dyn FnMut(IterationEvent<'_>),
+) -> DatagramPath
+where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+{
+    match in_place_unit(unit, actions, true) {
+        Ok(InPlaceUnit::Fragment(head, payload_at)) => fragment_in_place(
+            unit, head, payload_at, actions, engine, record, reasm, now_ms, on_event,
+        ),
+        Ok(InPlaceUnit::Frame(head, payload_at)) => frame_in_place(
+            unit,
+            head,
+            payload_at,
+            actions,
+            engine,
+            record,
+            &mut through_hand_off(reasm, actions, now_ms, on_event),
+        ),
+        Err(reason) => dispatch_copied(
+            unit,
+            reason,
+            actions,
+            engine,
+            &mut through_hand_off(reasm, actions, now_ms, on_event),
+        ),
+    }
+}
+
+/// `on_event` with every `Poll` passed through [`report_outcome_reassembling`]
+/// on its way, as the copying loop reports its outcomes.
+#[cfg(feature = "reassembly")]
+fn through_hand_off<'a, R, T, const SLOTS: usize, const CAP: usize, S>(
+    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    actions: &'a SessionLinkActions<R, T>,
+    now_ms: u64,
+    on_event: &'a mut dyn FnMut(IterationEvent<'_>),
+) -> impl FnMut(IterationEvent<'_>) + 'a
+where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+{
+    move |event: IterationEvent<'_>| match event {
+        IterationEvent::Poll(outcome) => {
+            report_outcome_reassembling(outcome, reasm, actions, now_ms, &mut *on_event)
+        }
+        other => on_event(other),
+    }
+}
+
+/// The copying path for a unit [`dispatch_datagram`] does not read in place:
+/// the unit copied onto the heap and dispatched by [`dispatch_link_event`].
+#[cfg(feature = "codec-frame")]
+fn dispatch_copied<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    reason: CopyReason,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+) -> DatagramPath {
+    let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
+    on_event(crate::driver_loop::IterationEvent::Poll(
+        &dispatch_link_event(LinkEvent::Rx(frame), actions, engine),
+    ));
+    DatagramPath::Copied(reason)
+}
+
+/// The accounting `dispatch_link_event` and `dispatch_unit` do for a unit and
+/// the one transport message decoded off its front, for a unit read in place.
+#[cfg(feature = "codec-frame")]
+fn account_unit_in_place<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    actions: &SessionLinkActions<R, T>,
+) {
     #[cfg(feature = "transport-stats")]
     {
         actions.stats.inc_rx(unit.len());
@@ -1095,19 +1235,121 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
         });
         count_rx_transport_message(actions);
     }
+    #[cfg(not(feature = "transport-stats"))]
+    let _ = (unit, actions);
+}
+
+/// The admissible `Frame` at the front of a unit, read where it lies.
+#[cfg(feature = "codec-frame")]
+fn frame_in_place<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    head: crate::inbound::FrameHead<crate::inbound::InPlaceExtChain>,
+    payload_at: usize,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+) -> DatagramPath {
+    use crate::driver_loop::IterationEvent;
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    account_unit_in_place(unit, actions);
     actions.stamp_rx_activity();
+    let priority = head.priority();
     let crate::inbound::FrameHead {
         reliable,
         sn,
         has_ext,
-        extensions,
-        priority,
+        chain,
     } = head;
     if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
         on_event(IterationEvent::Poll(&refused));
         return DatagramPath::InPlace;
     }
-    let mut outcome = DriverLoopOutcome::FramePayload {
+    let carrier = RecordCarrier {
+        reliable,
+        sn,
+        priority,
+        has_ext,
+    };
+    // The frame's own chain is handed over owned only with an owned record:
+    // a frame whose every record is lent never owns it.
+    let walked = walk_records_in_place(
+        &unit[payload_at..],
+        carrier,
+        &mut || chain.owned(unit, payload_at),
+        PUSH_FORM,
+        RecordSource::Frame,
+        actions,
+        record,
+        on_event,
+    );
+    if let Err(parse_err) = walked {
+        engine.process_event(E::FramingError);
+        on_event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
+            parse_err,
+        )));
+    }
+    DatagramPath::InPlace
+}
+
+/// What every event of a record walk reports of the message the records came
+/// in: a `Frame`'s own SN, reliability and priority, and whether it carried an
+/// extension chain, or those of the fragment that completed a reassembled one.
+#[cfg(feature = "codec-frame")]
+#[derive(Clone, Copy)]
+struct RecordCarrier {
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    has_ext: bool,
+}
+
+/// Where a walk's records came from, which decides the two things the copying
+/// paths do differently for the two: a `Frame`'s messages are counted
+/// (`transport-stats`), a reassembled message's are stripped of the routing
+/// namespace (`routing-namespace`), each as its copying path does it.
+#[cfg(feature = "codec-frame")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordSource {
+    Frame,
+    #[cfg(feature = "reassembly")]
+    Reassembled,
+}
+
+/// Decode `payload`'s records one at a time where they lie and hand each to
+/// `on_event` before the next is decoded: a Push lent (`form` permitting) as
+/// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace), any
+/// other record as a `Poll(FramePayload)` of the one owned message, decoded
+/// into `record`. A payload with no record is reported as one `FramePayload`
+/// with none, as the copying paths report it.
+///
+/// `extensions` yields the carrier's own chain, owned; it is asked once, and
+/// only when an owned outcome is built. An error, from a record or from the
+/// chain, ends the walk after the records before it were handed over.
+#[cfg(feature = "codec-frame")]
+#[allow(clippy::too_many_arguments)]
+fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
+    payload: &[u8],
+    carrier: RecordCarrier,
+    extensions: &mut dyn FnMut() -> Result<
+        alloc::vec::Vec<wz_codecs::ext_entry::ExtEntryOwned>,
+        crate::parse_error::InboundParseError,
+    >,
+    form: crate::network_message::PushForm,
+    source: RecordSource,
+    actions: &SessionLinkActions<R, T>,
+    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+) -> Result<(), crate::parse_error::InboundParseError> {
+    use crate::driver_loop::IterationEvent;
+    use crate::network_message::WalkedRecord;
+    let RecordCarrier {
+        reliable,
+        sn,
+        priority,
+        has_ext,
+    } = carrier;
+    let empty = |extensions| DriverLoopOutcome::FramePayload {
         reliable,
         sn,
         messages: alloc::vec::Vec::new(),
@@ -1115,49 +1357,178 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
         extensions,
         priority,
     };
+    let mut outcome: Option<DriverLoopOutcome> = None;
     let mut dispatched = false;
-    let walked =
-        crate::network_message::for_each_record(&unit[payload_at..], record, PUSH_FORM, |one| {
-            match one {
-                WalkedRecord::Owned(one) => {
-                    if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
-                        core::mem::swap(messages, one);
+    crate::network_message::try_for_each_record(payload, record, form, |one| {
+        match one {
+            WalkedRecord::Owned(one) => {
+                let outcome = match &mut outcome {
+                    Some(outcome) => outcome,
+                    None => outcome.insert(empty(extensions()?)),
+                };
+                if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
+                    core::mem::swap(messages, one);
+                    if source == RecordSource::Frame {
                         *messages = count_rx_network_messages(actions, core::mem::take(messages));
                     }
-                    on_event(IterationEvent::Poll(&outcome));
-                    if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
-                        core::mem::swap(messages, one);
-                    }
                 }
-                #[cfg(feature = "codec-push")]
-                WalkedRecord::Push(push) => on_event(IterationEvent::InPlace(
-                    crate::driver_loop::InPlaceRecord::push_of_frame(push, reliable, sn, priority),
-                )),
+                // The reassembled message's copying path strips the namespace
+                // off its outcome before the fan-out; so does this one.
+                #[cfg(all(feature = "reassembly", feature = "routing-namespace"))]
+                if source == RecordSource::Reassembled {
+                    actions.apply_namespace_ingress(outcome);
+                }
+                on_event(IterationEvent::Poll(outcome));
+                if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
+                    core::mem::swap(messages, one);
+                }
             }
-            dispatched = true;
-        });
-    match walked {
-        Ok(()) if !dispatched => on_event(IterationEvent::Poll(&outcome)),
-        Ok(()) => {}
-        Err(parse_err) => {
-            engine.process_event(E::FramingError);
-            on_event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
-                parse_err,
-            )));
+            #[cfg(feature = "codec-push")]
+            WalkedRecord::Push(push) => on_event(IterationEvent::InPlace(
+                crate::driver_loop::InPlaceRecord::push_of_frame(push, reliable, sn, priority),
+            )),
         }
+        dispatched = true;
+        Ok(())
+    })?;
+    if !dispatched {
+        on_event(IterationEvent::Poll(&empty(extensions()?)));
     }
-    DatagramPath::InPlace
+    Ok(())
 }
 
-/// The admissible `Frame` at the front of `unit`, decoded up to its payload,
-/// when [`dispatch_datagram`] may read it where it lies; otherwise why the unit
-/// goes down the copying path. A head that does not decode is also the copying
-/// path's: it decodes it again and reports the error the way it always has.
+/// The admissible `Fragment` at the front of a unit, staged into its chain's
+/// slot from where it lies ([`dispatch_datagram_reassembling`]).
+#[cfg(feature = "reassembly")]
+#[allow(clippy::too_many_arguments)]
+fn fragment_in_place<R, T, const SLOTS: usize, const CAP: usize, S>(
+    unit: &[u8],
+    head: crate::inbound::FragmentHead<crate::inbound::InPlaceExtChain>,
+    payload_at: usize,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    now_ms: u64,
+    on_event: &mut dyn FnMut(IterationEvent<'_>),
+) -> DatagramPath
+where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+{
+    account_unit_in_place(unit, actions);
+    actions.stamp_rx_activity();
+    let priority = head.priority();
+    let markers = head.markers();
+    let crate::inbound::FragmentHead {
+        reliable,
+        sn,
+        more,
+        has_ext,
+        ..
+    } = head;
+    // The copying `Fragment` arm's two gates, in its order; an SN rejection
+    // reaches the hand-off, which clears the channel's chain.
+    if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
+        report_outcome_reassembling(&refused, reasm, actions, now_ms, &mut *on_event);
+        return DatagramPath::FragmentInPlace;
+    }
+    on_event(IterationEvent::InPlaceFragment(
+        crate::driver_loop::InPlaceFragment::new(
+            unit, payload_at, reliable, sn, more, has_ext, priority, markers,
+        ),
+    ));
+    // Armed from the negotiated patch level, as the copying hand-off arms it.
+    reasm.set_fragmentation_markers(actions.fragmentation_markers_negotiated());
+    let sn_mask = actions.negotiated_sn_mask();
+    // The chain key's peer half, copied out of the session's slot first: the
+    // Router delivers a completed chain from inside the ingest, and what the
+    // delivery dispatches must not run under that slot's lock. The Router keys
+    // a chain on at most this many bytes of it.
+    let mut peer = [0u8; crate::reassembly_dispatch::PEER_KEY_MAX];
+    let peer_len = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+        let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
+        let n = zid.len().min(peer.len());
+        peer[..n].copy_from_slice(&zid[..n]);
+        n
+    });
+    let mut dropped_by_decode = None;
+    let ingest_outcome = reasm.ingest(
+        ReassemblyFragment {
+            peer_key: &peer[..peer_len],
+            reliable,
+            sn,
+            more: u8::from(more),
+            payload: &unit[payload_at..],
+            priority,
+            markers,
+        },
+        sn_mask,
+        now_ms,
+        |message| {
+            // ARCHITECTURE section 9.3: the completed message is read in the
+            // slot its fragments were staged into, borrowed for this call.
+            let carrier = RecordCarrier {
+                reliable,
+                sn,
+                priority,
+                has_ext: false,
+            };
+            dropped_by_decode = walk_records_in_place(
+                message,
+                carrier,
+                &mut || Ok(alloc::vec::Vec::new()),
+                REASSEMBLED_PUSH_FORM,
+                RecordSource::Reassembled,
+                actions,
+                record,
+                &mut *on_event,
+            )
+            .err();
+        },
+    );
+    // A reassembled message that does not decode is reported and dropped; the
+    // session goes on, as on the copying path.
+    if let Some(parse_err) = dropped_by_decode {
+        on_event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
+            parse_err,
+        )));
+    }
+    if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
+        on_event(IterationEvent::ReassemblyDropped(reason));
+    }
+    DatagramPath::FragmentInPlace
+}
+
+/// What the in-place receive path reads at the front of a unit: an admissible
+/// `Frame`, or (on a path that reassembles) an admissible `Fragment`, each
+/// decoded up to its payload, with the offset at which the payload starts.
 #[cfg(feature = "codec-frame")]
-fn in_place_frame<R: SessionRuntime, T: TimeSource>(
+enum InPlaceUnit {
+    Frame(
+        crate::inbound::FrameHead<crate::inbound::InPlaceExtChain>,
+        usize,
+    ),
+    #[cfg(feature = "reassembly")]
+    Fragment(
+        crate::inbound::FragmentHead<crate::inbound::InPlaceExtChain>,
+        usize,
+    ),
+}
+
+/// The unit at `unit`'s front when [`dispatch_datagram`] may read it where it
+/// lies, a `Fragment` only when `fragments` asks for one (a path that holds a
+/// Router to stage it into); otherwise why the unit goes down the copying path.
+/// A head that does not decode is also the copying path's: it decodes it again
+/// and reports the error the way it always has.
+#[cfg(feature = "codec-frame")]
+fn in_place_unit<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-) -> Result<(crate::inbound::FrameHead, usize), CopyReason> {
+    fragments: bool,
+) -> Result<InPlaceUnit, CopyReason> {
+    use crate::ext_admit::ExtAdmission;
     // The compressed batch is un-wrapped into a buffer of its own, and a lean
     // lowlatency unit carries no Frame envelope: both are the copying path's.
     #[cfg(feature = "transport-compression")]
@@ -1170,24 +1541,31 @@ fn in_place_frame<R: SessionRuntime, T: TimeSource>(
     }
     #[cfg(not(any(feature = "transport-compression", feature = "transport-lowlatency")))]
     let _ = actions;
-    let Some(head) = crate::inbound::parse_frame_in_place(unit) else {
-        let fragment =
-            unit.first().map(|h| h & 0x1F) == Some(wz_codecs::wire_const::T_MID_FRAGMENT);
-        return Err(if fragment {
-            CopyReason::Fragment
-        } else {
-            CopyReason::NotAFrame
-        });
-    };
-    let (head, payload_at) = head.map_err(|_| CopyReason::FrameHeadUndecodable)?;
-    if matches!(
-        head.ext_admission(),
-        crate::ext_admit::ExtAdmission::Admissible
-    ) {
-        Ok((head, payload_at))
-    } else {
-        Err(CopyReason::FrameExtRefused)
+    if let Some(head) = crate::inbound::parse_frame_in_place(unit) {
+        let (head, payload_at) = head.map_err(|_| CopyReason::FrameHeadUndecodable)?;
+        return match head.ext_admission() {
+            ExtAdmission::Admissible => Ok(InPlaceUnit::Frame(head, payload_at)),
+            _ => Err(CopyReason::FrameExtRefused),
+        };
     }
+    #[cfg(feature = "reassembly")]
+    if fragments {
+        if let Some(head) = crate::inbound::parse_fragment_in_place(unit) {
+            let (head, payload_at) = head.map_err(|_| CopyReason::FragmentHeadUndecodable)?;
+            return match head.ext_admission() {
+                ExtAdmission::Admissible => Ok(InPlaceUnit::Fragment(head, payload_at)),
+                _ => Err(CopyReason::FragmentExtRefused),
+            };
+        }
+    }
+    #[cfg(not(feature = "reassembly"))]
+    let _ = fragments;
+    let fragment = unit.first().map(|h| h & 0x1F) == Some(wz_codecs::wire_const::T_MID_FRAGMENT);
+    Err(if fragment {
+        CopyReason::Fragment
+    } else {
+        CopyReason::NotAFrame
+    })
 }
 /// R77/R84 — compare the session's lease baseline against `params.lease` and
 /// inject `SessionFsmUnicastEvent::LeaseExpired` when the window has elapsed,
@@ -1794,7 +2172,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
-    F: FnMut(IterationEvent<'_>),
+    F: FnMut(IterationEvent<'_>) + ?Sized,
 {
     on_event(IterationEvent::Poll(outcome));
     // R311ke — a channel-gate rejection clears that channel's in-progress

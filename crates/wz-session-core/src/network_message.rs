@@ -617,12 +617,29 @@ pub(crate) enum WalkedRecord<'r> {
 /// A lent Push is judged by the same rule as an owned one
 /// (`judge_push_chains`), so an extension a participant must refuse ends the
 /// walk at the same record on both forms.
-#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+#[cfg(all(feature = "codec-frame", test))]
 pub(crate) fn for_each_record(
     payload: &[u8],
     record: &mut Vec<NetworkMessage>,
     form: PushForm,
     mut each: impl FnMut(WalkedRecord<'_>),
+) -> Result<(), crate::parse_error::InboundParseError> {
+    try_for_each_record(payload, record, form, |one| {
+        each(one);
+        Ok(())
+    })
+}
+
+/// [`for_each_record`] whose consumer may END the walk: an `Err` from `each`
+/// stops it after that record, and is the walk's answer. What a receive path
+/// needs when handing a record over can itself fail (the owned extension chain
+/// of the `Frame` it came in, made only when an owned record needs it).
+#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+pub(crate) fn try_for_each_record(
+    payload: &[u8],
+    record: &mut Vec<NetworkMessage>,
+    form: PushForm,
+    mut each: impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     use crate::parse_error::InboundParseError;
     // Without a Push codec there is nothing to lend, and every form is owned.
@@ -643,7 +660,7 @@ pub(crate) fn for_each_record(
             {
                 return Err(InboundParseError::UnknownMandatoryExt { eid });
             }
-            each(WalkedRecord::Push(&push));
+            each(WalkedRecord::Push(&push))?;
             continue;
         }
         let known =
@@ -655,7 +672,10 @@ pub(crate) fn for_each_record(
             record.clear();
             return Err(refusal);
         }
-        each(WalkedRecord::Owned(record));
+        if let Err(stop) = each(WalkedRecord::Owned(record)) {
+            record.clear();
+            return Err(stop);
+        }
         if !known {
             break;
         }

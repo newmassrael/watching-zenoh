@@ -60,7 +60,7 @@
 
 use wz_codecs::ext_entry::ExtEntryOwned;
 
-use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
+use crate::unit_ext::encode_unit_ext;
 
 /// `fragment::ext::First` — `zextunit!(0x2, false)`. Marks the leading
 /// fragment of a chain. Header byte on the wire is exactly `0x02` (UNIT
@@ -114,9 +114,27 @@ pub fn encode_fragment_drop_ext() -> ExtEntryOwned {
 /// [`crate::unit_ext::chain_has_ext_eid`]), so a z64-bodied entry that
 /// merely shares the 4-bit id field is not read as the unit marker.
 pub fn project_markers(extensions: &[ExtEntryOwned]) -> FragmentMarkers {
-    FragmentMarkers {
-        first: chain_has_ext_eid(extensions, FRAGMENT_FIRST_EXT_ID),
-        dropped: chain_has_ext_eid(extensions, FRAGMENT_DROP_EXT_ID),
+    FragmentMarkers::from_headers(extensions.iter().map(|ext| ext.header))
+}
+
+impl FragmentMarkers {
+    /// The markers a chain carries, read off its entries' header bytes alone,
+    /// which is all the projection reads: the one rule behind
+    /// [`project_markers`] and behind a Fragment read where it lies, whose chain
+    /// is kept as its headers and never owned. Matches on the extension
+    /// identity ([`crate::ext_header::ext_eid`]) as
+    /// [`crate::unit_ext::chain_has_ext_eid`] does, so a z64-bodied entry that
+    /// merely shares the 4-bit id field is not read as the unit marker.
+    pub fn from_headers(headers: impl IntoIterator<Item = u8>) -> Self {
+        let first = crate::ext_header::ext_eid(FRAGMENT_FIRST_EXT_ID);
+        let dropped = crate::ext_header::ext_eid(FRAGMENT_DROP_EXT_ID);
+        headers
+            .into_iter()
+            .map(crate::ext_header::ext_eid)
+            .fold(Self::NONE, |markers, eid| Self {
+                first: markers.first || eid == first,
+                dropped: markers.dropped || eid == dropped,
+            })
     }
 }
 

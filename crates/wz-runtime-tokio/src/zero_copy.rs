@@ -78,7 +78,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use wz_session_core::chain_staging::{ChainStaging, StagingError};
+use wz_session_core::chain_staging::{BuildsOwnStorage, ChainStaging, StagingError};
 use wz_session_core::link::{RxBytes, RxStorage};
 
 use crate::reassembly_pool_ap::{CpuMut, ReassemblyPoolAp, Slot, SLOT_COUNT, SLOT_SIZE};
@@ -194,7 +194,7 @@ impl Lent {
 /// per in-flight chain.
 ///
 /// `SLOTS` / `CAP` are the Router's dims and are checked against the pool's own
-/// in [`ChainStaging::new`], so a Router asking for more than the SCXML
+/// in [`BuildsOwnStorage::new`], so a Router asking for more than the SCXML
 /// declares fails at construction rather than by refusing chains at runtime.
 pub struct PooledStaging<const SLOTS: usize, const CAP: usize> {
     home: Arc<PoolHome>,
@@ -321,9 +321,9 @@ impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
     // arithmetic on the slot.
 }
 
-impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledStaging<SLOTS, CAP> {
-    type Chain = PooledChain;
-
+impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
+    for PooledStaging<SLOTS, CAP>
+{
     fn new() -> Self {
         assert!(
             SLOTS <= SLOT_COUNT,
@@ -341,6 +341,10 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
             staged: 0,
         }
     }
+}
+
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledStaging<SLOTS, CAP> {
+    type Chain = PooledChain;
 
     fn acquire(&mut self) -> Option<Self::Chain> {
         // A slot whose last range dropped since the previous acquire is the
@@ -607,7 +611,7 @@ mod tests {
     /// one-liner it looks like it should be.
     #[test]
     fn a_debug_build_can_construct_the_ap_pool() {
-        let arena: PooledStaging<SLOT_COUNT, SLOT_SIZE> = ChainStaging::new();
+        let arena: PooledStaging<SLOT_COUNT, SLOT_SIZE> = BuildsOwnStorage::new();
         assert_eq!(arena.free_count(), SLOT_COUNT);
         assert_eq!(
             ChainStaging::<SLOT_COUNT, SLOT_SIZE>::available(&arena),
@@ -642,7 +646,7 @@ mod tests {
     /// The address is the one observable the copy cannot reproduce.
     #[test]
     fn a_pooled_buf_is_the_chains_own_bytes_rather_than_a_copy() {
-        let mut arena: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut arena: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut chain = ChainStaging::<SLOTS, CAP>::acquire(&mut arena).expect("slots");
 
         let lent = ChainStaging::<SLOTS, CAP>::buf(&mut arena, &mut chain, 8).expect("room for 8");
@@ -677,14 +681,14 @@ mod tests {
     /// separate tests could each pass while the arenas disagreed.
     #[test]
     fn a_short_fill_stages_only_what_was_written_on_both_arenas() {
-        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut pooled_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
         let lent = ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut pooled_chain, 8).expect("8");
         lent[..3].copy_from_slice(b"abc");
         ChainStaging::<SLOTS, CAP>::commit(&mut pooled, &mut pooled_chain, 3).expect("3 of 8");
         let from_pool = ChainStaging::<SLOTS, CAP>::bytes(&pooled, &pooled_chain).to_vec();
 
-        let mut heaped: HeapStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut heaped: HeapStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut heap_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut heaped).expect("slots");
         let lent = ChainStaging::<SLOTS, CAP>::buf(&mut heaped, &mut heap_chain, 8).expect("8");
         lent[..3].copy_from_slice(b"abc");
@@ -706,12 +710,12 @@ mod tests {
     /// started; the pooled one would stage slot bytes nobody wrote.
     #[test]
     fn commit_refuses_more_than_was_lent_on_both_arenas() {
-        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut pooled_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
         ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut pooled_chain, 4).expect("4");
         assert!(ChainStaging::<SLOTS, CAP>::commit(&mut pooled, &mut pooled_chain, 5).is_err());
 
-        let mut heaped: HeapStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut heaped: HeapStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut heap_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut heaped).expect("slots");
         ChainStaging::<SLOTS, CAP>::buf(&mut heaped, &mut heap_chain, 4).expect("4");
         assert!(ChainStaging::<SLOTS, CAP>::commit(&mut heaped, &mut heap_chain, 5).is_err());
@@ -735,7 +739,7 @@ mod tests {
     /// rule and would pass for the wrong reason.
     #[test]
     fn a_reservation_past_the_cap_is_refused() {
-        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled: PooledStaging<SLOTS, CAP> = BuildsOwnStorage::new();
         let mut chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
 
         ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut chain, CAP)

@@ -424,6 +424,119 @@ pub enum IterationEvent<'a> {
     /// the other variants, so every consumer's match stays feature-independent;
     /// only the producer is gated. `Copy`.
     InPlace(InPlaceRecord<'a>),
+    /// ARCHITECTURE section 9.3 — one inbound `Fragment` read where its unit
+    /// lies, its payload staged into its reassembly slot straight from there:
+    /// what the reassembling in-place receive path
+    /// (`drive::dispatch_datagram_reassembling`, reached under
+    /// `wz-runtime-coop`'s `rx-in-place` with `reassembly`) reports in place of
+    /// `Poll(DriverLoopOutcome::Fragment)`, whose payload is an owned copy.
+    ///
+    /// Carries a borrowed descriptor, not the payload's bytes: the unit and
+    /// where in it the payload starts, valid for the call only. A consumer that
+    /// counts or inspects fragments reads this variant as it reads
+    /// `Poll(Fragment)` on the copying path. A chain the fragment completes
+    /// arrives after it, as `InPlace` and `Poll(FramePayload)` events read in
+    /// the slot. Ungated, like the other variants; only the producer is gated.
+    /// `Copy`.
+    InPlaceFragment(InPlaceFragment<'a>),
+}
+
+/// One inbound `Fragment` read where its unit lies: what
+/// [`IterationEvent::InPlaceFragment`] carries. The fields of
+/// `DriverLoopOutcome::Fragment` but the extension chain (its two facts a
+/// participant acts on, the priority and the chain-boundary markers, are
+/// here), with the payload as a range of the unit instead of a copy of it.
+#[derive(Clone, Copy, Debug)]
+pub struct InPlaceFragment<'a> {
+    unit: &'a [u8],
+    payload_at: usize,
+    reliable: bool,
+    sn: u64,
+    more: bool,
+    has_ext: bool,
+    priority: crate::qos::Priority,
+    /// Only a build that reassembles reads a fragment at all.
+    #[cfg(feature = "reassembly")]
+    markers: crate::extfragment::FragmentMarkers,
+}
+
+impl<'a> InPlaceFragment<'a> {
+    /// The fragment at the front of `unit`, whose payload starts at
+    /// `payload_at`. Built by the reassembling in-place receive path alone.
+    #[cfg(all(feature = "reassembly", feature = "session-unicast"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        unit: &'a [u8],
+        payload_at: usize,
+        reliable: bool,
+        sn: u64,
+        more: bool,
+        has_ext: bool,
+        priority: crate::qos::Priority,
+        markers: crate::extfragment::FragmentMarkers,
+    ) -> Self {
+        debug_assert!(
+            payload_at <= unit.len(),
+            "the payload starts inside the unit"
+        );
+        Self {
+            unit,
+            payload_at,
+            reliable,
+            sn,
+            more,
+            has_ext,
+            priority,
+            markers,
+        }
+    }
+
+    /// The whole unit the fragment was read from.
+    pub fn unit(&self) -> &'a [u8] {
+        self.unit
+    }
+
+    /// Where in [`Self::unit`] the payload lies: from the end of the head to
+    /// the end of the unit (a `Fragment` consumes the rest of its unit).
+    pub fn payload_range(&self) -> core::ops::Range<usize> {
+        self.payload_at..self.unit.len()
+    }
+
+    /// The payload: the bytes staged into the chain's slot.
+    pub fn payload(&self) -> &'a [u8] {
+        &self.unit[self.payload_at..]
+    }
+
+    /// Whether the fragment rode the reliable channel (the R bit).
+    pub fn reliable(&self) -> bool {
+        self.reliable
+    }
+
+    /// The fragment's sequence number.
+    pub fn sn(&self) -> u64 {
+        self.sn
+    }
+
+    /// Whether more fragments follow (the M bit).
+    pub fn more(&self) -> bool {
+        self.more
+    }
+
+    /// Whether the fragment carried an extension chain of its own.
+    pub fn has_ext(&self) -> bool {
+        self.has_ext
+    }
+
+    /// The priority its QoS extension carries, `Priority::DEFAULT` without one.
+    pub fn priority(&self) -> crate::qos::Priority {
+        self.priority
+    }
+
+    /// The chain-boundary markers it carries.
+    #[cfg(feature = "reassembly")]
+    pub fn markers(&self) -> crate::extfragment::FragmentMarkers {
+        self.markers
+    }
 }
 
 /// One record of an inbound `Frame` decoded where the frame lies, with the

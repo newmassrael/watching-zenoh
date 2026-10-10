@@ -520,6 +520,10 @@ where
                 DriverLoopOutcome::Fragment { .. } => on_fragment(),
                 _ => {}
             },
+            // The same fragment, read where the link held it (a pump that
+            // reads its units in place reports it so, not as `Poll(Fragment)`).
+            #[cfg(feature = "reassembly")]
+            IterationEvent::InPlaceFragment(_) => on_fragment(),
             // The deadline sweep evicted an abandoned chain — count it (the
             // FragmentChainStalled verdict).
             IterationEvent::ReassemblyTimeout(n) => reassembly_timed_out += n as u32,

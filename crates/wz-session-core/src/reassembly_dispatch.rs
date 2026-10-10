@@ -66,7 +66,7 @@
 //! one `--no-std` codegen emit drives both the std (AP) and heapless (MCU)
 //! `sce-rust-runtime`.
 
-use crate::chain_staging::{ChainStaging, HeapStaging};
+use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
 use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
@@ -116,7 +116,7 @@ impl ChainBytes<'_> {
 /// ([`crate::multicast_dispatch::multicast_chain_key`]) is 4 bytes. The
 /// chain key copies the peer key into a fixed buffer so the Router holds
 /// no allocation per chain.
-const PEER_KEY_MAX: usize = 16;
+pub(crate) const PEER_KEY_MAX: usize = 16;
 
 /// Deploy-sourced reassembly runtime knobs (§4 `buffer_pools.reassembly_pool`).
 ///
@@ -528,12 +528,25 @@ impl<const SLOTS: usize, const CAP: usize, S> ReassemblyDispatcher<SLOTS, CAP, S
 where
     S: ChainStaging<SLOTS, CAP>,
 {
-    /// Build a Router with `SLOTS` empty slots over `config`.
-    pub fn new(config: ReassemblyConfig) -> Self {
+    /// Build a Router with `SLOTS` empty slots over `config`, staging into an
+    /// arena that makes its own storage.
+    pub fn new(config: ReassemblyConfig) -> Self
+    where
+        S: BuildsOwnStorage<SLOTS, CAP>,
+    {
+        Self::with_staging(config, S::new())
+    }
+
+    /// Build a Router with `SLOTS` empty slots over `config`, staging into
+    /// `staging`: an arena built by its caller, which is how an arena whose
+    /// storage is handed in (a slot table the image placed) reaches a Router.
+    /// The arena must be EMPTY, with no chain of its own outstanding; the
+    /// Router's accounting starts from all of `SLOTS` free.
+    pub fn with_staging(config: ReassemblyConfig, staging: S) -> Self {
         Self {
             slots: core::array::from_fn(|_| Slot::new()),
             config,
-            staging: S::new(),
+            staging,
         }
     }
 
