@@ -1345,7 +1345,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     ///   via [`build_loopback_sample`] (threading every `opts` metadata field —
     ///   timestamp / encoding / source_info / attachment / qos, R232), delivers
     ///   it in-process through
-    ///   [`crate::pubsub::SubscriberRegistry::local_publish`], then drains the
+    ///   [`wz_session_core::pubsub::SubscriberTable::local_publish`], then drains the
     ///   deferred-fire queue so the subscriber callbacks run on the caller
     ///   thread OUTSIDE the observer lock (R227+ / R311lh / R311lj). Routed only
     ///   when `opts.allowed_destination` allows local. A
@@ -2123,7 +2123,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// inbound subscriber registry so wire-arrived self-echoes (a
     /// `Locality::Any` publish that the network routes back to its
     /// publisher) are recognised by
-    /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] and
+    /// `SubscriberRegistry::dispatch_push` and
     /// suppressed before the local callback fires a second time.
     ///
     /// Returns `true` when the registry accepted the install,
@@ -3312,7 +3312,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// (populated by an earlier
     /// [`SessionLinkActions::send_declare_keyexpr`] from this side),
     /// and routes the loopback branch through the same
-    /// [`crate::pubsub::SubscriberRegistry::local_publish`] as
+    /// [`wz_session_core::pubsub::SubscriberTable::local_publish`] as
     /// [`Session::publish`] using `loopback_keyexpr` as the resolved
     /// literal form.
     ///
