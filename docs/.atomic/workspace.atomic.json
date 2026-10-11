@@ -270344,6 +270344,52 @@
         "The wz-session-lwip census failure the first branch saw is not in this change: the main line already names that test in its leg, and the census passes on the merged tree."
       ]
     },
+    "Round 3265": {
+      "decision_summary": "Open-debt item 903 reproduced; repaid at its cause. test_double_knob_gate.py decided what a RECORD is by a list of field TYPE names (usize, u32, u64, AtomicUsize, Vec<). Measured on wz-session-core tx_lease.rs: a_grant_that_describes_no_memory_is_handed_back_and_costs_a_heap_frame passed only because it assigns link.headroom, a plain usize the double merely reads; with its reads of the RefCell<usize> record aborts removed, the OLD gate still passed (rc 0) and the new one fails naming that test. A record is now what the double WRITES: a field of a struct declared in the test module that the double's non-test code assigns or mutates, whatever its type; a knob never witnesses itself; a test reads a record when it mentions it other than as an assignment target. A mutation the vocabulary does not know drops the field, which can only turn a witnessed test red, never green. Residual, in the gate docstring: a field the double writes for another reason counts as a record.",
+      "changes_bullets": [
+        "scripts/lib/test_double_knob_gate.py: RECORD_FIELD_RE (a list of type names) removed. A record is derived from struct bodies declared in the test module (STRUCT_RE, ANY_FIELD_RE) and kept when the double's non-test code writes the field (writes_field: assignment, compound assignment, or a mutating std call through the field). Knob fields are excluded from records. A test reads a record by reads_field (a mention that is not an assignment target). scan_file returns (findings, knobs, records); --list prints the record roster; the summary line prints the record count; a population of zero records is a FAIL like zero knobs. Module docstring rewritten for the new definition, with the residual stated.",
+        "Four selftest fixtures added: interior-record (RefCell<usize> witness is seen), config-not-record (a usize the double only reads, and a counter nothing writes, witness nothing), record-assigned (resetting a counter is not reading it), bool-record (a bool the double writes is a record).",
+        "No product code and no test body changed: the 16 knobs and 47 records of the tree are all witnessed under the new definition."
+      ],
+      "verification_bullets": [
+        "Host-level only (python gate, no build). Run locally because it is a pure python read of the tracked sources, no cargo.",
+        "Red first: the four new selftest fixtures run against the old gate: 4 FAIL (interior-record, config-not-record, record-assigned, bool-record), the 5 existing cases ok.",
+        "Green: test_double_knob_gate.py --selftest 9 of 9 ok; the tree run reports 16 knob(s) derived, 10 configured by a test and each one witnessed, over 47 record field(s) the doubles write (rc 0). The knob roster is byte-identical to the old gate's (16 knobs, same lines, same setter counts).",
+        "Mutant on the real tree: in wz-session-core tx_lease.rs the two reads of link.aborts in a_grant_that_describes_no_memory_is_handed_back_and_costs_a_heap_frame deleted (reverted afterwards). OLD gate: rc 0, still green (false pass, because link.headroom counts as a record). NEW gate: rc 1, one UNWITNESSED finding naming that test.",
+        "prose_named_identifier_gate.py --check OK; gate_provenance_lint.py OK (the docstring spans are real names).",
+        "Not run: the hook's whole gate array, Layer C0; the gate takes about 60 s over the tree, as before."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Residual stated in the gate docstring: a field the double writes for a reason other than recording (a pool free-list taken and handed back) is a record to this derivation, so a test reading only that has not necessarily asked the double the question that matters. Closing it needs the double's call sites, which a name-based scan cannot see; the general instrument remains mutation testing over the suite (items 625 and 374).",
+        "Records are matched by field NAME across the test module, not resolved to the struct that owns the knob; two doubles in one module with a same-named field would share a witness. No such pair exists today (47 records, none duplicated within a module).",
+        "Item 903 can be stamped closed by the ledger entry that carries this work; the gate change is in scripts/lib/test_double_knob_gate.py only."
+      ],
+      "publishable_decision_summary": "Open-debt item 903 reproduced; repaid at its cause. test_double_knob_gate.py decided what a RECORD is by a list of field TYPE names (usize, u32, u64, AtomicUsize, Vec<). Measured on wz-session-core tx_lease.rs: a_grant_that_describes_no_memory_is_handed_back_and_costs_a_heap_frame passed only because it assigns link.headroom, a plain usize the double merely reads; with its reads of the RefCell<usize> record aborts removed, the OLD gate still passed (rc 0) and the new one fails naming that test. A record is now what the double WRITES: a field of a struct declared in the test module that the double's non-test code assigns or mutates, whatever its type; a knob never witnesses itself; a test reads a record when it mentions it other than as an assignment target. A mutation the vocabulary does not know drops the field, which can only turn a witnessed test red, never green. Residual, in the gate docstring: a field the double writes for another reason counts as a record.",
+      "publishable_changes_bullets": [
+        "scripts/lib/test_double_knob_gate.py: RECORD_FIELD_RE (a list of type names) removed. A record is derived from struct bodies declared in the test module (STRUCT_RE, ANY_FIELD_RE) and kept when the double's non-test code writes the field (writes_field: assignment, compound assignment, or a mutating std call through the field). Knob fields are excluded from records. A test reads a record by reads_field (a mention that is not an assignment target). scan_file returns (findings, knobs, records); --list prints the record roster; the summary line prints the record count; a population of zero records is a FAIL like zero knobs. Module docstring rewritten for the new definition, with the residual stated.",
+        "Four selftest fixtures added: interior-record (RefCell<usize> witness is seen), config-not-record (a usize the double only reads, and a counter nothing writes, witness nothing), record-assigned (resetting a counter is not reading it), bool-record (a bool the double writes is a record).",
+        "No product code and no test body changed: the 16 knobs and 47 records of the tree are all witnessed under the new definition."
+      ],
+      "publishable_verification_bullets": [
+        "Host-level only (python gate, no build). Run locally because it is a pure python read of the tracked sources, no cargo.",
+        "Red first: the four new selftest fixtures run against the old gate: 4 FAIL (interior-record, config-not-record, record-assigned, bool-record), the 5 existing cases ok.",
+        "Green: test_double_knob_gate.py --selftest 9 of 9 ok; the tree run reports 16 knob(s) derived, 10 configured by a test and each one witnessed, over 47 record field(s) the doubles write (rc 0). The knob roster is byte-identical to the old gate's (16 knobs, same lines, same setter counts).",
+        "Mutant on the real tree: in wz-session-core tx_lease.rs the two reads of link.aborts in a_grant_that_describes_no_memory_is_handed_back_and_costs_a_heap_frame deleted (reverted afterwards). OLD gate: rc 0, still green (false pass, because link.headroom counts as a record). NEW gate: rc 1, one UNWITNESSED finding naming that test.",
+        "prose_named_identifier_gate.py --check OK; gate_provenance_lint.py OK (the docstring spans are real names).",
+        "Not run: the hook's whole gate array, Layer C0; the gate takes about 60 s over the tree, as before."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Residual stated in the gate docstring: a field the double writes for a reason other than recording (a pool free-list taken and handed back) is a record to this derivation, so a test reading only that has not necessarily asked the double the question that matters. Closing it needs the double's call sites, which a name-based scan cannot see; the general instrument remains mutation testing over the suite (items 625 and 374).",
+        "Records are matched by field NAME across the test module, not resolved to the struct that owns the knob; two doubles in one module with a same-named field would share a witness. No such pair exists today (47 records, none duplicated within a module).",
+        "Item 903 can be stamped closed by the ledger entry that carries this work; the gate change is in scripts/lib/test_double_knob_gate.py only."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
