@@ -26,6 +26,8 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
+use core::ops::Deref;
+
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::observer::ApplicationLayerObserver;
@@ -36,12 +38,19 @@ use wz_session_core::session_actions::SessionLinkActions;
 ///
 /// Pass the same `actions` the session is driven with: a reply drained
 /// through a different bundle would go out on a different session.
-pub fn dispatch_to<C>(
+///
+/// `actions` is the session handle of the profile: an `Rc` of the bundle, or under
+/// `session-slot` a counted reference to the slot that holds it. It is taken as
+/// anything that derefs to the bundle, which is what lets the clock type `C` be
+/// read off the handle at the call site (a handle named through the runtime's
+/// associated type would leave `C` to be spelled out).
+pub fn dispatch_to<C, H>(
     observer: Rc<RefCell<ApplicationLayerObserver>>,
-    actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    actions: H,
 ) -> impl FnMut(IterationEvent<'_>) + 'static
 where
     C: ClockSource + 'static,
+    H: Deref<Target = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>> + 'static,
 {
     move |event| observer.borrow_mut().dispatch(event, &*actions)
 }
@@ -50,7 +59,8 @@ where
     test,
     feature = "query-queryable",
     feature = "codec-response",
-    feature = "pubsub-put"
+    feature = "pubsub-put",
+    not(feature = "session-slot")
 ))]
 mod tests {
     use super::*;

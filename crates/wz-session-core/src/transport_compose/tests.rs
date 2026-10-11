@@ -12,13 +12,13 @@ fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
     SessionInitParams {
         version: 0x05,
         whatami: WhatAmI::Peer,
-        zid: zid.to_vec(),
+        zid: crate::session_init_params::zid_bytes(zid),
         seq_num_res: 2,
         req_id_res: 1,
         batch_size,
         lease_ms,
         initial_sn: 0x1234,
-        cookie: vec![0xC0, 0xC1, 0xC2],
+        cookie: crate::session_init_params::cookie_bytes(&[0xC0, 0xC1, 0xC2]),
         tx_queue: TxQueueConf::default(),
         cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key"),

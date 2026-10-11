@@ -1134,6 +1134,30 @@ transport-tx-lend = []
 # this selector on does not turn those two on.
 tx-lend-only = ["transport-tx-lend"]
 
+# session-slot — fixed-memory step S5: a session's per-session state lives in
+# storage of fixed size, and nothing it holds is behind a pointer to the heap.
+# A SELECTOR, as `bounded-heapless` and `tx-lend-only` are, and the one that
+# names the whole per-session profile: it implies those two (a slot whose
+# collections grow, or whose frames are built on the heap, has not removed the
+# heap from the session), and `alloc` keeps its meaning. Under it the init
+# parameters hold their zid, cookie and key in arrays, the peer facts a
+# handshake captures and the four handshake ext chains are arrays too, the
+# cookie entropy source is a reference to a source the slot holds and not a
+# `Box`, and the kernel and the link state are fields of the bundle and not
+# reference-counted allocations of their own.
+#
+# It must be turned on by an MCU final binary only, never by a library crate's
+# dependency line: workspace feature unification would hand the AP sessions
+# that take a slot where they should take the heap. `wz-runtime-tokio` asserts
+# at build time that it is off (`session_actions::SESSION_SLOT`).
+#
+# `transport-multilink` shares ONE kernel between several links by reference
+# count, which a slot, holding exactly one of each, has no form of: with both on
+# the multilink aggregation API is not compiled (a build that selects every
+# feature at once must still build; an image that turns this selector on does
+# not turn multilink on).
+session-slot = ["bounded-heapless", "tx-lend-only"]
+
 # Item 895 — `transport_compose`: transport messages WRITTEN from explicit
 # fields, for a caller that says every field itself (the transport build door
 # of `wz-capture`, behind `wz_dissect_transport_build`).

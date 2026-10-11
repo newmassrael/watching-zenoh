@@ -259,12 +259,40 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> DriverLoopOutcome {
+    dispatch_unit_in(unit.as_slice(), Some(unit), actions, engine)
+}
+
+/// [`dispatch_unit`] over a unit that is only BORROWED: the bytes of a datagram
+/// where the link holds them, read without making a shareable value of them
+/// first. It is the one dispatch of a unit that is not a `Frame` for a profile
+/// whose receive does not copy ([`dispatch_datagram`]'s `session-slot` form),
+/// and runs the same code as the copying path, so a handshake is judged the same
+/// way whichever way it arrived. The only things that need an owner are a
+/// residue left for the next turn and the lean arm, and each copies then.
+#[cfg(all(feature = "codec-frame", feature = "session-slot"))]
+fn dispatch_unit_borrowed<R: SessionRuntime, T: TimeSource>(
+    bytes: &[u8],
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> DriverLoopOutcome {
+    dispatch_unit_in(bytes, None, actions, engine)
+}
+
+/// The body of [`dispatch_unit`] and `dispatch_unit_borrowed`: `bytes` is the
+/// unit, and `shared` is the same unit as a shareable value when the caller has
+/// one.
+fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
+    bytes: &[u8],
+    shared: Option<&crate::link::RxBytes>,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> DriverLoopOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // The unit is read two ways below: as bytes, for the leading id and the
-    // lengths, and as a shareable value, for every decode and for the remainder
-    // it parks. The decodes run over `unit` itself and never over a copy of it,
-    // because a range is recognisable as part of `unit` only if it is.
-    let bytes: &[u8] = unit.as_slice();
+    // lengths, and (when there is one) as a shareable value, for every decode and
+    // for the remainder it parks. The decodes run over `shared` itself and never
+    // over a copy of it, because a range is recognisable as part of `shared` only
+    // if it is.
 
     // transport-lowlatency — lean rx: once this session negotiated
     // lowlatency AND is established, a datagram whose leading message id
@@ -286,6 +314,17 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
     if actions.is_lowlatency() && actions.is_established() {
         // Dispatch the leading message id ([`is_lean_network_unit`]).
         if is_lean_network_unit(bytes) {
+            // A unit that is only borrowed is made a value of its own here, the
+            // one case that needs it (a profile that reads lean units in place
+            // never gets here).
+            let owned;
+            let unit = match shared {
+                Some(unit) => unit,
+                None => {
+                    owned = crate::link::RxBytes::from(bytes.to_vec());
+                    &owned
+                }
+            };
             return match parse_frame_payload_out_of_line(unit) {
                 Ok(messages) => {
                     // R2825 — a lean datagram is ONE transport message whatever
@@ -319,13 +358,23 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
     // message begins: nothing is parked, and the `Unknown` frame below already
     // projects to `FramingError`, which is what both reference implementations
     // do with a batch they cannot finish reading.
-    let parsed = actions.handle_inbound_consuming_in(unit);
+    let parsed = match shared {
+        Some(unit) => actions.handle_inbound_consuming_in(unit),
+        None => actions.handle_inbound_consuming(bytes),
+    };
     if let Ok((_, consumed)) = &parsed {
         // R2825 — one transport message decoded off the front of the unit.
         #[cfg(feature = "transport-stats")]
         count_rx_transport_message(actions);
         if *consumed > 0 && *consumed < bytes.len() {
-            if let Some(rest) = unit.subslice(*consumed..bytes.len()) {
+            let rest = match shared {
+                Some(unit) => unit.subslice(*consumed..bytes.len()),
+                // A borrowed unit's residue is copied to be kept: the one copy
+                // a batch costs on this path, and a unit holding only the one
+                // message a handshake sends costs none.
+                None => Some(crate::link::RxBytes::from(bytes[*consumed..].to_vec())),
+            };
+            if let Some(rest) = rest {
                 actions.park_pending_unit(rest);
             }
         }
@@ -1251,6 +1300,21 @@ fn dispatch_copied<R: SessionRuntime, T: TimeSource>(
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
 ) -> DatagramPath {
+    // Fixed-memory step S5 — under `session-slot` a handshake, a KeepAlive or a
+    // Close is dispatched where the link holds it, by the copying path's own
+    // code over bytes that are only borrowed (`dispatch_unit_borrowed`), and the
+    // decode of it holds its body and its extension chain in arrays: a session
+    // is established and closed without a heap. The path is still the copying
+    // path's, and the unit is still counted as one that was not read as a Frame
+    // (`CopyReason::NotAFrame`), because what it does with the message is the
+    // same; what it no longer does is copy the unit onto the heap first.
+    #[cfg(feature = "session-slot")]
+    if matches!(reason, CopyReason::NotAFrame) {
+        account_bytes_in_place(unit, actions);
+        let outcome = dispatch_unit_borrowed(unit, actions, engine);
+        on_event(crate::driver_loop::IterationEvent::Poll(&outcome));
+        return DatagramPath::Copied(reason);
+    }
     let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
     on_event(crate::driver_loop::IterationEvent::Poll(
         &dispatch_link_event(LinkEvent::Rx(frame), actions, engine),

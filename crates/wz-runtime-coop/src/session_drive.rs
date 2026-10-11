@@ -55,7 +55,6 @@ use wz_session_core::link::LinkEvent;
 use wz_session_core::link::{BoxedLinkDriver, RxFrame};
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
@@ -72,6 +71,7 @@ use wz_session_core::drive::report_outcome_reassembling;
 #[cfg(feature = "reassembly")]
 use wz_session_core::reassembly_dispatch::sweep_reporting;
 
+use crate::session_runtime::SessionHandle;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What the drive loop needs from a network stack: advance its input path,
@@ -257,7 +257,7 @@ pub struct SessionDriveConfig {
 pub fn run_session<C, L, F>(
     runtime: &CoopRuntime<C>,
     link: L,
-    actions: &Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    actions: &SessionHandle<C>,
     clock: &CoopTime<C>,
     config: SessionDriveConfig,
     mut on_event: F,
@@ -302,7 +302,7 @@ where
 pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
     runtime: CoopRuntime<C>,
     link: L,
-    actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    actions: SessionHandle<C>,
     clock: CoopTime<C>,
     engine: SessionEngine<CoopRuntime<C>, CoopTime<C>>,
     deadline_tracker: HandshakeDeadlineTracker,
@@ -421,7 +421,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     pub fn new(
         runtime: CoopRuntime<C>,
         link: L,
-        actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+        actions: SessionHandle<C>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Self {
@@ -446,7 +446,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     pub fn with_reassembly_arena(
         runtime: CoopRuntime<C>,
         link: L,
-        actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+        actions: SessionHandle<C>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         arena: ReassemblyArena,
@@ -474,7 +474,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     fn build(
         runtime: CoopRuntime<C>,
         link: L,
-        actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+        actions: SessionHandle<C>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
@@ -713,7 +713,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
 pub async fn session_task<C, L, F>(
     runtime: CoopRuntime<C>,
     link: L,
-    actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    actions: SessionHandle<C>,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     mut on_event: F,
@@ -746,7 +746,7 @@ where
 pub fn spawn_session<C, L, F>(
     local: &CoopLocalSet<C>,
     link: L,
-    actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    actions: SessionHandle<C>,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,

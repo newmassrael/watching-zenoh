@@ -18,11 +18,59 @@
 //! `wz-ap-demo`, and the `fixture_session_init_params` test-support
 //! builder) resolve unchanged. A DP3 leaf out of `session_glue.rs`.
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::vec::Vec;
 
 use wz_codecs::whatami::WhatAmI;
 
 use crate::signing_key::SigningKey;
+
+/// The longest zid on the wire, in bytes: the INIT `cbyte` carries `len - 1` in
+/// four bits.
+pub const ZID_MAX: usize = 16;
+
+/// The longest cookie a session keeps, in bytes: the INIT and OPEN bodies' own
+/// declared capacity for it (`sce:max-size` of the generated `InitBody` and
+/// `OpenBody`), so a cookie the decoder accepts always fits.
+pub const COOKIE_MAX: usize = 128;
+
+/// Bytes a session keeps for the length of one handshake: a zid, a cookie.
+///
+/// A growable vector on every profile but `session-slot`, which is the
+/// heap-free per-session profile (fixed-memory step S5): there it is an array
+/// of `N` bytes held in the session's own storage, and a value that does not
+/// fit is refused rather than grown into.
+#[cfg(not(feature = "session-slot"))]
+pub type SessionBytes<const N: usize> = Vec<u8>;
+/// See the growable form of this alias.
+#[cfg(feature = "session-slot")]
+pub type SessionBytes<const N: usize> = heapless::Vec<u8, N>;
+
+/// Copy `src` into session bytes, or `None` when `N` cannot hold it (which only
+/// the fixed form can say: the growable one always fits).
+pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
+    #[cfg(not(feature = "session-slot"))]
+    {
+        Some(src.to_vec())
+    }
+    #[cfg(feature = "session-slot")]
+    {
+        heapless::Vec::from_slice(src).ok()
+    }
+}
+
+/// A zid for [`SessionInitParams::zid`], written the same way on every
+/// profile. Panics when `src` is longer than [`ZID_MAX`]: a zid longer than the
+/// wire carries is a construction mistake, not a runtime condition.
+pub fn zid_bytes(src: &[u8]) -> SessionBytes<ZID_MAX> {
+    session_bytes::<ZID_MAX>(src).expect("a zid is at most 16 bytes on the wire")
+}
+
+/// A cookie for [`SessionInitParams::cookie`], written the same way on every
+/// profile. Panics when `src` is longer than [`COOKIE_MAX`].
+pub fn cookie_bytes(src: &[u8]) -> SessionBytes<COOKIE_MAX> {
+    session_bytes::<COOKIE_MAX>(src).expect("a cookie is at most 128 bytes in an INIT or OPEN body")
+}
 
 /// Per-deploy parameters that drive the codec field values for the
 /// 4-way handshake + close. Production callers source these from
@@ -39,7 +87,7 @@ pub struct SessionInitParams {
     pub whatami: WhatAmI,
     /// ZenohID — 1..=16 bytes. The codec encodes the length in the
     /// high 4 bits of `cbyte` as `zid_len - 1`.
-    pub zid: Vec<u8>,
+    pub zid: SessionBytes<ZID_MAX>,
     /// Sequence-number resolution (0..=3 → 8 / 16 / 32 / 64-bit).
     pub seq_num_res: u8,
     /// Request-id resolution (0..=3).
@@ -77,7 +125,7 @@ pub struct SessionInitParams {
     /// accessor shares its name with the slot it reads). This
     /// field reaches the wire only where no peer zid or no nonce is known,
     /// and in that state `cookie_valid` admits nothing.
-    pub cookie: Vec<u8>,
+    pub cookie: SessionBytes<COOKIE_MAX>,
 
     /// Per-process secret key used by the Accepting side to MAC the
     /// outbound cookie. Constructed via `SigningKey::new(bytes)` so

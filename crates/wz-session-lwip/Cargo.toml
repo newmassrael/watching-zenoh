@@ -62,6 +62,20 @@ transport-tx-lend = ["wz-session-core/transport-tx-lend"]
 # unicast image whose whole link is this driver turns it on beside
 # `transport-tx-lend`'s users; a library crate never does.
 tx-lend-only = ["transport-tx-lend", "wz-session-core/tx-lend-only"]
+# Fixed-memory step S5 — the per-session slot: a session's link driver (with its
+# socket, by value), its entropy source and the bundle that drives it live in one
+# slot of a `static` table (`wz-session-core`'s `session-slot`), and nothing the
+# session holds is behind a pointer to the heap. It implies the lend-only send and
+# the in-place receive, the other two halves of the heap-free session, and
+# `wz-session-mcu`'s form of the shell (which has no admin node under it yet). An
+# image turns it on; a library crate never does.
+session-slot = [
+    "tx-lend-only",
+    "rx-in-place",
+    "wz-runtime-coop/session-slot",
+    "wz-session-core/session-slot",
+    "wz-session-mcu/session-slot",
+]
 # The drive loop dispatches each inbound datagram where the session socket
 # holds it, record by record (`wz-runtime-coop`'s `rx-in-place`), with this
 # crate's link lending the socket's queued datagram instead of copying it out.
@@ -280,6 +294,9 @@ lwip-sys = { path = "../lwip-sys" }
 # Mutex the cooperative runtime uses. No impl feature here: the firmware (or
 # the std impl in dev-dependencies, for host tests) supplies it at link time.
 critical-section = "1"
+# The driver renders its link's two locators into fixed text (`udp/a.b.c.d:port`),
+# the same crate and version `wz-session-core`'s bounded backing is made of.
+heapless = { version = "0.8", default-features = false }
 
 [dev-dependencies]
 # critical-section's std impl backs CoopRuntime's critical_section::Mutex
@@ -346,6 +363,18 @@ required-features = [
 [[test]]
 name = "link_state_allocations"
 required-features = ["session-unicast-open", "session-unicast-accept", "pubsub-put"]
+
+[[test]]
+name = "session_slot_allocations"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "transport-keepalive",
+    "codec-close",
+    "tx-lend-only",
+    "rx-in-place",
+]
 
 [lints]
 workspace = true

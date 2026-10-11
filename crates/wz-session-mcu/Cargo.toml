@@ -42,6 +42,16 @@ default = []
 # crate that wants a stack-neutral peer. Never in a production build.
 test-support = []
 
+# Fixed-memory step S5 — the shell on the per-session slot profile
+# (`wz-runtime-coop`'s `session-slot`). The application layer is generic over the
+# session handle and takes the slot's. The dialer, the connection manager and the
+# admin node open sessions through `SessionLinks` with `Rc` handles and a
+# `Box<dyn FnMut>` per dial, none of which has a slot form yet (steps S8 and S9),
+# so under this feature those modules and the in-memory test network are not
+# compiled: a build that selects it alongside `adminspace-*` gets the application
+# layer and no admin node, which is what every image on this profile is until then.
+session-slot = ["wz-runtime-coop/session-slot", "wz-session-core/session-slot"]
+
 transport-keepalive = [
     "wz-session-core/transport-keepalive",
     "wz-runtime-coop/transport-keepalive",

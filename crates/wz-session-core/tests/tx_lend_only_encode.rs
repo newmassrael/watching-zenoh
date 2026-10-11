@@ -42,7 +42,9 @@ use wz_session_core::handshake_encode::{
     encode_close, encode_close_into, encode_init, encode_init_into, encode_open, encode_open_into,
     InitCaps,
 };
-use wz_session_core::session_init_params::{SessionInitParams, TxQueueConf};
+use wz_session_core::session_init_params::{
+    cookie_bytes, zid_bytes, SessionInitParams, TxQueueConf,
+};
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::tx_buf::{SliceTxBuf, TxBuf};
 
@@ -50,13 +52,13 @@ fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
     SessionInitParams {
         version: 0x09,
         whatami: WhatAmI::Peer,
-        zid: zid.to_vec(),
+        zid: zid_bytes(zid),
         seq_num_res: 2,
         req_id_res: 1,
         batch_size: 1472,
         lease_ms: 10_000,
         initial_sn: 77,
-        cookie: cookie.to_vec(),
+        cookie: cookie_bytes(cookie),
         tx_queue: TxQueueConf::default(),
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
     }
@@ -400,9 +402,17 @@ fn a_cookie_that_does_not_fit_the_array_is_refused_not_truncated() {
 fn no_cookie_is_minted_for_a_zid_outside_one_to_sixteen() {
     let k = key();
     let mut array = [0u8; ACCEPT_COOKIE_MAX_BYTES];
-    for zid_len in [0usize, 17] {
+    // A zid longer than sixteen bytes is not a value the fixed form can hold at
+    // all (`session-slot` refuses it before a cookie is in question).
+    let lens: &[usize] = if cfg!(feature = "session-slot") {
+        &[0]
+    } else {
+        &[0, 17]
+    };
+    for &zid_len in lens {
         let state = AcceptCookieState {
-            peer_zid: vec![1; zid_len],
+            peer_zid: wz_session_core::session_init_params::session_bytes::<16>(&vec![1; zid_len])
+                .expect("fits"),
             ..cookie_state(1, None)
         };
         assert!(

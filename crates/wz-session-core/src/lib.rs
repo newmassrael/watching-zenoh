@@ -1647,6 +1647,17 @@ pub mod session_timeouts;
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub mod session_actions;
 
+/// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
+/// one session (its link driver, its entropy source and the bundle that drives it)
+/// and frees it when the last handle goes. Only under the `session-slot`
+/// selector, which is the MCU profile's and never a library crate's.
+#[cfg(all(
+    feature = "alloc",
+    feature = "session-unicast",
+    feature = "session-slot"
+))]
+pub mod session_slot;
+
 /// A4 (session-reconnect) — re-dial + re-handshake support types: the
 /// [`reconnect::CachedDeclaration`] declaration-cache entry (zenoh-pico
 /// `_z_session_t._declaration_cache` parity), the

@@ -4,13 +4,14 @@
 //! `LwipUdpDriver` — the MCU [`BoxedLinkDriver`] adapter over a shared
 //! [`SessionRxSocket`] (`LwipUdpSocket<SESSION_RX_SLOT_SIZE, _>`).
 
-use alloc::format;
+#[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
-use alloc::string::String;
 use core::cell::{Cell, OnceCell, RefCell};
+use core::fmt::Write as _;
 
 use wz_link_lwip::rx_sockets::{SessionRxSocket, SESSION_RX_SLOT_SIZE};
 use wz_link_lwip::{Datagram, TxPayload};
+use wz_session_core::caps::MAX_LOCATOR_LEN;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
 };
@@ -36,7 +37,29 @@ const LENT_MAX: usize = 2;
 /// [`wz_session_core::link::SessionRuntime::LinkSink`] = `Rc<dyn
 /// BoxedLinkDriver>` on the lwIP MCU profile, so no atomic refcount traffic
 /// is incurred on a profile that never crosses threads.
+///
+/// Under `session-slot` (fixed-memory step S5) it is not shared by pointer at all:
+/// the driver holds its socket by value, and the one driver is what the drive
+/// loop and the send seam both reach (through the slot that holds it), so there
+/// is no `Rc` to allocate.
+#[cfg(not(feature = "session-slot"))]
 pub type SharedSessionSocket = Rc<RefCell<SessionRxSocket>>;
+/// See the shared form of this alias.
+#[cfg(feature = "session-slot")]
+pub type SharedSessionSocket = RefCell<SessionRxSocket>;
+
+/// A bound session socket in the form [`LwipUdpDriver::new`] takes it: shared by
+/// `Rc` on every profile but `session-slot`, by value under it.
+pub fn share_socket(socket: SessionRxSocket) -> SharedSessionSocket {
+    #[cfg(not(feature = "session-slot"))]
+    {
+        Rc::new(RefCell::new(socket))
+    }
+    #[cfg(feature = "session-slot")]
+    {
+        RefCell::new(socket)
+    }
+}
 
 /// The inbound datagram type the session socket delivers — payload capped
 /// at `SESSION_RX_SLOT_SIZE` (the `session_rx_pool_mcu` buffer-pool SSOT).
@@ -69,10 +92,24 @@ pub struct LwipUdpDriver {
     lent: RefCell<[Option<TxPayload>; LENT_MAX]>,
 }
 
-/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator.
-fn udp_locator(addr: u32, port: u16) -> String {
+/// How the drive loop's link holds the driver it reads from: an `Rc` of it on
+/// every profile but `session-slot`, and under it a counted handle to the slot
+/// that holds the driver, which keeps the slot for as long as the loop reads.
+#[cfg(not(feature = "session-slot"))]
+pub type DriverHandle = Rc<LwipUdpDriver>;
+/// See the `Rc` form of this alias.
+#[cfg(feature = "session-slot")]
+pub type DriverHandle = wz_session_core::session_slot::SlotDriver<LwipUdpDriver>;
+
+/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed
+/// text: the longest one, `udp/255.255.255.255:65535`, is 25 bytes of the
+/// `MAX_LOCATOR_LEN` the text has.
+fn udp_locator(addr: u32, port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
     let [a, b, c, d] = wz_link_lwip::ipv4_octets(addr);
-    format!("udp/{a}.{b}.{c}.{d}:{port}")
+    let mut text = heapless::String::new();
+    // Cannot fail: the longest rendering is shorter than the text's capacity.
+    let _ = write!(text, "udp/{a}.{b}.{c}.{d}:{port}");
+    text
 }
 
 impl LwipUdpDriver {
@@ -114,8 +151,8 @@ impl LwipUdpDriver {
         };
         let local_port = self.socket.borrow().local_port();
         let _ = self.endpoints.set(LinkEndpoints::new(
-            udp_locator(src, local_port),
-            udp_locator(addr, port),
+            udp_locator(src, local_port).as_str(),
+            udp_locator(addr, port).as_str(),
         ));
     }
 
@@ -257,7 +294,9 @@ impl BoxedLinkDriver for LwipUdpDriver {
     }
 }
 
-#[cfg(test)]
+// The driver's tests share sockets and drivers by `Rc`, the form every profile
+// but `session-slot` has; the slot profile's own are in `tests/`.
+#[cfg(all(test, not(feature = "session-slot")))]
 mod tests {
     use super::*;
     use alloc::vec::Vec;

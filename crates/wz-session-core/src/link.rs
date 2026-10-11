@@ -815,17 +815,54 @@ pub struct TxSlotGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LinkEndpoints {
     /// This end of the link — zenoh's `Link::src`.
-    pub src: String,
+    pub src: LocatorText,
     /// The peer end of the link — zenoh's `Link::dst`.
-    pub dst: String,
+    pub dst: LocatorText,
 }
+
+/// A locator's text as a link holds it: a `String`, or under `session-slot`
+/// (fixed-memory step S5) text of at most [`crate::caps::MAX_LOCATOR_LEN`] bytes
+/// held in the link itself, so a driver names its two ends without allocating.
+#[cfg(not(feature = "session-slot"))]
+pub type LocatorText = String;
+/// See the `String` form of this alias.
+#[cfg(feature = "session-slot")]
+pub type LocatorText = heapless::String<{ crate::caps::MAX_LOCATOR_LEN }>;
 
 impl LinkEndpoints {
     /// Build a pair from two already-rendered locator strings.
+    #[cfg(not(feature = "session-slot"))]
     pub fn new(src: impl Into<String>, dst: impl Into<String>) -> Self {
         Self {
             src: src.into(),
             dst: dst.into(),
+        }
+    }
+
+    /// Build a pair from two already-rendered locator strings. A locator longer
+    /// than [`crate::caps::MAX_LOCATOR_LEN`] is not stored: that end reads blank,
+    /// the answer for an end the link cannot name, rather than a cut locator
+    /// nobody could dial.
+    #[cfg(feature = "session-slot")]
+    pub fn new(src: impl AsRef<str>, dst: impl AsRef<str>) -> Self {
+        Self {
+            src: LocatorText::try_from(src.as_ref()).unwrap_or_default(),
+            dst: LocatorText::try_from(dst.as_ref()).unwrap_or_default(),
+        }
+    }
+
+    /// The two ends as owned `String`s, for a consumer that renders them (the
+    /// admin space's link list): moved out as they are where they already are
+    /// `String`s, copied where they are fixed text.
+    #[cfg(feature = "adminspace-core")]
+    pub fn into_strings(self) -> (String, String) {
+        #[cfg(not(feature = "session-slot"))]
+        {
+            (self.src, self.dst)
+        }
+        #[cfg(feature = "session-slot")]
+        {
+            (self.src.as_str().into(), self.dst.as_str().into())
         }
     }
 }
@@ -1124,7 +1161,16 @@ pub trait SessionRuntime: Runtime + Sized {
     /// [`SessionLinkActions::new_generic`](crate::session_actions::SessionLinkActions::new_generic)
     /// routes through this so generic-`R` code never names the concrete
     /// pointer type.
-    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
+    ///
+    /// Absent under `session-slot` (fixed-memory step S5), where no runtime can
+    /// make a handle out of a bundle by value: the bundle is placed in a slot of
+    /// storage somebody owns (`crate::session_slot::SessionSlots`), and the slot
+    /// hands the handle out.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "session-unicast",
+        not(feature = "session-slot")
+    ))]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T>;
 
     /// Erase the per-profile refcount wrapper to the pure

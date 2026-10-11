@@ -58,7 +58,7 @@ pub mod admin_host;
 pub mod connect_manager;
 // R2831 — the dialer: a written `udp/<ipv4>:<port>` becomes an initiator
 // session on the firmware's task set, over whichever stack opens the link.
-#[cfg(feature = "adminspace-write")]
+#[cfg(all(feature = "adminspace-write", not(feature = "session-slot")))]
 pub mod dial;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
 // through the shared answerer, on the same application layer.
@@ -66,9 +66,13 @@ pub mod dial;
 pub mod admin_status;
 // R2837 — the node a host reaches and reconfigures at runtime: listen, the
 // write subscriber, the status queryable and the dial manager, ticked as one.
-#[cfg(all(feature = "adminspace-core", feature = "adminspace-write"))]
+#[cfg(all(
+    feature = "adminspace-core",
+    feature = "adminspace-write",
+    not(feature = "session-slot")
+))]
 pub mod admin_node;
 // An in-memory network for the shell's tests, and for a sibling crate's that
 // wants a peer no stack owns.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(any(test, feature = "test-support"), not(feature = "session-slot")))]
 pub mod memory;

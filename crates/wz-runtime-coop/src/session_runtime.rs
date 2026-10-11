@@ -46,7 +46,10 @@ use alloc::rc::Rc;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+#[cfg(not(feature = "session-slot"))]
 use wz_session_core::session_actions::SessionLinkActions;
+#[cfg(feature = "session-slot")]
+use wz_session_core::session_slot::{SlotClaim, SlotRef, SlotSink};
 
 use crate::runtime_impl::CoopRuntime;
 use crate::time::{ClockSource, CoopTime};
@@ -56,7 +59,14 @@ use crate::time::{ClockSource, CoopTime};
 /// its synchronous `LwipUdpSocket` driver; `!Send` is the intended
 /// shape (see module doc).
 impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
+    #[cfg(not(feature = "session-slot"))]
     type LinkSink = Rc<dyn BoxedLinkDriver>;
+
+    // Fixed-memory step S5 — under `session-slot` the sink is a reference to the
+    // driver the session's own slot holds (`wz_session_core::session_slot`), not
+    // an `Rc` of one: there is nothing to allocate and the slot is what frees it.
+    #[cfg(feature = "session-slot")]
+    type LinkSink = SlotSink;
 
     // R311y205 (transport-multilink IMPL-2b-i) — the MCU shareable pointer is
     // `Rc`, not `Arc`: the single-task sync drive loop shares the aggregation
@@ -84,20 +94,41 @@ impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
     // that unblocks the no-alloc M0+ session reach — `alloc::sync::Arc`
     // requires `target_has_atomic = "ptr"`, which ARMv6-M lacks; `Rc` lowers
     // to plain loads / stores and cross-compiles on every Phase W target.
+    #[cfg(not(feature = "session-slot"))]
     type ActionsHandle<T: TimeSource> = Rc<SessionLinkActions<Self, T>>;
 
+    // Fixed-memory step S5 — under `session-slot` the handle is a counted
+    // reference to the session in its slot, which the slot table hands out and
+    // frees the slot with the last of.
+    #[cfg(feature = "session-slot")]
+    type ActionsHandle<T: TimeSource> = SlotRef<Self, T>;
+
+    #[cfg(not(feature = "session-slot"))]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
         Rc::new(actions)
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver {
-        // `&**sink` reborrows through `Rc<dyn BoxedLinkDriver>` to the
-        // pure `&dyn BoxedLinkDriver` the action methods send through.
-        // No auto-trait coercion is needed (the MCU sink carries none),
-        // unlike the AP `&**sink` which also drops `+ Send + Sync`.
-        &**sink
+        #[cfg(not(feature = "session-slot"))]
+        {
+            // `&**sink` reborrows through `Rc<dyn BoxedLinkDriver>` to the
+            // pure `&dyn BoxedLinkDriver` the action methods send through.
+            // No auto-trait coercion is needed (the MCU sink carries none),
+            // unlike the AP `&**sink` which also drops `+ Send + Sync`.
+            &**sink
+        }
+        #[cfg(feature = "session-slot")]
+        {
+            sink.driver()
+        }
     }
 }
+
+/// The handle to a session, as this profile holds it: an `Rc` of the bundle, or
+/// under `session-slot` a counted reference to the slot that holds it. The type
+/// the drive loop, the FSM's action binding and the application layer each take,
+/// written once so the two spellings are one name.
+pub type SessionHandle<C> = <CoopRuntime<C> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
 
 // ───────────────────── compile-time preconditions ─────────────────────
 //
@@ -156,7 +187,12 @@ fn _session_link_actions_composes_on_lwip<C: ClockSource>(
 /// means a named feature rather than a `cfg` — a change that moves the declared
 /// cargo-feature surface the A3 / A5 inventory gates count, so it is its own
 /// round. Carry N52.
-#[cfg(not(target_has_atomic = "ptr"))]
+///
+/// Absent under `session-slot` as well: the registry takes the bundle as an
+/// `Rc<dyn OwnMappingSpace>`, and a session in a slot is not an `Rc`. A node on
+/// that profile that declares keyexprs of its own reaches the registry through
+/// its slot handle when the registry takes one (carried).
+#[cfg(all(not(target_has_atomic = "ptr"), not(feature = "session-slot")))]
 pub fn install_own_mapping_space<C, T, S>(
     registry: &mut wz_session_core::pubsub::SubscriberRegistry<S>,
     actions: &Rc<SessionLinkActions<CoopRuntime<C>, T>>,
@@ -217,6 +253,7 @@ pub fn install_own_mapping_space<C, T, S>(
 /// every InitAck, which needs a source that lives as long as it does. Hence
 /// ownership. A board passes its TRNG type by value here instead of a borrow
 /// that ends when this function returns.
+#[cfg(not(feature = "session-slot"))]
 pub fn new_session_actions<C, E>(
     driver: Rc<dyn BoxedLinkDriver>,
     params: wz_session_core::session_init_params::SessionInitParams,
@@ -240,6 +277,32 @@ where
     actions
 }
 
+/// Fixed-memory step S5 — `new_session_actions` for `session-slot`: the same
+/// seam, with the session built in the slot the caller claimed
+/// ([`SessionSlots::claim`](wz_session_core::session_slot::SessionSlots::claim)),
+/// which already holds the link driver and the board's entropy source by value.
+///
+/// What the seam guarantees is unchanged: the entropy source is installed before
+/// the handle exists, so no handshake of this session can run without it, and
+/// the construction-time nonce draw is kept (a source that is not ready leaves
+/// `cookie_nonce` at `None`, the fail-closed report, observable here and not at
+/// the first handshake). Nothing is allocated.
+#[cfg(feature = "session-slot")]
+pub fn new_session_in_slot<C, D, E>(
+    claim: SlotClaim<CoopRuntime<C>, CoopTime<C>, D, E>,
+    params: wz_session_core::session_init_params::SessionInitParams,
+    clock: CoopTime<C>,
+) -> SlotRef<CoopRuntime<C>, CoopTime<C>>
+where
+    C: ClockSource + 'static,
+    D: BoxedLinkDriver + 'static,
+    E: wz_session_core::entropy::EntropySource + Send + 'static,
+{
+    let actions = claim.open(params, clock);
+    let _ = actions.draw_cookie_nonce();
+    actions
+}
+
 /// LinkSink fixity. Mirrors the AP-side
 /// `tokio_session_runtime_link_sink_bounds_compile` regression assert,
 /// but pins the *opposite* auto-trait shape: the MCU sink is `Clone`
@@ -256,7 +319,7 @@ fn _lwip_session_runtime_link_sink_is_clone<C: ClockSource>() {
     _assert_clone::<<CoopRuntime<C> as SessionRuntime>::LinkSink>();
 }
 
-#[cfg(all(test, feature = "session-unicast"))]
+#[cfg(all(test, feature = "session-unicast", not(feature = "session-slot")))]
 mod cookie_nonce_draw_tests {
     use super::*;
     use alloc::vec;

@@ -16,6 +16,157 @@
 use alloc::vec::Vec;
 use wz_codecs::ext_entry::ExtEntryOwned;
 
+/// How many extension entries a session can have staged on ONE of its four
+/// handshake chains at once, derived from what this build can stage.
+///
+/// Every stager replaces an entry by its extension id before it adds one (the
+/// `retain` then `push` of `stage_capability`, the replace-in-place of the patch
+/// stager), so a chain holds at most one entry per kind of extension the build
+/// can stage. The kinds are counted from the features that stage them: the patch
+/// level, the region name and the remote bound are staged by every build that
+/// has the handshake; the rest each by the feature that owns them. Capacity for
+/// one more than the count is not kept: an entry that would not fit is a
+/// stager that skipped its replace, and `ExtChainBuf::push` says so.
+#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+pub const STAGED_EXT_KINDS: usize = 3
+    + cfg!(feature = "transport-qos") as usize
+    + cfg!(feature = "transport-lowlatency") as usize
+    + cfg!(feature = "session-extcompression") as usize
+    + cfg!(feature = "session-extshm") as usize
+    + cfg!(feature = "session-extauth") as usize
+    + cfg!(feature = "transport-multilink") as usize;
+
+/// One handshake ext chain as a session stages it: the growable `Vec` of every
+/// profile but `session-slot`, and under it an array of `STAGED_EXT_KINDS`
+/// entries held in the session's own storage (fixed-memory step S5).
+///
+/// The fixed form has exactly the operations the stagers use on the vector
+/// (`push`, `retain`, indexing, iteration, `Default` for the take-and-put-back
+/// of the lend-only handshake), so a stager is written once.
+#[cfg(all(not(feature = "session-slot"), feature = "session-unicast"))]
+pub type ExtChainBuf = Vec<ExtEntryOwned>;
+
+/// See the growable form of this alias.
+#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+#[derive(Debug, Clone, Default)]
+pub struct ExtChainBuf(heapless::Vec<ExtEntryOwned, STAGED_EXT_KINDS>);
+
+// Which of these a build uses depends on which extensions it can stage.
+#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+#[allow(dead_code)]
+impl ExtChainBuf {
+    /// A chain of exactly `entry`.
+    pub fn one(entry: ExtEntryOwned) -> Self {
+        let mut chain = Self::default();
+        chain.push(entry);
+        chain
+    }
+
+    /// Append `entry`. The chain holds one entry per kind of extension the
+    /// build stages (`STAGED_EXT_KINDS`), so this fits whenever the stager
+    /// replaced the entry of its own id first, as every stager does; one that
+    /// did not is a defect in the stager, and failing here names it rather than
+    /// dropping an entry the peer was owed.
+    pub fn push(&mut self, entry: ExtEntryOwned) {
+        if self.0.push(entry).is_err() {
+            panic!("a handshake ext chain holds one entry per staged extension kind");
+        }
+    }
+
+    /// Keep only the entries `keep` accepts, in order.
+    pub fn retain<F: FnMut(&ExtEntryOwned) -> bool>(&mut self, keep: F) {
+        self.0.retain(keep);
+    }
+
+    /// Remove and return the entry at `at`, keeping the order of the rest.
+    pub fn remove(&mut self, at: usize) -> ExtEntryOwned {
+        self.0.remove(at)
+    }
+}
+
+#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+impl core::ops::Deref for ExtChainBuf {
+    type Target = [ExtEntryOwned];
+
+    fn deref(&self) -> &[ExtEntryOwned] {
+        self.0.as_slice()
+    }
+}
+
+#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+impl core::ops::DerefMut for ExtChainBuf {
+    fn deref_mut(&mut self) -> &mut [ExtEntryOwned] {
+        self.0.as_mut_slice()
+    }
+}
+
+/// The extension chain a received handshake message (INIT, OPEN, CLOSE,
+/// KEEP_ALIVE) carries, as the decoder hands it over: a growable `Vec` on every
+/// profile but `session-slot`, and under it an array of the decoder's own bound
+/// (`MAX_EXT_CHAIN_DEPTH` entries), so reading a chain allocates nothing for
+/// the chain itself. Both are read as `[ExtEntryOwned]`.
+#[cfg(not(feature = "session-slot"))]
+pub type ExtChainOwned = Vec<ExtEntryOwned>;
+/// See the growable form of this alias.
+#[cfg(feature = "session-slot")]
+pub type ExtChainOwned = heapless::Vec<ExtEntryOwned, { crate::parse_error::MAX_EXT_CHAIN_DEPTH }>;
+
+/// [`decode_ext_chain`] into the form a received handshake message holds its
+/// chain in ([`ExtChainOwned`]).
+///
+/// An entry's own body is a separate matter: an owned entry carries its bytes
+/// in the SCE default storage, so an extension whose body is a byte string (the
+/// region name, an auth or SHM challenge) still owns a heap copy of it; the
+/// entries a wz peer's handshake carries (the patch level, the unit and integer
+/// capability offers) own nothing.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive"
+))]
+pub(crate) fn decode_handshake_ext_chain(
+    cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
+) -> Result<ExtChainOwned, crate::parse_error::InboundParseError> {
+    #[cfg(not(feature = "session-slot"))]
+    {
+        decode_ext_chain(cursor)
+    }
+    #[cfg(feature = "session-slot")]
+    {
+        use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
+        use wz_codecs::ext_entry::ExtEntry;
+
+        let mut entries = ExtChainOwned::new();
+        for _ in 0..MAX_EXT_CHAIN_DEPTH {
+            let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
+            let z = entry.z();
+            let owned = entry.try_into_owned().map_err(InboundParseError::Codec)?;
+            // Cannot overflow: the loop's bound is the array's.
+            if entries.push(owned).is_err() {
+                return Err(InboundParseError::ExtChainOverflow);
+            }
+            if !z {
+                return Ok(entries);
+            }
+        }
+        Err(InboundParseError::ExtChainOverflow)
+    }
+}
+
+/// A chain of exactly `entry`, in whichever form this profile stages it.
+#[cfg(feature = "session-unicast")]
+pub(crate) fn ext_chain_of(entry: ExtEntryOwned) -> ExtChainBuf {
+    #[cfg(not(feature = "session-slot"))]
+    {
+        alloc::vec![entry]
+    }
+    #[cfg(feature = "session-slot")]
+    {
+        ExtChainBuf::one(entry)
+    }
+}
+
 /// The `max-depth` every entry-flag ext chain in the network and zenoh-payload
 /// layers is generated with (`sources/codecs/*.scxml`).
 ///

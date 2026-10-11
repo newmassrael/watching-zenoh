@@ -53,13 +53,21 @@ extern crate std;
 // the paths it always had, so a firmware that names `wz_session_lwip::admin_node`
 // still does. Only the lwIP half stays in this crate: the driver, the links that
 // open it, the multicast drive loop.
-#[cfg(all(feature = "adminspace-core", feature = "adminspace-write"))]
+// The dialer and the admin node are not on the `session-slot` profile yet (see
+// `wz-session-mcu`'s `session-slot`).
+#[cfg(all(
+    feature = "adminspace-core",
+    feature = "adminspace-write",
+    not(feature = "session-slot")
+))]
 pub use wz_session_mcu::admin_node;
 #[cfg(feature = "adminspace-core")]
 pub use wz_session_mcu::admin_status;
 pub use wz_session_mcu::app_layer;
+#[cfg(all(feature = "adminspace-write", not(feature = "session-slot")))]
+pub use wz_session_mcu::dial;
 #[cfg(feature = "adminspace-write")]
-pub use wz_session_mcu::{admin_host, connect_manager, dial};
+pub use wz_session_mcu::{admin_host, connect_manager};
 pub mod driver;
 // The lwIP stack's links, as the shell's `SessionLinks` seam: a socket bound on
 // a port for an acceptor, on a free port for an initiator.
@@ -77,7 +85,8 @@ pub mod session_drive;
     feature = "transport-multicast",
     feature = "session-unicast-open",
     feature = "session-unicast-accept",
-    feature = "codec-push"
+    feature = "codec-push",
+    not(feature = "session-slot")
 ))]
 mod two_session_tests;
 // ARCHITECTURE section 9.1 — which frames of an established session leave from a
@@ -87,7 +96,8 @@ mod two_session_tests;
     test,
     feature = "transport-keepalive",
     feature = "session-unicast-open",
-    feature = "session-unicast-accept"
+    feature = "session-unicast-accept",
+    not(feature = "session-slot")
 ))]
 mod tx_pool_session_tests;
 

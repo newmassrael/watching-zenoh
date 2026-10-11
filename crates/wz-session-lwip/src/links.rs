@@ -14,16 +14,17 @@
 //! `spawn_session`), moved to the one place that knows the stack.
 
 use alloc::rc::Rc;
-use core::cell::RefCell;
 
 #[cfg(not(feature = "static-link-storage"))]
 use wz_link_lwip::rx_sockets::bind_session_rx;
 #[cfg(feature = "static-link-storage")]
 use wz_link_lwip::rx_sockets::SessionSocketSource;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
-use wz_runtime_coop::session_drive::{LinkOpenError, OpenedLink, SessionLinks, UdpPeer};
+use wz_runtime_coop::session_drive::{LinkOpenError, UdpPeer};
+#[cfg(not(feature = "session-slot"))]
+use wz_runtime_coop::session_drive::{OpenedLink, SessionLinks};
 
-use crate::driver::{LwipUdpDriver, SharedSessionSocket};
+use crate::driver::{share_socket, DriverHandle, LwipUdpDriver};
 use crate::session_drive::LwipSessionLink;
 
 /// The links of a node whose network stack is lwIP.
@@ -59,28 +60,48 @@ impl LwipLinks {
         &self.link
     }
 
+    /// Bind a session socket on `port` (0 asks lwIP for a free one) and wrap it
+    /// in the driver that is a session's outbound sink: the half of opening a
+    /// link that only this stack can do. Under `session-slot` this is the whole
+    /// of it, and the driver is moved into a slot of
+    /// `wz_session_core::session_slot::SessionSlots` by the caller; on the other
+    /// profiles `SessionLinks` wraps it in an `Rc`.
+    ///
+    /// `peer` is where the first sends go: an acceptor passes the unspecified
+    /// address, which its first inbound datagram overwrites; an initiator its
+    /// configured peer.
+    pub fn bind_driver(&self, port: u16, peer: UdpPeer) -> Result<LwipUdpDriver, LinkOpenError> {
+        // Round 3277 (`static-link-storage`): the socket's state is a cell of the
+        // pool the image handed to `new`, and a full pool is the same
+        // `Exhausted` a port lwIP refuses is.
+        #[cfg(not(feature = "static-link-storage"))]
+        let socket = bind_session_rx(&self.link, port);
+        #[cfg(feature = "static-link-storage")]
+        let socket = self.sockets.bind_session_rx(&self.link, port);
+        let socket = socket.map_err(|_| LinkOpenError::Exhausted)?;
+        Ok(LwipUdpDriver::new(
+            share_socket(socket),
+            ipv4_addr_from_octets(peer.addr),
+            peer.port,
+        ))
+    }
+
+    /// The pump the drive loop services for a session whose driver is `driver`.
+    pub fn pump_over(&self, driver: DriverHandle) -> LwipSessionLink<Rc<LwipLink>> {
+        LwipSessionLink::new(self.link.clone(), driver)
+    }
+
+    #[cfg(not(feature = "session-slot"))]
     fn opened(
         &self,
         port: u16,
         peer: UdpPeer,
     ) -> Result<OpenedLink<<Self as SessionLinks>::Pump>, LinkOpenError> {
         // Port 0 asks lwIP for a free one, one per initiator session.
-        #[cfg(not(feature = "static-link-storage"))]
-        let socket = bind_session_rx(&self.link, port);
-        #[cfg(feature = "static-link-storage")]
-        let socket = self.sockets.bind_session_rx(&self.link, port);
-        let socket = socket.map_err(|_| LinkOpenError::Exhausted)?;
-        let socket: SharedSessionSocket = Rc::new(RefCell::new(socket));
-        let driver = Rc::new(LwipUdpDriver::new(
-            socket,
-            // An acceptor passes the unspecified address, which its first
-            // inbound datagram overwrites; an initiator its configured peer.
-            ipv4_addr_from_octets(peer.addr),
-            peer.port,
-        ));
+        let driver = Rc::new(self.bind_driver(port, peer)?);
         Ok(OpenedLink {
             sink: driver.clone(),
-            pump: LwipSessionLink::new(self.link.clone(), driver),
+            pump: self.pump_over(driver),
         })
     }
 }
@@ -88,7 +109,7 @@ impl LwipLinks {
 /// Links for a host test: `LwipLinks::new` on the default profile, and with
 /// `static-link-storage` over a leaked pool of sockets (a test is host code and may
 /// allocate; a firmware declares a `static` pool instead).
-#[cfg(test)]
+#[cfg(all(test, not(feature = "session-slot")))]
 pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
     #[cfg(not(feature = "static-link-storage"))]
     {
@@ -100,6 +121,10 @@ pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
     }
 }
 
+// The seam opens a link as an `Rc` of its driver, the form every profile but
+// `session-slot` has; under it a link is opened by `bind_driver` and the slot
+// that takes the driver, which no shell is written against yet (steps S8, S9).
+#[cfg(not(feature = "session-slot"))]
 impl SessionLinks for LwipLinks {
     type Pump = LwipSessionLink<Rc<LwipLink>>;
 
@@ -119,7 +144,7 @@ impl SessionLinks for LwipLinks {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "session-slot")))]
 mod tests {
     use super::*;
 

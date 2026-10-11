@@ -48,9 +48,19 @@ use zeroize::Zeroizing;
 /// `as_slice`. Consumers store / move / clone a `SigningKey` like
 /// any other value type but cannot accidentally serialise it or
 /// log its inner bytes.
+///
+/// Under `session-slot` (the heap-free per-session profile, fixed-memory step
+/// S5) the bytes are an array of `SIGNING_KEY_MAX` held in the key itself, and a
+/// key longer than that is stored as its SHA-256, which is the same key to HMAC:
+/// RFC 2104 defines a key longer than the block as that key hashed.
 #[derive(Clone)]
 pub struct SigningKey {
+    #[cfg(not(feature = "session-slot"))]
     bytes: Zeroizing<Vec<u8>>,
+    #[cfg(feature = "session-slot")]
+    bytes: Zeroizing<[u8; SIGNING_KEY_MAX]>,
+    #[cfg(feature = "session-slot")]
+    len: usize,
 }
 
 impl core::fmt::Debug for SigningKey {
@@ -58,7 +68,7 @@ impl core::fmt::Debug for SigningKey {
     /// panic backtraces show only the length.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SigningKey")
-            .field("len", &self.bytes.len())
+            .field("len", &self.len())
             .field("bytes", &"<redacted>")
             .finish()
     }
@@ -86,6 +96,11 @@ impl core::error::Error for SigningKeyTooShort {}
 /// by it, and a draw that were shorter than the validator's floor would build a
 /// key `new` would have refused.
 pub const SIGNING_KEY_BYTES: usize = 32;
+
+/// How many key bytes a [`SigningKey`] holds under `session-slot`: the HMAC-SHA256
+/// block, which is also the longest key HMAC uses as it stands.
+#[cfg(feature = "session-slot")]
+pub const SIGNING_KEY_MAX: usize = 64;
 
 impl SigningKey {
     /// R311y820 — draw a fresh key from the §2.5 plugin-tier entropy port
@@ -125,9 +140,21 @@ impl SigningKey {
     ) -> Result<Self, crate::entropy::EntropyUnavailable> {
         // Zeroizing FIRST, so a partially-filled buffer is wiped on the `?`
         // rather than left on the heap for the allocator to hand out.
-        let mut bytes = Zeroizing::new(alloc::vec![0u8; SIGNING_KEY_BYTES]);
-        source.try_fill_bytes(&mut bytes)?;
-        Ok(Self { bytes })
+        #[cfg(not(feature = "session-slot"))]
+        {
+            let mut bytes = Zeroizing::new(alloc::vec![0u8; SIGNING_KEY_BYTES]);
+            source.try_fill_bytes(&mut bytes)?;
+            Ok(Self { bytes })
+        }
+        #[cfg(feature = "session-slot")]
+        {
+            let mut bytes = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
+            source.try_fill_bytes(&mut bytes[..SIGNING_KEY_BYTES])?;
+            Ok(Self {
+                bytes,
+                len: SIGNING_KEY_BYTES,
+            })
+        }
     }
 
     /// Construct a key from owned bytes. The input is moved into a
@@ -141,28 +168,75 @@ impl SigningKey {
             let _ = Zeroizing::new(bytes);
             return Err(SigningKeyTooShort(0)); // length already inspected
         }
-        Ok(Self {
-            bytes: Zeroizing::new(bytes),
-        })
+        #[cfg(not(feature = "session-slot"))]
+        {
+            Ok(Self {
+                bytes: Zeroizing::new(bytes),
+            })
+        }
+        #[cfg(feature = "session-slot")]
+        {
+            let bytes = Zeroizing::new(bytes);
+            Self::from_slice(&bytes)
+        }
+    }
+
+    /// Construct a key from a borrowed slice, which is copied into the key.
+    /// The constructor a caller with no `Vec` uses: it allocates nothing under
+    /// `session-slot`. A slice shorter than 32 bytes is refused as
+    /// [`Self::new`] refuses it.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, SigningKeyTooShort> {
+        if bytes.len() < SIGNING_KEY_BYTES {
+            return Err(SigningKeyTooShort(0));
+        }
+        #[cfg(not(feature = "session-slot"))]
+        {
+            Ok(Self {
+                bytes: Zeroizing::new(bytes.to_vec()),
+            })
+        }
+        #[cfg(feature = "session-slot")]
+        {
+            let mut out = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
+            let len = if bytes.len() <= SIGNING_KEY_MAX {
+                out[..bytes.len()].copy_from_slice(bytes);
+                bytes.len()
+            } else {
+                // RFC 2104: a key longer than the hash's block is the hash of
+                // that key, so the stored key makes the same MACs.
+                use sha2::Digest;
+                let digest = Sha256::digest(bytes);
+                out[..digest.len()].copy_from_slice(&digest);
+                digest.len()
+            };
+            Ok(Self { bytes: out, len })
+        }
     }
 
     /// Key length in bytes. Non-secret (already surfaced via the
     /// `Debug` impl); exposed so callers / tests can assert the
     /// `>= 32` length contract without reaching the private bytes.
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.as_slice().len()
     }
 
     /// `true` when the key holds zero bytes. Present to satisfy the
     /// clippy `len_without_is_empty` lint; a constructed `SigningKey`
     /// is never empty (the `>= 32` constructor contract).
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.as_slice().is_empty()
     }
 
     /// Crate-internal slice view; not exposed to consumers.
     fn as_slice(&self) -> &[u8] {
-        &self.bytes
+        #[cfg(not(feature = "session-slot"))]
+        {
+            &self.bytes
+        }
+        #[cfg(feature = "session-slot")]
+        {
+            &self.bytes[..self.len]
+        }
     }
 }
 

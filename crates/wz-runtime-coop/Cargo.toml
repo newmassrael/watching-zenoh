@@ -142,6 +142,17 @@ session-unicast = [
     "wz-session-core/no_std",
 ]
 
+# Fixed-memory step S5 — the per-session slot (`wz-session-core`'s `session-slot`):
+# under it the session runtime's link sink is a reference to the driver the
+# session's slot holds and its action handle a counted reference to the slot, not
+# `Rc`s, and the construction seam is `session_runtime::new_session_in_slot`. A
+# SELECTOR, off by default, and an MCU final binary's: workspace feature
+# unification would otherwise hand a library crate's dependents a runtime whose
+# sessions need a slot table. It implies `rx-in-place` and nothing it does not
+# need: the slot's witness is a session that allocates nothing, which the
+# copying receive loop does not.
+session-slot = ["session-unicast", "rx-in-place", "wz-session-core/session-slot"]
+
 # The unicast drive loop reads each inbound datagram WHERE THE LINK HOLDS IT
 # and hands the session its records one at a time, instead of copying the
 # datagram onto the heap, copying the frame's payload out of that copy and

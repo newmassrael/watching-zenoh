@@ -1004,6 +1004,7 @@ name = "wz-session-lwip"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "heapless",
  "lwip-sys",
  "wz-link-lwip",
  "wz-runtime-coop",

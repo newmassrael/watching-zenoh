@@ -6,7 +6,7 @@
 //! R2915 — the loop itself is `wz_runtime_coop::session_drive`, generic over
 //! the network stack. This module is lwIP's side of that seam:
 //! [`LwipSessionLink`] implements `SessionDatagramLink` (pump lwIP's input
-//! path; take a datagram from the [`LwipUdpDriver`] and retarget replies to
+//! path; take a datagram from the [`LwipUdpDriver`](crate::driver::LwipUdpDriver) and retarget replies to
 //! its source), and [`run_session`] / [`session_task`] / [`spawn_session`]
 //! keep the lwIP-typed signatures every existing caller writes, building the
 //! link and handing it to the shared loop.
@@ -17,19 +17,19 @@ use core::ops::Deref;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{self as coop_drive, SessionDatagramLink};
 pub use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
+use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::RxFrame;
-use wz_session_core::session_actions::SessionLinkActions;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "session-slot")))]
 use wz_session_core::session_timeouts::SessionTimeouts;
 
-use crate::driver::LwipUdpDriver;
+use crate::driver::DriverHandle;
 
 /// lwIP's [`SessionDatagramLink`]: the `NO_SYS` stack is pumped from the
 /// loop's own thread, and inbound datagrams come off the session socket the
-/// [`LwipUdpDriver`] shares with the outbound send seam.
+/// [`LwipUdpDriver`](crate::driver::LwipUdpDriver) shares with the outbound send seam.
 ///
 /// Generic over the link handle `L` rather than borrowing `&LwipLink`,
 /// because the two drivers hold the link differently: the synchronous loop
@@ -38,13 +38,13 @@ use crate::driver::LwipUdpDriver;
 /// `Deref<Target = LwipLink>` bound admits both at no runtime cost.
 pub struct LwipSessionLink<L: Deref<Target = LwipLink>> {
     link: L,
-    driver: Rc<LwipUdpDriver>,
+    driver: DriverHandle,
 }
 
 impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
     /// Pair the lwIP link whose input path is pumped with the driver whose
     /// socket carries the session.
-    pub fn new(link: L, driver: Rc<LwipUdpDriver>) -> Self {
+    pub fn new(link: L, driver: DriverHandle) -> Self {
         Self { link, driver }
     }
 }
@@ -82,16 +82,17 @@ pub type SessionPump<C, L> = coop_drive::SessionPump<C, LwipSessionLink<L>>;
 /// - `link` — the [`LwipLink`]; `poll_loopback` + `check_timeouts` drive the
 ///   lwIP input path each tick. This is the loopback / QEMU shape — a real
 ///   multi-NIC deploy drives netif input from the RX ISR instead (carry tail).
-/// - `driver` — the concrete [`LwipUdpDriver`] (for `try_recv` + `set_peer`);
-///   the same object lives inside `actions` as `Rc<dyn BoxedLinkDriver>` for
-///   the outbound send seam.
+/// - `driver` — the concrete [`LwipUdpDriver`](crate::driver::LwipUdpDriver) (for
+///   `try_recv` + `set_peer`); the same object lives inside `actions` as the
+///   session's link sink (`Rc<dyn BoxedLinkDriver>`, or under `session-slot` a
+///   reference into the slot that holds both) for the outbound send seam.
 ///
 /// The other parameters are the shared loop's.
 pub fn run_session<C, F>(
     runtime: &CoopRuntime<C>,
     link: &LwipLink,
-    driver: &Rc<LwipUdpDriver>,
-    actions: &Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    driver: &DriverHandle,
+    actions: &SessionHandle<C>,
     clock: &CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -117,8 +118,8 @@ where
 pub async fn session_task<C, F>(
     runtime: CoopRuntime<C>,
     link: Rc<LwipLink>,
-    driver: Rc<LwipUdpDriver>,
-    actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    driver: DriverHandle,
+    actions: SessionHandle<C>,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -143,8 +144,8 @@ where
 pub fn spawn_session<C, F>(
     local: &CoopLocalSet<C>,
     link: Rc<LwipLink>,
-    driver: Rc<LwipUdpDriver>,
-    actions: Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    driver: DriverHandle,
+    actions: SessionHandle<C>,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -163,7 +164,9 @@ where
     )
 }
 
-#[cfg(test)]
+// The tests build sessions with `Rc` handles and sockets, the form every profile
+// but `session-slot` has; the slot profile's own are in `tests/`.
+#[cfg(all(test, not(feature = "session-slot")))]
 mod tests {
     use super::*;
     use alloc::rc::Rc;

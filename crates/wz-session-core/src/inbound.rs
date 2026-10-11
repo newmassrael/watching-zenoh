@@ -34,6 +34,14 @@ use alloc::vec::Vec;
 use crate::parse_error::InboundParseError;
 
 use crate::ext_chain::decode_ext_chain;
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive"
+))]
+use crate::ext_chain::decode_handshake_ext_chain;
+pub use crate::ext_chain::ExtChainOwned;
 use crate::link::RxBytes;
 // `CodecError` is named only by the `Frame` arm, which is `codec-frame`'s.
 #[cfg(feature = "codec-frame")]
@@ -52,6 +60,20 @@ use wz_codecs::join::JoinOwned;
 use wz_codecs::keep_alive::KeepAlive;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::{OpenBody, OpenBodyOwned};
+
+/// The storage profile a handshake body (an INIT or an OPEN) is decoded into: the
+/// SCE default (the heap) on every profile but `session-slot`, and under it the
+/// inline profile, whose zid and cookie are arrays of the capacities the
+/// generated codec declares, so reading a handshake allocates nothing
+/// (fixed-memory step S5). The accessors a reader uses (`as_slice`) are the same
+/// on both.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+#[cfg(not(feature = "session-slot"))]
+pub type HandshakeStorage = sce_forge_runtime::storage::DefaultStorage;
+/// See the default form of this alias.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+#[cfg(feature = "session-slot")]
+pub type HandshakeStorage = sce_forge_runtime::storage::Inline;
 
 /// A decoded inbound transport-message frame.
 ///
@@ -95,8 +117,8 @@ pub enum InboundFrame {
     Init {
         is_ack: bool,
         has_ext: bool,
-        body: InitBodyOwned,
-        extensions: Vec<ExtEntryOwned>,
+        body: InitBodyOwned<HandshakeStorage>,
+        extensions: ExtChainOwned,
     },
     /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`.
     /// `body.lease` is ALWAYS milliseconds — the `_Z_FLAG_T_OPEN_T`
@@ -108,8 +130,8 @@ pub enum InboundFrame {
     Open {
         is_ack: bool,
         has_ext: bool,
-        body: OpenBodyOwned,
-        extensions: Vec<ExtEntryOwned>,
+        body: OpenBodyOwned<HandshakeStorage>,
+        extensions: ExtChainOwned,
     },
     /// `_Z_MID_T_CLOSE` (0x03). `reason` is the single body byte.
     ///
@@ -130,7 +152,7 @@ pub enum InboundFrame {
         reason: u8,
         session: bool,
         has_ext: bool,
-        extensions: Vec<ExtEntryOwned>,
+        extensions: ExtChainOwned,
     },
     /// `_Z_MID_T_KEEP_ALIVE` (0x04). Empty-body liveness ping; the
     /// only payload is the optional ext chain (Z flag-gated). The
@@ -139,7 +161,7 @@ pub enum InboundFrame {
     #[cfg(feature = "codec-keep-alive")]
     KeepAlive {
         has_ext: bool,
-        extensions: Vec<ExtEntryOwned>,
+        extensions: ExtChainOwned,
     },
     /// `_Z_MID_T_FRAME` (0x05). Established-session payload carrier:
     /// `reliable` mirrors `_Z_FLAG_T_FRAME_R`; `sn` is the VLE
@@ -920,7 +942,7 @@ fn parse_unit(
         #[cfg(feature = "codec-init-body")]
         wire_const::T_MID_INIT => {
             let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
-                .try_into_owned()?;
+                .try_into_owned_in::<HandshakeStorage>()?;
             // The M (mandatory) bit is judged at the participant seam like every
             // other transport message's ([`InboundFrame::ext_admission`]), by the
             // extension's identity: the decode reads the chain, so a capture
@@ -929,9 +951,9 @@ fn parse_unit(
             // id with the mandatory bit set (`0x58`, the region name as a
             // mandatory ZBuf) through and refused an unknown one at the decode.
             let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
+                decode_handshake_ext_chain(&mut cursor)?
             } else {
-                Vec::new()
+                ExtChainOwned::new()
             };
             Ok((
                 InboundFrame::Init {
@@ -945,7 +967,8 @@ fn parse_unit(
         }
         #[cfg(feature = "codec-open-body")]
         wire_const::T_MID_OPEN => {
-            let mut body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?.try_into_owned()?;
+            let mut body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?
+                .try_into_owned_in::<HandshakeStorage>()?;
             // R311ku — the `_Z_FLAG_T_OPEN_T` seconds form is projected
             // back to milliseconds AT the wire boundary
             // ([`crate::lease::lease_from_wire`], pico decode parity
@@ -954,9 +977,9 @@ fn parse_unit(
             body.lease =
                 crate::lease::lease_from_wire((flags & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
             let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
+                decode_handshake_ext_chain(&mut cursor)?
             } else {
-                Vec::new()
+                ExtChainOwned::new()
             };
             Ok((
                 InboundFrame::Open {
@@ -972,9 +995,9 @@ fn parse_unit(
         wire_const::T_MID_CLOSE => {
             let body = Close::decode(&mut cursor)?;
             let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
+                decode_handshake_ext_chain(&mut cursor)?
             } else {
-                Vec::new()
+                ExtChainOwned::new()
             };
             Ok((
                 InboundFrame::Close {
@@ -1230,9 +1253,9 @@ fn decode_keep_alive(
     let mut cursor = SceCursor::new(&bytes[1..]);
     let _body = KeepAlive::decode(&mut cursor)?;
     let extensions = if has_ext {
-        decode_ext_chain(&mut cursor)?
+        decode_handshake_ext_chain(&mut cursor)?
     } else {
-        Vec::new()
+        ExtChainOwned::new()
     };
     Ok((
         InboundFrame::KeepAlive {

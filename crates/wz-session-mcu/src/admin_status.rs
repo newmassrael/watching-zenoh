@@ -301,7 +301,9 @@ pub fn host_admin_queryable(
         .map(|_id| ())
 }
 
-#[cfg(test)]
+// The tests drive the shell over the in-memory network and `Rc` handles, which
+// the `session-slot` profile does not have (see the crate's `session-slot`).
+#[cfg(all(test, not(feature = "session-slot")))]
 mod tests {
     use super::*;
     use alloc::boxed::Box;

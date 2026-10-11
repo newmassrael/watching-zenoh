@@ -47,6 +47,11 @@
 //! Host-test level: no board runs it, and the stack depth of the in-place
 //! dispatch is not measured here.
 
+// Not on the `session-slot` profile, whose sessions are made in a slot and not
+// through the `Rc` seams this file builds them with: `session_slot_allocations`
+// counts that profile's, receive path included.
+#![cfg(not(feature = "session-slot"))]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

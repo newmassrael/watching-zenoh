@@ -20,9 +20,9 @@
 //! action bodies stay gated on their codec / handshake-role feature —
 //! cfg-off is a documented no-emit no-op, not a build error.
 
+#[cfg(any(not(feature = "session-slot"), feature = "session-extshm"))]
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
@@ -69,6 +69,7 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 
 use crate::action_trace::ActionTrace;
 use crate::close_reason::CloseReason;
+use crate::ext_chain::{ext_chain_of, ExtChainBuf};
 use crate::ext_chain_role::ExtChainRole;
 use crate::link::{BoxedLinkDriver, SessionRuntime};
 use crate::peer_init_caps::PeerInitCaps;
@@ -126,7 +127,7 @@ use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
 use crate::session_fsm_unicast::SessionFsmUnicastActions as SessionFsmUnicastActionsTrait;
-use crate::session_init_params::SessionInitParams;
+use crate::session_init_params::{SessionBytes, SessionInitParams, COOKIE_MAX, ZID_MAX};
 // R2769 — the accept cookie replaced the bare tag at both ends, so the mint
 // reaches for the carrier's encoder here and the verify names
 // `decode_accept_cookie` at its own site.
@@ -996,6 +997,31 @@ impl FrameTxConduits {
     }
 }
 
+/// Whether this build compiled the per-session slot profile (`session-slot`,
+/// fixed-memory step S5). `false` on every build the AP links, and a crate that
+/// shares this one with an MCU build and cannot work on the slot profile asserts
+/// it `false` at compile time, so a build graph that unifies the selector into it
+/// fails to build instead of misbehaving: `wz-runtime-tokio` does, as it does for
+/// `tx_buf::TX_LEND_ONLY`.
+pub const SESSION_SLOT: bool = cfg!(feature = "session-slot");
+
+/// The entropy source a session re-draws its cookie nonce from, as the session
+/// holds it: the §2.5 plugin-tier port behind a `Box` on every profile but
+/// `session-slot`.
+///
+/// Under `session-slot` (fixed-memory step S5) it is a reference to a source the
+/// session's own slot holds beside the bundle, so installing one allocates
+/// nothing. It stays a trait object, and not a type parameter of the bundle,
+/// for the reason `Box<dyn ..>` was chosen at R2763: a parameter would be one
+/// more thing every `SessionLinkActions` mention in the workspace would have to
+/// carry. What the profile removes is the allocation, and the slot, which is
+/// generic over the source's type, is where its type is named.
+#[cfg(not(feature = "session-slot"))]
+pub type CookieEntropy = Box<dyn EntropySource + Send>;
+/// See the `Box` form of this alias.
+#[cfg(feature = "session-slot")]
+pub type CookieEntropy = &'static mut (dyn EntropySource + Send);
+
 /// R311y205 (transport-multilink IMPL-2a) — the SHARED session kernel: the
 /// ~30 fields that are one-per-logical-session regardless of how many physical
 /// links carry it (SN generators, RX-SN gate, negotiated caps, peer identity,
@@ -1142,7 +1168,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `handle_inbound`. When populated this overrides
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
-    pub inbound_cookie: R::Mutex<Option<Vec<u8>>>,
+    pub inbound_cookie: R::Mutex<Option<SessionBytes<COOKIE_MAX>>>,
     /// R311kv — the lease window the peer advertised in its OPEN body
     /// (milliseconds; `parse_inbound` already projected the wire T-flag
     /// seconds form back, R311ku). Captured from BOTH OpenSyn (accepting
@@ -1196,7 +1222,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// back to `params.cookie` verbatim — callers that need strict
     /// HMAC-only behavior must validate the slot before signalling
     /// `inbound.start`.
-    pub inbound_peer_zid: R::Mutex<Option<Vec<u8>>>,
+    pub inbound_peer_zid: R::Mutex<Option<SessionBytes<ZID_MAX>>>,
     /// R311qh — the remote peer's zid learned at handshake, captured for the
     /// ROUTING layer from BOTH the inbound InitSyn (Accepting side) and the
     /// inbound InitAck (Initiating side) — the remote peer's stable network
@@ -1207,7 +1233,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// touching it, to avoid cross-role confusion), whereas this slot is the
     /// role-agnostic remote identity a face exposes once Established. Reset on
     /// re-handshake alongside the other captured slots.
-    pub remote_peer_zid: R::Mutex<Option<Vec<u8>>>,
+    pub remote_peer_zid: R::Mutex<Option<SessionBytes<ZID_MAX>>>,
     /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
     /// (`InitBody::whatami()` = `cbyte & 0x03`: 0 Router, 1 Peer, 2 Client),
     /// captured at handshake from BOTH the inbound InitSyn (Accepting side) and
@@ -1235,7 +1261,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// two slots model the same wire field on opposite sides of
     /// the handshake — one slot per role keeps the dispatch
     /// unambiguous.
-    pub inbound_opensyn_cookie: R::Mutex<Option<Vec<u8>>>,
+    pub inbound_opensyn_cookie: R::Mutex<Option<SessionBytes<COOKIE_MAX>>>,
     /// R311y813 — the per-handshake nonce that binds the Accepting side's
     /// cookie to THIS handshake, the wz analogue of the `cookie_nonce` zenoh
     /// keeps in its own accept state and compares the OpenSyn echo against
@@ -1309,16 +1335,16 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// acceptor mints no HMAC cookie and admits no OpenSyn rather than reusing
     /// the previous handshake's binding. Both production construction seams
     /// install one, so no shipped acceptor keeps the per-bundle behaviour.
-    cookie_entropy: R::Mutex<Option<Box<dyn EntropySource + Send>>>,
+    cookie_entropy: R::Mutex<Option<CookieEntropy>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
     /// (e.g. mid-handshake auth-step rotation can rewrite the
     /// OpenSyn chain without touching the InitSyn record).
-    init_syn_ext: R::Mutex<Vec<ExtEntryOwned>>,
-    init_ack_ext: R::Mutex<Vec<ExtEntryOwned>>,
-    open_syn_ext: R::Mutex<Vec<ExtEntryOwned>>,
-    open_ack_ext: R::Mutex<Vec<ExtEntryOwned>>,
+    init_syn_ext: R::Mutex<ExtChainBuf>,
+    init_ack_ext: R::Mutex<ExtChainBuf>,
+    open_syn_ext: R::Mutex<ExtChainBuf>,
+    open_ack_ext: R::Mutex<ExtChainBuf>,
     /// R3b — the Z_EXT_AUTH dispatch (`session-extauth`). Holds the negotiated
     /// auth methods (usrpwd, ...) and mux/demuxes their per-stage sub-exts into
     /// the four handshake ext chains above. Default empty (no auth ext, admits
@@ -2144,14 +2170,28 @@ impl<R: SessionRuntime> LinkState<R> {
 /// through either is seen by both). ONE type shape at every N — at N=1 (every
 /// build today, and every MCU build always) both are refcount-1 pointers,
 /// behavior / wire / data-plane identical to the pre-split flat struct.
+///
+/// Fixed-memory step S5 — under `session-slot` they are NOT behind a pointer
+/// either: the bundle holds exactly one kernel and one link, so both are its own
+/// fields and the whole session is one value, which a slot holds
+/// (`crate::session_slot`). The aggregation of several links onto one kernel is
+/// what the shared pointer is for, and a slot has no form of it.
 pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// Shared session kernel — SN/rx_sn/caps/identity/id-spaces/caches. Cloned
     /// (refcount) across every link that aggregates into this logical session.
+    #[cfg(not(feature = "session-slot"))]
     pub core: R::Shared<SessionCore<R, T>>,
+    /// The session kernel, the bundle's own field (`session-slot`).
+    #[cfg(feature = "session-slot")]
+    pub core: SessionCore<R, T>,
     /// This binding's physical link. The SAME `R::Shared<LinkState>` is held in
     /// [`SessionCore::links`] under the multilink feature, so the link's F2 gate
     /// / lease stamps are one instance the binding and the send router share.
+    #[cfg(not(feature = "session-slot"))]
     pub link: R::Shared<LinkState<R>>,
+    /// This binding's link state, the bundle's own field (`session-slot`).
+    #[cfg(feature = "session-slot")]
+    pub link: LinkState<R>,
     /// R2952 (open-debt item 835) — the runtime's block-first hand-off, if it
     /// has one. See [`SessionLinkActions::install_block_first_handoff`].
     pub block_first_handoff: R::Mutex<Option<BlockFirstHandoff>>,
@@ -2500,11 +2540,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `params` are captured by value; `clock` is the shared monotonic
     /// clock (R263 + R294) consumed by [`Self::handle_inbound`] and the
     /// `record_established_at` action.
+    ///
+    /// Absent under `session-slot`: there the bundle is built in a slot of fixed
+    /// storage (`crate::session_slot::SessionSlots`), not behind a handle the
+    /// runtime wraps it in.
+    #[cfg(not(feature = "session-slot"))]
     pub fn new_generic(
         driver: R::LinkSink,
         params: SessionInitParams,
         clock: T,
     ) -> R::ActionsHandle<T> {
+        R::wrap_actions(Self::build(driver, params, clock))
+    }
+
+    /// The bundle itself, built from its parts: what [`Self::new_generic`] wraps
+    /// in the runtime's handle and what a slot places in its own storage.
+    pub(crate) fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self {
         // R121e — seed the outbound Frame SN with `params.initial_sn`
         // so the first emitted Frame matches the value announced in
         // the OpenSyn/OpenAck body. The peer enforces this start
@@ -2523,19 +2574,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             });
             (metrics, slot)
         };
-        // R311ja — wrap through the per-profile `wrap_actions` seam (tokio
-        // `Arc`, lwIP `Rc`) so this one constructor serves both the
-        // multi-thread AP handle and the single-task MCU handle without
+        // R311ja — `new_generic` wraps this through the per-profile
+        // `wrap_actions` seam (tokio `Arc`, lwIP `Rc`) so one constructor serves
+        // both the multi-thread AP handle and the single-task MCU handle without
         // naming a concrete pointer. `alloc::sync::Arc` here would wall the
         // bundle off ARMv6-M (no `target_has_atomic = "ptr"`).
-        R::wrap_actions(Self {
+        Self {
             // R311y205 (IMPL-2a) — the 5 per-link fields are grouped into
             // `LinkState`, the rest into the shared `SessionCore`. IMPL-2b-i —
             // each half is wrapped in the per-profile `R::Shared` pointer (tokio
             // `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
             // refcount-1 pointers, behavior-identical to the pre-split struct.
+            // Under `session-slot` they are the bundle's own fields (`hold_*`).
             // Every field initializer expression is verbatim.
-            link: R::share(LinkState {
+            link: Self::hold_link(LinkState {
                 driver,
                 last_inbound_at: R::new_mutex(None::<u64>),
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
@@ -2557,7 +2609,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     [const { None::<crate::tx_lease::HeldSlot> }; TX_CONDUITS],
                 ),
             }),
-            core: R::share(SessionCore {
+            core: Self::hold_core(SessionCore {
                 #[cfg(feature = "transport-stats")]
                 stats: crate::stats::TransportStats::default(),
                 #[cfg(feature = "transport-stats")]
@@ -2581,30 +2633,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "tx-lend-only")]
                 tx_refusals: R::new_mutex(TxRefusalCounts::default()),
                 trace: R::new_mutex(ActionTrace::default()),
-                inbound_cookie: R::new_mutex(None::<Vec<u8>>),
+                inbound_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
                 awaiting_open_ack: R::new_mutex(false),
                 clock,
-                inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
-                remote_peer_zid: R::new_mutex(None::<Vec<u8>>),
+                inbound_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
+                remote_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
                 peer_whatami: R::new_mutex(None::<u8>),
-                inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
+                inbound_opensyn_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 // R311y813 — fail-closed until a host with an entropy source
                 // installs one; this crate has none to draw from.
                 cookie_nonce: R::new_mutex(None::<u64>),
                 // R2763 — no source until a profile's construction seam
                 // installs one; the core names no entropy source (§2.5).
-                cookie_entropy: R::new_mutex(None::<Box<dyn EntropySource + Send>>),
+                cookie_entropy: R::new_mutex(None::<CookieEntropy>),
                 // R121f1 — default ext chains seed both Init roles with the
                 // patch-extension entry that zenoh-pico's accept-side
                 // size-negotiation requires. See
                 // [`default_init_patch_ext_entry`] for the wire-spec
                 // citation and the foreign-interop failure mode this
                 // closes.
-                init_syn_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
-                init_ack_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
-                open_syn_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
-                open_ack_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
+                init_syn_ext: R::new_mutex(ext_chain_of(default_init_patch_ext_entry())),
+                init_ack_ext: R::new_mutex(ext_chain_of(default_init_patch_ext_entry())),
+                open_syn_ext: R::new_mutex(ExtChainBuf::default()),
+                open_ack_ext: R::new_mutex(ExtChainBuf::default()),
                 // R3b — empty dispatch (no auth ext, admits all = zenoh
                 // `Auth::default()`); the AP layer installs the configured one.
                 #[cfg(feature = "session-extauth")]
@@ -2679,7 +2731,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }),
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
             block_first_handoff: R::new_mutex(None),
-        })
+        }
+    }
+
+    /// The per-link half of the bundle as it holds it: behind the runtime's
+    /// `R::Shared` pointer, so N links can share a core and each keep a link, or
+    /// under `session-slot` as the bundle's own field.
+    #[cfg(not(feature = "session-slot"))]
+    fn hold_link(link: LinkState<R>) -> R::Shared<LinkState<R>> {
+        R::share(link)
+    }
+
+    /// See the shared form of [`Self::hold_link`].
+    #[cfg(feature = "session-slot")]
+    fn hold_link(link: LinkState<R>) -> LinkState<R> {
+        link
+    }
+
+    /// The kernel half of the bundle as it holds it; see `hold_link`.
+    #[cfg(not(feature = "session-slot"))]
+    fn hold_core(core: SessionCore<R, T>) -> R::Shared<SessionCore<R, T>> {
+        R::share(core)
+    }
+
+    /// See the shared form of `hold_core`.
+    #[cfg(feature = "session-slot")]
+    fn hold_core(core: SessionCore<R, T>) -> SessionCore<R, T> {
+        core
     }
 
     /// R2952 — a second binding onto an existing session: `core` shared, `link`
@@ -2687,6 +2765,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// so the runtime installs its block-first hand-off on EVERY binding (the
     /// multilink join used to build this struct literally, which would have
     /// left a joined link sending block-first as blocking).
+    ///
+    /// Absent under `session-slot`, which holds exactly one kernel and one link.
+    #[cfg(not(feature = "session-slot"))]
     pub fn joined(
         core: R::Shared<SessionCore<R, T>>,
         link: R::Shared<LinkState<R>>,
@@ -2713,6 +2794,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `driver` field lives on the per-link `self.link`.
     fn link_driver(&self) -> &dyn BoxedLinkDriver {
         self.link.link_driver()
+    }
+
+    /// This binding's link state as a plain reference, whichever way the bundle
+    /// holds it (behind `R::Shared`, or as its own field under `session-slot`):
+    /// for the places that compare it by address or hand it on, where `&*self.link`
+    /// would name one of the two forms.
+    #[allow(dead_code)]
+    fn own_link(&self) -> &LinkState<R> {
+        &self.link
     }
 
     /// R311y453 — the §5.16 link-derived SUBJECT of this binding's link: the
@@ -2754,9 +2844,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn admin_links(&self) -> Vec<crate::adminspace::AdminLink> {
         self.link_endpoints_all()
             .into_iter()
-            .map(|e| crate::adminspace::AdminLink {
-                src: e.src,
-                dst: e.dst,
+            .map(|e| {
+                let (src, dst) = e.into_strings();
+                crate::adminspace::AdminLink { src, dst }
             })
             .collect()
     }
@@ -3350,7 +3440,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         f: impl FnOnce(Option<(&LinkState<R>, crate::tx_lease::HeldSlot)>) -> O,
     ) -> O {
         if let Some(held) = R::with_mutex_mut(&self.link.batch_slots, |slots| slots[idx].take()) {
-            return f(Some((&*self.link, held)));
+            return f(Some((self.own_link(), held)));
         }
         #[cfg(feature = "transport-multilink")]
         {
@@ -3446,7 +3536,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "transport-multilink"))]
         let _ = (reliability, priority);
-        core::ptr::eq(&*self.link, link)
+        core::ptr::eq(self.own_link(), link)
     }
 
     /// ARCHITECTURE section 9.1 -- the batch slots a reopen discards. A reopen
@@ -4402,7 +4492,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Reads [`remote_peer_zid`](Self::remote_peer_zid); see that field for why
     /// it is distinct from the R86 cookie-HMAC slot.
     pub fn peer_zid(&self) -> Option<Vec<u8>> {
-        R::with_mutex_mut(&self.remote_peer_zid, |slot| slot.clone())
+        R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+            slot.as_deref().map(<[u8]>::to_vec)
+        })
     }
 
     /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
@@ -4563,6 +4655,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Replace the ext chain for the given role. Production callers
     /// stage their negotiation result here; the next outbound frame
     /// of `role` reads the new chain via the encoder.
+    ///
+    /// Absent under `session-slot`, where the four chains are arrays of the
+    /// session's own storage and the stagers fill them one entry per extension
+    /// kind: a caller there has no vector to hand over.
+    #[cfg(not(feature = "session-slot"))]
     pub fn set_ext_chain(&self, role: ExtChainRole, entries: Vec<ExtEntryOwned>) {
         R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);
     }
@@ -4692,7 +4789,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Some(initial_sn)
     }
 
-    fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<Vec<ExtEntryOwned>> {
+    fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<ExtChainBuf> {
         match role {
             ExtChainRole::InitSyn => &self.init_syn_ext,
             ExtChainRole::InitAck => &self.init_ack_ext,
@@ -4842,7 +4939,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// if the bundle should be able to mint before its first InitAck (both
     /// seams do, so an unusable source is visible at construction rather than
     /// at the first handshake).
-    pub fn install_cookie_entropy(&self, source: Box<dyn EntropySource + Send>) {
+    ///
+    /// What the slot holds is [`CookieEntropy`]: a `Box` on every profile but
+    /// `session-slot`, and under it a reference to a source the session's own
+    /// slot holds (fixed-memory step S5), so there is no allocation to make.
+    pub fn install_cookie_entropy(&self, source: CookieEntropy) {
         R::with_mutex_mut(&self.cookie_entropy, |slot| *slot = Some(source));
     }
 
@@ -5732,7 +5833,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// stage has run. Reads only the staged chains, no wire capture.
     #[cfg(feature = "transport-multilink")]
     pub fn staged_multilink_ext_count(&self) -> usize {
-        let count_in = |slot: &R::Mutex<Vec<ExtEntryOwned>>| {
+        let count_in = |slot: &R::Mutex<ExtChainBuf>| {
             R::with_mutex_mut(slot, |chain| {
                 chain
                     .iter()
@@ -6043,7 +6144,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn decide_local_remote_bound(
         &self,
     ) -> Result<Option<crate::extbound::Bound>, crate::region_partition::RegionError> {
-        let zid = self.peer_zid().unwrap_or_default();
+        // The slot's own form, copied: the public `peer_zid` hands out a
+        // vector, which this decision (run on every handshake) must not need.
+        let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| slot.clone()).unwrap_or_default();
         let whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
         let region = self.peer_region();
         let interfaces: Vec<&str> = self
@@ -7443,7 +7546,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // into `remote_peer_zid`, giving the routing layer the remote
                 // peer's identity for BOTH handshake directions.
                 R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-                    *slot = Some(body.zid.as_slice().to_vec());
+                    *slot =
+                        crate::session_init_params::session_bytes::<ZID_MAX>(body.zid.as_slice());
                 });
                 // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
                 // alongside its zid. Both Init arms capture it (a face may be
@@ -7454,7 +7558,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 });
                 if let Some(cookie) = &body.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
-                        *slot = Some(cookie.as_slice().to_vec());
+                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(
+                            cookie.as_slice(),
+                        );
                     });
                 }
                 // R311kb — capture the InitAck's sizing caps too: the
@@ -7479,14 +7585,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 R::with_mutex_mut(&self.inbound_peer_zid, |slot| {
-                    *slot = Some(body.zid.as_slice().to_vec());
+                    *slot =
+                        crate::session_init_params::session_bytes::<ZID_MAX>(body.zid.as_slice());
                 });
                 // R311qh — also capture it into the role-agnostic routing
                 // identity slot (the Initiating side captures the same from the
                 // InitAck above), so a held face exposes its remote peer's zid
                 // regardless of which side opened it.
                 R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-                    *slot = Some(body.zid.as_slice().to_vec());
+                    *slot =
+                        crate::session_init_params::session_bytes::<ZID_MAX>(body.zid.as_slice());
                 });
                 // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
                 // alongside its zid; see the InitAck arm above for why both
@@ -7517,7 +7625,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // sides of the handshake.
                 if let Some(cookie) = &body.cookie {
                     R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
-                        *slot = Some(cookie.as_slice().to_vec());
+                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(
+                            cookie.as_slice(),
+                        );
                     });
                 }
                 // R2782 — the cookie is the ONLY thing taken off an OpenSyn
@@ -12752,7 +12862,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // reads `link_count()`, which would otherwise keep counting the dead
         // link forever). A no-op for a single-link (empty-set) session — releasing
         // the sole link stays the existing teardown path, N=1 behavior unchanged.
-        #[cfg(feature = "transport-multilink")]
+        //
+        // Under `session-slot` the bundle holds its own link and there is no
+        // aggregation set to leave (a slot holds exactly one link).
+        #[cfg(all(feature = "transport-multilink", not(feature = "session-slot")))]
         a.del_link(&a.link);
         a.link_driver().close_blocking();
     }

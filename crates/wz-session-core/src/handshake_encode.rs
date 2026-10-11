@@ -462,17 +462,16 @@ mod tests {
     #[cfg(feature = "codec-open-body")]
     fn open_params(lease_ms: u64) -> crate::session_init_params::SessionInitParams {
         use alloc::vec;
-        use alloc::vec::Vec;
         crate::session_init_params::SessionInitParams {
             version: 0x05,
             whatami: WhatAmI::Peer,
-            zid: vec![0x01; 4],
+            zid: crate::session_init_params::zid_bytes(&[0x01; 4]),
             seq_num_res: 0,
             req_id_res: 0,
             batch_size: 0,
             lease_ms,
             initial_sn: 0,
-            cookie: Vec::new(),
+            cookie: crate::session_init_params::cookie_bytes(&[]),
             tx_queue: crate::session_init_params::TxQueueConf::default(),
             cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte test key"),
