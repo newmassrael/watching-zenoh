@@ -4298,7 +4298,11 @@ mod tests {
 
         // ONE door: what `absorb_declare` bound is what the pair yields.
         assert_eq!(
-            registry.mapping_spaces().peer().get(&7).map(|s| &s[..]),
+            registry
+                .mapping_spaces()
+                .peer()
+                .get(&7)
+                .map(AsRef::<str>::as_ref),
             Some("theirs/seven"),
             "the pair's peer half IS the table the DeclKexpr absorb binds into",
         );
@@ -4674,7 +4678,7 @@ mod tests {
             // `absorb_declare` takes the owned variant; deep-copy the
             // borrowed test arm at the boundary.
             let body = body.try_into_owned().unwrap();
-            registry.absorb_declare(&body);
+            registry.peer.absorb_declare(&body);
             assert!(
                 registry.mapping_spaces().peer().is_empty(),
                 "{name} arm must not mutate the peer keyexpr table"

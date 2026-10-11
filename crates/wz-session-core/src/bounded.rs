@@ -157,6 +157,12 @@ impl<T, const N: usize> BoundedVec<T, N> {
         self.inner.push(value).map_err(CapacityFull)
     }
 
+    /// Remove and return the last entry, if any. Both backings spell it the same
+    /// way, so this needs no split.
+    pub fn pop(&mut self) -> Option<T> {
+        self.inner.pop()
+    }
+
     /// Retain only the entries for which `keep` returns `true`,
     /// preserving order. The registries use this for `undeclare`
     /// (drop the entry whose id matches).

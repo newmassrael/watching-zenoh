@@ -971,19 +971,21 @@ mod mapping_bit_tests {
     #[test]
     fn the_peer_half_is_the_table_it_was_built_over() {
         let (peer, own) = (peer_space(), own_space());
+        // `peer()` lends the plain map on the growable backing and a view on the
+        // fixed one; both answer a keyexpr text, read the same way here.
+        fn text<S: AsRef<str>>(s: S) -> String {
+            s.as_ref().to_string()
+        }
         assert_eq!(
-            MappingSpaces::peer_only(&peer)
-                .peer()
-                .get(&7)
-                .map(|s| &s[..]),
-            Some("peers/space/temp"),
+            MappingSpaces::peer_only(&peer).peer().get(&7).map(text),
+            Some("peers/space/temp".to_string()),
         );
         assert_eq!(
             MappingSpaces::with_own(&peer, &own)
                 .peer()
                 .get(&7)
-                .map(|s| &s[..]),
-            Some("peers/space/temp"),
+                .map(text),
+            Some("peers/space/temp".to_string()),
             "installing an own space must not change which table `peer()` names",
         );
     }

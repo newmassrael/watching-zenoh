@@ -4465,7 +4465,7 @@ mod tests {
             NetworkMessage::Request(Box::new(request_query(12, 0, Some("garden/temp")))),
         ];
         let mut replies = ReplyStage::new();
-        let mut finals = Vec::new();
+        let mut finals = FinalStage::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
 
         assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
@@ -4506,12 +4506,12 @@ mod tests {
             Some("garden/humid"),
         )))];
         let mut replies = ReplyStage::new();
-        let mut finals = Vec::new();
+        let mut finals = FinalStage::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty(), "nothing matched, so nothing replied");
         assert_eq!(
-            finals,
-            vec![(7, QosLevel::DEFAULT)],
+            &finals[..],
+            &[(7, QosLevel::DEFAULT)][..],
             "a resolvable query that matched NOBODY still owes exactly one \
              Final -- zenoh's Drop<QueryInner> and pico's qle_nb==0 branch both \
              send it, and wz's own loopback leg already did"
@@ -4539,15 +4539,15 @@ mod tests {
                 .expect("build AllComplete request"),
         ))];
         let mut replies = ReplyStage::new();
-        let mut finals = Vec::new();
+        let mut finals = FinalStage::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(
             replies.is_empty(),
             "AllComplete filtered the incomplete queryable out, so it never fired"
         );
         assert_eq!(
-            finals,
-            vec![(9, QosLevel::DEFAULT)],
+            &finals[..],
+            &[(9, QosLevel::DEFAULT)][..],
             "the query DID reach the table, so it owes a Final even though the \
              completeness filter left nothing to fire"
         );
@@ -4565,7 +4565,7 @@ mod tests {
             99, 99, None,
         )))];
         let mut replies = ReplyStage::new();
-        let mut finals = Vec::new();
+        let mut finals = FinalStage::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty());
         assert!(
@@ -4604,7 +4604,7 @@ mod tests {
             "home/temp",
         )))];
         let mut replies = ReplyStage::new();
-        let mut finals = Vec::new();
+        let mut finals = FinalStage::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty(), "a MsgPut body fires no queryable");
         assert!(
@@ -4631,7 +4631,7 @@ mod tests {
             "home/temp",
         )))];
         let mut replies = ReplyStage::new();
-        let mut finals = Vec::new();
+        let mut finals = FinalStage::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert_eq!(invocations.load(Ordering::SeqCst), 0);
         assert!(replies.is_empty());

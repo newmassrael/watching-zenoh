@@ -176,6 +176,22 @@ impl ReplyStage {
     pub fn clear(&mut self) {
         self.rows.clear();
     }
+
+    /// Remove and return the reply staged last, as `Vec::pop` does.
+    pub fn pop(&mut self) -> Option<QueryReply> {
+        self.rows.pop()
+    }
+}
+
+#[cfg(feature = "bounded-heapless")]
+impl IntoIterator for ReplyStage {
+    type Item = QueryReply;
+    type IntoIter =
+        <BoundedVec<QueryReply, { caps::MAX_PENDING_REPLIES }> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.into_iter()
+    }
 }
 
 #[cfg(feature = "bounded-heapless")]
@@ -252,6 +268,17 @@ impl FinalStage {
     /// Drop every owed `Final`; the count is kept.
     pub fn clear(&mut self) {
         self.rows.clear();
+    }
+}
+
+#[cfg(feature = "bounded-heapless")]
+impl IntoIterator for FinalStage {
+    type Item = (u64, QosLevel);
+    type IntoIter =
+        <BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.into_iter()
     }
 }
 
