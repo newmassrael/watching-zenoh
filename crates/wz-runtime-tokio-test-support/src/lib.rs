@@ -555,34 +555,48 @@ const FREE_PORT_ATTEMPTS: usize = 64;
 /// `z_open` = -4 (`locality_roundtrip.rs:92`) with the other eight tests in the
 /// same binary green.
 ///
-/// WHY THE PROCESS IS THE RIGHT SCOPE. `cargo test` runs one binary's `#[test]`
-/// fns on many threads and the binaries themselves one after another, so the
-/// two callers that can collide are two THREADS. A probe listener on a port
-/// that was never accepted on is released completely when it drops — no
-/// TIME_WAIT — so the kernel is free to hand the same number to the next
-/// `bind(:0)` microseconds later, and under load it does. Remembering what has
-/// been handed out closes exactly that case.
+/// WHY THE PROCESS IS THE RIGHT SCOPE FOR THE LEDGER. `cargo test` runs one
+/// binary's `#[test]` fns on many threads and the binaries themselves one after
+/// another, so two callers of THIS function can only collide as two THREADS.
+/// Remembering what has been handed out closes that case.
 ///
-/// HOW THE RETRY WORKS, and it is not a sleep-and-hope: a candidate already
-/// handed out is rejected with its listener STILL OPEN, so the kernel cannot
-/// offer the same number again on the next attempt. The held listeners drop
-/// together once a fresh port is found.
+/// WHY THE NUMBER IS NEVER THE KERNEL'S TO OFFER, which the ledger could not
+/// close and the first version of this function left open. The caller is a test
+/// that hands the number to a session it has not opened yet, and every session
+/// opened as a peer binds a `tcp/[::]:0` listener of its own: a `bind(:0)` from
+/// another test of the same binary. A number this function took from the kernel
+/// and released is in the pool that `bind(:0)` draws from, and measured on a
+/// 2-core host with 8 threads opening and closing peer sessions beside a
+/// late-listener leg, the draw landed on the leg's number (3 times in 1050
+/// legs; 22 of 960 whole-binary runs failed with 24 copies on the same cores).
+/// The consequences were not one failure but four: the late listener could not
+/// bind (`z_open` = -4), a client that must wait for a listener 400 ms late
+/// dialled the other session's listener and opened after 105 ms, a peer's start
+/// window ended early because its dial was answered, and a dial that must have
+/// been refused succeeded. None of them is a wz fault and a ledger cannot see
+/// any of them, because the other caller never asked this function for anything.
 ///
-/// WHAT IS NOT CLOSED, stated rather than implied: a process outside this one —
-/// another test binary if a runner ever parallelises them, or anything else on
-/// the host — can still take the port between this call and the caller's bind.
-/// Nothing a function returning a `u16` can do about that; closing it needs the
-/// caller to hold the listener until it hands the socket over, which the C ABI
-/// under test cannot accept.
+/// So the number comes from a range the kernel does not autoselect from
+/// ([`autoselect_range`]): `bind(:0)` anywhere in this process, or in a child it
+/// spawns, cannot be given it, whatever the load. A candidate is probed by an
+/// explicit bind, which is also what refuses a number a running service holds.
+///
+/// WHAT IS NOT CLOSED, stated rather than implied: a process that binds this
+/// very number EXPLICITLY between this call and the caller's bind — another
+/// test binary if a runner ever parallelises them with a picker that also
+/// chooses explicitly, or a service that starts on a fixed port — can still take
+/// it. Candidates are drawn at random from a range of thousands, so two
+/// pickers meet rarely, and nothing a function returning a `u16` can do closes
+/// it: that needs the caller to hold the listener until it hands the socket
+/// over, which the C ABI under test cannot accept.
 pub fn free_port() -> u16 {
     let mut rejected = Vec::new();
     for _ in 0..FREE_PORT_ATTEMPTS {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
-        let port = listener.local_addr().expect("probe addr").port();
+        let (listener, port) = bind_unautoselected();
         let mut seen = HANDED_OUT_PORTS.lock().expect("port ledger");
         if seen.contains(&port) {
             // HELD, not dropped: releasing it here would let the very next
-            // attempt be offered the same number.
+            // attempt draw the same number again.
             rejected.push(listener);
             continue;
         }
@@ -592,8 +606,108 @@ pub fn free_port() -> u16 {
     panic!(
         "free_port: {FREE_PORT_ATTEMPTS} consecutive candidates had already been \
          handed out in this process. Either a test is leaking ports faster than \
-         the loopback range can supply them, or the ledger is never cleared and \
-         this binary has run for a very long time"
+         the range can supply them, or the ledger is never cleared and this \
+         binary has run for a very long time"
+    );
+}
+
+/// The smallest span of ports the picker will draw from. A narrower range makes
+/// two pickers meet often, which is the thing the range exists to avoid.
+const MIN_PICK_SPAN: u32 = 1024;
+
+/// How far below the autoselect range the picker's own range reaches.
+const PICK_SPAN: u32 = 8192;
+
+/// The first number a non-privileged process may bind explicitly.
+const FIRST_UNPRIVILEGED_PORT: u32 = 1024;
+
+/// The closed range `(first, last)` the kernel draws a `bind(:0)` number and an
+/// outgoing connection's source number from on this host.
+///
+/// Linux states it in `/proc/sys/net/ipv4/ip_local_port_range`, 32768 to 60999
+/// unless an administrator moved it; the BSD stack under macOS and Windows use
+/// the IANA range, 49152 to 65535. The Linux file is read because a container or
+/// a CI image does move it, and a hard-coded number would then be a claim about
+/// a different host. An unreadable file is the Linux default: the range can only
+/// be wrong that way on a host whose administrator moved it AND hid the file.
+pub fn autoselect_range() -> (u16, u16) {
+    #[cfg(target_os = "linux")]
+    {
+        let stated = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+            .ok()
+            .and_then(|text| {
+                let mut numbers = text.split_whitespace().map(str::parse::<u16>);
+                match (numbers.next(), numbers.next()) {
+                    (Some(Ok(first)), Some(Ok(last))) if first <= last => Some((first, last)),
+                    _ => None,
+                }
+            });
+        stated.unwrap_or((32768, 60999))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (49152, 65535)
+    }
+}
+
+/// The closed range `(first, last)` the picker draws from: the ports just below
+/// [`autoselect_range`], or, when that leaves too little room, the ports above it.
+///
+/// Below first, because nothing assigns a number there on its own and it keeps
+/// clear of the top of the range where a high port is more likely to be one a
+/// service chose. Panics when neither side has [`MIN_PICK_SPAN`] numbers, which
+/// is a host whose autoselect range covers nearly all of the unprivileged ports:
+/// there is then no number a test can be handed that the kernel will not also
+/// offer to someone else, and saying so beats a pick that quietly can be stolen.
+fn pick_range() -> (u16, u16) {
+    let (first, last) = autoselect_range();
+    let below_end = u32::from(first).saturating_sub(1);
+    let below_start = below_end
+        .saturating_sub(PICK_SPAN - 1)
+        .max(FIRST_UNPRIVILEGED_PORT);
+    if below_end >= below_start && below_end - below_start + 1 >= MIN_PICK_SPAN {
+        return (below_start as u16, below_end as u16);
+    }
+    let above_start = u32::from(last) + 1;
+    let above_end = (above_start + PICK_SPAN - 1).min(u32::from(u16::MAX));
+    if above_end >= above_start && above_end - above_start + 1 >= MIN_PICK_SPAN {
+        return (above_start as u16, above_end as u16);
+    }
+    panic!(
+        "the kernel's autoselect range {first}..={last} leaves no {MIN_PICK_SPAN}-port span \
+         of unprivileged ports outside it, so no number can be handed to a test that a \
+         bind(:0) elsewhere in the process could not also be given"
+    );
+}
+
+/// A uniformly drawn value, from the standard library's per-instance random keys.
+fn random_draw() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    hasher.finish()
+}
+
+/// Bind `127.0.0.1` on a port the kernel does not autoselect, and return the
+/// listener with its number. The caller holds the listener for as long as the
+/// number must stay its own: [`free_port`] drops it at once, a reservation that
+/// wraps a child process holds it until the child has bound.
+///
+/// Reads no address back from the socket and takes none from the kernel: the
+/// number is the one this function asked for, and a bind that fails (a number
+/// something already holds) is drawn again, at most [`FREE_PORT_ATTEMPTS`] times.
+pub fn bind_unautoselected() -> (std::net::TcpListener, u16) {
+    let (first, last) = pick_range();
+    let span = u64::from(last - first) + 1;
+    for _ in 0..FREE_PORT_ATTEMPTS {
+        let port = first + (random_draw() % span) as u16;
+        if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+            return (listener, port);
+        }
+    }
+    panic!(
+        "bind_unautoselected: {FREE_PORT_ATTEMPTS} draws from {first}..={last} were all \
+         already bound by something else on this host"
     );
 }
 
@@ -956,7 +1070,7 @@ pub async fn establish_capability_pair(
 
 #[cfg(test)]
 mod port_tests {
-    use super::{free_port, refusing_port};
+    use super::{autoselect_range, free_port, refusing_port};
     use std::collections::BTreeSet;
 
     /// R2778 — the discriminator for `refusing_port`, moved here with the
@@ -1033,6 +1147,94 @@ mod port_tests {
                 "and stay reserved after the {phase} listener is dropped"
             );
         }
+    }
+
+    /// The structural half of the claim below, with no draw in it: no number
+    /// `free_port` hands out lies in the range the kernel autoselects from, and
+    /// the range that is read is a real one.
+    #[test]
+    fn a_handed_out_port_lies_outside_the_autoselect_range() {
+        let (first, last) = autoselect_range();
+        assert!(
+            first <= last,
+            "the autoselect range {first}..={last} is empty"
+        );
+        for _ in 0..256 {
+            let port = free_port();
+            assert!(
+                port < first || port > last,
+                "free_port handed out {port}, inside the autoselect range {first}..={last}"
+            );
+            assert!(port >= 1024, "{port} is a privileged port");
+        }
+    }
+
+    /// A port `free_port` has handed out and its owner has not bound yet is
+    /// never what a `bind(:0)` anywhere in the process returns.
+    ///
+    /// The race this closes, as measured on a 2-core host: a wz session opened
+    /// as a peer binds `tcp/[::]:0` of its own, and the kernel chose that number
+    /// from the same pool `free_port` had just released a number into, so a test
+    /// that was about to dial or bind its handed-out port met another test's
+    /// session instead (the open returned after 105 ms where a listener 400 ms
+    /// late was expected). The ledger of [`free_port`] cannot see that caller;
+    /// only a number the kernel never offers to `bind(:0)` is safe from it.
+    ///
+    /// The probe is the kernel's own: many threads bind `:0` on the two address
+    /// families a session uses and the numbers they are given are compared with
+    /// the handed-out set. It is a draw, so the claim it carries is bounded: with
+    /// the old shape the draw hits within a fraction of a second on every host
+    /// measured, and a number outside the autoselect range cannot be hit at all.
+    #[test]
+    fn a_handed_out_port_is_never_an_autoselect_result() {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let handed: Arc<HashSet<u16>> = Arc::new((0..64).map(|_| free_port()).collect());
+        let stop = Arc::new(AtomicBool::new(false));
+        let hits = Arc::new(AtomicU64::new(0));
+        let binds = Arc::new(AtomicU64::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|n| {
+                let (handed, stop, hits, binds) =
+                    (handed.clone(), stop.clone(), hits.clone(), binds.clone());
+                std::thread::spawn(move || {
+                    let wildcard = if n % 2 == 0 { "[::]:0" } else { "127.0.0.1:0" };
+                    while !stop.load(Ordering::SeqCst) {
+                        let Ok(l) = std::net::TcpListener::bind(wildcard) else {
+                            continue;
+                        };
+                        binds.fetch_add(1, Ordering::SeqCst);
+                        if let Ok(a) = l.local_addr() {
+                            if handed.contains(&a.port()) {
+                                hits.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(4) && hits.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop.store(true, Ordering::SeqCst);
+        for t in threads {
+            t.join().expect("autoselect thread");
+        }
+        std::println!(
+            "{} autoselect bind(s) against {} handed-out port(s): {} hit(s)",
+            binds.load(Ordering::SeqCst),
+            handed.len(),
+            hits.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "a bind(:0) was given a port free_port had handed out and nobody had bound yet"
+        );
     }
 
     /// The old three-line helper: bind, read, drop. Reproduced here so the

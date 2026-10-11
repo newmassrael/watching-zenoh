@@ -329,10 +329,15 @@ pub mod common {
         /// (R311pp). The caller owns the drop: [`pick`](Self::pick) drops at
         /// once, [`pick_pair`](Self::pick_pair) holds both bound until two
         /// distinct ports are read (so the OS cannot re-hand the first).
+        ///
+        /// The number is NOT one the kernel autoselects from: the child it is
+        /// reserved for may be bound well after the drop, and a wz session opened as
+        /// a peer by another test of the same binary binds a `bind(:0)` listener of
+        /// its own in the meantime. A number from the autoselect pool is in that
+        /// session's reach; one outside it is not
+        /// (`wz_runtime_tokio_test_support::free_port` states the measurement).
         fn bind_ephemeral() -> (TcpListener, u16) {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-            let port = listener.local_addr().expect("local_addr").port();
-            (listener, port)
+            wz_runtime_tokio_test_support::bind_unautoselected()
         }
     }
 

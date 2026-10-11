@@ -62,7 +62,14 @@ member -- a classification that outlived its site is a claim about nothing.
 
   listen-picker   the number is handed to something that will LISTEN on it
                   (item 553's class). A stolen number fails that bind loudly;
-                  it cannot make a dial succeed that was meant to fail.
+                  it cannot make a dial succeed that was meant to fail --
+                  WHEN the number is one the kernel never autoselects
+                  (`bind_unautoselected`). A number drawn from the autoselect
+                  pool and released is in reach of every `bind(:0)` in the
+                  process, and a wz peer session binds one by default: the
+                  thief then ANSWERS the dial (a late-listener leg opened
+                  after 105 ms against another session's listener, measured),
+                  so the row's reason must say the number is not autoselected.
   not-a-port      the address is not a kernel-assigned IP port -- a unix
                   socket path, a pipe name, a vsock address the test chose.
   bind-probe      only the bind's success is the subject; the number is
@@ -112,7 +119,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
         "listen-picker",
         "PortGuard::pick reserves a number for a CHILD to `--listen` on (zenohd, "
         "a C example), under a process mutex and a cross-process file lock held "
-        "until the child has bound it",
+        "until the child has bound it, from outside the kernel's autoselect range",
     ),
     "crates/wz-integration-tests/src/lib.rs::pick_pair::l1": (
         "listen-picker",
@@ -127,7 +134,9 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "crates/wz-runtime-tokio-test-support/src/lib.rs::free_port::listener": (
         "listen-picker",
         "free_port returns a bare u16 for a C ABI that must bind the number "
-        "itself; its own doc states the residue a u16 cannot close",
+        "itself; the number is drawn from outside the kernel's autoselect range, "
+        "so no bind(:0) in the process can be given it, and its own doc states "
+        "the residue a u16 cannot close",
     ),
     "crates/wz-runtime-tokio-test-support/src/lib.rs::old_shape::<temp>": (
         "bind-probe",
