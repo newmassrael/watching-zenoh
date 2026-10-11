@@ -428,6 +428,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # WORKSPACE edges into the crate, which is the facade's alone; the firmware
     # images that name these two are deploy crates outside this workspace, and the
     # predicate does not speak for them.
+    # Round 3286 -- `session-unicast-accept` and `reassembly` join. The first gates
+    # the listener and the session host of the `session-slot` profile
+    # (`pub mod listener`, `pub mod session_host`), the second the pump that carries
+    # its reassembly table in its cell: both are choices an MCU final binary makes
+    # next to the two selectors above, and the facade forwards neither, for the
+    # same reason; the sentence above about what the predicate does and does not
+    # speak for holds for them as it does for those.
     "wz-session-lwip": (
         "the lwip session glue; its consumers are MCU firmware images and "
         "deploy probes built with a fixed feature set",
@@ -438,7 +445,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "codec-response",
                 "codec-response-final",
                 "liveliness-token",
+                "reassembly",
                 "session-slot",
+                "session-unicast-accept",
                 "static-link-storage",
                 "transport-multicast",
             }
@@ -722,7 +731,9 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
             "codec-response",
             "codec-response-final",
             "liveliness-token",
+            "reassembly",
             "session-slot",
+            "session-unicast-accept",
             "static-link-storage",
             "transport-multicast",
         }
