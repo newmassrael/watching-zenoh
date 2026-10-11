@@ -9872,7 +9872,18 @@ layer_c1g_cargo_test_observer() {
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet || return 1
     _runci_guarded_test C1g 8 \
         cargo test -p wz-session-core --test tx_lend_only_encode --features codec-init-body,codec-open-body,codec-close,session-slot --quiet || return 1
+    # S9d -- the slot profile lends the control records (a Declare, an Interest, a
+    # ResponseFinal) where their frame lies: the walk of every kind against the owned
+    # walk, extension refusals included (4 = what that command PRINTED), and each
+    # registry that consumes one fed the owned and the lent form and held to the same
+    # answer (8 = what that PRINTED). Both need the whole set of registries the slot
+    # profile carries, which is why they are not part of the leg above.
+    _runci_guarded_test C1g 4 \
+        cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,declare-final,codec-response-final,session-slot --quiet -- record_walk_tests::control || return 1
+    _runci_guarded_test C1g 8 \
+        cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,codec-request,codec-response,codec-response-final,declare-subscriber,declare-queryable,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- lent_tests || return 1
     (cd crates \
+        && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,declare-subscriber,declare-queryable,query-queryable,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,session-unicast,session-unicast-accept,codec-init-body,codec-open-body,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,session-unicast,codec-close,session-slot --quiet -- -D warnings) || return 1
@@ -11300,6 +11311,17 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu \
         --features adminspace-core,adminspace-write,session-slot \
         --test admin_reply_fits --quiet || return 1
+    # S9d -- the control records of a frame (a keyexpr alias, a subscriber
+    # declaration and its withdrawal, a DeclFinal, a subscriber Interest and its
+    # cancelling Interest, a ResponseFinal, an Oam, a MID with no decoder, and four of
+    # them in one frame) each read by one acceptor iteration on the slot profile at
+    # ZERO allocations (the one interest that asks for the current subscribers owns
+    # one allocation, the answer's owned build, which the file names), and the
+    # owned builders of the sends bounded: 2 = what that command PRINTED.
+    _runci_guarded_test "C1m slot control records" 2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
+        --test slot_control_records --quiet || return 1
     # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
     # (`tests/session_pump_allocations.rs`): the same real pair, each end run as a
     # task of one local set, from the runtime's making to the last task's end. Under
@@ -11399,6 +11421,9 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features transport-multicast,codec-push,session-slot \

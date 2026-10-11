@@ -35,6 +35,8 @@
 
 #![cfg(all(
     feature = "session-slot",
+    feature = "session-unicast-open",
+    feature = "session-unicast-accept",
     feature = "declare-subscriber",
     feature = "codec-response-final"
 ))]
@@ -187,15 +189,12 @@ fn create(
     (actions, pump_link, sender)
 }
 
+/// The `on_event` an end's pump is driven with.
+type OnEvent = Box<dyn FnMut(IterationEvent<'_>)>;
+
 /// The application layer of the acceptor: an observer with a declaration observer
 /// that counts what the peer declared and undeclared.
-fn application(
-    actions: &Handle,
-) -> (
-    Box<dyn FnMut(IterationEvent<'_>)>,
-    Rc<RefCell<ApplicationLayerObserver>>,
-    Arc<Told>,
-) {
+fn application(actions: &Handle) -> (OnEvent, Rc<RefCell<ApplicationLayerObserver>>, Arc<Told>) {
     let told = Arc::new(Told::default());
     let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
     {

@@ -686,6 +686,53 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         adminspace-write,\
         session-slot\
         |"
+    # S9d: the receive path of the slot profile lends the control records (a
+    # Declare, an Interest, a ResponseFinal) where their frame lies, and every
+    # registry that consumes one reads the lent form and the owned form through one
+    # body. Two things only this profile reaches: the walk of every record kind
+    # (`network_message::record_walk_tests::control`, the lent walk against the
+    # owned one, extension refusals included) and the registry-by-registry
+    # equivalence (`declare::lent_tests`). `session-slot` is a selector, so the row
+    # is its own; the features are the codecs and registries those tests name, and
+    # the filter is EMPTY so a test added later is claimed without touching the row.
+    "wz-session-core|hook|\
+        codec-close,\
+        codec-declare,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        codec-request,\
+        codec-response,\
+        codec-response-final,\
+        declare-queryable,\
+        declare-subscriber,\
+        liveliness-get,\
+        liveliness-subscriber,\
+        liveliness-token,\
+        pubsub-put,\
+        query-queryable,\
+        session-slot,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive\
+        |"
+    # S9d, the end-to-end half: `wz-session-lwip`'s `tests/slot_control_records.rs`
+    # drives a real session pair on the host lwIP loopback and counts one acceptor
+    # iteration per control record. It names `codec-response-final` beside the slot
+    # row's features, so it is a row of its own, the file selected by name.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        codec-response-final,\
+        declare-subscriber,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive\
+        |--test=slot_control_records"
     # ── R2156 (item 543): wz-ap-demo's SECOND leg, and the HANDOFF ──────
     #
     # The row above runs the config surface at ONE feature, because the guard it
