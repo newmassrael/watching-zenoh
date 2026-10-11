@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-#![cfg(all(feature = "transport-fragmentation", feature = "transport-link-udp"))]
+#![cfg(all(
+    feature = "transport-fragmentation",
+    feature = "transport-link-udp",
+    feature = "pubsub-qos"
+))]
 
 //! R311ol — the first LOSSY-link robustness e2e (P3.10 chaos track): over a
 //! real loopback UDP link a DROPPED fragment datagram aborts its reassembly
@@ -59,6 +63,27 @@
 //! continuously so the reassembly pool persists across both chains; `select!`
 //! drops the drives once the scenario observes the recovery delivery.
 //! ([[feedback-no-flaky-ever]])
+//!
+//! ## The Puts are sent lossless, so the only loss is the injected one
+//!
+//! The FIFO argument above holds for what LEAVES the TX queue, and a Put with
+//! the default congestion control (`Drop`) need not enter it: the lane of a
+//! datagram link holds `DEFAULT_QUEUE_SIZE` (2) frames, a Put that finds it full
+//! waits `wait_before_drop` (1 ms, upstream's default) for the writer task to
+//! free a slot and is DROPPED when the writer has not run by then. One lane
+//! refusal also marks the lane congested, so the next droppable Put is refused
+//! at once. Two back-to-back Puts of two or three datagrams each put four to
+//! six datagrams through a lane of two, so on a loaded machine the recovery Put
+//! was dropped before it left the sender: the acceptor then sees nothing after
+//! the injected loss and the poll below waits out its whole budget for a Put
+//! that was never sent (measured on an instrumented build: in all 14 failing
+//! runs of the reorder test the sender's transport stats read one dropped
+//! message as soon as both `publish` calls had returned `Ok`, and the acceptor
+//! saw no datagram of the second Put). A Put sent with
+//! [`CongestionControl::Block`] waits for a slot instead (`wait_before_close`),
+//! which is what the scenario assumes of the sender. The receive side under
+//! test is untouched: the chaos decorator still injects exactly the one loss,
+//! and a Put that is truly lost still fails the poll.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -79,11 +104,20 @@ use wz_runtime_tokio::RxFrame;
 use wz_runtime_tokio_test_support::{fixture_session_init_params, ChaosReadDriver};
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent, ReassemblyDropReason};
 use wz_session_core::locator::parse_any_locator;
+use wz_session_core::qos::CongestionControl;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::wire_const;
 
 const ITER_CAP: usize = 4096;
 const KEYEXPR: &str = "demo/udp-chaos";
+
+/// A Put that waits for room in the sender's queue instead of being dropped when
+/// it is full (see the module note): the scenarios send two oversize Puts back to
+/// back through a lane that holds two datagrams, and the loss they study is the
+/// injected one alone.
+fn lossless_put() -> PublishOptions {
+    PublishOptions::put().with_congestion_control(CongestionControl::Block)
+}
 
 /// A UDP datagram carries exactly one transport message, so its first byte is
 /// the transport header whose low 5 bits are the MID — the production
@@ -248,10 +282,10 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
         // writer drains FIFO, so P1's fragments precede P2's deterministically
         // — the 2nd fragment the chaos driver drops is unambiguously P1's.
         publisher
-            .publish(KEYEXPR, &payload_lost, PublishOptions::put())
+            .publish(KEYEXPR, &payload_lost, lossless_put())
             .expect("lossy publish builds and routes through the send seam");
         publisher
-            .publish(KEYEXPR, &payload_kept_probe, PublishOptions::put())
+            .publish(KEYEXPR, &payload_kept_probe, lossless_put())
             .expect("recovery publish builds and routes through the send seam");
         // The sole synchronization: poll until the clean Put is delivered. By
         // FIFO the dropped fragment + P1's abort are already processed by the
@@ -480,10 +514,10 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
         // fragment chain precedes P2's on the wire (FIFO), so the duplicated 1st
         // fragment is unambiguously P1's first.
         publisher
-            .publish(KEYEXPR, &payload_lost, PublishOptions::put())
+            .publish(KEYEXPR, &payload_lost, lossless_put())
             .expect("first publish builds and routes through the send seam");
         publisher
-            .publish(KEYEXPR, &payload_kept_probe, PublishOptions::put())
+            .publish(KEYEXPR, &payload_kept_probe, lossless_put())
             .expect("recovery publish builds and routes through the send seam");
         for _ in 0..200 {
             if delivered_probe
@@ -691,10 +725,10 @@ async fn udp_reordered_fragment_aborts_then_channel_recovers() {
     let payload_kept_probe = payload_kept.clone();
     let scenario = async move {
         publisher
-            .publish(KEYEXPR, &payload_lost, PublishOptions::put())
+            .publish(KEYEXPR, &payload_lost, lossless_put())
             .expect("first publish builds and routes through the send seam");
         publisher
-            .publish(KEYEXPR, &payload_kept_probe, PublishOptions::put())
+            .publish(KEYEXPR, &payload_kept_probe, lossless_put())
             .expect("recovery publish builds and routes through the send seam");
         for _ in 0..200 {
             if delivered_probe
