@@ -430,4 +430,66 @@ mod tests {
         let table = HashMap::new();
         assert_eq!(resolve_ext_keyexpr(Some(&vec![truncated]), &table), None);
     }
+
+    /// An aliased `ext_keyexpr` (id 7, suffix `x`); the extension carries no
+    /// mapping bit, so the id is the peer's.
+    fn aliased_ext() -> Vec<ExtEntryOwned> {
+        vec![ExtEntryOwned {
+            header: KEYEXPR_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 3,
+                value: crate::codec_owned::owned_bytes(&[0x03, 0x07, b'x']).unwrap(),
+            }),
+        }]
+    }
+
+    /// The own-space witness of this plane (R311y740). The extension names a key
+    /// through the PEER's table only, so the discriminator is the collision: our
+    /// space holds id 7 as `ours/` and the peer's holds it as `theirs/`, and a
+    /// resolution that read OUR space would answer `ours/x` with confidence. Both
+    /// forms read the peer's half.
+    #[test]
+    fn an_own_space_with_a_colliding_id_never_answers_the_ext_keyexpr() {
+        let mut peer = HashMap::new();
+        peer.insert(7u64, String::from("theirs/"));
+        let mut own = HashMap::new();
+        own.insert(7u64, String::from("ours/"));
+        let spaces = MappingSpaces::with_own(&peer, &own);
+        let exts = aliased_ext();
+        assert_eq!(
+            resolve_ext_keyexpr(Some(&exts), spaces),
+            Some(String::from("theirs/x")),
+            "the extension reads the peer's table"
+        );
+        let mut out = crate::wireexpr_resolve::KeyexprBuf::new();
+        assert_eq!(
+            resolve_ext_keyexpr_into(Some(&exts), spaces, &mut out).expect("fits"),
+            Some("theirs/x"),
+            "so does the form that composes into a buffer"
+        );
+    }
+
+    /// The anti-vacuity twin: with no own space supplied the same fixture
+    /// resolves the same peer literal, and with the peer's table empty and only
+    /// our space holding the id it resolves NOTHING. The first shows the
+    /// witness above does not depend on the own space; the second that the
+    /// fixture would notice a read of it.
+    #[test]
+    fn without_an_own_space_the_ext_keyexpr_reads_the_same_peer_literal_and_never_ours() {
+        let mut peer = HashMap::new();
+        peer.insert(7u64, String::from("theirs/"));
+        let exts = aliased_ext();
+        assert_eq!(
+            resolve_ext_keyexpr(Some(&exts), MappingSpaces::peer_only(&peer)),
+            Some(String::from("theirs/x"))
+        );
+        let none = HashMap::new();
+        let mut own = HashMap::new();
+        own.insert(7u64, String::from("ours/"));
+        assert_eq!(
+            resolve_ext_keyexpr(Some(&exts), MappingSpaces::with_own(&none, &own)),
+            None,
+            "an id only OUR space holds is not the peer's"
+        );
+    }
 }

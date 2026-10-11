@@ -479,3 +479,182 @@ impl SlotObserver {
         let _ = (requesters, sink);
     }
 }
+
+#[cfg(all(
+    test,
+    feature = "codec-push",
+    feature = "codec-declare",
+    feature = "pubsub-put",
+    feature = "declare-subscriber"
+))]
+mod tests {
+    //! The own-space witness of the slot fan (R311y740, carry N37): this fan is
+    //! the edge every plane of a session reaches its two id spaces through, so a
+    //! fan that handed over the peer table alone would type-check and silently
+    //! restore the wrong-space read on every plane at once. The per-registry
+    //! witnesses cannot see the edge; these drive it.
+    use super::*;
+    use crate::decl_sink::{BoxedDeclSink, DeclView};
+    use crate::driver_loop::DriverLoopOutcome;
+    use crate::locality::Locality;
+    use crate::network_message::NetworkMessage;
+    use crate::reply_sink::BoxedReplySink;
+    use crate::sink::{BoxedSink, SampleView};
+    use alloc::boxed::Box;
+    use alloc::string::{String, ToString};
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use std::sync::{Arc, Mutex};
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+    use wz_session_core_test_support as fx;
+
+    type Req = Requesters<BoxedReplySink, BoxedReplySink>;
+
+    fn frame(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
+        DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages,
+            has_ext: false,
+            extensions: Vec::new(),
+        }
+    }
+
+    /// A Push naming id `mapping_id` with `M=0`: the id is in OUR space.
+    fn push_own_alias(mapping_id: u64) -> crate::wire::PushOwned {
+        use wz_codecs::push::Push;
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: mapping_id,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .unwrap()
+    }
+
+    /// One observer with a subscriber on each of the two literals, a listener on
+    /// the subscribers a peer declares, and a session whose PEER declared id 7 as
+    /// `theirs/x`, absorbed through the ordinary inbound `DeclKexpr` path. The
+    /// session's own space holds id 7 as `ours/x` when `own` is set. The
+    /// collision is the discriminator: a fan handing over the peer's table alone
+    /// would resolve a confident wrong keyexpr, not drop the frame.
+    struct Fixture {
+        observer: SlotObserver,
+        peers: PeerTables,
+        requesters: Req,
+        ours: Arc<Mutex<Vec<String>>>,
+        theirs: Arc<Mutex<Vec<String>>>,
+        declared: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn fixture(own: bool) -> Fixture {
+        let mut observer = SlotObserver::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = Req::new();
+        if own {
+            let mut space = hashbrown::HashMap::new();
+            space.insert(7u64, "ours/x".to_string());
+            peers.subscribers.set_own_mapping_space(Arc::new(space));
+        }
+        let outcome = frame(vec![NetworkMessage::Declare(Box::new(
+            fx::declare_envelope_decl_kexpr(fx::decl_kexpr(7, "theirs/x")),
+        ))]);
+        observer.dispatch_event(&mut peers, &mut requesters, IterationEvent::Poll(&outcome));
+
+        let mut record = |literal: &str| {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let into = seen.clone();
+            observer
+                .subscribers
+                .register_sink(
+                    literal,
+                    Locality::Any,
+                    BoxedSink::new(move |s: &dyn SampleView| {
+                        into.lock().unwrap().push(s.keyexpr().to_string());
+                    }),
+                )
+                .expect("register");
+            seen
+        };
+        let ours = record("ours/x");
+        let theirs = record("theirs/x");
+        let declared = Arc::new(Mutex::new(Vec::new()));
+        let into = declared.clone();
+        observer
+            .remote_subscribers
+            .on_subscriber_declared_sink(BoxedDeclSink::new(move |d: &dyn DeclView| {
+                into.lock().unwrap().push(d.keyexpr().to_string());
+            }))
+            .expect("install");
+        Fixture {
+            observer,
+            peers,
+            requesters,
+            ours,
+            theirs,
+            declared,
+        }
+    }
+
+    /// The same two messages in both tests: a Push and a `DeclareSubscriber`, each
+    /// naming id 7 with `M=0`.
+    fn own_alias_frame() -> DriverLoopOutcome {
+        frame(vec![
+            NetworkMessage::Push(Box::new(push_own_alias(7))),
+            NetworkMessage::Declare(Box::new(fx::declare_envelope_decl_subscriber(
+                fx::decl_subscriber_nonlocal(1, 7, None),
+            ))),
+        ])
+    }
+
+    #[test]
+    fn an_own_space_alias_resolves_through_the_slot_fan_on_both_planes() {
+        let mut f = fixture(true);
+        let outcome = own_alias_frame();
+        f.observer.dispatch_event(
+            &mut f.peers,
+            &mut f.requesters,
+            IterationEvent::Poll(&outcome),
+        );
+        assert_eq!(
+            *f.ours.lock().unwrap(),
+            vec!["ours/x".to_string()],
+            "the Push plane resolved id 7 in OUR space"
+        );
+        assert!(
+            f.theirs.lock().unwrap().is_empty(),
+            "a fan handing over the peer table alone would have fired this one"
+        );
+        assert_eq!(
+            *f.declared.lock().unwrap(),
+            vec!["ours/x".to_string()],
+            "the declare-subscriber plane resolved id 7 in OUR space"
+        );
+    }
+
+    /// The anti-vacuity twin: the same frame against a session with no own space
+    /// installed resolves nothing on either plane, so the witness above would not
+    /// pass on a peer table that merely happened to be empty.
+    #[test]
+    fn without_an_own_space_the_slot_fan_refuses_the_same_frame_on_both_planes() {
+        let mut f = fixture(false);
+        let outcome = own_alias_frame();
+        f.observer.dispatch_event(
+            &mut f.peers,
+            &mut f.requesters,
+            IterationEvent::Poll(&outcome),
+        );
+        assert!(
+            f.ours.lock().unwrap().is_empty() && f.theirs.lock().unwrap().is_empty(),
+            "an M=0 alias must refuse with no own space, never fall back to the peer's table"
+        );
+        assert!(f.declared.lock().unwrap().is_empty());
+    }
+}

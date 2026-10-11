@@ -479,9 +479,37 @@ mod tests {
     /// buffer through `OwnMappingSpace::append_own_mapping`.
     #[test]
     fn an_own_space_alias_resolves_as_the_owned_path_resolves_it() {
+        let wire = own_space_wire();
+        let push = own_space_push(&wire);
+        let (lent, owned, _) = both_ways(&push, "mine/*", with_own_space);
+        assert_eq!(owned.len(), 1);
+        assert_eq!(lent, owned);
+        assert_eq!(lent[0].keyexpr, "mine/x");
+    }
+
+    /// The anti-vacuity twin of the witness above: the same frame, with no own
+    /// space installed (only the peer's space, and nothing declared there), is
+    /// delivered by neither path, so the witness measures the install and not a
+    /// fixture that resolves either way.
+    #[test]
+    fn without_an_own_space_the_lent_path_refuses_the_same_alias() {
+        let wire = own_space_wire();
+        let push = own_space_push(&wire);
+        let (lent, owned, _) = both_ways(&push, "**", |_| {});
+        assert_eq!((lent.len(), owned.len()), (0, 0));
+    }
+
+    /// The wire of an aliased Put (id 3, suffix `x`), before it is read as an
+    /// `M=0` alias.
+    fn own_space_wire() -> Vec<u8> {
         let built = crate::push_build::build_push_aliased(3, Some("x"), b"v").expect("build");
-        let wire = wire_of(&built);
-        let mut push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        wire_of(&built)
+    }
+
+    /// `wire` decoded, its keyexpr rewritten from the peer-space form the
+    /// builder writes to the `M=0` form that names OUR space.
+    fn own_space_push(wire: &[u8]) -> Push<'_> {
+        let mut push = Push::decode(&mut SceCursor::new(wire)).expect("decode");
         let wz_codecs::wireexpr::WireexprVariant::WireexprLocal(local) = &push.keyexpr.body else {
             panic!("the builder writes the peer-space form");
         };
@@ -492,19 +520,15 @@ mod tests {
                 suffix: local.suffix,
             },
         );
-        let own = |r: &mut SubscriberRegistry| {
-            let mut table = hashbrown::HashMap::new();
-            table.insert(3u64, "mine/".to_string());
-            let space: crate::wireexpr_resolve::SharedOwnMappingSpace = Arc::new(table);
-            r.set_own_mapping_space(space);
-        };
-        let (lent, owned, _) = both_ways(&push, "mine/*", own);
-        assert_eq!(owned.len(), 1);
-        assert_eq!(lent, owned);
-        assert_eq!(lent[0].keyexpr, "mine/x");
-        // Without an own space the alias refuses on both paths.
-        let (lent, owned, _) = both_ways(&push, "**", |_| {});
-        assert_eq!((lent.len(), owned.len()), (0, 0));
+        push
+    }
+
+    /// Install our space: id 3 is `mine/`.
+    fn with_own_space(r: &mut SubscriberRegistry) {
+        let mut table = hashbrown::HashMap::new();
+        table.insert(3u64, "mine/".to_string());
+        let space: crate::wireexpr_resolve::SharedOwnMappingSpace = Arc::new(table);
+        r.set_own_mapping_space(space);
     }
 
     /// A sliced Put is not delivered lent: it takes the owned projection, which

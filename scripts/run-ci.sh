@@ -9932,9 +9932,16 @@ layer_c1own_own_space_witnesses() {
         return 1
     fi
     python3 scripts/lib/own_space_witness_lint.py >/dev/null || return 1
-    local log
+    local log union
     log="$(mktemp)"
-    if ! (cd crates && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-reply,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber,liveliness-get,switchboard own_space) >"$log" 2>&1; then
+    union=codec-push,codec-declare,codec-response,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-reply,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber,liveliness-get,switchboard
+    # Two legs into one executed list: the growable backing, and the fixed one
+    # (`bounded-heapless`), where the slot observer's fan exists. That module is
+    # compiled only there, so its witness pair would be in the source and never in
+    # the executed list under the first leg alone, which `--executed` reads as a
+    # witness that did not run.
+    if ! (cd crates && cargo test -p wz-session-core --features "$union" own_space) >"$log" 2>&1 ||
+        ! (cd crates && cargo test -p wz-session-core --features "$union,bounded-heapless" own_space) >>"$log" 2>&1; then
         cat "$log" >&2
         rm -f "$log"
         return 1
