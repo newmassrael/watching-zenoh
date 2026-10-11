@@ -271548,6 +271548,48 @@
         "No environment was installed."
       ]
     },
+    "Round 3283": {
+      "decision_summary": "The red test is a wrong premise in the test, not a product defect. It bound the session socket, whose queue depth is a profile constant (16 default, 4 under buffer-pool-session-rx-slim). A queue of Q holds Q-1 datagrams and a socket that holds lent frames keeps them in that queue, so the slim socket is full at its third held frame (3) and never reaches the shim's bound of 8 (RX_HELD_MAX). The product behaves correctly there: the full queue refuses the frame, counts it and returns the slot. Fix: the test shapes its socket from the shim's bound (queue RX_HELD_MAX+2, const-asserted to outlast the bound) so it means the same on every profile, plus a control for the shallow-queue case. CI never ran this lib at the slim profile (only clippy compiled it): one C1n leg added.",
+      "changes_bullets": [
+        "crates/wz-link-lwip/src/ethernet.rs (tests only): consts SHIM_BOUND_QUEUE, SHIM_BOUND_SLOT, SHALLOW_QUEUE; past_the_shims_bound_a_held_socket_falls_back_to_the_copy binds bind_shaped::<16, 10> with a const assert that the queue outlasts the bound and asserts rx_drop_count()==0; new control a_held_socket_with_a_full_queue_drops_the_frame_and_gives_the_slot_back (queue 3: two held, third dropped and counted, slot returned, none lost from the pool).",
+        "scripts/run-ci.sh: layer C1n gains _runci_guarded_test \"C1n link lib slim\" + for wz-link-lwip --lib at buffer-pool-session-rx-slim.",
+        "Commits: f385617d, 77837e79 on branch fslim (base d28c4e8c)."
+      ],
+      "verification_bullets": [
+        "Red: the test fails (left 3, right 8, held_rx assert) at slim on origin/main 6c55e873 (pc3, 46 filtered out) and on base d28c4e8c (pc2): S7 did not cause it.",
+        "Green (bx pc2, lib suite): slim 51 passed 0 failed; default 51 passed; static-link-storage 51 passed (50 existing + 1 control; the changed test passes on all three).",
+        "clippy -D warnings --all-targets -p wz-link-lwip at slim: rc 0 (run before a rustfmt-only line join). cargo fmt --all --check: clean.",
+        "Not run: clippy at the default and static-link-storage profiles (test-only change), A4 (no test under crates/*/tests touched), C1bz (the new doc comments sit in a cfg(test) module that rustdoc does not document), the new C1n leg through run-ci itself (its cargo command ran directly, 51 passed; bash -n ok).",
+        "Pins: reason_review_pin_gate --check output is identical before and after (already stale on the base for wz-link-lwip lib.rs and others); ethernet.rs and run-ci.sh are not pinned, so no row moves from this change."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: none for the red. Merge note: the C1n leg sits after \"C1n slim e2e\" in layer_c1n_mcu_session_acceptor; the coordinator's rebase onto origin/main touches the ethernet.rs tests module that S7 also changed (base d28c4e8c already contains S7). Hosted: the new leg builds the wz-link-lwip lib at slim, cheap (one crate, 51 tests). Next step for the integrator: after the rebase, run cargo test -p wz-link-lwip --lib --features buffer-pool-session-rx-slim once."
+      ],
+      "publishable_decision_summary": "The red test is a wrong premise in the test, not a product defect. It bound the session socket, whose queue depth is a profile constant (16 default, 4 under buffer-pool-session-rx-slim). A queue of Q holds Q-1 datagrams and a socket that holds lent frames keeps them in that queue, so the slim socket is full at its third held frame (3) and never reaches the shim's bound of 8 (RX_HELD_MAX). The product behaves correctly there: the full queue refuses the frame, counts it and returns the slot. Fix: the test shapes its socket from the shim's bound (queue RX_HELD_MAX+2, const-asserted to outlast the bound) so it means the same on every profile, plus a control for the shallow-queue case. CI never ran this lib at the slim profile (only clippy compiled it): one C1n leg added.",
+      "publishable_changes_bullets": [
+        "crates/wz-link-lwip/src/ethernet.rs (tests only): consts SHIM_BOUND_QUEUE, SHIM_BOUND_SLOT, SHALLOW_QUEUE; past_the_shims_bound_a_held_socket_falls_back_to_the_copy binds bind_shaped::<16, 10> with a const assert that the queue outlasts the bound and asserts rx_drop_count()==0; new control a_held_socket_with_a_full_queue_drops_the_frame_and_gives_the_slot_back (queue 3: two held, third dropped and counted, slot returned, none lost from the pool).",
+        "scripts/run-ci.sh: layer C1n gains _runci_guarded_test \"C1n link lib slim\" + for wz-link-lwip --lib at buffer-pool-session-rx-slim.",
+        "Commits: f385617d, 77837e79 on branch fslim (base d28c4e8c)."
+      ],
+      "publishable_verification_bullets": [
+        "Red: the test fails (left 3, right 8, held_rx assert) at slim on origin/main 6c55e873 (pc3, 46 filtered out) and on base d28c4e8c (pc2): S7 did not cause it.",
+        "Green (bx pc2, lib suite): slim 51 passed 0 failed; default 51 passed; static-link-storage 51 passed (50 existing + 1 control; the changed test passes on all three).",
+        "clippy -D warnings --all-targets -p wz-link-lwip at slim: rc 0 (run before a rustfmt-only line join). cargo fmt --all --check: clean.",
+        "Not run: clippy at the default and static-link-storage profiles (test-only change), A4 (no test under crates/*/tests touched), C1bz (the new doc comments sit in a cfg(test) module that rustdoc does not document), the new C1n leg through run-ci itself (its cargo command ran directly, 51 passed; bash -n ok).",
+        "Pins: reason_review_pin_gate --check output is identical before and after (already stale on the base for wz-link-lwip lib.rs and others); ethernet.rs and run-ci.sh are not pinned, so no row moves from this change."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: none for the red. Merge note: the C1n leg sits after \"C1n slim e2e\" in layer_c1n_mcu_session_acceptor; the coordinator's rebase onto origin/main touches the ethernet.rs tests module that S7 also changed (base d28c4e8c already contains S7). Hosted: the new leg builds the wz-link-lwip lib at slim, cheap (one crate, 51 tests). Next step for the integrator: after the rebase, run cargo test -p wz-link-lwip --lib --features buffer-pool-session-rx-slim once."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
