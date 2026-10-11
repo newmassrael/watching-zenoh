@@ -524,12 +524,14 @@ DEFERRED: dict[str, dict[str, str]] = {
             )
             for f in (
                 "attachment-bytes",
-                # The fixed bounded backing. It gates public items the other
-                # way round: turning it ON removes the closure-taking registry
-                # wrappers whose `.expect` holds only on the growable backing.
-                # Every such site is `any(test, doc, not(feature = ..))`, so
-                # every one is compound.
-                "bounded-heapless",
+                # R3291 -- `bounded-heapless` LEFT this list by the R2686 route.
+                # It was here because every public item it gated sat behind
+                # `any(test, doc, not(feature = ..))` (the closure-taking
+                # registry wrappers turning it ON removes). S9a then added
+                # public items under a bare `#[cfg(feature = "bounded-heapless")]`
+                # in the public modules `observer` and `reply_stage`, which
+                # `submodule_probes` reads, so the feature became probed and this
+                # row false. The merge of that branch did not run this gate.
                 "codec-fragment",
                 "codec-hello",
                 "codec-linkstate",
@@ -543,8 +545,15 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # line of an attribute. All three are compound
                 # (`session_actions.rs`), which is exactly `compound-cfg`.
                 "declare-keyexpr",
-                "declare-undeclare",
-                # Moved here from `NO_PUBLIC_PATH` (see the note there): the
+                # R3291 -- `declare-undeclare` LEFT this list: S9a moved
+                # `mark_aggregate_announced` into an `impl` under a bare
+                # `#[cfg(feature = "declare-undeclare")]` (`pubsub.rs`), a site
+                # that is simple, so "every public item it gates is compound"
+                # became false. Every public item it gates is a METHOD, so it
+                # is listed with the other method-only features below.
+                #
+                # `pubsub-delete` and `pubsub-put` were moved here from
+                # `NO_PUBLIC_PATH` (see the note there): the
                 # in-place delivery's fallback counts and their getter, both
                 # behind `all(alloc, any(pubsub-put, pubsub-delete))`.
                 "pubsub-delete",
@@ -574,6 +583,7 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "declare-interest",
                 "declare-queryable",
                 "declare-token",
+                "declare-undeclare",
                 "multicast-declarations",
                 "query-attachment",
                 "query-reply-err",
