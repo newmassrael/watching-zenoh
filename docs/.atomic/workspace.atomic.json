@@ -270390,6 +270390,68 @@
         "Item 903 can be stamped closed by the ledger entry that carries this work; the gate change is in scripts/lib/test_double_knob_gate.py only."
       ]
     },
+    "Round 3266": {
+      "decision_summary": "Open-debt item 902 reproduced, and wider than the register says: not only the multicast group link but every wz datagram link (unicast dial, accepted demux face, UdpDriver group and scouting) reported a lost link from a failed READ only. In a netns, deleting the device a socket is bound to leaves recvfrom silent while every send fails; the writer task logged and returned, and the multicast transmit task counted the datagram unwritten and went on. Upstream has no carrier watch either: its UDP link maps io errors to ZResult, and the transport ends the link at the first TX or RX task error (unicast universal link.rs, multicast link.rs delete). So wz mirrors that rather than adding an rtnetlink watch: a failed send trips a per-link latch (DatagramWriteFault) which the read driver's poll_event races first and reports as LinkEvent::Lost OsError. Faces of one listener keep separate latches. Any send error trips it, as upstream's does. Deviation from the register: no rtnetlink path.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/udp_pipeline.rs: new pub DatagramWriteFault (tripping half, idempotent, logs the first error), DatagramWriteWatch (read half), DatagramWriteLatch (both, for UdpDriver). udp_writer_task takes a DatagramWriteFault and trips it on a failed send (signature change, pub). wire_udp_socket and wire_udp_demuxed make one latch per link or face; UdpReadDriver holds the watch, its receive moved into a private receive(), and poll_event is a biased select of the latch and the receive. Four unit tests: failed write on a dial link, on an accepted face, on one face leaving its sibling served, and an ICMP refusal taken by the writer.",
+        "crates/wz-runtime-tokio/src/lib.rs: UdpDriver gains write_latch; UdpGroupSender::send trips it on a failed send_to; poll_event races it first; receive_datagram split out per feature arm. No other hunk (integ10's files untouched).",
+        "crates/wz-runtime-tokio/tests/udp_group_write_fault.rs (new): group send failing is a lost link; a send that succeeds leaves it up.",
+        "crates/wz-runtime-tokio/tests/datagram_tx_pool_allocations.rs: passes a latch to udp_writer_task.",
+        "crates/wz-integration-tests/tests/wz_datagram_carrier_loss_netns.rs (new, 2 ignored legs): group link and dial link in a veth netns, interface deleted, premise asserted that the read half stays silent, then the failed write ends the link.",
+        "scripts/run-ci.sh: Layer M runs the new netns test behind the existing netns probe, guarded at 2."
+      ],
+      "verification_bullets": [
+        "Run on pc2 (Linux x86_64, sudo netns available); nothing ran on hosted CI, Windows or macOS.",
+        "Red first: the three lib tests (dial, accepted face, sibling) FAILED with Elapsed after 5 s each on the unmodified code; udp_group_write_fault a_group_send_that_fails_is_a_lost_link FAILED (the negative twin passed); the netns test on the unmodified code: both legs FAILED \"must be lost; got Err(Elapsed)\" with the premise assertions (read half silent after the interface is deleted) passing.",
+        "Green: lib udp_pipeline 15 passed (4 new); udp_group_write_fault 2 passed; netns test 2 passed (2.1 s).",
+        "Mutants (reverted): M1 writer task does not trip the latch: 4 of the new lib tests FAILED; M2 poll_event never reads the latch: the same 4 FAILED. Group-send mutant covered by the red above.",
+        "clippy -D warnings --all-targets wz-runtime-tokio and wz-integration-tests: clean; rustfmt --check on every touched file clean; C1bz for wz-runtime-tokio and wz-integration-tests: pass; A4: pass; layer_e_oracle_scope_gate, multicast_address_collision_gate, count_guard_lint, guarded_count_lattice_gate: OK; upstream_citation_anchor_gate --resolve-if-pinned: OK.",
+        "On the merged integration tree (this change with the multicast and ws pool work): udp_group_write_fault 2 passed; the netns test 2 passed in 3.4 s; datagram_tx_pool_allocations 28 passed and datagram_rx_pool_allocations 15 passed; clippy -D warnings --all-targets clean for wz-runtime-tokio with runtime-zero-copy alone, with transport-link-udp alone, with the datagram set and with the C1bq lane's set, and for wz-integration-tests; C1bz holds at the merged budget for wz-runtime-tokio and wz-integration-tests.",
+        "reason_review_pin_gate on the merged tree: one row fails, atom runtime-zero-copy, file crates/wz-runtime-tokio/src/lib.rs (pinned df15845530, now 7d59c08f78). docs/reason-review-pins.md was not edited, as instructed.",
+        "NOT run: the multicast and udp e2e suites beyond udp_seam_e2e and udp_chaos_e2e, Layer M as a lane (only this test with the lane's own command), platform legs, any process-level zenohd test."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The runtime-zero-copy arm is clippy-gated on the merged integration tree (clean with runtime-zero-copy alone, with the datagram set and with the C1bq lane's set).",
+        "The pin row for runtime-zero-copy / wz-runtime-tokio lib.rs must be re-pinned by the coordinator after re-reading the reason against lib.rs: on the merged tree the new blob is 7d59c08f78f51f790b42efdfbd3cc809e8c5c040 (this change touched UdpDriver and UdpGroupSender, the pool work touched the ws and multicast claims).",
+        "A transient send error (for example ENOBUFS on a busy group) now ends the link and triggers the re-join loop, exactly as upstream's TX task error ends its transport. If that proves too eager in the field, the narrowing belongs in DatagramWriteFault::trip by error kind, with upstream cited.",
+        "The process-level netns leg of item 902's register text (delete and re-add the device under a running --sessions group session, expect link lost, rejoined, a new peer arrived) was not built; this change covers the link seam (Lost at the failed write) that loop was waiting on. The multicast pool work is now merged in the same tree, so that leg can be built on it."
+      ],
+      "publishable_decision_summary": "Open-debt item 902 reproduced, and wider than the register says: not only the multicast group link but every wz datagram link (unicast dial, accepted demux face, UdpDriver group and scouting) reported a lost link from a failed READ only. In a netns, deleting the device a socket is bound to leaves recvfrom silent while every send fails; the writer task logged and returned, and the multicast transmit task counted the datagram unwritten and went on. Upstream has no carrier watch either: its UDP link maps io errors to ZResult, and the transport ends the link at the first TX or RX task error (unicast universal link.rs, multicast link.rs delete). So wz mirrors that rather than adding an rtnetlink watch: a failed send trips a per-link latch (DatagramWriteFault) which the read driver's poll_event races first and reports as LinkEvent::Lost OsError. Faces of one listener keep separate latches. Any send error trips it, as upstream's does. Deviation from the register: no rtnetlink path.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/udp_pipeline.rs: new pub DatagramWriteFault (tripping half, idempotent, logs the first error), DatagramWriteWatch (read half), DatagramWriteLatch (both, for UdpDriver). udp_writer_task takes a DatagramWriteFault and trips it on a failed send (signature change, pub). wire_udp_socket and wire_udp_demuxed make one latch per link or face; UdpReadDriver holds the watch, its receive moved into a private receive(), and poll_event is a biased select of the latch and the receive. Four unit tests: failed write on a dial link, on an accepted face, on one face leaving its sibling served, and an ICMP refusal taken by the writer.",
+        "crates/wz-runtime-tokio/src/lib.rs: UdpDriver gains write_latch; UdpGroupSender::send trips it on a failed send_to; poll_event races it first; receive_datagram split out per feature arm. No other hunk (integ10's files untouched).",
+        "crates/wz-runtime-tokio/tests/udp_group_write_fault.rs (new): group send failing is a lost link; a send that succeeds leaves it up.",
+        "crates/wz-runtime-tokio/tests/datagram_tx_pool_allocations.rs: passes a latch to udp_writer_task.",
+        "crates/wz-integration-tests/tests/wz_datagram_carrier_loss_netns.rs (new, 2 ignored legs): group link and dial link in a veth netns, interface deleted, premise asserted that the read half stays silent, then the failed write ends the link.",
+        "scripts/run-ci.sh: Layer M runs the new netns test behind the existing netns probe, guarded at 2."
+      ],
+      "publishable_verification_bullets": [
+        "Run on pc2 (Linux x86_64, sudo netns available); nothing ran on hosted CI, Windows or macOS.",
+        "Red first: the three lib tests (dial, accepted face, sibling) FAILED with Elapsed after 5 s each on the unmodified code; udp_group_write_fault a_group_send_that_fails_is_a_lost_link FAILED (the negative twin passed); the netns test on the unmodified code: both legs FAILED \"must be lost; got Err(Elapsed)\" with the premise assertions (read half silent after the interface is deleted) passing.",
+        "Green: lib udp_pipeline 15 passed (4 new); udp_group_write_fault 2 passed; netns test 2 passed (2.1 s).",
+        "Mutants (reverted): M1 writer task does not trip the latch: 4 of the new lib tests FAILED; M2 poll_event never reads the latch: the same 4 FAILED. Group-send mutant covered by the red above.",
+        "clippy -D warnings --all-targets wz-runtime-tokio and wz-integration-tests: clean; rustfmt --check on every touched file clean; C1bz for wz-runtime-tokio and wz-integration-tests: pass; A4: pass; layer_e_oracle_scope_gate, multicast_address_collision_gate, count_guard_lint, guarded_count_lattice_gate: OK; upstream_citation_anchor_gate --resolve-if-pinned: OK.",
+        "On the merged integration tree (this change with the multicast and ws pool work): udp_group_write_fault 2 passed; the netns test 2 passed in 3.4 s; datagram_tx_pool_allocations 28 passed and datagram_rx_pool_allocations 15 passed; clippy -D warnings --all-targets clean for wz-runtime-tokio with runtime-zero-copy alone, with transport-link-udp alone, with the datagram set and with the C1bq lane's set, and for wz-integration-tests; C1bz holds at the merged budget for wz-runtime-tokio and wz-integration-tests.",
+        "reason_review_pin_gate on the merged tree: one row fails, atom runtime-zero-copy, file crates/wz-runtime-tokio/src/lib.rs (pinned df15845530, now 7d59c08f78). docs/reason-review-pins.md was not edited, as instructed.",
+        "NOT run: the multicast and udp e2e suites beyond udp_seam_e2e and udp_chaos_e2e, Layer M as a lane (only this test with the lane's own command), platform legs, any process-level zenohd test."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The runtime-zero-copy arm is clippy-gated on the merged integration tree (clean with runtime-zero-copy alone, with the datagram set and with the C1bq lane's set).",
+        "The pin row for runtime-zero-copy / wz-runtime-tokio lib.rs must be re-pinned by the coordinator after re-reading the reason against lib.rs: on the merged tree the new blob is 7d59c08f78f51f790b42efdfbd3cc809e8c5c040 (this change touched UdpDriver and UdpGroupSender, the pool work touched the ws and multicast claims).",
+        "A transient send error (for example ENOBUFS on a busy group) now ends the link and triggers the re-join loop, exactly as upstream's TX task error ends its transport. If that proves too eager in the field, the narrowing belongs in DatagramWriteFault::trip by error kind, with upstream cited.",
+        "The process-level netns leg of item 902's register text (delete and re-add the device under a running --sessions group session, expect link lost, rejoined, a new peer arrived) was not built; this change covers the link seam (Lost at the failed write) that loop was waiting on. The multicast pool work is now merged in the same tree, so that leg can be built on it."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
