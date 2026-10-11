@@ -270756,6 +270756,54 @@
         "Open: land branch f877 (rebase onto main; two commits: the burst default and the comment that says it ran), then stamp register item 877 closed with this entry. The RX_RESOURCE_ERRORS reading of 2 on one INCR4 boot is unexplained: next step is a longer run on the INCR4 both-pool image reading that register every few seconds from boot (the counters appear to clear when read, so as deltas) to see whether the 2 comes at the first frames before the ring is armed or later; if it shows later under burst traffic, the receive ring depth against INCR4 needs a look. Hardware item 877 needs nothing else from the owner."
       ]
     },
+    "Round 3272": {
+      "decision_summary": "This integration lands sixteen commits from seven branches on the Round 3261 tree: the multicast and websocket pool path, three hosted-red repairs, the datagram write-fault latch, the shared-memory arming, the knob gate, the unixpipe hang repair, the census role repair and the kit witness text. The hosted run of the Round 3261 push failed in two jobs (the lean-unit allocation test of C1bn and the heap-chain control of C1bq); both are repaired here at their causes and this push carries an acknowledgement row for that run. No conflict arose: the overlapping files merged cleanly. The reason-review pin of the runtime-zero-copy atom moves for lib.rs only, re-derived in this round. The board table rows for the two pool images are promoted in this round, because the kit round they cite exists in the store now.",
+      "changes_bullets": [
+        "The merge applied sixteen cherry-picks in this order: the multicast and websocket branch (seven), the register-item branch (four), the fragment-count repair, the lean-unit repair, the unixpipe repair, the kit verdict text and the census role repair; none was dropped.",
+        "docs/reason-review-pins.md: the runtime-zero-copy row for crates/wz-runtime-tokio/src/lib.rs is re-derived with this integration round. No other pin moved.",
+        "docs/hosted-red-acks.md: one row for the hosted run of the Round 3261 push, attributed per job terminal line.",
+        "deploy/zephyr-boards.json: the two pool-image rows (transmit and receive) are promoted to HARDWARE with the image hashes and date the kit round recorded.",
+        "scripts/run-ci.sh: the C1p count 69 to 72 and the C1bz budget 478 for wz-runtime-tokio, both already carried by the branches and re-measured on the merged tree."
+      ],
+      "verification_bullets": [
+        "Every build and test of the merged tree ran on the remote build host; nothing was built on this machine except the tree-only python gates. Allocation-counting binaries: datagram_tx 28 of 28 and looped whole 40 of 40 on two cores and 40 of 40 on all; datagram_rx 15; fragment_tx 4 and 0 failures in 160 loops; reassembly 2 and 0 in 160; lent_slot_send 22; udp_group_write_fault 2; lowlatency_e2e 3 under the C1ad set, with transport-stats and under the 81-feature wide leg, each 40 loops on two cores and on all with 0 failures. Lib tests: 608 with runtime-zero-copy, 538 default, 597 with the unixpipe set; wz-capture 1087 and 1277; wz-capi-dissect 175. Clippy -D warnings --all-targets and fmt clean for wz-runtime-tokio in nine feature sets, wz-integration-tests, wz-session-core and wz-capture. Census gate and Layer A4 pass; the count-guard oracle held 89 of 89 before the last three branches joined. NOT measured: hosted CI, Windows, macOS, the full C1bz stale-line check, the full Layer M lane, Layer C0 and the hook array on the merged tree before this round, and any interop against a real peer."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Reconstruct the reason of the runtime-zero-copy atom against the merged lib.rs: it now holds the multicast and websocket pool claims and the datagram write-fault latch.",
+        "With transport-stats the receive path lends nothing, so the zero-heap proof of a lean unit lives only in builds without the counters; making the counters work over a lent Push is a product change with its own proof.",
+        "The datagram write-fault latch ends a link on any send error, as upstream does; a transient ENOBUFS now triggers the re-join loop, to be narrowed in the latch if that proves too eager.",
+        "bind_udp_demux registers its socket on the caller's runtime and spawns the pump on the acceptor runtime, the pattern that hung the unixpipe acceptor; found by reading and not reproduced; the other WzRuntime::Acceptor spawn sites are not audited.",
+        "The shared-memory interop legs of Layer Z still skip on hosted CI because that job builds no shared-memory router; arming them needs the same build there, an owner decision.",
+        "Kit: a first INCR4 boot read RX_RESOURCE_ERRORS as 2 against 0 elsewhere while the pool counted no refusal or drop; read it as deltas over a longer run. Register item 877 stays open for that reading.",
+        "Censuses stored before this push hold wrong roles for nodes named only by an Init or Join."
+      ],
+      "publishable_decision_summary": "This integration lands sixteen commits from seven branches on the Round 3261 tree: the multicast and websocket pool path, three hosted-red repairs, the datagram write-fault latch, the shared-memory arming, the knob gate, the unixpipe hang repair, the census role repair and the kit witness text. The hosted run of the Round 3261 push failed in two jobs (the lean-unit allocation test of C1bn and the heap-chain control of C1bq); both are repaired here at their causes and this push carries an acknowledgement row for that run. No conflict arose: the overlapping files merged cleanly. The reason-review pin of the runtime-zero-copy atom moves for lib.rs only, re-derived in this round. The board table rows for the two pool images are promoted in this round, because the kit round they cite exists in the store now.",
+      "publishable_changes_bullets": [
+        "The merge applied sixteen cherry-picks in this order: the multicast and websocket branch (seven), the register-item branch (four), the fragment-count repair, the lean-unit repair, the unixpipe repair, the kit verdict text and the census role repair; none was dropped.",
+        "docs/reason-review-pins.md: the runtime-zero-copy row for crates/wz-runtime-tokio/src/lib.rs is re-derived with this integration round. No other pin moved.",
+        "docs/hosted-red-acks.md: one row for the hosted run of the Round 3261 push, attributed per job terminal line.",
+        "deploy/zephyr-boards.json: the two pool-image rows (transmit and receive) are promoted to HARDWARE with the image hashes and date the kit round recorded.",
+        "scripts/run-ci.sh: the C1p count 69 to 72 and the C1bz budget 478 for wz-runtime-tokio, both already carried by the branches and re-measured on the merged tree."
+      ],
+      "publishable_verification_bullets": [
+        "Every build and test of the merged tree ran on the remote build host; nothing was built on this machine except the tree-only python gates. Allocation-counting binaries: datagram_tx 28 of 28 and looped whole 40 of 40 on two cores and 40 of 40 on all; datagram_rx 15; fragment_tx 4 and 0 failures in 160 loops; reassembly 2 and 0 in 160; lent_slot_send 22; udp_group_write_fault 2; lowlatency_e2e 3 under the C1ad set, with transport-stats and under the 81-feature wide leg, each 40 loops on two cores and on all with 0 failures. Lib tests: 608 with runtime-zero-copy, 538 default, 597 with the unixpipe set; wz-capture 1087 and 1277; wz-capi-dissect 175. Clippy -D warnings --all-targets and fmt clean for wz-runtime-tokio in nine feature sets, wz-integration-tests, wz-session-core and wz-capture. Census gate and Layer A4 pass; the count-guard oracle held 89 of 89 before the last three branches joined. NOT measured: hosted CI, Windows, macOS, the full C1bz stale-line check, the full Layer M lane, Layer C0 and the hook array on the merged tree before this round, and any interop against a real peer."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Reconstruct the reason of the runtime-zero-copy atom against the merged lib.rs: it now holds the multicast and websocket pool claims and the datagram write-fault latch.",
+        "With transport-stats the receive path lends nothing, so the zero-heap proof of a lean unit lives only in builds without the counters; making the counters work over a lent Push is a product change with its own proof.",
+        "The datagram write-fault latch ends a link on any send error, as upstream does; a transient ENOBUFS now triggers the re-join loop, to be narrowed in the latch if that proves too eager.",
+        "bind_udp_demux registers its socket on the caller's runtime and spawns the pump on the acceptor runtime, the pattern that hung the unixpipe acceptor; found by reading and not reproduced; the other WzRuntime::Acceptor spawn sites are not audited.",
+        "The shared-memory interop legs of Layer Z still skip on hosted CI because that job builds no shared-memory router; arming them needs the same build there, an owner decision.",
+        "Kit: a first INCR4 boot read RX_RESOURCE_ERRORS as 2 against 0 elsewhere while the pool counted no refusal or drop; read it as deltas over a longer run. Register item 877 stays open for that reading.",
+        "Censuses stored before this push hold wrong roles for nodes named only by an Init or Join."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
