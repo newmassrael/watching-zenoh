@@ -20,10 +20,19 @@
 //! `wz-mcu-session-acceptor`) keeps the wire format a single editable point:
 //! a spec change touches one definition, not four drifting ones.
 
+// The `Vec`-returning forms are behind `alloc` (on by default); the forms of
+// `fixed` write into a buffer the caller's stack holds and need no allocator, which
+// is what an image on the fixed-memory profile drives its reactive peer with
+// (fixed-memory step S9c).
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
 use alloc::vec;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+
+pub mod fixed;
 
 // ── Transport-header constants (zenoh-pico transport.h; mirror the private
 //    `wz_session_core` / session_glue `wire_const`). Public so a test that
@@ -63,6 +72,7 @@ pub const FIXTURE_LISTENER_ZID: [u8; 4] = [0xA0, 0xA1, 0xA2, 0xA3];
 /// Minimal `InitSyn` (parent flag `FLAG_T_INIT_S`, no `_A` so no cookie):
 /// version, cbyte (whatami=Peer wire 0x01 | (zid_len-1)<<4), 4-byte
 /// [`FIXTURE_PEER_ZID`], sn_res, batch_size LE u16.
+#[cfg(feature = "alloc")]
 pub fn craft_initsyn_wire() -> Vec<u8> {
     let mut wire = vec![
         FLAG_T_INIT_S | T_MID_INIT,
@@ -80,6 +90,7 @@ pub fn craft_initsyn_wire() -> Vec<u8> {
 /// `InitAck` (parent flags `FLAG_T_INIT_S | FLAG_T_INIT_A`) carrying
 /// [`FIXTURE_LISTENER_ZID`] and a single-byte-VLE-length `cookie`. Cookie
 /// fields are gated by `FLAG_T_INIT_A` per zenoh-pico transport.h §5.M.
+#[cfg(feature = "alloc")]
 pub fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
     assert!(
         cookie.len() < 0x80,
@@ -109,6 +120,7 @@ pub fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
 /// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection condition,
 /// unicast/transport.c:123-140). `craft_initack_wire` keeps the all-zero
 /// caps the conforming-handshake tests rely on.
+#[cfg(feature = "alloc")]
 pub fn craft_initack_wire_with_caps(cookie: &[u8], sn_res_byte: u8, batch_size: u16) -> Vec<u8> {
     assert!(
         cookie.len() < 0x80,
@@ -144,6 +156,7 @@ pub const EXT_HDR_INIT_PATCH_ZINT: u8 = 0x27;
 /// R311y817 — the `0x7` PATCH ext as a lone terminal chain entry: header
 /// byte then the level as a single-byte VLE. Appended to an Init whose
 /// parent header carries [`FLAG_T_Z`].
+#[cfg(feature = "alloc")]
 fn patch_ext_chain(level: u8) -> [u8; 2] {
     assert!(level < 0x80, "fixture: single-byte VLE patch level only");
     [EXT_HDR_INIT_PATCH_ZINT, level]
@@ -164,6 +177,7 @@ pub const EXT_HDR_INIT_REGION_ZBUF: u8 = 0x48;
 /// the wire is not required to be valid UTF-8, and refusing that is one of
 /// the three arms upstream's `ext_to_name` has. A fixture that could only
 /// express valid names could not present the input that fails.
+#[cfg(feature = "alloc")]
 fn region_ext_chain(value: &[u8]) -> Vec<u8> {
     assert!(value.len() < 0x80, "fixture: single-byte VLE length only");
     let mut out = Vec::with_capacity(2 + value.len());
@@ -179,6 +193,7 @@ fn region_ext_chain(value: &[u8]) -> Vec<u8> {
 /// Caps are the all-zero conforming advertisement, which is what makes a
 /// rejection this fixture produces DISCRIMINATING: it cannot be the
 /// size-parameter rule firing, because none of the three sizes moved.
+#[cfg(feature = "alloc")]
 pub fn craft_initsyn_wire_with_region(value: &[u8]) -> Vec<u8> {
     let mut wire = vec![
         FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT,
@@ -204,6 +219,7 @@ pub fn craft_initsyn_wire_with_region(value: &[u8]) -> Vec<u8> {
 /// Caps are the all-zero conforming advertisement, which is what makes
 /// this fixture DISCRIMINATING: a rejection it produces cannot be the
 /// size-parameter rule firing, because none of the three sizes moved.
+#[cfg(feature = "alloc")]
 pub fn craft_initack_wire_with_patch(cookie: &[u8], patch_level: u8) -> Vec<u8> {
     assert!(
         cookie.len() < 0x80,
@@ -233,6 +249,7 @@ pub fn craft_initack_wire_with_patch(cookie: &[u8], patch_level: u8) -> Vec<u8> 
 /// level above its own — zenoh's `AcceptFsm::recv_init_syn` stores it
 /// unexamined (`ext/patch.rs:168-175`) and answers the `min`, and pico
 /// caps with the same `min` (`unicast/transport.c:237-241`).
+#[cfg(feature = "alloc")]
 pub fn craft_initsyn_wire_with_patch(patch_level: u8) -> Vec<u8> {
     let mut wire = vec![
         FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT,
@@ -251,6 +268,7 @@ pub fn craft_initsyn_wire_with_patch(patch_level: u8) -> Vec<u8> {
 /// `OpenSyn` echoing `cookie` (parent flags 0x00 so the cookie carrier is
 /// present and the lease is in ms): lease VLE=0, initial_sn VLE=0,
 /// cookie_len VLE, cookie bytes.
+#[cfg(feature = "alloc")]
 pub fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
     assert!(
         cookie.len() < 0x80,
@@ -271,6 +289,7 @@ pub fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
 /// the peer's announced bound CHANGES (auto `south:0:client`, `north` when
 /// it calls us south), which a peer-peer pair cannot show: it is `north`
 /// in every arm.
+#[cfg(feature = "alloc")]
 pub fn craft_initsyn_wire_as_client() -> Vec<u8> {
     let mut wire = craft_initsyn_wire();
     wire[2] = 0x32; // cbyte: whatami=Client wire(0x02), zid_len=4
@@ -286,6 +305,7 @@ pub const EXT_HDR_OPEN_REMOTE_BOUND_ZINT: u8 = 0x27;
 /// R2858 — [`craft_opensyn_wire`] carrying a `0x7` REMOTE-BOUND whose value
 /// is `value`, VLE-encoded so values past one byte (upstream truncates them)
 /// can be presented.
+#[cfg(feature = "alloc")]
 pub fn craft_opensyn_wire_with_remote_bound(cookie: &[u8], value: u64) -> Vec<u8> {
     let mut wire = craft_opensyn_wire(cookie);
     wire[0] |= FLAG_T_Z;
@@ -310,6 +330,7 @@ pub const FLAG_T_OPEN_A: u8 = 0x20;
 /// cookie rides the Syn only) announcing `initial_sn`: lease VLE=0,
 /// initial_sn VLE. Seeds the initiator-side RX SN gate in tests exactly
 /// as a real acceptor's OpenAck does.
+#[cfg(feature = "alloc")]
 pub fn craft_openack_wire(initial_sn: u64) -> Vec<u8> {
     assert!(
         initial_sn < 0x80,
@@ -325,6 +346,7 @@ pub fn craft_openack_wire(initial_sn: u64) -> Vec<u8> {
 /// Application `Frame` with the `R` (reliable) flag set per `reliable`, a
 /// single-byte-VLE `sn`, and an empty payload (decodes to a `FramePayload`
 /// with an empty NetworkMessage batch).
+#[cfg(feature = "alloc")]
 pub fn craft_frame_wire(sn: u64, reliable: bool) -> Vec<u8> {
     assert!(sn < 0x80, "fixture: single-byte VLE sn only");
     let header = if reliable {
@@ -339,6 +361,7 @@ pub fn craft_frame_wire(sn: u64, reliable: bool) -> Vec<u8> {
 /// byte `priority`: the header's ext-chain `Z` flag, then the Frame's sole
 /// extension, `[0x31][VLE(priority)]` (zenoh's `QoSType`, id 0x1, z64, never
 /// chained on a Frame).
+#[cfg(feature = "alloc")]
 pub fn craft_frame_wire_with_priority(sn: u64, reliable: bool, priority: u8) -> Vec<u8> {
     assert!(sn < 0x80, "fixture: single-byte VLE sn only");
     assert!(priority < 8, "fixture: a Priority wire byte is 0..=7");
@@ -355,6 +378,7 @@ pub fn craft_frame_wire_with_priority(sn: u64, reliable: bool, priority: u8) -> 
 /// body is `sn + payload`. A chain's non-final fragments set `more`; the
 /// final fragment clears it. The concatenated payloads of a chain are the
 /// reassembled message (re-parsed as a `Frame` payload by the drive loop).
+#[cfg(feature = "alloc")]
 pub fn craft_fragment_wire(reliable: bool, more: bool, sn: u64, payload: &[u8]) -> Vec<u8> {
     assert!(sn < 0x80, "fixture: single-byte VLE sn only");
     let mut flags = 0u8;
@@ -372,6 +396,7 @@ pub fn craft_fragment_wire(reliable: bool, more: bool, sn: u64, payload: &[u8]) 
 /// R2927 — [`craft_fragment_wire`] carrying an `ext_qos` for the `Priority`
 /// wire byte `priority`, as the Fragment's sole extension (`Z` on the header,
 /// `[0x31][VLE(priority)]`, not chained), ahead of the payload.
+#[cfg(feature = "alloc")]
 pub fn craft_fragment_wire_with_priority(
     reliable: bool,
     more: bool,

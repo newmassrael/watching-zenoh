@@ -40,5 +40,14 @@ description = "SSOT for synthetic zenoh session handshake wire bytes (craft_init
 name = "wz_session_wire_fixtures"
 path = "src/lib.rs"
 
+[features]
+# The `Vec`-returning forms of every crafted frame (`craft_*_wire`), on by default so
+# every existing caller builds unchanged. The forms of `fixed` write into a buffer the
+# caller holds and need no allocator, which is what an image on the fixed-memory profile
+# builds with: it names this crate with `default-features = false`, so the crate does
+# not link `alloc` there (fixed-memory step S9c).
+default = ["alloc"]
+alloc = []
+
 [lints]
 workspace = true
