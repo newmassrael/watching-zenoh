@@ -615,6 +615,10 @@ pub struct UdpAcceptedInputs {
 /// The hand-over is through a `std` socket, which belongs to no reactor:
 /// `into_std` leaves the caller's registration, and `from_std` registers with
 /// the runtime entered here. The guard is held across no await.
+// LINK-SOCKET-SEAM-NOT-APPLICABLE: the socket is the one `bind_udp` made and
+// configured through the options seam; this only moves its registration to
+// another reactor, so it is the same descriptor with every option already set
+// and there is nothing left to apply.
 fn register_on_acceptor(socket: UdpSocket) -> io::Result<UdpSocket> {
     let socket = socket.into_std()?;
     let _acceptor = WzRuntime::Acceptor.handle().enter();
