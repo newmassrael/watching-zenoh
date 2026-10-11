@@ -25,13 +25,13 @@
 //!   refused, counted and answered to the querier as a typed error.
 //!
 //! What writes [`FixedNodeStatus`] on a slot image is the admin node shell (step
-//! S9c, [`crate::admin_status::NodeStatus`]'s writer today); it gives the rows as
+//! S9c, `crate::admin_status::NodeStatus`'s writer today); it gives the rows as
 //! [`wz_session_core::adminspace::AdminSessionRef`] views of whatever it keeps.
 //!
 //! # The lock
 //!
 //! The status, the arena and the busy count live behind one `critical_section` lock,
-//! as [`crate::admin_status::NodeStatus`] does, and a GET holds it for the whole
+//! as `crate::admin_status::NodeStatus` does, and a GET holds it for the whole
 //! answer: the legs are rendered from the rows where they lie, which is what removes
 //! the clone. On a single-core cooperative runtime nothing else contends for it
 //! except the shell's own `set_sessions`, which runs between GETs; the interrupt-off
@@ -221,11 +221,27 @@ impl<const SESSIONS: usize> FixedNodeStatus<SESSIONS> {
     /// Replace the sessions the node reports with `rows`. A row that does not fit
     /// the table, or whose text does not fit its fields, is left out and COUNTED.
     pub fn set_sessions<'a>(&self, rows: impl IntoIterator<Item = AdminSessionRef<'a>>) {
+        self.set_session_rows(
+            rows.into_iter()
+                .map(|row| FixedAdminSession::from_view(&row)),
+        );
+    }
+
+    /// [`Self::set_sessions`] for rows already copied into fixed storage, each as the
+    /// result of copying it (a row that did not fit arrives as its refusal and is
+    /// COUNTED, not left out silently). What a node that reads each session's row
+    /// through a lend (`SessionLinkActions::with_admin_session`) gives it: the borrowed
+    /// row cannot leave the call that lends it, so the copy is made there and the
+    /// copies are given here, outside any lock.
+    pub fn set_session_rows(
+        &self,
+        rows: impl IntoIterator<Item = Result<FixedAdminSession, RowRefused>>,
+    ) {
         critical_section::with(|cs| {
             let mut state = self.state.borrow(cs).borrow_mut();
             state.sessions.clear();
             for row in rows {
-                match FixedAdminSession::from_view(&row) {
+                match row {
                     Ok(row) => {
                         if state.sessions.push(row).is_err() {
                             state.refusals.sessions_full =
@@ -368,7 +384,7 @@ impl<const BODY: usize> Default for AdminHost<BODY> {
 /// `host`'s arena with nothing allocated per GET.
 ///
 /// The legs and their gates are those of
-/// [`crate::admin_status::host_admin_queryable`]: every upstream leg through
+/// `crate::admin_status::host_admin_queryable`: every upstream leg through
 /// [`AdminReplyArena::answer`], the `config` leg from `config` (`{}` when `None`),
 /// and, with `connect`, the connection status leg `@/<zid>/<whatami>/status/connect`.
 /// A denied read answers nothing and the query is still terminated. The registration

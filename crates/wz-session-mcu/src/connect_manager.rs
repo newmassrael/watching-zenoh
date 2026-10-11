@@ -29,9 +29,9 @@
 //! schedule exists to prevent. It is tried again only when the list is
 //! written again, since that is the only event that can change it.
 
-use alloc::vec::Vec;
-
 use wz_session_core::admin_connect::{group_len, ConnectEndpoints, ConnectEntry};
+use wz_session_core::bounded::BoundedVec;
+use wz_session_core::caps::MAX_STATIC_CONNECT;
 use wz_session_core::retry_period::{RetryPeriod, RetryPolicy};
 
 use crate::admin_host::ConnectControl;
@@ -130,13 +130,22 @@ struct Slot<S> {
     state: State<S>,
 }
 
+/// The endpoints a manager holds, one row each. The list a host writes is itself
+/// held in `MAX_STATIC_CONNECT` rows (`ConnectEndpoints`), so no list can name more
+/// endpoints than this table has rows: the table is bounded by the same number that
+/// bounds what feeds it, and a manager holds no row it was not told of. The backing
+/// is the profile's (`BoundedVec`): the growable one where there is a heap, a fixed
+/// table of that many rows under `bounded-heapless`, where a row past the bound could
+/// only be a defect and is hung up and refused rather than grown (`reconcile`).
+type Slots<S> = BoundedVec<Slot<S>, MAX_STATIC_CONNECT>;
+
 /// Keeps a node's sessions in step with its [`ConnectControl`].
 pub struct ConnectManager<D: Dialer> {
     control: &'static ConnectControl,
     dialer: D,
     policy: RetryPolicy,
     generation: Option<u32>,
-    slots: Vec<Slot<D::Session>>,
+    slots: Slots<D::Session>,
 }
 
 impl<D: Dialer> ConnectManager<D> {
@@ -153,7 +162,7 @@ impl<D: Dialer> ConnectManager<D> {
             dialer,
             policy,
             generation: None,
-            slots: Vec::new(),
+            slots: BoundedVec::new(),
         }
     }
 
@@ -193,7 +202,7 @@ impl<D: Dialer> ConnectManager<D> {
             self.reconcile(&list, now_ms);
             self.generation = Some(generation);
         }
-        for slot in &mut self.slots {
+        for slot in self.slots.iter_mut() {
             let next = match &mut slot.state {
                 State::Live { session, period } => match self.dialer.ended(session) {
                     None => None,
@@ -241,32 +250,46 @@ impl<D: Dialer> ConnectManager<D> {
     fn reconcile(&mut self, list: &ConnectEndpoints, now_ms: u64) {
         // An empty group names nothing to dial.
         let dialable = |e: &ConnectEntry| !e.endpoint.is_empty();
-        // Hang up what the list no longer names.
-        let mut kept = Vec::with_capacity(self.slots.len());
-        for slot in self.slots.drain(..) {
+        // Hang up what the list no longer names. The rows that stay are held as
+        // `Option`s so one can be taken out by position without shifting the rest.
+        let mut kept_rows: BoundedVec<Option<Slot<D::Session>>, MAX_STATIC_CONNECT> =
+            BoundedVec::new();
+        for slot in core::mem::take(&mut self.slots) {
             if list.iter().any(|e| dialable(e) && *e == slot.entry) {
-                kept.push(slot);
+                // At most as many rows as the table has, which it just held.
+                let _ = kept_rows.push(Some(slot));
             } else if let State::Live { session, .. } = slot.state {
                 self.dialer.hang_up(session);
             }
         }
         // Keep the list's order; a new endpoint is due now, and a refused one
         // is given another chance, since a rewrite is what could change it.
-        let mut slots = Vec::with_capacity(list.len());
+        let mut slots: Slots<D::Session> = BoundedVec::new();
         for entry in list.iter().filter(|e| dialable(e)) {
             let fresh = self.first_state(list, entry, now_ms);
-            match kept.iter().position(|s| s.entry == *entry) {
-                Some(i) => {
-                    let mut slot = kept.swap_remove(i);
+            let held = kept_rows
+                .iter()
+                .position(|s| s.as_ref().is_some_and(|s| s.entry == *entry))
+                .and_then(|i| kept_rows[i].take());
+            let slot = match held {
+                Some(mut slot) => {
                     if let State::Refused(_) = slot.state {
                         slot.state = fresh;
                     }
-                    slots.push(slot);
+                    slot
                 }
-                None => slots.push(Slot {
+                None => Slot {
                     entry: entry.clone(),
                     state: fresh,
-                }),
+                },
+            };
+            // The list holds as many entries as this table has rows, so a row
+            // always fits. A row that did not could only be a defect, and a live
+            // session left in it would be one nobody tells to close: hang it up.
+            if let Err(wz_session_core::bounded::CapacityFull(refused)) = slots.push(slot) {
+                if let State::Live { session, .. } = refused.state {
+                    self.dialer.hang_up(session);
+                }
             }
         }
         self.slots = slots;
@@ -302,6 +325,7 @@ mod tests {
     use super::*;
     use alloc::string::String;
     use alloc::vec;
+    use alloc::vec::Vec;
     use core::cell::RefCell;
 
     /// A dialer that records what it was asked and ends sessions on demand.

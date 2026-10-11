@@ -30,6 +30,7 @@
 //! [`crate::admin_host::ConnectControl::last_outcome`] is where the refusal
 //! can be read, since upstream only logs it.
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::string::String;
 use core::cell::RefCell;
 
@@ -39,10 +40,13 @@ use wz_session_core::admin_connect::{
     parse_connect_endpoints_write, ConfigWriteBody, ConnectEndpoints, ConnectWriteOutcome,
 };
 use wz_session_core::locality::Locality;
+#[cfg(not(feature = "session-slot"))]
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BoxedSink, SampleView};
+#[cfg(feature = "session-slot")]
+use wz_session_core::text_out::FixedText;
 #[cfg(feature = "adminspace-core")]
 use wz_session_core::text_out::TextOut;
 
@@ -115,7 +119,17 @@ impl ConnectControl {
         );
     }
 
-    fn apply(&self, zid_hex: &str, whatami: &str, keyexpr: &str, body: ConfigWriteBody<'_>) {
+    /// Decide one config write as the subscriber of `host_connect_writes` does and
+    /// apply the verdict: the permit first, then whether the key is this node's own
+    /// config space, then the value. `zid_hex` and `whatami` name this node,
+    /// `keyexpr` is the key the write arrived on.
+    ///
+    /// Public so an image that learns its endpoints some other way than a remote
+    /// write (a list it read from its own flash at boot) takes them through the SAME
+    /// decision, permit and bounds included, and so a host test can write a node's
+    /// list without a session to carry the write. The verdict is
+    /// [`last_outcome`](Self::last_outcome).
+    pub fn apply(&self, zid_hex: &str, whatami: &str, keyexpr: &str, body: ConfigWriteBody<'_>) {
         let mut scratch = ConnectEndpoints::new();
         critical_section::with(|cs| {
             let mut s = self.state.borrow(cs).borrow_mut();
@@ -274,6 +288,12 @@ fn push_connect_endpoints(
 /// Both are reachable on the fixed backing (`bounded-heapless`), where the
 /// node then hosts no config writes and must say so rather than run as if it
 /// did; on the growable backing neither is ever returned.
+///
+/// Absent under `session-slot` (fixed-memory step S9c), whose form is
+/// `host_connect_writes_fixed`: the same registration on the process-wide
+/// subscriber table of the slot observer, with the node's zid and role held in
+/// fixed text and no `String`.
+#[cfg(not(feature = "session-slot"))]
 pub fn host_connect_writes(
     observer: &mut ApplicationLayerObserver,
     zid_hex: &str,
@@ -301,7 +321,55 @@ pub fn host_connect_writes(
         .map(|_id| ())
 }
 
-#[cfg(test)]
+/// `host_connect_writes` for the slot profile: subscribe `subscribers`, the
+/// application's table of the slot observer
+/// (`wz_session_core::slot_observer::SlotObserver::subscribers`), to the config
+/// space of the node `zid_hex` / `whatami` and apply every write it receives to
+/// `control`.
+///
+/// The pattern is built in fixed text and the sink keeps the zid in fixed text, so
+/// the registration costs the heap what every sink costs it, one box for the sink
+/// itself (`BoxedSink::new`), once, at startup.
+///
+/// `Err` when the table refuses the registration: full, a pattern past
+/// `caps::MAX_KEYEXPR_BYTES`, or a zid wider than a zenoh id (32 digits) that no
+/// real node has, which is refused by the pattern's own overflow and not cut.
+#[cfg(feature = "session-slot")]
+pub fn host_connect_writes_fixed(
+    subscribers: &mut wz_session_core::pubsub::SubscriberTable<BoxedSink>,
+    zid_hex: &str,
+    whatami: &'static str,
+    control: &'static ConnectControl,
+) -> Result<(), RegisterError> {
+    let mut pattern: FixedText<{ wz_session_core::caps::MAX_KEYEXPR_BYTES }> = FixedText::new();
+    // A refusal is recorded by the text itself and read at `finish`.
+    let _ = write_config_space_pattern(&mut pattern, zid_hex, whatami);
+    let pattern = pattern
+        .finish()
+        .map_err(|_| RegisterError::KeyexprTooLong)?;
+    let mut zid: FixedText<32> = FixedText::new();
+    zid.push_str(zid_hex);
+    if zid.overflowed() {
+        return Err(RegisterError::KeyexprTooLong);
+    }
+    subscribers
+        .register_sink(
+            pattern,
+            Locality::Any,
+            BoxedSink::new(move |sample: &dyn SampleView| {
+                let body = match sample.kind() {
+                    SampleKind::Put => ConfigWriteBody::Put(sample.payload()),
+                    SampleKind::Del => ConfigWriteBody::Del,
+                };
+                control.apply(zid.prefix(), whatami, sample.keyexpr(), body);
+            }),
+        )
+        .map(|_id| ())
+}
+
+// The tests drive an `ApplicationLayerObserver`, the growable profile's; the slot
+// profile's registration is witnessed by `tests/admin_node_slot.rs`.
+#[cfg(all(test, not(feature = "session-slot")))]
 mod tests {
     use super::*;
     use alloc::boxed::Box;

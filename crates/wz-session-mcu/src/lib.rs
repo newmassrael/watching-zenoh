@@ -21,11 +21,14 @@
 //!   arena.
 //! - [`connect_manager`] (`adminspace-write`) — the node holds a session with every
 //!   endpoint its control names and re-dials the ones that drop.
-//! - `dial` (`adminspace-write`, absent under `session-slot`) — the dialer that
-//!   opens a written `udp/<ipv4>:<port>` as an initiator session.
+//! - `dial` (`adminspace-write`) — the dialer that opens a written
+//!   `udp/<ipv4>:<port>` as an initiator session. Under `session-slot` only the
+//!   endpoint parser is here: the dialer that opens the link is the stack's
+//!   (`wz-session-lwip`'s `slot_node`), over the tables the image declared.
 //! - `admin_node` (both, absent under `session-slot`) — those pieces as one
 //!   thing a firmware ticks, and
-//!   the acceptor session a host reaches the node on.
+//!   the acceptor session a host reaches the node on. Its slot-profile form is
+//!   `wz-session-lwip`'s `slot_node`.
 //!
 //! ## Why a crate of its own, and what it is generic over
 //!
@@ -33,7 +36,7 @@
 //! that open a socket, and a board whose network is Zephyr's own sockets (the
 //! profile zenoh-pico's Zephyr port takes) cannot carry the lwIP crate, whose
 //! build compiles lwIP's C sources, to run an admin node. So the four lines
-//! became [`wz_runtime_coop::session_drive::SessionLinks`] — a link that accepts
+//! became `wz_runtime_coop::session_drive::SessionLinks` — a link that accepts
 //! on a port, a link that dials an address — and the shell is generic over it.
 //! lwIP supplies its links from `wz-session-lwip`, Zephyr from
 //! `wz-runtime-zephyr`, and the shell's own tests from `memory`, which is
@@ -42,6 +45,11 @@
 //! The crate depends on no link crate, for the reason the runtime tier does not:
 //! a shell that named a stack would be that stack's shell.
 
+// Fixed-memory step S9c -- under `session-slot` the crate does not link `alloc` at
+// all, so a use that creeps back into the slot profile is a compile error and not a
+// silent allocation (the rule `wz-link-lwip` keeps under `static-link-storage`). The
+// tests keep it: their sessions, sinks and fixtures are host code.
+#[cfg(any(not(feature = "session-slot"), test))]
 extern crate alloc;
 
 // Host tests: the shell's synchronization is `critical_section`, whose std
@@ -62,7 +70,7 @@ pub mod admin_host;
 pub mod connect_manager;
 // R2831 — the dialer: a written `udp/<ipv4>:<port>` becomes an initiator
 // session on the firmware's task set, over whichever stack opens the link.
-#[cfg(all(feature = "adminspace-write", not(feature = "session-slot")))]
+#[cfg(feature = "adminspace-write")]
 pub mod dial;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
 // through the shared answerer, on the same application layer.

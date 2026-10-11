@@ -12,7 +12,7 @@
 //! effect of a `connect/endpoints` write, and how it tells a node that is
 //! alive and refused from one that did not answer at all.
 //!
-//! Nothing new answers it. [`crate::admin_status::host_admin_queryable`]
+//! Nothing new answers it. `crate::admin_status::host_admin_queryable`
 //! registers, on the node's application-layer observer, a queryable for
 //! `@/<zid>/<whatami>/**` — the key upstream declares its admin queryable
 //! on — and hands every query to `wz_session_core::adminspace::
@@ -21,25 +21,41 @@
 //! the same state. The MCU runs with a heap, so there is no reason to write a
 //! second emitter for it.
 //!
-//! What the node supplies is its state: [`crate::admin_status::NodeStatus`]
+//! What the node supplies is its state: `crate::admin_status::NodeStatus`
 //! holds the sessions (the dial layer updates them) and the read permit, and a
 //! [`crate::admin_status::ConfigView`] — the connection control, when the node
 //! hosts the write surface — supplies the `config` leg, so a host can GET
 //! `@/<zid>/<whatami>/config` and read back the endpoint list it wrote.
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::string::String;
+#[cfg(not(feature = "session-slot"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "session-slot"))]
 use core::cell::RefCell;
 
+#[cfg(not(feature = "session-slot"))]
 use critical_section::Mutex;
+#[cfg(not(feature = "session-slot"))]
 use wz_session_core::adminspace::{
     admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminSession,
 };
+#[cfg(not(feature = "session-slot"))]
 use wz_session_core::locality::Locality;
+#[cfg(not(feature = "session-slot"))]
 use wz_session_core::observer::ApplicationLayerObserver;
+#[cfg(not(feature = "session-slot"))]
 use wz_session_core::query_sink::BoxedQuerySink;
+#[cfg(not(feature = "session-slot"))]
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::text_out::TextOut;
+
+// What is here on EVERY profile is the part that holds no `String` or `Vec`: the
+// views the document is written from ([`ConfigView`], [`ConnectStatusSource`]), a
+// row's state ([`DialStatus`]) and the document writer ([`write_connect_status`]).
+// The `String`-and-`Vec` node state (`NodeIdentity`, `EndpointStatus`, `NodeStatus`,
+// `host_admin_queryable`) is the growable profile's, and its slot-profile twin is
+// `crate::admin_fixed` (fixed-memory step S9c: this crate links no `alloc` there).
 
 /// What the `config` leg of the admin GET answers from. The node's
 /// connection control implements it when the write surface is compiled in;
@@ -52,6 +68,7 @@ pub trait ConfigView {
 }
 
 /// Who the node is, as the `local_data` leg reports it.
+#[cfg(not(feature = "session-slot"))]
 pub struct NodeIdentity {
     /// The node's zid in zenoh hex form.
     pub zid_hex: String,
@@ -85,6 +102,7 @@ pub enum DialStatus {
 }
 
 /// R2846 — one endpoint of the written list and where it stands.
+#[cfg(not(feature = "session-slot"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointStatus {
     /// The endpoint text as written.
@@ -112,6 +130,7 @@ pub trait ConnectStatusSource {
 /// admin key to read the answer from. This one sits under `status/`, beside
 /// upstream's `status/plugins`, and apart from the `config` leg, which keeps
 /// upstream's shape exactly.
+#[cfg(not(feature = "session-slot"))]
 pub fn admin_connect_status_key(zid_hex: &str, whatami: &str) -> String {
     let mut key = wz_session_core::adminspace::admin_root_key(zid_hex, whatami);
     key.push('/');
@@ -128,6 +147,7 @@ pub const CONNECT_STATUS_TAIL: &str = "status/connect";
 /// endpoint `{"endpoint":…,"state":"live","established":…}`,
 /// `{"endpoint":…,"state":"waiting","retry_in_ms":…}` or
 /// `{"endpoint":…,"state":"refused","reason":…}`.
+#[cfg(not(feature = "session-slot"))]
 pub fn connect_status_json(
     source: &dyn ConnectStatusSource,
     endpoints: &[EndpointStatus],
@@ -140,7 +160,7 @@ pub fn connect_status_json(
     );
 }
 
-/// [`connect_status_json`] over endpoint rows given as `(endpoint, status)`, into
+/// `connect_status_json` over endpoint rows given as `(endpoint, status)`, into
 /// any sink: the document is written once, whether the node holds its rows as
 /// `String`s or in fixed storage.
 pub fn write_connect_status<'a>(
@@ -182,6 +202,7 @@ pub fn write_connect_status<'a>(
     out.push_str("]}");
 }
 
+#[cfg(not(feature = "session-slot"))]
 struct StatusState {
     sessions: Vec<AdminSession>,
     endpoints: Vec<EndpointStatus>,
@@ -190,10 +211,12 @@ struct StatusState {
 
 /// The node state its admin GET reports, kept where both the session layer
 /// and the queryable reach it.
+#[cfg(not(feature = "session-slot"))]
 pub struct NodeStatus {
     state: Mutex<RefCell<StatusState>>,
 }
 
+#[cfg(not(feature = "session-slot"))]
 impl NodeStatus {
     /// No sessions yet. `permit_read` is the node's
     /// `adminspace.permissions.read`; upstream's default is `true`.
@@ -261,6 +284,7 @@ impl NodeStatus {
 /// are reachable on the fixed backing (`bounded-heapless`), where the node
 /// then answers no admin GET and must say so rather than run as if it did; on
 /// the growable backing neither is ever returned.
+#[cfg(not(feature = "session-slot"))]
 pub fn host_admin_queryable(
     observer: &mut ApplicationLayerObserver,
     identity: NodeIdentity,
