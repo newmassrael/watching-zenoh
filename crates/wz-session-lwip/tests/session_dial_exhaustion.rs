@@ -134,7 +134,7 @@ struct Rig<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASK
     runtime: Rt,
     local: CoopLocalSet<Frozen>,
     host: SessionHost<Frozen, LinkRc, Counting, SLOTS, PUMPS>,
-    links: LwipLinks,
+    links: LwipLinks<LinkRc>,
     sessions: &'static Slots<SLOTS>,
     pumps: &'static Pumps<PUMPS>,
     sockets: &'static SessionRxPool<POOL>,

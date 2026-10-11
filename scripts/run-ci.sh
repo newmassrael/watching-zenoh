@@ -11358,7 +11358,25 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage \
         --test session_dial_exhaustion --quiet || return 1
+    # S9c -- the stack handle of a node on the slot profile is a reference to a
+    # `static` (`LwipLink::init_static`), not an `Rc`, and the shell crates do not
+    # link `alloc` at all there: the handle costs the heap nothing, and an `Rc` round
+    # a zero-sized handle is the instrument's control: 2 = what that command PRINTED.
+    _runci_guarded_test "C1m static link handle" 2 \
+        cargo test -p wz-session-lwip --features session-slot \
+        --test static_link_handle --quiet || return 1
+    # S9c -- the multicast pump on the slot profile: a reply queue that refuses and
+    # counts what it has no room for, a pump claimed from a table of cells (a claim on
+    # a full table refused, counted, its group socket given back) and run as a task of
+    # a static runtime: 3 = what that command PRINTED.
+    _runci_guarded_test "C1m multicast slot" 3 \
+        cargo test -p wz-session-lwip \
+        --features transport-multicast,codec-push,codec-response-final,session-slot,static-link-storage \
+        --test multicast_slot --quiet || return 1
     (cd crates \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features transport-multicast,codec-push,codec-response-final,session-slot,static-link-storage \
+            --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage \
             --quiet -- -D warnings \

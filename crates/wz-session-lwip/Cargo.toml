@@ -430,6 +430,27 @@ required-features = [
     "static-link-storage",
 ]
 
+# Fixed-memory step S9c -- the multicast pump on the slot profile: its reply queue
+# refuses and counts, and the pump lives in a cell of a table the image declares.
+# It needs the group transport with a reply variant that inhabits the queue (a
+# final is the inline one), the selector, and the pooled group socket.
+[[test]]
+name = "multicast_slot"
+required-features = [
+    "transport-multicast",
+    "codec-push",
+    "codec-response-final",
+    "session-slot",
+    "static-link-storage",
+]
+
+# Fixed-memory step S9c -- the stack handle of the slot profile is a reference to a
+# `static`, counted against the `Rc` of the other profiles. It needs only the
+# selector: a handle is not a session.
+[[test]]
+name = "static_link_handle"
+required-features = ["session-slot"]
+
 # Fixed-memory step S9a -- the tables a peer writes live in the session slot: two
 # real sessions in two slots, a flood through one handle refused and counted
 # there and not in the other, and a slot that comes back empty. It needs the slot

@@ -514,6 +514,23 @@ pub struct LwipLink {
     _no_send_sync: core::marker::PhantomData<*mut ()>,
 }
 
+/// The `static` that [`LwipLink::init_static`] hands out a reference to.
+struct StaticLink(LwipLink);
+
+// SAFETY: `LwipLink` is a zero-sized witness (a `PhantomData<*mut ()>` that keeps it
+// `!Send` and `!Sync` so an owned handle stays on the thread that owns the stack).
+// This `static` holds no state a thread could race on; what the handle's methods do
+// is call into lwIP, whose single-thread contract (NO_SYS=1) is the caller's, as for
+// every handle, owned or shared. `Sync` is what a `static` needs.
+unsafe impl Sync for StaticLink {}
+
+static STATIC_LINK: StaticLink = StaticLink(LwipLink {
+    _no_send_sync: core::marker::PhantomData,
+});
+
+/// Whether [`LwipLink::init_static`] has brought lwIP up.
+static STACK_UP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 impl LwipLink {
     /// Initialise lwIP. Calls `lwip_init` and lets `netif_init` set
     /// up the loopback netif (LWIP_HAVE_LOOPIF + LWIP_NETIF_LOOPBACK
@@ -533,6 +550,27 @@ impl LwipLink {
         Self {
             _no_send_sync: core::marker::PhantomData,
         }
+    }
+
+    /// Initialise lwIP and hand back the one handle to it as a `&'static`: the
+    /// handle of a node that has no heap to put an `Rc` of it in (fixed-memory
+    /// step S9c). `LwipLink` holds nothing (it is the witness that `lwip_init` ran),
+    /// so the handle is a zero-sized `static` and this allocates nothing.
+    ///
+    /// The first call runs `lwip_init`; a later call returns the same reference and
+    /// runs nothing, because there is one stack and one handle to it, and bringing
+    /// lwIP up a second time under a live loopback interface is not something the
+    /// stack survives (it asserts that the interface is already added). It is
+    /// called from the one thread that owns the stack, so the flag is read and
+    /// written, not compare-exchanged: a target without atomic compare-exchange
+    /// (ARMv6-M) has nothing more to offer a single thread.
+    pub fn init_static() -> &'static LwipLink {
+        if !STACK_UP.load(core::sync::atomic::Ordering::Acquire) {
+            // SAFETY: as `init`: `lwip_init` has no preconditions under NO_SYS=1.
+            unsafe { lwip_init() };
+            STACK_UP.store(true, core::sync::atomic::Ordering::Release);
+        }
+        &STATIC_LINK.0
     }
 
     /// Drain the loopback netif's output queue into the ip_input

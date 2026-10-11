@@ -197,7 +197,7 @@ where
     /// task first runs.
     pub fn dial<F>(
         &self,
-        links: &LwipLinks,
+        links: &LwipLinks<L>,
         peer: UdpPeer,
         entropy: E,
         params: SessionInitParams,

@@ -123,8 +123,10 @@
 //! bothered to say so, and every shipped MCU host in this tree would have
 //! passed `|| false` — an arm with a witness and no user.
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::ops::Deref;
 
 use wz_link_lwip::rx_sockets::{SessionMulticastRxSocket, SESSION_MULTICAST_RX_SLOT_SIZE};
 use wz_link_lwip::{Datagram, LwipLink};
@@ -182,10 +184,13 @@ use wz_session_core::sn::{self, MulticastTxConduits};
 // mpsc, because the busy-poll loop is single-task (no cross-thread Send). R311md
 // folded the ResponseSink / DeclareReplySink construction into the shared sink,
 // so this crate names no wz_codecs type and provides ONLY the enqueue backing.
-#[cfg(any(
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    not(feature = "session-slot"),
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 use alloc::collections::VecDeque;
 #[cfg(any(
@@ -270,20 +275,26 @@ impl LwipMulticastDriver {
 /// here is gone, and the duplicated AP/MCU impls collapsed to one. The backing
 /// exists when any reply variant inhabits `MulticastTxItem` (the codec-response /
 /// codec-response-final / liveliness-token union).
-#[cfg(any(
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    not(feature = "session-slot"),
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 #[derive(Clone, Default)]
 pub struct MulticastReplyQueue {
     queue: Rc<RefCell<VecDeque<MulticastTxItem>>>,
 }
 
-#[cfg(any(
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    not(feature = "session-slot"),
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 impl MulticastReplyQueue {
     /// A fresh empty reply queue.
@@ -303,14 +314,162 @@ impl MulticastReplyQueue {
 // becomes, the build_*_reply + Box::new) lives ONCE in
 // wz_session_core::multicast_reply_sink; this backing owns only the push_back
 // onto the single-task queue (the MCU analogue of the AP backing's mpsc send).
-#[cfg(any(
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    not(feature = "session-slot"),
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 impl MulticastReplyEnqueue for MulticastReplyQueue {
     fn enqueue(&self, item: MulticastTxItem) {
         self.queue.borrow_mut().push_back(item);
+    }
+}
+
+/// Fixed-memory step S9c -- the multicast reply backing of the `session-slot`
+/// profile: a queue of `N` items in a `static`, which REFUSES the reply it has no
+/// room for and COUNTS it, where the heap form above grows without bound.
+///
+/// The queue is the seam between the observer that stages a reply and the loop that
+/// frames and sends it, and the sender is a pump that gives the thread back
+/// between iterations, so a peer that asks faster than the loop answers (a flood of
+/// interests or queries on the group) would have grown the heap form for as long as
+/// it lasted. Here the reply that does not fit is dropped (the item is dropped
+/// with it, which frees what the sink built) and
+/// [`dropped`](MulticastReplyQueue::dropped) says how many, the same
+/// counted, typed-by-its-counter refusal every other table of the profile makes. A
+/// dropped reply is the loss multicast already allows (UDP to a group is best
+/// effort, and a querier whose reply never comes retries or times out), and the
+/// count is what tells the image its `N` is too small.
+///
+/// Declared by the image, shared by the sink that fills it (`&'static` is a
+/// [`MulticastReplyEnqueue`]) and the loop's `next_tx` that drains it:
+///
+/// ```ignore
+/// static REPLIES: MulticastReplyQueue<8> = MulticastReplyQueue::new();
+/// let sink = MulticastReplySink::new(&REPLIES);
+/// // next_tx: || REPLIES.pop()
+/// ```
+///
+/// What stays on the heap is the ITEM: the sink builds each `MulticastTxItem` with a
+/// boxed owned message (the codec owned mirrors, a step of their own), and the
+/// queue's own storage is the table, not the items' bodies.
+///
+/// Like the other tables of the profile it is `Sync` by the profile's rule (one
+/// cooperative task on one core fills and drains it), with every access inside a
+/// critical section.
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+pub struct MulticastReplyQueue<const N: usize> {
+    items: RefCell<heapless::Deque<MulticastTxItem, N>>,
+    dropped: core::cell::Cell<u32>,
+}
+
+// SAFETY: the profile's rule, stated on the type: every access to `items` and
+// `dropped` is made inside a critical section, so no two accesses overlap, and the
+// items inside are moved in and out by value.
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+unsafe impl<const N: usize> Sync for MulticastReplyQueue<N> {}
+
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+impl<const N: usize> MulticastReplyQueue<N> {
+    /// An empty queue, for a `static`.
+    pub const fn new() -> Self {
+        Self {
+            items: RefCell::new(heapless::Deque::new()),
+            dropped: core::cell::Cell::new(0),
+        }
+    }
+
+    /// How many replies the queue holds at most.
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+
+    /// How many replies are waiting.
+    pub fn len(&self) -> usize {
+        critical_section::with(|_| self.items.borrow().len())
+    }
+
+    /// Whether no reply is waiting.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// How many replies were dropped for want of room since the queue was made.
+    pub fn dropped(&self) -> u32 {
+        critical_section::with(|_| self.dropped.get())
+    }
+
+    /// Drain one queued reply for the loop's `next_tx` seam (FIFO order). `None`
+    /// when empty: the loop then keeps serving RX and the JOIN beacon.
+    pub fn pop(&self) -> Option<MulticastTxItem> {
+        critical_section::with(|_| self.items.borrow_mut().pop_front())
+    }
+
+    fn push(&self, item: MulticastTxItem) {
+        let refused = critical_section::with(|_| {
+            self.items
+                .borrow_mut()
+                .push_back(item)
+                .err()
+                .inspect(|_| self.dropped.set(self.dropped.get().saturating_add(1)))
+        });
+        // Dropped outside the critical section: freeing the item is the allocator's
+        // business and has no place in an interrupt-off window.
+        drop(refused);
+    }
+}
+
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+impl<const N: usize> Default for MulticastReplyQueue<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The sink of the slot profile is built over the image's `static` queue, so the
+/// queue is shared by a reference and the reply it cannot take is counted.
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+impl<const N: usize> MulticastReplyEnqueue for &'static MulticastReplyQueue<N> {
+    fn enqueue(&self, item: MulticastTxItem) {
+        self.push(item);
     }
 }
 
@@ -736,6 +895,11 @@ impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS>
         }
     }
 
+    /// The peer table the pump drives, for a caller that reports its group.
+    pub fn dispatcher(&self) -> &MulticastDispatcher<MAX_PEERS> {
+        self.dispatcher
+    }
+
     /// Advance the session by one iteration. `Some(outcome)` means the session
     /// is finished (left Running, stopped, lost its carrier, or hit the test
     /// budget); `None` means call again.
@@ -1010,9 +1174,9 @@ pub struct MulticastSession<const MAX_PEERS: usize> {
 ///
 /// `should_stop` is the same graceful-stop predicate the synchronous entry
 /// takes; pass `|| false` for a session that runs until its link is lost.
-pub async fn multicast_session_task<C, F, G, H, const MAX_PEERS: usize>(
+pub async fn multicast_session_task<C, L, F, G, H, const MAX_PEERS: usize>(
     runtime: CoopRuntime<C>,
-    link: Rc<LwipLink>,
+    link: L,
     session: MulticastSession<MAX_PEERS>,
     mut on_event: F,
     mut next_tx: G,
@@ -1020,6 +1184,7 @@ pub async fn multicast_session_task<C, F, G, H, const MAX_PEERS: usize>(
 ) -> MulticastOutcome
 where
     C: ClockSource,
+    L: Deref<Target = LwipLink>,
     F: FnMut(IterationEvent<'_>),
     G: FnMut() -> Option<MulticastTxItem>,
     H: FnMut() -> bool,
@@ -1055,45 +1220,314 @@ where
 /// cannot ride a different runtime from the one the set pumps. The multicast
 /// twin of `spawn_session` (absent under `session-slot`).
 ///
-/// Under `session-slot` the task table can refuse the task, and the answer is the
-/// handle or the reason ([`wz_runtime_coop::executor::SpawnRefusal`]); the
-/// multicast loop's own state is not on the slot profile yet (its reassembly
-/// router and reply queue still allocate), so this is the task's half only.
-pub fn spawn_multicast_session<C, F, G, H, const MAX_PEERS: usize>(
+/// Absent under `session-slot`: it builds the session inside the task's future,
+/// where a task cell of the runtime's fixed size cannot hold a peer table and a
+/// reassembly router. The slot profile's form is a cell of `MulticastSlots` and
+/// `spawn_multicast_pump`.
+#[cfg(not(feature = "session-slot"))]
+pub fn spawn_multicast_session<C, L, F, G, H, const MAX_PEERS: usize>(
     local: &CoopLocalSet<C>,
-    link: Rc<LwipLink>,
+    link: L,
     session: MulticastSession<MAX_PEERS>,
     on_event: F,
     next_tx: G,
     should_stop: H,
-) -> Spawned
+) -> CoopLocalJoinHandle<MulticastOutcome>
 where
     C: ClockSource + 'static,
+    L: Deref<Target = LwipLink> + 'static,
     F: FnMut(IterationEvent<'_>) + 'static,
     G: FnMut() -> Option<MulticastTxItem> + 'static,
     H: FnMut() -> bool + 'static,
 {
-    let spawned = local.spawn_local(multicast_session_task(
+    local.spawn_local(multicast_session_task(
         local.runtime().clone(),
         link,
         session,
         on_event,
         next_tx,
         should_stop,
-    ));
-    #[cfg(feature = "session-slot")]
-    let spawned = spawned.map_err(|refused| refused.why);
-    spawned
+    ))
 }
 
-/// What [`spawn_multicast_session`] answers: the task's handle.
-#[cfg(not(feature = "session-slot"))]
-pub type Spawned = CoopLocalJoinHandle<MulticastOutcome>;
-/// What [`spawn_multicast_session`] answers: the task's handle, or why the task
-/// table refused it.
+// ─────────── the multicast pump in a cell of a table the image declares ───────────
+//
+// Fixed-memory step S9c. The multicast session is the peer table (`MAX_PEERS`
+// members), the group socket, the parameters it advertises and, with `reassembly`,
+// the router that stages a fragment chain per member. Built into a future by
+// `multicast_session_task` it lives wherever that future is spawned, which on the
+// slot profile is a task cell of the runtime's fixed size; here it lives in a CELL of
+// a table the image declares, as the unicast pump does (`PumpSlots`), and the task
+// that drives it holds a reference to the cell.
+
+/// Why a multicast pump could not be put in a cell, or its task could not be spawned.
 #[cfg(feature = "session-slot")]
-pub type Spawned =
-    Result<CoopLocalJoinHandle<MulticastOutcome>, wz_runtime_coop::executor::SpawnRefusal>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MulticastSpawnRefused {
+    /// Every cell of the multicast table is taken. Counted by the table
+    /// ([`MulticastSlots::refused`]); the session offered is dropped, which closes
+    /// its group socket and gives it back to its pool.
+    NoCell,
+    /// The runtime's task table refused the task.
+    Task(wz_runtime_coop::executor::SpawnRefusal),
+}
+
+/// One cell of a [`MulticastSlots`] table: the session, the runtime handle the pump
+/// reads time from, and the pump, which borrows both for as long as the cell is
+/// taken.
+#[cfg(feature = "session-slot")]
+struct MulticastCell<C: ClockSource + 'static, const MAX_PEERS: usize> {
+    taken: core::cell::Cell<bool>,
+    session: core::cell::UnsafeCell<core::mem::MaybeUninit<MulticastSession<MAX_PEERS>>>,
+    runtime: core::cell::UnsafeCell<core::mem::MaybeUninit<CoopRuntime<C>>>,
+    pump: core::cell::UnsafeCell<core::mem::MaybeUninit<MulticastPump<'static, C, MAX_PEERS>>>,
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource + 'static, const MAX_PEERS: usize> MulticastCell<C, MAX_PEERS> {
+    const fn new() -> Self {
+        Self {
+            taken: core::cell::Cell::new(false),
+            session: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
+            runtime: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
+            pump: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
+        }
+    }
+}
+
+/// The multicast table an image declares: `N` cells, each holding one multicast
+/// session and its pump, in a `static`. The counterpart of
+/// [`wz_runtime_coop::session_drive::PumpSlots`], declared the same way:
+///
+/// ```ignore
+/// static GROUPS: MulticastSlots<BoardClock, 4, 1> = MulticastSlots::new();
+/// let pump = GROUPS.claim(runtime.clone(), link, session)?;
+/// spawn_multicast_pump(&local, pump, on_event, || REPLIES.pop(), || false)?;
+/// ```
+///
+/// [`claim`](MulticastSlots::claim) builds the pump IN a free cell, or refuses and
+/// counts. The cell is freed (the pump dropped in place, then the runtime handle and
+/// the session, so the group socket goes home to its pool) when its
+/// [`MulticastRef`] is dropped, which is when the task that drives it ends or is
+/// swept.
+///
+/// Like the other tables of the profile it is `Sync` by the profile's rule (one
+/// cooperative task on one core drives the pump; claiming and freeing are critical
+/// sections), not by anything a compiler can check.
+#[cfg(feature = "session-slot")]
+pub struct MulticastSlots<C: ClockSource + 'static, const MAX_PEERS: usize, const N: usize> {
+    cells: [MulticastCell<C, MAX_PEERS>; N],
+    refused: core::cell::Cell<u32>,
+}
+
+// SAFETY: the profile's rule, stated on the type. A cell's `taken` flag is set and
+// cleared inside a critical section, the cell's contents are written by its one
+// claimant and reached only through that claimant's `MulticastRef`.
+#[cfg(feature = "session-slot")]
+unsafe impl<C: ClockSource + 'static, const MAX_PEERS: usize, const N: usize> Sync
+    for MulticastSlots<C, MAX_PEERS, N>
+{
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource + 'static, const MAX_PEERS: usize, const N: usize>
+    MulticastSlots<C, MAX_PEERS, N>
+{
+    /// A table of free cells.
+    pub const fn new() -> Self {
+        Self {
+            cells: [const { MulticastCell::new() }; N],
+            refused: core::cell::Cell::new(0),
+        }
+    }
+
+    /// How many cells the table has.
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+
+    /// How many cells hold a session.
+    pub fn in_use(&self) -> usize {
+        critical_section::with(|_| self.cells.iter().filter(|cell| cell.taken.get()).count())
+    }
+
+    /// How many claims were refused for want of a free cell.
+    pub fn refused(&self) -> u32 {
+        critical_section::with(|_| self.refused.get())
+    }
+
+    /// The bytes this table takes in the image's `.bss`, with each cell's session and
+    /// pump (and, with `reassembly`, the router's staging).
+    pub const fn size_bytes() -> usize {
+        core::mem::size_of::<Self>()
+    }
+
+    /// Put `session` and its pump in a free cell: the dispatcher comes up (Idle to
+    /// Running) and the JOIN and sweep cadences are armed, as
+    /// [`MulticastPump::new`] does. Nothing of that is done when no cell is free: the
+    /// session offered is dropped (its socket goes back to its pool) and the refusal
+    /// is counted.
+    pub fn claim(
+        &'static self,
+        runtime: CoopRuntime<C>,
+        link: &'static LwipLink,
+        session: MulticastSession<MAX_PEERS>,
+    ) -> Result<MulticastRef<C, MAX_PEERS>, MulticastSpawnRefused> {
+        let cell =
+            critical_section::with(|_| self.cells.iter().find(|cell| !cell.taken.replace(true)));
+        let Some(cell) = cell else {
+            critical_section::with(|_| self.refused.set(self.refused.get().saturating_add(1)));
+            return Err(MulticastSpawnRefused::NoCell);
+        };
+        // SAFETY: the cell is `taken` by this call alone, so nothing else reaches its
+        // three places, and each is uninitialised: it was never written, or the
+        // `MulticastRef` that freed the cell dropped what it held. The session and
+        // the runtime handle are written before the pump borrows them, the borrows
+        // are `'static` because the cell is (it lies in `self`), and `Drop for
+        // MulticastRef` ends the pump before either.
+        unsafe {
+            let session_place = (*cell.session.get()).write(session);
+            let runtime_place = (*cell.runtime.get()).write(runtime);
+            let MulticastSession {
+                dispatcher,
+                driver,
+                params,
+                tick_ms,
+                max_iters,
+            } = session_place;
+            let pump = MulticastPump::new(
+                dispatcher,
+                MulticastDriveConfig {
+                    params: &*params,
+                    tick_ms: *tick_ms,
+                    max_iters: *max_iters,
+                },
+                runtime_place,
+                link,
+                driver,
+            );
+            (*cell.pump.get()).write(pump);
+        }
+        Ok(MulticastRef { cell })
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource + 'static, const MAX_PEERS: usize, const N: usize> Default
+    for MulticastSlots<C, MAX_PEERS, N>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The exclusive handle to a multicast pump in its cell. Dropping it drops the pump,
+/// then the runtime handle and the session, in that order, and frees the cell. The
+/// task that drives a pump ([`multicast_pump_task`]) owns it.
+#[cfg(feature = "session-slot")]
+pub struct MulticastRef<C: ClockSource + 'static, const MAX_PEERS: usize> {
+    cell: &'static MulticastCell<C, MAX_PEERS>,
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource + 'static, const MAX_PEERS: usize> MulticastRef<C, MAX_PEERS> {
+    /// The session's peer table, for a firmware that reports its group. Read through
+    /// the pump that holds the table, which is the one place a reference to it is
+    /// made.
+    pub fn dispatcher(&self) -> &MulticastDispatcher<MAX_PEERS> {
+        // SAFETY: a `MulticastRef` exists only for a cell whose pump was written by
+        // `claim` and not yet dropped, and `&self` allows no step of that pump to
+        // run while the borrow lasts.
+        unsafe { (*self.cell.pump.get()).assume_init_ref().dispatcher() }
+    }
+
+    fn pump(&mut self) -> &mut MulticastPump<'static, C, MAX_PEERS> {
+        // SAFETY: as for `dispatcher`, and `&mut self` is the cell's one reference.
+        unsafe { (*self.cell.pump.get()).assume_init_mut() }
+    }
+
+    /// Advance the pump by one iteration, for a firmware (or a test) that drives it
+    /// by hand instead of as a task; [`MulticastPump::step`] with the pump this
+    /// handle holds.
+    pub fn step<'s, F, G>(
+        &mut self,
+        on_event: &mut F,
+        next_tx: &mut G,
+        should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
+    ) -> Option<MulticastOutcome>
+    where
+        F: FnMut(IterationEvent<'_>),
+        G: FnMut() -> Option<MulticastTxItem>,
+    {
+        self.pump().step(on_event, next_tx, should_stop)
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource + 'static, const MAX_PEERS: usize> Drop for MulticastRef<C, MAX_PEERS> {
+    fn drop(&mut self) {
+        // SAFETY: the cell holds this handle's pump, runtime handle and session,
+        // written by `claim` and dropped only here, the pump first because it
+        // borrows the other two; the flag is cleared after, so no claim can write
+        // over them first.
+        unsafe {
+            (*self.cell.pump.get()).assume_init_drop();
+            (*self.cell.runtime.get()).assume_init_drop();
+            (*self.cell.session.get()).assume_init_drop();
+        }
+        critical_section::with(|_| self.cell.taken.set(false));
+    }
+}
+
+/// The multicast session AS A TASK over a pump in a cell: the multicast twin of
+/// [`wz_runtime_coop::session_drive::pump_task`]. It runs [`MulticastPump::step`]
+/// once per executor pass and awaits [`yield_now`] between steps; the future is the
+/// cell's handle and the observer's and the loop's state, a few dozen bytes.
+#[cfg(feature = "session-slot")]
+pub async fn multicast_pump_task<C, F, G, H, const MAX_PEERS: usize>(
+    mut pump: MulticastRef<C, MAX_PEERS>,
+    mut on_event: F,
+    mut next_tx: G,
+    mut should_stop: H,
+) -> MulticastOutcome
+where
+    C: ClockSource + 'static,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxItem>,
+    H: FnMut() -> bool,
+{
+    loop {
+        if let Some(outcome) = pump
+            .pump()
+            .step(&mut on_event, &mut next_tx, Some(&mut should_stop))
+        {
+            return outcome;
+        }
+        yield_now().await;
+    }
+}
+
+/// Host the pump in `pump` as a task of `local`: the answer is the task's handle,
+/// or why the runtime's task table refused it (counted by that table; the pump, which
+/// this call owns, is dropped with its cell and its group socket).
+#[cfg(feature = "session-slot")]
+pub fn spawn_multicast_pump<C, F, G, H, const MAX_PEERS: usize>(
+    local: &CoopLocalSet<C>,
+    pump: MulticastRef<C, MAX_PEERS>,
+    on_event: F,
+    next_tx: G,
+    should_stop: H,
+) -> Result<CoopLocalJoinHandle<MulticastOutcome>, MulticastSpawnRefused>
+where
+    C: ClockSource + 'static,
+    F: FnMut(IterationEvent<'_>) + 'static,
+    G: FnMut() -> Option<MulticastTxItem> + 'static,
+    H: FnMut() -> bool + 'static,
+{
+    local
+        .spawn_local(multicast_pump_task(pump, on_event, next_tx, should_stop))
+        .map_err(|refused| MulticastSpawnRefused::Task(refused.why))
+}
 
 #[cfg(all(test, not(feature = "session-slot")))]
 mod tests {

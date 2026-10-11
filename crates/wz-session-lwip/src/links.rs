@@ -13,7 +13,9 @@
 //! themselves (`bind_session_rx`, `LwipUdpDriver::new`, the pair handed to
 //! `spawn_session`), moved to the one place that knows the stack.
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
+use core::ops::Deref;
 
 #[cfg(not(feature = "static-link-storage"))]
 use wz_link_lwip::rx_sockets::bind_session_rx;
@@ -27,9 +29,25 @@ use wz_runtime_coop::session_drive::{OpenedLink, SessionLinks};
 use crate::driver::{share_socket, DriverHandle, LwipUdpDriver};
 use crate::session_drive::LwipSessionLink;
 
+/// The handle a [`LwipLinks`] holds the lwIP stack by, unless it is given another:
+/// an `Rc` of the link, or under `session-slot` a reference to a `static` one
+/// (`LwipLink::init_static`), so that nothing a node on that profile opens a link
+/// with is behind a pointer to the heap (fixed-memory step S9c).
+#[cfg(not(feature = "session-slot"))]
+pub type StackHandle = Rc<LwipLink>;
+
+/// See the `Rc` form of this alias.
+#[cfg(feature = "session-slot")]
+pub type StackHandle = &'static LwipLink;
+
 /// The links of a node whose network stack is lwIP.
-pub struct LwipLinks {
-    link: Rc<LwipLink>,
+///
+/// Generic over the handle `L` it holds the stack by, as [`LwipSessionLink`] is, and
+/// for the same reason: what a link needs of the stack is a reference to it, and
+/// who owns the stack is the image's business (`Rc` where there is a heap, a
+/// `&'static` where there is not).
+pub struct LwipLinks<L: Deref<Target = LwipLink> + Clone = StackHandle> {
+    link: L,
     /// Round 3277 (`static-link-storage`) -- where the session sockets this opens
     /// are bound out of: a `static` pool the image declared, which is what keeps
     /// each socket's state off the heap.
@@ -37,10 +55,10 @@ pub struct LwipLinks {
     sockets: &'static dyn SessionSocketSource,
 }
 
-impl LwipLinks {
+impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     /// Links over `link`, the witness that lwIP is initialised.
     #[cfg(not(feature = "static-link-storage"))]
-    pub fn new(link: Rc<LwipLink>) -> Self {
+    pub fn new(link: L) -> Self {
         Self { link }
     }
 
@@ -51,12 +69,12 @@ impl LwipLinks {
     /// is `LinkOpenError::Exhausted`, counted by the pool, with nothing allocated
     /// instead.
     #[cfg(feature = "static-link-storage")]
-    pub fn new(link: Rc<LwipLink>, sockets: &'static dyn SessionSocketSource) -> Self {
+    pub fn new(link: L, sockets: &'static dyn SessionSocketSource) -> Self {
         Self { link, sockets }
     }
 
     /// The stack handle, for a firmware that also pumps lwIP's timers.
-    pub fn link(&self) -> &Rc<LwipLink> {
+    pub fn link(&self) -> &L {
         &self.link
     }
 
@@ -87,7 +105,7 @@ impl LwipLinks {
     }
 
     /// The pump the drive loop services for a session whose driver is `driver`.
-    pub fn pump_over(&self, driver: DriverHandle) -> LwipSessionLink<Rc<LwipLink>> {
+    pub fn pump_over(&self, driver: DriverHandle) -> LwipSessionLink<L> {
         LwipSessionLink::new(self.link.clone(), driver)
     }
 
@@ -96,7 +114,10 @@ impl LwipLinks {
         &self,
         port: u16,
         peer: UdpPeer,
-    ) -> Result<OpenedLink<<Self as SessionLinks>::Pump>, LinkOpenError> {
+    ) -> Result<OpenedLink<<Self as SessionLinks>::Pump>, LinkOpenError>
+    where
+        L: 'static,
+    {
         // Port 0 asks lwIP for a free one, one per initiator session.
         let driver = Rc::new(self.bind_driver(port, peer)?);
         Ok(OpenedLink {
@@ -125,8 +146,8 @@ pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
 // `session-slot` has; under it a link is opened by `bind_driver` and the slot
 // that takes the driver, which no shell is written against yet (steps S8, S9).
 #[cfg(not(feature = "session-slot"))]
-impl SessionLinks for LwipLinks {
-    type Pump = LwipSessionLink<Rc<LwipLink>>;
+impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L> {
+    type Pump = LwipSessionLink<L>;
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever speaks first; the driver learns it on receive.

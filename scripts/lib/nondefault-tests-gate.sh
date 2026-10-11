@@ -632,6 +632,17 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         session-unicast-open,\
         static-link-storage\
         |--test=session_dial_exhaustion"
+    # S9c: the multicast pump on the slot profile (`tests/multicast_slot.rs`): its
+    # reply queue and its cell table, with the group socket out of the static pool.
+    # The file's `required-features`; the group transport and a reply variant that
+    # inhabits the queue are what it adds to the dialler's row above.
+    "wz-session-lwip|hook|\
+        codec-push,\
+        codec-response-final,\
+        session-slot,\
+        static-link-storage,\
+        transport-multicast\
+        |--test=multicast_slot"
     # R3080 — the MCU session shell, split out of the row above with its tests.
     # Seventeen of its twenty tests are feature-gated (the admin node and its host
     # and status documents need both adminspace features, the application layer

@@ -38,6 +38,12 @@
 //! This crate is what that session-drive layer is when the tiers are kept
 //! clean; the end-state is a symmetric future `wz-session-tokio`.
 
+// Fixed-memory step S9c -- under `session-slot` the crate does not link `alloc` at
+// all, so a use that creeps back into the slot profile is a compile error and not a
+// silent allocation (the rule `wz-link-lwip` keeps under `static-link-storage`). The
+// tests keep it: their MAC and cable doubles and their counting allocators are host
+// code.
+#[cfg(any(not(feature = "session-slot"), test))]
 extern crate alloc;
 
 // lwIP under NO_SYS=1 keeps process-global state and `lwip_init` is not
