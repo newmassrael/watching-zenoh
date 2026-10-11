@@ -6252,6 +6252,84 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// [`admin_session`](Self::admin_session) lent instead of built (fixed-memory step
+    /// S9c): this session as one `sessions[]` row, handed to `f` as a BORROWED row
+    /// ([`AdminSessionRef`](crate::adminspace::AdminSessionRef)), with nothing
+    /// allocated. `None` while the session is not established, as upstream lists
+    /// transports and a transport exists only once its handshake has finished.
+    ///
+    /// The row is the one `admin_session` builds, field for field: the peer's zid in
+    /// zenoh's hex form, its role, the one link this session holds with its two
+    /// ends (blank ends where the driver cannot name them, since the COUNT is the
+    /// load-bearing answer), `shm`, and the region, all read off this session by the
+    /// same derivations ([`write_zenoh_hex`](crate::zid_hex::write_zenoh_hex),
+    /// [`write_admin_region`](crate::extbound::write_admin_region)). A role that never
+    /// arrived stays `None`, which the writer renders as upstream's `"unknown"`. The
+    /// link weight is `None`: an MCU session holds no router graph.
+    ///
+    /// The row's texts live on this call's stack in fixed buffers and are gone when
+    /// `f` returns, so what a node keeps it copies (`FixedAdminSession::from_view`).
+    #[cfg(feature = "adminspace-core")]
+    pub fn with_admin_session<X>(
+        &self,
+        f: impl FnOnce(crate::adminspace::AdminSessionRef<'_>) -> X,
+    ) -> Option<X> {
+        use crate::adminspace::{AdminLinkList, AdminSessionRef};
+        use crate::text_out::FixedText;
+
+        /// The one link of a session, as the writer reads a list of links.
+        struct OneLink<'a>(Option<&'a crate::link::LinkEndpoints>);
+
+        impl AdminLinkList for OneLink<'_> {
+            fn link_count(&self) -> usize {
+                1
+            }
+
+            fn link(&self, index: usize) -> Option<(&str, &str)> {
+                if index != 0 {
+                    return None;
+                }
+                Some(match self.0 {
+                    Some(ends) => (ends.src.as_str(), ends.dst.as_str()),
+                    None => ("", ""),
+                })
+            }
+        }
+
+        if !self.is_established() {
+            return None;
+        }
+        // A zid is at most 16 bytes, 32 hex digits; a region is `north`, `south(..)`,
+        // or `unknown`, well inside 32. A refusal of either is recorded by the text and
+        // leaves the prefix, never a cut row.
+        let mut zid_hex: FixedText<32> = FixedText::new();
+        R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+            if let Some(zid) = slot.as_deref() {
+                let _ = crate::zid_hex::write_zenoh_hex(zid, &mut zid_hex);
+            }
+        });
+        let role = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
+        let mut region: FixedText<32> = FixedText::new();
+        let _ = crate::extbound::write_admin_region(
+            &mut region,
+            self.params.whatami,
+            role,
+            self.peer_remote_bound(),
+        );
+        let links = OneLink(self.link_driver().link_endpoints());
+        Some(f(AdminSessionRef {
+            peer_zid_hex: zid_hex.prefix(),
+            whatami: role.map(|role| role.to_str()),
+            links: &links,
+            #[cfg(feature = "transport-shm")]
+            shm: self.is_shm(),
+            #[cfg(not(feature = "transport-shm"))]
+            shm: false,
+            weight: None,
+            region: Some(region.prefix()),
+        }))
+    }
+
     /// R2539 — admit the peer's region identity off an Init's ext chain.
     ///
     /// `false` means the entry was THERE and its value is not a region name,

@@ -67,6 +67,18 @@ pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
     stripped.into()
 }
 
+/// [`zid_to_zenoh_hex`] written into `out`, with no allocation of its own (fixed-memory
+/// step S9c): the same string, for a node that renders a peer's zid into fixed text
+/// (an admin `sessions[]` row) and has no `String` to build it in.
+///
+/// The recipe is the one above, `u128` printed as big-endian hex; `{:x}` prints no
+/// leading zeros, which is what stripping the one pad zero of `{:02x}` leaves, so the
+/// two give the same text for every id (`the_writer_prints_what_the_string_form_does`).
+pub fn write_zenoh_hex(zid: &[u8], out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+    let id = u128::from_le_bytes(zid_to_le_array(zid));
+    write!(out, "{id:x}")
+}
+
 /// The inverse of [`zid_to_zenoh_hex`]: parse the lowercase hex back to the
 /// length-trimmed zid bytes ([`crate::sample::TimestampHint::zid`] form), or
 /// `None` if the text is not a zid a conforming implementation would accept.
@@ -132,6 +144,22 @@ mod tests {
         assert_eq!(zid_to_zenoh_hex(&[0xab]), "ab");
         // Two bytes [0x01, 0x02] = LE u128 0x0201 -> "201".
         assert_eq!(zid_to_zenoh_hex(&[0x01, 0x02]), "201");
+    }
+
+    /// S9c -- the writer a node without a `String` uses prints what the string
+    /// form prints, for every width and for the ids whose first digit is 0 after the
+    /// pad (the case the string form's strip exists for).
+    #[test]
+    fn the_writer_prints_what_the_string_form_does() {
+        let mut zids: Vec<Vec<u8>> = vec![vec![], vec![0x00], vec![0x0a], vec![0x10]];
+        zids.extend((1..=16u8).map(|n| (1..=n).collect::<Vec<u8>>()));
+        zids.push(vec![0xff; 16]);
+        zids.push(vec![0x01, 0x00]);
+        for zid in zids {
+            let mut written = String::new();
+            write_zenoh_hex(&zid, &mut written).expect("a String takes it");
+            assert_eq!(written, zid_to_zenoh_hex(&zid), "{zid:?}");
+        }
     }
 
     #[test]

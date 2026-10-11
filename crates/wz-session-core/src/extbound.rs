@@ -316,15 +316,25 @@ pub fn sends_initial_interest_final(
 /// whose module is itself `alloc`-only).
 #[cfg(feature = "alloc")]
 pub fn admin_region(mode: WhatAmI, remote: Option<WhatAmI>, remote_bound: Option<Bound>) -> String {
-    use core::fmt::Write as _;
     let mut out = String::new();
-    match remote.and_then(|r| region_of(mode, r, remote_bound)) {
-        Some(region) => {
-            let _ = write!(out, "{region}");
-        }
-        None => out.push_str("unknown"),
-    }
+    // A `String` takes every write.
+    let _ = write_admin_region(&mut out, mode, remote, remote_bound);
     out
+}
+
+/// [`admin_region`] written into `out`, with no allocation of its own (fixed-memory
+/// step S9c): the one derivation of the string, for a node that writes a session row
+/// into fixed text. [`admin_region`] is this over a `String`.
+pub fn write_admin_region(
+    out: &mut dyn core::fmt::Write,
+    mode: WhatAmI,
+    remote: Option<WhatAmI>,
+    remote_bound: Option<Bound>,
+) -> core::fmt::Result {
+    match remote.and_then(|r| region_of(mode, r, remote_bound)) {
+        Some(region) => write!(out, "{region}"),
+        None => out.write_str("unknown"),
+    }
 }
 
 #[cfg(test)]
