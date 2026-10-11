@@ -325,6 +325,14 @@ fn allocations_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
 /// in place is the record the copying decode reads out of the same unit. The
 /// generic in-place path runs here over the AP runtime because no MCU crate
 /// forwards `transport-lowlatency`; the function is the one the MCU pump calls.
+///
+/// The zero-heap claim is the claim of a build WITHOUT `transport-stats`: the
+/// counters classify a record by reading its owned message, so a build that has
+/// them hands every Put over owned (three allocations for one Put: its key
+/// expression, its payload and the owned message itself) and the test then
+/// asserts what that build promises instead, that nothing it read went
+/// uncounted. The lowlatency lane builds without the counters and runs the
+/// zero-heap arm; the lane that turns every feature on runs the counting arm.
 #[tokio::test(flavor = "current_thread")]
 async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_it() {
     use wz_session_core::drive::{dispatch_datagram, dispatch_link_event, DatagramPath};
@@ -368,24 +376,57 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             panic!("the copying lean path reads a batch: {copied:?}");
         };
         let expected: Vec<Vec<u8>> = messages.iter().map(record_bytes).collect();
+        let puts = messages
+            .iter()
+            .filter(|message| matches!(message, NetworkMessage::Push(_)))
+            .count();
 
         // In place, with an observer that keeps nothing: what the path costs.
         let mut handed = 0usize;
+        let mut lent_puts = 0usize;
+        #[cfg(feature = "transport-stats")]
+        let counted_before = actions.stats.report().rx.n_msgs_total();
         let (path, in_place_cost) = allocations_during(|| {
-            dispatch_datagram(unit, &actions, &mut engine, &mut record, &mut |event| {
-                if matches!(event, IterationEvent::InPlace(_) | IterationEvent::Poll(_)) {
-                    handed += 1;
-                }
-            })
+            dispatch_datagram(
+                unit,
+                &actions,
+                &mut engine,
+                &mut record,
+                &mut |event| match event {
+                    IterationEvent::InPlace(_) => {
+                        handed += 1;
+                        lent_puts += 1;
+                    }
+                    IterationEvent::Poll(_) => handed += 1,
+                    _ => {}
+                },
+            )
         });
         assert_eq!(path, DatagramPath::LowLatencyInPlace);
         assert_eq!(handed, expected.len(), "one event per record");
-        let lent = unit.len() == one_put.len() || unit.len() == two_puts.len();
-        if lent {
+
+        // What this build does with a Put is the build's own rule, and the test
+        // states it from both sides: a build without `transport-stats` lends
+        // every Put where it lies and that costs the heap nothing; a build with
+        // it keeps the owned form, because its counters classify the owned
+        // message (`RECORD_FORM` in the session core's drive module), so it
+        // lends none and must have counted every record it read.
+        if cfg!(feature = "transport-stats") {
+            assert_eq!(lent_puts, 0, "a counting build hands its Puts over owned");
+            #[cfg(feature = "transport-stats")]
             assert_eq!(
-                in_place_cost, 0,
-                "a lean unit of Puts read in place costs the heap nothing"
+                actions.stats.report().rx.n_msgs_total() - counted_before,
+                expected.len(),
+                "a counting build counts each record it reads in place"
             );
+        } else {
+            assert_eq!(lent_puts, puts, "every Put is lent where it lies");
+            if puts == expected.len() {
+                assert_eq!(
+                    in_place_cost, 0,
+                    "a lean unit of Puts read in place costs the heap nothing"
+                );
+            }
         }
 
         // The copying control sees what in place does not make.
@@ -396,10 +437,13 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
                 &mut engine,
             )
         });
-        assert!(
-            copied_cost > in_place_cost,
-            "copying {copied_cost} against in place {in_place_cost}"
-        );
+        assert!(copied_cost > 0, "the control sees the copying path's heap");
+        if !cfg!(feature = "transport-stats") {
+            assert!(
+                copied_cost > in_place_cost,
+                "copying {copied_cost} against in place {in_place_cost}"
+            );
+        }
 
         // Byte for byte, in wire order.
         let mut got: Vec<Vec<u8>> = Vec::new();
