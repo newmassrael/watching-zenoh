@@ -2371,7 +2371,7 @@ mod history_replay_is_peer_scoped {
                 0,
                 Some("live/theirs"),
             )),
-            &Default::default(),
+            &hashbrown::HashMap::<u64, alloc::string::String>::new(),
         );
 
         let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

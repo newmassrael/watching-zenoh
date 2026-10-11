@@ -220,6 +220,41 @@ pub fn resolve_ext_keyexpr<'a>(
     })
 }
 
+/// [`resolve_ext_keyexpr`] without a `String`: the answer is lent from the
+/// extension (a literal) or composed in `out` (an alias plus its suffix), so a
+/// session on the fixed backing resolves an undeclaration a peer sent without
+/// touching the heap. [`KeyexprPastBound`](crate::wireexpr_resolve::KeyexprPastBound)
+/// is the one answer a bounded buffer adds: the composed keyexpr does not fit.
+pub fn resolve_ext_keyexpr_into<'k>(
+    exts: Option<&'k Vec<ExtEntryOwned>>,
+    table: impl Into<MappingSpaces<'k>>,
+    out: &'k mut crate::wireexpr_resolve::KeyexprBuf,
+) -> Result<Option<&'k str>, crate::wireexpr_resolve::KeyexprPastBound> {
+    use crate::wireexpr_resolve::KeyexprPastBound;
+    let Some((inner_header, id, suffix_bytes)) = parse_ext_keyexpr_entry(exts) else {
+        return Ok(None);
+    };
+    let suffix = if inner_header & INNER_HAS_SUFFIX != 0 {
+        match core::str::from_utf8(suffix_bytes) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        ""
+    };
+    if id == 0 {
+        return Ok(Some(suffix));
+    }
+    let Some(base) = table.into().peer_literal(id) else {
+        return Ok(None);
+    };
+    out.clear();
+    out.push_str(base).map_err(|_| KeyexprPastBound)?;
+    out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
+    let out: &'k crate::wireexpr_resolve::KeyexprBuf = out;
+    Ok(Some(out.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
