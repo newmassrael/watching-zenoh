@@ -349,9 +349,8 @@ fn fill_then_refuse<
     // own peer's datagrams: a Put from peer `k` reaches accepted session `k` alone,
     // and a Put the other way reaches peer `k` alone.
     let ((), n) = m.count("a put each way", || {
-        for k in 0..fill {
-            dialled[k]
-                .actions
+        for (k, peer) in dialled.iter().enumerate().take(fill) {
+            peer.actions
                 .send_push_literal(KEY, &[k as u8; 8], true)
                 .expect("the dialling peer's Put leaves");
             rig.turn();
