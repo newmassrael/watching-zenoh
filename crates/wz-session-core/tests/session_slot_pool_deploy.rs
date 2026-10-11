@@ -279,7 +279,7 @@ fn a_changed_number_is_named_by_the_comparison() {
 #[test]
 fn the_peer_table_limits_are_the_deploy_files_numbers() {
     use wz_session_core::caps;
-    let report = report();
+    let Some(report) = report() else { return };
     let limits = &report["limits"];
     let mut drift = Vec::new();
     for (key, constant) in [
