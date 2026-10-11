@@ -270166,6 +270166,60 @@
         "The stream receive path still allocates one Arc per frame; unchanged and separate."
       ]
     },
+    "Round 3262": {
+      "decision_summary": "Hosted C1bq went red on the control of fragment_tx_lend_allocations (whole 4, chain 17, 14 fragments: floor 18). Decision: the floor is right and the heap chain did not change; the counter was wrong. The suite counted allocations process-wide behind a lock that serialised only the two tests' windows, so an allocation on a libtest thread (start, report, join) landing inside a window moved a count by one; the claim test failed the same way (chain 2 against whole 3). Option (c), a product defect, was excluded: reproduced on the unmodified tree at 2 of 60 (all cores) and 1 of 60 (two cores), with both signatures. Fix: count on the measuring thread (the send is synchronous on the test thread), no assertion loosened, two controls added for the attribution. reassembly_lend_allocations carried the same counter and is moved too, though it did not fail in 300 runs.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/fragment_tx_lend_allocations.rs: the counting allocator keeps a thread-local count (it was a process-wide AtomicUsize); the SERIAL lock and its guard are removed as they protected nothing the count needed; module doc states the measurement and the attribution; two new tests pin the attribution (the_window_counts_what_its_own_thread_allocates, the_window_does_not_count_what_another_thread_allocates: a helper thread allocates 1000 boxes inside the window and the window reads 0). The existing assertions, including the control floor whole + fragments, are byte-for-byte unchanged.",
+        "crates/wz-runtime-tokio/tests/reassembly_lend_allocations.rs: the same counter change (per thread); SERIAL is kept, its comment says it no longer protects a count; no assertion touched.",
+        "No product code changed."
+      ],
+      "verification_bullets": [
+        "All runs on the pc2 build host (Linux x86_64, 32 cores), built there, binaries looped there under timeout; nothing was built or run on the coordinator host.",
+        "Before (unmodified tree, a488569d), fragment_tx_lend_allocations under the C1bq lane's feature set (runtime-zero-copy,codec-push,transport-unicast,transport-fragmentation): taskset -c 0,1: 1 of 60 failed, then 2 of 200 failed (3 of 260 = 1.2 percent); all 32 cores: 2 of 60 failed. Signatures: claim test chain 2 vs whole 3 or 4; control whole 4, chain 17, 14 fragments (the hosted figures exactly).",
+        "Before, reassembly_lend_allocations (same counter): 0 of 100 on two cores, 0 of 300 on all cores. It did not fail; it is changed for the same hazard, not for a measured red.",
+        "After: fragment_tx_lend_allocations 300 of 300 passed on two cores and 300 of 300 on all cores (4 tests); reassembly_lend_allocations 200 of 200 and 200 of 200.",
+        "Mutant A (heap fragment path reuses one vector, allocating nothing): the control a_chain_over_a_link_that_lends_nothing_is_seen_allocating failed 5 of 5 (whole 3, chain 3, 14 fragments). Mutant B (counter made process-wide again): the_window_does_not_count_what_another_thread_allocates failed 5 of 5 (window read 1004). Both reverted; git diff shows only the two test files.",
+        "clippy -D warnings --all-targets for wz-runtime-tokio: features runtime-zero-copy,codec-push,transport-unicast,transport-fragmentation clean; the C1bq lane's own clippy features clean; rustfmt --check clean; run-ci Layer A4 pass; reason_review_pin_gate --check OK before and after (no row moved).",
+        "NOT measured: hosted CI (2-core runner, other load); Windows; macOS; core counts other than 2 (taskset) and 32; the full C1bq lane end to end; the count-guard oracle, hook gate array and Layer C0 (owner rule: integration preflight); C1bz (test files carry no doc budget)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Other allocation-counting binaries of wz-runtime-tokio: serial_tx_pool_allocations and stream_tx_pool_allocations already count per thread (current-thread runtimes, no defect); datagram_tx_pool_allocations and datagram_rx_pool_allocations use the per-measurement Tally; shared_unit_dispatch counts large allocations per thread; lowlatency_e2e is another worker's file and was not touched or run.",
+        "Hosted CI has not seen this change: read the C1bq job on the next hosted run, job by job (the lane builds on a 2-core runner; here two cores were emulated with taskset on a 32-core host).",
+        "Windows and macOS legs do not build this suite (runtime-zero-copy is not part of the platform legs); not measured there.",
+        "docs/reason-review-pins.md: the pin gate reported no row moved by these two test files (they are not cited by any standing atom reason).",
+        "The reassembly baseline never failed (0 of 300 all cores, 0 of 100 two cores), so its change is a removal of the same latent hazard, not a repaired red; if the owner prefers no change without a measured failure, revert that file alone."
+      ],
+      "publishable_decision_summary": "Hosted C1bq went red on the control of fragment_tx_lend_allocations (whole 4, chain 17, 14 fragments: floor 18). Decision: the floor is right and the heap chain did not change; the counter was wrong. The suite counted allocations process-wide behind a lock that serialised only the two tests' windows, so an allocation on a libtest thread (start, report, join) landing inside a window moved a count by one; the claim test failed the same way (chain 2 against whole 3). Option (c), a product defect, was excluded: reproduced on the unmodified tree at 2 of 60 (all cores) and 1 of 60 (two cores), with both signatures. Fix: count on the measuring thread (the send is synchronous on the test thread), no assertion loosened, two controls added for the attribution. reassembly_lend_allocations carried the same counter and is moved too, though it did not fail in 300 runs.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/fragment_tx_lend_allocations.rs: the counting allocator keeps a thread-local count (it was a process-wide AtomicUsize); the SERIAL lock and its guard are removed as they protected nothing the count needed; module doc states the measurement and the attribution; two new tests pin the attribution (the_window_counts_what_its_own_thread_allocates, the_window_does_not_count_what_another_thread_allocates: a helper thread allocates 1000 boxes inside the window and the window reads 0). The existing assertions, including the control floor whole + fragments, are byte-for-byte unchanged.",
+        "crates/wz-runtime-tokio/tests/reassembly_lend_allocations.rs: the same counter change (per thread); SERIAL is kept, its comment says it no longer protects a count; no assertion touched.",
+        "No product code changed."
+      ],
+      "publishable_verification_bullets": [
+        "All runs on the pc2 build host (Linux x86_64, 32 cores), built there, binaries looped there under timeout; nothing was built or run on the coordinator host.",
+        "Before (unmodified tree, a488569d), fragment_tx_lend_allocations under the C1bq lane's feature set (runtime-zero-copy,codec-push,transport-unicast,transport-fragmentation): taskset -c 0,1: 1 of 60 failed, then 2 of 200 failed (3 of 260 = 1.2 percent); all 32 cores: 2 of 60 failed. Signatures: claim test chain 2 vs whole 3 or 4; control whole 4, chain 17, 14 fragments (the hosted figures exactly).",
+        "Before, reassembly_lend_allocations (same counter): 0 of 100 on two cores, 0 of 300 on all cores. It did not fail; it is changed for the same hazard, not for a measured red.",
+        "After: fragment_tx_lend_allocations 300 of 300 passed on two cores and 300 of 300 on all cores (4 tests); reassembly_lend_allocations 200 of 200 and 200 of 200.",
+        "Mutant A (heap fragment path reuses one vector, allocating nothing): the control a_chain_over_a_link_that_lends_nothing_is_seen_allocating failed 5 of 5 (whole 3, chain 3, 14 fragments). Mutant B (counter made process-wide again): the_window_does_not_count_what_another_thread_allocates failed 5 of 5 (window read 1004). Both reverted; git diff shows only the two test files.",
+        "clippy -D warnings --all-targets for wz-runtime-tokio: features runtime-zero-copy,codec-push,transport-unicast,transport-fragmentation clean; the C1bq lane's own clippy features clean; rustfmt --check clean; run-ci Layer A4 pass; reason_review_pin_gate --check OK before and after (no row moved).",
+        "NOT measured: hosted CI (2-core runner, other load); Windows; macOS; core counts other than 2 (taskset) and 32; the full C1bq lane end to end; the count-guard oracle, hook gate array and Layer C0 (owner rule: integration preflight); C1bz (test files carry no doc budget)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Other allocation-counting binaries of wz-runtime-tokio: serial_tx_pool_allocations and stream_tx_pool_allocations already count per thread (current-thread runtimes, no defect); datagram_tx_pool_allocations and datagram_rx_pool_allocations use the per-measurement Tally; shared_unit_dispatch counts large allocations per thread; lowlatency_e2e is another worker's file and was not touched or run.",
+        "Hosted CI has not seen this change: read the C1bq job on the next hosted run, job by job (the lane builds on a 2-core runner; here two cores were emulated with taskset on a 32-core host).",
+        "Windows and macOS legs do not build this suite (runtime-zero-copy is not part of the platform legs); not measured there.",
+        "docs/reason-review-pins.md: the pin gate reported no row moved by these two test files (they are not cited by any standing atom reason).",
+        "The reassembly baseline never failed (0 of 300 all cores, 0 of 100 two cores), so its change is a removal of the same latent hazard, not a repaired red; if the owner prefers no change without a measured failure, revert that file alone."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
