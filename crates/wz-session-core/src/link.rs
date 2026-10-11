@@ -409,6 +409,22 @@ pub enum LinkDropCause {
     /// receiver dropped. Every subsequent write on this link drops the same way
     /// until the session notices the link is down.
     WriterGone,
+    /// The link lent no slot to encode the frame into, so the frame was never
+    /// built: both of the driver's slots were out, its buffer pool was dry, or
+    /// the slot it lent was too short to hold the frame.
+    ///
+    /// This is the refusal of the lend-only profile (`tx-lend-only`, fixed-memory
+    /// step S4), where the answer to "no slot" is NOT a frame built on the heap:
+    /// there is no heap to build it on, and a fallback that allocated exactly
+    /// when the pool ran dry would be a failure mode that appears only under
+    /// load. The session raises it itself, before any driver write, and counts
+    /// it (`SessionLinkActions::tx_refusals`); a driver may also report it from
+    /// `send_blocking` when it can take a write only into a buffer of its own.
+    ///
+    /// Not terminal: the pool refills as frames are written, so the next send
+    /// finds a slot. Closing the F2 gate on it would turn a moment of
+    /// congestion into a dead session.
+    NoTxSlot,
 }
 
 /// R2921 — what [`BoxedLinkDriver::wait_for_room`] found.

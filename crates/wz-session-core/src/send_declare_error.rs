@@ -127,6 +127,16 @@ pub enum SendDeclareError {
     /// Variant ordering: appended at end, per the note on
     /// [`Self::FeatureDisabled`].
     FragmentTxBudgetExhausted,
+    /// Fixed-memory step S4 — declare-plane projection of
+    /// [`SendWireError::LinkRefused`](crate::send_wire_error::SendWireError::LinkRefused):
+    /// the link lent no slot to encode the DECLARE into (or the DECLARE is past
+    /// its budget and there is no heap to cut it up in). A no-emit reject,
+    /// counted: nothing is cached and nothing reaches the wire, so the caller
+    /// may re-declare once the pool refills.
+    ///
+    /// Present only under `tx-lend-only`, as the wire-plane variant is.
+    #[cfg(feature = "tx-lend-only")]
+    LinkRefused(crate::link::LinkDropCause),
 }
 
 impl fmt::Display for SendDeclareError {
@@ -186,6 +196,13 @@ impl fmt::Display for SendDeclareError {
                  session holds a multicast transport (no declare handshake \
                  bundle) — no bytes emitted",
             ),
+            #[cfg(feature = "tx-lend-only")]
+            Self::LinkRefused(cause) => write!(
+                f,
+                "send_declare: the link refused the DECLARE before it was \
+                 built ({cause:?}) — no bytes emitted and nothing cached; \
+                 re-declare once the pool refills"
+            ),
         }
     }
 }
@@ -225,6 +242,8 @@ impl From<crate::send_wire_error::SendWireError> for SendDeclareError {
             W::UnsupportedVariant => Self::RequiresUnicast,
             W::ExceedsReassemblyCap => Self::ExceedsReassemblyCap,
             W::FragmentTxBudgetExhausted => Self::FragmentTxBudgetExhausted,
+            #[cfg(feature = "tx-lend-only")]
+            W::LinkRefused(cause) => Self::LinkRefused(cause),
         }
     }
 }

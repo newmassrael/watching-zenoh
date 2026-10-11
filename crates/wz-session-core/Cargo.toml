@@ -1109,6 +1109,31 @@ dissect-serde = ["dissect", "dep:serde"]
 # data-path codec features, which bring `alloc` with them.
 transport-tx-lend = []
 
+# tx-lend-only — fixed-memory step S4: every frame this session sends is
+# encoded into a slot its link LENDS, and a send the link cannot take a slot
+# for is a counted refusal, never a frame built on the heap. A SELECTOR, as
+# `bounded-heapless` is: the heap encode paths (`encode_frame_envelope`,
+# `encode_init`, the batching window's vector stage, the fragment vectors) stay
+# under `not(tx-lend-only)` for the AP, whose sessions keep them, and an MCU
+# build's final binary turns this on. It implies `transport-tx-lend`, the seam
+# it is the strict form of, and nothing else: `alloc` keeps its meaning.
+#
+# It must be turned on by an MCU final binary only, never by a library crate's
+# dependency line: workspace feature unification would hand the AP a session
+# that refuses a send when its pool is dry where it should fall back to the
+# heap. `wz-runtime-tokio` asserts at build time that it is off
+# (`tx_buf::TX_LEND_ONLY`).
+#
+# Two AP-class features copy a frame and have no slot form: with
+# `transport-compression` a compressed copy of the frame is built in a vector,
+# and with `transport-multilink` a frame lent by one link that the conduit then
+# routes to another is copied out to the heap. Under this selector each is a
+# counted refusal and not a copy (the frame is dropped and counted in
+# `tx_refusals`), because a build that selects every feature at once (the
+# `--all-features` clippy and doc lanes) must still compile; an image that turns
+# this selector on does not turn those two on.
+tx-lend-only = ["transport-tx-lend"]
+
 # Item 895 — `transport_compose`: transport messages WRITTEN from explicit
 # fields, for a caller that says every field itself (the transport build door
 # of `wz-capture`, behind `wz_dissect_transport_build`).

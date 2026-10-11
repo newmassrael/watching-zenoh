@@ -13435,7 +13435,11 @@ fn a_default_locality_query_runs_fires_it_did_not_stage_unless_the_drain_is_defe
 fn a_driver_refusal_charges_n_dropped_and_no_sent_counter() {
     use wz_session_core::link::LinkDropCause;
 
-    for cause in [LinkDropCause::Oversize, LinkDropCause::WriterGone] {
+    for cause in [
+        LinkDropCause::Oversize,
+        LinkDropCause::WriterGone,
+        LinkDropCause::NoTxSlot,
+    ] {
         let (actions, driver) = crate::test_fixtures::refusing_actions(cause);
         actions
             .send_push_literal("demo/refused", b"payload", true)
@@ -13545,23 +13549,34 @@ fn a_writer_gone_refusal_closes_the_f2_send_gate() {
 /// gate on it would turn a single oversize frame into a dead session, so this
 /// pins that the gate stays OPEN — which is also what stops the sibling test
 /// above from passing under a seam that simply closes the gate on every refusal.
+///
+/// Fixed-memory step S4 — [`LinkDropCause::NoTxSlot`] is the second cause that
+/// leaves the gate open, for the same reason: a link with no buffer to give for
+/// this frame at this moment (the lend-only profile's refusal of a send whose
+/// slot pool is dry) refills its pool as frames are written, so the next send
+/// finds a slot, and closing the gate on it would turn a dry pool into a dead
+/// session. Both causes run through the one body.
 #[cfg(feature = "codec-push")]
 #[test]
 fn an_oversize_refusal_leaves_the_f2_send_gate_open() {
     use wz_session_core::link::LinkDropCause;
 
-    let (actions, driver) = crate::test_fixtures::refusing_actions(LinkDropCause::Oversize);
+    for cause in [LinkDropCause::Oversize, LinkDropCause::NoTxSlot] {
+        let (actions, driver) = crate::test_fixtures::refusing_actions(cause);
 
-    for attempt in ["first", "second"] {
-        actions
-            .send_push_literal("demo/oversize", attempt.as_bytes(), true)
-            .expect("an oversize refusal does not close the send gate");
+        for attempt in ["first", "second"] {
+            actions
+                .send_push_literal("demo/oversize", attempt.as_bytes(), true)
+                .unwrap_or_else(|e| {
+                    panic!("{cause:?}: a refusal that is not terminal must not close the send gate: {e:?}")
+                });
+        }
+        assert_eq!(
+            driver.offered_count(),
+            2,
+            "{cause:?}: both writes reached the driver — the gate never closed"
+        );
     }
-    assert_eq!(
-        driver.offered_count(),
-        2,
-        "both writes reached the driver — the gate never closed"
-    );
 }
 
 // ── R2543 — the Session handle is one shared Arc, and it can be held WEAKLY ──

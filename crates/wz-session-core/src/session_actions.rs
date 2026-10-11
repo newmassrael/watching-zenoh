@@ -130,7 +130,11 @@ use crate::session_init_params::SessionInitParams;
 // R2769 — the accept cookie replaced the bare tag at both ends, so the mint
 // reaches for the carrier's encoder here and the verify names
 // `decode_accept_cookie` at its own site.
-#[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+#[cfg(all(
+    feature = "codec-init-body",
+    feature = "session-unicast-accept",
+    not(feature = "tx-lend-only")
+))]
 use crate::accept_cookie::encode_accept_cookie;
 use crate::wireexpr_resolve::OwnMappingSpace;
 
@@ -155,7 +159,9 @@ use crate::metadata::{PushMetadata, QueryMetadata};
 use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 
 // handshake encoders consumed by the wire-emit action bodies
-#[cfg(feature = "codec-close")]
+// (`encode_close` is the heap form the lend-only profile replaces with
+// `encode_close_into` over a lent slot, so it is named only where it is called.)
+#[cfg(all(feature = "codec-close", not(feature = "tx-lend-only")))]
 use crate::handshake_encode::encode_close;
 #[cfg(feature = "codec-init-body")]
 use crate::handshake_encode::encode_init;
@@ -326,6 +332,28 @@ pub struct BatchLendCounts {
     /// or read on the link that lent it. Zero unless a driver breaks the slot
     /// contract.
     pub lost: u32,
+}
+
+/// Fixed-memory step S4 -- the sends a LEND-ONLY session (`tx-lend-only`)
+/// refused, by [`LinkDropCause`](crate::link::LinkDropCause) (the answer of
+/// [`SessionLinkActions::tx_refusals`]).
+///
+/// The profile has no heap frame to fall back on, so a send for which the link
+/// lends no usable slot does not happen, and the session says so here instead
+/// of being silent: the count is the signal a dry pool has no other way to give.
+/// Each is one message (a handshake message, a close, a data frame, a fragment)
+/// that never reached the wire.
+#[cfg(feature = "tx-lend-only")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TxRefusalCounts {
+    /// The link lent no slot for the frame: both of the driver's slots were out,
+    /// its pool was dry, or the slot it lent was shorter than the frame
+    /// ([`LinkDropCause::NoTxSlot`](crate::link::LinkDropCause::NoTxSlot)).
+    pub no_slot: u32,
+    /// The frame is past the link's budget and, there being no heap to cut it up
+    /// in (or fragmentation being off), cannot leave
+    /// ([`LinkDropCause::Oversize`](crate::link::LinkDropCause::Oversize)).
+    pub oversize: u32,
 }
 
 /// ARCHITECTURE section 9.1 -- where a session's FRAGMENTS were written, by
@@ -720,7 +748,10 @@ impl<R: SessionRuntime> core::fmt::Debug for TxConduits<R> {
 #[derive(Debug, Default)]
 struct BatchStage {
     /// The open outbound frame bytes when the frame is staged on the heap
-    /// (empty = no heap frame open).
+    /// (empty = no heap frame open). Fixed-memory step S4 -- absent under
+    /// `tx-lend-only`, where no frame is ever staged on the heap: the open
+    /// frame is in a lent slot or there is none.
+    #[cfg(not(feature = "tx-lend-only"))]
     buf: Vec<u8>,
     /// Network messages absorbed into the open frame. The flush trigger is
     /// the byte budget (`params.batch_size`), never this count.
@@ -795,6 +826,7 @@ enum LentBatchOpen {
 #[cfg(all(
     feature = "transport-batching",
     feature = "transport-tx-lend",
+    not(feature = "tx-lend-only"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1099,6 +1131,12 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `target_has_atomic = "ptr"`.
     #[cfg(feature = "transport-fragmentation")]
     pub fragment_tx_budget: R::Mutex<usize>,
+    /// Fixed-memory step S4 -- the sends this session refused because its link
+    /// lent no slot (`tx-lend-only`): see [`TxRefusalCounts`]. Held behind
+    /// `R::Mutex` for the reason [`Self::fragment_tx_budget`] is: ARMv6-M has no
+    /// `target_has_atomic = "ptr"`.
+    #[cfg(feature = "tx-lend-only")]
+    pub tx_refusals: R::Mutex<TxRefusalCounts>,
     pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
     /// `handle_inbound`. When populated this overrides
@@ -2540,6 +2578,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // never configures one fragments exactly as it did before.
                 #[cfg(feature = "transport-fragmentation")]
                 fragment_tx_budget: R::new_mutex(usize::MAX),
+                #[cfg(feature = "tx-lend-only")]
+                tx_refusals: R::new_mutex(TxRefusalCounts::default()),
                 trace: R::new_mutex(ActionTrace::default()),
                 inbound_cookie: R::new_mutex(None::<Vec<u8>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
@@ -3364,15 +3404,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         priority: Priority,
         lend: &mut BatchLendCounts,
     ) {
+        #[cfg(not(feature = "tx-lend-only"))]
         use crate::tx_buf::TxBuf;
         if self.conduit_routes_to(link, channel, priority) {
             self.emit_on_link(link, &[], Some(&mut slot), channel, priority);
             return;
         }
-        let bytes = slot.as_slice().to_vec();
-        drop(slot);
-        lend.moved_to_heap = lend.moved_to_heap.wrapping_add(1);
-        self.send_wire(&bytes, channel, priority);
+        // Fixed-memory step S4 — the conduit now routes to another link, which
+        // can send only a slot IT lent, and the heap copy that stood in for one is
+        // not available under `tx-lend-only`: the frame is given up, counted as
+        // lost and as a refusal. (Only an aggregating session gets here, and
+        // `transport-multilink` is outside what the lend-only profile covers.)
+        #[cfg(feature = "tx-lend-only")]
+        {
+            drop(slot);
+            lend.lost = lend.lost.wrapping_add(1);
+            let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
+            let _ = (channel, priority);
+        }
+        #[cfg(not(feature = "tx-lend-only"))]
+        {
+            let bytes = slot.as_slice().to_vec();
+            drop(slot);
+            lend.moved_to_heap = lend.moved_to_heap.wrapping_add(1);
+            self.send_wire(&bytes, channel, priority);
+        }
     }
 
     /// Whether [`Self::send_wire`] would put a `(reliability, priority)` frame
@@ -3430,6 +3486,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-tx-lend"
     ))]
     fn move_lent_batches_off(&self, link: &LinkState<R>) {
+        #[cfg(not(feature = "tx-lend-only"))]
         use crate::tx_buf::TxBuf;
         for idx in 0..TX_CONDUITS {
             let priority = TxConduits::<R>::conduit_priority(idx);
@@ -3444,9 +3501,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 };
                 batch.stage.lent = false;
                 match crate::tx_lease::TxLease::resume(link.link_driver(), held) {
+                    #[cfg(not(feature = "tx-lend-only"))]
                     Some(slot) => {
                         batch.stage.buf = slot.as_slice().to_vec();
                         batch.lend.moved_to_heap = batch.lend.moved_to_heap.wrapping_add(1);
+                    }
+                    // Fixed-memory step S4 -- there is no heap stage to move the
+                    // frame to: the frame is given up (the lease's drop gives its
+                    // slot back), counted lost and as a refusal.
+                    #[cfg(feature = "tx-lend-only")]
+                    Some(slot) => {
+                        drop(slot);
+                        batch.stage.count = 0;
+                        batch.lend.lost = batch.lend.lost.wrapping_add(1);
+                        let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
                     }
                     None => {
                         batch.stage.count = 0;
@@ -3710,22 +3778,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // a build with an establishment codec and NEITHER role encodes nothing and
     // must not compile the dead seam (`--features session-extqos,
     // codec-init-body` was the combination that reded `-D warnings`).
-    #[cfg(any(
-        all(
-            any(feature = "codec-init-body", feature = "codec-open-body"),
-            any(feature = "session-unicast-open", feature = "session-unicast-accept")
-        ),
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-interest",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token",
-        feature = "transport-batching",
+    //
+    // Fixed-memory step S4 — `not(tx-lend-only)`: the lend-only profile has no
+    // byte door for a frame built elsewhere. Every message it sends is written
+    // into a slot the link lends and leaves through `emit_on_link` directly (the
+    // keep-alive, a one-byte constant, through `send_wire_this_link`).
+    #[cfg(all(
+        not(feature = "tx-lend-only"),
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-interest",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "liveliness-token",
+            feature = "transport-batching",
+        )
     ))]
     fn send_wire(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
         // R311y205 (transport-multilink IMPL-2b-iii) — reliability-routed data
@@ -3910,6 +3986,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // and the next, smaller write succeeds — closing the gate here
                 // would turn a single oversize frame into a dead session.
                 crate::link::LinkDropCause::Oversize => {}
+                // NOT terminal either: the link had no buffer to give for this
+                // frame at this moment. Its pool refills as frames are written,
+                // so the next send finds a slot; closing the gate would turn a
+                // dry pool into a dead session. (The lend-only profile raises
+                // this itself, before a write; a driver that can take a write
+                // only into a buffer of its own may report it here.)
+                crate::link::LinkDropCause::NoTxSlot => {}
             }
         };
         // transport-compression — once compression is ACTIVE, every
@@ -3921,7 +4004,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `compresses_batches`, which the RX un-wrap consults too so the two
         // directions cannot disagree. R311y434 added the lowlatency conjunct: wz
         // used to wrap OUTSIDE the lean encode, which no zenoh peer can read.
-        #[cfg(feature = "transport-compression")]
+        //
+        // Fixed-memory step S4 -- the compressed copy of a frame is built in a
+        // vector, and the lend-only profile has no heap to build it on and no
+        // second slot to build it in: the frame is not sent (the lent slot is
+        // dropped unsent when this call returns, which gives it back to its
+        // link), counted as a refusal. An image that turns `tx-lend-only` on
+        // does not negotiate compression; this arm is what keeps a build that
+        // has both honest about it.
+        #[cfg(all(feature = "transport-compression", feature = "tx-lend-only"))]
+        if self.compresses_batches() {
+            let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
+            return;
+        }
+        #[cfg(all(feature = "transport-compression", not(feature = "tx-lend-only")))]
         if self.compresses_batches() {
             // A lent slot is NOT sent here: the wire bytes are the compressed
             // copy, so the slot is dropped unsent when this call returns, which
@@ -3963,9 +4059,232 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the data a caller sent before closing leaves before the close does
     /// (`io/zenoh-transport/src/unicast/universal/transport.rs`
     /// @ `p.push_transport_message(msg, Priority::Background);`).
-    #[cfg(any(feature = "codec-close", feature = "transport-keepalive",))]
+    // Fixed-memory step S4 — under `tx-lend-only` a close leaves through
+    // `send_control_lent`, so only the keep-alive (a one-byte constant array,
+    // which needs no buffer of the session's) still reaches this byte door.
+    #[cfg(any(
+        all(feature = "codec-close", not(feature = "tx-lend-only")),
+        feature = "transport-keepalive",
+    ))]
     fn send_wire_this_link(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
         self.emit_on_link(&self.link, bytes, None, reliability, priority);
+    }
+
+    /// Fixed-memory step S4 — the lend-only form of the handshake and close
+    /// send: encode ONE transport message into a slot this binding's link lends,
+    /// and send that slot, or refuse and count it. The heap form of the same
+    /// send (`encode_*_with_role` into a vector, then `send_wire`) is what
+    /// `tx-lend-only` replaces, and it has no counterpart here: with no slot there
+    /// is no frame, which is the point.
+    ///
+    /// `fill` writes the message into the lent buffer and answers whether it
+    /// fitted. A slot too short to hold it is a refusal like a missing one: the
+    /// lease's drop gives the slot back and the message is not sent, because a
+    /// handshake message cut short is not a message. Both are
+    /// [`LinkDropCause::NoTxSlot`](crate::link::LinkDropCause::NoTxSlot),
+    /// counted ([`Self::tx_refusals`]).
+    ///
+    /// The link is this binding's own, as `send_wire_this_link`'s is and
+    /// `send_wire`'s is for a session that does not aggregate links, which the
+    /// lend-only profile is (`transport-multilink` is not covered by it).
+    #[cfg(all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+        )
+    ))]
+    fn send_control_lent(
+        &self,
+        reliability: Reliability,
+        priority: Priority,
+        want: usize,
+        fill: impl FnOnce(
+            &mut crate::tx_buf::EncodeBuf<'_>,
+        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    ) -> Result<(), crate::link::LinkDropCause> {
+        let link = &self.link;
+        let Some(mut slot) = crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
+        else {
+            return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
+        };
+        if fill(&mut slot).is_err() {
+            // Dropping the lease gives the slot back unsent.
+            return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
+        }
+        self.emit_on_link(link, &[], Some(&mut slot), reliability, priority);
+        Ok(())
+    }
+
+    /// Fixed-memory step S4 — the answer of a lend-only send the link took no
+    /// slot for: the cause, counted on the session ([`Self::tx_refusals`]) and,
+    /// under `transport-stats`, as the dropped transport message it is, so a dry
+    /// pool is visible and never silent. Returns `cause` so a sender hands it on
+    /// in one expression.
+    ///
+    /// `WriterGone` is not a refusal the SESSION raises (a driver's writer is
+    /// gone: `emit_on_link`'s disposition closes the gate on it) and is not
+    /// counted here.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-close",
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+            feature = "transport-batching",
+            // The compression arm of `emit_on_link`, which is compiled where
+            // that seam is (its union, which `transport-keepalive` joins).
+            all(
+                feature = "transport-compression",
+                feature = "transport-keepalive"
+            ),
+        )
+    ))]
+    fn refuse_tx(&self, cause: crate::link::LinkDropCause) -> crate::link::LinkDropCause {
+        R::with_mutex_mut(&self.tx_refusals, |counts| match cause {
+            crate::link::LinkDropCause::NoTxSlot => counts.no_slot = counts.no_slot.wrapping_add(1),
+            crate::link::LinkDropCause::Oversize => {
+                counts.oversize = counts.oversize.wrapping_add(1)
+            }
+            crate::link::LinkDropCause::WriterGone => {}
+        });
+        #[cfg(feature = "transport-stats")]
+        self.stats
+            .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+        cause
+    }
+
+    /// Fixed-memory step S4 — the sends this lend-only session refused for want
+    /// of a slot, by cause: see [`TxRefusalCounts`].
+    #[cfg(feature = "tx-lend-only")]
+    pub fn tx_refusals(&self) -> TxRefusalCounts {
+        R::with_mutex_mut(&self.tx_refusals, |counts| *counts)
+    }
+
+    /// Fixed-memory step S4 — the lend-only InitSyn / InitAck: the Init message
+    /// written into a lent slot from the parameters where they lie (no clone of
+    /// the bundle), the extension chain staged for `role`, and `cookie_override`
+    /// as [`encode_init`](crate::handshake_encode::encode_init) takes it. The
+    /// InitAck advertises the sizes capped to the peer's InitSyn
+    /// ([`Self::init_ack_caps`]).
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn send_init_lent(
+        &self,
+        is_ack: bool,
+        cookie_override: Option<&[u8]>,
+        role: ExtChainRole,
+    ) -> Result<(), crate::link::LinkDropCause> {
+        let caps = if is_ack {
+            self.init_ack_caps()
+        } else {
+            crate::handshake_encode::InitCaps::of(&self.params)
+        };
+        // The codec's worst case for the body and the longest chain a peer can
+        // send back, so the link lends one slot that holds any InitSyn / InitAck.
+        const WANT: usize = 1
+            + wz_codecs::init_body::InitBody::MAX_ENCODED_BYTES
+            + crate::parse_error::MAX_EXT_CHAIN_DEPTH
+                * wz_codecs::ext_entry::ExtEntry::MAX_ENCODED_BYTES;
+        self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, WANT, |buf| {
+            R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+                crate::handshake_encode::encode_init_into(
+                    buf,
+                    &self.params,
+                    caps,
+                    is_ack,
+                    chain,
+                    cookie_override,
+                )
+            })
+        })
+    }
+
+    /// Fixed-memory step S4 — the lend-only OpenSyn / OpenAck, as
+    /// [`Self::send_init_lent`] is for Init. The ring origin is DERIVED here, as
+    /// [`Self::encode_open_with_role`] derives it (and re-seeds the TX conduits
+    /// with it), but handed to the encoder as a number and not put into a clone
+    /// of the parameter bundle.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "codec-open-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn send_open_lent(
+        &self,
+        is_ack: bool,
+        echo_inbound_cookie: bool,
+        role: ExtChainRole,
+    ) -> Result<(), crate::link::LinkDropCause> {
+        let initial_sn = self.open_initial_sn().unwrap_or(self.params.initial_sn);
+        const WANT: usize = 1
+            + wz_codecs::open_body::OpenBody::MAX_ENCODED_BYTES
+            + crate::parse_error::MAX_EXT_CHAIN_DEPTH
+                * wz_codecs::ext_entry::ExtEntry::MAX_ENCODED_BYTES;
+        // The staged chain is taken out of its slot for the encode and put back
+        // after it (a move of the vector's handle, which allocates nothing), so
+        // the encode holds ONE session mutex at a time: the cookie's, when it
+        // echoes one, and not the chain's as well. Session mutex scopes stay
+        // disjoint by discipline, and the non-reentrant per-profile mutexes are
+        // why. The slot is empty only for the span of the encode, which no other
+        // reader of a handshake chain runs inside of (the send is the chain's
+        // only consumer, and the drive loop is one task on this profile).
+        let chain = R::with_mutex_mut(self.ext_chain_slot(role), core::mem::take);
+        let sent = self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, WANT, |buf| {
+            if echo_inbound_cookie {
+                R::with_mutex_mut(&self.inbound_cookie, |cookie| {
+                    crate::handshake_encode::encode_open_into(
+                        buf,
+                        &self.params,
+                        initial_sn,
+                        is_ack,
+                        cookie.as_deref(),
+                        &chain,
+                    )
+                })
+            } else {
+                crate::handshake_encode::encode_open_into(
+                    buf,
+                    &self.params,
+                    initial_sn,
+                    is_ack,
+                    None,
+                    &chain,
+                )
+            }
+        });
+        R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = chain);
+        sent
+    }
+
+    /// Fixed-memory step S4 — the lend-only Close: the header (the S flag derived
+    /// from the link set, [`Self::close_scope_is_session`]) and the reason byte
+    /// written into a lent slot. It queues at `Priority::Background`, behind the
+    /// data already handed to the link, as the heap form does.
+    #[cfg(all(feature = "tx-lend-only", feature = "codec-close"))]
+    fn send_close_lent(&self, reason: u8) -> Result<(), crate::link::LinkDropCause> {
+        const WANT: usize = 1 + wz_codecs::close::Close::MAX_ENCODED_BYTES;
+        self.send_control_lent(Reliability::Reliable, Priority::Background, WANT, |buf| {
+            crate::handshake_encode::encode_close_into(buf, reason, self.close_scope_is_session())
+        })
     }
 
     /// R121d — derive the SessionInitParams the Accepting side
@@ -3987,25 +4306,64 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session, which is the R121d immediate symptom this
     /// negotiation closes.
     pub fn init_ack_params(&self) -> SessionInitParams {
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes();
         let mut params = self.params.clone();
-        if let Some(p) = peer {
-            params.seq_num_res = params.seq_num_res.min(p.seq_num_res);
-            params.req_id_res = params.req_id_res.min(p.req_id_res);
-            // R311kl — the min(local, peer) reduction on batch_size is
-            // core transport (pico runs it outside every
-            // Z_FEATURE_BATCHING gate, unicast/transport.c:135-140).
-            // The former R311cb transport-batching gate skipped the
-            // reduction with the feature off, so the InitAck ENLARGED
-            // a smaller InitSyn advertisement and foreign pico
-            // initiators rejected the session (R311fg).
-            // R311kj — min over the EFFECTIVE own advertisement (0 =
-            // unset would otherwise pin the InitAck to a literal 0 on
-            // the wire); the peer side is already 0-normalized by the
-            // from_init_body projection.
-            params.batch_size = params.effective_batch_size().min(p.batch_size);
-        }
+        params.seq_num_res = seq_num_res;
+        params.req_id_res = req_id_res;
+        params.batch_size = batch_size;
         params
+    }
+
+    /// The three sizes an InitAck advertises, capped to the peer's InitSyn when
+    /// one has been parsed ([`Self::init_ack_params`] puts them in a clone of the
+    /// parameter bundle; [`Self::init_ack_caps`] names them without one). One
+    /// rule, so the two cannot disagree: `(seq_num_res, req_id_res,
+    /// batch_size)`.
+    fn init_ack_sizes(&self) -> (u8, u8, u16) {
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let params = &self.params;
+        match peer {
+            Some(p) => (
+                params.seq_num_res.min(p.seq_num_res),
+                params.req_id_res.min(p.req_id_res),
+                // R311kl — the min(local, peer) reduction on batch_size is
+                // core transport (pico runs it outside every
+                // Z_FEATURE_BATCHING gate, unicast/transport.c:135-140).
+                // The former R311cb transport-batching gate skipped the
+                // reduction with the feature off, so the InitAck ENLARGED
+                // a smaller InitSyn advertisement and foreign pico
+                // initiators rejected the session (R311fg).
+                // R311kj — min over the EFFECTIVE own advertisement (0 =
+                // unset would otherwise pin the InitAck to a literal 0 on
+                // the wire); the peer side is already 0-normalized by the
+                // from_init_body projection.
+                params.effective_batch_size().min(p.batch_size),
+            ),
+            None => (params.seq_num_res, params.req_id_res, params.batch_size),
+        }
+    }
+
+    /// [`Self::init_ack_params`]' sizes as the Init encoder takes them, with no
+    /// copy of the parameter bundle: what the lend-only InitAck sender hands
+    /// `encode_init_into`.
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn init_ack_caps(&self) -> crate::handshake_encode::InitCaps {
+        let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes();
+        crate::handshake_encode::InitCaps {
+            seq_num_res,
+            req_id_res,
+            // The wire never carries the internal 0 = "unset" sentinel: no peer
+            // caps leaves the bundle's own, which may be that sentinel.
+            batch_size: if batch_size == 0 {
+                self.params.effective_batch_size()
+            } else {
+                batch_size
+            },
+        }
     }
 
     /// R311kb — the session's negotiated SN ring mask
@@ -4307,13 +4665,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// as the reason for hashing rather than drawing entropy.
     #[cfg(feature = "codec-open-body")]
     fn open_params(&self) -> Option<SessionInitParams> {
-        let peer_zid = self.peer_zid()?;
-        let mask = self.negotiated_sn_mask();
-        let initial_sn = crate::initial_sn::derive_initial_sn(&self.params.zid, &peer_zid, mask);
-        self.outbound_frame_sn.reset(initial_sn);
+        let initial_sn = self.open_initial_sn()?;
         let mut params = self.params.clone();
         params.initial_sn = initial_sn;
         Some(params)
+    }
+
+    /// The Open body's derived `initial_sn` (see [`Self::open_params`], which
+    /// puts it into a clone of the parameter bundle for the heap encoder), with
+    /// the TX conduits re-seeded to it, and no copy of the peer's zid: the
+    /// derivation reads it where the session holds it. `None` when the peer zid
+    /// is not yet known.
+    #[cfg(feature = "codec-open-body")]
+    fn open_initial_sn(&self) -> Option<u64> {
+        let mask = self.negotiated_sn_mask();
+        let initial_sn = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+            slot.as_deref()
+                .map(|peer| crate::initial_sn::derive_initial_sn(&self.params.zid, peer, mask))
+        })?;
+        self.outbound_frame_sn.reset(initial_sn);
+        Some(initial_sn)
     }
 
     fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<Vec<ExtEntryOwned>> {
@@ -4532,24 +4903,92 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// spelling: the same state has to be reconstructed by anything that
     /// checks the cookie, and a second gathering would be a second answer to
     /// "what did this handshake negotiate".
-    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    // Fixed-memory step S4 -- the owned form is the heap profile's: the lend-only
+    // mint writes the same members through a borrowed view
+    // (`mint_accept_cookie_into`) and builds no owned state.
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "session-unicast-accept",
+        not(feature = "tx-lend-only")
+    ))]
     pub(crate) fn accept_cookie_state(
         &self,
         peer_zid: Vec<u8>,
         nonce: u64,
     ) -> crate::accept_cookie::AcceptCookieState {
-        let caps = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let (peer_whatami, sn_res, batch_size, negotiated, multilink) =
+            self.accept_cookie_members();
         crate::accept_cookie::AcceptCookieState {
             peer_zid,
-            peer_whatami: self.peer_whatami_wire().unwrap_or(0),
+            peer_whatami,
+            sn_res,
+            batch_size,
+            nonce,
+            negotiated,
+            multilink,
+        }
+    }
+
+    /// The members of [`Self::accept_cookie_state`] that come from the session
+    /// (everything but the zid and the nonce the caller names), gathered in the
+    /// one place both forms of the cookie read them from: the owned state, and
+    /// the borrowed view [`Self::mint_accept_cookie_into`] writes without a
+    /// copy. `(peer_whatami, sn_res, batch_size, negotiated, multilink)`.
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    fn accept_cookie_members(
+        &self,
+    ) -> (
+        u8,
+        u8,
+        u16,
+        crate::accept_state::NegotiatedExtensions,
+        crate::accept_cookie::MultilinkAcceptState,
+    ) {
+        let caps = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        (
+            self.peer_whatami_wire().unwrap_or(0),
             // The peer's advertisement as the BYTE the peer sent, re-packed by
             // the module that decoded it rather than re-spelled here.
-            sn_res: caps.map(|c| c.sn_res_byte()).unwrap_or(0),
-            batch_size: caps.map(|c| c.batch_size).unwrap_or(0),
-            nonce,
-            negotiated: self.negotiated_extensions(),
-            multilink: self.multilink_accept_state(),
-        }
+            caps.map(|c| c.sn_res_byte()).unwrap_or(0),
+            caps.map(|c| c.batch_size).unwrap_or(0),
+            self.negotiated_extensions(),
+            self.multilink_accept_state(),
+        )
+    }
+
+    /// Mint this handshake's accept cookie into `out`, a buffer of the caller's
+    /// (the lend-only InitAck sender gives it a stack array of
+    /// [`crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES`]), and answer the
+    /// written prefix: [`Self::accept_cookie_state`] and
+    /// [`crate::accept_cookie::encode_accept_cookie`] without the vector either
+    /// one builds. `None` when the cookie cannot be minted (the zid is outside
+    /// 1..=16) or does not fit `out`, which the caller reads as "no cookie".
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "codec-init-body",
+        feature = "session-unicast-accept"
+    ))]
+    fn mint_accept_cookie_into<'o>(
+        &self,
+        peer_zid: &[u8],
+        nonce: u64,
+        out: &'o mut [u8],
+    ) -> Option<&'o [u8]> {
+        let (peer_whatami, sn_res, batch_size, negotiated, multilink) =
+            self.accept_cookie_members();
+        crate::accept_cookie::encode_accept_cookie_into(
+            &self.params.cookie_signing_key,
+            &crate::accept_cookie::AcceptCookieView {
+                peer_zid,
+                peer_whatami,
+                sn_res,
+                batch_size,
+                nonce,
+                negotiated,
+                multilink: multilink.0.as_ref().map(|(c, k)| (*c, k.as_slice())),
+            },
+            out,
+        )
     }
 
     /// R2774 — READ the negotiated slots the cookie carries, as one value.
@@ -7532,18 +7971,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     count_pushed();
                     return Ok(());
                 }
+                // Fixed-memory step S4 — no slot, or one the message does not
+                // fit, is a refusal under `tx-lend-only`: there is no heap
+                // encode to answer it with.
+                #[cfg(feature = "tx-lend-only")]
+                return Err(SendWireError::LinkRefused(
+                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                ));
             }
-            let mut wire = Vec::with_capacity(worst_case_payload);
+            #[cfg(not(feature = "tx-lend-only"))]
             {
-                let mut sink = crate::tx_buf::TxSink::new(&mut wire);
-                encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+                let mut wire = Vec::with_capacity(worst_case_payload);
+                {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut wire);
+                    encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
+                }
+                // No congestion decision on this path: upstream's lowlatency
+                // transport writes to the link under its own lock and has no
+                // pipeline to be full.
+                count_pushed();
+                self.send_wire(&wire, wire_reliability, priority);
+                return Ok(());
             }
-            // No congestion decision on this path: upstream's lowlatency
-            // transport writes to the link under its own lock and has no
-            // pipeline to be full.
-            count_pushed();
-            self.send_wire(&wire, wire_reliability, priority);
-            return Ok(());
         }
         // R2952 (open-debt item 835) — a `BlockFirst` message leaves the
         // synchronous path here, once it has a link (upstream schedules it
@@ -7648,7 +8097,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let push = R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
             #[cfg(feature = "transport-batching")]
             if self.tx_conduits.is_active() {
+                // The heap stage's helpers: under `tx-lend-only` the window's
+                // frame opens in a lent slot or the message is refused, so there
+                // is no vector to encode into and no frame prefix to write by hand.
+                #[cfg(not(feature = "tx-lend-only"))]
                 use crate::frame_encode::{begin_frame, frame_flags, frame_wire_reliability};
+                #[cfg(not(feature = "tx-lend-only"))]
                 let encode_into = |buf: &mut Vec<u8>| {
                     let mut sink = crate::tx_buf::TxSink::new(buf);
                     encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
@@ -7679,6 +8133,58 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         }
                         continue;
                     }
+                    // Fixed-memory step S4 — under `tx-lend-only` no frame is ever
+                    // staged on the heap, so what follows the lent arm above is
+                    // always an OPEN: the frame opens in a slot the conduit's link
+                    // lends, or the message is refused and counted. A message past
+                    // the budget leaves as a chain of lent fragments (with
+                    // fragmentation) or is refused as oversize (without it).
+                    #[cfg(feature = "tx-lend-only")]
+                    {
+                        if congested() {
+                            return Ok(PushOutcome::Congested);
+                        }
+                        let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
+                        return match self.open_lent_batch(
+                            batch,
+                            idx,
+                            sn,
+                            priority,
+                            reliable,
+                            ext_qos,
+                            mtu,
+                            &encode_body,
+                        ) {
+                            LentBatchOpen::Opened => Ok(PushOutcome::Pushed),
+                            #[cfg(feature = "transport-fragmentation")]
+                            LentBatchOpen::Heap(HeapStage::PastBudget) => self
+                                .emit_fragments_encoded(
+                                    batch,
+                                    &encode_body,
+                                    FrameEmit {
+                                        ext_qos,
+                                        sn,
+                                        reliable,
+                                        mtu,
+                                        sn_mask,
+                                        max_reassembly_bytes,
+                                        deadline: deadline.get(),
+                                    },
+                                ),
+                            #[cfg(not(feature = "transport-fragmentation"))]
+                            LentBatchOpen::Heap(HeapStage::PastBudget) => {
+                                Err(SendWireError::LinkRefused(
+                                    self.refuse_tx(crate::link::LinkDropCause::Oversize),
+                                ))
+                            }
+                            LentBatchOpen::Heap(HeapStage::NoSlot | HeapStage::ShortSlot) => {
+                                Err(SendWireError::LinkRefused(
+                                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                                ))
+                            }
+                        };
+                    }
+                    #[cfg(not(feature = "tx-lend-only"))]
                     if batch.stage.buf.is_empty() {
                         if congested() {
                             return Ok(PushOutcome::Congested);
@@ -7777,36 +8283,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // (`zenoh-codec` `CurrentFrame`/`NewFrame`).
                     // Read the open frame's reliability once (its own R flag) —
                     // reused as the flush channel below (`prev` is the same bytes).
-                    let stage = &mut batch.stage;
-                    let open_channel = frame_wire_reliability(&stage.buf);
-                    if open_channel != Reliability::from_reliable_bool(reliable) {
+                    #[cfg(not(feature = "tx-lend-only"))]
+                    {
+                        let stage = &mut batch.stage;
+                        let open_channel = frame_wire_reliability(&stage.buf);
+                        if open_channel != Reliability::from_reliable_bool(reliable) {
+                            let prev = core::mem::take(&mut stage.buf);
+                            stage.count = 0;
+                            // Route the flushed frame by its OWN conduit — the frame's
+                            // R flag (`open_channel`, read above) + this stage's
+                            // priority — NOT the triggering message's reliability (this
+                            // arm fires BECAUSE they differ; y217 #3, splitting one
+                            // conduit across links would trip the peer's per-conduit RX
+                            // SN gate).
+                            self.send_wire(&prev, open_channel, priority);
+                            continue;
+                        }
+                        let wpos = stage.buf.len();
+                        encode_into(&mut stage.buf);
+                        if stage.buf.len() <= mtu {
+                            stage.count += 1;
+                            return Ok(PushOutcome::Pushed);
+                        }
+                        // Overflow: roll the partial encode back, flush this
+                        // conduit's open frame, loop into the open-fresh-frame arm.
+                        stage.buf.truncate(wpos);
                         let prev = core::mem::take(&mut stage.buf);
                         stage.count = 0;
-                        // Route the flushed frame by its OWN conduit — the frame's
-                        // R flag (`open_channel`, read above) + this stage's
-                        // priority — NOT the triggering message's reliability (this
-                        // arm fires BECAUSE they differ; y217 #3, splitting one
-                        // conduit across links would trip the peer's per-conduit RX
-                        // SN gate).
-                        self.send_wire(&prev, open_channel, priority);
-                        continue;
+                        let channel = frame_wire_reliability(&prev);
+                        // Same conduit as the current message (this is the append
+                        // overflow, not a conduit change), so `priority` is the open
+                        // frame's own band.
+                        self.send_wire(&prev, channel, priority);
                     }
-                    let wpos = stage.buf.len();
-                    encode_into(&mut stage.buf);
-                    if stage.buf.len() <= mtu {
-                        stage.count += 1;
-                        return Ok(PushOutcome::Pushed);
-                    }
-                    // Overflow: roll the partial encode back, flush this
-                    // conduit's open frame, loop into the open-fresh-frame arm.
-                    stage.buf.truncate(wpos);
-                    let prev = core::mem::take(&mut stage.buf);
-                    stage.count = 0;
-                    let channel = frame_wire_reliability(&prev);
-                    // Same conduit as the current message (this is the append
-                    // overflow, not a conduit change), so `priority` is the open
-                    // frame's own band.
-                    self.send_wire(&prev, channel, priority);
                 }
             }
             // With transport-batching off the window flag never reads
@@ -7841,7 +8350,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A frame past the budget is not built on the heap either: it is cut
             // into a chain whose fragments are each encoded straight into a slot
             // of their own (`Self::emit_fragments_encoded`, R3251).
-            #[cfg(feature = "transport-tx-lend")]
+            #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
             match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
                 FrameLend::Sent => return Ok(PushOutcome::Pushed),
                 #[cfg(feature = "transport-fragmentation")]
@@ -7852,14 +8361,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 FrameLend::PastMtu => {}
                 FrameLend::Heap => {}
             }
-            let wire = crate::frame_encode::encode_frame_envelope(
-                sn,
-                crate::frame_encode::frame_flags(reliable),
-                worst_case_payload,
-                ext_qos,
-                &encode_body,
-            );
-            self.emit_frame_or_fragments(batch, &wire, frame_emit)
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let wire = crate::frame_encode::encode_frame_envelope(
+                    sn,
+                    crate::frame_encode::frame_flags(reliable),
+                    worst_case_payload,
+                    ext_qos,
+                    &encode_body,
+                );
+                self.emit_frame_or_fragments(batch, &wire, frame_emit)
+            }
+            // Fixed-memory step S4 — under `tx-lend-only` the heap frame is not
+            // an answer: a frame past the budget with fragmentation off is an
+            // oversize refusal, and no slot (or one too short) is a no-slot
+            // refusal, each counted. Nothing was sent in either, and the SN
+            // minted above is spent, as it is for a refused fragment chain.
+            #[cfg(feature = "tx-lend-only")]
+            match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
+                FrameLend::Sent => Ok(PushOutcome::Pushed),
+                #[cfg(feature = "transport-fragmentation")]
+                FrameLend::PastMtu => self.emit_fragments_encoded(batch, &encode_body, frame_emit),
+                #[cfg(not(feature = "transport-fragmentation"))]
+                FrameLend::PastMtu => {
+                    // What only a fragment chain reads is unread here, as in
+                    // `emit_frame_or_fragments` without fragmentation.
+                    let _ = (
+                        frame_emit.sn_mask,
+                        frame_emit.max_reassembly_bytes,
+                        frame_emit.deadline,
+                    );
+                    Err(SendWireError::LinkRefused(
+                        self.refuse_tx(crate::link::LinkDropCause::Oversize),
+                    ))
+                }
+                FrameLend::Heap => Err(SendWireError::LinkRefused(
+                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                )),
+            }
         });
         match push {
             // R2923 — upstream's `handle_push_result`
@@ -7883,6 +8422,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 }
                 Ok(())
             }
+            // Fixed-memory step S4 — a send the link lent no slot for was never
+            // pushed: it is not an `n_msgs` message, as a congestion drop is not,
+            // and the refusal was counted where it was raised (`refuse_tx`).
+            #[cfg(feature = "tx-lend-only")]
+            Err(refused @ SendWireError::LinkRefused(_)) => Err(refused),
             // A typed refusal past the room check (the reassembly cap) keeps
             // the count it had before R2923: only a congestion drop leaves it.
             pushed => {
@@ -7911,17 +8455,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// mint and this follow-on reserve both run inside the one conduit-lock
     /// hold, so the split reservation is atomic w.r.t. a concurrent sender
     /// (the reassembly dispatcher aborts a non-consecutive chain).
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
+    ///
+    /// Fixed-memory step S4 — the heap frame's terminal emit: under
+    /// `tx-lend-only` there is no heap frame to emit, so the function is not
+    /// compiled (its callers are the heap arms, which are not either).
+    #[cfg(all(
+        not(feature = "tx-lend-only"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
     ))]
     fn emit_frame_or_fragments(
         &self,
@@ -8156,7 +8707,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 deadline.spend(answer.waited_us);
                 if answer.room == crate::link::LinkRoom::Congested {
                     self.outbound_frame_sn.reserve_next(priority, reliable);
-                    self.send_fragment(
+                    // (A stop marker the link lends no slot for is lost, and the
+                    // peer's staged chain with it: there is nothing more to send
+                    // it on a profile that has no heap frame to fall back to.)
+                    let _ = self.send_fragment(
                         batch,
                         &crate::frame_encode::FragmentSpan::stop(this_sn),
                         body,
@@ -8189,7 +8743,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // spend an SN, which zenoh's receive-side `SeqNum::roll`
                 // requires of every accepted transport message.
                 self.outbound_frame_sn.reserve_next(priority, reliable);
-                self.send_fragment(
+                let _ = self.send_fragment(
                     batch,
                     &crate::frame_encode::FragmentSpan::stop(this_sn),
                     body,
@@ -8212,7 +8766,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Every fragment rides the frame's conduit (`priority`
             // reconstructed above == the SN-mint conduit) so the whole
             // chain pins to one link (y217 one-conduit=one-link).
-            self.send_fragment(batch, &span, body, reliable, ext_qos);
+            // The heap form of a fragment cannot be refused, so this `?` is
+            // vacuous there.
+            #[cfg(not(feature = "tx-lend-only"))]
+            self.send_fragment(batch, &span, body, reliable, ext_qos)?;
+            // Fixed-memory step S4 — under `tx-lend-only` a fragment the link
+            // lends no slot for ends the chain: the fragments already on the
+            // wire are followed by the stop marker (which draws the SN this
+            // fragment would have had, reserved above), so the peer releases
+            // what it staged, and the message is refused, counted.
+            #[cfg(feature = "tx-lend-only")]
+            if let Err(refused) = self.send_fragment(batch, &span, body, reliable, ext_qos) {
+                if emitted > 0 {
+                    let _ = self.send_fragment(
+                        batch,
+                        &crate::frame_encode::FragmentSpan::stop(this_sn),
+                        body,
+                        reliable,
+                        ext_qos,
+                    );
+                }
+                return Err(refused);
+            }
             emitted += 1;
             deadline.next_fragment();
         }
@@ -8250,32 +8825,57 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         body: crate::frame_encode::FragmentBody<'_>,
         reliable: bool,
         ext_qos: Option<Priority>,
-    ) {
+    ) -> Result<(), SendWireError> {
         let reliability = Reliability::from_reliable_bool(reliable);
         let priority = ext_qos.unwrap_or(Priority::DEFAULT);
-        #[cfg(feature = "transport-tx-lend")]
+        // Fixed-memory step S4 — under `tx-lend-only` no slot, or one the
+        // fragment does not fit, is a refusal, and the fragment is not written on
+        // the heap.
+        #[cfg(feature = "tx-lend-only")]
         {
-            // A fragment the slot cannot hold gives the slot back (the lease's
-            // drop) and is written on the heap below.
             let lent = self.send_lent(reliability, priority, span.wire_bound(), |slot| {
                 crate::frame_encode::write_fragment(slot, span, body, reliable, ext_qos)
             });
-            let counts = &mut batch.frag_lend;
             match lent {
                 Lend::Sent => {
+                    let counts = &mut batch.frag_lend;
                     counts.slot_fragments = counts.slot_fragments.wrapping_add(1);
-                    return;
+                    Ok(())
                 }
-                Lend::NoSlot => counts.heap_no_slot = counts.heap_no_slot.wrapping_add(1),
-                Lend::Refused(_) => counts.heap_short_slot = counts.heap_short_slot.wrapping_add(1),
+                Lend::NoSlot | Lend::Refused(_) => Err(SendWireError::LinkRefused(
+                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                )),
             }
         }
-        #[cfg(not(feature = "transport-tx-lend"))]
-        let _ = batch;
-        let mut wire = Vec::with_capacity(span.wire_bound());
-        crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)
-            .expect("a Vec grows, so its sink is infallible");
-        self.send_wire(&wire, reliability, priority);
+        #[cfg(not(feature = "tx-lend-only"))]
+        {
+            #[cfg(feature = "transport-tx-lend")]
+            {
+                // A fragment the slot cannot hold gives the slot back (the
+                // lease's drop) and is written on the heap below.
+                let lent = self.send_lent(reliability, priority, span.wire_bound(), |slot| {
+                    crate::frame_encode::write_fragment(slot, span, body, reliable, ext_qos)
+                });
+                let counts = &mut batch.frag_lend;
+                match lent {
+                    Lend::Sent => {
+                        counts.slot_fragments = counts.slot_fragments.wrapping_add(1);
+                        return Ok(());
+                    }
+                    Lend::NoSlot => counts.heap_no_slot = counts.heap_no_slot.wrapping_add(1),
+                    Lend::Refused(_) => {
+                        counts.heap_short_slot = counts.heap_short_slot.wrapping_add(1)
+                    }
+                }
+            }
+            #[cfg(not(feature = "transport-tx-lend"))]
+            let _ = batch;
+            let mut wire = Vec::with_capacity(span.wire_bound());
+            crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)
+                .expect("a Vec grows, so its sink is infallible");
+            self.send_wire(&wire, reliability, priority);
+            Ok(())
+        }
     }
 
     /// R311jq — drain the open batch frames to the link, if any. Private
@@ -8310,21 +8910,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
                 // ARCHITECTURE section 9.1 -- a frame open in a lent slot leaves
                 // as that slot, with nothing copied.
-                #[cfg(feature = "transport-tx-lend")]
+                //
+                // Fixed-memory step S4 — under `tx-lend-only` no frame is staged
+                // on the heap, so a conduit with no lent frame open has nothing
+                // to drain, and this is all the drain there is.
+                #[cfg(feature = "tx-lend-only")]
+                if batch.stage.lent {
+                    self.close_lent_batch(batch, idx, priority);
+                }
+                #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
                 if batch.stage.lent {
                     self.close_lent_batch(batch, idx, priority);
                     return;
                 }
-                let stage = &mut batch.stage;
-                if stage.buf.is_empty() {
-                    return;
+                #[cfg(not(feature = "tx-lend-only"))]
+                {
+                    let stage = &mut batch.stage;
+                    if stage.buf.is_empty() {
+                        return;
+                    }
+                    stage.count = 0;
+                    let frame = core::mem::take(&mut stage.buf);
+                    let channel = crate::frame_encode::frame_wire_reliability(&frame);
+                    // Route each frame by its OWN conduit (y217 #3) — this drain path
+                    // carries no caller priority, so the band comes from the walk.
+                    self.send_wire(&frame, channel, priority);
                 }
-                stage.count = 0;
-                let frame = core::mem::take(&mut stage.buf);
-                let channel = crate::frame_encode::frame_wire_reliability(&frame);
-                // Route each frame by its OWN conduit (y217 #3) — this drain path
-                // carries no caller priority, so the band comes from the walk.
-                self.send_wire(&frame, channel, priority);
             });
         }
     }
@@ -9185,7 +9796,59 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         priority: Priority,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "codec-push")]
+        // Fixed-memory step S4 — under `tx-lend-only` the Put is encoded from
+        // the caller's own `&str` and `&[u8]` through the codec's BORROWED view,
+        // straight into the lent slot: the owned `PushOwned` the form below builds
+        // (a copy of the keyexpr and a copy of the payload) is a heap object whose
+        // only job is to be encoded and dropped. `transport-stats` classifies a
+        // message from its owned form, so a stats build keeps the owned build.
+        #[cfg(all(
+            feature = "codec-push",
+            feature = "tx-lend-only",
+            not(feature = "transport-stats")
+        ))]
+        {
+            use wz_codecs::msg_put::MsgPut;
+            use wz_codecs::push::{Push, PushVariant};
+            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+            use wz_codecs::wireexpr_local::WireexprLocal;
+            self.dispatch_network_message(
+                priority,
+                reliable,
+                // A Put built here carries no extension, so no `ext_qos`: the
+                // default QoS, which `read_push_qos` answers for the same message.
+                crate::sample::QosLevel::DEFAULT,
+                wz_codecs::push::Push::MAX_ENCODED_BYTES,
+                crate::stats::NetworkStatsClass::unread(),
+                |sink| {
+                    Push {
+                        // `N_MID_PUSH | N_flag` -- the `M` flag derives from the
+                        // WireexprLocal arm at encode time, as in
+                        // `build_push_literal`.
+                        header: wz_codecs::wire_const::N_MID_PUSH | 0x20,
+                        keyexpr: Wireexpr {
+                            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                                id: 0,
+                                suffix_len: Some(keyexpr_suffix.len() as u64),
+                                suffix: Some(keyexpr_suffix),
+                            }),
+                        },
+                        extensions: None,
+                        body: PushVariant::CodecZenohMsgPut(MsgPut {
+                            header: 0x01,
+                            payload_len: Some(value.len() as u64),
+                            payload: Some(value),
+                            ..MsgPut::default()
+                        }),
+                    }
+                    .encode(sink)
+                },
+            )
+        }
+        #[cfg(all(
+            feature = "codec-push",
+            not(all(feature = "tx-lend-only", not(feature = "transport-stats")))
+        ))]
         {
             let push = build_push_literal(keyexpr_suffix, value)?;
             self.dispatch_push(priority, push, reliable)?;
@@ -11010,11 +11673,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311y839 — the S flag is derived, not literal: this path tears down
             // ONE link, so it announces a whole-session close only when no other
             // link survives it. See `close_scope_is_session`.
-            let bytes = encode_close(reason as u8, self.close_scope_is_session());
+            //
             // R311y205 (transport-multilink) — CLOSE is per-link (targets the
             // link this path is tearing down), not reliability-routed. R2919 —
             // and it queues BEHIND the data already handed to the writer.
-            self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let bytes = encode_close(reason as u8, self.close_scope_is_session());
+                self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+            }
+            // Fixed-memory step S4 — two bytes written into a lent slot, or
+            // refused and counted.
+            #[cfg(feature = "tx-lend-only")]
+            let _ = self.send_close_lent(reason as u8);
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
@@ -11676,14 +12347,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // @ `fn send_init_syn`), so the entry is present exactly when
             // the node has an identity and ABSENT when it does not.
             a.stage_local_region(ExtChainRole::InitSyn);
-            let bytes = a
-                .encode_init_with_role(
-                    /*is_ack=*/ false,
-                    /*cookie_override=*/ None,
-                    ExtChainRole::InitSyn,
-                )
-                .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
-            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+            // Fixed-memory step S4 — under `tx-lend-only` the message is written
+            // into a lent slot, or refused and counted; there is no vector.
+            #[cfg(feature = "tx-lend-only")]
+            let _ = a.send_init_lent(
+                /*is_ack=*/ false,
+                /*cookie_override=*/ None,
+                ExtChainRole::InitSyn,
+            );
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let bytes = a
+                    .encode_init_with_role(
+                        /*is_ack=*/ false,
+                        /*cookie_override=*/ None,
+                        ExtChainRole::InitSyn,
+                    )
+                    .expect(
+                        "InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)",
+                    );
+                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+            }
         }
     }
 
@@ -11719,15 +12403,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // re-acquires the ext-chain mutex, and a per-profile mutex is
             // non-reentrant (lwIP critical_section), so the slot guard must
             // drop before the encode call (2b-① reentrancy discipline).
-            let cookie_override = R::with_mutex_mut(&a.inbound_cookie, |c| c.clone());
-            let bytes = a
-                .encode_open_with_role(
-                    /*is_ack=*/ false,
-                    cookie_override.as_deref(),
-                    ExtChainRole::OpenSyn,
-                )
-                .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
-            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let cookie_override = R::with_mutex_mut(&a.inbound_cookie, |c| c.clone());
+                let bytes = a
+                    .encode_open_with_role(
+                        /*is_ack=*/ false,
+                        cookie_override.as_deref(),
+                        ExtChainRole::OpenSyn,
+                    )
+                    .expect(
+                        "OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)",
+                    );
+                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+            }
+            // Fixed-memory step S4 — the peer's cookie is echoed from the slot
+            // that holds it, read where it lies, and the message is written into
+            // a lent slot or refused and counted. Nothing is copied out first: the
+            // cookie is the peer's, and this side assumes no width of it beyond
+            // the codec's own cap, which the slot is sized for.
+            #[cfg(feature = "tx-lend-only")]
+            let _ = a.send_open_lent(
+                /*is_ack=*/ false,
+                /*echo_inbound_cookie=*/ true,
+                ExtChainRole::OpenSyn,
+            );
             // R2782 — the one OpenAck this OpenSyn asks for is now awaited.
             R::with_mutex_mut(&a.awaiting_open_ack, |s| *s = true);
         }
@@ -11868,26 +12568,63 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // post-InitSyn merge, and the comments on those lines say so.
             a.draw_cookie_nonce();
             let nonce: Option<u64> = R::with_mutex_mut(&a.cookie_nonce, |slot| *slot);
-            let peer_zid: Option<Vec<u8>> =
-                R::with_mutex_mut(&a.inbound_peer_zid, |slot| slot.clone());
-            let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
-                (Some(zid), Some(n)) => encode_accept_cookie(
-                    &a.params.cookie_signing_key,
-                    &a.accept_cookie_state(zid, n),
-                ),
-                _ => None,
+            #[cfg(not(feature = "tx-lend-only"))]
+            let cookie_carried = {
+                let peer_zid: Option<Vec<u8>> =
+                    R::with_mutex_mut(&a.inbound_peer_zid, |slot| slot.clone());
+                let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
+                    (Some(zid), Some(n)) => encode_accept_cookie(
+                        &a.params.cookie_signing_key,
+                        &a.accept_cookie_state(zid, n),
+                    ),
+                    _ => None,
+                };
+                let bytes = a
+                    .encode_init_with_role(
+                        /*is_ack=*/ true,
+                        cookie_bytes.as_deref(),
+                        ExtChainRole::InitAck,
+                    )
+                    .expect(
+                        "the widest accept cookie is held under the codec's 128 cap by \
+                         accept_cookie::the_widest_cookie_fits_the_generated_field",
+                    );
+                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                cookie_bytes.is_some()
             };
-            let bytes = a
-                .encode_init_with_role(
-                    /*is_ack=*/ true,
-                    cookie_bytes.as_deref(),
-                    ExtChainRole::InitAck,
-                )
-                .expect(
-                    "the widest accept cookie is held under the codec's 128 cap by \
-                     accept_cookie::the_widest_cookie_fits_the_generated_field",
-                );
-            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+            // Fixed-memory step S4 — the same InitAck with no heap in it: the
+            // peer's zid is copied (at most 16 bytes) into a stack array, the
+            // cookie is minted into a stack array of the widest cookie
+            // (`ACCEPT_COOKIE_MAX_BYTES`, held under the codec's 128 cap by the
+            // same test), and the message is written into a lent slot or refused
+            // and counted. A cookie that cannot be minted (no zid, no nonce, a zid
+            // outside 1..=16) leaves as an InitAck with the parameters' own, as
+            // the heap form does, and the state below is then not released.
+            #[cfg(feature = "tx-lend-only")]
+            let cookie_carried = {
+                let mut zid = [0u8; 16];
+                let zid_len = R::with_mutex_mut(&a.inbound_peer_zid, |slot| {
+                    slot.as_deref().map(|z| {
+                        let n = z.len().min(zid.len());
+                        zid[..n].copy_from_slice(&z[..n]);
+                        z.len()
+                    })
+                });
+                let peer_zid: Option<&[u8]> = match zid_len {
+                    Some(len) if (1..=zid.len()).contains(&len) => Some(&zid[..len]),
+                    _ => None,
+                };
+                let mut cookie_buf = [0u8; crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES];
+                let cookie: Option<&[u8]> = match (peer_zid, nonce) {
+                    (Some(zid), Some(n)) => a.mint_accept_cookie_into(zid, n, &mut cookie_buf),
+                    _ => None,
+                };
+                // "Only when a carrying cookie WENT OUT", below: a refused send
+                // carried nothing, so the state it would have released stays.
+                a.send_init_lent(/*is_ack=*/ true, cookie, ExtChainRole::InitAck)
+                    .is_ok()
+                    && cookie.is_some()
+            };
             // R2774 — LET GO of what the cookie now carries. Upstream's
             // acceptor keeps nothing negotiated between InitAck and OpenSyn:
             // `send_init_ack` takes its `State` by value and `recv_open_syn`
@@ -11901,7 +12638,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // but the release is justified by the carriage and by nothing
             // else. Last, after the send: every read of these slots for this
             // InitAck — the reflections staged above and the mint — is done.
-            if cookie_bytes.is_some() {
+            if cookie_carried {
                 a.install_negotiated(a.offered_extensions());
                 // R2782 — and the HEAD: the peer's zid, role and sizing caps
                 // ride the cookie's head, so they go too.
@@ -11941,14 +12678,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // get here (it travelled inbound on OpenSyn and was already
             // MAC-verified); the OpenAck shape omits it (parent.A=1
             // suppresses the cookie field per transport.c:300-302).
-            let bytes = a
-                .encode_open_with_role(
-                    /*is_ack=*/ true,
-                    /*cookie_override=*/ None,
-                    ExtChainRole::OpenAck,
-                )
-                .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
-            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+            //
+            // Fixed-memory step S4 — under `tx-lend-only` the message is written
+            // into a lent slot, or refused and counted; there is no vector.
+            #[cfg(feature = "tx-lend-only")]
+            let _ = a.send_open_lent(
+                /*is_ack=*/ true,
+                /*echo_inbound_cookie=*/ false,
+                ExtChainRole::OpenAck,
+            );
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let bytes = a
+                    .encode_open_with_role(
+                        /*is_ack=*/ true,
+                        /*cookie_override=*/ None,
+                        ExtChainRole::OpenAck,
+                    )
+                    .expect(
+                        "OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied",
+                    );
+                a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+            }
         }
     }
 
@@ -11970,8 +12721,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // R311y839 — and its SCOPE follows that: the sibling `release_link`
             // action removes only this link, so the announcement says session only
             // when this link was the session. See `close_scope_is_session`.
-            let bytes = encode_close(reason, a.close_scope_is_session());
-            a.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let bytes = encode_close(reason, a.close_scope_is_session());
+                a.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+            }
+            // Fixed-memory step S4 — the close is two bytes written into a lent
+            // slot, or refused and counted (the session is going down either way).
+            #[cfg(feature = "tx-lend-only")]
+            let _ = a.send_close_lent(reason);
         }
     }
 

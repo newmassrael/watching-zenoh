@@ -62,7 +62,7 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{SceCursor, VecSink};
+use sce_forge_runtime::codec::{SceCursor, SceSink, SliceSink, VecSink};
 
 use crate::accept_state::{AcceptState, NegotiatedExtensions};
 use crate::signing_key::{cookie_payload_tag, cookie_payload_tag_verify, SigningKey};
@@ -159,21 +159,24 @@ pub struct AcceptCookieState {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MultilinkAcceptState(pub Option<(u64, Vec<u8>)>);
 
-impl MultilinkAcceptState {
-    fn encode(&self, out: &mut Vec<u8>) -> Option<()> {
-        match &self.0 {
-            None => out.push(0),
-            Some((challenge, key)) => {
-                let len = u16::try_from(key.len()).ok()?;
-                out.push(1);
-                out.extend_from_slice(&challenge.to_le_bytes());
-                out.extend_from_slice(&len.to_le_bytes());
-                out.extend_from_slice(key);
-            }
+/// Write the multilink member into `w`: the one byte `0` for `None`, else `1 ‖
+/// challenge(8, LE) ‖ key_len(2, LE) ‖ key`. `None` for a key too long to carry
+/// its length in the two bytes the member gives it, or for a sink that refuses.
+fn write_multilink<S: SceSink>(multilink: Option<(u64, &[u8])>, w: &mut S) -> Option<()> {
+    match multilink {
+        None => w.write_u8(0).ok()?,
+        Some((challenge, key)) => {
+            let len = u16::try_from(key.len()).ok()?;
+            w.write_u8(1).ok()?;
+            w.write_bytes(&challenge.to_le_bytes()).ok()?;
+            w.write_bytes(&len.to_le_bytes()).ok()?;
+            w.write_bytes(key).ok()?;
         }
-        Some(())
     }
+    Some(())
+}
 
+impl MultilinkAcceptState {
     /// Read the member from `tail`, which must be EXACTLY the member: it is
     /// the cookie's last one, so anything left over is a mint this reader
     /// disagrees with.
@@ -228,29 +231,99 @@ pub enum CookieError {
 /// cookie for a zid the wire cannot carry is not a value this function should
 /// invent.
 pub fn encode_accept_cookie(key: &SigningKey, state: &AcceptCookieState) -> Option<Vec<u8>> {
-    let zid_len = state.peer_zid.len();
-    if zid_len == 0 || zid_len > MAX_ZID_BYTES {
-        return None;
-    }
-    let mut out =
-        Vec::with_capacity(COOKIE_HEAD_BYTES + zid_len + COOKIE_EXT_BYTES + COOKIE_TAG_BYTES);
-    out.extend_from_slice(&state.nonce.to_le_bytes());
-    out.push(state.peer_whatami);
-    out.push(state.sn_res);
-    out.extend_from_slice(&state.batch_size.to_le_bytes());
-    out.push(zid_len as u8);
-    out.extend_from_slice(&state.peer_zid);
-    // `VecSink` grows, so this arm cannot be taken here; it is written rather
-    // than unwrapped because the group's `encode` is the same body the
-    // bounded Inline sink runs, where it can be.
-    {
-        let mut sink = VecSink::new(&mut out);
-        state.negotiated.encode(&mut sink).ok()?;
-    }
-    state.multilink.encode(&mut out)?;
+    let view = AcceptCookieView {
+        peer_zid: &state.peer_zid,
+        peer_whatami: state.peer_whatami,
+        sn_res: state.sn_res,
+        batch_size: state.batch_size,
+        nonce: state.nonce,
+        negotiated: state.negotiated,
+        multilink: state.multilink.0.as_ref().map(|(c, k)| (*c, k.as_slice())),
+    };
+    let mut out = Vec::with_capacity(
+        COOKIE_HEAD_BYTES + view.peer_zid.len() + COOKIE_EXT_BYTES + COOKIE_TAG_BYTES,
+    );
+    // `VecSink` grows, so a refused write cannot happen here; the payload writer
+    // is the one the fixed-buffer mint runs, where it can.
+    write_cookie_payload(&view, &mut VecSink::new(&mut out))?;
     let t = cookie_payload_tag(key, &out);
     out.extend_from_slice(&t);
     Some(out)
+}
+
+/// [`AcceptCookieState`] as a VIEW: the same members, with the two variable ones
+/// (the peer's zid, the multilink key) borrowed from where the session holds
+/// them instead of owned, so a cookie can be minted without the copy that
+/// owning them takes.
+///
+/// What [`encode_accept_cookie_into`] writes, byte for byte what
+/// [`encode_accept_cookie`] writes for the owned form of the same values (the
+/// owned form builds one of these and runs the same writer).
+#[derive(Debug, Clone, Copy)]
+pub struct AcceptCookieView<'a> {
+    /// The peer's claimed zid, 1..=16 bytes.
+    pub peer_zid: &'a [u8],
+    /// The peer's WhatAmI as the raw 2-bit wire form.
+    pub peer_whatami: u8,
+    /// The peer's packed `sn_res` byte.
+    pub sn_res: u8,
+    /// The peer's advertised batch size.
+    pub batch_size: u16,
+    /// The nonce this cookie is bound to.
+    pub nonce: u64,
+    /// Every extension state.
+    pub negotiated: NegotiatedExtensions,
+    /// The multilink member: the challenge issued and the initiator's key.
+    pub multilink: Option<(u64, &'a [u8])>,
+}
+
+/// The widest cookie [`encode_accept_cookie_into`] can write without a multilink
+/// member: head, a 16-byte zid, the extension states, the member's one byte and
+/// the tag. It is the buffer a fixed-memory acceptor reserves for the mint, and
+/// it is held under the generated `cookie` field's cap of 128 by
+/// `the_widest_cookie_fits_the_generated_field`. A multilink key is variable and
+/// has no place in a fixed buffer this wide: such a cookie is refused (`None`),
+/// which the acceptor reads as "no cookie", the fail-closed answer.
+pub const ACCEPT_COOKIE_MAX_BYTES: usize =
+    COOKIE_HEAD_BYTES + MAX_ZID_BYTES + COOKIE_EXT_BYTES + 1 + COOKIE_TAG_BYTES;
+
+/// The payload of the cookie, written to any sink: `None` when `peer_zid` is
+/// outside the protocol's 1..=16, when a state refuses its own encoding, or when
+/// the sink does.
+fn write_cookie_payload<S: SceSink>(view: &AcceptCookieView<'_>, w: &mut S) -> Option<()> {
+    let zid_len = view.peer_zid.len();
+    if zid_len == 0 || zid_len > MAX_ZID_BYTES {
+        return None;
+    }
+    w.write_bytes(&view.nonce.to_le_bytes()).ok()?;
+    w.write_u8(view.peer_whatami).ok()?;
+    w.write_u8(view.sn_res).ok()?;
+    w.write_bytes(&view.batch_size.to_le_bytes()).ok()?;
+    w.write_u8(zid_len as u8).ok()?;
+    w.write_bytes(view.peer_zid).ok()?;
+    view.negotiated.encode(w).ok()?;
+    write_multilink(view.multilink, w)
+}
+
+/// [`encode_accept_cookie`] into a buffer the caller owns: the cookie is
+/// written to the front of `out` and the written prefix is returned, so a
+/// fixed-memory acceptor mints one into a stack array of
+/// [`ACCEPT_COOKIE_MAX_BYTES`] and allocates nothing.
+///
+/// `None` when [`encode_accept_cookie`] would answer `None`, and when the
+/// cookie does not fit `out`. Nothing of a refused cookie is meaningful in
+/// `out`.
+pub fn encode_accept_cookie_into<'o>(
+    key: &SigningKey,
+    view: &AcceptCookieView<'_>,
+    out: &'o mut [u8],
+) -> Option<&'o [u8]> {
+    let mut sink = SliceSink::new(&mut *out);
+    write_cookie_payload(view, &mut sink)?;
+    let n = sink.position();
+    let t = cookie_payload_tag(key, &out[..n]);
+    out.get_mut(n..n + COOKIE_TAG_BYTES)?.copy_from_slice(&t);
+    Some(&out[..n + COOKIE_TAG_BYTES])
 }
 
 /// Verify and parse a cookie this node minted.

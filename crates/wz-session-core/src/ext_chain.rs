@@ -66,27 +66,71 @@ pub const QUERY_EXT_CHAIN_DEPTH: usize = 8;
 /// The non-Z header bits (`ext_id`, `M`, `enc`) stay author-set; the helper
 /// only patches the Z bit per chain position (`ExtEntry::encode` pushes the
 /// header byte first).
+///
+/// The vector form: its consumers are the ones that want the chain as bytes of
+/// their own (the auth ext's inner method chain, which is then wrapped in an
+/// outer ext; the transport composer). The handshake encoders write their chain
+/// straight after the body through [`encode_ext_chain_into`] and do not call
+/// this.
 #[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "session-extauth"
+    feature = "session-extauth",
+    feature = "transport-compose",
+    // The unit tests of `passive` (which builds the same wire from the same
+    // entries) and of the lend-only chain writer below, under the feature sets
+    // their own modules are compiled at.
+    all(
+        test,
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-frame"
+    ),
+    all(
+        test,
+        feature = "tx-lend-only",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    )
 ))]
 pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
     if entries.is_empty() {
         return Vec::new();
     }
     let mut buf = Vec::with_capacity(entries.len() * 4);
-    let last = entries.len() - 1;
-    for (i, entry) in entries.iter().enumerate() {
-        let mut bytes = entry.as_borrowed().encode_to_vec();
-        if i == last {
-            bytes[0] &= !0x80;
-        } else {
-            bytes[0] |= 0x80;
-        }
-        buf.extend_from_slice(&bytes);
-    }
+    encode_ext_chain_into(&mut buf, entries).expect("a Vec grows, so its sink is infallible");
     buf
+}
+
+/// [`encode_ext_chain`] into a buffer the caller chose: a heap `Vec` (what the
+/// function above passes) or a link's lent slot, so a handshake message's chain
+/// is written once, where the message is, and not into a vector of its own that
+/// is then copied after the body.
+///
+/// The same bytes as the vector form, by construction: each entry is encoded
+/// from its borrowed view with the chain-continuation bit set on its header
+/// first, which is the byte the vector form patched after encoding it. A fixed
+/// buffer that cannot hold the chain refuses with `BufferOverflow`; the bytes
+/// already written stay, so the caller rolls back with
+/// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "session-extauth"
+))]
+pub(crate) fn encode_ext_chain_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    entries: &[ExtEntryOwned],
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    let last = entries.len().wrapping_sub(1);
+    for (i, entry) in entries.iter().enumerate() {
+        let mut view = entry.as_borrowed();
+        if i == last {
+            view.header &= !0x80;
+        } else {
+            view.header |= 0x80;
+        }
+        view.encode(&mut crate::tx_buf::TxSink::new(&mut *buf))?;
+    }
+    Ok(())
 }
 
 /// Decode the Z-flag-gated ext chain into the lifetime-free owned mirror,
@@ -117,4 +161,74 @@ pub(crate) fn decode_ext_chain(
         }
     }
     Err(InboundParseError::ExtChainOverflow)
+}
+
+// Compiled only under the lend-only profile, whose handshake is the one that
+// writes its chain through the `_into` form: the profile's own lib leg runs it.
+#[cfg(all(
+    test,
+    feature = "tx-lend-only",
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// Three entries with distinct headers and bodies, the first two with Z set
+    /// by the encoder and the last with it cleared.
+    fn chain() -> Vec<ExtEntryOwned> {
+        use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+        let unit = |id: u8| ExtEntryOwned {
+            header: id,
+            body: ExtEntryOwnedVariant::CodecZenohExtUnit(wz_codecs::ext_unit::ExtUnit {}),
+        };
+        vec![crate::extpatch::encode_patch_ext(), unit(0x05), unit(0x01)]
+    }
+
+    /// The chain written straight into a buffer is the chain the vector form
+    /// builds: each entry's header carries the continuation bit on all but the
+    /// last, and the bytes are the entries' own. The lend-only handshake writes
+    /// its chain through the `_into` form, and every other builder of a
+    /// handshake message is held to this equality.
+    #[test]
+    fn a_chain_written_into_a_buffer_is_the_chain_the_vector_form_builds() {
+        let entries = chain();
+        let expected = encode_ext_chain(&entries);
+        assert!(!expected.is_empty(), "three entries make bytes");
+
+        // The fixed form needs a buffer type that is not the vector, which is
+        // what the writers take only where a link can lend a slot.
+        #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+        {
+            use crate::tx_buf::{SliceTxBuf, TxBuf};
+            let mut storage = [0u8; 64];
+            let mut fixed = SliceTxBuf::new(&mut storage);
+            encode_ext_chain_into(&mut fixed, &entries).expect("the chain fits 64 bytes");
+            assert_eq!(fixed.as_slice(), expected.as_slice());
+        }
+
+        let mut grown: Vec<u8> = Vec::new();
+        encode_ext_chain_into(&mut grown, &entries).expect("a vector grows");
+        assert_eq!(grown, expected);
+
+        // The empty chain writes nothing, in both forms.
+        assert!(encode_ext_chain(&[]).is_empty());
+        let mut empty: Vec<u8> = Vec::new();
+        encode_ext_chain_into(&mut empty, &[]).expect("nothing to write");
+        assert!(empty.is_empty());
+    }
+
+    /// A buffer too short for the chain refuses it.
+    #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+    #[test]
+    fn a_buffer_too_short_for_the_chain_refuses_it() {
+        use crate::tx_buf::SliceTxBuf;
+        let entries = chain();
+        let mut storage = [0u8; 3];
+        let mut fixed = SliceTxBuf::new(&mut storage);
+        assert_eq!(
+            encode_ext_chain_into(&mut fixed, &entries),
+            Err(sce_forge_runtime::codec::CodecError::BufferOverflow)
+        );
+    }
 }

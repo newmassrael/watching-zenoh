@@ -20,9 +20,11 @@
 //! (gated at the `lib.rs` module declaration). Semantically distinct
 //! from `frame_encode` (which is the `T_MID_FRAME` data-plane envelope).
 
-// Vec / VecSink back the codec-body encoders only; `encode_keep_alive`
+// Vec backs the heap wrappers of the codec-body encoders; `encode_keep_alive`
 // (transport-keepalive) is a const header byte, so a keepalive-only
-// subset must not carry the unused imports (CI denies warnings).
+// subset must not carry the unused imports (CI denies warnings). `VecSink`
+// is the heap `encode_close`'s alone: Init and Open are written through the
+// buffer seam (`encode_init_into` / `encode_open_into`) whatever the buffer is.
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -30,21 +32,32 @@
 ))]
 use alloc::vec::Vec;
 
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close"
-))]
+#[cfg(feature = "codec-close")]
 use sce_forge_runtime::codec::VecSink;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-use crate::ext_chain::encode_ext_chain;
+use crate::ext_chain::encode_ext_chain_into;
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 use crate::session_init_params::SessionInitParams;
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+// The `_into` encoders write through the buffer seam, which every one of them
+// reaches with `append_byte` and a sink over it. `TxBuf` is needed for the
+// method call only when `EncodeBuf` is a concrete type (no lending); on a
+// `dyn TxBuf` the methods resolve without the import.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close"
+))]
+#[allow(unused_imports)]
+use crate::tx_buf::{TxBuf, TxSink};
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close"
+))]
 use sce_forge_runtime::codec::CodecError;
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 use wz_codecs::ext_entry::ExtEntryOwned;
@@ -52,9 +65,9 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
 #[cfg(feature = "codec-init-body")]
-use wz_codecs::init_body::{InitBody, InitBodyOwned};
+use wz_codecs::init_body::InitBody;
 #[cfg(feature = "codec-open-body")]
-use wz_codecs::open_body::{OpenBody, OpenBodyOwned};
+use wz_codecs::open_body::OpenBody;
 
 /// Build the wire bytes for an Init frame (InitSyn if `is_ack==false`,
 /// InitAck if `is_ack==true`). The codec body is the wz `InitBody`,
@@ -68,6 +81,80 @@ pub fn encode_init(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Result<Vec<u8>, CodecError> {
+    // The worst case the codec bounds the body by, the header byte and the
+    // chain's own entries (a coarse four bytes each, as the chain encoder
+    // reserves): one allocation for the whole frame, as the body-then-chain
+    // form it replaced made.
+    let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + extensions.len() * 4);
+    encode_init_into(
+        &mut wire,
+        params,
+        InitCaps::of(params),
+        is_ack,
+        extensions,
+        cookie_override,
+    )?;
+    Ok(wire)
+}
+
+/// The sizes an Init message advertises: the `sn_res` pair and the batch size.
+///
+/// Separate from [`SessionInitParams`] because the InitAck advertises the
+/// SMALLER of this node's and the peer's (`InitAck.size <= InitSyn.size`, the
+/// wire-spec invariant `SessionLinkActions::init_ack_params` enforces), and a
+/// sender that had to clone the whole parameter bundle to say a different
+/// number would copy a zid, a cookie and a signing key to do it. Naming the
+/// three numbers lets the encoder read the bundle where it is.
+#[cfg(feature = "codec-init-body")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitCaps {
+    /// `SessionInitParams::seq_num_res`: the frame sequence-number resolution.
+    pub seq_num_res: u8,
+    /// `SessionInitParams::req_id_res`: the request-id resolution.
+    pub req_id_res: u8,
+    /// The batch size on the wire, never the internal `0` = "unset" sentinel.
+    pub batch_size: u16,
+}
+
+#[cfg(feature = "codec-init-body")]
+impl InitCaps {
+    /// What `params` advertises as it stands, as an InitSyn does.
+    pub fn of(params: &SessionInitParams) -> Self {
+        Self {
+            seq_num_res: params.seq_num_res,
+            req_id_res: params.req_id_res,
+            // R311kj — the wire NEVER carries the internal 0 = "unset"
+            // sentinel (a pico peer would adopt it and size a 0-byte TX
+            // wbuf); the effective accessor is the advertisement SSOT.
+            batch_size: params.effective_batch_size(),
+        }
+    }
+}
+
+/// [`encode_init`] into a buffer the caller chose: a heap `Vec` (what
+/// [`encode_init`] passes) or the slot a link lent, so the frame is written once
+/// where it will be sent and nothing is allocated to build it.
+///
+/// The body is the codec's BORROWED view over the parameters' own zid and the
+/// cookie, not an owned copy of either, and the extension chain is written
+/// straight after it (`ext_chain::encode_ext_chain_into`). A buffer
+/// that cannot hold the frame refuses with `BufferOverflow` and keeps the bytes
+/// it was given; the caller discards the buffer, or rolls back with
+/// `TxBuf::truncate`.
+///
+/// `caps` is what the message advertises ([`InitCaps::of`] for an InitSyn, the
+/// peer-capped value for an InitAck). The cookie rules are those of
+/// [`encode_init`]'s: an InitSyn never carries one, an InitAck carries
+/// `cookie_override` or, without one, the parameters' own.
+#[cfg(feature = "codec-init-body")]
+pub fn encode_init_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    params: &SessionInitParams,
+    caps: InitCaps,
+    is_ack: bool,
+    extensions: &[ExtEntryOwned],
+    cookie_override: Option<&[u8]>,
+) -> Result<(), CodecError> {
     let mut parent_flags = wire_const::FLAG_T_INIT_S;
     if is_ack {
         parent_flags |= wire_const::FLAG_T_INIT_A;
@@ -82,48 +169,28 @@ pub fn encode_init(
     // path from send_init_ack_with_cookie) and falls back to
     // params.cookie otherwise. cookie_override is silently ignored on
     // InitSyn because the wire-spec forbids the field there.
-    let cbyte = init_cbyte(params.whatami, params.zid.len());
-    let cookie_bytes: Option<Vec<u8>> = if is_ack {
-        Some(
-            cookie_override
-                .map(|c| c.to_vec())
-                .unwrap_or_else(|| params.cookie.clone()),
-        )
+    let cookie: Option<&[u8]> = if is_ack {
+        Some(cookie_override.unwrap_or(&params.cookie))
     } else {
         None
     };
-    let body: InitBodyOwned = InitBodyOwned {
+    let body = InitBody {
         version: params.version,
-        cbyte,
+        cbyte: init_cbyte(params.whatami, params.zid.len()),
         // zid is the protocol-bounded peer id (1..=16); init_cbyte
-        // above already encodes its length, so the bounded copy is an
-        // invariant leaf (`.expect`), mirroring request_build.rs.
-        zid: crate::codec_owned::owned_bytes(&params.zid).expect("zid length asserted in 1..=16"),
-        sn_res: Some(pack_sn_res(params.seq_num_res, params.req_id_res)),
-        // R311kj — the wire NEVER carries the internal 0 = "unset"
-        // sentinel (a pico peer would adopt it and size a 0-byte TX
-        // wbuf); the effective accessor is the advertisement SSOT.
-        batch_size: Some(params.effective_batch_size()),
-        cookie_len: cookie_bytes.as_ref().map(|c| c.len() as u64),
-        cookie: cookie_bytes
-            .as_deref()
-            .map(crate::codec_owned::owned_bytes)
-            .transpose()?,
+        // above already encodes its length.
+        zid: &params.zid,
+        sn_res: Some(pack_sn_res(caps.seq_num_res, caps.req_id_res)),
+        batch_size: Some(caps.batch_size),
+        cookie_len: cookie.map(|c| c.len() as u64),
+        cookie,
     };
 
-    let ext_bytes = encode_ext_chain(extensions);
-    let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + ext_bytes.len());
-    wire.push(parent_flags | wire_const::T_MID_INIT);
+    buf.append_byte(parent_flags | wire_const::T_MID_INIT)?;
     let s = (parent_flags >> 6) & 1;
     let a = (parent_flags >> 5) & 1;
-    {
-        let mut sink = VecSink::new(&mut wire);
-        body.as_borrowed()
-            .encode(&mut sink, s, a)
-            .expect("VecSink is infallible");
-    }
-    wire.extend_from_slice(&ext_bytes);
-    Ok(wire)
+    body.encode(&mut TxSink::new(&mut *buf), s, a)?;
+    encode_ext_chain_into(buf, extensions)
 }
 
 /// Build the wire bytes for an Open frame (OpenSyn / OpenAck). Body
@@ -144,6 +211,36 @@ pub fn encode_open(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<Vec<u8>, CodecError> {
+    let mut wire = Vec::with_capacity(1 + OpenBody::MAX_ENCODED_BYTES + extensions.len() * 4);
+    encode_open_into(
+        &mut wire,
+        params,
+        params.initial_sn,
+        is_ack,
+        cookie_override,
+        extensions,
+    )?;
+    Ok(wire)
+}
+
+/// [`encode_open`] into a buffer the caller chose, with the Open body's
+/// `initial_sn` named instead of read from `params`.
+///
+/// The ring origin is DERIVED at the Open seam (R311y816:
+/// `SessionLinkActions::encode_open_with_role` computes it from the two zids and
+/// the negotiated mask), and a sender that had to put it into a clone of the
+/// parameter bundle to say so would copy the zid, the cookie and the signing key
+/// for one number. Taking it as an argument leaves the bundle where it is. See
+/// [`encode_init_into`] for the buffer contract.
+#[cfg(feature = "codec-open-body")]
+pub fn encode_open_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    params: &SessionInitParams,
+    initial_sn: u64,
+    is_ack: bool,
+    cookie_override: Option<&[u8]>,
+    extensions: &[ExtEntryOwned],
+) -> Result<(), CodecError> {
     // R311ku — the T flag is DERIVED, not configured: a whole-second
     // lease compacts to the seconds form, pico `_z_t_msg_make_open_syn`
     // / `_ack` parity (definitions/transport.c:196-214; the pre-ku
@@ -166,33 +263,21 @@ pub fn encode_open(
     } else {
         &[]
     };
-    let body: OpenBodyOwned = OpenBodyOwned {
+    let body = OpenBody {
         lease: wire_lease,
-        initial_sn: params.initial_sn,
+        initial_sn,
         cookie_len: if !is_ack {
             Some(cookie_bytes.len() as u64)
         } else {
             None
         },
-        cookie: if !is_ack {
-            Some(crate::codec_owned::owned_bytes(cookie_bytes)?)
-        } else {
-            None
-        },
+        cookie: if !is_ack { Some(cookie_bytes) } else { None },
     };
 
-    let ext_bytes = encode_ext_chain(extensions);
-    let mut wire = Vec::with_capacity(1 + OpenBody::MAX_ENCODED_BYTES + ext_bytes.len());
-    wire.push(parent_flags | wire_const::T_MID_OPEN);
+    buf.append_byte(parent_flags | wire_const::T_MID_OPEN)?;
     let a = (parent_flags >> 5) & 1;
-    {
-        let mut sink = VecSink::new(&mut wire);
-        body.as_borrowed()
-            .encode(&mut sink, a)
-            .expect("VecSink is infallible");
-    }
-    wire.extend_from_slice(&ext_bytes);
-    Ok(wire)
+    body.encode(&mut TxSink::new(&mut *buf), a)?;
+    encode_ext_chain_into(buf, extensions)
 }
 
 // R2 (R311ww) — the ext-chain serializer moved to the shared `crate::ext_chain`
@@ -265,6 +350,29 @@ pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
         .encode(&mut sink)
         .expect("VecSink is infallible");
     wire
+}
+
+/// [`encode_close`] into a buffer the caller chose: the slot a link lent, so a
+/// close is two bytes written where they will be sent and not a vector built to
+/// be copied. The same two bytes (header with the S flag, then the reason); a
+/// buffer with no room for them refuses with `BufferOverflow`.
+///
+/// Not `#[inline(never)]`: that attribute on [`encode_close`] gives the
+/// codec-elision gate a by-name witness in the heap profile, and this form is
+/// the lend-only profile's, which that gate does not build.
+#[cfg(feature = "codec-close")]
+pub fn encode_close_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    reason: u8,
+    session: bool,
+) -> Result<(), CodecError> {
+    let parent_flags = if session {
+        wire_const::FLAG_T_CLOSE_S
+    } else {
+        0
+    };
+    buf.append_byte(parent_flags | wire_const::T_MID_CLOSE)?;
+    Close { reason }.encode(&mut TxSink::new(buf))
 }
 
 /// R311y782 — the wire bytes a multicast group member puts on the group when

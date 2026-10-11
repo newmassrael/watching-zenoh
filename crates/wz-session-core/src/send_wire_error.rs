@@ -139,6 +139,24 @@ pub enum SendWireError {
     /// downstream crates surface a non-exhaustive-match warning rather
     /// than silently rebind a prior variant.
     FragmentTxBudgetExhausted,
+    /// Fixed-memory step S4 — the link refused the frame before it was built:
+    /// it lent no slot to encode it into
+    /// ([`LinkDropCause::NoTxSlot`](crate::link::LinkDropCause::NoTxSlot)), or
+    /// the frame is past the link's budget and the session has no heap to build
+    /// the fragment vectors in
+    /// ([`LinkDropCause::Oversize`](crate::link::LinkDropCause::Oversize)). NO bytes were
+    /// emitted, and the refusal is counted
+    /// ([`SessionLinkActions::tx_refusals`](crate::session_actions::SessionLinkActions::tx_refusals)),
+    /// so a dry pool is visible and never silent.
+    ///
+    /// Present only under `tx-lend-only`, the profile that has no heap frame to
+    /// fall back on: everywhere else a send the link cannot lend a slot for is
+    /// built on the heap and succeeds, so the variant would be unreachable
+    /// there. A property of the moment, as [`Self::FragmentTxBudgetExhausted`]
+    /// is: the pool refills as frames are written, and the same send repeated
+    /// finds a slot.
+    #[cfg(feature = "tx-lend-only")]
+    LinkRefused(crate::link::LinkDropCause),
 }
 
 impl fmt::Display for SendWireError {
@@ -178,6 +196,13 @@ impl fmt::Display for SendWireError {
                  fragments already on the wire are followed by a 0x3 Drop \
                  stop fragment so the peer releases its defragmentation \
                  buffer; retry once the budget is refilled",
+            ),
+            #[cfg(feature = "tx-lend-only")]
+            Self::LinkRefused(cause) => write!(
+                f,
+                "send_wire: the link refused the frame before it was built \
+                 ({cause:?}) — no bytes were emitted; the refusal is counted, \
+                 and the same send finds a slot once the pool refills"
             ),
         }
     }

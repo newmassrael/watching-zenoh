@@ -220,6 +220,18 @@ pub type EncodeBuf<'a> = dyn TxBuf + 'a;
 #[cfg(all(not(feature = "transport-tx-lend"), feature = "alloc"))]
 pub type EncodeBuf<'a> = alloc::vec::Vec<u8>;
 
+/// Whether this build is the LEND-ONLY profile (`tx-lend-only`, fixed-memory
+/// step S4): every frame the session sends is encoded into a slot its link
+/// lends, and a send for which none is lent is a counted refusal, never a frame
+/// built on the heap.
+///
+/// A constant and not only a `cfg`, so a crate that is written for the other
+/// profile can state the fact in one place and refuse the build that disagrees:
+/// the AP's `wz-runtime-tokio` falls back to a heap frame when its pool is dry,
+/// and a session that refused there instead would be a regression no test of
+/// the AP's own configuration could see.
+pub const TX_LEND_ONLY: bool = cfg!(feature = "tx-lend-only");
+
 impl<'a> TxSink<'a, EncodeBuf<'a>> {
     /// Wrap `buf`; the position starts at the buffer's current length.
     pub fn new(buf: &'a mut EncodeBuf<'a>) -> Self {

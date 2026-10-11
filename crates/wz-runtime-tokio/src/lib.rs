@@ -47,6 +47,19 @@ const _: () = assert!(
      `wz-session-core/bounded-heapless` (the MCU fixed backing) was unified into an AP build"
 );
 
+// And the same for the send side. The AP's links lend a slot when their pool has
+// one and otherwise the session builds the frame on the heap and sends it, so a
+// pool that runs dry costs a copy and never a message. `wz-session-core/
+// tx-lend-only` (fixed-memory step S4, the MCU profile) turns that fallback into
+// a counted refusal; a build graph that unified it into this crate would make a
+// busy AP link drop messages where it should have copied them, and nothing in
+// the AP's own configuration would show it.
+const _: () = assert!(
+    !wz_session_core::tx_buf::TX_LEND_ONLY,
+    "wz-runtime-tokio needs the heap fallback for a send the link lends no slot for; \
+     `wz-session-core/tx-lend-only` (the MCU lend-only profile) was unified into an AP build"
+);
+
 // R311mk — `session_glue` is the unicast handshake driver (it names the
 // `SessionFsmUnicast{Policy,Event}` types + drives `session_actions` /
 // `session_timeouts` / `drive`, all `session-unicast`-gated in
