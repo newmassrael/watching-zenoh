@@ -208,12 +208,31 @@ impl WsIo {
         }
     }
 
-    /// The connection, while it is whole.
-    fn tcp(&self) -> &TcpStream {
+    /// Ask the connection a question while it is whole. The socket is lent to
+    /// `ask` and never returned: this connection was tuned where it was dialled
+    /// or accepted, so an accessor that handed the `TcpStream` out would be a
+    /// second producer of one, which the per-link tuning seam gate
+    /// (`tcp_tuning_seam_gate.py`) rightly reads as an untuned socket.
+    fn ask_whole<R>(&self, ask: impl FnOnce(&TcpStream) -> R) -> R {
         match &self.read {
-            WsRead::Whole(tcp) => tcp,
+            WsRead::Whole(tcp) => ask(tcp),
             _ => unreachable!("a link is read as whole only before it is wired"),
         }
+    }
+
+    /// The local address of the connection, while it is whole.
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.ask_whole(TcpStream::local_addr)
+    }
+
+    /// The peer address of the connection, while it is whole.
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.ask_whole(TcpStream::peer_addr)
+    }
+
+    /// `TCP_NODELAY` as the connection holds it, while it is whole.
+    fn nodelay(&self) -> io::Result<bool> {
+        self.ask_whole(TcpStream::nodelay)
     }
 
     /// Keep the read half, route later writes to `control`, and hand back the
@@ -288,9 +307,12 @@ pub struct WsLink {
 }
 
 impl WsLink {
-    /// The TCP connection the link rides.
-    pub fn get_ref(&self) -> &TcpStream {
-        self.ws.get_ref().tcp()
+    /// `TCP_NODELAY` as the TCP connection under the link holds it, read back
+    /// off the socket itself. The socket is not handed out: it was tuned where
+    /// it was dialled or accepted, and a witness reads the option, not the
+    /// stream.
+    pub fn tcp_nodelay(&self) -> io::Result<bool> {
+        self.ws.get_ref().nodelay()
     }
 
     /// Which end of the connection this is.
@@ -348,14 +370,14 @@ pub fn wire_ws_stream(link: WsLink) -> (WsReadDriver, Arc<WsWriteDriver>, Writer
     let WsLink { mut ws, end } = link;
     // R311y453 — the §5.16 subject, off the TCP socket the WebSocket wraps,
     // read BEFORE the split takes ownership of the halves.
-    let tcp = ws.get_ref().tcp();
-    let subject = ip_link_subject(LinkKind::Ws, tcp.local_addr().ok());
+    let wire = ws.get_ref();
+    let subject = ip_link_subject(LinkKind::Ws, wire.local_addr().ok());
     // R311y473 — the adminspace `{src,dst}` pair, off the same wrapped TCP socket
     // and in the same before-the-split window.
     let endpoints = crate::link_interfaces::ip_link_endpoints(
         LinkKind::Ws,
-        tcp.local_addr().ok(),
-        tcp.peer_addr().ok(),
+        wire.local_addr().ok(),
+        wire.peer_addr().ok(),
     );
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
     let write = ws.get_mut().split_off(tx.clone());

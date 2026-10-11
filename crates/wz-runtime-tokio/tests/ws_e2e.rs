@@ -348,9 +348,10 @@ async fn a_ws_link_disables_nagle_on_both_the_dial_and_the_accept_half() {
         let DialedLink::Ws(ws) = link else {
             panic!("{half}: expected a WebSocket link");
         };
-        // `WebSocketStream::get_ref` is the TCP socket the RFC6455 framing rides.
+        // `tcp_nodelay` reads the option off the TCP socket the RFC6455
+        // framing rides.
         assert!(
-            ws.get_ref().nodelay().expect("read TCP_NODELAY back"),
+            ws.tcp_nodelay().expect("read TCP_NODELAY back"),
             "{half} half of a ws link left Nagle ON; zenoh sets TCP_NODELAY on \
              every TCP-backed link in its shared dial+accept constructor"
         );
