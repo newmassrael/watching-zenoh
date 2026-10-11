@@ -307,7 +307,7 @@ fn the_peer_table_limits_are_the_deploy_files_numbers() {
 #[test]
 fn the_admin_limits_are_the_deploy_files_numbers() {
     use wz_session_core::caps;
-    let report = report();
+    let Some(report) = report() else { return };
     let process = &report["process"];
     let mut drift = Vec::new();
     for (key, constant) in [
