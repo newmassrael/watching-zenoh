@@ -70,10 +70,12 @@ recorded on `unclassifiable()` itself; this paragraph described the discarded
 design for long enough that R2250 built a gate to stop prose naming machinery
 the code does not have.
 
-## Why the oracle kinds are a CLOSED set of two
+## Why the oracle kinds are a CLOSED set of three
 
-`file` and `program`, and each is exactly testable with one command on any
-machine -- which is what makes `--probe --host` possible at all. A kind whose
+`file`, `program` and `python-module` (a module `python3` can import, which a
+`program` row for `python3` alone would let a machine pass without), and each is
+exactly testable with one command on any machine -- which is what makes
+`--probe --host` possible at all. A kind whose
 presence could not be decided by a shell one-liner would be a row nobody could
 check remotely, and this file would be back to prose.
 """
@@ -99,8 +101,10 @@ ARMING = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+cargo\b")
 #: between this and the one above is what the prose test has to account for.
 ANY_ASSIGN = re.compile(r"\b(WZ_[A-Z0-9_]*REQUIRE[A-Z0-9_]*)=1\s+(\S+)")
 
-#: `flag -> (test file, oracles)`. An oracle is `("file", path)` or
-#: `("program", name)`.
+#: `flag -> (test file, oracles)`. An oracle is `("file", path)`,
+#: `("program", name)` or `("python-module", name)`. The test file is a name
+#: under `wz-integration-tests/tests`, or, when it holds a `/`, a path under
+#: `crates/` (a test of another crate that needs a host capability).
 #:
 #: The rows are declared and NOT believed: `--check` requires each oracle's
 #: string to occur in the named test's own source, so a default that moves in
@@ -131,9 +135,23 @@ ROWS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
             ("file", "/usr/include/google/protobuf/descriptor.proto"),
         ),
     ),
+    # The generated session-slot table compared with the deploy file through the
+    # deploy validator, which is a python3 program that imports PyYAML. Two
+    # oracles because `python3` can be present without the module (the hosted
+    # macOS and Windows legs are exactly that), and the module is the one a
+    # `python3` row alone would let a machine pass without.
+    "WZ_DEPLOY_REPORT_REQUIRE": (
+        "wz-session-core/tests/session_slot_pool_deploy.rs",
+        (("program", "python3"), ("python-module", "yaml")),
+    ),
 }
 
-KINDS = ("file", "program")
+KINDS = ("file", "program", "python-module")
+
+
+def test_path(test: str) -> pathlib.Path:
+    """A row's test file: a bare name is in `wz-integration-tests/tests`."""
+    return ROOT / "crates" / test if "/" in test else TESTS / test
 
 
 def armings(text: str) -> set[str]:
@@ -164,6 +182,8 @@ def unclassifiable(text: str) -> list[tuple[int, str, str]]:
 def probe_command(kind: str, name: str) -> str:
     if kind == "file":
         return f"test -r {shlex.quote(name)}"
+    if kind == "python-module":
+        return f"python3 -c {shlex.quote('import ' + name)} >/dev/null 2>&1"
     return f"command -v {shlex.quote(name)} >/dev/null 2>&1"
 
 
@@ -209,7 +229,7 @@ def check() -> int:
         )
 
     for flag, (test, oracles) in sorted(ROWS.items()):
-        path = TESTS / test
+        path = test_path(test)
         if not path.is_file():
             findings.append(f"`{flag}`'s row names `{test}`, which is not a file")
             continue
@@ -283,7 +303,7 @@ def probe(host: str | None) -> int:
                 continue
             seen.add((kind, name))
             ok = run_probe(kind, name, host)
-            print(f"  {'present' if ok else 'ABSENT ':8s} {kind:8s} {name}")
+            print(f"  {'present' if ok else 'ABSENT ':8s} {kind:13s} {name}")
             if not ok:
                 missing.append(f"{kind} {name} (armed by {flag})")
     where = host or "this machine"
@@ -296,7 +316,8 @@ def probe(host: str | None) -> int:
             print(f"  {m}")
         print(
             "  On a Debian-family host: `sudo apt-get install -y libpcap-dev "
-            "tcpdump netbase` covers every row this file declares."
+            "tcpdump netbase python3-yaml` covers the pcap, tcpdump and "
+            "PyYAML rows this file declares."
         )
         return 1
     print(f"  armed-oracle: {where} has every oracle the armed lanes demand")
@@ -383,6 +404,8 @@ def selftest() -> int:
         ("file", "/nonexistent/armed-oracle-probe/dlt.h", False),
         ("program", "sh", True),
         ("program", "armed-oracle-no-such-program", False),
+        ("python-module", "sys", True),
+        ("python-module", "armed_oracle_no_such_module", False),
     ]
     for kind, name, want in presence:
         got = run_probe(kind, name, None)
@@ -412,7 +435,8 @@ def selftest() -> int:
         f"arms, an assignment in neither shape, an oracle the test does not "
         f"name, a row naming none); a clean script carrying an arming AND both "
         f"shapes of prose about it passes; the presence test tells a present "
-        f"file and program from an absent one in all four directions; and an "
+        f"file, program and python module from an absent one in all six "
+        f"directions; and an "
         f"emptied table refuses to call a machine ready"
     )
     return 0

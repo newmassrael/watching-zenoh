@@ -9857,12 +9857,20 @@ layer_c1g_cargo_test_observer() {
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-batching,transport-fragmentation,transport-tx-lend --quiet -- -D warnings) || return 1
     # Round 3278 -- the generated session-slot table says what the deploy file
     # says: the validator's report of deploy/mcu_client_and_group.yaml is read by
-    # running it (python3 with PyYAML, a host without them FAILS) and each number
-    # is held equal to the committed `session_slot_pool_mcu` constant. 3 = what
-    # that command PRINTED: the equality, the comparison's own control, and the
-    # fit of every declared session in the generated slot.
-    _runci_guarded_test C1g 3 \
-        cargo test -p wz-session-core --test session_slot_pool_deploy --quiet || return 1
+    # running it (python3 with PyYAML) and each number is held equal to the
+    # committed `session_slot_pool_mcu` constant. A host without python3 and
+    # PyYAML skips the comparison, loudly, wherever the crate's whole suite runs
+    # (the macOS and Windows portability legs have neither), and libtest prints a
+    # skip as `ok`. So THIS lane, which owns the capability, arms
+    # WZ_DEPLOY_REPORT_REQUIRE=1, which turns the skip into a failure, and the
+    # count below can only be read from comparisons that ran. 8 = what that
+    # command PRINTED: the equality, the comparison's own control, the fit of
+    # every declared session in the generated slot, and the five witnesses of the
+    # skip decision itself (they need no Python). `cargo` stays on the line of
+    # the `env` prefix: that is the shape `armed_oracle_census.py` reads as an
+    # arming.
+    _runci_guarded_test C1g 8 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
+        --test session_slot_pool_deploy --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }

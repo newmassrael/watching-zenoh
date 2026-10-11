@@ -15,13 +15,31 @@
 //! a report that misreads the document all fail here, each naming the number.
 //!
 //! The report is read by RUNNING the validator, so the test needs `python3` with
-//! PyYAML on the host, exactly as `scripts/validate-deploy.sh` does. A host
-//! without them FAILS the test: a comparison that could not read its input must
-//! not pass for one that matched.
+//! PyYAML on the host, exactly as `scripts/validate-deploy.sh` does. This crate's
+//! tests also run where neither is a given (the macOS and Windows portability
+//! legs run the whole crate), so what the test does about a host without them is
+//! the repository's arming-flag rule, not a choice of its own:
+//!
+//! - the capability is MEASURED first, by asking `python3` to `import yaml`, so
+//!   "cannot read the deploy file here" is told apart from every way the
+//!   validator can fail once it runs (a refusal, a report that is not JSON, an
+//!   input it could not read): those FAIL on every host, armed or not;
+//! - a host that lacks it SKIPS, loudly (a line on stderr that libtest does not
+//!   capture, naming what was missing), unless `WZ_DEPLOY_REPORT_REQUIRE` is set,
+//!   when it FAILS: a comparison that could not read its input must not pass for
+//!   one that matched, on the lane that is meant to run it;
+//! - the lane that owns the capability arms it: Layer C1g, on the hosted Linux
+//!   job that provides python3 and PyYAML. libtest prints a skip as `ok`, so the
+//!   count guard there cannot tell a skip from a pass; the flag is what can.
+//!
+//! The decision is [`decide`], a function of two facts, with its own tests that
+//! need no Python.
 //!
 //! Nothing in the crate uses the generated table yet. Host-test level: no board
 //! runs it.
 
+use std::ffi::OsStr;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -32,13 +50,127 @@ use wz_session_core::session_slot_pool_mcu as generated;
 const DEPLOY_FILE: &str = "deploy/mcu_client_and_group.yaml";
 const MACHINE: &str = "mcu_node";
 
+/// The arming flag: set, this test FAILS on a host that cannot read the deploy
+/// file instead of skipping. [`required`] reads it under this exact name.
+const FLAG: &str = "WZ_DEPLOY_REPORT_REQUIRE";
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The validator's report of [`MACHINE`], parsed. Panics, never skips, when the
-/// validator cannot run or prints something that is not JSON.
-fn report() -> Value {
+/// Whether this host can run the validator.
+#[derive(Debug, PartialEq, Eq)]
+enum Capability {
+    Present,
+    /// Why not, in the words of whatever refused.
+    Absent(String),
+}
+
+/// What the test does about the capability.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Run,
+    /// The comparison did not happen; the text is the notice.
+    Skip(String),
+    /// The comparison could not happen on a host that must run it.
+    Fail(String),
+}
+
+/// The capability from the outcome of `python3 -c "import yaml"`: the exit code
+/// and stderr of the run, or the error that stopped it from starting. Of a
+/// traceback only its last line, the exception, goes into the reason.
+fn capability(probe: std::io::Result<(Option<i32>, String)>) -> Capability {
+    match probe {
+        Ok((Some(0), _)) => Capability::Present,
+        Ok((code, stderr)) => Capability::Absent(format!(
+            "python3 cannot import yaml (PyYAML): `python3 -c \"import yaml\"` exited {code:?}: {}",
+            stderr.trim().lines().last().unwrap_or("no output")
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Capability::Absent("python3 is not on PATH".to_string())
+        }
+        Err(e) => Capability::Absent(format!("python3 could not be started: {e}")),
+    }
+}
+
+/// Armed when [`FLAG`] is set to anything but nothing or `0`: the reading the
+/// repository's Python gates give their own flags.
+fn armed(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// The one decision: a host with the capability runs the comparison, one
+/// without it fails if it is armed and skips, saying so, if it is not.
+fn decide(capability: Capability, required: bool) -> Verdict {
+    match (capability, required) {
+        (Capability::Present, _) => Verdict::Run,
+        (Capability::Absent(why), true) => Verdict::Fail(format!(
+            "{FLAG} is set and the deploy file cannot be read here: {why}. The generated \
+             session-slot table is compared with the deploy file through the validator and \
+             there is no other reader, so a lane that armed this flag was asking for the \
+             comparison, not for a skip"
+        )),
+        (Capability::Absent(why), false) => Verdict::Skip(format!(
+            "{FLAG} is unset and the deploy file was not read, so the generated session-slot \
+             table was not compared with it: {why}; set {FLAG}=1 to make that a failure"
+        )),
+    }
+}
+
+/// The validator's report as JSON, or why what it printed is not one. The
+/// capability was measured before it ran, so EVERY failure here is a real one
+/// and no flag softens it: a refusal (exit 1), an input it could not read (exit
+/// 2, including its own "yaml module unavailable" after `import yaml` worked),
+/// and output that is not JSON.
+fn read_report(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Value, String> {
+    if code != Some(0) {
+        return Err(format!(
+            "deploy_sessions.py --report exited {code:?} (0 is a machine with no refusal, 2 an input it could not read)\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(stdout),
+            String::from_utf8_lossy(stderr),
+        ));
+    }
+    serde_json::from_slice(stdout).map_err(|e| format!("the report is not JSON: {e}"))
+}
+
+/// Whether the arming flag is set. The read is on one line with the name, which
+/// is the shape `scripts/lib/armed_skip_guard.py` recognises as a consumer; a
+/// value that is not UTF-8 still arms (`var_os`, never `var().ok()`).
+fn required() -> bool {
+    armed(std::env::var_os("WZ_DEPLOY_REPORT_REQUIRE").as_deref())
+}
+
+/// The skip notice, written to the stderr handle itself: libtest drops what a
+/// passing test `eprintln!`s, and a skip nobody can see is the silent pass the
+/// flag exists to prevent. [`report`] also `eprintln!`s it, which is the spelling
+/// `scripts/lib/silent_skip_gate.py` reads as a skip site, so a run with
+/// `--nocapture` shows it twice.
+fn announce(notice: &str) {
+    let _ = writeln!(std::io::stderr(), "skip: {notice}");
+}
+
+/// The validator's report of [`MACHINE`], parsed, or `None` when this host
+/// cannot read the deploy file and is not armed (a notice was printed). Panics
+/// when it is armed and cannot, and on every failure of the validator itself.
+fn report() -> Option<Value> {
+    let probe = Command::new("python3")
+        .args(["-c", "import yaml"])
+        .output()
+        .map(|o| {
+            (
+                o.status.code(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            )
+        });
+    match decide(capability(probe), required()) {
+        Verdict::Run => {}
+        Verdict::Skip(notice) => {
+            announce(&notice);
+            eprintln!("skip: {notice}");
+            return None;
+        }
+        Verdict::Fail(why) => panic!("{why}"),
+    }
     let root = repo_root();
     let output = Command::new("python3")
         .arg(root.join("scripts/lib/deploy_sessions.py"))
@@ -46,17 +178,11 @@ fn report() -> Value {
         .arg(root.join(DEPLOY_FILE))
         .arg(MACHINE)
         .output()
-        .expect(
-            "python3 must be on PATH: the deploy validator is how this test reads the deploy file",
-        );
-    assert!(
-        output.status.code() == Some(0),
-        "deploy_sessions.py --report exited {:?} (0 is a machine with no refusal, 2 an input it could not read)\nstdout: {}\nstderr: {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    serde_json::from_slice(&output.stdout).expect("the report is JSON")
+        .expect("python3 ran a moment ago and must run the validator");
+    match read_report(output.status.code(), &output.stdout, &output.stderr) {
+        Ok(report) => Some(report),
+        Err(why) => panic!("{why}"),
+    }
 }
 
 /// Every way `report` disagrees with the generated constants, one line each; an
@@ -98,7 +224,7 @@ fn drift(report: &Value) -> Vec<String> {
 /// The numbers of the deploy file's table ARE the generated constants.
 #[test]
 fn the_generated_table_holds_the_deploy_files_numbers() {
-    let report = report();
+    let Some(report) = report() else { return };
     let found = drift(&report);
     assert!(found.is_empty(), "{}", found.join("\n"));
 }
@@ -150,7 +276,7 @@ fn a_changed_number_is_named_by_the_comparison() {
 /// number of the alignment SCE carries into the slot type.
 #[test]
 fn every_declared_session_fits_the_generated_slot() {
-    let report = report();
+    let Some(report) = report() else { return };
     let sessions = report["sessions"].as_array().expect("sessions");
     assert!(!sessions.is_empty(), "the deploy file declares sessions");
     assert!(
@@ -169,4 +295,132 @@ fn every_declared_session_fits_the_generated_slot() {
         );
     }
     assert_eq!(generated::SLOT_SIZE % generated::ALIGNMENT as usize, 0);
+}
+
+// ---- the decision is held to its own witnesses, which need no Python ----------
+
+/// The three ways a host can lack the capability, as `capability` is given them:
+/// `import yaml` fails, `python3` is not there, `python3` cannot be started.
+fn absent_hosts() -> Vec<(&'static str, Capability)> {
+    use std::io::{Error, ErrorKind};
+    vec![
+        (
+            "yaml missing",
+            capability(Ok((
+                Some(1),
+                "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n\
+                 ModuleNotFoundError: No module named 'yaml'\n"
+                    .to_string(),
+            ))),
+        ),
+        (
+            "python3 absent",
+            capability(Err(Error::from(ErrorKind::NotFound))),
+        ),
+        (
+            "python3 not startable",
+            capability(Err(Error::from(ErrorKind::PermissionDenied))),
+        ),
+        ("python3 killed", capability(Ok((None, String::new())))),
+    ]
+}
+
+/// A host that lacks the capability skips when the flag is unset and FAILS when
+/// it is set, and the text of each names the flag and what was missing, so the
+/// skip is a line someone can act on and the failure says what the lane lost.
+#[test]
+fn a_host_that_cannot_read_the_deploy_file_skips_unarmed_and_fails_armed() {
+    for (name, absent) in absent_hosts() {
+        let Capability::Absent(why) = &absent else {
+            panic!("{name}: the probe's failure is an absence");
+        };
+        let why = why.clone();
+        assert!(!why.is_empty(), "{name}: the absence says why");
+        match decide(absent, false) {
+            Verdict::Skip(notice) => {
+                assert!(notice.contains(FLAG), "{name}: the notice names the flag");
+                assert!(notice.contains(&why), "{name}: it names {why:?}");
+                assert_eq!(notice.lines().count(), 1, "{name}: the notice is one line");
+            }
+            other => panic!("{name} unarmed must skip, got {other:?}"),
+        }
+    }
+    for (name, absent) in absent_hosts() {
+        let Capability::Absent(why) = &absent else {
+            unreachable!("checked above");
+        };
+        let why = why.clone();
+        match decide(absent, true) {
+            Verdict::Fail(message) => {
+                assert!(message.contains(FLAG), "{name}: the failure names the flag");
+                assert!(message.contains(&why), "{name}: it names {why:?}");
+            }
+            other => panic!("{name} armed must fail, got {other:?}"),
+        }
+    }
+}
+
+/// The capability is read from what the probe printed and nothing else: exit 0
+/// is the only presence, and a host that has it runs the comparison armed or not.
+#[test]
+fn a_host_that_can_read_the_deploy_file_runs_armed_or_not() {
+    assert_eq!(
+        capability(Ok((Some(0), String::new()))),
+        Capability::Present
+    );
+    assert_eq!(decide(Capability::Present, false), Verdict::Run);
+    assert_eq!(decide(Capability::Present, true), Verdict::Run);
+    for (name, absent) in absent_hosts() {
+        assert_ne!(absent, Capability::Present, "{name} is not a presence");
+    }
+}
+
+/// The flag arms on any value but nothing or `0`, so a flag exported as empty or
+/// zero does not arm and `1` (what the lane sets) does.
+#[test]
+fn the_flag_arms_on_anything_but_nothing_or_zero() {
+    assert!(!armed(None));
+    assert!(!armed(Some(OsStr::new(""))));
+    assert!(!armed(Some(OsStr::new("0"))));
+    assert!(armed(Some(OsStr::new("1"))));
+    assert!(armed(Some(OsStr::new("yes"))));
+}
+
+/// A failure of the validator ITSELF is not a missing capability: `read_report`
+/// takes no flag, so none of these can be skipped on any host. Exit 2 with the
+/// validator's own "yaml module unavailable" is among them on purpose: it comes
+/// after `import yaml` worked, so it contradicts the probe and is a defect.
+#[test]
+fn a_real_failure_of_the_validator_fails_on_every_host() {
+    let refusal = b"deploy_sessions: machine `mcu_node`: more sessions than slots\n";
+    let unavailable = b"deploy_sessions: python3 yaml module unavailable\n";
+    for (name, code, stdout, stderr) in [
+        ("a refusal", Some(1), &b""[..], &refusal[..]),
+        ("an unreadable input", Some(2), &b""[..], &unavailable[..]),
+        ("a signal", None, &b""[..], &b""[..]),
+        ("not JSON", Some(0), &b"not json"[..], &b""[..]),
+        ("empty", Some(0), &b""[..], &b""[..]),
+    ] {
+        assert!(
+            read_report(code, stdout, stderr).is_err(),
+            "{name} must be an error"
+        );
+    }
+    let report = read_report(Some(0), br#"{"pool": null}"#, b"").expect("a JSON report");
+    assert!(report["pool"].is_null());
+    let err = read_report(Some(1), b"", refusal).expect_err("a refusal");
+    assert!(
+        err.contains("more sessions than slots"),
+        "the text is kept: {err}"
+    );
+}
+
+/// The flag [`required`] reads is the one the notices name: the read is on a
+/// line of its own with the name spelled out, which is also what
+/// `scripts/lib/armed_skip_guard.py` looks for to count it a consumer.
+#[test]
+fn the_flag_is_read_under_the_name_the_notices_give() {
+    let source = include_str!("session_slot_pool_deploy.rs");
+    let read = format!("std::env::var_os(\"{FLAG}\")");
+    assert_eq!(source.matches(&read).count(), 1, "one read of {FLAG}");
 }
