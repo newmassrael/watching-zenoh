@@ -16103,7 +16103,9 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
     # registry probe link lwIP (a C build); that probe is also built by Q.0.
     local noalloc_name noalloc_target noalloc_cpu noalloc_machine noalloc_bin
     if command -v arm-none-eabi-nm >/dev/null 2>&1; then
-        while read -r noalloc_name noalloc_target; do
+        # The list is read on fd 3: a QEMU boot below reads stdin (`-nographic`)
+        # and would swallow the rest of it.
+        while read -r noalloc_name noalloc_target <&3; do
             if ! grep -q "^${noalloc_target}$" <<< "$installed"; then
                 _q_unavailable "Q.0n.${noalloc_name}.${noalloc_target}" \
                     "rustup target ${noalloc_target} absent" || fail=1
@@ -16133,7 +16135,7 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
                 "$noalloc_cpu" "$noalloc_machine" "$noalloc_bin"; then
                 fail=1
             fi
-        done < <(python3 scripts/lib/no_allocator_link_gate.py --list)
+        done 3< <(python3 scripts/lib/no_allocator_link_gate.py --list)
     else
         _q_unavailable "Q.0n" "arm-none-eabi-nm not on PATH" || fail=1
     fi

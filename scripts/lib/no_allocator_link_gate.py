@@ -692,7 +692,12 @@ ENTRY_RE = re.compile(
     r"|alloc_error_handler_should_panic|no_alloc_shim_is_unstable)"
     r"|__rdl_\w+|__rg_\w+)$"
 )
-IMPL_RE = re.compile(r"core::alloc::global::GlobalAlloc>::")
+IMPL_RE = re.compile(
+    r"core::alloc::global::GlobalAlloc>::"
+    # the heap crates themselves, so an `init` or a free-list walk that is not
+    # a GlobalAlloc method (and an impl inlined away) still names its heap
+    r"|(?<![\w])(?:embedded_alloc|linked_list_allocator|rlsf|talc|buddy_system_allocator)::"
+)
 ALLOC_CRATE_RE = re.compile(
     r"(?<![\w:])alloc::(?:alloc|raw_vec|vec|boxed|rc|sync|string|fmt|collections"
     r"|borrow|slice|str|ffi|task|ops)\b"
@@ -1535,6 +1540,13 @@ def _selftest() -> int:
         )
     )
     check(len(impl.impl) == 1, "a GlobalAlloc impl is class B")
+    heap_init = classify(
+        parse_nm(
+            CLEAN_NM + "00000610 00000100 t _RNvXs_Ix\n",
+            CLEAN_NM_C + "00000610 00000100 t embedded_alloc::llff::Heap::init\n",
+        )
+    )
+    check(len(heap_init.impl) == 1, "a heap crate's init is class B")
     glue = classify(
         parse_nm(
             CLEAN_NM + "00000700 00000020 t _RNvCs3_Gx\n",
