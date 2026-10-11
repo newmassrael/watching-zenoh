@@ -271486,6 +271486,68 @@
         "6. Option, not taken: install PyYAML on the macOS and Windows legs so the comparison runs there too (it is host-independent logic, only the reader is Python). Then those legs could arm the flag as well; today they only skip loudly."
       ]
     },
+    "Round 3282": {
+      "decision_summary": "The hosted C1bn red (udp_chaos_e2e, 'recovery Put not delivered within the ~6s budget') is a pre-existing test defect, not a regression and not a slow poll. It reproduces on 6c55e873 and on 2658d13c alike (1 in 100 unloaded each; 22% vs 26% with 8 copies on 2 cores, no significant difference), and no congestion or writer-queue code moved between them. Cause, measured with transport stats on an instrumented build: the datagram lane holds 2 frames and a droppable Put waits wait_before_drop (1 ms) for the writer task; the tests publish two oversize Puts back to back with the default Drop policy, so the recovery Put is congestion-dropped before it leaves the sender (stats read one dropped message in all 14 failing reorder runs; the acceptor saw no datagram of it). Repair: both Puts of the three chaos tests use CongestionControl::Block. The timeout is untouched. 0 of 208 runs fail under the same contention afterwards; a mutant that sends the recovery Put nowhere is red in all three tests.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs only (test code; no product change):",
+        "new helper lossless_put() = PublishOptions::put().with_congestion_control(CongestionControl::Block), used for both Puts of each of the three tests (lossy, duplicate, reordered);",
+        "the file gate gains feature pubsub-qos (with_congestion_control is gated on it; a default feature, so the C1l guard of 3 tests is unchanged);",
+        "a module note states why: the datagram lane holds DEFAULT_QUEUE_SIZE (2) frames, a droppable Put waits 1 ms, so back-to-back oversize Puts can be dropped at the sender, and what was measured.",
+        "The 200 x 30 ms delivery poll and its 6 s budget are unchanged: it is the failure detector for a Put that is truly lost.",
+        "No pin row moves (reason_review_pin_gate --check: OK, 13 rows). No test added, removed or renamed."
+      ],
+      "verification_bullets": [
+        "Ran (all builds and loops on pc3 via bx; none on this host):",
+        "A/B on the exact C1bn feature set of wz-runtime-tokio (82 features, whole crate build, --test udp_chaos_e2e), old 6c55e873 vs new 2658d13c, alternating runs of the whole 3-test binary. Unloaded, 100 runs each: old 99 pass 1 fail, new 99 pass 1 fail (the failing test was udp_reordered_fragment_aborts_then_channel_recovers in both, same panic text, ~6.3 s). Under contention (8 copies of the binary at once pinned to 2 cores, ABBA blocks of 104 runs): old 85/104 and 77/104 pass, new 71/104 and 82/104 pass; old fails 19+27=46 of 208, new 33+22=55 of 208 (22% vs 26%, same three tests, no significant difference).",
+        "Instrumented minimal-feature build (transport-fragmentation, transport-link-udp, transport-stats): 1 of 600 unloaded failed; in all 14 failing reorder runs under contention the sender stats read n_dropped 1 as soon as both publish calls returned, and the acceptor saw no datagram of the second Put. 150 + 150 runs under a 2-core taskset with 2 spinners did not fail (that contention is too weak to show it).",
+        "Fixed file (716b9df1) on the 82-feature set, 8 copies on 2 cores, 208 runs: 208 pass, max wall 405 ms. Mutant (recovery Put published to another keyexpr): 0 of 3 tests pass, each panics 'recovery Put not delivered within the ~6s budget'; mutant reverted, tree clean.",
+        "Sibling test files that publish oversize or fragmented Puts (udp_frag_e2e, layer3_reassembly_tx, namespace_reassembly_e2e, lowlatency_e2e, metadata_wire_e2e), same 8-on-2 contention, 104 runs each: all pass.",
+        "cargo fmt --all --check: ok. clippy -D warnings --all-targets -p wz-runtime-tokio --features transport-fragmentation: ok. A4: pass. reason_review_pin_gate --check: OK, no row moves.",
+        "Not run: the full hosted C1bn job; any other feature combination of clippy; Layer C1l (3-test guard is unchanged, no test added). The committed fix was also rebuilt after the mutant run and looped: 300 unloaded runs (150 per slot) all pass, and 208 runs at 8 copies on 2 cores all pass (max 537 ms). (A first 300-run loop was invalid: the mutant build had overwritten the same binary path, so all 300 failed; that is the mutant being red, not the fix.) Hosted CI is the only proof for the hosted runner's own contention."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open:",
+        "1. Merge branch fchaos (one commit, 716b9df1, test-only) into the next integration; read the hosted C1bn job of that push by job. If udp_chaos_e2e fails again, the next step is the sender stats (transport-stats) at the failure, as in this analysis.",
+        "2. The same class may exist elsewhere: any test that publishes several large Puts back to back with the default Drop policy over a datagram link (lane of 2 frames, 1 ms wait). The five sibling files above survived 104 contended runs each, so no repair is claimed for them; a type-wide derivation (publish call sites over datagram links without a congestion setting) was not done.",
+        "3. Product question for the owner, not changed here: a back-to-back burst of oversize Puts on a UDP session is dropped at the sender under load by default, as upstream's default does with its own queue; the wz default queue of 2 frames per lane (DEFAULT_QUEUE_SIZE) is smaller than one 3-fragment Put's worth of datagrams.",
+        "4. Removed: worktrees fchaos-old and fchaos-new, and every remote copy and scratch file of this work on pc3 (the fchaos worktree itself stays).",
+        "No environment was installed."
+      ],
+      "publishable_decision_summary": "The hosted C1bn red (udp_chaos_e2e, 'recovery Put not delivered within the ~6s budget') is a pre-existing test defect, not a regression and not a slow poll. It reproduces on 6c55e873 and on 2658d13c alike (1 in 100 unloaded each; 22% vs 26% with 8 copies on 2 cores, no significant difference), and no congestion or writer-queue code moved between them. Cause, measured with transport stats on an instrumented build: the datagram lane holds 2 frames and a droppable Put waits wait_before_drop (1 ms) for the writer task; the tests publish two oversize Puts back to back with the default Drop policy, so the recovery Put is congestion-dropped before it leaves the sender (stats read one dropped message in all 14 failing reorder runs; the acceptor saw no datagram of it). Repair: both Puts of the three chaos tests use CongestionControl::Block. The timeout is untouched. 0 of 208 runs fail under the same contention afterwards; a mutant that sends the recovery Put nowhere is red in all three tests.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs only (test code; no product change):",
+        "new helper lossless_put() = PublishOptions::put().with_congestion_control(CongestionControl::Block), used for both Puts of each of the three tests (lossy, duplicate, reordered);",
+        "the file gate gains feature pubsub-qos (with_congestion_control is gated on it; a default feature, so the C1l guard of 3 tests is unchanged);",
+        "a module note states why: the datagram lane holds DEFAULT_QUEUE_SIZE (2) frames, a droppable Put waits 1 ms, so back-to-back oversize Puts can be dropped at the sender, and what was measured.",
+        "The 200 x 30 ms delivery poll and its 6 s budget are unchanged: it is the failure detector for a Put that is truly lost.",
+        "No pin row moves (reason_review_pin_gate --check: OK, 13 rows). No test added, removed or renamed."
+      ],
+      "publishable_verification_bullets": [
+        "Ran (all builds and loops on pc3 via bx; none on this host):",
+        "A/B on the exact C1bn feature set of wz-runtime-tokio (82 features, whole crate build, --test udp_chaos_e2e), old 6c55e873 vs new 2658d13c, alternating runs of the whole 3-test binary. Unloaded, 100 runs each: old 99 pass 1 fail, new 99 pass 1 fail (the failing test was udp_reordered_fragment_aborts_then_channel_recovers in both, same panic text, ~6.3 s). Under contention (8 copies of the binary at once pinned to 2 cores, ABBA blocks of 104 runs): old 85/104 and 77/104 pass, new 71/104 and 82/104 pass; old fails 19+27=46 of 208, new 33+22=55 of 208 (22% vs 26%, same three tests, no significant difference).",
+        "Instrumented minimal-feature build (transport-fragmentation, transport-link-udp, transport-stats): 1 of 600 unloaded failed; in all 14 failing reorder runs under contention the sender stats read n_dropped 1 as soon as both publish calls returned, and the acceptor saw no datagram of the second Put. 150 + 150 runs under a 2-core taskset with 2 spinners did not fail (that contention is too weak to show it).",
+        "Fixed file (716b9df1) on the 82-feature set, 8 copies on 2 cores, 208 runs: 208 pass, max wall 405 ms. Mutant (recovery Put published to another keyexpr): 0 of 3 tests pass, each panics 'recovery Put not delivered within the ~6s budget'; mutant reverted, tree clean.",
+        "Sibling test files that publish oversize or fragmented Puts (udp_frag_e2e, layer3_reassembly_tx, namespace_reassembly_e2e, lowlatency_e2e, metadata_wire_e2e), same 8-on-2 contention, 104 runs each: all pass.",
+        "cargo fmt --all --check: ok. clippy -D warnings --all-targets -p wz-runtime-tokio --features transport-fragmentation: ok. A4: pass. reason_review_pin_gate --check: OK, no row moves.",
+        "Not run: the full hosted C1bn job; any other feature combination of clippy; Layer C1l (3-test guard is unchanged, no test added). The committed fix was also rebuilt after the mutant run and looped: 300 unloaded runs (150 per slot) all pass, and 208 runs at 8 copies on 2 cores all pass (max 537 ms). (A first 300-run loop was invalid: the mutant build had overwritten the same binary path, so all 300 failed; that is the mutant being red, not the fix.) Hosted CI is the only proof for the hosted runner's own contention."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open:",
+        "1. Merge branch fchaos (one commit, 716b9df1, test-only) into the next integration; read the hosted C1bn job of that push by job. If udp_chaos_e2e fails again, the next step is the sender stats (transport-stats) at the failure, as in this analysis.",
+        "2. The same class may exist elsewhere: any test that publishes several large Puts back to back with the default Drop policy over a datagram link (lane of 2 frames, 1 ms wait). The five sibling files above survived 104 contended runs each, so no repair is claimed for them; a type-wide derivation (publish call sites over datagram links without a congestion setting) was not done.",
+        "3. Product question for the owner, not changed here: a back-to-back burst of oversize Puts on a UDP session is dropped at the sender under load by default, as upstream's default does with its own queue; the wz default queue of 2 frames per lane (DEFAULT_QUEUE_SIZE) is smaller than one 3-fragment Put's worth of datagrams.",
+        "4. Removed: worktrees fchaos-old and fchaos-new, and every remote copy and scratch file of this work on pc3 (the fchaos worktree itself stays).",
+        "No environment was installed."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
