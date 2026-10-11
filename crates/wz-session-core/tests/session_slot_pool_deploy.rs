@@ -104,10 +104,23 @@ fn the_generated_table_holds_the_deploy_files_numbers() {
 }
 
 /// The comparison is not vacuous: each number changed on its own is named, so a
-/// drift of any one of them is what fails the test above.
+/// drift of any one of them is what fails the test above. The starting point is
+/// built from the generated constants, not read from the deploy file, so this
+/// control stays green when the deploy file and the generated file have drifted
+/// apart (which is when the test above must be the one that is red).
 #[test]
 fn a_changed_number_is_named_by_the_comparison() {
-    let report = report();
+    let slots = generated::SLOT_COUNT as u64;
+    let size = generated::SLOT_SIZE as u64;
+    let report = serde_json::json!({
+        "pool": {
+            "generated": true,
+            "max_sessions": slots,
+            "slot_bytes": size,
+            "total_bytes": slots * size,
+        }
+    });
+    assert!(drift(&report).is_empty(), "the constructed report agrees");
     for (key, name) in [
         ("max_sessions", "max_sessions / SLOT_COUNT"),
         ("slot_bytes", "slot_bytes / SLOT_SIZE"),
