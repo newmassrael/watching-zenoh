@@ -439,6 +439,15 @@ impl TxPools {
         self.classes.iter().any(|c| c.has_room())
     }
 
+    /// Whether a class that holds a frame of `need` bytes may hand out one more
+    /// slot: [`Self::has_room`] for THAT frame. A frame only the large class
+    /// holds gets no room from a small class with slots to spare.
+    pub fn has_room_for(&self, need: usize) -> bool {
+        self.classes
+            .iter()
+            .any(|c| c.slot_size() >= need && c.has_room())
+    }
+
     /// A slot for a frame of `need` bytes: the smallest class that holds it and
     /// has room, else the next larger one. Its class, index and first byte.
     pub fn acquire(&mut self, need: usize) -> Option<(usize, usize, *mut u8)> {

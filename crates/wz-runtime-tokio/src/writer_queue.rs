@@ -353,7 +353,11 @@ struct Batch {
     cap: usize,
     /// First byte of the slot, from the pool.
     base: usize,
-    /// Bytes of whole frames written into it.
+    /// R3250 — where the first frame starts in the slot: 0, except for a frame
+    /// a link framed around its message in place ([`OutboundTx::commit_from`]),
+    /// which starts where its header begins. Only a non-packing batch has any.
+    offset: usize,
+    /// Bytes of whole frames written into it, from `offset`.
     fill: usize,
     /// A lend is encoding a frame at `fill`: nothing else may write the slot,
     /// and the writer may not take it until the lend is committed or given back.
@@ -582,7 +586,7 @@ impl LaneState {
                     Out::Slot {
                         class: batch.class,
                         idx: batch.idx,
-                        base: base as usize,
+                        base: base as usize + batch.offset,
                         len: batch.fill,
                     },
                 )
@@ -601,6 +605,20 @@ impl LaneState {
             return pool.has_room();
         }
         true
+    }
+
+    /// R3250 — [`Self::slot_room`] once the frame's size is known: a slot of a
+    /// class that holds `need` bytes, which is what a sender that is already
+    /// waiting for a slot of its own must see before it goes on. Asking the
+    /// question for ANY class here let a sender that needs the large class
+    /// stop waiting because the small one had a slot, find none large, and go
+    /// round again at full speed.
+    #[cfg(feature = "runtime-zero-copy")]
+    fn slot_room_for(&self, need: usize) -> bool {
+        match self.pool.as_ref() {
+            Some(pool) => pool.has_room_for(need),
+            None => true,
+        }
     }
 
     /// R2923 — the answer to `wait` on `lane` if it needs no waiting: the
@@ -1084,7 +1102,7 @@ impl OutboundTx {
                 } else {
                     let Some((class, idx, base)) = pool.acquire(room) else {
                         drop(guard);
-                        if !self.wait_for_slot() {
+                        if !self.wait_for_slot(room) {
                             return Err(PooledSendError::Closed);
                         }
                         continue;
@@ -1113,6 +1131,7 @@ impl OutboundTx {
                         idx,
                         cap,
                         base,
+                        offset: 0,
                         fill: written,
                         lent: false,
                     }));
@@ -1173,6 +1192,7 @@ impl OutboundTx {
                         idx,
                         cap,
                         base,
+                        offset: 0,
                         fill: 0,
                         lent: true,
                     }));
@@ -1184,7 +1204,7 @@ impl OutboundTx {
                     });
                 }
             }
-            if !self.wait_for_slot() {
+            if !self.wait_for_slot(need) {
                 return None;
             }
         }
@@ -1195,7 +1215,30 @@ impl OutboundTx {
     /// when the queue has closed since the lend, as [`Self::send`] refuses; the
     /// slot then goes home if nothing else is in it.
     pub fn commit(&self, lend: TxLend, len: usize) -> Result<(), PooledSendError> {
-        debug_assert!(len <= lend.cap, "a lent frame stays inside its lend");
+        self.commit_at(lend, 0, len)
+    }
+
+    /// R3250 — [`Self::commit`] for a frame that starts `start` bytes into the
+    /// lend instead of at its first byte: a link that frames a message around
+    /// its payload in place (the WebSocket link writes the RFC 6455 header just
+    /// before the payload the session encoded, so the slot IS the wire frame)
+    /// queues what lies in `[start, start + len)`. Datagram pools only, where a
+    /// slot holds one frame; a packing pool's frames follow one another from
+    /// the batch's start.
+    pub fn commit_from(
+        &self,
+        lend: TxLend,
+        start: usize,
+        len: usize,
+    ) -> Result<(), PooledSendError> {
+        self.commit_at(lend, start, len)
+    }
+
+    fn commit_at(&self, lend: TxLend, start: usize, len: usize) -> Result<(), PooledSendError> {
+        debug_assert!(
+            start + len <= lend.cap,
+            "a lent frame stays inside its lend"
+        );
         let (result, freed) = {
             let mut guard = self.shared.state.lock().expect("outbound lanes poisoned");
             let st = &mut *guard;
@@ -1218,6 +1261,13 @@ impl OutboundTx {
                 }
                 (Err(PooledSendError::Closed), goes_home)
             } else {
+                if start > 0 {
+                    debug_assert!(
+                        batch.fill == 0 && lend.base == batch.base,
+                        "only a slot's one frame starts past the slot's first byte"
+                    );
+                    batch.offset = start;
+                }
                 batch.fill += len;
                 let class = batch.class;
                 st.occupied[lend.lane] += len;
@@ -1264,18 +1314,18 @@ impl OutboundTx {
         }
     }
 
-    /// Wait until the pool has a free slot (`true`) or the queue closes
-    /// (`false`). On a multi-thread runtime the wait releases the worker, as
-    /// [`Self::link_room`]'s does and for the same reason: the writer that frees
-    /// the slot may be queued behind the waiter.
-    fn wait_for_slot(&self) -> bool {
+    /// Wait until the pool has a free slot for a frame of `need` bytes (`true`)
+    /// or the queue closes (`false`). On a multi-thread runtime the wait
+    /// releases the worker, as [`Self::link_room`]'s does and for the same
+    /// reason: the writer that frees the slot may be queued behind the waiter.
+    fn wait_for_slot(&self, need: usize) -> bool {
         let wait = || {
             let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
             loop {
                 if st.closed {
                     return false;
                 }
-                if st.slot_room() {
+                if st.slot_room_for(need) {
                     return true;
                 }
                 st = self.shared.room.wait(st).expect("outbound lanes poisoned");
@@ -1320,7 +1370,22 @@ impl LendTable {
         max: usize,
         priority: Priority,
     ) -> Option<wz_session_core::link::TxSlotGrant> {
-        let lend = tx.lend(priority, want.min(max))?;
+        self.acquire_with_headroom(tx, want, max, 0, priority)
+    }
+
+    /// R3250 — [`Self::acquire`] for a link that frames each message in place:
+    /// the lend is `headroom` bytes longer, and the grant says the message
+    /// starts that far into the slot, so the link can write its header in front
+    /// of it ([`OutboundTx::commit_from`]). `max` is the most the MESSAGE may be.
+    pub fn acquire_with_headroom(
+        &self,
+        tx: &OutboundTx,
+        want: usize,
+        max: usize,
+        headroom: usize,
+        priority: Priority,
+    ) -> Option<wz_session_core::link::TxSlotGrant> {
+        let lend = tx.lend(priority, headroom + want.min(max))?;
         let mut table = self.lent.lock().expect("lent slots poisoned");
         let (slots, free) = &mut *table;
         let number = match free.pop() {
@@ -1333,7 +1398,7 @@ impl LendTable {
         slots[number as usize] = Some(lend);
         Some(wz_session_core::link::TxSlotGrant {
             slot: wz_session_core::link::TxSlot(number),
-            headroom: 0,
+            headroom,
         })
     }
 
@@ -1347,7 +1412,7 @@ impl LendTable {
     }
 
     /// Take lent slot `slot` back out of the table.
-    fn take(&self, slot: wz_session_core::link::TxSlot) -> TxLend {
+    pub fn take(&self, slot: wz_session_core::link::TxSlot) -> TxLend {
         let mut table = self.lent.lock().expect("lent slots poisoned");
         let (slots, free) = &mut *table;
         let lend = slots[slot.0 as usize]
@@ -1471,6 +1536,29 @@ impl OutboundRx {
             .lock()
             .expect("outbound lanes poisoned")
             .give_spare(frame);
+    }
+
+    /// R3250 — the pool's counters, its free slots and its capacity, by the
+    /// pool's own count, read from the receiving half; `None` on a heap queue.
+    #[cfg(feature = "runtime-zero-copy")]
+    pub fn tx_pool_stats(&self) -> Option<(TxPoolStats, usize, usize)> {
+        let st = self.shared.state.lock().expect("outbound lanes poisoned");
+        st.pool
+            .as_ref()
+            .map(|pool| (pool.stats(), pool.free_count(), pool.capacity()))
+    }
+
+    /// R3250 — the writer has written `wire` out: a heap frame's buffer is kept
+    /// to be lent again ([`Self::recycle`]); a pooled frame's slot goes home
+    /// through the completion edge, counted as written. For a writer that holds
+    /// the receiving half itself (the multicast transmit task) as well as for
+    /// [`OutboundQueue::recycle_wire`].
+    pub fn recycle_wire(&self, wire: WireFrame) {
+        match wire.0 {
+            Wire::Heap(bytes) => self.recycle(bytes),
+            #[cfg(feature = "runtime-zero-copy")]
+            Wire::Slot(mut slot) => slot.written = true,
+        }
     }
 
     /// The next frame, highest priority first; `None` once the queue is
@@ -1662,10 +1750,9 @@ impl WireFrame {
         }
     }
 
-    /// R3240 / R3250 — the frame as `bytes::Bytes` for a library that takes
-    /// ownership of the buffer it sends (quinn's `send_datagram`, tungstenite's
-    /// `Message::Binary`). A heap frame's vector
-    /// moves in; a pooled frame's SLOT moves in as the `Bytes`' owner
+    /// R3240 — the frame as `bytes::Bytes` for a library that takes
+    /// ownership of the buffer it sends (quinn's `send_datagram`). A heap
+    /// frame's vector moves in; a pooled frame's SLOT moves in as the `Bytes`' owner
     /// (`Bytes::from_owner`), so the library reads the slot in place and the
     /// slot goes home through the completion edge when the library drops the
     /// last clone: the write ended when the library has done with the bytes,
@@ -1675,10 +1762,7 @@ impl WireFrame {
     /// The one allocation this costs is the library's, not a copy: `from_owner`
     /// boxes its owner (bytes 1.11 `Bytes::from_owner`), one small allocation
     /// per frame and no copy of the frame's bytes.
-    #[cfg(any(
-        feature = "transport-link-quic-datagram",
-        feature = "transport-link-ws"
-    ))]
+    #[cfg(feature = "transport-link-quic-datagram")]
     pub fn into_bytes(mut self) -> bytes::Bytes {
         self.begin_write();
         match self.0 {
@@ -1695,19 +1779,13 @@ impl WireFrame {
 /// R3240 — a writer's slot as the owner of a `bytes::Bytes`.
 #[cfg(all(
     feature = "runtime-zero-copy",
-    any(
-        feature = "transport-link-quic-datagram",
-        feature = "transport-link-ws"
-    )
+    feature = "transport-link-quic-datagram"
 ))]
 struct SlotBytes(SlotWire);
 
 #[cfg(all(
     feature = "runtime-zero-copy",
-    any(
-        feature = "transport-link-quic-datagram",
-        feature = "transport-link-ws"
-    )
+    feature = "transport-link-quic-datagram"
 ))]
 impl AsRef<[u8]> for SlotBytes {
     fn as_ref(&self) -> &[u8] {
@@ -1903,11 +1981,7 @@ impl OutboundQueue {
     /// to be lent again ([`Self::recycle`]); a pooled frame's slot goes home
     /// through the completion edge, counted as written.
     pub fn recycle_wire(&self, wire: WireFrame) {
-        match wire.0 {
-            Wire::Heap(bytes) => self.rx.recycle(bytes),
-            #[cfg(feature = "runtime-zero-copy")]
-            Wire::Slot(mut slot) => slot.written = true,
-        }
+        self.rx.recycle_wire(wire);
     }
 
     /// Take the next frame, or `None` once the queue is finished.
@@ -2705,5 +2779,95 @@ mod tests {
             rest.push(frame[0]);
         }
         assert_eq!(rest, [1, 2, 3, 4]);
+    }
+
+    /// The CPU time a thread of this process has used, in clock ticks, read off
+    /// its own `/proc` entry.
+    #[cfg(all(feature = "runtime-zero-copy", target_os = "linux"))]
+    fn thread_cpu_ticks(tid: u32) -> u64 {
+        let stat = std::fs::read_to_string(format!("/proc/self/task/{tid}/stat"))
+            .expect("the thread's stat");
+        // The command name is parenthesised and may hold spaces; the fields
+        // after it start at the state, which is field 3, so utime and stime
+        // (fields 14 and 15) are the 12th and 13th after the closing bracket.
+        let after = &stat[stat.rfind(')').expect("the comm field ends") + 2..];
+        let field = |n: usize| -> u64 {
+            after
+                .split_whitespace()
+                .nth(n)
+                .and_then(|f| f.parse().ok())
+                .expect("a numeric stat field")
+        };
+        field(11) + field(12)
+    }
+
+    /// A sender that needs a slot of a class whose budget is spent WAITS for the
+    /// writer, as it waits when the whole pool is spent: it does not poll.
+    ///
+    /// The wait used to ask "does ANY class have a slot to take", and the small
+    /// class always did, so a frame that only the large class holds found the
+    /// wait over at once, found no large slot, and went round again: a thread
+    /// spinning at full CPU until the writer happened to free a large slot.
+    /// Measured here as the waiter's own CPU time while it waits, which is
+    /// near nothing parked and most of the interval spinning.
+    #[cfg(all(feature = "runtime-zero-copy", target_os = "linux"))]
+    #[test]
+    fn a_lend_for_a_spent_class_parks_instead_of_spinning() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, mut rx) = outbound_channel_datagram_with_capacity([2; Priority::NUM], 1450);
+        let past_small = TxPools::datagram().slot_size(0) + 1;
+        let mut held = 0;
+        while tx
+            .tx_class_stats(1)
+            .is_some_and(|(_, free, budget)| free > 0 && held < budget)
+        {
+            let lend = tx
+                .lend(Priority::DEFAULT, past_small)
+                .expect("a large slot");
+            tx.commit(lend, 1).expect("queued");
+            held += 1;
+        }
+        assert!(held > 0, "CONTROL: the large class was spent by lends");
+        assert!(
+            tx.tx_class_stats(0).is_some_and(|(_, free, _)| free > 0),
+            "CONTROL: the small class still has a slot, which is what fooled the wait"
+        );
+
+        let waiter_tx = tx.clone();
+        let (tid_tx, tid_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let tid = std::fs::read_link("/proc/thread-self")
+                .expect("this thread's proc entry")
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.parse::<u32>().ok())
+                .expect("a tid");
+            tid_tx.send(tid).expect("main is listening");
+            let lend = waiter_tx.lend(Priority::DEFAULT, past_small);
+            let got = lend.is_some();
+            if let Some(lend) = lend {
+                waiter_tx.abort_lend(lend);
+            }
+            got
+        });
+        let tid = tid_rx.recv_timeout(Duration::from_secs(10)).expect("a tid");
+        let start = thread_cpu_ticks(tid);
+        std::thread::sleep(Duration::from_millis(400));
+        let spent = thread_cpu_ticks(tid) - start;
+        assert!(!waiter.is_finished(), "the lend waits for a large slot");
+        // At 100 ticks a second a spinning thread uses about 40 of these.
+        assert!(
+            spent <= 4,
+            "the waiting lend used {spent} ticks of CPU in 400 ms"
+        );
+
+        // The writer takes one large frame and is done with it: the waiter lends.
+        drop(rx.try_recv_wire_tagged().expect("a queued frame").1);
+        assert!(
+            waiter.join().expect("the waiter ends"),
+            "it was lent a slot"
+        );
     }
 }
