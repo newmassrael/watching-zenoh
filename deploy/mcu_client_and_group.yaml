@@ -57,6 +57,30 @@ machines:
       local_queryables: 8
       pending_queries: 8
       tx_queue: 16
+      # Per-session limits that name a constant the tree has today
+      # (tx_lend_slots is wz-session-lwip's LENT_MAX) or one a growable table
+      # makes unbounded on this profile (the rest). No code reads these numbers
+      # yet; `scripts/lib/deploy_sessions.py` is where each key is defined, and
+      # a session may lower any of them in its own `limits`, never raise one.
+      tx_lend_slots: 2
+      peer_keyexpr_aliases: 16
+      remote_decls: 16
+      pending_replies: 8
+      pending_finals: 8
+      reply_payload_bytes: 1024
+
+    # The table the machine's sessions live in (Round 3278). `ref` names the
+    # SCE document whose `slot-count` is MAX_SESSIONS and whose `slot-size` is
+    # one session slot's byte ceiling, so the RAM of every session is that
+    # document's SLOT_COUNT * SLOT_SIZE and no other number: the validator
+    # checks the sessions below against it, and a host test holds it equal to
+    # the generated constants. `process` is what belongs to no session.
+    session_pool:
+      ref: session_slot_pool_mcu
+      process:
+        max_tasks: 8
+        max_timers: 16
+        admin_reply_bytes: 1024
 
     sessions:                          # one entry per session, in start order
       - name: to_router

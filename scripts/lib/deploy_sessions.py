@@ -71,6 +71,50 @@ machines.<m>.sessions[i]
 
 Any other key in a session is refused by name.
 
+## The session pool (Round 3278): how many sessions, and the one RAM number
+
+A fixed-memory machine holds its sessions in a static table of N slots, each
+big enough for ONE session whatever its transport. A machine with no
+`session_pool:` key is read exactly as above and nothing below applies.
+
+machines.<m>.session_pool
+    ref         the SSOT document of the table, a `sources/**/<name>.scxml`
+                buffer-pool: its `slot-count` is MAX_SESSIONS and its
+                `slot-size` is the byte CEILING of one session slot (the typed
+                slot, its link socket and its reassembly staging together).
+                SCE emits both as `SLOT_COUNT` / `SLOT_SIZE`, and the numbers
+                live ONLY in that document, as every other pool's do.
+    max_sessions, slot_bytes
+                the inline form of the same two numbers, positive integers,
+                for a machine whose document does not exist yet. It is read and
+                budgeted here and generates nothing; `ref` and the inline pair
+                together are refused.
+    process     numbers that belong to no session: `max_tasks`, `max_timers`,
+                `admin_reply_bytes`, each a positive integer.
+
+What the table adds to the checks above:
+
+    count       the sessions the machine declares must fit `max_sessions`; a
+                listening session claims `accept.max_sessions` slots and any
+                other session one.
+    budget      the pools one session takes (`session_rx_pool` and
+                `reassembly_pool`, the session's own or else the machine's or
+                else the profile's default) may not add up to more than
+                `slot_bytes`: they are PART of the slot, so a slot smaller
+                than they are cannot hold the session. The table's RAM is
+                `max_sessions * slot_bytes`, one number; whether the typed
+                part also fits is `core::mem::size_of` of the slot, which only
+                the compiler can say and the consuming crate asserts against
+                the same `SLOT_SIZE`.
+    limits      the machine's `limits` may name only the keys in
+                `LIMIT_KEYS`, and a session's own `limits` may only LOWER the
+                machine's value: the slot is sized by the machine's number, so
+                a larger override would be a table the slot cannot hold.
+
+`deploy_sessions.py --report <deploy.yaml> <machine>` prints the resolved
+numbers and every refusal of one machine as JSON (see `session_pool_report`),
+which is what an editor of the file shows beside its keys.
+
 ## The AP column (`platform.class: ap`)
 
 Open-debt item 900 again: `wz-ap-demo --sessions <file>` starts every session
@@ -90,13 +134,17 @@ differently, the rule is stated here, once:
                 apply one to, so an override would be read and do nothing.
     buffer_pools  refused. An AP session has no pools of its own: link buffers
                 are the process's shared link-RX arena.
+    session_pool  refused. An AP holds its sessions as tasks over a growable
+                heap, so there is no table to size.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -123,6 +171,46 @@ UNICAST_ONLY = ("connect", "listen", "accept")
 MULTICAST_ONLY = ("group",)
 SESSION_POOLS = frozenset({"session_rx_pool", "session_tx_pool", "reassembly_pool"})
 GROUP_KEYS = frozenset({"endpoint", "join_interval_ms", "lease_ms"})
+
+# Round 3278 -- the session pool. Every name below is a key the editor of a
+# deploy file offers, so each carries the constant it will set. EXISTING means
+# the constant is in the tree today and the key only gives it a number a
+# deploy can state; NEW means the limit has no constant yet (it is a growable
+# table or an unbounded buffer on the MCU profile today).
+POOL_KEYS = frozenset({"ref", "max_sessions", "slot_bytes", "process"})
+PROCESS_KEYS = frozenset({"max_tasks", "max_timers", "admin_reply_bytes"})
+LIMIT_KEYS = frozenset(
+    {
+        # The seven keys every deploy has declared since the first skeleton.
+        "peer_table",
+        "multicast_peer_table",
+        "local_subscriptions",  # EXISTING caps::MAX_SUBSCRIPTIONS
+        "local_queryables",  # EXISTING caps::MAX_QUERYABLES
+        "pending_queries",  # EXISTING caps::MAX_PENDING_QUERIES
+        "in_flight_reassembly",
+        "tx_queue",
+        # Existing caps that had no key.
+        "inbound_sub_interests",  # EXISTING caps::MAX_INBOUND_SUB_INTERESTS
+        "pending_declares",  # EXISTING caps::MAX_PENDING_DECLARES
+        "keyexpr_bytes",  # EXISTING caps::MAX_KEYEXPR_BYTES
+        # Per-session limits with no constant today.
+        "tx_lend_slots",  # EXISTING wz-session-lwip driver.rs LENT_MAX (private)
+        "peer_keyexpr_aliases",  # NEW: the peer alias table is an unbounded HashMap
+        "remote_decls",  # NEW: the remote declaration tables are unbounded HashMaps
+        "pending_replies",  # NEW
+        "pending_finals",  # NEW
+        "reply_payload_bytes",  # NEW
+    }
+)
+# The two pools whose bytes are part of ONE session's slot, and the document
+# each takes when neither the session nor the machine names one (the MCU
+# profile's defaults, `deploy/mcu_target.yaml`).
+SLOT_POOLS = ("session_rx_pool", "reassembly_pool")
+DEFAULT_SLOT_POOL_REF = {
+    "session_rx_pool": "session_rx_pool_mcu",
+    "reassembly_pool": "reassembly_pool_mcu",
+}
+SCE_NS = "{http://sce.dev/ext}"
 
 
 def zid_problem(value: object) -> str | None:
@@ -221,7 +309,7 @@ def _pool_problem(repo_root: Path, value: object) -> str | None:
     return None
 
 
-def validate_machine(
+def _validate_zid_and_sessions(
     machine_name: str, machine: dict, repo_root: Path
 ) -> list[str]:
     """Every refusal for one machine's `zid` and `sessions`; [] when it passes."""
@@ -437,6 +525,314 @@ def validate_machine(
                     if why:
                         errors.append(f"{path}.buffer_pools.{key}: {why}")
     return errors
+
+
+def validate_machine(
+    machine_name: str, machine: dict, repo_root: Path
+) -> list[str]:
+    """Every refusal for one machine's `zid`, `sessions` and `session_pool`."""
+    return _validate_zid_and_sessions(
+        machine_name, machine, repo_root
+    ) + session_pool_problems(machine_name, machine, repo_root)
+
+
+# ---------------------------------------------------------------------------
+# Round 3278 -- the session pool
+# ---------------------------------------------------------------------------
+
+
+def pool_document_dims(repo_root: Path, ref: str) -> tuple[int, int] | str:
+    """`(slot_count, slot_size)` of the buffer-pool document `ref`, or why not.
+
+    The numbers are read from the document itself, which is their only home:
+    this module never restates one.
+    """
+    paths = sorted((repo_root / "sources").rglob(f"{ref}.scxml"))
+    if not paths:
+        return f"`ref: {ref}` names no `sources/**/{ref}.scxml`"
+    try:
+        root = ET.parse(paths[0]).getroot()
+    except ET.ParseError as e:
+        return f"`{paths[0].name}` does not parse: {e}"
+    if root.get(f"{SCE_NS}kind") != "buffer-pool":
+        return f"`{ref}` is not an `sce:kind=\"buffer-pool\"` document"
+    dims = []
+    for tag in ("slot-count", "slot-size"):
+        node = root.find(f"{SCE_NS}{tag}")
+        text = node.text.strip() if node is not None and node.text else ""
+        if not text.isdigit() or int(text) == 0:
+            return f"`{ref}` has no positive `<sce:{tag}>`"
+        dims.append(int(text))
+    return dims[0], dims[1]
+
+
+def _pool_numbers(
+    repo_root: Path, pool: dict
+) -> tuple[dict | None, list[tuple[str, str]]]:
+    """The table's resolved numbers, and `(key, why)` for every refusal."""
+    problems: list[tuple[str, str]] = []
+    inline = sorted({"max_sessions", "slot_bytes"} & set(pool))
+    if "ref" in pool:
+        if inline:
+            problems.append(
+                (
+                    "ref",
+                    f"a `ref` pool takes no {' or '.join(f'`{k}`' for k in inline)}; "
+                    "the document holds them",
+                )
+            )
+            return None, problems
+        ref = pool["ref"]
+        if not isinstance(ref, str) or not NAME_RE.match(ref):
+            problems.append(("ref", "must name a buffer-pool document"))
+            return None, problems
+        dims = pool_document_dims(repo_root, ref)
+        if isinstance(dims, str):
+            problems.append(("ref", dims))
+            return None, problems
+        return (
+            {
+                "ref": ref,
+                "generated": True,
+                "max_sessions": dims[0],
+                "slot_bytes": dims[1],
+            },
+            problems,
+        )
+    if not inline:
+        problems.append(
+            (
+                "ref",
+                "required: a buffer-pool document, or `max_sessions` with `slot_bytes`",
+            )
+        )
+        return None, problems
+    for key in ("max_sessions", "slot_bytes"):
+        if key not in pool:
+            problems.append((key, "required beside the other inline number"))
+        elif not _positive_int(pool[key]):
+            problems.append((key, "a positive integer"))
+    if problems:
+        return None, problems
+    return (
+        {
+            "ref": None,
+            "generated": False,
+            "max_sessions": pool["max_sessions"],
+            "slot_bytes": pool["slot_bytes"],
+        },
+        problems,
+    )
+
+
+def _slots_claimed(session: dict, single_accept: bool) -> int:
+    """How many slots one declared session holds: a listening session claims
+    every session it accepts, any other session one."""
+    accept = session.get("accept")
+    if (
+        session.get("transport") == "unicast"
+        and "listen" in session
+        and isinstance(accept, dict)
+        and _positive_int(accept.get("max_sessions"))
+        and not single_accept
+    ):
+        return accept["max_sessions"]
+    return 1
+
+
+def _session_pool_parts(
+    repo_root: Path, machine: dict, session: dict
+) -> list[dict]:
+    """The pools of ONE session that are part of its slot, with their bytes.
+
+    A session's own `buffer_pools` entry wins, then the machine's, then the
+    profile's default document. An entry that cannot be read is left out: the
+    refusal for it is made where it is declared.
+    """
+    own = session.get("buffer_pools")
+    own = own if isinstance(own, dict) else {}
+    shared = machine.get("buffer_pools")
+    shared = shared if isinstance(shared, dict) else {}
+    parts = []
+    for key in SLOT_POOLS:
+        if key in own:
+            spec, origin = own[key], "session"
+        elif key in shared:
+            spec, origin = shared[key], "machine"
+        else:
+            spec, origin = {"ref": DEFAULT_SLOT_POOL_REF[key]}, "default"
+        if not isinstance(spec, dict):
+            continue
+        if "ref" in spec:
+            ref = spec["ref"]
+            if not isinstance(ref, str):
+                continue
+            dims = pool_document_dims(repo_root, ref)
+            if isinstance(dims, str):
+                continue
+            count, size = dims
+            source = ref
+        else:
+            count, size = spec.get("slot_count"), spec.get("slot_size")
+            if not (_positive_int(count) and _positive_int(size)):
+                continue
+            source = "inline"
+        parts.append(
+            {
+                "pool": key,
+                "origin": origin,
+                "source": source,
+                "slots": count,
+                "slot_size": size,
+                "bytes": count * size,
+            }
+        )
+    return parts
+
+
+def session_pool_problems(
+    machine_name: str, machine: dict, repo_root: Path
+) -> list[str]:
+    """Every refusal for one machine's `session_pool`; [] when it passes or is absent."""
+    if "session_pool" not in machine:
+        return []
+    base = f"machines.{machine_name}"
+    path = f"{base}.session_pool"
+    platform = machine.get("platform") or {}
+    if platform.get("class") == "ap":
+        return [
+            f"{path}: an AP holds its sessions as tasks over a growable heap; "
+            "there is no session table to size"
+        ]
+    pool = machine["session_pool"]
+    if not isinstance(pool, dict):
+        return [f"{path}: must be a mapping"]
+    errors: list[str] = []
+    for key in sorted(set(pool) - POOL_KEYS):
+        errors.append(f"{path}.{key}: unknown key")
+    numbers, problems = _pool_numbers(repo_root, pool)
+    errors.extend(f"{path}.{key}: {why}" for key, why in problems)
+
+    process = pool.get("process", {})
+    if not isinstance(process, dict):
+        errors.append(f"{path}.process: must be a mapping")
+    else:
+        for key, value in process.items():
+            if key not in PROCESS_KEYS:
+                errors.append(f"{path}.process.{key}: unknown key")
+            elif not _positive_int(value):
+                errors.append(f"{path}.process.{key}: a positive integer")
+
+    machine_limits = machine.get("limits")
+    machine_limits = machine_limits if isinstance(machine_limits, dict) else {}
+    for key, value in machine_limits.items():
+        if key not in LIMIT_KEYS:
+            errors.append(
+                f"{base}.limits.{key}: unknown key (the keys are "
+                f"{', '.join(sorted(LIMIT_KEYS))})"
+            )
+        elif not _positive_int(value):
+            errors.append(f"{base}.limits.{key}: a positive integer")
+
+    sessions = machine.get("sessions")
+    sessions = sessions if isinstance(sessions, list) else []
+    single_accept = platform.get("class") == "mcu" or platform.get("os") == "zephyr"
+    claimed = 0
+    for i, s in enumerate(sessions):
+        if not isinstance(s, dict):
+            continue
+        claimed += _slots_claimed(s, single_accept)
+        lim = s.get("limits")
+        if isinstance(lim, dict):
+            for key, value in lim.items():
+                declared = machine_limits.get(key)
+                if (
+                    _positive_int(value)
+                    and _positive_int(declared)
+                    and value > declared
+                ):
+                    errors.append(
+                        f"{base}.sessions[{i}].limits.{key}: {value} raises the "
+                        f"machine's {declared}; the slot is sized by the machine's "
+                        "number, so a session may only lower it"
+                    )
+        if numbers is not None:
+            parts = _session_pool_parts(repo_root, machine, s)
+            total = sum(p["bytes"] for p in parts)
+            if total > numbers["slot_bytes"]:
+                detail = ", ".join(
+                    f"{p['pool']} {p['slots']} x {p['slot_size']} = {p['bytes']}"
+                    for p in parts
+                )
+                errors.append(
+                    f"{base}.sessions[{i}].buffer_pools: the pools this session "
+                    f"takes ({detail}) add up to {total} bytes, more than the "
+                    f"{numbers['slot_bytes']} a session slot holds "
+                    "(session_pool slot size)"
+                )
+    if numbers is not None and claimed > numbers["max_sessions"]:
+        errors.append(
+            f"{path}.max_sessions: the machine's sessions claim {claimed} slots "
+            f"and the table holds {numbers['max_sessions']}"
+        )
+    return errors
+
+
+def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> dict:
+    """The resolved numbers of one machine and every refusal, as plain data.
+
+    The shape an editor of the deploy file reads: nothing in it is derived by
+    the reader. `pool` is None for a machine that declares no `session_pool`.
+    """
+    report: dict = {
+        "machine": machine_name,
+        "refusals": validate_machine(machine_name, machine, repo_root),
+        "vocabulary": {
+            "pool": sorted(POOL_KEYS),
+            "process": sorted(PROCESS_KEYS),
+            "limits": sorted(LIMIT_KEYS),
+        },
+        "pool": None,
+        "process": {},
+        "limits": {},
+        "sessions": [],
+    }
+    pool = machine.get("session_pool")
+    if not isinstance(pool, dict):
+        return report
+    numbers, _ = _pool_numbers(repo_root, pool)
+    process = pool.get("process")
+    report["process"] = dict(process) if isinstance(process, dict) else {}
+    machine_limits = machine.get("limits")
+    machine_limits = dict(machine_limits) if isinstance(machine_limits, dict) else {}
+    report["limits"] = machine_limits
+    if numbers is None:
+        return report
+    report["pool"] = dict(
+        numbers, total_bytes=numbers["max_sessions"] * numbers["slot_bytes"]
+    )
+    platform = machine.get("platform") or {}
+    single_accept = platform.get("class") == "mcu" or platform.get("os") == "zephyr"
+    for s in machine.get("sessions") or []:
+        if not isinstance(s, dict):
+            continue
+        parts = _session_pool_parts(repo_root, machine, s)
+        total = sum(p["bytes"] for p in parts)
+        lim = s.get("limits")
+        effective = dict(machine_limits)
+        if isinstance(lim, dict):
+            effective.update(lim)
+        report["sessions"].append(
+            {
+                "name": s.get("name"),
+                "slots": _slots_claimed(s, single_accept),
+                "pools": parts,
+                "pool_bytes": total,
+                "headroom_bytes": numbers["slot_bytes"] - total,
+                "limits": effective,
+            }
+        )
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -681,9 +1077,248 @@ def _selftest(repo_root: Path) -> int:
         mutate(lambda m: m["sessions"][0]["buffer_pools"].update(session_tx_pool={"slot_count": 8})),
         "needs a positive `slot_size`",
     )
+    failures += _pool_selftest(repo_root)
     failures += _ap_cases(repo_root)
     print(f"deploy_sessions selftest: {'FAIL' if failures else 'OK'} ({failures} failing)")
     return 1 if failures else 0
+
+
+POOL_DOCUMENT = "session_slot_pool_mcu"
+
+
+def _pool_fixture() -> dict:
+    """The two-session machine with a session pool, every pool spelled inline so
+    the arithmetic of the budget is stated here and read from no document.
+
+    Session 0 takes 4 x 1000 + 2 x 500 = 5000 bytes, session 1 takes
+    8 x 1000 + 2 x 500 = 9000.
+    """
+    machine = _fixture()
+    machine["limits"] = {"local_subscriptions": 16, "pending_queries": 8}
+    machine["sessions"][0]["buffer_pools"] = {
+        "session_rx_pool": {"slot_count": 4, "slot_size": 1000},
+        "reassembly_pool": {"slot_count": 2, "slot_size": 500},
+    }
+    machine["sessions"][0]["limits"] = {"pending_queries": 4}
+    machine["sessions"][1]["buffer_pools"] = {
+        "session_rx_pool": {"slot_count": 8, "slot_size": 1000},
+        "reassembly_pool": {"slot_count": 2, "slot_size": 500},
+    }
+    machine["sessions"][1]["limits"] = {"local_subscriptions": 8}
+    machine["session_pool"] = {
+        "max_sessions": 3,
+        "slot_bytes": 9000,
+        "process": {"max_tasks": 8, "max_timers": 16, "admin_reply_bytes": 1024},
+    }
+    return machine
+
+
+def _pool_selftest(repo_root: Path) -> int:
+    import copy
+
+    failures = 0
+
+    def check(label: str, machine: dict, expect: str | None) -> None:
+        nonlocal failures
+        errs = validate_machine("m", machine, repo_root)
+        if expect is None:
+            ok = errs == []
+        else:
+            ok = len(errs) == 1 and expect in errs[0]
+        print(f"  {'ok  ' if ok else 'FAIL'} pool: {label}: {errs or 'accepted'}")
+        failures += 0 if ok else 1
+
+    def mutate(fn) -> dict:
+        m = copy.deepcopy(_pool_fixture())
+        fn(m)
+        return m
+
+    def expect_equal(label: str, got: object, want: object) -> None:
+        nonlocal failures
+        ok = got == want
+        print(f"  {'ok  ' if ok else 'FAIL'} pool: {label}: {got}")
+        if not ok:
+            print(f"       want {want}")
+        failures += 0 if ok else 1
+
+    check("two sessions in a table of three, within the budget", _pool_fixture(), None)
+    check(
+        "a table of exactly the sessions it holds",
+        mutate(lambda m: m["session_pool"].update(max_sessions=2)),
+        None,
+    )
+    check(
+        "a machine with no table is not read for limit keys",
+        mutate(lambda m: (m.pop("session_pool"), m["limits"].update(zzz=1))),
+        None,
+    )
+    check(
+        "zero sessions is refused naming the key",
+        mutate(lambda m: m["session_pool"].update(max_sessions=0)),
+        "session_pool.max_sessions: a positive integer",
+    )
+    check(
+        "a boolean is not a count",
+        mutate(lambda m: m["session_pool"].update(max_sessions=True)),
+        "session_pool.max_sessions: a positive integer",
+    )
+    check(
+        "more sessions declared than the table holds",
+        mutate(lambda m: m["session_pool"].update(max_sessions=1)),
+        "claim 2 slots and the table holds 1",
+    )
+    check(
+        "a session whose pools overflow the slot is refused naming it",
+        mutate(lambda m: m["session_pool"].update(slot_bytes=8999)),
+        "sessions[1].buffer_pools: the pools this session takes "
+        "(session_rx_pool 8 x 1000 = 8000, reassembly_pool 2 x 500 = 1000) "
+        "add up to 9000 bytes, more than the 8999",
+    )
+
+    def machine_pools(m):
+        # The second session names no pools: the machine's stand for it.
+        shared = m["sessions"][1].pop("buffer_pools")
+        m["buffer_pools"] = shared
+
+    check(
+        "the machine's pools stand for a session that names none",
+        mutate(machine_pools),
+        None,
+    )
+
+    def machine_pools_overflow(m):
+        machine_pools(m)
+        m["session_pool"]["slot_bytes"] = 8999
+
+    check(
+        "and are budgeted the same",
+        mutate(machine_pools_overflow),
+        "sessions[1].buffer_pools: the pools this session takes",
+    )
+    check(
+        "an unknown key of the table is refused by name",
+        mutate(lambda m: m["session_pool"].update(heap_budget_bytes=4096)),
+        "session_pool.heap_budget_bytes: unknown key",
+    )
+    check(
+        "an unknown process key is refused by name",
+        mutate(lambda m: m["session_pool"]["process"].update(max_threads=2)),
+        "session_pool.process.max_threads: unknown key",
+    )
+    check(
+        "a zero process number is refused",
+        mutate(lambda m: m["session_pool"]["process"].update(max_tasks=0)),
+        "session_pool.process.max_tasks: a positive integer",
+    )
+    check(
+        "a table that is not a mapping is refused",
+        mutate(lambda m: m.update(session_pool=4)),
+        "session_pool: must be a mapping",
+    )
+    check(
+        "a table with neither a document nor numbers is refused",
+        mutate(lambda m: m.update(session_pool={})),
+        "session_pool.ref: required",
+    )
+    check(
+        "a table with one inline number is refused",
+        mutate(lambda m: m["session_pool"].pop("slot_bytes")),
+        "session_pool.slot_bytes: required beside",
+    )
+    check(
+        "a document and inline numbers together are refused",
+        mutate(lambda m: m["session_pool"].update(ref=POOL_DOCUMENT)),
+        "a `ref` pool takes no `max_sessions` or `slot_bytes`",
+    )
+    check(
+        "a document that does not exist is refused",
+        mutate(lambda m: m.update(session_pool={"ref": "no_such_pool"})),
+        "names no `sources/**/no_such_pool.scxml`",
+    )
+    check(
+        "a document that is not a buffer-pool is refused",
+        mutate(lambda m: m.update(session_pool={"ref": "reassembly_slot"})),
+        "is not an `sce:kind=\"buffer-pool\"` document",
+    )
+    check(
+        "a limit key the vocabulary does not have is refused by name",
+        mutate(lambda m: m["limits"].update(sessions_max=4)),
+        "machines.m.limits.sessions_max: unknown key",
+    )
+    check(
+        "a session that raises a machine limit is refused",
+        mutate(lambda m: m["sessions"][0]["limits"].update(pending_queries=9)),
+        "sessions[0].limits.pending_queries: 9 raises the machine's 8",
+    )
+    check(
+        "a session may lower it",
+        mutate(lambda m: m["sessions"][0]["limits"].update(pending_queries=1)),
+        None,
+    )
+
+    def on_ap(m):
+        m["platform"] = {"class": "ap", "os": "linux"}
+        for s in m["sessions"]:
+            s.pop("limits", None)
+            s.pop("buffer_pools", None)
+
+    check(
+        "an AP has no table to size",
+        mutate(on_ap),
+        "an AP holds its sessions as tasks over a growable heap",
+    )
+
+    # The report: the numbers an editor shows, and they are the arithmetic.
+    report = session_pool_report("m", _pool_fixture(), repo_root)
+    expect_equal("the report of the fixture has no refusal", report["refusals"], [])
+    expect_equal(
+        "the table is one number",
+        (report["pool"] or {}).get("total_bytes"),
+        27000,
+    )
+    expect_equal(
+        "each session reports its pools and what is left of its slot",
+        [(s["pool_bytes"], s["headroom_bytes"]) for s in report["sessions"]],
+        [(5000, 4000), (9000, 0)],
+    )
+    expect_equal(
+        "a session's limits are the machine's with its own laid over",
+        report["sessions"][0]["limits"],
+        {"local_subscriptions": 16, "pending_queries": 4},
+    )
+    refused = session_pool_report(
+        "m", mutate(lambda m: m["session_pool"].update(max_sessions=0)), repo_root
+    )
+    expect_equal(
+        "a refused table reports no number and says why",
+        (refused["pool"], len(refused["refusals"])),
+        (None, 1),
+    )
+
+    # The document is the only home of its numbers: the report reads them from
+    # it, checked here against a read of the file's own text.
+    document = repo_root / "sources" / "network" / f"{POOL_DOCUMENT}.scxml"
+    try:
+        text = document.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"  FAIL pool: the table's document cannot be read: {e}")
+        return failures + 1
+    want = []
+    for tag in ("slot-count", "slot-size"):
+        found = re.search(rf"<sce:{tag}>\s*(\d+)\s*</sce:{tag}>", text)
+        want.append(int(found.group(1)) if found else None)
+    from_document = session_pool_report(
+        "m", mutate(lambda m: m.update(session_pool={"ref": POOL_DOCUMENT})), repo_root
+    )
+    expect_equal(
+        f"`{POOL_DOCUMENT}`: the report holds the document's two numbers",
+        (
+            (from_document["pool"] or {}).get("max_sessions"),
+            (from_document["pool"] or {}).get("slot_bytes"),
+        ),
+        tuple(want),
+    )
+    return failures
 
 
 AP_CASES = Path(__file__).resolve().parent / "deploy_sessions_ap_cases.json"
@@ -735,8 +1370,39 @@ def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     if argv[1:] == ["--selftest"]:
         return _selftest(repo_root)
-    print("usage: deploy_sessions.py --selftest", file=sys.stderr)
+    if len(argv) == 4 and argv[1] == "--report":
+        return _report(repo_root, Path(argv[2]), argv[3])
+    print(
+        "usage: deploy_sessions.py --selftest\n"
+        "       deploy_sessions.py --report <deploy.yaml> <machine>",
+        file=sys.stderr,
+    )
     return 2
+
+
+def _report(repo_root: Path, deploy_file: Path, machine_name: str) -> int:
+    """Print `session_pool_report` of one machine as JSON; 1 when it refuses."""
+    try:
+        import yaml
+    except ImportError:
+        print("deploy_sessions: python3 yaml module unavailable", file=sys.stderr)
+        return 2
+    try:
+        document = yaml.safe_load(deploy_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as e:
+        print(f"deploy_sessions: cannot read {deploy_file}: {e}", file=sys.stderr)
+        return 2
+    machines = document.get("machines") if isinstance(document, dict) else None
+    machine = machines.get(machine_name) if isinstance(machines, dict) else None
+    if not isinstance(machine, dict):
+        print(
+            f"deploy_sessions: {deploy_file} has no machine `{machine_name}`",
+            file=sys.stderr,
+        )
+        return 2
+    report = session_pool_report(machine_name, machine, repo_root)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 1 if report["refusals"] else 0
 
 
 if __name__ == "__main__":
