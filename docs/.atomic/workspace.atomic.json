@@ -272220,6 +272220,58 @@
         "5. The C1g deploy guard now reads 10 witnesses (the S9b admin limits test is the tenth); the C1m leg admin reply fits reads 4."
       ]
     },
+    "Round 3294": {
+      "decision_summary": "Integration onto origin/main of S9b (the admin space answers a GET with no allocator on the slot profile, R7). The branch was cherry-picked in order, nine commits; the last (module docs naming no module the slot profile removes) came out empty because the previous integration had already made the same two doc edits, and was skipped. One conflict, in the C1g deploy leg of run-ci.sh: the armed form of the previous integration is kept and its witness count moves 9 -> 10, because the S9b admin limits test is a tenth test of that file. One seam, the one the last integration found in the sibling test: the new admin limits test read the deploy report as a value although it is an Option; it now returns early like its siblings while an armed run still fails hard. No budget moved: wz-session-core counts 505 on the C1bz command, wz-session-mcu 0.",
+      "changes_bullets": [
+        "Cherry-picked onto origin/main in order: the nine S9b commits above the S9a tip; eight applied, the ninth was empty and skipped. One conflict: scripts/run-ci.sh, the C1g deploy leg (env WZ_DEPLOY_REPORT_REQUIRE=1 of the previous integration kept, the S9b guard comment merged, count 9 -> 10).",
+        "Fix, crates/wz-session-core/tests/session_slot_pool_deploy.rs: the admin limits test took the Option report as a value (E0608 under --all-features); it returns early when the report is absent and the armed lane fails hard as before.",
+        "The nine commits ran the gates the previous integration had to repair after the fact in the first pass: own_space_witness_lint, feature_public_surface_census and feature_gate_diagnostic all pass with no change, and the pin gate reports no stale row (S9b touches none of the cited files).",
+        "docs/hosted-red-acks.md: one row for the newest completed run, the one the previous push acknowledged, because the run of the previous head had not completed when this push was made."
+      ],
+      "verification_bullets": [
+        "RAN on the integrated tree through bx on a build host (this host built nothing):",
+        "fmt --all --check clean. wz-session-core: lib default 542 passed; lib with the session-slot set of the C1g leg 696 passed; admin_reply_fits 3 passed with all features; session_slot_pool_deploy 10 passed with WZ_DEPLOY_REPORT_REQUIRE=1 (the armed lane, so every report comparison ran); cargo test --all-features --no-run compiles; clippy -D warnings --all-targets --all-features clean.",
+        "wz-session-mcu: adminspace-core with adminspace-write lib 20 passed; session-slot with both features lib 8 and admin_reply_fits 4 passed; clippy -D warnings --all-targets clean both without and with session-slot (the second was not run on the branch).",
+        "wz-session-lwip and wz-link-lwip: cargo test --all-features --no-run compile.",
+        "C1bz command (cargo doc --no-deps --quiet --all-features) counted: wz-session-core 505 error lines (budget 505), wz-session-mcu builds with none (budget 0); no budget moved.",
+        "Static: own_space_witness_lint, feature_public_surface_census --check, feature_gate_diagnostic --check and reason_review_pin_gate --check pass on the cherry-picked tree.",
+        "NOT RUN here: the thumbv7m cross check, the S8 gate selftest, QEMU stack peak, interrupt-off time of one admin answer, hardware, hosted CI, the deploy image mcu-admin-node."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "1. Read the hosted run of this push per job. It can prove what nothing here did: C1g and C1m through run-ci.sh itself with the new witness counts (10 for the deploy leg, 4 for admin reply fits), the C1bz lane on the hosted toolchain, and the cross job with the llvm-nm of Round 3290.",
+        "2. The run of the previous head had not completed when this push was made, so the ack row names the run of the push before it, read again; if that run of the previous head fails, its reds are a debt of the previous integration and are paid as their own round.",
+        "3. S9c and S9d stay open as the carry of Round 3293 states; the runtime-zero-copy reason is not rewritten here.",
+        "4. A branch that adds a test next to a sibling that reads an Option report must copy the sibling's skip: this is the second integration to find that seam only at the first compile; the cheap local witness is cargo test --all-features --no-run of the crate before the integration commit."
+      ],
+      "publishable_decision_summary": "Integration onto origin/main of S9b (the admin space answers a GET with no allocator on the slot profile, R7). The branch was cherry-picked in order, nine commits; the last (module docs naming no module the slot profile removes) came out empty because the previous integration had already made the same two doc edits, and was skipped. One conflict, in the C1g deploy leg of run-ci.sh: the armed form of the previous integration is kept and its witness count moves 9 -> 10, because the S9b admin limits test is a tenth test of that file. One seam, the one the last integration found in the sibling test: the new admin limits test read the deploy report as a value although it is an Option; it now returns early like its siblings while an armed run still fails hard. No budget moved: wz-session-core counts 505 on the C1bz command, wz-session-mcu 0.",
+      "publishable_changes_bullets": [
+        "Cherry-picked onto origin/main in order: the nine S9b commits above the S9a tip; eight applied, the ninth was empty and skipped. One conflict: scripts/run-ci.sh, the C1g deploy leg (env WZ_DEPLOY_REPORT_REQUIRE=1 of the previous integration kept, the S9b guard comment merged, count 9 -> 10).",
+        "Fix, crates/wz-session-core/tests/session_slot_pool_deploy.rs: the admin limits test took the Option report as a value (E0608 under --all-features); it returns early when the report is absent and the armed lane fails hard as before.",
+        "The nine commits ran the gates the previous integration had to repair after the fact in the first pass: own_space_witness_lint, feature_public_surface_census and feature_gate_diagnostic all pass with no change, and the pin gate reports no stale row (S9b touches none of the cited files).",
+        "docs/hosted-red-acks.md: one row for the newest completed run, the one the previous push acknowledged, because the run of the previous head had not completed when this push was made."
+      ],
+      "publishable_verification_bullets": [
+        "RAN on the integrated tree through bx on a build host (this host built nothing):",
+        "fmt --all --check clean. wz-session-core: lib default 542 passed; lib with the session-slot set of the C1g leg 696 passed; admin_reply_fits 3 passed with all features; session_slot_pool_deploy 10 passed with WZ_DEPLOY_REPORT_REQUIRE=1 (the armed lane, so every report comparison ran); cargo test --all-features --no-run compiles; clippy -D warnings --all-targets --all-features clean.",
+        "wz-session-mcu: adminspace-core with adminspace-write lib 20 passed; session-slot with both features lib 8 and admin_reply_fits 4 passed; clippy -D warnings --all-targets clean both without and with session-slot (the second was not run on the branch).",
+        "wz-session-lwip and wz-link-lwip: cargo test --all-features --no-run compile.",
+        "C1bz command (cargo doc --no-deps --quiet --all-features) counted: wz-session-core 505 error lines (budget 505), wz-session-mcu builds with none (budget 0); no budget moved.",
+        "Static: own_space_witness_lint, feature_public_surface_census --check, feature_gate_diagnostic --check and reason_review_pin_gate --check pass on the cherry-picked tree.",
+        "NOT RUN here: the thumbv7m cross check, the S8 gate selftest, QEMU stack peak, interrupt-off time of one admin answer, hardware, hosted CI, the deploy image mcu-admin-node."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "1. Read the hosted run of this push per job. It can prove what nothing here did: C1g and C1m through run-ci.sh itself with the new witness counts (10 for the deploy leg, 4 for admin reply fits), the C1bz lane on the hosted toolchain, and the cross job with the llvm-nm of Round 3290.",
+        "2. The run of the previous head had not completed when this push was made, so the ack row names the run of the push before it, read again; if that run of the previous head fails, its reds are a debt of the previous integration and are paid as their own round.",
+        "3. S9c and S9d stay open as the carry of Round 3293 states; the runtime-zero-copy reason is not rewritten here.",
+        "4. A branch that adds a test next to a sibling that reads an Option report must copy the sibling's skip: this is the second integration to find that seam only at the first compile; the cheap local witness is cargo test --all-features --no-run of the crate before the integration commit."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
