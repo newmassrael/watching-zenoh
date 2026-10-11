@@ -225,6 +225,32 @@ pub trait MulticastTxQueue {
     /// outside the bound, as upstream's ephemeral stop batch is outside its
     /// pool.
     fn enqueue(&mut self, datagram: MulticastTxDatagram);
+
+    /// R3250 — ARCHITECTURE section 9.1 on the multicast TX: put one datagram
+    /// on `priority`'s lane by having it ENCODED straight into a slot the queue
+    /// lends, so the frame is never a vector of its own. `fill` writes the
+    /// frame into the slot it is handed and answers whether the slot now holds
+    /// the datagram to send (`false`: the frame does not fit the slot, or is
+    /// past the group's batch and must be fragmented); `want` is the most the
+    /// frame can need. The queue may hand `fill` a smaller slot first and a
+    /// larger one after a `false`. Answers whether the datagram was enqueued;
+    /// `false` means nothing was, and the caller encodes on the heap with the
+    /// sequence number `sn` it already minted, as the unicast lend falls back.
+    ///
+    /// The default lends nothing, which is every queue that has no pool (the
+    /// MCU loop's, the collecting one behind `multicast_tx_emit`).
+    #[cfg(feature = "transport-tx-lend")]
+    fn enqueue_lent(
+        &mut self,
+        priority: Priority,
+        reliable: bool,
+        sn: u64,
+        want: usize,
+        fill: &mut dyn FnMut(&mut crate::tx_buf::SliceTxBuf<'_>) -> bool,
+    ) -> bool {
+        let _ = (priority, reliable, sn, want, fill);
+        false
+    }
 }
 
 /// R2929 — one datagram a push puts on the queue, with the conduit and the
@@ -378,14 +404,8 @@ where
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Push { push, .. } => push_frame(
             meta,
-            |sn| {
-                crate::frame_encode::encode_frame_with_push_qos(
-                    sn,
-                    *push,
-                    meta.reliable,
-                    meta.ext_qos,
-                )
-            },
+            wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            crate::frame_encode::push_body(&push),
             tx_sn,
             params,
             conf,
@@ -396,23 +416,16 @@ where
         // `Z_RELIABILITY_RELIABLE`); a large reply re-frames as a fragment
         // chain exactly like an oversize Push.
         #[cfg(feature = "codec-response")]
-        MulticastTxItem::Response { response } => {
-            push_frame(
-                meta,
-                |sn| {
-                    crate::frame_encode::encode_frame_with_response_qos(
-                        sn,
-                        *response,
-                        /* reliable = */ true,
-                        meta.ext_qos,
-                    )
-                },
-                tx_sn,
-                params,
-                conf,
-                queue,
-            )
-        }
+        MulticastTxItem::Response { response } => push_frame(
+            // `meta.reliable` is pinned true for a reply (`frame_meta`).
+            meta,
+            wz_codecs::response::Response::MAX_ENCODED_BYTES,
+            crate::frame_encode::response_body(&response),
+            tx_sn,
+            params,
+            conf,
+            queue,
+        ),
         // R311lq — the terminal of a multicast reply chain. Always reliable and
         // always tiny (a single VLE rid), so it never reaches the fragment
         // budget: one minted reliable-ring SN, one frame. Mirrors the unicast
@@ -423,16 +436,11 @@ where
             // reaches the budget, so `push_frame` enqueues the one frame with no
             // follow-on mint (byte-identical to a single send) - one path for
             // all four variants rather than a special case.
+            let response_final = crate::response_final_build::build_response_final(request_id, qos);
             push_frame(
                 meta,
-                |sn| {
-                    crate::frame_encode::encode_frame_with_response_final_qos(
-                        sn,
-                        crate::response_final_build::build_response_final(request_id, qos),
-                        /* reliable = */ true,
-                        meta.ext_qos,
-                    )
-                },
+                wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+                crate::frame_encode::response_final_body(&response_final),
                 tx_sn,
                 params,
                 conf,
@@ -444,20 +452,17 @@ where
         // `Z_RELIABILITY_RELIABLE` (src/net/primitives.c:52); a large held-token
         // keyexpr re-frames as a fragment chain exactly like an oversize Push.
         #[cfg(feature = "liveliness-token")]
-        MulticastTxItem::DeclareReply { declare } => {
-            push_frame(
-                meta,
-                |sn| {
-                    crate::frame_encode::encode_frame_with_declare(
-                        sn, *declare, /* reliable = */ true,
-                    )
-                },
-                tx_sn,
-                params,
-                conf,
-                queue,
-            )
-        }
+        // `meta` pins a declare reply reliable and DEFAULT-band (no ext_qos),
+        // the frame `encode_frame_with_declare` writes.
+        MulticastTxItem::DeclareReply { declare } => push_frame(
+            meta,
+            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            crate::frame_encode::declare_body(&declare),
+            tx_sn,
+            params,
+            conf,
+            queue,
+        ),
     }
 }
 
@@ -650,8 +655,15 @@ struct FrameMeta {
 
 /// R2928 — one message's walk onto the queue: ask for room, mint, encode, and
 /// enqueue the frame, or stream it as a fragment chain that asks again before
-/// each further fragment. `encode` turns the minted SN into the framed
-/// message.
+/// each further fragment. `body` encodes the network message the frame carries
+/// (at most `worst_case` bytes), behind the frame header the minted SN starts.
+///
+/// R3250 — under `transport-tx-lend` the frame is first offered to the queue
+/// to be encoded straight into a slot it lends
+/// ([`MulticastTxQueue::enqueue_lent`]), as the unicast send offers its link a
+/// lend; a queue that lends nothing, or a frame past the group's batch (which
+/// is fragmented from the heap), takes the heap path below, with the same SN
+/// and the same bytes: one envelope encoder writes both.
 ///
 /// The chain's bytes are [`FragmentChain`](crate::frame_encode::FragmentChain)'s,
 /// the one producer `multicast_frame_or_fragments` collects too, and its SNs are
@@ -664,14 +676,20 @@ struct FrameMeta {
     feature = "codec-response-final",
     feature = "liveliness-token"
 ))]
-fn push_frame<M: MulticastTxMint + ?Sized, Q: MulticastTxQueue + ?Sized>(
+fn push_frame<M, Q, P>(
     meta: FrameMeta,
-    encode: impl FnOnce(u64) -> Vec<u8>,
+    worst_case: usize,
+    body: P,
     tx_sn: &mut M,
     params: &crate::multicast_params::MulticastParams,
     conf: &TxQueueConf,
     queue: &mut Q,
-) -> PushOutcome {
+) -> PushOutcome
+where
+    M: MulticastTxMint + ?Sized,
+    Q: MulticastTxQueue + ?Sized,
+    P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+{
     let FrameMeta {
         priority,
         ext_qos,
@@ -690,8 +708,24 @@ fn push_frame<M: MulticastTxMint + ?Sized, Q: MulticastTxQueue + ?Sized>(
         return PushOutcome::Congested;
     }
     let sn = tx_sn.mint(priority, reliable);
-    let frame = encode(sn);
     let mtu = params.batch_size as usize;
+    let flags = crate::frame_encode::frame_flags(reliable);
+    #[cfg(feature = "transport-tx-lend")]
+    {
+        // A frame sent whole is at most one batch (past it, it is fragmented),
+        // so that is the most a lent slot must hold. NOT the codec's
+        // `MAX_ENCODED_BYTES`, which sizes a vector's first reservation and is
+        // exceeded by any payload larger than it.
+        let want = mtu;
+        let mut fill = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
+            crate::frame_encode::encode_frame_envelope_into(slot, sn, flags, ext_qos, &body).is_ok()
+                && crate::tx_buf::TxBuf::len(slot) <= mtu
+        };
+        if queue.enqueue_lent(priority, reliable, sn, want, &mut fill) {
+            return PushOutcome::Pushed;
+        }
+    }
+    let frame = crate::frame_encode::encode_frame_envelope(sn, flags, worst_case, ext_qos, &body);
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
         let body = crate::frame_encode::frame_wire_body(&frame, sn, ext_qos);
@@ -1232,5 +1266,207 @@ mod push_tests {
             &TxQueueConf::default(),
             &mut Scripted::default(),
         );
+    }
+}
+
+// R3250 — the multicast push into a queue that LENDS: the datagram is encoded
+// straight into the lent slot, the bytes and the SN walk are the heap path's,
+// and every way the lend cannot take a frame falls back to the heap.
+#[cfg(all(test, feature = "codec-push", feature = "transport-tx-lend"))]
+mod lend_tests {
+    use super::*;
+    use crate::multicast_params::MulticastParams;
+    use crate::sn::{mask_from_res, MulticastTxConduits};
+    use crate::tx_buf::{SliceTxBuf, TxBuf};
+    use crate::WhatAmI;
+
+    fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
+        MulticastParams {
+            version: 0x09,
+            whatami: WhatAmI::Peer,
+            zid: alloc::vec![1, 2, 3, 4],
+            lease_ms: 5_000,
+            join_interval_ms: 50,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size,
+            is_qos,
+            tx_queue: TxQueueConf::default(),
+        }
+    }
+
+    /// A queue that lends from two slot sizes, small first, as the AP pipeline
+    /// does, and records what went where.
+    struct Lending {
+        small: usize,
+        large: usize,
+        /// Datagrams that arrived through a lent slot: `(slot size, bytes, sn)`.
+        lent: Vec<(usize, Vec<u8>, u64)>,
+        /// Datagrams that arrived as vectors.
+        heap: Vec<(Vec<u8>, u64)>,
+        offers: usize,
+        refused: usize,
+    }
+
+    impl Lending {
+        fn new(small: usize, large: usize) -> Self {
+            Self {
+                small,
+                large,
+                lent: Vec::new(),
+                heap: Vec::new(),
+                offers: 0,
+                refused: 0,
+            }
+        }
+    }
+
+    impl MulticastTxQueue for Lending {
+        fn wait_for_room(&mut self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+            RoomAnswer::at_once(LinkRoom::Free)
+        }
+
+        fn enqueue(&mut self, datagram: MulticastTxDatagram) {
+            self.heap.push((datagram.bytes, datagram.sn));
+        }
+
+        fn enqueue_lent(
+            &mut self,
+            _priority: Priority,
+            _reliable: bool,
+            sn: u64,
+            want: usize,
+            fill: &mut dyn FnMut(&mut SliceTxBuf<'_>) -> bool,
+        ) -> bool {
+            for size in [self.small.min(want), self.large.min(want)] {
+                self.offers += 1;
+                let mut storage = alloc::vec![0u8; size];
+                let mut slot = SliceTxBuf::new(&mut storage);
+                if fill(&mut slot) {
+                    let bytes = slot.as_slice().to_vec();
+                    self.lent.push((size, bytes, sn));
+                    return true;
+                }
+                self.refused += 1;
+            }
+            false
+        }
+    }
+
+    fn put(payload: &[u8], priority: Priority) -> MulticastTxItem {
+        MulticastTxItem::Push {
+            push: Box::new(crate::push_build::build_push_literal("k/lent", payload).unwrap()),
+            reliable: true,
+            priority,
+        }
+    }
+
+    /// The heap path's frame for the same item: the queue-less emit.
+    fn emitted(item: MulticastTxItem, params: &MulticastParams) -> Vec<Vec<u8>> {
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        multicast_tx_emit(item, &mut tx, params).datagrams
+    }
+
+    /// A push is encoded INTO the lent slot, and the slot holds exactly the
+    /// frame the heap path builds: with and without a QoS band.
+    #[test]
+    fn a_lent_datagram_is_the_frame_the_heap_path_builds() {
+        for (is_qos, priority) in [(false, Priority::DEFAULT), (true, Priority::RealTime)] {
+            let params = params(8_192, is_qos);
+            let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+            let mut queue = Lending::new(1_472, 65_600);
+            let outcome = multicast_tx_push(
+                put(b"payload", priority),
+                &mut tx,
+                &params,
+                &TxQueueConf::default(),
+                &mut queue,
+            );
+            assert_eq!(outcome, PushOutcome::Pushed);
+            assert!(queue.heap.is_empty(), "nothing took the heap path");
+            assert_eq!(queue.lent.len(), 1);
+            let (size, bytes, sn) = &queue.lent[0];
+            assert_eq!(*size, 1_472, "a small frame takes the small slot");
+            assert_eq!(*sn, 0);
+            assert_eq!(
+                alloc::vec![bytes.clone()],
+                emitted(put(b"payload", priority), &params),
+                "qos {is_qos}"
+            );
+        }
+    }
+
+    /// A frame past the small slot is refused there and encoded into the
+    /// larger one, the same bytes.
+    #[test]
+    fn a_frame_past_the_small_slot_takes_the_larger_one() {
+        let params = params(8_192, false);
+        let payload = [0x5Au8; 3_000];
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Lending::new(1_472, 65_600);
+        multicast_tx_push(
+            put(&payload, Priority::DEFAULT),
+            &mut tx,
+            &params,
+            &TxQueueConf::default(),
+            &mut queue,
+        );
+        assert_eq!((queue.offers, queue.refused), (2, 1));
+        assert_eq!(queue.lent.len(), 1);
+        assert!(queue.lent[0].0 > 1_472);
+        assert_eq!(
+            alloc::vec![queue.lent[0].1.clone()],
+            emitted(put(&payload, Priority::DEFAULT), &params)
+        );
+    }
+
+    /// A frame past the group's batch is NOT sent from a slot: every offer is
+    /// refused and the message is fragmented from the heap, the very chain the
+    /// emit returns, its SNs ring-consecutive from the one minted for the lend.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_frame_past_the_batch_is_fragmented_from_the_heap() {
+        let params = params(256, false);
+        let payload = [0xA5u8; 1_000];
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Lending::new(1_472, 65_600);
+        multicast_tx_push(
+            put(&payload, Priority::DEFAULT),
+            &mut tx,
+            &params,
+            &TxQueueConf::default(),
+            &mut queue,
+        );
+        assert!(
+            queue.lent.is_empty(),
+            "no slot holds a frame past the batch"
+        );
+        assert!(queue.refused >= 1);
+        let chain: Vec<Vec<u8>> = queue.heap.iter().map(|(b, _)| b.clone()).collect();
+        assert!(chain.len() > 2, "the message fragments");
+        assert_eq!(chain, emitted(put(&payload, Priority::DEFAULT), &params));
+        let sns: Vec<u64> = queue.heap.iter().map(|(_, sn)| *sn).collect();
+        assert_eq!(sns, (0..chain.len() as u64).collect::<Vec<_>>());
+    }
+
+    /// The SN walk through the lend is the heap path's: consecutive pushes mint
+    /// consecutive SNs, each carried by its own lent slot.
+    #[test]
+    fn consecutive_lent_pushes_carry_consecutive_sequence_numbers() {
+        let params = params(8_192, false);
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Lending::new(1_472, 65_600);
+        for _ in 0..3 {
+            multicast_tx_push(
+                put(b"v", Priority::DEFAULT),
+                &mut tx,
+                &params,
+                &TxQueueConf::default(),
+                &mut queue,
+            );
+        }
+        let sns: Vec<u64> = queue.lent.iter().map(|(_, _, sn)| *sn).collect();
+        assert_eq!(sns, [0, 1, 2]);
+        assert_eq!(tx.advertise_default().next_reliable, 3);
     }
 }
