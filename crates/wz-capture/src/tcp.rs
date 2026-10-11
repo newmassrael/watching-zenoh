@@ -559,7 +559,10 @@ impl StreamAssembler {
             return SegmentOutcome::HeldOutOfOrder;
         }
         // delta <= 0: the segment starts at or before what we expect.
-        let already = (-delta) as usize;
+        // `unsigned_abs`, not `-delta`: `i32::MIN` has no positive twin, and
+        // negating it overflowed. That segment starts half the sequence space
+        // behind, which is far past any payload, so it is a duplicate.
+        let already = delta.unsigned_abs() as usize;
         if already >= payload.len() {
             return SegmentOutcome::Duplicate;
         }
@@ -646,6 +649,33 @@ mod tests {
             crate::link::Transport::Tcp(s) => s,
             other => panic!("the TCP fixture decapsulated as {other:?}"),
         }
+    }
+
+    /// A segment exactly half the sequence space BEHIND what the stream expects
+    /// is a duplicate, and not an arithmetic fault.
+    ///
+    /// The distance is read as an `i32`, and the one value of it that has no
+    /// positive twin is `i32::MIN`: negating it overflowed, so a capture with
+    /// such a segment (a damaged one, or one a person built) panicked a debug
+    /// build inside the reader instead of being read. Found by feeding damaged
+    /// containers to the session table door, which must answer every input.
+    #[test]
+    fn a_segment_half_the_sequence_space_behind_is_a_duplicate() {
+        let mut s = StreamAssembler::new();
+        assert_eq!(
+            s.push(&seg(1000, 0x18, b"hello", 0)),
+            SegmentOutcome::Appended {
+                len: 5,
+                stream_offset: 0
+            }
+        );
+        // next_seq is 1005; 1005 - 2^31 wrapping is the segment's start.
+        let behind = 1005u32.wrapping_add(0x8000_0000);
+        assert_eq!(
+            s.push(&seg(behind, 0x18, b"x", 1)),
+            SegmentOutcome::Duplicate
+        );
+        assert_eq!(s.stream(), b"hello", "nothing was added");
     }
 
     /// The ordinary case: a SYN establishes the origin, then contiguous data.
