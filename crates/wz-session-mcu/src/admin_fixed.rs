@@ -281,7 +281,7 @@ impl<const SESSIONS: usize> FixedNodeStatus<SESSIONS> {
     }
 }
 
-/// Why a [`FixedNodeIdentity`] was not built.
+/// Which input [`FixedNodeIdentity::new`] refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityRefused {
     /// The zid is wider than a zenoh id (32 hex digits).
