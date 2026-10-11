@@ -48,6 +48,10 @@
 //! Host-test level: no board runs it, and the stack the slot takes is not
 //! measured here.
 
+// A refused claim hands back what it was offered, a whole driver and its socket,
+// which is what makes the refusal free of the heap; boxing it would allocate.
+#![allow(clippy::result_large_err)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -392,9 +396,12 @@ impl End {
     }
 }
 
+/// The `on_event` an end's pump is driven with.
+type OnEvent = Box<dyn FnMut(IterationEvent<'_>)>;
+
 /// The application layer of an end: an observer with one subscriber on
 /// [`KEY`] that counts what it is handed.
-fn application(actions: &Handle) -> (Box<dyn FnMut(IterationEvent<'_>)>, Arc<Seen>) {
+fn application(actions: &Handle) -> (OnEvent, Arc<Seen>) {
     let seen = Arc::new(Seen::default());
     let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
     let counted = seen.clone();
@@ -791,6 +798,21 @@ mod table {
             bind_session_rx(&link, 7724).is_ok(),
             "and its socket went with it"
         );
+    }
+
+    /// The bytes a slot takes, printed with its parts (the lwIP driver with its
+    /// socket, the bundle) so the number in the step's record can be re-derived,
+    /// and bounded below by its parts so a slot that held less than it claims to
+    /// would be caught. Host-sized (the test runs on the host): the target's
+    /// numbers are the same expression compiled for the target.
+    #[test]
+    fn a_slot_is_at_least_the_sum_of_what_it_holds() {
+        use wz_session_core::session_actions::SessionLinkActions;
+        let slot = Table::slot_bytes();
+        let driver = core::mem::size_of::<LwipUdpDriver>();
+        let bundle = core::mem::size_of::<SessionLinkActions<Rt, CoopTime<Frozen>>>();
+        println!("slot {slot} B = driver {driver} B + bundle {bundle} B + rest");
+        assert!(slot >= driver + bundle + core::mem::size_of::<Tracked>());
     }
 
     /// A claim that is never opened gives its slot back and drops what it was

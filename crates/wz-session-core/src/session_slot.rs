@@ -242,6 +242,15 @@ impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> SessionSlots<R, T, 
         N
     }
 
+    /// The bytes ONE slot takes where the table is placed, for this driver and
+    /// entropy source: the head and state, the driver, the entropy source and the
+    /// bundle, as the compiler lays them out for the target the call is compiled
+    /// for. The table is `N` of these and a counter, so an image's RAM for its
+    /// sessions is this times `N`, read off the types and not measured on a board.
+    pub const fn slot_bytes() -> usize {
+        core::mem::size_of::<SlotCell<R, T, D, E>>()
+    }
+
     /// How many slots are taken.
     pub fn in_use(&self) -> usize {
         self.cells

@@ -11206,12 +11206,13 @@ layer_c1m_session_lwip() {
     # lend-only send and in-place receive): creation of the per-session state, the
     # handshake, a Put each way at four sizes, a KeepAlive, idle turns and the Close
     # are each counted. Under `session-slot` every one must cost the heap nothing
-    # and the slot table's own three tests run beside it (a full table refuses and
-    # counts, the last handle frees a slot, what it held is dropped once): 4 =
-    # what that command PRINTED. Beside it, the same file on the selectors the
+    # and the slot table's own four tests run beside it (a full table refuses and
+    # counts, the last handle frees a slot, what it held is dropped once, a slot
+    # is at least what it holds): 5 = what that command PRINTED. Beside it, the
+    # same file on the selectors the
     # slot is built from but without it, which is the instrument's control: there
     # the same windows must cost the heap something, 1 = what that PRINTED.
-    _runci_guarded_test "C1m session slot alloc" 4 \
+    _runci_guarded_test "C1m session slot alloc" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
         --test session_slot_allocations --quiet || return 1
