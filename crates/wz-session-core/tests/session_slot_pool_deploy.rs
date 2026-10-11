@@ -325,6 +325,29 @@ fn the_admin_limits_are_the_deploy_files_numbers() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// The numbers the shell's connect table and multicast reply queue are compiled with
+/// (S9c) are the deploy file's: the rows of the connect table, which the list a
+/// host writes is held in too, and the room of a multicast pump's reply queue.
+#[test]
+fn the_shell_limits_are_the_deploy_files_numbers() {
+    use wz_session_core::caps;
+    let Some(report) = report() else { return };
+    let process = &report["process"];
+    let mut drift = Vec::new();
+    for (key, constant) in [
+        ("connect_endpoints", caps::MAX_STATIC_CONNECT),
+        ("multicast_replies", caps::MAX_MULTICAST_REPLIES),
+    ] {
+        if process[key].as_u64() != Some(constant as u64) {
+            drift.push(format!(
+                "session_pool.process.{key}: the deploy file states {}, the code is compiled with {constant}",
+                process[key]
+            ));
+        }
+    }
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Every session the machine declares takes pools that fit the generated slot,
 /// by the report's own sums and by this crate's constant, and the slot is a whole
 /// number of the alignment SCE carries into the slot type.

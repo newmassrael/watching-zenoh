@@ -643,6 +643,19 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         static-link-storage,\
         transport-multicast\
         |--test=multicast_slot"
+    # S9c: the admin node of the slot profile, whole (`tests/admin_node_slot.rs`): the
+    # file's `required-features`, which add both halves of the admin surface to the
+    # dialler's row above.
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage\
+        |--test=admin_node_slot"
     # R3080 — the MCU session shell, split out of the row above with its tests.
     # Seventeen of its twenty tests are feature-gated (the admin node and its host
     # and status documents need both adminspace features, the application layer

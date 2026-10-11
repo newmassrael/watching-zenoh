@@ -257,6 +257,14 @@ pub const MAX_ADMIN_LOCATORS: usize = 4;
 /// is refused and counted, not listed in part.
 pub const MAX_ADMIN_SESSION_LINKS: usize = 2;
 
+/// Maximum number of replies a multicast pump of a node with no allocator holds
+/// between the observer that stages one and the loop that frames and sends it (the
+/// deploy `session_pool.process.multicast_replies` key). A reply past it is dropped and
+/// counted by the queue (`wz_session_lwip::multicast_drive::MulticastReplyQueue`),
+/// never queued without bound: multicast to a group is best effort, and a querier
+/// whose reply was dropped asks again.
+pub const MAX_MULTICAST_REPLIES: usize = 8;
+
 /// Maximum byte length of the keyexpr one admin reply is stamped with:
 /// `@/<zid>/<whatami>/<leg>` and, for a per-entity leg, the entity's own
 /// keyexpr of up to [`MAX_KEYEXPR_BYTES`], so two of them cover the prefix and

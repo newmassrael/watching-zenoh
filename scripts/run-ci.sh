@@ -9897,16 +9897,17 @@ layer_c1g_cargo_test_observer() {
     # (the macOS and Windows portability legs have neither), and libtest prints a
     # skip as `ok`. So THIS lane, which owns the capability, arms
     # WZ_DEPLOY_REPORT_REQUIRE=1, which turns the skip into a failure, and the
-    # count below can only be read from comparisons that ran. 10 = what that
+    # count below can only be read from comparisons that ran. 11 = what that
     # command PRINTED: the equality, the comparison's own control, the fit of
     # every declared session in the generated slot, (S9a) the five limits of the
     # tables a peer writes held equal to the constants they are compiled with,
     # (S9b) the admin node's three numbers (the reply buffer, the locators, the
-    # links of a row) held equal to the constants too, and the five witnesses
-    # of the skip decision itself (they need no Python).
+    # links of a row) held equal to the constants too, (S9c) the shell's two
+    # (the connect table's rows, the multicast reply queue's room), and the five
+    # witnesses of the skip decision itself (they need no Python).
     # `cargo` stays on the line of the `env` prefix: that is the shape
     # `armed_oracle_census.py` reads as an arming.
-    _runci_guarded_test C1g 10 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
+    _runci_guarded_test C1g 11 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
         --test session_slot_pool_deploy --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
@@ -11373,7 +11374,20 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response-final,session-slot,static-link-storage \
         --test multicast_slot --quiet || return 1
+    # S9c -- the admin node of the slot profile, whole: two nodes on one lwIP
+    # loopback, a written endpoint dialled, a remote write that makes the other node
+    # dial back, a node with fewer slots than endpoints, and the size the task cell
+    # has to hold, with the heap counted by the crate that asks for each allocation
+    # (none by the shell; what remains is the codec owned mirrors'): 3 = what that
+    # command PRINTED.
+    _runci_guarded_test "C1m admin node slot" 3 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \
+        --test admin_node_slot --quiet || return 1
     (cd crates \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \
+            --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features transport-multicast,codec-push,codec-response-final,session-slot,static-link-storage \
             --quiet -- -D warnings \

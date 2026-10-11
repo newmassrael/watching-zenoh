@@ -1,0 +1,68 @@
+# deploy/mcu_session_acceptor.yaml -- one MCU program that ACCEPTS several sessions.
+#
+# Fixed-memory step S9c. The acceptor of the pool profile is one listener over ONE
+# lwIP socket (`wz_session_lwip::listener::SessionListener`): every peer sends its
+# `InitSyn` to the one port, the listener tells the peers apart by source address, and
+# for each new peer it claims a session slot, a pump cell and a task cell BEFORE the
+# session answers, answering nothing (and counting the refusal by table) when one is
+# missing. That is why `accept.max_sessions` may be more than 1 on this machine: the
+# heap profiles' acceptor binds one socket per accepted session and lwIP refuses a
+# second bind of the port, so a machine WITHOUT a `session_pool` still holds one
+# (`scripts/lib/deploy_sessions.py` refuses 2 there by name).
+#
+# This is a FOCUSED profile like mcu_client_and_group.yaml: it declares what an
+# accepting machine adds and inherits everything else from mcu_target.yaml's
+# mcu_node. The two sessions the listener can hold claim two of the pool's slots
+# (the count check), and `process` bounds what belongs to no session.
+
+machines:
+  mcu_acceptor:
+    platform:
+      class: mcu
+      os: bare_metal
+      soc: mps2_an385                  # the QEMU board Layer Q.4 boots.
+      core: cortex_m3
+
+    zid: a1b2c3d5
+
+    links:
+      udp_listen:
+        bind: "0.0.0.0:7460"
+        driver: lwip_udp
+        mtu_bytes: 1472
+
+    limits:
+      local_subscriptions: 16
+      local_queryables: 8
+      pending_queries: 8
+      tx_queue: 16
+      tx_lend_slots: 2
+      peer_keyexpr_aliases: 16
+      remote_decls: 16
+      pending_replies: 8
+      pending_finals: 8
+      reply_payload_bytes: 1024
+
+    session_pool:
+      ref: session_slot_pool_mcu
+      process:
+        max_tasks: 8
+        max_timers: 16
+        admin_reply_bytes: 1024
+        admin_locators: 4
+        admin_session_links: 2
+        connect_endpoints: 8
+        multicast_replies: 8
+
+    sessions:
+      - name: acceptor
+        mode: peer
+        transport: unicast
+        link: udp_listen
+        listen:
+          endpoints: ["udp/0.0.0.0:7460"]
+        accept:
+          max_sessions: 2              # two slots of the pool, one lane each
+        buffer_pools:
+          session_rx_pool: { ref: session_rx_pool_mcu }
+          reassembly_pool: { ref: reassembly_pool_mcu }

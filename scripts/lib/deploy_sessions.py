@@ -40,8 +40,14 @@ machines.<m>.sessions[i]
     listen.endpoints    unicast only; locators this session accepts on.
     accept.max_sessions unicast only, with `listen`; how many accepted
                 sessions it holds at once. On an MCU or Zephyr machine only 1
-                is accepted: the acceptor there holds one accepted session at
-                a time and listens again when it ends.
+                is accepted unless the machine declares a `session_pool`: the
+                heap profiles' acceptor there holds one accepted session at a
+                time and listens again when it ends, while the acceptor of the
+                pool profile is one listener over one socket that claims a slot,
+                a pump cell and a task cell for each peer before it answers it
+                (and answers nothing when one is missing), so it holds as many
+                as the pool has slots for. Each claims a slot of the pool (the
+                count check below).
     group.endpoint      multicast only, required; `udp/<group>:<port>`, with the
                 interface only as the `#iface=<name|addr>` tail, the metadata
                 key upstream's UDP multicast locator reads:
@@ -91,10 +97,14 @@ machines.<m>.session_pool
                 together are refused.
     process     numbers that belong to no session: `max_tasks`, `max_timers`,
                 `admin_reply_bytes`, `admin_locators`, `admin_session_links`,
-                each a positive integer. `admin_reply_bytes` is the buffer one
+                `connect_endpoints`, `multicast_replies`, each a positive
+                integer. `admin_reply_bytes` is the buffer one
                 admin reply is built in; an admin reply is staged as a reply, so
                 it may not exceed `limits.reply_payload_bytes` (the machine's,
-                nor a session's own, lower one).
+                nor a session's own, lower one). `connect_endpoints` is the rows
+                of the node's connect table, and a session whose
+                `connect.endpoints` lists more than that is refused.
+                `multicast_replies` is the room of a multicast pump's reply queue.
 
 What the table adds to the checks above:
 
@@ -196,6 +206,15 @@ PROCESS_KEYS = frozenset(
         # lists (EXISTING caps::MAX_ADMIN_SESSION_LINKS).
         "admin_locators",
         "admin_session_links",
+        # S9c: the rows of the node's connect table, which holds one row per endpoint
+        # a host has written or a session lists in `connect.endpoints` (EXISTING
+        # caps::MAX_STATIC_CONNECT). The list a host writes is itself that many rows,
+        # so the table is as large as what feeds it.
+        "connect_endpoints",
+        # S9c: the replies a multicast pump queues for sending between the observer
+        # that stages them and the loop that frames them (NEW
+        # caps::MAX_MULTICAST_REPLIES); a reply past it is dropped and counted.
+        "multicast_replies",
     }
 )
 LIMIT_KEYS = frozenset(
@@ -348,7 +367,7 @@ def _validate_zid_and_sessions(
     platform = machine.get("platform") or {}
     is_mcu = platform.get("class") == "mcu"
     is_ap = platform.get("class") == "ap"
-    single_accept = is_mcu or platform.get("os") == "zephyr"
+    single_accept = _single_accept(machine)
     links = machine.get("links") or {}
     machine_limits = machine.get("limits") or {}
     machine_zid = machine.get("zid") if zid_problem(machine.get("zid")) is None else None
@@ -478,7 +497,10 @@ def _validate_zid_and_sessions(
                         errors.append(
                             f"{path}.accept.max_sessions: {n} is refused on this "
                             "machine; an MCU or Zephyr acceptor holds ONE accepted "
-                            "session at a time, so only 1 is accepted"
+                            "session at a time, so only 1 is accepted, unless the "
+                            "machine declares a `session_pool`: the acceptor of "
+                            "that profile claims a slot, a pump cell and a task "
+                            "cell before it answers a peer, so it can hold several"
                         )
         elif transport == "multicast":
             for key in UNICAST_ONLY:
@@ -644,6 +666,24 @@ def _pool_numbers(
     )
 
 
+def _single_accept(machine: dict) -> bool:
+    """Does an acceptor on this machine hold ONE accepted session at a time?
+
+    An MCU or Zephyr acceptor does, unless the machine declares a `session_pool`.
+    The heap profiles' acceptor binds one socket per accepted session, and lwIP
+    refuses a second bind of the port, so it has one. The acceptor of the pool
+    profile is a listener over ONE socket (`wz_session_lwip::listener`): it reads
+    every peer's datagrams from it, and claims a session slot, a pump cell and a
+    task cell for a peer before it answers it, answering nothing when one is
+    missing, so it holds as many sessions as it has lanes and the pool has slots
+    (S6, R1; the deploy lift is S9c).
+    """
+    platform = machine.get("platform") or {}
+    return (
+        platform.get("class") == "mcu" or platform.get("os") == "zephyr"
+    ) and "session_pool" not in machine
+
+
 def _slots_claimed(session: dict, single_accept: bool) -> int:
     """How many slots one declared session holds: a listening session claims
     every session it accepts, any other session one."""
@@ -770,12 +810,28 @@ def session_pool_problems(
 
     sessions = machine.get("sessions")
     sessions = sessions if isinstance(sessions, list) else []
-    single_accept = platform.get("class") == "mcu" or platform.get("os") == "zephyr"
+    single_accept = _single_accept(machine)
+    connect_bound = process.get("connect_endpoints") if isinstance(process, dict) else None
     claimed = 0
     for i, s in enumerate(sessions):
         if not isinstance(s, dict):
             continue
         claimed += _slots_claimed(s, single_accept)
+        # S9c: the endpoints a session dials are rows of the node's connect table,
+        # which `process.connect_endpoints` bounds; a list longer than the table
+        # would name endpoints the node has no row to hold.
+        connect = s.get("connect")
+        listed = connect.get("endpoints") if isinstance(connect, dict) else None
+        if (
+            _positive_int(connect_bound)
+            and isinstance(listed, list)
+            and len(listed) > connect_bound
+        ):
+            errors.append(
+                f"{base}.sessions[{i}].connect.endpoints: {len(listed)} endpoints, "
+                f"but process.connect_endpoints holds {connect_bound}; the node has "
+                "no row for the rest"
+            )
         lim = s.get("limits")
         if isinstance(lim, dict):
             own_payload = lim.get("reply_payload_bytes")
@@ -856,8 +912,7 @@ def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> di
     report["pool"] = dict(
         numbers, total_bytes=numbers["max_sessions"] * numbers["slot_bytes"]
     )
-    platform = machine.get("platform") or {}
-    single_accept = platform.get("class") == "mcu" or platform.get("os") == "zephyr"
+    single_accept = _single_accept(machine)
     for s in machine.get("sessions") or []:
         if not isinstance(s, dict):
             continue
@@ -1269,6 +1324,89 @@ def _pool_selftest(repo_root: Path) -> int:
         "a zero admin table size is refused",
         mutate(lambda m: m["session_pool"]["process"].update(admin_locators=0)),
         "session_pool.process.admin_locators: a positive integer",
+    )
+    # S9c: the connect table, the multicast reply queue, and the acceptor that holds
+    # several sessions on a machine with a table.
+    check(
+        "the connect table and the multicast reply queue are process keys",
+        mutate(
+            lambda m: m["session_pool"]["process"].update(
+                connect_endpoints=8, multicast_replies=8
+            )
+        ),
+        None,
+    )
+    check(
+        "a zero connect table is refused",
+        mutate(lambda m: m["session_pool"]["process"].update(connect_endpoints=0)),
+        "session_pool.process.connect_endpoints: a positive integer",
+    )
+    check(
+        "a zero multicast reply queue is refused",
+        mutate(lambda m: m["session_pool"]["process"].update(multicast_replies=0)),
+        "session_pool.process.multicast_replies: a positive integer",
+    )
+
+    def endpoints_beyond_the_table(m):
+        m["session_pool"]["process"]["connect_endpoints"] = 1
+        m["sessions"][0]["connect"]["endpoints"] = ["udp/192.0.2.10:7447", "udp/192.0.2.11:7447"]
+
+    check(
+        "a session that lists more endpoints than the connect table holds is refused",
+        mutate(endpoints_beyond_the_table),
+        "sessions[0].connect.endpoints: 2 endpoints, but process.connect_endpoints holds 1",
+    )
+
+    def acceptor(m, n):
+        m["links"]["udp_listen"] = {
+            "bind": "0.0.0.0:7447",
+            "driver": "lwip_udp",
+            "mtu_bytes": 1472,
+        }
+        m["sessions"][1] = {
+            "name": "listener",
+            "mode": "peer",
+            "transport": "unicast",
+            "link": "udp_listen",
+            "zid": "b1",
+            "listen": {"endpoints": ["udp/0.0.0.0:7447"]},
+            "accept": {"max_sessions": n},
+            "buffer_pools": {
+                "session_rx_pool": {"slot_count": 4, "slot_size": 1000},
+                "reassembly_pool": {"slot_count": 2, "slot_size": 500},
+            },
+        }
+
+    check(
+        "an MCU acceptor of a machine with a session table holds two sessions",
+        mutate(lambda m: acceptor(m, 2)),
+        None,
+    )
+    check(
+        "each accepted session claims a slot of the table",
+        mutate(lambda m: acceptor(m, 3)),
+        "session_pool.max_sessions: the machine's sessions claim 4 slots and the "
+        "table holds 3",
+    )
+
+    def zephyr_acceptor(m):
+        acceptor(m, 2)
+        m["platform"] = {"class": "mcu_rtos", "os": "zephyr"}
+
+    check(
+        "a Zephyr acceptor of a machine with a session table holds two sessions",
+        mutate(zephyr_acceptor),
+        None,
+    )
+
+    def no_table_acceptor(m):
+        acceptor(m, 2)
+        m.pop("session_pool")
+
+    check(
+        "the same acceptor on a machine with no table still holds one",
+        mutate(no_table_acceptor),
+        "sessions[1].accept.max_sessions: 2 is refused",
     )
     check(
         "an admin reply buffer of exactly the reply payload bound is accepted",

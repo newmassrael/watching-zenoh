@@ -88,6 +88,10 @@ machines:
         # `sessions[]` row lists.
         admin_locators: 4
         admin_session_links: 2
+        # The rows of the node's connect table (one per endpoint a host writes or a
+        # session lists), and the room of the multicast pump's reply queue.
+        connect_endpoints: 8
+        multicast_replies: 8
 
     sessions:                          # one entry per session, in start order
       - name: to_router
