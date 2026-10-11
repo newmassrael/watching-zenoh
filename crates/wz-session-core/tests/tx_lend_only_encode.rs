@@ -355,10 +355,12 @@ fn a_cookie_minted_into_an_array_is_the_cookie_the_owned_form_mints() {
 /// generated `cookie` field caps at 128: the array must fit the field.
 #[test]
 fn the_cookie_array_fits_the_generated_field() {
-    assert!(
-        ACCEPT_COOKIE_MAX_BYTES <= 128,
-        "the widest array cookie is {ACCEPT_COOKIE_MAX_BYTES} bytes and the generated field caps at 128"
-    );
+    const {
+        assert!(
+            ACCEPT_COOKIE_MAX_BYTES <= 128,
+            "the widest array cookie exceeds the 128 bytes the generated field caps at"
+        )
+    };
     let widest = cookie_state(16, None);
     let owned = encode_accept_cookie(&key(), &widest).expect("owned");
     assert_eq!(
