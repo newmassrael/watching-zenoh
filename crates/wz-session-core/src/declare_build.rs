@@ -33,7 +33,7 @@ use crate::ext_nodeid::MESSAGE_FLAG_Z;
 /// content lives in [`crate::declare_ext_qos`]: a builder that sets one without
 /// the other emits a header promising extensions that are not there, which the
 /// peer reads as a truncated message rather than as a missing field.
-const DECLARE_ENVELOPE_HEADER: u8 = wire_const::N_MID_DECLARE | MESSAGE_FLAG_Z;
+pub(crate) const DECLARE_ENVELOPE_HEADER: u8 = wire_const::N_MID_DECLARE | MESSAGE_FLAG_Z;
 
 // R2386 — gated with its one consumer, `build_declare_final`. The import was
 // unconditional while the builder was `codec-declare`-gated, so the two moved

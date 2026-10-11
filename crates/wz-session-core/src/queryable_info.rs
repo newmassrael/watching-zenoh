@@ -104,7 +104,7 @@ impl Default for QueryableInfo {
 
 /// Pack into the z64 ext value, zenoh's exact layout
 /// (`zenoh-codec .../declare.rs:556`): `(complete) | (distance << 8)`.
-fn pack(info: QueryableInfo) -> u64 {
+pub(crate) fn pack(info: QueryableInfo) -> u64 {
     (info.complete as u64) | ((info.distance as u64) << DISTANCE_SHIFT)
 }
 

@@ -60,9 +60,9 @@ pub const KEYEXPR_EXT_HEADER: u8 = KEYEXPR_EXT_ID | EXT_FLAG_M | EXT_ENC_ZBUF;
 /// Inner-body flag (zenoh `_z_wireexpr_is_local`): the keyexpr was rooted in the
 /// SENDER's own mapping table. A freshly built literal keyexpr (mapping 0) is
 /// local.
-const INNER_IS_LOCAL: u8 = 0x02;
+pub(crate) const INNER_IS_LOCAL: u8 = 0x02;
 /// Inner-body flag (zenoh `kelen != 0`): a suffix string follows the id.
-const INNER_HAS_SUFFIX: u8 = 0x01;
+pub(crate) const INNER_HAS_SUFFIX: u8 = 0x01;
 
 /// Build the `ext_keyexpr` extension entry for a LITERAL keyexpr — the keyexpr
 /// a sourced `UndeclareSubscriber` retracts. Mirrors zenoh-pico

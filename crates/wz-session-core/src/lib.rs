@@ -966,6 +966,17 @@ pub mod interest_build;
 #[cfg(all(feature = "alloc", feature = "codec-response-final"))]
 pub mod response_final_build;
 
+/// Fixed-memory step S9d -- the control messages (a `Declare`, an `Interest`, a
+/// `ResponseFinal`) written as the codec's BORROWED views over the caller's own
+/// text, ready to encode into the slot a link lends, where `declare_build`,
+/// `interest_build` and `response_final_build` make the owned mirror (a `String`
+/// and a `Vec` per message) and encode that. Byte-equal to those builders, which
+/// the module's tests hold for every input they take. The Declare family is
+/// `codec-declare`-gated and the `ResponseFinal` writer `codec-response-final`-gated,
+/// as their builders are.
+#[cfg(feature = "alloc")]
+pub mod lent_control;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns

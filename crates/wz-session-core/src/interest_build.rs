@@ -343,43 +343,72 @@ fn build_restricted_interest(
     future: bool,
     keyexpr: Option<(u64, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
-    // Outer header: MID 0x19 | (current ? C) | (future ? F). Z stays
-    // clear — wz emits no Interest-level extensions today; the
-    // wz-codecs envelope leaves bit 7 free for a future ext-chain.
-    let c_flag = if current { 0x20u8 } else { 0x00u8 };
-    let f_flag = if future { 0x40u8 } else { 0x00u8 };
-
-    let ke_flag = 0x01u8;
-    let (r_flag, n_flag, m_flag, wireexpr) = match keyexpr {
+    let wireexpr = match keyexpr {
         Some((mapping_id, suffix)) => {
             let suffix_len = suffix.map(|s| s.len() as u64);
             let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
-            (
-                0x10u8,
-                if suffix.is_some() { 0x20u8 } else { 0x00u8 },
-                0x40u8, // Local arm (M=1)
-                Some(WireexprOwned {
-                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                        id: mapping_id,
-                        suffix_len,
-                        suffix: suffix_string,
-                    }),
+            Some(WireexprOwned {
+                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                    id: mapping_id,
+                    suffix_len,
+                    suffix: suffix_string,
                 }),
-            )
+            })
         }
-        None => (0x00u8, 0x00u8, 0x00u8, None),
+        None => None,
     };
-    let body_header = ke_flag | kinds.bits() | r_flag | n_flag | m_flag;
 
     Ok(InterestOwned {
-        header: wire_const::N_MID_INTEREST | c_flag | f_flag,
+        header: interest_header(current, future),
         interest_id,
         body: Some(InterestBodyOwned {
-            header: body_header,
+            header: interest_body_header(
+                kinds,
+                keyexpr.map(|(_, suffix)| suffix.is_some()),
+                /*aggregate=*/ false,
+            ),
             keyexpr: wireexpr,
         }),
         extensions: None,
     })
+}
+
+/// The OUTER `Interest.header` of every builder in this module and of the lent
+/// writers ([`crate::lent_control`]): MID `0x19` with the `C` (CURRENT, `0x20`)
+/// and `F` (FUTURE, `0x40`) bits. `Z` stays clear here; an extension chain sets
+/// it where one is attached. One definition, so the owned and the lent
+/// form of an Interest cannot disagree about which bit is which.
+pub(crate) const fn interest_header(current: bool, future: bool) -> u8 {
+    let c_flag = if current { 0x20u8 } else { 0x00u8 };
+    let f_flag = if future { 0x40u8 } else { 0x00u8 };
+    wire_const::N_MID_INTEREST | c_flag | f_flag
+}
+
+/// The `InterestBody` header of every builder in this module and of the lent
+/// writers: `KE | <kinds> | R | N | M | A`. `keyexpr` is `None` for an
+/// unrestricted interest (no wireexpr: `R`, `N` and `M` all clear) and
+/// `Some(has_suffix)` for a restricted one, whose `N` follows the suffix and whose
+/// `M` is the `Local` arm every builder here writes.
+pub(crate) const fn interest_body_header(
+    kinds: InterestKinds,
+    keyexpr: Option<bool>,
+    aggregate: bool,
+) -> u8 {
+    let ke_flag = 0x01u8;
+    let (r_flag, n_flag, m_flag) = match keyexpr {
+        Some(has_suffix) => (
+            0x10u8,
+            if has_suffix { 0x20u8 } else { 0x00u8 },
+            0x40u8, // Local arm (M=1)
+        ),
+        None => (0x00u8, 0x00u8, 0x00u8),
+    };
+    let ag_flag = if aggregate {
+        INTEREST_BODY_AGGREGATE
+    } else {
+        0x00u8
+    };
+    ke_flag | kinds.bits() | r_flag | n_flag | m_flag | ag_flag
 }
 
 /// [`build_restricted_interest`] with the AGGREGATE bit — the one composition
