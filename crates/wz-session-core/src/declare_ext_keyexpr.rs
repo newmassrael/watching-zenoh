@@ -45,6 +45,7 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 
 use crate::ext_header::ext_eid;
 use crate::ext_nodeid::{EXT_ENC_ZBUF, EXT_FLAG_M};
+use crate::ext_view::ExtEntryView;
 use crate::vle::read_vle_u64;
 use crate::wireexpr_resolve::MappingSpaces;
 
@@ -114,18 +115,21 @@ pub fn build_ext_wireexpr(mapping_id: u64, suffix: &str) -> Result<ExtEntryOwned
 /// place rather than two hand-rolled parsers that could drift. `None` when no
 /// `ext_keyexpr` entry is present, its body is not a ZBuf, or the id VLE is
 /// truncated.
-fn parse_ext_keyexpr_entry(exts: Option<&Vec<ExtEntryOwned>>) -> Option<(u8, u64, &[u8])> {
+///
+/// Generic over the chain a reader can ask ([`ExtEntryView`]): the owned one, or
+/// the chain of a declaration read where its frame lies. One scan, so the two
+/// forms cannot disagree about which entry is the keyexpr.
+fn parse_ext_keyexpr_entry<E: ExtEntryView>(exts: Option<&[E]>) -> Option<(u8, u64, &[u8])> {
     for ext in exts? {
         // Told by its identity, the header without the chain flag, as upstream tells
         // it (`ext::WireExprExt::ID`): a ZBuf of the same id that is not mandatory
         // is another extension.
-        if ext_eid(ext.header) != KEYEXPR_EXT_HEADER {
+        if ext_eid(ext.header()) != KEYEXPR_EXT_HEADER {
             continue;
         }
-        let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body else {
+        let Some(body) = ext.plain_zbuf() else {
             continue;
         };
-        let body = z.value.as_slice();
         let (&inner_header, rest) = body.split_first()?;
         let (id, consumed) = read_vle_u64(rest)?;
         let suffix_bytes = rest.get(consumed..)?;
@@ -141,7 +145,7 @@ fn parse_ext_keyexpr_entry(exts: Option<&Vec<ExtEntryOwned>>) -> Option<(u8, u64
 /// declare literal seams. Borrows the suffix out of the ext body (no
 /// allocation). The alias-capable superset is [`resolve_ext_keyexpr`].
 pub fn read_ext_keyexpr(exts: Option<&Vec<ExtEntryOwned>>) -> Option<&str> {
-    let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts)?;
+    let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts.map(Vec::as_slice))?;
     if inner_header & INNER_HAS_SUFFIX == 0 || id != 0 {
         return None; // no suffix, or an aliased mapping id → literal-only defer
     }
@@ -205,7 +209,7 @@ pub fn resolve_ext_keyexpr<'a>(
     exts: Option<&Vec<ExtEntryOwned>>,
     table: impl Into<MappingSpaces<'a>>,
 ) -> Option<String> {
-    let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts)?;
+    let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts.map(Vec::as_slice))?;
     let suffix = if inner_header & INNER_HAS_SUFFIX != 0 {
         core::str::from_utf8(suffix_bytes).ok()?
     } else {
@@ -227,6 +231,17 @@ pub fn resolve_ext_keyexpr<'a>(
 /// is the one answer a bounded buffer adds: the composed keyexpr does not fit.
 pub fn resolve_ext_keyexpr_into<'k>(
     exts: Option<&'k Vec<ExtEntryOwned>>,
+    table: impl Into<MappingSpaces<'k>>,
+    out: &'k mut crate::wireexpr_resolve::KeyexprBuf,
+) -> Result<Option<&'k str>, crate::wireexpr_resolve::KeyexprPastBound> {
+    resolve_ext_keyexpr_in(exts.map(Vec::as_slice), table, out)
+}
+
+/// [`resolve_ext_keyexpr_into`] over any chain a reader can ask
+/// ([`ExtEntryView`]): the owned one, or the chain of an undeclaration read where
+/// its frame lies. The one body both forms resolve through.
+pub fn resolve_ext_keyexpr_in<'k, E: ExtEntryView>(
+    exts: Option<&'k [E]>,
     table: impl Into<MappingSpaces<'k>>,
     out: &'k mut crate::wireexpr_resolve::KeyexprBuf,
 ) -> Result<Option<&'k str>, crate::wireexpr_resolve::KeyexprPastBound> {

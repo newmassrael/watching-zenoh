@@ -26,6 +26,8 @@ use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use wz_codecs::declare::DeclareVariant;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::decl_sink::BorrowedDecl;
@@ -41,6 +43,8 @@ use crate::locality::Locality;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 
@@ -846,8 +850,6 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
-        // Consumed only by the `session-matching` re-evaluations below.
-        let _ = &local_matching;
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(decl) => {
@@ -864,13 +866,6 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
                         return;
                     }
                 };
-                // R288 — track peer-declared queryable so
-                // get_matching_status can consult the membership at
-                // a later point. Late-arrival semantics — a
-                // subsequent declare with the same id overwrites
-                // the prior entry (peer renamed the keyexpr), which
-                // matches zenoh-pico's same-id-replaces behaviour.
-                //
                 // R311y797 — the completeness rides the SAME insert, read
                 // off this declaration's own `QueryableInfo` ext through
                 // the production `read_queryable_info` SSOT. A re-declare
@@ -881,49 +876,129 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
                 // `net/filtering.c:202`).
                 let complete =
                     crate::queryable_info::read_queryable_info(decl.extensions.as_ref()).complete;
-                let Ok(text) = key_text(resolved) else {
-                    peer.oversize = peer.oversize.saturating_add(1);
-                    return;
-                };
-                if peer
-                    .declared
-                    .bind(
-                        decl.id,
-                        DeclaredQueryable {
-                            keyexpr: text,
-                            complete,
-                        },
-                    )
-                    .is_err()
-                {
-                    return;
-                }
-                let view = BorrowedDecl {
-                    id: decl.id,
-                    keyexpr: resolved,
-                };
-                self.dispatch_declared_borrowed(&view);
-                // R311kh — membership changed: flip-fire the matching
-                // watches (disjoint field borrows via the free-fn consult).
-                #[cfg(feature = "session-matching")]
-                self.matching_watches
-                    .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
+                self.apply_declared(peer, decl.id, resolved, complete, local_matching);
             }
             DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
-                // R288 — drop the membership entry first so a
-                // get_matching_status fired from inside the
-                // on_undecl callback chain observes the post-
-                // undeclare state. Missing-id remove is silent.
-                peer.declared.unbind(undecl.id);
-                self.dispatch_undeclared(undecl.id);
-                // R311kh — see the DeclQueryable arm.
-                #[cfg(feature = "session-matching")]
-                self.matching_watches
-                    .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
+                self.apply_undeclared(peer, undecl.id, local_matching);
             }
             // Other sub-variants do not reach this registry.
             _ => {}
         }
+    }
+
+    /// [`Self::dispatch_declare_with_local`] for a `Declare` the in-place receive
+    /// path lends ([`IterationEvent::InPlace`]): the same two arms, refusals and
+    /// fan-out over the declaration as it is decoded where its frame lies. The
+    /// keyexpr is resolved by [`resolve_wireexpr_view`] and the completeness is
+    /// read by the projection both forms share
+    /// ([`crate::queryable_info::read_queryable_info_in`]); what is done with them
+    /// is [`Self::apply_declared`] for both.
+    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    pub fn dispatch_declare_view_with_local<'a>(
+        &mut self,
+        peer: &mut RemoteQueryablePeer,
+        body: &DeclareVariant<'a>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareVariant::CodecZenohDeclQueryable(decl) => {
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_view(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        peer.oversize = peer.oversize.saturating_add(1);
+                        return;
+                    }
+                };
+                let complete =
+                    crate::queryable_info::read_queryable_info_in(decl.extensions.as_deref())
+                        .complete;
+                self.apply_declared(peer, decl.id, resolved, complete, local_matching);
+            }
+            DeclareVariant::CodecZenohUndeclQueryable(undecl) => {
+                self.apply_undeclared(peer, undecl.id, local_matching);
+            }
+            // Other sub-variants do not reach this registry.
+            _ => {}
+        }
+    }
+
+    /// What a declared peer queryable does once its keyexpr and completeness are
+    /// read, whichever form carried the declaration: bind it in the peer's table
+    /// (refusing and counting past the table's room or a row's text), fan it to the
+    /// observers through the no-heap SSOT, and flip-fire the matching watches.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    fn apply_declared(
+        &mut self,
+        peer: &mut RemoteQueryablePeer,
+        id: u64,
+        resolved: &str,
+        complete: bool,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) {
+        // Consumed only by the `session-matching` re-evaluation below.
+        let _ = &local_matching;
+        // R288 — track peer-declared queryable so
+        // get_matching_status can consult the membership at
+        // a later point. Late-arrival semantics — a
+        // subsequent declare with the same id overwrites
+        // the prior entry (peer renamed the keyexpr), which
+        // matches zenoh-pico's same-id-replaces behaviour.
+        let Ok(text) = key_text(resolved) else {
+            peer.oversize = peer.oversize.saturating_add(1);
+            return;
+        };
+        if peer
+            .declared
+            .bind(
+                id,
+                DeclaredQueryable {
+                    keyexpr: text,
+                    complete,
+                },
+            )
+            .is_err()
+        {
+            return;
+        }
+        let view = BorrowedDecl {
+            id,
+            keyexpr: resolved,
+        };
+        self.dispatch_declared_borrowed(&view);
+        // R311kh — membership changed: flip-fire the matching
+        // watches (disjoint field borrows via the free-fn consult).
+        #[cfg(feature = "session-matching")]
+        self.matching_watches
+            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
+    }
+
+    /// What an undeclared peer queryable does, whichever form carried the
+    /// undeclaration: drop the membership entry first (so a `get_matching_status`
+    /// fired from inside the `on_undecl` chain observes the post-undeclare state;
+    /// a missing id is silent), fan it to the observers, and flip-fire the
+    /// matching watches.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    fn apply_undeclared(
+        &mut self,
+        peer: &mut RemoteQueryablePeer,
+        id: u64,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) {
+        let _ = &local_matching;
+        peer.declared.unbind(id);
+        self.dispatch_undeclared(id);
+        // R311kh — see `apply_declared`.
+        #[cfg(feature = "session-matching")]
+        self.matching_watches
+            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
     }
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
@@ -984,8 +1059,28 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages_with_local(peer, messages, peer_keyexpr_table, local_matching);
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages_with_local(
+                    peer,
+                    messages,
+                    peer_keyexpr_table,
+                    local_matching,
+                );
+            }
+            // A Declare the slot profile's receive path lends where its frame lies.
+            #[cfg(feature = "session-slot")]
+            IterationEvent::InPlace(record) => {
+                if let Some(declare) = record.declare() {
+                    self.dispatch_declare_view_with_local(
+                        peer,
+                        &declare.body,
+                        peer_keyexpr_table,
+                        local_matching,
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }

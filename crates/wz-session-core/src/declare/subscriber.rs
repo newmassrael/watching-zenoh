@@ -28,6 +28,8 @@ use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use wz_codecs::declare::DeclareVariant;
 
 // The shared [`DeclObserverPair`] holds the bounded observer lists +
 // install/fire SSOT; `DeclSink` / `UndeclSink` (bounds) + `DeclView`
@@ -48,6 +50,8 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 
@@ -754,7 +758,6 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        let _ = &local_matching;
         match body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(decl) => {
                 let mut composed = KeyexprBuf::new();
@@ -770,47 +773,120 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
                         return;
                     }
                 };
-                // R290 — same membership-tracking pattern as the
-                // Q-side registry: same-id-replaces semantic, no
-                // explicit conflict surfacing.
-                let Ok(text) = key_text(resolved) else {
-                    peer.oversize = peer.oversize.saturating_add(1);
-                    return;
-                };
-                if peer.declared.bind(decl.id, text).is_err() {
-                    return;
-                }
-                // R311gb-3d / Track 2 — fan through the DeclSink seam via
-                // the no-heap SSOT: build the `(id, resolved-keyexpr)`
-                // view once and hand each observer `&dyn DeclView`.
-                let view = BorrowedDecl {
-                    id: decl.id,
-                    keyexpr: resolved,
-                };
-                self.dispatch_declared_borrowed(&view);
-                // R311kh — membership changed: re-evaluate the matching
-                // watches (flip-fire only). Disjoint field borrows: the
-                // watch list is &mut, the membership table is read
-                // through the free-fn consult.
-                #[cfg(feature = "session-matching")]
-                self.matching_watches
-                    .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
+                self.apply_declared(peer, decl.id, resolved, local_matching);
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
-                // R290 — drop the membership entry first so a
-                // get_matching_status fired from inside the
-                // on_undecl callback chain observes the post-
-                // undeclare state.
-                peer.declared.unbind(undecl.id);
-                self.dispatch_undeclared(undecl.id);
-                // R311kh — see the DeclSubscriber arm.
-                #[cfg(feature = "session-matching")]
-                self.matching_watches
-                    .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
+                self.apply_undeclared(peer, undecl.id, local_matching);
             }
             // Other sub-variants do not reach this registry.
             _ => {}
         }
+    }
+
+    /// [`Self::dispatch_declare_with_local`] for a `Declare` the in-place receive
+    /// path lends ([`IterationEvent::InPlace`]): the same two arms, the same
+    /// refusals and the same fan-out, over the declaration as it is decoded where
+    /// its frame lies. Only the reading differs (the keyexpr is resolved by
+    /// [`resolve_wireexpr_view`], the rule the owned form's resolver shares); what is
+    /// done with the resolved keyexpr is [`Self::apply_declared`] for both, so a
+    /// rule lives in one place.
+    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    pub fn dispatch_declare_view_with_local<'a>(
+        &mut self,
+        peer: &mut RemoteSubscriberPeer,
+        body: &DeclareVariant<'a>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareVariant::CodecZenohDeclSubscriber(decl) => {
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_view(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        peer.oversize = peer.oversize.saturating_add(1);
+                        return;
+                    }
+                };
+                self.apply_declared(peer, decl.id, resolved, local_matching);
+            }
+            DeclareVariant::CodecZenohUndeclSubscriber(undecl) => {
+                self.apply_undeclared(peer, undecl.id, local_matching);
+            }
+            // Other sub-variants do not reach this registry.
+            _ => {}
+        }
+    }
+
+    /// What a declared peer subscriber does once its keyexpr is resolved, whichever
+    /// form carried the declaration: bind it in the peer's table (refusing and
+    /// counting past the table's room or a row's text), fan it to the observers
+    /// through the no-heap SSOT, and re-evaluate the matching watches.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    fn apply_declared(
+        &mut self,
+        peer: &mut RemoteSubscriberPeer,
+        id: u64,
+        resolved: &str,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) {
+        // Consumed only by the `session-matching` re-evaluation below.
+        let _ = &local_matching;
+        // R290 — same membership-tracking pattern as the
+        // Q-side registry: same-id-replaces semantic, no
+        // explicit conflict surfacing.
+        let Ok(text) = key_text(resolved) else {
+            peer.oversize = peer.oversize.saturating_add(1);
+            return;
+        };
+        if peer.declared.bind(id, text).is_err() {
+            return;
+        }
+        // R311gb-3d / Track 2 — fan through the DeclSink seam via
+        // the no-heap SSOT: build the `(id, resolved-keyexpr)`
+        // view once and hand each observer `&dyn DeclView`.
+        let view = BorrowedDecl {
+            id,
+            keyexpr: resolved,
+        };
+        self.dispatch_declared_borrowed(&view);
+        // R311kh — membership changed: re-evaluate the matching
+        // watches (flip-fire only). Disjoint field borrows: the
+        // watch list is &mut, the membership table is read
+        // through the free-fn consult.
+        #[cfg(feature = "session-matching")]
+        self.matching_watches
+            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
+    }
+
+    /// What an undeclared peer subscriber does, whichever form carried the
+    /// undeclaration: drop the membership entry first (so a `get_matching_status`
+    /// fired from inside the `on_undecl` chain observes the post-undeclare state),
+    /// fan it to the observers, and re-evaluate the matching watches.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    fn apply_undeclared(
+        &mut self,
+        peer: &mut RemoteSubscriberPeer,
+        id: u64,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) {
+        let _ = &local_matching;
+        // R290 — drop the membership entry first so a
+        // get_matching_status fired from inside the
+        // on_undecl callback chain observes the post-
+        // undeclare state.
+        peer.declared.unbind(id);
+        self.dispatch_undeclared(id);
+        // R311kh — see `apply_declared`.
+        #[cfg(feature = "session-matching")]
+        self.matching_watches
+            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
     }
 
     /// Drain a `Vec<NetworkMessage>` (typically the
@@ -881,8 +957,28 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages_with_local(peer, messages, peer_keyexpr_table, local_matching);
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages_with_local(
+                    peer,
+                    messages,
+                    peer_keyexpr_table,
+                    local_matching,
+                );
+            }
+            // A Declare the slot profile's receive path lends where its frame lies.
+            #[cfg(feature = "session-slot")]
+            IterationEvent::InPlace(record) => {
+                if let Some(declare) = record.declare() {
+                    self.dispatch_declare_view_with_local(
+                        peer,
+                        &declare.body,
+                        peer_keyexpr_table,
+                        local_matching,
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }

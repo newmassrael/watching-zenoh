@@ -544,11 +544,20 @@ impl<'a> InPlaceFragment<'a> {
 /// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
 /// carries.
 ///
-/// Three kinds travel this way: a Push ([`Self::push`]), a Request
-/// ([`Self::request`]) and a Response ([`Self::response`]), each read by the
-/// registry that consumes it (the subscribers, the queryables, the pending
+/// Three kinds travel this way on every build: a Push ([`Self::push`]), a
+/// Request ([`Self::request`]) and a Response ([`Self::response`]), each read by
+/// the registry that consumes it (the subscribers, the queryables, the pending
 /// gets); a record of any other kind is decoded into its owned message and
-/// reported as `Poll(FramePayload)`. Exactly one accessor answers `Some`.
+/// reported as `Poll(FramePayload)`.
+///
+/// On the per-session slot profile (`session-slot`) the control kinds travel this
+/// way too: a Declare (`declare`), an Interest (`interest`) and a ResponseFinal
+/// (`response_final`). Their owned messages are what that profile cannot build:
+/// the boxed `DeclareOwned` and the lists it carries are heap, and the same
+/// mirror at the inline profile would put the spread of the codecs' widest bodies
+/// into the one record buffer of every pump and refuse a keyexpr past the codec's
+/// own text bound, which the decode where the frame lies reads whole. Exactly one
+/// accessor answers `Some`.
 #[derive(Clone, Copy, Debug)]
 pub struct InPlaceRecord<'a> {
     reliable: bool,
@@ -557,7 +566,8 @@ pub struct InPlaceRecord<'a> {
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
-        feature = "codec-response"
+        feature = "codec-response",
+        feature = "session-slot"
     ))]
     record: LentRecord<'a>,
     _frame: core::marker::PhantomData<&'a [u8]>,
@@ -572,7 +582,8 @@ pub struct InPlaceRecord<'a> {
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
-    feature = "codec-response"
+    feature = "codec-response",
+    feature = "session-slot"
 ))]
 #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
 #[derive(Clone, Copy, Debug)]
@@ -583,6 +594,12 @@ enum LentRecord<'a> {
     Request(&'a wz_codecs::request::Request<'a>),
     #[cfg(feature = "codec-response")]
     Response(&'a wz_codecs::response::Response<'a>),
+    #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+    Declare(&'a wz_codecs::declare::Declare<'a>),
+    #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+    ResponseFinal(&'a wz_codecs::response_final::ResponseFinal<'a>),
+    #[cfg(feature = "session-slot")]
+    Interest(&'a wz_codecs::interest::Interest<'a>),
 }
 
 impl<'a> InPlaceRecord<'a> {
@@ -594,7 +611,8 @@ impl<'a> InPlaceRecord<'a> {
         any(
             feature = "codec-push",
             feature = "codec-request",
-            feature = "codec-response"
+            feature = "codec-response",
+            feature = "session-slot"
         )
     ))]
     #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
@@ -649,6 +667,55 @@ impl<'a> InPlaceRecord<'a> {
         Self::of_frame(LentRecord::Response(response), reliable, sn, priority)
     }
 
+    /// A Declare record of a frame, on the slot profile.
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-declare",
+        any(test, feature = "session-unicast")
+    ))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    pub(crate) fn declare_of_frame(
+        declare: &'a wz_codecs::declare::Declare<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Declare(declare), reliable, sn, priority)
+    }
+
+    /// A ResponseFinal record of a frame, on the slot profile.
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-response-final",
+        any(test, feature = "session-unicast")
+    ))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    pub(crate) fn response_final_of_frame(
+        response_final: &'a wz_codecs::response_final::ResponseFinal<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(
+            LentRecord::ResponseFinal(response_final),
+            reliable,
+            sn,
+            priority,
+        )
+    }
+
+    /// An Interest record of a frame, on the slot profile.
+    #[cfg(all(feature = "session-slot", any(test, feature = "session-unicast")))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    pub(crate) fn interest_of_frame(
+        interest: &'a wz_codecs::interest::Interest<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self::of_frame(LentRecord::Interest(interest), reliable, sn, priority)
+    }
+
     /// Whether the carrying frame rode the reliable channel.
     pub fn reliable(&self) -> bool {
         self.reliable
@@ -692,6 +759,40 @@ impl<'a> InPlaceRecord<'a> {
     pub fn response(&self) -> Option<&'a wz_codecs::response::Response<'a>> {
         match self.record {
             LentRecord::Response(response) => Some(response),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Declare, as it is decoded, its keyexpr, extensions and inner body
+    /// ranges of the frame (slot profile). `None` when the record is of another
+    /// kind.
+    #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+    pub fn declare(&self) -> Option<&'a wz_codecs::declare::Declare<'a>> {
+        match self.record {
+            LentRecord::Declare(declare) => Some(declare),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The ResponseFinal, as it is decoded (slot profile). `None` when the
+    /// record is of another kind.
+    #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+    pub fn response_final(&self) -> Option<&'a wz_codecs::response_final::ResponseFinal<'a>> {
+        match self.record {
+            LentRecord::ResponseFinal(response_final) => Some(response_final),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Interest, as it is decoded, its keyexpr and extensions ranges of the
+    /// frame (slot profile). `None` when the record is of another kind.
+    #[cfg(feature = "session-slot")]
+    pub fn interest(&self) -> Option<&'a wz_codecs::interest::Interest<'a>> {
+        match self.record {
+            LentRecord::Interest(interest) => Some(interest),
             #[allow(unreachable_patterns)]
             _ => None,
         }

@@ -356,6 +356,59 @@ impl LocalTokenRegistry {
             .map(|_staged| ())
     }
 
+    /// [`Self::respond_to_interest`] for an `Interest` the in-place receive path
+    /// lends ([`IterationEvent::InPlace`]): the same reading (a CURRENT bit, a
+    /// tokens body, an optional keyexpr, an unresolvable one dropping silently)
+    /// over the interest as it is decoded where its frame lies, then the one
+    /// staging SSOT both forms funnel into. The keyexpr is resolved by
+    /// `resolve_wireexpr_view` into a bounded buffer; one past it can match no
+    /// held token (a registered token's keyexpr fits the same bound), so it is
+    /// answered with the terminating `Final` alone, as the subscriber side
+    /// answers it.
+    #[cfg(all(feature = "alloc", feature = "session-slot"))]
+    pub fn respond_to_interest_view<'a>(
+        &self,
+        interest: &wz_codecs::interest::Interest<'a>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+    ) -> Result<(), CapacityFull<()>> {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        if !interest.c() {
+            return Ok(());
+        }
+        let Some(body) = interest.body.as_ref() else {
+            return Ok(());
+        };
+        if !body.to() {
+            return Ok(());
+        }
+        let mut composed = crate::wireexpr_resolve::KeyexprBuf::new();
+        let pattern: Option<&str> = match &body.keyexpr {
+            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view(
+                &w.body,
+                peer_keyexpr_table,
+                &mut composed,
+            ) {
+                Ok(Some(p)) => Some(p),
+                // Unresolvable mapping id — drop silently.
+                Ok(None) => return Ok(()),
+                Err(crate::wireexpr_resolve::KeyexprPastBound) => {
+                    if pending.free_slots() < 1 {
+                        return Err(CapacityFull(()));
+                    }
+                    return pending
+                        .push(DeclResponseItem::Final {
+                            interest_id: interest.interest_id,
+                        })
+                        .map_err(|_| CapacityFull(()));
+                }
+            },
+            None => None,
+        };
+        self.respond_to_interest_borrowed(pattern, interest.interest_id, pending)
+            .map(|_staged| ())
+    }
+
     /// Drain a `&[NetworkMessage]`, staging an interest-response for each
     /// inbound `Interest`. Mirror of the sibling registries'
     /// `dispatch_messages`. `alloc`-gated (consumes owned messages +
@@ -399,10 +452,21 @@ impl LocalTokenRegistry {
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
     ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table, pending)
-        } else {
-            0
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages(messages, peer_keyexpr_table, pending)
+            }
+            // An Interest the slot profile's receive path lends where its frame
+            // lies; a refused chain is counted as for the owned one.
+            #[cfg(feature = "session-slot")]
+            IterationEvent::InPlace(record) => match record.interest() {
+                Some(interest) => usize::from(
+                    self.respond_to_interest_view(interest, peer_keyexpr_table, pending)
+                        .is_err(),
+                ),
+                None => 0,
+            },
+            _ => 0,
         }
     }
 }

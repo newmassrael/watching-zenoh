@@ -124,6 +124,18 @@ pub fn read_queryable_info(exts: Option<&Vec<ExtEntryOwned>>) -> QueryableInfo {
     read_z64_ext(exts, QUERYABLE_INFO_EXT_HEADER).map_or(QueryableInfo::DEFAULT, unpack)
 }
 
+/// [`read_queryable_info`] over any chain a reader can ask
+/// ([`ExtEntryView`](crate::ext_view::ExtEntryView)): the owned one, or the chain
+/// of a declaration read where its frame lies. The same projection of
+/// [`read_z64_in`](crate::ext_nodeid::read_z64_in), so the two forms cannot read
+/// the extension differently.
+pub fn read_queryable_info_in<E: crate::ext_view::ExtEntryView>(
+    exts: Option<&[E]>,
+) -> QueryableInfo {
+    crate::ext_nodeid::read_z64_in(exts, QUERYABLE_INFO_EXT_HEADER)
+        .map_or(QueryableInfo::DEFAULT, unpack)
+}
+
 /// Set / omit the QueryableInfo on a body's ext chain, mirroring zenoh's
 /// omit-on-DEFAULT encoding: the DEFAULT `{ false, 0 }` (z64 value `0`) REMOVES
 /// any existing entry, anything else inserts / replaces it. Returns whether the

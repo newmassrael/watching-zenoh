@@ -945,10 +945,47 @@ impl<C: SampleSink> SubscriberTable<C> {
                     self.dispatch(peer, message, reliability);
                 }
             }
-            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            IterationEvent::InPlace(record) => self.dispatch_in_place(peer, &record),
+            // A Push lent where its frame lies, and on the slot profile the control
+            // records lent beside it: a Declare's alias is absorbed and a
+            // subscriber Interest is answered from the same views.
+            #[cfg(any(
+                feature = "pubsub-put",
+                feature = "pubsub-delete",
+                feature = "session-slot"
+            ))]
+            IterationEvent::InPlace(record) => {
+                #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+                self.dispatch_in_place(peer, &record);
+                #[cfg(feature = "session-slot")]
+                self.dispatch_in_place_control(peer, &record);
+            }
             _ => {}
         }
+    }
+
+    /// The control records of the slot profile that this registry owns, lent where
+    /// their frame lies: a `Declare`'s `DeclKexpr` / `UndeclKexpr` bind and unbind
+    /// the peer's keyexpr aliases, and a subscriber `Interest` is answered from this
+    /// session's own subscriptions. Both are the owned forms' rules over the
+    /// borrowed views ([`SubscriberPeer::absorb_declare_view`],
+    /// `respond_to_subscriber_interest_view`); a record of any other kind is another
+    /// registry's.
+    #[cfg(feature = "session-slot")]
+    fn dispatch_in_place_control(
+        &mut self,
+        peer: &mut SubscriberPeer,
+        record: &crate::driver_loop::InPlaceRecord<'_>,
+    ) {
+        #[cfg(feature = "codec-declare")]
+        if let Some(declare) = record.declare() {
+            peer.absorb_declare_view(&declare.body);
+        }
+        #[cfg(feature = "declare-subscriber")]
+        if let Some(interest) = record.interest() {
+            self.respond_to_subscriber_interest_view(peer, interest);
+        }
+        // Nothing of either kind is compiled in: the arguments are unread.
+        let _ = (&self, &peer, &record);
     }
 
     /// Route a decoded `NetworkMessage` to matching subscriber
@@ -1059,6 +1096,54 @@ impl<C: SampleSink> SubscriberTable<C> {
         let mut composed = KeyexprBuf::new();
         let pattern: Option<&str> = match &body.keyexpr {
             Some(w) => match resolve_wireexpr_into(&w.body, naming.spaces(), &mut composed) {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => return,
+                Err(crate::wireexpr_resolve::KeyexprPastBound) => {
+                    interests.stage_final_only(interest_id);
+                    return;
+                }
+            },
+            None => None,
+        };
+        self.respond_to_interest(interests, interest_id, pattern, body.ag(), current, future);
+    }
+
+    /// [`Self::respond_to_subscriber_interest`] for an `Interest` the in-place
+    /// receive path lends: the same reading of the interest (a FINAL retires its
+    /// row, only a subscriber interest is answered, a keyexpr past the buffer is
+    /// answered with the terminating `Final` alone) over the interest as it is
+    /// decoded where its frame lies, then the one staging SSOT both forms funnel
+    /// into. The keyexpr is resolved by the rule both forms share
+    /// ([`crate::wireexpr_resolve::resolve_wireexpr_view`]).
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-subscriber",
+        feature = "session-slot"
+    ))]
+    fn respond_to_subscriber_interest_view(
+        &mut self,
+        peer: &mut SubscriberPeer,
+        interest: &wz_codecs::interest::Interest<'_>,
+    ) {
+        let SubscriberPeer { naming, interests } = peer;
+        let interest_id = interest.interest_id;
+        let (current, future) = (interest.c(), interest.f());
+        let Some(body) = interest.body.as_ref() else {
+            if !current && !future {
+                interests.retire(interest_id);
+            }
+            return;
+        };
+        if !body.su() {
+            return;
+        }
+        let mut composed = KeyexprBuf::new();
+        let pattern: Option<&str> = match &body.keyexpr {
+            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view(
+                &w.body,
+                naming.spaces(),
+                &mut composed,
+            ) {
                 Ok(Some(p)) => Some(p),
                 Ok(None) => return,
                 Err(crate::wireexpr_resolve::KeyexprPastBound) => {
@@ -2283,6 +2368,50 @@ impl SubscriberPeer {
             // table is by definition not affected by an unknown
             // Declare sub-type.
             DeclareOwnedVariant::Default { .. } => {}
+        }
+    }
+
+    /// [`Self::absorb_declare`] for a `Declare` the in-place receive path lends
+    /// ([`IterationEvent::InPlace`]): the same two arms by the same rules, over the
+    /// declaration as it is decoded where its frame lies. The keyexpr a `DeclKexpr`
+    /// declares is resolved by the one rule both forms share
+    /// ([`crate::wireexpr_resolve::resolve_declared_keyexpr_view`]), into a
+    /// bounded buffer, so the slot profile absorbs an alias without the heap and
+    /// without the owned `DeclareOwned` it could not build. Every other arm is
+    /// another registry's, as in the owned form.
+    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    pub(crate) fn absorb_declare_view(&mut self, body: &wz_codecs::declare::DeclareVariant<'_>) {
+        use wz_codecs::declare::DeclareVariant;
+        match body {
+            DeclareVariant::CodecZenohDeclKexpr(d) => {
+                let mut composed = KeyexprBuf::new();
+                let literal = match crate::wireexpr_resolve::resolve_declared_keyexpr_view(
+                    &d.keyexpr.body,
+                    self.naming.spaces(),
+                    &mut composed,
+                ) {
+                    Ok(Some(literal)) => literal,
+                    // Unresolvable, or too long for the table's text.
+                    Ok(None) | Err(_) => return,
+                };
+                let Ok(text) = key_text(literal) else {
+                    return;
+                };
+                // A refusal is counted by the table itself, as for the owned form.
+                let _ = self.naming.aliases.bind(d.id, text);
+            }
+            DeclareVariant::CodecZenohUndeclKexpr(u) => {
+                self.naming.aliases.unbind(u.id);
+            }
+            // The other arms are the dedicated registries', as in the owned form.
+            DeclareVariant::CodecZenohDeclSubscriber(_)
+            | DeclareVariant::CodecZenohUndeclSubscriber(_)
+            | DeclareVariant::CodecZenohDeclQueryable(_)
+            | DeclareVariant::CodecZenohUndeclQueryable(_)
+            | DeclareVariant::CodecZenohDeclToken(_)
+            | DeclareVariant::CodecZenohUndeclToken(_)
+            | DeclareVariant::CodecZenohDeclFinal(_)
+            | DeclareVariant::Default { .. } => {}
         }
     }
 }

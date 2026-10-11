@@ -1557,10 +1557,21 @@ impl<C: ReplySink> ReplyRegistry<C> {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(messages, peer_keyexpr_table);
             }
-            #[cfg(feature = "codec-response")]
+            // The slot profile lends a `ResponseFinal` too: the same rule as the
+            // owned one (`dispatch_response_final`), which reads the request id
+            // and nothing else of it.
+            #[cfg(any(
+                feature = "codec-response",
+                all(feature = "session-slot", feature = "codec-response-final")
+            ))]
             IterationEvent::InPlace(record) => {
+                #[cfg(feature = "codec-response")]
                 if let Some(response) = record.response() {
                     self.dispatch_response_in_place(response, peer_keyexpr_table);
+                }
+                #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+                if let Some(response_final) = record.response_final() {
+                    self.fire_final_for(response_final.request_id);
                 }
             }
             _ => {}

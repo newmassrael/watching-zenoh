@@ -16,6 +16,8 @@
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use wz_codecs::declare::DeclareVariant;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::decl_sink::BorrowedDecl;
@@ -29,6 +31,8 @@ use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf};
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclToken` / `UndeclToken` records — the liveliness layer in
@@ -48,6 +52,11 @@ pub struct LivelinessRegistry<D: DeclSink, U: UndeclSink> {
     /// `DeclSink` registries). `D = BoxedDeclSink` / `U = BoxedUndeclSink`
     /// on AP, consumer-supplied closed `enum`s on MCU.
     observers: DeclObserverPair<D, U>,
+    /// How many token declarations were NOT announced because their keyexpr is
+    /// longer than the bounded buffer the slot profile's receive path resolves
+    /// into ([`Self::oversize`]). Stays zero on every build that reads the owned
+    /// message, whose keyexpr is a `String`.
+    oversize: u32,
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for LivelinessRegistry<D, U> {
@@ -67,7 +76,16 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     pub fn with_sink_backing() -> Self {
         Self {
             observers: DeclObserverPair::new(),
+            oversize: 0,
         }
+    }
+
+    /// How many token declarations were refused for a keyexpr past the bounded
+    /// buffer ([`crate::wireexpr_resolve::KeyexprBuf`]) and so not announced. Only
+    /// the slot profile's receive path, which resolves into that buffer, can
+    /// refuse; a refusal is counted, never a truncated keyexpr announced.
+    pub fn oversize(&self) -> u32 {
+        self.oversize
     }
 
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
@@ -165,6 +183,47 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
         }
     }
 
+    /// [`Self::dispatch_declare`] for a `Declare` the in-place receive path lends
+    /// ([`IterationEvent::InPlace`]): the same two arms over the declaration as it
+    /// is decoded where its frame lies, funnelled through the same no-heap fire
+    /// SSOT. The keyexpr is resolved by [`resolve_wireexpr_view`] into a bounded
+    /// buffer; one past it is counted ([`Self::oversize`]) and not announced.
+    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    pub fn dispatch_declare_view<'a>(
+        &mut self,
+        body: &DeclareVariant<'a>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareVariant::CodecZenohDeclToken(decl) => {
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_view(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        self.oversize = self.oversize.saturating_add(1);
+                        return;
+                    }
+                };
+                let view = BorrowedDecl {
+                    id: decl.id,
+                    keyexpr: resolved,
+                };
+                self.dispatch_declared_borrowed(&view);
+            }
+            DeclareVariant::CodecZenohUndeclToken(undecl) => {
+                self.dispatch_undeclared(undecl.id);
+            }
+            // Other sub-variants do not reach this registry.
+            _ => {}
+        }
+    }
+
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages<'a>(
@@ -227,8 +286,21 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
         claimed: &dyn Fn(u64) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
+            }
+            // A Declare the slot profile's receive path lends where its frame lies,
+            // under the same claim as the owned one.
+            #[cfg(feature = "session-slot")]
+            IterationEvent::InPlace(record) => {
+                if let Some(declare) = record.declare() {
+                    if !declare.interest_id.is_some_and(claimed) {
+                        self.dispatch_declare_view(&declare.body, peer_keyexpr_table);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

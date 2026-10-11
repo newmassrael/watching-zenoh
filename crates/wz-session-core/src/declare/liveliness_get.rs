@@ -142,6 +142,11 @@ pub struct LivelinessGetRegistry<C: ReplySink> {
     /// capacity cannot overflow (a dropped marker would be a PERMANENT
     /// replay-leak: this drain is the entry's only prune).
     finalized: BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }>,
+    /// How many token replies were NOT delivered because their keyexpr is longer
+    /// than the bounded buffer the slot profile's receive path resolves into
+    /// ([`Self::oversize`]). Stays zero on every build that reads the owned
+    /// message, whose keyexpr is a `String`.
+    oversize: u32,
 }
 
 impl<C: ReplySink> Default for LivelinessGetRegistry<C> {
@@ -160,7 +165,16 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         Self {
             pending: BoundedVec::new(),
             finalized: BoundedVec::new(),
+            oversize: 0,
         }
+    }
+
+    /// How many token replies were refused for a keyexpr past the bounded buffer
+    /// ([`crate::wireexpr_resolve::KeyexprBuf`]) and so not delivered. Only the slot
+    /// profile's receive path, which resolves into that buffer, can refuse; a
+    /// refusal is counted, never a truncated keyexpr delivered.
+    pub fn oversize(&self) -> u32 {
+        self.oversize
     }
 
     /// F3 — drain the interest ids whose gets terminated since the last
@@ -462,6 +476,50 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         }
     }
 
+    /// [`Self::dispatch_declare`] for a `Declare` the in-place receive path lends
+    /// ([`IterationEvent::InPlace`]): the same two arms over the declaration as it
+    /// is decoded where its frame lies. The keyexpr is resolved by
+    /// [`resolve_wireexpr_view`](crate::wireexpr_resolve::resolve_wireexpr_view)
+    /// into a bounded buffer; a reply past it is counted
+    /// ([`Self::oversize`]) and not delivered.
+    #[cfg(all(feature = "alloc", feature = "codec-declare", feature = "session-slot"))]
+    pub fn dispatch_declare_view<'a>(
+        &mut self,
+        declare: &wz_codecs::declare::Declare<'a>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        use wz_codecs::declare::DeclareVariant;
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        let Some(interest_id) = declare.interest_id else {
+            // Unsolicited (proactive) declaration — not a get reply.
+            return;
+        };
+        match &declare.body {
+            DeclareVariant::CodecZenohDeclToken(decl) => {
+                let mut composed = crate::wireexpr_resolve::KeyexprBuf::new();
+                let resolved = match crate::wireexpr_resolve::resolve_wireexpr_view(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        self.oversize = self.oversize.saturating_add(1);
+                        return;
+                    }
+                };
+                self.dispatch_reply_borrowed(interest_id, resolved);
+            }
+            DeclareVariant::CodecZenohDeclFinal(_) => {
+                self.fire_final_for(interest_id);
+            }
+            // Other Declare sub-variants are not the liveliness-get
+            // requester's concern.
+            _ => {}
+        }
+    }
+
     /// Drain a `&[NetworkMessage]` through [`Self::dispatch_declare`] for
     /// every `Declare` arm. Mirror of the sibling registries'
     /// `dispatch_messages`; `alloc`-gated (consumes owned messages +
@@ -492,8 +550,18 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table);
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages(messages, peer_keyexpr_table);
+            }
+            // A Declare the slot profile's receive path lends where its frame lies.
+            #[cfg(all(feature = "codec-declare", feature = "session-slot"))]
+            IterationEvent::InPlace(record) => {
+                if let Some(declare) = record.declare() {
+                    self.dispatch_declare_view(declare, peer_keyexpr_table);
+                }
+            }
+            _ => {}
         }
     }
 }

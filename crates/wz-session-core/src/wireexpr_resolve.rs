@@ -731,6 +731,29 @@ pub fn resolve_declared_keyexpr_into<'k, S: CodecStorage>(
     out: &'k mut KeyexprBuf,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
     let (id, suffix_opt) = id_and_suffix(body);
+    resolve_declared_parts(id, suffix_opt, spaces, out)
+}
+
+/// [`resolve_declared_keyexpr_into`] over a wireexpr read where its frame lies:
+/// the same rule through one shared function, so a declaration the receive path
+/// lends is bound under exactly the keyexpr the owned one is.
+pub fn resolve_declared_keyexpr_view<'k>(
+    body: &WireexprVariant<'k>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
+    let (id, suffix_opt) = id_and_suffix_view(body);
+    resolve_declared_parts(id, suffix_opt, spaces, out)
+}
+
+/// The rule of [`resolve_declared_keyexpr`] over the parts of a wireexpr,
+/// whichever form carried them.
+fn resolve_declared_parts<'k>(
+    id: u64,
+    suffix_opt: Option<&'k str>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
     if id == 0 {
         return Ok(suffix_opt);
     }

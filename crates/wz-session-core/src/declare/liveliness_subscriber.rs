@@ -80,6 +80,8 @@
 // map it always was on the growable backing and a bounded table on the fixed one.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use wz_codecs::declare::DeclareVariant;
 
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
@@ -98,6 +100,8 @@ use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf};
 // R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
@@ -703,92 +707,14 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
                         return;
                     }
                 };
-                // R311y769 — the FIRST declaration of an id wins, and a repeat
-                // is silent. zenoh wraps this whole arm in
-                // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
-                // (`zenoh/src/api/session.rs`
-                // @ `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`),
-                // so an OCCUPIED id neither
-                // re-inserts nor calls the subscriber back.
-                //
-                // Both halves matter and they are one decision, not two. Firing
-                // again would tell an application that counts presence that the
-                // same token appeared twice; re-inserting would rebind the id to
-                // the newer keyexpr, and the eventual `UndeclToken` — which
-                // carries only the id — would then name a keyexpr the token was
-                // never declared on. Skipping the arm entirely is what keeps the
-                // retraction truthful.
-                if peer.table.find(decl.id).is_some() {
-                    return;
-                }
-                // S9a — a token the table has no room for (or whose keyexpr is
-                // longer than a row's text) is REFUSED and counted, and is not
-                // announced to the subscribers: what they are told is what the
-                // table holds, so a later `UndeclToken` can name it.
-                let Ok(text) = key_text(resolved) else {
-                    peer.oversize = peer.oversize.saturating_add(1);
-                    return;
-                };
-                if peer.table.bind(decl.id, text).is_err() {
-                    return;
-                }
-                self.fan_to_matching_slots(
-                    LivelinessSampleKind::Put,
-                    resolved,
-                    decl.id,
-                    historical,
-                );
+                self.apply_token_declared(peer, decl.id, resolved, historical);
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
-                // The row's own text, taken out of the table, or the keyexpr
-                // the retraction carries. `KeyText` is a `String` on the
-                // growable backing and a bounded buffer on the fixed one, so
-                // both arms are read as a `&str` below and neither allocates
-                // there.
-                let mut composed = KeyexprBuf::new();
-                let removed = peer.table.unbind(undecl.id);
-                let resolved: &str = match removed.as_ref() {
-                    Some(s) => s.as_str(),
-                    // R311y769 — the id is unknown, so FALL BACK to the keyexpr
-                    // the retraction carries itself. zenoh reaches its
-                    // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
-                    // branch here (`api/session.rs:2679-2708`) and delivers the
-                    // Delete all the same.
-                    //
-                    // This is what a SOURCED retraction always looks like: zenoh
-                    // identifies a sourced token by its KEYEXPR, not an id (the
-                    // id is 0 — see
-                    // [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr)),
-                    // so the table can never hold it and dropping on a table miss
-                    // discarded every one of them.
-                    //
-                    // [`resolve_ext_keyexpr`](crate::declare_ext_keyexpr::resolve_ext_keyexpr)
-                    // rather than the literal-only `read_ext_keyexpr`, because
-                    // the ext may name an alias; and the PEER half of the pair
-                    // because upstream pins this resolution to the remote space
-                    // (`wireexpr_to_keyexpr(.., false)`) regardless of what the
-                    // ext's own mapping bit says. An ext that is absent or names
-                    // an alias the peer never declared resolves to `None`, and
-                    // then nothing fires — a Delete for a keyexpr nobody named
-                    // would be worse than the drop this replaces.
-                    //
-                    // S9a — [`resolve_ext_keyexpr_into`](crate::declare_ext_keyexpr::resolve_ext_keyexpr_into):
-                    // the same rule composed in a bounded buffer, because this arm
-                    // is what a PEER reaches with an id the table never held, and a
-                    // peer must not be able to make the registry build a `String`.
-                    None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr_into(
-                        undecl.extensions.as_ref(),
-                        peer_keyexpr_table,
-                        &mut composed,
-                    ) {
-                        Ok(Some(s)) => s,
-                        Ok(None) | Err(_) => return,
-                    },
-                };
-                self.fan_to_matching_slots(
-                    LivelinessSampleKind::Delete,
-                    resolved,
+                self.apply_token_undeclared(
+                    peer,
                     undecl.id,
+                    undecl.extensions.as_deref(),
+                    peer_keyexpr_table,
                     historical,
                 );
             }
@@ -796,6 +722,157 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
             // concern.
             _ => {}
         }
+    }
+
+    /// [`Self::dispatch_declare_historical`] for a `Declare` the in-place receive
+    /// path lends ([`IterationEvent::InPlace`]): the same two arms over the
+    /// declaration as it is decoded where its frame lies. Only the reading differs
+    /// (the keyexpr by [`resolve_wireexpr_view`], the retraction's extension chain by
+    /// [`crate::declare_ext_keyexpr::resolve_ext_keyexpr_in`], each the rule the
+    /// owned form's resolver shares); what is done with the result is
+    /// [`Self::apply_token_declared`] / [`Self::apply_token_undeclared`] for both.
+    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    pub fn dispatch_declare_view_historical<'a>(
+        &mut self,
+        peer: &mut PeerTokens,
+        body: &DeclareVariant<'a>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        historical: bool,
+    ) {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        match body {
+            DeclareVariant::CodecZenohDeclToken(decl) => {
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_view(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        peer.oversize = peer.oversize.saturating_add(1);
+                        return;
+                    }
+                };
+                self.apply_token_declared(peer, decl.id, resolved, historical);
+            }
+            DeclareVariant::CodecZenohUndeclToken(undecl) => {
+                self.apply_token_undeclared(
+                    peer,
+                    undecl.id,
+                    undecl.extensions.as_deref(),
+                    peer_keyexpr_table,
+                    historical,
+                );
+            }
+            // Other arms are not the liveliness layer's concern.
+            _ => {}
+        }
+    }
+
+    /// What a declared peer token does once its keyexpr is resolved, whichever
+    /// form carried the declaration: bind it and fan a `Put` to the matching slots.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    fn apply_token_declared(
+        &mut self,
+        peer: &mut PeerTokens,
+        id: u64,
+        resolved: &str,
+        historical: bool,
+    ) {
+        // R311y769 — the FIRST declaration of an id wins, and a repeat
+        // is silent. zenoh wraps this whole arm in
+        // `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`
+        // (`zenoh/src/api/session.rs`
+        // @ `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`),
+        // so an OCCUPIED id neither
+        // re-inserts nor calls the subscriber back.
+        //
+        // Both halves matter and they are one decision, not two. Firing
+        // again would tell an application that counts presence that the
+        // same token appeared twice; re-inserting would rebind the id to
+        // the newer keyexpr, and the eventual `UndeclToken` — which
+        // carries only the id — would then name a keyexpr the token was
+        // never declared on. Skipping the arm entirely is what keeps the
+        // retraction truthful.
+        if peer.table.find(id).is_some() {
+            return;
+        }
+        // S9a — a token the table has no room for (or whose keyexpr is
+        // longer than a row's text) is REFUSED and counted, and is not
+        // announced to the subscribers: what they are told is what the
+        // table holds, so a later `UndeclToken` can name it.
+        let Ok(text) = key_text(resolved) else {
+            peer.oversize = peer.oversize.saturating_add(1);
+            return;
+        };
+        if peer.table.bind(id, text).is_err() {
+            return;
+        }
+        self.fan_to_matching_slots(LivelinessSampleKind::Put, resolved, id, historical);
+    }
+
+    /// What an undeclared peer token does, whichever form carried the
+    /// undeclaration (`exts` is its extension chain, `peer_keyexpr_table` the
+    /// spaces it resolves against): fan a `Delete` to the matching slots, under the
+    /// keyexpr the table held for the id or, for an id it never held, the one the
+    /// retraction carries.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    fn apply_token_undeclared<'k, E: crate::ext_view::ExtEntryView>(
+        &mut self,
+        peer: &mut PeerTokens,
+        id: u64,
+        exts: Option<&'k [E]>,
+        peer_keyexpr_table: MappingSpaces<'k>,
+        historical: bool,
+    ) {
+        // The row's own text, taken out of the table, or the keyexpr
+        // the retraction carries. `KeyText` is a `String` on the
+        // growable backing and a bounded buffer on the fixed one, so
+        // both arms are read as a `&str` below and neither allocates
+        // there.
+        let mut composed = KeyexprBuf::new();
+        let removed = peer.table.unbind(id);
+        let resolved: &str = match removed.as_ref() {
+            Some(s) => s.as_str(),
+            // R311y769 — the id is unknown, so FALL BACK to the keyexpr
+            // the retraction carries itself. zenoh reaches its
+            // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
+            // branch here (`api/session.rs:2679-2708`) and delivers the
+            // Delete all the same.
+            //
+            // This is what a SOURCED retraction always looks like: zenoh
+            // identifies a sourced token by its KEYEXPR, not an id (the
+            // id is 0 — see
+            // [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr)),
+            // so the table can never hold it and dropping on a table miss
+            // discarded every one of them.
+            //
+            // [`resolve_ext_keyexpr`](crate::declare_ext_keyexpr::resolve_ext_keyexpr)
+            // rather than the literal-only `read_ext_keyexpr`, because
+            // the ext may name an alias; and the PEER half of the pair
+            // because upstream pins this resolution to the remote space
+            // (`wireexpr_to_keyexpr(.., false)`) regardless of what the
+            // ext's own mapping bit says. An ext that is absent or names
+            // an alias the peer never declared resolves to `None`, and
+            // then nothing fires — a Delete for a keyexpr nobody named
+            // would be worse than the drop this replaces.
+            //
+            // S9a — [`resolve_ext_keyexpr_in`](crate::declare_ext_keyexpr::resolve_ext_keyexpr_in):
+            // the same rule composed in a bounded buffer, because this arm
+            // is what a PEER reaches with an id the table never held, and a
+            // peer must not be able to make the registry build a `String`.
+            None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
+                exts,
+                peer_keyexpr_table,
+                &mut composed,
+            ) {
+                Ok(Some(s)) => s,
+                Ok(None) | Err(_) => return,
+            },
+        };
+        self.fan_to_matching_slots(LivelinessSampleKind::Delete, resolved, id, historical);
     }
 
     /// R311y521 — flush EVERY remote token, firing a `Delete` to each matching
@@ -1215,8 +1292,34 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
         claimed: &dyn Fn(u64) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
+            }
+            // A Declare the slot profile's receive path lends where its frame lies,
+            // judged by the same three rules as the owned one: a GET's claim, the
+            // historical flag the envelope's `interest_id` gives, and the
+            // history-complete marker a CURRENT replay's `DeclFinal` is.
+            #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+            IterationEvent::InPlace(record) => {
+                if let Some(decl) = record.declare() {
+                    if decl.interest_id.is_some_and(claimed) {
+                        return;
+                    }
+                    self.dispatch_declare_view_historical(
+                        peer,
+                        &decl.body,
+                        peer_keyexpr_table,
+                        decl.interest_id.is_some(),
+                    );
+                    if let Some(interest_id) = decl.interest_id {
+                        if matches!(decl.body, DeclareVariant::CodecZenohDeclFinal(_)) {
+                            self.mark_history_complete(interest_id);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

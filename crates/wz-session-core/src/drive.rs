@@ -1075,8 +1075,21 @@ pub enum CopyReason {
 /// that profile is the AP's, which never takes this path. A counter that
 /// silently skipped the records of an in-place frame would be a wrong number,
 /// so the build that has the counters does not lend.
+///
+/// On the per-session slot profile (`session-slot`) EVERY record is lent, the
+/// control kinds (a Declare, an Interest, a ResponseFinal) too
+/// ([`RecordForm::LentControl`](crate::network_message::RecordForm::LentControl)):
+/// the owned message a control record would otherwise become is a boxed
+/// `DeclareOwned` with heap lists, which is what that profile does not have.
+#[cfg(all(feature = "codec-frame", feature = "session-slot"))]
+const RECORD_FORM: crate::network_message::RecordForm = if cfg!(feature = "transport-stats") {
+    crate::network_message::RecordForm::Owned
+} else {
+    crate::network_message::RecordForm::LentControl
+};
 #[cfg(all(
     feature = "codec-frame",
+    not(feature = "session-slot"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1091,6 +1104,7 @@ const RECORD_FORM: crate::network_message::RecordForm = if cfg!(feature = "trans
 /// Without a lendable codec there is no record to lend.
 #[cfg(all(
     feature = "codec-frame",
+    not(feature = "session-slot"),
     not(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1612,6 +1626,32 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                     response, reliable, sn, priority,
                 ),
             )),
+            // The slot profile's control records, lent as the data records are.
+            #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+            WalkedRecord::Declare(declare) => on_event(IterationEvent::InPlace(
+                crate::driver_loop::InPlaceRecord::declare_of_frame(
+                    declare, reliable, sn, priority,
+                ),
+            )),
+            #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+            WalkedRecord::ResponseFinal(response_final) => on_event(IterationEvent::InPlace(
+                crate::driver_loop::InPlaceRecord::response_final_of_frame(
+                    response_final,
+                    reliable,
+                    sn,
+                    priority,
+                ),
+            )),
+            #[cfg(feature = "session-slot")]
+            WalkedRecord::Interest(interest) => on_event(IterationEvent::InPlace(
+                crate::driver_loop::InPlaceRecord::interest_of_frame(
+                    interest, reliable, sn, priority,
+                ),
+            )),
+            // Read and judged, and nothing reads it further: no event, and the walk
+            // counts it as a record dispatched.
+            #[cfg(feature = "session-slot")]
+            WalkedRecord::Skipped => {}
         }
         dispatched = true;
         Ok(())

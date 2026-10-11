@@ -331,41 +331,115 @@ impl NetworkMessage {
             Self::Declare(declare) => {
                 use crate::ext_admit::DeclarationKind as K;
                 use wz_codecs::declare::DeclareOwnedVariant as B;
-                then_judge(
-                    judge_chain(C::Network(N::Declare), declare.extensions.as_deref()),
-                    || {
-                        let (kind, chain) = match &declare.body {
-                            B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.as_deref()),
-                            B::CodecZenohUndeclKexpr(d) => {
-                                (K::UndeclKeyExpr, d.extensions.as_deref())
-                            }
-                            B::CodecZenohDeclSubscriber(d) => {
-                                (K::Subscriber, d.extensions.as_deref())
-                            }
-                            B::CodecZenohUndeclSubscriber(d) => {
-                                (K::UndeclSubscriber, d.extensions.as_deref())
-                            }
-                            B::CodecZenohDeclQueryable(d) => {
-                                (K::Queryable, d.extensions.as_deref())
-                            }
-                            B::CodecZenohUndeclQueryable(d) => {
-                                (K::UndeclQueryable, d.extensions.as_deref())
-                            }
-                            B::CodecZenohDeclToken(d) => (K::Token, d.extensions.as_deref()),
-                            B::CodecZenohUndeclToken(d) => {
-                                (K::UndeclToken, d.extensions.as_deref())
-                            }
-                            B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
-                                (K::Final, d.extensions.as_deref())
-                            }
-                        };
-                        judge_chain(C::Declaration(kind), chain)
-                    },
-                )
+                let (kind, chain) = match &declare.body {
+                    B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.as_deref()),
+                    B::CodecZenohUndeclKexpr(d) => (K::UndeclKeyExpr, d.extensions.as_deref()),
+                    B::CodecZenohDeclSubscriber(d) => (K::Subscriber, d.extensions.as_deref()),
+                    B::CodecZenohUndeclSubscriber(d) => {
+                        (K::UndeclSubscriber, d.extensions.as_deref())
+                    }
+                    B::CodecZenohDeclQueryable(d) => (K::Queryable, d.extensions.as_deref()),
+                    B::CodecZenohUndeclQueryable(d) => {
+                        (K::UndeclQueryable, d.extensions.as_deref())
+                    }
+                    B::CodecZenohDeclToken(d) => (K::Token, d.extensions.as_deref()),
+                    B::CodecZenohUndeclToken(d) => (K::UndeclToken, d.extensions.as_deref()),
+                    B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
+                        (K::Final, d.extensions.as_deref())
+                    }
+                };
+                judge_declare_chains(declare.extensions.as_deref(), kind, chain)
             }
             Self::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
+}
+
+/// The verdict on a Declare: its own chain, then the chain of the declaration it
+/// carries (`kind`). One rule for the owned message
+/// ([`NetworkMessage::ext_admission`]) and the Declare read where its frame lies
+/// (`declare_view_admission`), so the receive path that delivers a Declare
+/// without copying it refuses exactly what the one that copies it does.
+#[cfg(feature = "codec-declare")]
+fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
+    outer: Option<&[E]>,
+    kind: crate::ext_admit::DeclarationKind,
+    chain: Option<&[E]>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
+    then_judge(judge_chain(C::Network(N::Declare), outer), || {
+        judge_chain(C::Declaration(kind), chain)
+    })
+}
+
+/// [`NetworkMessage::ext_admission`] for a Declare read where its frame lies.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-declare",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+fn declare_view_admission(
+    declare: &wz_codecs::declare::Declare<'_>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::DeclarationKind as K;
+    use wz_codecs::declare::DeclareVariant as B;
+    let (kind, chain) = match &declare.body {
+        B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.as_deref()),
+        B::CodecZenohUndeclKexpr(d) => (K::UndeclKeyExpr, d.extensions.as_deref()),
+        B::CodecZenohDeclSubscriber(d) => (K::Subscriber, d.extensions.as_deref()),
+        B::CodecZenohUndeclSubscriber(d) => (K::UndeclSubscriber, d.extensions.as_deref()),
+        B::CodecZenohDeclQueryable(d) => (K::Queryable, d.extensions.as_deref()),
+        B::CodecZenohUndeclQueryable(d) => (K::UndeclQueryable, d.extensions.as_deref()),
+        B::CodecZenohDeclToken(d) => (K::Token, d.extensions.as_deref()),
+        B::CodecZenohUndeclToken(d) => (K::UndeclToken, d.extensions.as_deref()),
+        B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
+            (K::Final, d.extensions.as_deref())
+        }
+    };
+    judge_declare_chains(declare.extensions.as_deref(), kind, chain)
+}
+
+/// [`NetworkMessage::ext_admission`] for an Interest read where its frame lies.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+fn interest_view_admission(
+    interest: &wz_codecs::interest::Interest<'_>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
+    judge_chain(C::Network(N::Interest), interest.extensions.as_deref())
+}
+
+/// [`NetworkMessage::ext_admission`] for a ResponseFinal read where its frame
+/// lies.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-response-final",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+fn response_final_view_admission(
+    response_final: &wz_codecs::response_final::ResponseFinal<'_>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
+    judge_chain(
+        C::Network(N::ResponseFinal),
+        response_final.extensions.as_deref(),
+    )
+}
+
+/// [`NetworkMessage::ext_admission`] for an Oam read where its frame lies.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+fn oam_view_admission(oam: &wz_codecs::oam::Oam<'_>) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
+    judge_chain(C::Network(N::Oam), oam.extensions.as_deref())
 }
 
 /// The verdict on a Push: its own chain, then the chain of the body it carries
@@ -756,10 +830,20 @@ pub(crate) enum RecordForm {
         feature = "codec-response"
     ))]
     Lent,
+    /// The slot profile's form: EVERY record is decoded where the payload lies
+    /// and lent, the control kinds (a Declare, an Interest, a ResponseFinal) beside
+    /// the data kinds, and nothing is projected into an owned message at all. A
+    /// record this build reads no further (an Oam, which has no consumer, or a
+    /// MID it has no decoder for, whose length is unknowable) is judged where
+    /// that is possible and skipped, so the walk allocates nothing whatever the
+    /// peer put in the frame ([`WalkedRecord::Skipped`]).
+    #[cfg(feature = "session-slot")]
+    LentControl,
 }
 
 /// One record the walk hands over: the one owned message in the caller's
-/// buffer, or a record read where the payload lies ([`RecordForm::Lent`]).
+/// buffer, or a record read where the payload lies ([`RecordForm::Lent`],
+/// [`RecordForm::LentControl`]).
 ///
 /// Read by the unicast receive path; a test build without it reads only the
 /// kinds its own tests walk.
@@ -777,6 +861,26 @@ pub(crate) enum WalkedRecord<'r> {
     /// A Response decoded where the payload lies, valid for the call.
     #[cfg(feature = "codec-response")]
     Response(&'r wz_codecs::response::Response<'r>),
+    /// A Declare decoded where the payload lies, valid for the call
+    /// ([`RecordForm::LentControl`]).
+    #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+    Declare(&'r wz_codecs::declare::Declare<'r>),
+    /// A ResponseFinal decoded where the payload lies, valid for the call
+    /// ([`RecordForm::LentControl`]).
+    #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+    ResponseFinal(&'r wz_codecs::response_final::ResponseFinal<'r>),
+    /// An Interest decoded where the payload lies, valid for the call
+    /// ([`RecordForm::LentControl`]).
+    #[cfg(feature = "session-slot")]
+    Interest(&'r wz_codecs::interest::Interest<'r>),
+    /// A record the walk read and judged and no consumer reads further: an Oam, or
+    /// the tail of a payload that opens with a MID this build has no decoder for
+    /// (the walk ends there, as the owned walk's `Unknown` ends it)
+    /// ([`RecordForm::LentControl`]). It carries nothing: the point of handing it
+    /// over is that the walk counts it as a record, as it counts the owned
+    /// `Oam` and `Unknown` it replaces.
+    #[cfg(feature = "session-slot")]
+    Skipped,
 }
 
 /// The records are copies of the payload's bytes (the build's [`WireStorage`])
@@ -816,12 +920,22 @@ pub(crate) fn try_for_each_record(
     #[cfg(not(any(
         feature = "codec-push",
         feature = "codec-request",
-        feature = "codec-response"
+        feature = "codec-response",
+        feature = "session-slot"
     )))]
     let _ = form;
     let mut cursor = SceCursor::new(payload);
     while cursor.remaining() > 0 {
         record.clear();
+        // The slot profile's form lends every kind, so there is no owned decode
+        // left for the rest of the loop to do on its behalf.
+        #[cfg(feature = "session-slot")]
+        if form == RecordForm::LentControl {
+            match lend_any_record(&mut cursor, &mut each)? {
+                Walk::Continue => continue,
+                Walk::End => break,
+            }
+        }
         #[cfg(any(
             feature = "codec-push",
             feature = "codec-request",
@@ -895,7 +1009,8 @@ fn lend_record(
     any(
         feature = "codec-push",
         feature = "codec-request",
-        feature = "codec-response"
+        feature = "codec-response",
+        feature = "session-slot"
     )
 ))]
 fn admit_lent(
@@ -955,6 +1070,146 @@ fn lend_response(
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(response_view_admission(&response))?;
     each(WalkedRecord::Response(&response))
+}
+
+/// Whether the walk goes on after a lent record: the record was one of a run
+/// (`Continue`), or it was the tail of the payload and the walk ends (`End`).
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+enum Walk {
+    Continue,
+    End,
+}
+
+/// The slot profile's walk of ONE record ([`RecordForm::LentControl`]): decode the
+/// record at the cursor where the payload lies, judge it by the owned rule, and
+/// hand it over, whatever kind it is.
+///
+/// The kinds this build has a decoder for are lent as their own variant of
+/// [`WalkedRecord`]; an Oam is judged and handed over as
+/// [`WalkedRecord::Skipped`] (nothing reads an Oam's body); and a MID this build
+/// has no decoder for, whose length is unknowable, takes the rest of the payload
+/// as one skipped record and ends the walk, as the owned walk's `Unknown` does.
+/// A kind whose codec is not selected is that last case, as it is in the owned
+/// walk.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+fn lend_any_record(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<Walk, crate::parse_error::InboundParseError> {
+    let mid = cursor
+        .peek_slice(1)
+        .map_err(crate::parse_error::InboundParseError::Codec)?[0]
+        & 0x1F;
+    match mid {
+        #[cfg(feature = "codec-push")]
+        wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| Walk::Continue),
+        #[cfg(feature = "codec-request")]
+        wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| Walk::Continue),
+        #[cfg(feature = "codec-response")]
+        wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| Walk::Continue),
+        #[cfg(feature = "codec-declare")]
+        wire_const::N_MID_DECLARE => lend_declare(cursor, each).map(|()| Walk::Continue),
+        #[cfg(feature = "codec-response-final")]
+        wire_const::N_MID_RESPONSE_FINAL => {
+            lend_response_final(cursor, each).map(|()| Walk::Continue)
+        }
+        wire_const::N_MID_INTEREST => lend_interest(cursor, each).map(|()| Walk::Continue),
+        wire_const::N_MID_OAM => lend_oam(cursor, each).map(|()| Walk::Continue),
+        _ => lend_unknown(cursor, each),
+    }
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-declare",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+#[inline(never)]
+fn lend_declare(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let declare = wz_codecs::declare::Declare::decode(cursor)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(declare_view_admission(&declare))?;
+    each(WalkedRecord::Declare(&declare))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-response-final",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+#[inline(never)]
+fn lend_response_final(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let response_final = wz_codecs::response_final::ResponseFinal::decode(cursor)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(response_final_view_admission(&response_final))?;
+    each(WalkedRecord::ResponseFinal(&response_final))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+#[inline(never)]
+fn lend_interest(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let interest = wz_codecs::interest::Interest::decode(cursor)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(interest_view_admission(&interest))?;
+    each(WalkedRecord::Interest(&interest))
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+#[inline(never)]
+fn lend_oam(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    let oam = wz_codecs::oam::Oam::decode(cursor)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(oam_view_admission(&oam))?;
+    each(WalkedRecord::Skipped)
+}
+
+/// The tail of a payload that opens with a MID this build has no decoder for: its
+/// length is unknowable, so the rest of the payload is one skipped record and the
+/// walk ends.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    any(test, feature = "session-unicast")
+))]
+fn lend_unknown(
+    cursor: &mut SceCursor<'_>,
+    each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<Walk, crate::parse_error::InboundParseError> {
+    let rest = cursor.remaining();
+    cursor
+        .advance(rest)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    each(WalkedRecord::Skipped).map(|()| Walk::End)
 }
 
 /// R311y578 — why a batch parse stopped short of the payload's end.
@@ -1790,7 +2045,8 @@ mod record_walk_tests {
             #[cfg(any(
                 feature = "codec-push",
                 feature = "codec-request",
-                feature = "codec-response"
+                feature = "codec-response",
+                feature = "session-slot"
             ))]
             let WalkedRecord::Owned(one) = one
             else {
@@ -1799,7 +2055,8 @@ mod record_walk_tests {
             #[cfg(not(any(
                 feature = "codec-push",
                 feature = "codec-request",
-                feature = "codec-response"
+                feature = "codec-response",
+                feature = "session-slot"
             )))]
             let WalkedRecord::Owned(one) = one;
             assert_eq!(one.len(), 1, "one record per call");
@@ -1941,6 +2198,238 @@ mod record_walk_tests {
         });
         assert!(result.is_ok());
         assert_eq!(owned, 3);
+    }
+
+    /// The slot profile's walk ([`RecordForm::LentControl`]): every kind this
+    /// build decodes is lent where the payload lies, and what no consumer reads is
+    /// skipped, so the walk builds no owned message at all.
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-declare",
+        feature = "codec-response-final"
+    ))]
+    mod control {
+        use super::*;
+        use crate::declare_build::{build_declare_final, build_declare_subscriber};
+        use crate::interest_build::build_interest_subscribers;
+        use crate::parse_error::InboundParseError;
+        use wz_codecs::declare::DeclareVariant;
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_unit::ExtUnit;
+
+        fn declare_bytes(declare: &wz_codecs::declare::DeclareOwned) -> Vec<u8> {
+            declare.try_as_borrowed().expect("a view").encode_to_vec()
+        }
+
+        fn interest_bytes(interest: &wz_codecs::interest::InterestOwned) -> Vec<u8> {
+            interest.try_as_borrowed().expect("a view").encode_to_vec()
+        }
+
+        fn response_final_bytes(done: &wz_codecs::response_final::ResponseFinalOwned) -> Vec<u8> {
+            done.try_as_borrowed().expect("a view").encode_to_vec()
+        }
+
+        /// A DeclSubscriber of `id` on a literal keyexpr.
+        fn subscriber(id: u64) -> Vec<u8> {
+            declare_bytes(&build_declare_subscriber(id, 0, Some("a/b")).expect("build"))
+        }
+
+        /// A mandatory unit extension no message defines: upstream refuses a
+        /// message that carries one.
+        fn mandatory_unknown() -> ExtEntryOwned {
+            ExtEntryOwned {
+                header: 0x1e,
+                body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+            }
+        }
+
+        /// What the walk handed over, one tag per call: the kind and an id that
+        /// names the record.
+        fn tag(one: WalkedRecord<'_>) -> (char, u64) {
+            match one {
+                WalkedRecord::Declare(d) => match &d.body {
+                    DeclareVariant::CodecZenohDeclSubscriber(s) => ('s', s.id),
+                    DeclareVariant::CodecZenohDeclFinal(_) => ('f', 0),
+                    other => panic!("an unexpected declaration {other:?}"),
+                },
+                WalkedRecord::Interest(i) => ('i', i.interest_id),
+                WalkedRecord::ResponseFinal(r) => ('r', r.request_id),
+                WalkedRecord::Skipped => ('-', 0),
+                WalkedRecord::Owned(_) => panic!("the control walk owns nothing"),
+                #[allow(unreachable_patterns)]
+                _ => panic!("a kind this test did not encode"),
+            }
+        }
+
+        fn walk(
+            payload: &[u8],
+            form: RecordForm,
+        ) -> (Vec<(char, u64)>, Result<(), InboundParseError>) {
+            let mut record = new_record_buf();
+            let mut seen = Vec::new();
+            let result = for_each_record(payload, &mut record, form, |one| match one {
+                WalkedRecord::Owned(one) => {
+                    // The owned walk's own records, tagged the same way so the two
+                    // walks can be compared.
+                    seen.push(match &one[0] {
+                        NetworkMessage::Declare(d) => match &d.body {
+                            wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+                                s,
+                            ) => ('s', s.id),
+                            wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(_) => {
+                                ('f', 0)
+                            }
+                            other => panic!("an unexpected declaration {other:?}"),
+                        },
+                        NetworkMessage::Interest(i) => ('i', i.interest_id),
+                        NetworkMessage::ResponseFinal(r) => ('r', r.request_id),
+                        NetworkMessage::Oam(_) | NetworkMessage::Unknown { .. } => ('-', 0),
+                        other => panic!("an unexpected record {other:?}"),
+                    });
+                }
+                other => seen.push(tag(other)),
+            });
+            (seen, result)
+        }
+
+        /// One payload of every kind, in an order that interleaves them.
+        fn every_kind() -> Vec<u8> {
+            [
+                subscriber(7),
+                interest_bytes(
+                    &build_interest_subscribers(9, true, true, 0, Some("a/**")).expect("build"),
+                ),
+                response_final_bytes(&crate::response_final_build::build_response_final(
+                    5,
+                    crate::sample::QosLevel::default(),
+                )),
+                oam_record(2),
+                declare_bytes(&build_declare_final()),
+            ]
+            .concat()
+        }
+
+        #[test]
+        fn the_control_walk_lends_every_kind_in_wire_order_and_owns_nothing() {
+            let payload = every_kind();
+            let (lent, result) = walk(&payload, RecordForm::LentControl);
+            assert!(result.is_ok());
+            assert_eq!(
+                lent,
+                vec![('s', 7), ('i', 9), ('r', 5), ('-', 0), ('f', 0)],
+                "(kind, id) of each record, an Oam skipped"
+            );
+            // The owned walk reads the same records in the same order, so the lent
+            // one is not a different reading.
+            let (owned, result) = walk(&payload, RecordForm::Owned);
+            assert!(result.is_ok());
+            assert_eq!(owned, lent, "the owned walk reads the same records");
+        }
+
+        #[test]
+        fn an_unknown_mid_is_skipped_and_ends_the_walk_as_the_owned_walk_ends() {
+            // 0x15 is a network MID no codec here decodes; whatever follows it is
+            // part of its unknowable body.
+            let payload = [subscriber(7), alloc::vec![0x15, 0x01, 0x02], subscriber(8)].concat();
+            let (lent, result) = walk(&payload, RecordForm::LentControl);
+            assert!(result.is_ok());
+            assert_eq!(
+                lent,
+                vec![('s', 7), ('-', 0)],
+                "the tail is one skipped record"
+            );
+            let (owned, result) = walk(&payload, RecordForm::Owned);
+            assert!(result.is_ok());
+            assert_eq!(owned, lent, "the owned walk ends where the lent one does");
+        }
+
+        #[test]
+        fn a_record_that_does_not_decode_ends_the_control_walk_after_the_ones_before_it() {
+            let mut payload = subscriber(7);
+            payload.push(wire_const::N_MID_DECLARE);
+            let (lent, result) = walk(&payload, RecordForm::LentControl);
+            assert_eq!(lent, vec![('s', 7)], "the record before it was handed over");
+            assert!(
+                matches!(result, Err(InboundParseError::Codec(_))),
+                "then the walk ends with the decode error: {result:?}"
+            );
+            let (owned, owned_result) = walk(&payload, RecordForm::Owned);
+            assert_eq!(
+                (owned, owned_result),
+                (lent, result),
+                "as the owned walk does"
+            );
+        }
+
+        /// A mandatory extension nobody defines refuses the message on every kind,
+        /// on the lent walk exactly as on the owned one: the same error, after the
+        /// same records.
+        #[test]
+        fn a_mandatory_extension_nobody_defines_refuses_each_control_kind_as_the_owned_walk_does() {
+            let before = subscriber(1);
+            let declare = {
+                let mut d = build_declare_final();
+                d.extensions = Some(alloc::vec![mandatory_unknown()]);
+                declare_bytes(&d)
+            };
+            let interest = {
+                let mut i = build_interest_subscribers(3, true, true, 0, Some("k")).expect("build");
+                i.extensions = Some(alloc::vec![mandatory_unknown()]);
+                i.header |= wire_const::FLAG_N_Z;
+                interest_bytes(&i)
+            };
+            let response_final = {
+                let mut done = crate::response_final_build::build_response_final(
+                    4,
+                    crate::sample::QosLevel::default(),
+                );
+                done.extensions = Some(alloc::vec![mandatory_unknown()]);
+                done.header |= wire_const::FLAG_N_Z;
+                response_final_bytes(&done)
+            };
+            let oam = {
+                use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+                let mut chain = sce_forge_runtime::heapless::Vec::new();
+                let _ = chain.push(ExtEntry {
+                    header: 0x1e,
+                    body: ExtEntryVariant::CodecZenohExtUnit(ExtUnit::default()),
+                });
+                wz_codecs::oam::Oam {
+                    header: wire_const::N_MID_OAM | wire_const::FLAG_N_Z,
+                    id: 6,
+                    extensions: Some(chain),
+                    ..Default::default()
+                }
+                .encode_to_vec()
+            };
+            for (name, bad) in [
+                ("declare", declare),
+                ("interest", interest),
+                ("response final", response_final),
+                ("oam", oam),
+            ] {
+                let payload = [before.clone(), bad].concat();
+                let (lent, lent_result) = walk(&payload, RecordForm::LentControl);
+                let (owned, owned_result) = walk(&payload, RecordForm::Owned);
+                assert_eq!(
+                    lent,
+                    vec![('s', 1)],
+                    "{name}: the record before it was handed over"
+                );
+                assert!(
+                    matches!(
+                        lent_result,
+                        Err(InboundParseError::UnknownMandatoryExt { .. })
+                    ),
+                    "{name}: the lent walk refuses: {lent_result:?}"
+                );
+                assert_eq!(
+                    (owned, owned_result),
+                    (lent, lent_result),
+                    "{name}: the owned walk refuses alike"
+                );
+            }
+        }
     }
 
     /// A Push whose own chain carries an unknown MANDATORY extension ends the
