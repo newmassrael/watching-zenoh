@@ -3572,14 +3572,14 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 2);
-        let keys: Vec<&str> = replies
+        let keys: Vec<String> = replies
             .iter()
             .map(|r| match r {
                 QueryReply::Reply {
                     keyexpr_literal,
                     body: ReplyBody::Put(_),
                     ..
-                } => keyexpr_literal.as_str(),
+                } => keyexpr_literal.clone(),
                 other => panic!("expected Put Reply, got {other:?}"),
             })
             .collect();
@@ -4839,12 +4839,12 @@ mod tests {
             "the handler is told which reply was refused"
         );
 
-        let staged: Vec<&str> = replies
+        let staged: Vec<String> = replies
             .iter()
             .filter_map(|r| match r {
                 QueryReply::Reply {
                     keyexpr_literal, ..
-                } => Some(keyexpr_literal.as_str()),
+                } => Some(keyexpr_literal.clone()),
                 _ => None,
             })
             .collect();
@@ -4936,12 +4936,12 @@ mod tests {
         .unwrap();
         reg.local_query(7, "demo/**", &query, None, QosLevel::DEFAULT, &mut replies);
 
-        let staged: Vec<&str> = replies
+        let staged: Vec<String> = replies
             .iter()
             .filter_map(|r| match r {
                 QueryReply::Reply {
                     keyexpr_literal, ..
-                } => Some(keyexpr_literal.as_str()),
+                } => Some(keyexpr_literal.clone()),
                 _ => None,
             })
             .collect();
