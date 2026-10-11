@@ -148,6 +148,15 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
         "the demux pump the accepted face still holds by Arc, which is where "
         "the stray datagram to this number must arrive",
     ),
+    # R3255: the gate reads the struct literal that takes the listener by value
+    # as a branch, so the move does not count as a hold; the socket is never
+    # released, which is the class below, not a picker.
+    "crates/wz-runtime-tokio/tests/datagram_rx_pool_allocations.rs::link::listener": (
+        "held-elsewhere",
+        "the listener is moved into `Reader::Accept { _listener }`, and that "
+        "reader leaves the arm inside the same `Link` as the number, so the "
+        "demux socket stays bound for as long as datagrams are sent to it",
+    ),
 }
 
 LOCAL_ADDR = re.compile(r"\.\s*local_addr\s*\(\s*\)")
