@@ -249,6 +249,16 @@ IMAGES: dict[str, Image] = {
                 label="mps2-fixed",
                 no_default_features=True,
             ),
+            # The same profile on ARMv6-M (no native atomics, `portable-atomic`): the
+            # slim session socket pool is what a 16 KB part could hold, and the build is
+            # the check that the fixed-memory shell compiles there as well.
+            Build(
+                V6M,
+                "microbit-minimal",
+                ("fixed-memory", "buffer-pool-session-rx-slim"),
+                label="microbit-fixed",
+                no_default_features=True,
+            ),
         ),
         "the session tier's own crates still carry `alloc`: wz-session-core (its session"
         " modules are gated on the feature), wz-runtime-core, the codec owned mirrors"

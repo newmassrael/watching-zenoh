@@ -23,22 +23,17 @@
 //! session must own its share. `!Send` is fine: the MCU session runs on a
 //! local set, which is the reason the bundle is `Rc` in the first place.
 
-#[cfg(not(feature = "session-slot"))]
-use alloc::rc::Rc;
 #[cfg(feature = "session-slot")]
 use core::cell::OnceCell;
 use core::cell::RefCell;
 
-#[cfg(not(feature = "session-slot"))]
 use core::ops::Deref;
 
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::driver_loop::IterationEvent;
-#[cfg(not(feature = "session-slot"))]
 use wz_session_core::observer::ApplicationLayerObserver;
 #[cfg(feature = "session-slot")]
 use wz_session_core::reply_sink::{ReplySink, ReplyView};
-#[cfg(not(feature = "session-slot"))]
 use wz_session_core::session_actions::SessionLinkActions;
 #[cfg(feature = "session-slot")]
 use wz_session_core::session_slot::SlotRef;
@@ -57,18 +52,18 @@ use wz_session_core::slot_observer::{Requesters, SlotObserver};
 /// read off the handle at the call site (a handle named through the runtime's
 /// associated type would leave `C` to be spelled out).
 ///
-/// Absent under `session-slot`: it shares an `Rc<RefCell<ApplicationLayerObserver>>`,
-/// the observer that holds a session's peer-written tables beside the application's.
-/// The slot profile's form is `dispatch_slot` over a process-wide `SlotObserver`
-/// and the session's own tables in its slot.
-#[cfg(not(feature = "session-slot"))]
-pub fn dispatch_to<C, H>(
-    observer: Rc<RefCell<ApplicationLayerObserver>>,
-    actions: H,
-) -> impl FnMut(IterationEvent<'_>) + 'static
+/// `observer` is anything that derefs to the shared observer cell (an
+/// `Rc<RefCell<ApplicationLayerObserver>>`, the form every caller has), and is named
+/// by what it derefs to and not by `Rc`, so that this crate links no `alloc` of its
+/// own under `session-slot`. That observer holds a session's peer-written tables
+/// beside the application's, in the growable form; the slot profile's own form is
+/// `dispatch_slot` over a process-wide `SlotObserver` and the session's tables in its
+/// slot.
+pub fn dispatch_to<C, H, O>(observer: O, actions: H) -> impl FnMut(IterationEvent<'_>) + 'static
 where
     C: ClockSource + 'static,
     H: Deref<Target = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>> + 'static,
+    O: Deref<Target = RefCell<ApplicationLayerObserver>> + 'static,
 {
     move |event| observer.borrow_mut().dispatch(event, &*actions)
 }
@@ -252,6 +247,7 @@ where
 mod tests {
     use super::*;
     use alloc::boxed::Box;
+    use alloc::rc::Rc;
     use alloc::vec;
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
