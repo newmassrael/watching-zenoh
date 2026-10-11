@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 32
+EXPECTED_VERSION = 33
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -314,6 +314,17 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, the unit and the body cross as hex inside it,
     # nothing is retained between calls, and no callback runs.
     "wz_dissect_transport_build",
+    # (ABI 33) -- the CAPTURE READ AS SESSIONS, one row per zid pair, from a
+    # container (`wz_dissect_pcap_session_table`, which takes the limit preset
+    # as an argument as `wz_dissect_pcap_census_where_limited` does) and from a
+    # live handle (`wz_dissect_live_session_table`, whose ceiling is the
+    # handle's). Two symbols and one document, as the census has. The memory
+    # rule does not move: the document is a `char*` released by
+    # `wz_dissect_string_free`, the handle is the one `wz_dissect_live_open`
+    # made and is `const` here, nothing is retained between calls, and no
+    # callback runs.
+    "wz_dissect_pcap_session_table",
+    "wz_dissect_live_session_table",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

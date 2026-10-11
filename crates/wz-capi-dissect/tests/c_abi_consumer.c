@@ -1820,6 +1820,99 @@ static int check_transport_layout_door(void) {
     return 0;
 }
 
+/* (ABI 33) -- the capture read as sessions, from a container and from a
+ * handle.
+ *
+ * What this asserts is that the two halves write the SAME document for the
+ * same frames at the same instants, byte for byte, and that the row says what a
+ * consumer maps: a flow joined after its handshake names no node (the cells are
+ * null and each is named under `unstated` with its reason), counts every
+ * message and every payload byte, and dates itself from the packets' own
+ * instants. A document whose cells depended on the retained list would differ
+ * between a ceiling and none; that is held in Rust, where the ceiling is a
+ * parameter of the fixture. */
+static int check_session_table_doors(void) {
+    static const char opening[] =
+        "{\"document\":{\"name\":\"session_table\",\"revision\":1},\"ok\":true,"
+        "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
+        "\"phase\":\"unseen\",\"encrypted\":\"clear\","
+        "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
+        "\"frames\":3,\"bytes\":3,"
+        "\"unstated\":[{\"cell\":\"initiator\",\"reason\":\"not_in_capture\"},"
+        "{\"cell\":\"acceptor\",\"reason\":\"not_in_capture\"}],\"flows\":[";
+    static const unsigned char junk[] = "not a capture, and not close to one";
+    wz_dissect_live *h = NULL;
+    unsigned char frame[64];
+    unsigned char file[24 + 3 * (16 + 64)];
+    char *from_file = NULL;
+    char *from_live = NULL;
+    char *doc = NULL;
+    size_t frame_len;
+    size_t file_len;
+    size_t i;
+    int rc;
+
+    frame_len = udp_keepalive_frame(frame);
+    file_len = pcap_of_frames(file, frame, frame_len, 3);
+
+    rc = wz_dissect_pcap_session_table(file, file_len, WZ_DISSECT_LIMITS_NONE,
+                                       &from_file);
+    CHECK(rc == WZ_DISSECT_OK, "pcap_session_table rc=%d", rc);
+    CHECK(from_file != NULL, "OK came back with no string");
+    CHECK(strncmp(from_file, opening, sizeof opening - 1) == 0,
+          "unexpected opening: %s", from_file);
+    CHECK(strstr(from_file, "\"excluded\":[{\"why\":\"multicast_group\","
+                            "\"count\":0},{\"why\":\"scouting_only\","
+                            "\"count\":0}]") != NULL,
+          "both exclusions are always named: %s", from_file);
+
+    /* THE HANDLE'S HALF, fed the same three frames at the same instants. */
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "session table handle rc=%d", rc);
+    for (i = 0; i < 3; i++) {
+        rc = wz_dissect_live_push(h, 1 /* ETHERNET */,
+                                  (uint64_t)(i + 1) * 1000000u, frame, frame_len);
+        CHECK(rc == WZ_DISSECT_OK, "session table push %zu rc=%d", i, rc);
+    }
+    rc = wz_dissect_live_session_table(h, &from_live);
+    CHECK(rc == WZ_DISSECT_OK, "live_session_table rc=%d", rc);
+    CHECK(from_live != NULL && strcmp(from_file, from_live) == 0,
+          "the two halves must write one document:\n%s\n%s", from_file,
+          from_live ? from_live : "(null)");
+    wz_dissect_string_free(from_live);
+    wz_dissect_string_free(from_file);
+
+    /* A bad container is a REFUSAL, a document and not an error code. */
+    rc = wz_dissect_pcap_session_table(junk, sizeof junk - 1,
+                                       WZ_DISSECT_LIMITS_NONE, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "junk rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false,\"refusal\":\"not_a_capture\"") != NULL,
+          "junk must be refused by name: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_pcap_session_table(file, file_len - 5,
+                                       WZ_DISSECT_LIMITS_NONE, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "truncated rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false,\"refusal\":\"truncated\"") != NULL,
+          "a container cut inside a record is `truncated`: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A caller's bug is a code and no string. */
+    doc = NULL;
+    rc = wz_dissect_pcap_session_table(file, file_len, 9, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL, "unknown preset rc=%d", rc);
+    rc = wz_dissect_pcap_session_table(NULL, file_len, WZ_DISSECT_LIMITS_NONE, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL, "null bytes rc=%d", rc);
+    rc = wz_dissect_pcap_session_table(file, file_len, WZ_DISSECT_LIMITS_NONE, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+    rc = wz_dissect_live_session_table(NULL, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL, "null handle rc=%d", rc);
+    rc = wz_dissect_live_session_table(h, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null live out rc=%d", rc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 /* (ABI 27) -- ONE message, read in the light of its session's context.
  *
  * The messages are the smallest complete ones of two network MIDs, laid out
@@ -2623,7 +2716,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[12];
+    } revisioned[13];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -3025,6 +3118,17 @@ int main(void) {
                                          &revisioned[11].doc);
         CHECK(rc == WZ_DISSECT_OK, "transport_layout document rc=%d", rc);
     }
+    /* (ABI 33) -- the session table. 1: the first revision a consumer could
+     * read. Built from a container that is not a capture, which is the cheapest
+     * way to hold the document's opening to the revision this consumer was
+     * written against: a refusal is the same document, under the same envelope. */
+    revisioned[12].name = "session_table";
+    revisioned[12].revision = 1;
+    revisioned[12].doc = NULL;
+    rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
+                                       WZ_DISSECT_LIMITS_NONE,
+                                       &revisioned[12].doc);
+    CHECK(rc == WZ_DISSECT_OK, "session_table document rc=%d", rc);
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -3148,6 +3252,12 @@ int main(void) {
     /* (ABI 32) -- and the same report for a unit the consumer already holds,
      * which is what a program that mutates captured frames asks. */
     if (check_transport_layout_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 33) -- and the capture read as sessions, from a container and from
+     * a handle, one row per zid pair. */
+    if (check_session_table_doors() != 0) {
         return 1;
     }
 

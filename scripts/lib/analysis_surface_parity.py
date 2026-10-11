@@ -444,6 +444,29 @@ ONLY_CAPI = {
         "a field is; neither reports a message's fields by kind.",
         (),
     ),
+    "the capture read as sessions, one row per zid pair": (
+        "wz_dissect_pcap_session_table",
+        "DELIBERATE for now. The door exists because a consumer that LINKS this "
+        "library and draws a sessions list must not join the census to the field "
+        "document and decide for itself what a session with two links, a "
+        "handshake that is not in the capture, or an encrypted transport looks "
+        "like: a second reading of that join is a second opinion about what a "
+        "session is. The command line prints the planes it folds (`--nodes` "
+        "gives the zids and the links, `--fields` the phase of each flow) and "
+        "its reader joins them with their own eyes, so a flag that printed the "
+        "table is a convenience and not a missing capability. The rows are built "
+        "from `wz_capture::session_table`, which is ungated, so a flag would add "
+        "no code that decides what a session is.",
+        (),
+    ),
+    "the session table of an OPEN handle": (
+        "wz_dissect_live_session_table",
+        "DELIBERATE, for the reason the live census row gives and the container "
+        "row above it: the command line holds no handle, and the document is the "
+        "one the container door writes, over the handle's own dissection, so a "
+        "consumer watching a running link keeps one reader and one schema.",
+        (),
+    ),
     "declarations written from a .proto schema": (
         "wz_dissect_declarations_from_proto",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "

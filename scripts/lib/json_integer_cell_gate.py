@@ -89,6 +89,7 @@ RULE_REVISION: dict[str, int] = {
     "e2e_open": 1,
     "transport_build": 1,
     "transport_layout": 1,
+    "session_table": 1,
 }
 
 
@@ -227,6 +228,18 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             "the integer `value` of a field in the `body` listing of an `e2e_open` document",
             "the integer `value` of a field of the body",
             born=2,
+        ),
+    ),
+    # ONE call writes both clock instants of a session row, through the helper
+    # `push_cell` hands each of them to, so the two keys are declared as the one
+    # cell the call is. The row's `frames` and `bytes` count what the host holds
+    # and stay bare numbers.
+    ("crates/wz-capture/src/session_table_json.rs", "push_instant"): (
+        Cell(
+            "session_table",
+            "a row's first_seen_ts_ns and last_seen_ts_ns",
+            "the `first_seen_ts_ns` and `last_seen_ts_ns` of a `session_table` row",
+            "`first_seen_ts_ns` and `last_seen_ts_ns` are nanoseconds since 1970",
         ),
     ),
     # ONE call writes every integer cell of a layout row, through the helper

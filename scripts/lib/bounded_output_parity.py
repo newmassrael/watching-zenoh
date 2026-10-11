@@ -65,6 +65,8 @@ CLI = ROOT / "crates" / "wz-analyze" / "src" / "lib.rs"
 CAPTURE_REPORT = ROOT / "crates" / "wz-capture" / "src" / "report.rs"
 CAPTURE_CENSUS = ROOT / "crates" / "wz-capture" / "src" / "census_json.rs"
 CAPTURE_FIELDS = ROOT / "crates" / "wz-capture" / "src" / "fields_json.rs"
+CAPTURE_SESSIONS = ROOT / "crates" / "wz-capture" / "src" / "session_table_json.rs"
+CAPI_SESSION_TESTS = ROOT / "crates" / "wz-capi-dissect" / "src" / "tests" / "session_table.rs"
 
 # The group every bounded read's document must carry, spelled as the JSON KEY
 # appears in Rust source — quotes included.
@@ -122,6 +124,14 @@ DOORS = {
         "asking which rows matched must not be handed a truncated answer that "
         "looks complete.",
     ),
+    "wz_dissect_pcap_session_table": (
+        CAPI_SESSION_TESTS,
+        "a_session_table_can_be_bounded_and_says_what_the_bound_cost",
+        "emits the SESSION TABLE, under a preset passed as an argument. A flow "
+        "the ceiling evicts has no row, so a table made short by it must say so "
+        "in the one place a consumer already looks. The test lives in the "
+        "door's own test file, beside the rest of what the door is held to.",
+    ),
     "--bounded": (
         CLI,
         "a_bound_is_never_silent_even_without_the_health_flag",
@@ -153,6 +163,7 @@ EMITTERS = {
     # names by function name WILL be refactored out from under it, and the gate
     # failing is the mechanism working rather than a false alarm.
     CAPTURE_FIELDS: ("fields_json_selected", "the field document"),
+    CAPTURE_SESSIONS: ("session_table_json", "the session table document"),
 }
 
 

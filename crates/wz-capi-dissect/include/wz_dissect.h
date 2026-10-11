@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "session_table", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -868,12 +868,15 @@
  * the `value`, `min`, `max`, `stored` and `ring_max` of a `transport_build` or
  * `transport_layout` layout row (those documents take the rule from their first
  * revision: a sequence number or a lease can be eight bytes, and the top of a
- * nine-byte VLE is 2^64 - 1); and to
+ * nine-byte VLE is 2^64 - 1); to the `first_seen_ts_ns` and `last_seen_ts_ns` of a
+ * `session_table` row (that document takes the rule from its first revision:
+ * they are clock instants, nanoseconds since 1970, which on a real clock are
+ * past the line); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
  * 16, summary 5, retention 2, e2e_wrap 1, e2e_open 1, transport_build 1,
- * transport_layout 1.
+ * transport_layout 1, session_table 1.
  * The gap total saturates at the top of `u64` instead of wrapping.
  *
  * @values fields carried_state
@@ -1525,7 +1528,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 32
+#define WZ_DISSECT_ABI_REVISION 33
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1904,6 +1907,180 @@ int wz_dissect_pcap_census_where(const unsigned char *bytes, size_t len,
 int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
                                          const char *selector, int limits,
                                          char **out);
+
+/* wz_dissect_pcap_session_table (ABI 33) -- THE CAPTURE READ AS SESSIONS: one
+ * row per zenoh session, in the cells a sessions editor shows.
+ *
+ * Every other document is keyed by a FLOW or by a NODE. A session is the unit a
+ * person asks about, and getting one meant joining the census to the field
+ * document and deciding on the consumer's side what the join leaves open: two
+ * links of one session, a capture that began after the handshake, a transport
+ * that is encrypted. They are decided here, once, and a consumer maps cells.
+ *
+ * `limits` is WZ_DISSECT_LIMITS_NONE or WZ_DISSECT_LIMITS_LIVE_TAP, as for
+ * wz_dissect_pcap_census_where_limited, and for the reason that door gives it is
+ * an argument and not a `_bounded` twin. An unknown value is
+ * WZ_DISSECT_ERR_INVALID_ARG. There is NO selector: a selector narrows the
+ * messages a plane is folded from, and a table whose totals moved with one would
+ * state a count of what was selected as if it were what happened.
+ *
+ * This door reads a capture container. A handle that is being fed packets
+ * answers the same question through wz_dissect_live_session_table, with the
+ * same document; its limits are the handle's, chosen at open.
+ *
+ *     {"document":{"name":"session_table","revision":1},"ok":true,
+ *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
+ *                   "phase":"established","encrypted":"clear",
+ *                   "first_seen_ts_ns":"1700000000000000000",
+ *                   "last_seen_ts_ns":"1700000000000015000",
+ *                   "frames":10,"bytes":48,"unstated":[],
+ *                   "flows":[{"flow":{"low":{...},"high":{...},"link":"tcp"},
+ *                             "encrypted":"clear","bytes":48}]}],
+ *      "excluded":[{"why":"multicast_group","count":0},
+ *                  {"why":"scouting_only","count":0}],
+ *      "dropped_by_limits":{...}}
+ *
+ * A SESSION IS A PAIR OF ZIDS. The flows whose handshake named the same two
+ * nodes (an Init in each direction, naming two different nodes: the node plane's
+ * own rule for a link) are ONE row, whichever end dialled and whatever kind of
+ * link each is on. A flow whose pair is not known is a row of its own. Rows come
+ * in the order the dissection first met each: stream flows, then datagram flows,
+ * then the serial line.
+ *
+ * A TAP HAS NO LOCAL SIDE, so there is no "local" and no "remote". The role a
+ * passive observer can state is the OBSERVED INITIATOR. The cells of a row:
+ *
+ *   `initiator`  the zid of the end that sent the InitSyn, lowercase hex as the
+ *                census writes it (`nodes[].zid`), or null.
+ *   `acceptor`   the zid of the end that sent the InitAck, or null.
+ *   `link`       `tcp`, `udp`, `raweth`, `vsock` or `serial`: the word a field
+ *                document's flow carries. A QUIC connection is `udp` and a TLS
+ *                one `tcp`; `encrypted` says which are encrypted. A session over
+ *                links of different kinds is null (`mixed`).
+ *   `phase`      the words of a field document's `context.phase`. A session is
+ *                `closed` only when EVERY flow of it is: one link closing while
+ *                another carries on is not the session closing. Otherwise it is
+ *                as far as the furthest flow still open.
+ *   `encrypted`  see below.
+ *   `first_seen_ts_ns`, `last_seen_ts_ns`
+ *                the capture instants of the earliest and the latest PACKET of
+ *                any flow of the row (the smallest and the largest, not the first
+ *                and last in file order). The clock is the container's own and
+ *                never this host's: nanoseconds since the Unix epoch as the file
+ *                stores them (a classic pcap holds seconds and microseconds or
+ *                nanoseconds, a pcapng ticks of the interface's resolution). An
+ *                instant is a number up to 2^53 - 1 and a string of its digits
+ *                beyond it (see the integer paragraph above), so on a real clock
+ *                it is a string. A packet with no timestamp contributes nothing,
+ *                and a session none of whose packets had one is null.
+ *   `frames`     how many transport messages this reader produced for the session
+ *                in all, summed over its flows. They are counted as they are
+ *                decoded and not from what is still held, so a retention ceiling
+ *                moves the count not at all: the oldest messages leave the list
+ *                first and the count is a counter. A `Frame` that carries ten
+ *                network messages is ONE; a fragment is one per fragment; a unit
+ *                this reader could not decode, or whose MID it does not know, is
+ *                one. On a stream a retransmitted segment and an out-of-order one
+ *                are reassembled and counted once, and messages lost in a hole of
+ *                the capture are not counted (wz_dissect_live_health says how
+ *                much was lost). On a datagram link every arrival is a message,
+ *                so a duplicated datagram is two.
+ *   `bytes`      the bytes the flows carried, summed: for a stream flow the
+ *                reassembled byte stream of both directions (TCP payload,
+ *                retransmissions once; for TLS and WebSocket the ciphertext and
+ *                the frame headers too); for a datagram flow the UDP payload of
+ *                every datagram, a duplicate counted again; for the serial line
+ *                the bytes of the line as captured. Never the Ethernet, IP or
+ *                transport headers. A count this library measures: a bare number.
+ *   `unstated`   one {"cell":...,"reason":...} for each cell that is null; see
+ *                below.
+ *   `flows`      the flows the row is made of, each with the flow object every
+ *                other document carries (so a consumer can join), its `encrypted`
+ *                finding and its own `bytes`.
+ *
+ * EVERY CELL IS PRESENT ON EVERY ROW. A value this reader cannot state is `null`
+ * and the row's `unstated` names it with a REASON, so a cell is null exactly when
+ * it is named there:
+ *
+ *   `not_in_capture`  the message that would state it is not in what was read (a
+ *                     capture that began after the handshake);
+ *   `encrypted`       the flow is an encrypted transport and no key was applied;
+ *   `no_clock`        no packet of the session carried a timestamp;
+ *   `mixed`           the evidence disagrees: the row's flows differ, or one
+ *                     flow's own Inits do (two InitSyns and no InitAck).
+ *
+ * The reasons a cell can carry:
+ *   `initiator`, `acceptor`            `not_in_capture`, `encrypted`, `mixed`
+ *   `link`                             `mixed`
+ *   `phase`, `frames`                  `encrypted`
+ *   `first_seen_ts_ns`, `last_seen_ts_ns`   `no_clock`
+ * An `evicted` reason does not exist: a flow the table's ceiling evicted has no
+ * row, so no cell could say it. That loss is stated for the whole document, by
+ * dropped_by_limits.
+ *
+ * `encrypted` is `clear` (zenoh messages of a kind this reader knows were
+ * decoded from the flow's own bytes), `encrypted_unreadable` (a TLS or QUIC
+ * flow, nothing decrypted), `decrypted_tls` or `decrypted_quic` (the session was
+ * recovered by a decryption pass), `unknown` (nothing was understood and nothing
+ * says the flow is encrypted: it may be zenoh this reader could not read, or
+ * something else) or `mixed` (the row's flows differ). The detection is the
+ * report's (`wz-analyze --summary`'s `encrypted` group), not a second one.
+ * THESE DOORS DO NOT DECRYPT, so `decrypted_tls` and `decrypted_quic` are words a
+ * consumer has to handle and that a capture handed to this door cannot produce
+ * today; they arise only over a dissection a caller decrypted first. An
+ * encrypted flow is a row because zenoh over TLS or QUIC cannot be told from
+ * other TLS or QUIC without keys, so a capture of a whole network lists every
+ * flow and one with bytes and nothing understood is `unknown`, not hidden:
+ * filter the capture to the deployment's ports for a table of sessions. An
+ * encrypted row states what it can (link, bytes, the instants) and nothing
+ * inside.
+ *
+ * A FLOW THAT IS NOT A ROW. A multicast group has no handshake and no pair: a
+ * peer announces itself to the listeners with a Join, and the node plane records
+ * that as an END of a flow and never as a link, so a row would invent a pair.
+ * The test is the dissector's own, whether the link has a handshake (a multicast
+ * destination, or pico's raweth). A flow that carried only Scout or Hello is not
+ * a session either. Both are counted, by reason, in `excluded`, which always
+ * names both:
+ *
+ *   `multicast_group`  the link has no handshake;
+ *   `scouting_only`    only discovery messages were decoded from the flow.
+ *
+ * A CONTAINER THAT DOES NOT READ is a refusal and not an error code, because it
+ * is a diagnosis of the bytes the caller holds (the census doors return
+ * WZ_DISSECT_ERR_BAD_CAPTURE and no string for the same bytes; this door follows
+ * the refusal-as-a-value convention of the diagnosing doors):
+ *
+ *     {"document":{...},"ok":false,"refusal":"truncated","message":"..."}
+ *
+ * with `not_a_capture` (the bytes are not a pcap or a pcapng), `truncated` (the
+ * container ends inside a header or a record) or `damaged` (its own lengths do
+ * not hold together). A caller bug -- a null `bytes` or `out`, or an unknown
+ * `limits` -- is WZ_DISSECT_ERR_INVALID_ARG and no string. Memory is as for every
+ * door: the document is a `char*` released by wz_dissect_string_free, nothing is
+ * retained between calls and no callback runs.
+ *
+ * @values session_table cell
+ * @values session_table encrypted
+ * @values session_table family
+ * @values session_table link
+ * @values session_table phase
+ * @values session_table reason
+ * @values session_table refusal
+ * @values session_table why
+ * @carries session_table cell passenger
+ * @carries session_table encrypted passenger
+ * @carries session_table family passenger
+ * @carries session_table link passenger
+ * @carries session_table phase passenger
+ * @carries session_table reason passenger
+ * @carries session_table refusal passenger
+ * @carries session_table why passenger
+ *
+ * @bound limits work-ceiling -- it bounds the WALK, and what the walk dropped is
+ * reported in dropped_by_limits. */
+int wz_dissect_pcap_session_table(const unsigned char *bytes, size_t len,
+                                  int limits, char **out);
 
 /* R311y854 (ABI 4) — compile a selector and say what is wrong with it,
  * without a capture.
@@ -4343,6 +4520,44 @@ int wz_dissect_pcap_frame_bytes(const unsigned char *bytes, size_t len,
  * wz_dissect_selector_diagnose. */
 int wz_dissect_live_census(const wz_dissect_live *h, const char *selector,
                            char **out);
+
+/* wz_dissect_live_session_table (ABI 33) -- THE SESSION TABLE OVER A LIVE
+ * HANDLE.
+ *
+ * The document wz_dissect_pcap_session_table writes, over the handle's own
+ * dissection, so a consumer watching a link that is still being read keeps one
+ * reader and one schema across both halves. Its cells, its reasons and its
+ * `excluded` list are described at that door and are the same here, and for the
+ * same packets at the same instants the two doors write the same bytes.
+ *
+ * One door and no `limits` argument, for the reason wz_dissect_live_census
+ * gives: the ceiling was chosen at wz_dissect_live_open and is a property of the
+ * handle, and taking it again would be the same fact in two places. There is no
+ * selector either, for the reason the container door gives. The document
+ * carries dropped_by_limits.
+ *
+ * WHAT THE CLOCK IS. `first_seen_ts_ns` and `last_seen_ts_ns` are the `ts_ns` the
+ * caller passed to wz_dissect_live_push for the session's packets (a handle fed
+ * a container by wz_dissect_pcap_replay or wz_dissect_live_follow has the
+ * container's own, as the container door states). Nothing here reads this host's
+ * clock. A packet pushed with WZ_DISSECT_NO_TIMESTAMP contributes no instant,
+ * and a session none of whose packets had one is `no_clock`.
+ *
+ * WHAT A RETENTION CEILING DOES NOT TAKE. On a handle opened with
+ * WZ_DISSECT_LIMITS_LIVE_TAP the oldest messages of a flow are discarded to stay
+ * inside the ceiling, and the Init is the oldest message there is. A row is not
+ * built from what is held: the zids, the instants and the totals are taken as
+ * the packets arrive, so a session that has run for a week still names its two
+ * ends and still counts every message the retained list no longer holds. What a
+ * ceiling DOES take is a FLOW: one it evicts from the table has no row, and
+ * dropped_by_limits says how many. If that flow reappears under the same
+ * 5-tuple it is a new flow with its own counters from that moment.
+ *
+ * It is a READ, and `h` is const to say so: drawing the table does not change
+ * what the tap decodes. A handle cannot be a bad container, so the document is
+ * always the `"ok":true` branch. A null `h` or `out` is WZ_DISSECT_ERR_INVALID_ARG
+ * and no string. The document is a `char*` released by wz_dissect_string_free. */
+int wz_dissect_live_session_table(const wz_dissect_live *h, char **out);
 
 /* R2453 (ABI 16) — THE FEED ENDED: spend the patience a capture's last packet
  * spends.

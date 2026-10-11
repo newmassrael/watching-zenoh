@@ -363,6 +363,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 32, for `wz_dissect_transport_layout`: the structural report of a
     // transport message that already exists, in the row shape the build door
     // reports the bytes it built.
+    // 33, for `wz_dissect_pcap_session_table` and `wz_dissect_live_session_table`:
+    // the capture read as sessions, one row per zid pair.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -380,7 +382,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 32;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 33;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -632,6 +634,13 @@ enum Door {
     /// picks between. It joins nothing, because nothing else answers the same
     /// question.
     FrameBytes,
+    /// (ABI 33) — the capture read as sessions, one row per zid pair.
+    ///
+    /// In this walk because the population is derived from the header's
+    /// `wz_dissect_pcap_*` names. It joins nothing: no other door answers the
+    /// session question, and it takes a preset beside its bytes as the census
+    /// doors do, so neither is the older shape of the other.
+    SessionTable,
 }
 
 impl Door {
@@ -653,6 +662,7 @@ impl Door {
             Door::FieldsWhereLimited => "wz_dissect_pcap_fields_where_limited",
             Door::Replay => "wz_dissect_pcap_replay",
             Door::FrameBytes => "wz_dissect_pcap_frame_bytes",
+            Door::SessionTable => "wz_dissect_pcap_session_table",
         }
     }
 
@@ -694,7 +704,8 @@ impl Door {
             | Door::FieldsWhereLimited
             | Door::Replay
             // Like `Replay`, it emits no document and joins nothing.
-            | Door::FrameBytes => None,
+            | Door::FrameBytes
+            | Door::SessionTable => None,
         }
     }
 
@@ -712,7 +723,8 @@ impl Door {
             Door::FieldsLimited => Some(Door::FieldsWhereLimited),
             Door::FieldsWhereLimited => Some(Door::Replay),
             Door::Replay => Some(Door::FrameBytes),
-            Door::FrameBytes => None,
+            Door::FrameBytes => Some(Door::SessionTable),
+            Door::SessionTable => None,
         }
     }
 }
@@ -2500,6 +2512,74 @@ pub unsafe extern "C" fn wz_dissect_pcap_census_where_limited(
     )
 }
 
+/// (ABI 33) — THE CAPTURE READ AS SESSIONS: one row per zenoh session, in the
+/// cells a sessions editor shows.
+///
+/// # What was missing
+///
+/// Every other document is keyed by a flow or by a node. A session is the unit a
+/// person asks about, and getting one meant joining the census to the field
+/// document and deciding, on the consumer's side, what the join leaves open: two
+/// links of one session, a capture that began after the handshake, an encrypted
+/// transport. Those are decided here once, so a consumer maps cells and carries
+/// no interpretation of its own. `wz_dissect.h` has the whole document.
+///
+/// # A pair of zids, and an observed initiator
+///
+/// A session is the pair of nodes its handshake named, so two flows of one
+/// session are one row. A tap has no local side, so the role it can state is the
+/// observed INITIATOR, the end that sent the InitSyn, and the acceptor beside it.
+///
+/// # The totals are totals
+///
+/// `frames`, `bytes` and the two instants are taken as packets ARRIVE, in the
+/// flow tables, and a retention ceiling does not move them. A row built from the
+/// retained lists would lose the handshake (the oldest message) and stop counting
+/// at the cap.
+///
+/// # `limits`, and no selector
+///
+/// The preset is a parameter, as for [`wz_dissect_pcap_census_where_limited`] and
+/// for its reason; an unknown value is [`WZ_DISSECT_ERR_INVALID_ARG`] and never a
+/// silent fall back to unbounded. There is no selector: a table whose totals
+/// moved with one would state a count of what was selected as if it were what
+/// happened. The handle's twin is [`wz_dissect_live_session_table`].
+///
+/// # A container that does not read is a refusal, not an error code
+///
+/// The door returns [`WZ_DISSECT_OK`] and `{"ok":false,"refusal":...}` naming
+/// one of three words, because it is a diagnosis of the bytes the caller holds.
+/// The census doors answer the same bytes with [`WZ_DISSECT_ERR_BAD_CAPTURE`] and
+/// no string; this door follows the refusal-as-a-value convention the
+/// diagnosing doors share, at the consumer's request.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes and `out` must be a
+/// writable pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_session_table(
+    bytes: *const u8,
+    len: usize,
+    limits: c_int,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // Refused rather than defaulted, as in the census door: a caller that asked
+    // for a ceiling this build does not have must not be handed none.
+    let Some(preset) = preset_limits(limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let document = match Dissection::from_capture_bounded(input, preset) {
+        Ok(dissection) => wz_capture::session_table_json::session_table_json(&dissection),
+        Err(error) => wz_capture::session_table_json::refusal_json(error),
+    };
+    write_string(document, out)
+}
+
 /// R311y854 — compile a selector and say what is wrong with it, WITHOUT a
 /// capture.
 ///
@@ -3214,6 +3294,54 @@ pub unsafe extern "C" fn wz_dissect_live_census(
     write_string(unsafe { (*handle).census(&filter) }, out)
 }
 
+/// (ABI 33) — THE SESSION TABLE OVER A LIVE HANDLE: the document
+/// [`wz_dissect_pcap_session_table`] writes, over the handle's own dissection.
+///
+/// # Why a second door and not one that takes either
+///
+/// A container and a handle are different inputs and C has no union to name
+/// both, so the pair is the shape the census and the field document already
+/// have: one door over bytes, one over a handle, ONE document. A consumer keeps
+/// one reader and one schema across both halves, and a test holds the two to
+/// byte-identical output for the same packets at the same instants.
+///
+/// # No `limits` argument, and no selector
+///
+/// The ceiling was chosen at [`wz_dissect_live_open`] and is a property of the
+/// handle, which is the argument [`wz_dissect_live_census`] makes at length;
+/// taking it again here would be the same fact in two places. There is no
+/// selector for the reason the container door gives: a table whose totals moved
+/// with one would state a count of what was selected as if it were what
+/// happened.
+///
+/// # What a ceiling does not take
+///
+/// On a handle opened with [`WZ_DISSECT_LIMITS_LIVE_TAP`] the oldest messages of
+/// a flow are discarded to stay inside the ceiling, and the Init is the oldest
+/// message there is. A row is therefore not built from what is held: the zids,
+/// the instants and the totals are taken as the packets arrive. What a ceiling
+/// does take is a FLOW, and `dropped_by_limits` says how many.
+///
+/// # It is a READ, and the handle is `const` to say so
+///
+/// Drawing the table must not change what the tap decodes.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] that has not been
+/// closed, and `out` must be a writable pointer to a `*mut c_char`. Neither may
+/// be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_session_table(
+    handle: *const live::LiveDissection,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    write_string(unsafe { (*handle).session_table() }, out)
+}
+
 /// (ABI 18) — THE FIELD DOCUMENT OVER A LIVE HANDLE, each row
 /// carrying the record coordinates of that handle.
 ///
@@ -3829,6 +3957,11 @@ mod tests {
     /// `wz_dissect_transport_layout` across the boundary: the same report for
     /// bytes that already exist, held against the build door through this ABI.
     mod transport_layout;
+
+    /// `wz_dissect_pcap_session_table` and `wz_dissect_live_session_table` across
+    /// the boundary: the mechanism and its oracle are held in `wz-capture`, and
+    /// this file holds what the ABI adds to them.
+    mod session_table;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -7262,7 +7395,11 @@ mod tests {
         // 32, for `wz_dissect_transport_layout`: one symbol, a `char*` released
         // by `wz_dissect_string_free`, and no struct; the unit crosses as bytes
         // the caller already holds and the ring as a word.
-        assert_eq!(wz_dissect_abi_version(), 32);
+        // 33, for `wz_dissect_pcap_session_table` and
+        // `wz_dissect_live_session_table`: two symbols, each a `char*` released
+        // by `wz_dissect_string_free`; the live one takes the handle the other
+        // doors already take, and no struct crosses.
+        assert_eq!(wz_dissect_abi_version(), 33);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -8011,6 +8148,10 @@ mod tests {
             // the refusals for bytes that do not read, a prefix that lies and a
             // message the report does not cover.
             (rev::TRANSPORT_LAYOUT, transport_layout::documents()),
+            // Every shape the session table writes: a clear session, a flow
+            // joined after its handshake, an encrypted one, a session over two
+            // links, and a refusal of each kind.
+            (rev::SESSION_TABLE, session_table::documents()),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
             (rev::RETENTION, retention_documents()),
@@ -8189,6 +8330,15 @@ mod tests {
                     .next()
                     .expect("a document"),
             ),
+            // Declares no plane either: a table is a list of rows, and the
+            // `null` in a row is a cell of the row.
+            (
+                rev::SESSION_TABLE,
+                session_table::documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             // Declares no plane, so it contributes no `@planes` marker,
             // and being in this table is what makes that a checked fact.
             (
@@ -8349,6 +8499,10 @@ mod tests {
             // Every shape the layout door writes, for the same reason: a report
             // and each refusal, and neither writes a top-level `null`.
             (rev::TRANSPORT_LAYOUT, transport_layout::documents()),
+            // Every shape the session table writes, for the same reason: the
+            // refusal omits the table's keys and the table omits the refusal's,
+            // and a null cell is a cell of a row and not a top-level plane.
+            (rev::SESSION_TABLE, session_table::documents()),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
             // With a clock and without, for the reason `retention_documents` gives.

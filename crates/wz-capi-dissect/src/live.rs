@@ -815,6 +815,24 @@ impl LiveDissection {
         wz_capture::retention_json::retention_json(&self.dissection)
     }
 
+    /// THE SESSIONS THIS HANDLE HAS SEEN, one row per zid pair.
+    ///
+    /// # `&self`, for the reason [`Self::census`] is
+    ///
+    /// Drawing the table must not change what the tap decodes.
+    ///
+    /// # One emitter
+    ///
+    /// The document is `wz_capture::session_table_json::session_table_json` over
+    /// the handle's own dissection, the same function the container door calls,
+    /// so the two halves write byte-identical documents for the same packets. Its
+    /// zids, instants and totals are taken as packets arrive, so a retention
+    /// ceiling that has discarded a long session's handshake does not take its
+    /// identity or its count.
+    pub fn session_table(&self) -> String {
+        wz_capture::session_table_json::session_table_json(&self.dissection)
+    }
+
     /// WHAT THIS HANDLE HAS LOST OR DOUBTED: the summary's `health` object and
     /// the count of flows its stream counters are over.
     ///
