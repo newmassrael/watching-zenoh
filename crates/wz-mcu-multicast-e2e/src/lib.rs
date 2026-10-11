@@ -12,7 +12,9 @@
 
 //! wz-mcu-multicast-e2e — the MCU multicast transport e2e SSOT (R311mi).
 //!
-//! [`run_multicast_e2e`] exercises the full MCU multicast feature profile end
+//! `run_multicast_e2e` (the heap form; with `fixed-memory` the crate has
+//! `run_multicast_e2e_fixed` over `MulticastE2eStatics` instead) exercises the full
+//! MCU multicast feature profile end
 //! to end over a REAL lwIP loopback, through the Stage 4b
 //! [`wz::session_lwip::multicast_drive::run_multicast_session`] sync drive
 //! loop. The multicast machinery is the shared [`wz_session_core`] SSOT; this
@@ -212,7 +214,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
 }
 
 /// The stage a running multicast e2e is IN, announced once on entering it
-/// through [`run_multicast_e2e_with_progress`].
+/// through `run_multicast_e2e_with_progress`.
 ///
 /// R3189 (open-debt item 815). The e2e is one call to a bare-metal image, and a
 /// guest that stops making progress inside it used to leave the harness one

@@ -5,9 +5,9 @@
 
 //! wz-mcu-session-acceptor — Stage 5 MCU acceptor session e2e SSOT.
 //!
-//! [`run_acceptor_e2e_on`] drives the acceptor half of the zenoh unicast
+//! `run_acceptor_e2e_on` drives the acceptor half of the zenoh unicast
 //! handshake to `Established` and then dispatches one application Frame,
-//! through the cooperative drive loop's [`SessionPump`] — the same sequence
+//! through the cooperative drive loop's `SessionPump` — the same sequence
 //! `run_session` runs. The session machinery is the shared
 //! [`wz_session_core`] SSOT; this crate is only the e2e TOPOLOGY + verdict,
 //! factored into one `ClockSource`-generic function so the host integration
@@ -16,7 +16,7 @@
 //! ## The topology
 //!
 //! Two loopback UDP endpoints on one network stack, which an
-//! [`AcceptorTopology`] supplies:
+//! `AcceptorTopology` supplies:
 //!
 //! - the ACCEPTOR — the session's link on [`SESSION_PORT`], driven in
 //!   `SessionRole::Acceptor`;
@@ -25,9 +25,14 @@
 //!
 //! R2917 — the topology is a trait. It used to be lwIP's, written into the
 //! function, so no profile whose network stack is not lwIP (Zephyr's own
-//! sockets) could run this handshake. The lwIP topology is [`lwip`] (feature
-//! `lwip`, on by default), and [`run_acceptor_e2e`] keeps its signature for
+//! sockets) could run this handshake. The lwIP topology is `lwip` (feature
+//! `lwip`, on by default), and `run_acceptor_e2e` keeps its signature for
 //! every existing caller.
+//!
+//! These items are the heap form's. With `fixed-memory` the crate has the fixed form
+//! instead (`run_acceptor_e2e_fixed` over `AcceptorStatics`, in the `fixed` module), so
+//! they are written as code, and a doc build with every feature on does not look for
+//! them.
 //!
 //! ## Why the peer is REACTIVE (not pre-queued)
 //!
@@ -141,7 +146,7 @@ const FIXTURE_COOKIE_NONCE: u64 = 0x5A5A_5A5A_5A5A_5A5A;
 /// DEMONSTRATED installing a constant — and a board copying the demo inherited
 /// one cookie per zid for its whole service life. The constant now reaches the
 /// slot through the same port a real board plugs its TRNG into
-/// ([`new_session_actions`](wz::runtime_coop::session_runtime::new_session_actions)), so what a
+/// (`new_session_actions` of `wz::runtime_coop::session_runtime`), so what a
 /// deploy copies is the seam, and what it replaces is this type.
 ///
 /// It deliberately does NOT satisfy the port's stated contract — the bytes are
@@ -242,7 +247,7 @@ pub enum DataMode {
     FragmentChainOoo,
 }
 
-/// The verdict [`run_acceptor_e2e_on`] returns. The host test asserts
+/// The verdict `run_acceptor_e2e_on` returns. The host test asserts
 /// `EstablishedAndDispatched`; the QEMU bin maps it to a semihost exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptorE2eOutcome {
@@ -323,7 +328,7 @@ pub struct AcceptorE2eReport {
 }
 
 /// The stage a running acceptor e2e is WAITING in, announced once on entering
-/// it through [`run_acceptor_e2e_on_with_progress`].
+/// it through `run_acceptor_e2e_on_with_progress`.
 ///
 /// R3189 (open-debt item 815). The e2e is one call to a bare-metal image, and a
 /// guest that stops making progress inside it (the SysTick-versus-spinlock

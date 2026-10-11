@@ -12736,6 +12736,16 @@ layer_c1bz_docs_resolve() {
     # command, not diffed against the old error list.
     # wz-session-lwip stays 3 for the same reason: the six links its drive docs
     # made to items the slot profile removes are code spans.
+    # Fixed-memory step S9c -- wz-mcu-session-acceptor 3 -> 1, by removal: this lane's
+    # command is `--all-features`, which turns `fixed-memory` on, and under it the heap
+    # form (`run_acceptor_e2e`, `AcceptorTopology`, the lwIP topology) is not built, so
+    # its docs and two of the three links broken in them are not built in this lane at
+    # all. The one left is `OffsetClock`, in the doc of the reassembly-timeout data mode,
+    # which names a type that exists in no crate of the tree (the host tests define their
+    # own clock): a link that was broken before this step and is not this step's to fix.
+    # The links in the heap form's items that the fixed form lacks are code spans now, so
+    # the fixed form's own docs add none. wz-mcu-multicast-e2e and wz-runtime-zephyr stay at zero
+    # for the same reason. COUNTED on this lane's command, not diffed.
     # Fixed-memory step S9a -- wz-session-core 510 -> 505, by removal, diffed
     # rather than counted: the sorted `error` lines of this lane's command at
     # `df9f2466` (510) and on the tree (505) differ by five removals and no
@@ -12753,7 +12763,7 @@ layer_c1bz_docs_resolve() {
         wz-capi-core:7
         wz-capi-pico:43
         wz-link-lwip:9
-        wz-mcu-session-acceptor:3
+        wz-mcu-session-acceptor:1
         wz-routing-graph:5
         wz-runtime-coop:7
         wz-runtime-tokio:478

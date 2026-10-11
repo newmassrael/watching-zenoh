@@ -27,7 +27,7 @@
 //!    and the session's link over them. Networking used to reuse `NO_SYS`
 //!    lwIP via `wz-link-lwip`, as the bare-metal and FreeRTOS profiles do,
 //!    which has no netif over Zephyr's drivers; zenoh-pico's Zephyr port
-//!    uses Zephyr's sockets, and so does this profile now. [`links`] is the same
+//!    uses Zephyr's sockets, and so does this profile now. `links` is the same
 //!    sockets as the session shell's `SessionLinks` seam (`ZephyrLinks`: an
 //!    accepting link and a dialling one), which is what lets a node that
 //!    listens and dials, the admin node, run over them.

@@ -5,7 +5,7 @@
 //! handshake and the same reactive peer as the heap form, with every table the run
 //! needs in statics the image declares and this crate linking no `alloc`.
 //!
-//! The heap form takes an [`AcceptorTopology`]-like pair of ends, builds the session
+//! The heap form takes an `AcceptorTopology`-like pair of ends, builds the session
 //! with `new_session_actions` into an `Rc` and drives a `SessionPump` it owns on its
 //! stack. This one claims what the session needs from [`AcceptorStatics`]: a socket of
 //! a static pool for the listener, a slot of the session table, a cell of the pump
@@ -129,7 +129,7 @@ fn peer_send(peer: &LwipUdpSocket<SESSION_RX_SLOT_SIZE, PEER_RX_SLOTS>, bytes: &
 
 /// Drive the acceptor session e2e over `statics` to a verdict.
 ///
-/// The parameters are [`crate::run_acceptor_e2e_with_progress`]'s, with the statics in
+/// The parameters are `run_acceptor_e2e_with_progress`'s (the heap form), with the statics in
 /// place of the topology: `clock_source` is the monotonic time the runtime and the
 /// lease comparator read, `entropy` the source the cookie nonce and the signing key are
 /// drawn from, `data_mode` what the peer sends once the session is `Established`,

@@ -87,7 +87,7 @@ impl<C: ClockSource + 'static> Default for MulticastE2eStatics<C> {
 
 /// Drive the multicast transport e2e over `statics` to a verdict.
 ///
-/// The parameters are [`crate::run_multicast_e2e_with_progress`]'s with the statics in
+/// The parameters are `run_multicast_e2e_with_progress`'s (the heap form) with the statics in
 /// place of the heap: `link` is the lwIP link (`LwipLink::init_static()`, with the
 /// multicast egress routed over the loop netif by the caller where the build has one),
 /// `clock_source` the monotonic time the runtime reads, `on_stage` the stage
