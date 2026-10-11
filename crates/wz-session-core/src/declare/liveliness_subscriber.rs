@@ -73,15 +73,11 @@
 //! it here keeps the cross-registry coupling at zero and matches
 //! zenoh-pico's `_z_session_t._remote_tokens` table sized per session.
 
-// R311gb (Track 2) — String / HashMap back the `alloc` wire side (the
-// `peer_token_table` token→keyexpr table + dispatch params); the no-alloc
-// control plane stores slots in a `BoundedVec` (each slot's pattern in a
-// `BoundedString`) and fires the borrowed `LivelinessSample` view.
-#[cfg(feature = "alloc")]
-use alloc::string::String;
-#[cfg(feature = "alloc")]
-use hashbrown::HashMap;
-
+// R311gb (Track 2) — the `alloc` wire side holds the `peer_token_table`
+// token→keyexpr table + dispatch params; the no-alloc control plane stores
+// slots in a `BoundedVec` (each slot's pattern in a `BoundedString`) and fires
+// the borrowed `LivelinessSample` view. S9a — the table is a `DeclaredKeys`: the
+// map it always was on the growable backing and a bounded table on the fixed one.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 
@@ -89,6 +85,10 @@ use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 #[cfg(feature = "alloc")]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::id_map::key_text;
+#[cfg(feature = "alloc")]
+use crate::id_map::{DeclaredKeys, IdMap};
 // R2662 — `keyexpr_pattern_matches` is gone from this module: both fan paths
 // were its last callers, so a token keyexpr cannot be read as a literal here
 // again without the import being restored deliberately. `MAX_KEYEXPR_CHUNKS`
@@ -99,7 +99,7 @@ use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::wireexpr_resolve::resolve_wireexpr_in;
+use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf};
 // R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
 // `dispatch_iteration_event` name it in their signatures under that gate alone,
 // while only the `Declare` arm inside them resolves and so carries `codec-declare`.
@@ -175,8 +175,21 @@ pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink> {
     /// `alloc`-gated per the borrow boundary. The no-alloc control plane
     /// (slot table + matching + fan) does not depend on it; an MCU caller
     /// supplies the keyexpr to [`Self::dispatch_sample_borrowed`] directly.
+    ///
+    /// S9a — a [`DeclaredKeys`]: a `HashMap` on the growable backing and, on the
+    /// fixed one, a table of [`caps::MAX_REMOTE_DECLS`] rows whose full state
+    /// refuses a NEW id, counts it, and announces nothing for it.
+    ///
+    /// This registry is per SESSION as a whole, not only in this table: its
+    /// slots are keyed by interest ids the session minted, and a history replay
+    /// is owed from the tokens THIS session's peer holds, so a registry shared by
+    /// two sessions would replay one peer's tokens to the other's subscriber.
     #[cfg(feature = "alloc")]
-    peer_token_table: HashMap<u64, String>,
+    peer_token_table: DeclaredKeys,
+    /// `DeclToken`s refused because their keyexpr is longer than a row's text.
+    /// Counted with the table's own refusals ([`Self::peer_token_refusals`]).
+    #[cfg(feature = "alloc")]
+    peer_token_oversize: u32,
 }
 
 impl<C: LivelinessSampleSink> Default for LivelinessSubscriberRegistry<C> {
@@ -197,7 +210,9 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         Self {
             slots: BoundedVec::new(),
             #[cfg(feature = "alloc")]
-            peer_token_table: HashMap::new(),
+            peer_token_table: DeclaredKeys::new(),
+            #[cfg(feature = "alloc")]
+            peer_token_oversize: 0,
         }
     }
 
@@ -329,7 +344,18 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// declared token set. Test / diagnostic surface only.
     #[cfg(feature = "alloc")]
     pub fn peer_token_count(&self) -> usize {
-        self.peer_token_table.len()
+        self.peer_token_table.count()
+    }
+
+    /// How many `DeclToken`s this registry refused: for a NEW id because the
+    /// peer-token table was full ([`caps::MAX_REMOTE_DECLS`]), or for a keyexpr
+    /// longer than a row's text. Always zero on the growable backing, where
+    /// nothing is refused.
+    #[cfg(feature = "alloc")]
+    pub fn peer_token_refusals(&self) -> u32 {
+        self.peer_token_table
+            .refusals()
+            .saturating_add(self.peer_token_oversize)
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -437,9 +463,20 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
-                let resolved = match resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table) {
-                    Some(s) => s,
-                    None => return,
+                // S9a — resolved into a bounded buffer: the fixed backing takes
+                // the declaration without the heap.
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_into(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        self.peer_token_oversize = self.peer_token_oversize.saturating_add(1);
+                        return;
+                    }
                 };
                 // R311y769 — the FIRST declaration of an id wins, and a repeat
                 // is silent. zenoh wraps this whole arm in
@@ -456,20 +493,37 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // carries only the id — would then name a keyexpr the token was
                 // never declared on. Skipping the arm entirely is what keeps the
                 // retraction truthful.
-                if self.peer_token_table.contains_key(&decl.id) {
+                if self.peer_token_table.find(decl.id).is_some() {
                     return;
                 }
-                self.peer_token_table.insert(decl.id, resolved.clone());
+                // S9a — a token the table has no room for (or whose keyexpr is
+                // longer than a row's text) is REFUSED and counted, and is not
+                // announced to the subscribers: what they are told is what the
+                // table holds, so a later `UndeclToken` can name it.
+                let Ok(text) = key_text(resolved) else {
+                    self.peer_token_oversize = self.peer_token_oversize.saturating_add(1);
+                    return;
+                };
+                if self.peer_token_table.bind(decl.id, text).is_err() {
+                    return;
+                }
                 self.fan_to_matching_slots(
                     LivelinessSampleKind::Put,
-                    &resolved,
+                    resolved,
                     decl.id,
                     historical,
                 );
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
-                let resolved = match self.peer_token_table.remove(&undecl.id) {
-                    Some(s) => s,
+                // The row's own text, taken out of the table, or the keyexpr
+                // the retraction carries. `KeyText` is a `String` on the
+                // growable backing and a bounded buffer on the fixed one, so
+                // both arms are read as a `&str` below and neither allocates
+                // there.
+                let mut composed = KeyexprBuf::new();
+                let removed = self.peer_token_table.unbind(undecl.id);
+                let resolved: &str = match removed.as_ref() {
+                    Some(s) => s.as_str(),
                     // R311y769 — the id is unknown, so FALL BACK to the keyexpr
                     // the retraction carries itself. zenoh reaches its
                     // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
@@ -492,17 +546,23 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                     // an alias the peer never declared resolves to `None`, and
                     // then nothing fires — a Delete for a keyexpr nobody named
                     // would be worse than the drop this replaces.
-                    None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr(
+                    //
+                    // S9a — [`resolve_ext_keyexpr_into`](crate::declare_ext_keyexpr::resolve_ext_keyexpr_into):
+                    // the same rule composed in a bounded buffer, because this arm
+                    // is what a PEER reaches with an id the table never held, and a
+                    // peer must not be able to make the registry build a `String`.
+                    None => match crate::declare_ext_keyexpr::resolve_ext_keyexpr_into(
                         undecl.extensions.as_ref(),
-                        peer_keyexpr_table.peer(),
+                        peer_keyexpr_table,
+                        &mut composed,
                     ) {
-                        Some(s) => s,
-                        None => return,
+                        Ok(Some(s)) => s,
+                        Ok(None) | Err(_) => return,
                     },
                 };
                 self.fan_to_matching_slots(
                     LivelinessSampleKind::Delete,
-                    &resolved,
+                    resolved,
                     undecl.id,
                     historical,
                 );
@@ -576,26 +636,37 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     #[cfg(feature = "alloc")]
     pub fn iter_peer_tokens(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.peer_token_table
-            .iter()
-            .map(|(id, keyexpr)| (*id, keyexpr.as_str()))
+            .entries()
+            .map(|(id, keyexpr)| (id, keyexpr.as_str()))
     }
 
+    /// The link-loss flush the long note above `iter_peer_tokens` describes.
+    ///
+    /// S9a — drained one token at a time, lowest id first, each taken out of the
+    /// table before its `Delete` fires: the order and the "no entry is being
+    /// iterated while a sink runs" property are the ones a drain-then-sort gave,
+    /// and nothing is collected, so a link loss allocates nothing on the fixed
+    /// backing.
     pub fn flush_peer_tokens_on_link_loss(&mut self) -> usize {
         #[cfg(feature = "alloc")]
         {
-            if self.peer_token_table.is_empty() {
-                return 0;
-            }
-            let mut drained: alloc::vec::Vec<(u64, String)> =
-                self.peer_token_table.drain().collect();
-            drained.sort_by_key(|(id, _)| *id);
-            for (id, keyexpr) in &drained {
+            let mut flushed = 0usize;
+            while let Some(id) = self.peer_token_table.entries().map(|(id, _)| id).min() {
+                let Some(keyexpr) = self.peer_token_table.unbind(id) else {
+                    break;
+                };
                 // A link loss is a LIVE event — the peer's tokens are going
                 // away NOW — so it reaches every matching slot regardless of
                 // its history flag, exactly as the live `UndeclToken` fan does.
-                self.fan_to_matching_slots(LivelinessSampleKind::Delete, keyexpr, *id, false);
+                self.fan_to_matching_slots(
+                    LivelinessSampleKind::Delete,
+                    keyexpr.as_str(),
+                    id,
+                    false,
+                );
+                flushed += 1;
             }
-            drained.len()
+            flushed
         }
         #[cfg(not(feature = "alloc"))]
         {
@@ -651,16 +722,21 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
             let Self {
                 slots,
                 peer_token_table,
+                ..
             } = self;
-            if peer_token_table.is_empty() {
+            if !peer_token_table.is_bound() {
                 return 0;
             }
             let slot = match slots.iter_mut().find(|s| s.interest_id == interest_id) {
                 Some(s) => s,
                 None => return 0,
             };
-            let mut matched: alloc::vec::Vec<(u64, &str)> = alloc::vec::Vec::new();
-            {
+            // S9a — replayed in ascending token id, one at a time, with nothing
+            // collected: each round finds the lowest matching id above the last
+            // one fired. The scan is over at most `caps::MAX_REMOTE_DECLS` rows.
+            let mut replayed = 0usize;
+            let mut after: Option<u64> = None;
+            loop {
                 // Same chunk view the live fan builds, hoisted out of the scan
                 // because one pattern is being matched against many keyexprs
                 // here rather than one keyexpr against many patterns. An
@@ -678,7 +754,13 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // no-alloc MCU profile. An over-deep TOKEN keyexpr is skipped
                 // rather than intersected truncated — the same refusal the
                 // hand-rolled pattern split made for an over-deep pattern.
-                for (token_id, keyexpr) in peer_token_table.iter() {
+                let mut next: Option<(u64, &str)> = None;
+                for (token_id, keyexpr) in peer_token_table.entries() {
+                    if after.is_some_and(|last| token_id <= last)
+                        || next.is_some_and(|(lowest, _)| token_id >= lowest)
+                    {
+                        continue;
+                    }
                     let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
                     let mut overflow = false;
                     for c in keyexpr.split('/') {
@@ -691,19 +773,21 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                         continue;
                     }
                     if keyexpr_intersects_target(&slot.pattern, &target) {
-                        matched.push((*token_id, keyexpr.as_str()));
+                        next = Some((token_id, keyexpr.as_str()));
                     }
                 }
-            }
-            matched.sort_by_key(|(token_id, _)| *token_id);
-            for (token_id, keyexpr) in &matched {
+                let Some((token_id, keyexpr)) = next else {
+                    break;
+                };
                 slot.sink.on_sample(LivelinessSample {
                     kind: LivelinessSampleKind::Put,
                     keyexpr,
-                    token_id: *token_id,
+                    token_id,
                 });
+                replayed += 1;
+                after = Some(token_id);
             }
-            matched.len()
+            replayed
         }
         #[cfg(not(feature = "alloc"))]
         {

@@ -104,16 +104,26 @@ pub mod liveliness_get;
 /// keyexpr-scan SSOT [`crate::keyexpr_match::keyexpr_intersects_target`]
 /// — the same per-candidate membership test the routing layer's
 /// linkstate-peer `matching_peers` scan uses.
+///
+/// S9a — over a [`DeclaredKeys`](crate::id_map::DeclaredKeys), the table in the
+/// shape the build keeps it, and the target split into a bounded chunk view
+/// instead of a `Vec`: a keyexpr deeper than
+/// [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS) matches
+/// nothing, the conservative answer every sibling scan gives an over-deep key.
 #[cfg(feature = "alloc")]
-pub(crate) fn declared_intersects(
-    declared: &hashbrown::HashMap<u64, alloc::string::String>,
-    keyexpr: &str,
-) -> bool {
-    use alloc::vec::Vec;
-    let target_chunks: Vec<&str> = keyexpr.split('/').collect();
-    declared
-        .values()
-        .any(|candidate| crate::keyexpr_match::keyexpr_intersects_target(candidate, &target_chunks))
+pub(crate) fn declared_intersects(declared: &crate::id_map::DeclaredKeys, keyexpr: &str) -> bool {
+    use crate::bounded::BoundedVec;
+    use crate::id_map::IdMap;
+    let mut target_chunks: BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
+        BoundedVec::new();
+    for chunk in keyexpr.split('/') {
+        if target_chunks.push(chunk).is_err() {
+            return false;
+        }
+    }
+    declared.entries().any(|(_, candidate)| {
+        crate::keyexpr_match::keyexpr_intersects_target(candidate.as_str(), &target_chunks)
+    })
 }
 
 // R311kh — matching-listener watch machinery (pico Z_FEATURE_MATCHING

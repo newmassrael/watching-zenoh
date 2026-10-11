@@ -53,6 +53,9 @@ use alloc::string::{String, ToString};
 
 use hashbrown::HashMap;
 
+#[cfg(feature = "bounded-heapless")]
+use crate::id_map::IdMap;
+use crate::id_map::PeerAliases;
 use sce_forge_runtime::codec::{CodecStorage, SceStr};
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
@@ -280,22 +283,92 @@ pub type SharedOwnMappingSpace = alloc::rc::Rc<dyn OwnMappingSpace>;
 /// prevent.
 #[derive(Clone, Copy)]
 pub struct MappingSpaces<'a> {
-    peer: &'a HashMap<u64, String>,
+    peer: PeerSpace<'a>,
     own: Option<&'a dyn OwnMappingSpace>,
+}
+
+/// The peer's id space as a [`MappingSpaces`] reads it: a plain map (a router
+/// face, a multicast peer, a test) or, on the fixed backing, the table a session
+/// keeps ([`PeerAliases`]).
+///
+/// Closed, and not a trait object, because the AP's `peer()` accessor lends the
+/// plain map to callers that need a `&HashMap`, and a closed pair keeps that.
+#[derive(Clone, Copy)]
+enum PeerSpace<'a> {
+    Map(&'a HashMap<u64, String>),
+    /// Only a build whose [`PeerAliases`] is not the plain map has this arm.
+    #[cfg(feature = "bounded-heapless")]
+    Table(&'a PeerAliases),
+}
+
+impl<'a> PeerSpace<'a> {
+    /// The literal keyexpr the peer declared for `id`.
+    fn literal(&self, id: u64) -> Option<&'a str> {
+        match *self {
+            PeerSpace::Map(map) => map.get(&id).map(String::as_str),
+            #[cfg(feature = "bounded-heapless")]
+            PeerSpace::Table(table) => table.find(id).map(|text| text.as_str()),
+        }
+    }
+}
+
+/// The peer's half of a [`MappingSpaces`] as a table to inspect: what
+/// [`MappingSpaces::peer`] answers on the fixed backing, where the table is not a
+/// `HashMap` to lend.
+#[cfg(feature = "bounded-heapless")]
+#[derive(Clone, Copy)]
+pub struct PeerSpaceView<'a>(PeerSpace<'a>);
+
+#[cfg(feature = "bounded-heapless")]
+impl<'a> PeerSpaceView<'a> {
+    /// The literal the peer declared for `id`.
+    pub fn get(&self, id: &u64) -> Option<&'a str> {
+        self.0.literal(*id)
+    }
+
+    /// How many ids the peer has declared.
+    pub fn len(&self) -> usize {
+        match self.0 {
+            PeerSpace::Map(map) => map.len(),
+            PeerSpace::Table(table) => table.count(),
+        }
+    }
+
+    /// Whether the peer has declared no id.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl<'a> MappingSpaces<'a> {
     /// Only the peer's space is known. `M=0` aliases refuse.
     pub fn peer_only(peer: &'a HashMap<u64, String>) -> Self {
-        Self { peer, own: None }
+        Self {
+            peer: PeerSpace::Map(peer),
+            own: None,
+        }
     }
 
     /// Both spaces are known. `M=1` reads the peer's, `M=0` reads ours.
     pub fn with_own(peer: &'a HashMap<u64, String>, own: &'a dyn OwnMappingSpace) -> Self {
         Self {
-            peer,
+            peer: PeerSpace::Map(peer),
             own: Some(own),
         }
+    }
+
+    /// The pair a session holds: the peer's aliases in whatever table the build
+    /// keeps them in ([`PeerAliases`]) and our own space when one is installed.
+    ///
+    /// On the growable backing that table IS the plain map, so this is
+    /// [`Self::peer_only`] / [`Self::with_own`] by another name; on the fixed one
+    /// it is the bounded table, which no `HashMap` constructor can take.
+    pub fn for_aliases(peer: &'a PeerAliases, own: Option<&'a dyn OwnMappingSpace>) -> Self {
+        #[cfg(not(feature = "bounded-heapless"))]
+        let peer = PeerSpace::Map(peer);
+        #[cfg(feature = "bounded-heapless")]
+        let peer = PeerSpace::Table(peer);
+        Self { peer, own }
     }
 
     /// The peer's half as a raw table, for a caller that must INSPECT it rather
@@ -314,8 +387,29 @@ impl<'a> MappingSpaces<'a> {
     /// [`resolve_wireexpr_in`] exists to prevent. That is also why it is
     /// reachable only THROUGH the pair — a consumer holding it has already been
     /// handed the `M=0` half it would otherwise silently refuse.
+    ///
+    /// The growable backing lends the plain map. The fixed backing has none to
+    /// lend and answers a [`PeerSpaceView`] with the same three questions.
+    #[cfg(not(feature = "bounded-heapless"))]
     pub fn peer(&self) -> &'a HashMap<u64, String> {
-        self.peer
+        match self.peer {
+            PeerSpace::Map(map) => map,
+        }
+    }
+
+    /// The peer's half as a table to inspect. See the growable form for what it
+    /// is for and why it is the narrow half.
+    #[cfg(feature = "bounded-heapless")]
+    pub fn peer(&self) -> PeerSpaceView<'a> {
+        PeerSpaceView(self.peer)
+    }
+
+    /// The literal the PEER declared for `id`, and nothing about our own space:
+    /// for a reader whose wire form carries no mapping bit to pick a space with
+    /// (the `ext_keyexpr` of an undeclaration), which has only ever read the
+    /// peer's.
+    pub(crate) fn peer_literal(&self, id: u64) -> Option<&'a str> {
+        self.peer.literal(id)
     }
 
     /// Whether an `M=0` alias can resolve at all. Diagnostic: it separates
@@ -349,6 +443,15 @@ impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a> {
     }
 }
 
+/// The fixed backing's table is a valid pair for the same reason, and on the
+/// same terms: no own space in it.
+#[cfg(feature = "bounded-heapless")]
+impl<'a> From<&'a PeerAliases> for MappingSpaces<'a> {
+    fn from(peer: &'a PeerAliases) -> Self {
+        Self::for_aliases(peer, None)
+    }
+}
+
 /// [`resolve_wireexpr`] against BOTH id spaces.
 ///
 /// - `id == 0` → suffix verbatim, no table consulted, either mapping.
@@ -377,7 +480,7 @@ pub fn resolve_wireexpr_in<S: CodecStorage>(
         return suffix_opt.map(str::to_string);
     }
     let base = match arm {
-        Space::Peer => spaces.peer.get(&id).cloned()?,
+        Space::Peer => spaces.peer.literal(id).map(str::to_string)?,
         Space::Own => spaces.own?.resolve_own_mapping(id)?,
     };
     Some(match suffix_opt {
@@ -436,25 +539,68 @@ pub fn resolve_wireexpr_view<'k>(
     spaces: MappingSpaces<'k>,
     out: &'k mut KeyexprBuf,
 ) -> Result<Option<&'k str>, KeyexprPastBound> {
-    let (id, suffix_opt) = id_and_suffix_view(body);
+    let (id, suffix) = id_and_suffix_view(body);
+    let arm = match body {
+        WireexprVariant::WireexprLocal(_) => Space::Peer,
+        WireexprVariant::WireexprNonlocal(_) => Space::Own,
+    };
+    resolve_parts(arm, id, suffix, spaces, out)
+}
+
+/// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an
+/// interest or a message decoded into its owned form carries. The rule is the
+/// same arm for arm and the answer is the same shape, a `&str` lent from the
+/// message, the peer's table or `out`, with no `String` built to hold it.
+///
+/// This is what lets the registries that consume owned `Declare` and `Interest`
+/// records resolve a keyexpr on the fixed backing without the heap
+/// ([`resolve_wireexpr_in`] answers a `String`, which allocates there as
+/// everywhere): the table they then bind it into is fixed too, so the whole
+/// absorb of one declaration is allocation-free once the message exists. On the
+/// growable backing `out` is a growable string and this allocates exactly when
+/// [`resolve_wireexpr_in`] did.
+pub fn resolve_wireexpr_into<'k, S: CodecStorage>(
+    body: &'k WireexprOwnedVariant<S>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
+    let (id, suffix) = id_and_suffix(body);
+    let arm = match body {
+        WireexprOwnedVariant::WireexprLocal(_) => Space::Peer,
+        WireexprOwnedVariant::WireexprNonlocal(_) => Space::Own,
+    };
+    resolve_parts(arm, id, suffix, spaces, out)
+}
+
+/// The resolution rule over the parts of a wireexpr, whichever form carried them:
+/// `id == 0` is the suffix verbatim, `M=1` reads the peer's space, `M=0` reads
+/// ours or answers `None` when no own space was given, and an id the space does
+/// not hold is `None`. A keyexpr that has to be composed lies in `out`.
+fn resolve_parts<'k>(
+    arm: Space,
+    id: u64,
+    suffix_opt: Option<&'k str>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
     if id == 0 {
         return Ok(suffix_opt);
     }
     out.clear();
-    match body {
+    match arm {
         // `M=1`: the PEER's space, a table this call can lend from.
-        WireexprVariant::WireexprLocal(_) => {
-            let Some(base) = spaces.peer.get(&id) else {
+        Space::Peer => {
+            let Some(base) = spaces.peer.literal(id) else {
                 return Ok(None);
             };
             let Some(suffix) = suffix_opt else {
-                return Ok(Some(base.as_str()));
+                return Ok(Some(base));
             };
             out.push_str(base).map_err(|_| KeyexprPastBound)?;
             out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
         }
         // `M=0`: OUR space, which is copied out of its lock into `out`.
-        WireexprVariant::WireexprNonlocal(_) => {
+        Space::Own => {
             let Some(own) = spaces.own else {
                 return Ok(None);
             };
@@ -547,7 +693,7 @@ pub fn resolve_declared_keyexpr<S: CodecStorage>(
     if id == 0 {
         return suffix_opt.map(str::to_string);
     }
-    let peer_base = spaces.peer.get(&id).cloned();
+    let peer_base = spaces.peer.literal(id).map(str::to_string);
     let own_base = spaces.own.and_then(|own| own.resolve_own_mapping(id));
     let base = match (peer_base, own_base) {
         (Some(peer), Some(own)) if peer == own => peer,
@@ -568,6 +714,57 @@ pub fn resolve_declared_keyexpr<S: CodecStorage>(
         }
         None => base,
     })
+}
+
+/// [`resolve_declared_keyexpr`] without a `String`: the rule is the same, arm for
+/// arm, and the answer is lent from the declaration, the peer's table or `out`.
+///
+/// The one place the two spaces have to be held at once is the disagreement
+/// test, so our own literal is composed into `out` first and compared where it
+/// lies against the peer's, which is borrowed; the answer is then built over
+/// whichever of the two the rule picks. [`KeyexprPastBound`] is the one answer a
+/// bounded buffer adds, as for [`resolve_wireexpr_into`].
+pub fn resolve_declared_keyexpr_into<'k, S: CodecStorage>(
+    body: &'k WireexprOwnedVariant<S>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
+    let (id, suffix_opt) = id_and_suffix(body);
+    if id == 0 {
+        return Ok(suffix_opt);
+    }
+    out.clear();
+    let peer_base = spaces.peer.literal(id);
+    let own_base = match spaces.own {
+        Some(own) => match own.append_own_mapping(id, out) {
+            None => false,
+            Some(Err(_)) => return Err(KeyexprPastBound),
+            Some(Ok(())) => true,
+        },
+        None => false,
+    };
+    match (peer_base, own_base) {
+        (Some(peer), true) if peer == out.as_str() => {}
+        (Some(_), true) => return Ok(None),
+        (Some(peer), false) => {
+            // The peer's literal alone: lent as it is when nothing follows it.
+            let Some(suffix) = suffix_opt else {
+                return Ok(Some(peer));
+            };
+            out.push_str(peer).map_err(|_| KeyexprPastBound)?;
+            out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
+            let out: &'k KeyexprBuf = out;
+            return Ok(Some(out.as_str()));
+        }
+        (None, true) => {}
+        (None, false) => return Ok(None),
+    }
+    // Ours is in `out` (alone, or agreeing with the peer's): the suffix follows.
+    if let Some(suffix) = suffix_opt {
+        out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
+    }
+    let out: &'k KeyexprBuf = out;
+    Ok(Some(out.as_str()))
 }
 
 /// Which space an arm names. Local to the resolver — the public surface says
@@ -774,14 +971,17 @@ mod mapping_bit_tests {
     fn the_peer_half_is_the_table_it_was_built_over() {
         let (peer, own) = (peer_space(), own_space());
         assert_eq!(
-            MappingSpaces::peer_only(&peer).peer().get(&7).map(|s| &**s),
+            MappingSpaces::peer_only(&peer)
+                .peer()
+                .get(&7)
+                .map(|s| &s[..]),
             Some("peers/space/temp"),
         );
         assert_eq!(
             MappingSpaces::with_own(&peer, &own)
                 .peer()
                 .get(&7)
-                .map(|s| &**s),
+                .map(|s| &s[..]),
             Some("peers/space/temp"),
             "installing an own space must not change which table `peer()` names",
         );

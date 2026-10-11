@@ -39,8 +39,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use hashbrown::HashMap;
-
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
@@ -48,6 +46,7 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 use crate::ext_header::ext_eid;
 use crate::ext_nodeid::{EXT_ENC_ZBUF, EXT_FLAG_M};
 use crate::vle::read_vle_u64;
+use crate::wireexpr_resolve::MappingSpaces;
 
 /// The `ext_keyexpr` extension id — zenoh `_z_decl_ext_keyexpr`, ext id `0x0f`.
 pub const KEYEXPR_EXT_ID: u8 = 0x0f;
@@ -198,9 +197,13 @@ pub fn set_ext_keyexpr_literal(
 /// resolves an ALIASED ext, so a transit linkstate peer can withdraw the right
 /// interest for an aliased undeclare (the withdrawal twin of the declare side's
 /// `resolve_wireexpr`).
-pub fn resolve_ext_keyexpr(
+///
+/// `table` is the peer's table in whichever form the build keeps it: a plain
+/// `&HashMap` (a router face) or the [`MappingSpaces`] a session holds, of which
+/// the PEER half is read, since this extension carries no mapping bit.
+pub fn resolve_ext_keyexpr<'a>(
     exts: Option<&Vec<ExtEntryOwned>>,
-    table: &HashMap<u64, String>,
+    table: impl Into<MappingSpaces<'a>>,
 ) -> Option<String> {
     let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts)?;
     let suffix = if inner_header & INNER_HAS_SUFFIX != 0 {
@@ -211,7 +214,7 @@ pub fn resolve_ext_keyexpr(
     Some(if id == 0 {
         String::from(suffix)
     } else {
-        let mut out = table.get(&id)?.clone();
+        let mut out = String::from(table.into().peer_literal(id)?);
         out.push_str(suffix);
         out
     })
@@ -221,6 +224,7 @@ pub fn resolve_ext_keyexpr(
 mod tests {
     use super::*;
     use alloc::vec;
+    use hashbrown::HashMap;
 
     #[test]
     fn build_emits_pico_ext_keyexpr_shape() {

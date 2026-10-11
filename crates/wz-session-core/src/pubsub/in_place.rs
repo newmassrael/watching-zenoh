@@ -40,7 +40,7 @@ use wz_codecs::encoding::Encoding;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::timestamp::Timestamp;
 
-use super::{fire_into, spaces_of, SubscriberRegistry};
+use super::{fire_into, SubscriberPeer, SubscriberTable};
 use crate::driver_loop::InPlaceRecord;
 use crate::reliability::Reliability;
 use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
@@ -200,35 +200,43 @@ fn lent_body<'s>(push: &'s Push<'s>) -> Result<Option<LentBody<'s>>, Fallback> {
     }
 }
 
-impl<C: SampleSink> SubscriberRegistry<C> {
+impl<C: SampleSink> SubscriberTable<C> {
     /// Deliver a Push the in-place receive path lent: the subscriber side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
     /// See the module docs for what it delivers and what it hands to the owned
     /// projection.
-    pub(super) fn dispatch_in_place(&mut self, record: &InPlaceRecord<'_>) {
+    ///
+    /// `peer` is the sending peer's side: whose aliases the keyexpr resolves
+    /// through and whose zid names a self-echo.
+    pub(super) fn dispatch_in_place(&mut self, peer: &SubscriberPeer, record: &InPlaceRecord<'_>) {
         // A lent Request or Response is the queryables' or the pending gets'.
         let Some(push) = record.push() else {
             return;
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
-        match self.deliver_lent(push, reliability) {
+        match self.deliver_lent(peer, push, reliability) {
             Ok(()) => {}
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
                 self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
-                self.dispatch_owned_projection(push, reliability);
+                self.dispatch_owned_projection(peer, push, reliability);
             }
             Err(Fallback::KeyexprPastBound) => {
                 self.in_place_fallbacks.keyexpr_past_bound =
                     self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
-                self.dispatch_owned_projection(push, reliability);
+                self.dispatch_owned_projection(peer, push, reliability);
             }
         }
     }
 
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
     /// fits, short of a timestamp or encoding hint a subscriber asks for.
-    fn deliver_lent(&mut self, push: &Push<'_>, reliability: Reliability) -> Result<(), Fallback> {
+    fn deliver_lent(
+        &mut self,
+        peer: &SubscriberPeer,
+        push: &Push<'_>,
+        reliability: Reliability,
+    ) -> Result<(), Fallback> {
         let Some(body) = lent_body(push)? else {
             return Ok(());
         };
@@ -237,7 +245,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         // own (`fire_into`). A composed keyexpr lies in `composed`, in this
         // frame: fixed on the fixed backing, an empty string until written on
         // the growable one.
-        let spaces = spaces_of(&self.peer_keyexpr_table, &self.own_mapping_space);
+        let spaces = peer.mapping_spaces();
         let mut composed = KeyexprBuf::new();
         let keyexpr = match resolve_wireexpr_view(&push.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
@@ -271,7 +279,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         };
         // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
         // wire-arrived sample whose source names this session is not fired.
-        if let (Some(own), Some(info)) = (self.own_zid.as_deref(), sample.source_info.as_ref()) {
+        if let (Some(own), Some(info)) = (peer.own_zid(), sample.source_info.as_ref()) {
             let prefix = info.zid_prefix();
             if !prefix.is_empty() && prefix == own {
                 return Ok(());
@@ -284,12 +292,17 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// The fallback: the owned projection of `push`, delivered by the path the
     /// copying receive takes ([`Self::dispatch_push`]), so a Put the lent form
     /// cannot represent is delivered exactly as it always was.
-    fn dispatch_owned_projection(&mut self, push: &Push<'_>, reliability: Reliability) {
+    fn dispatch_owned_projection(
+        &mut self,
+        peer: &SubscriberPeer,
+        push: &Push<'_>,
+        reliability: Reliability,
+    ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Push. It
         // consumes its view; the clone is of the view, not of the bytes.
         if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_push(&owned, reliability, true);
+            self.dispatch_push(peer, &owned, reliability, true);
         }
     }
 }
@@ -314,7 +327,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// The registry over the AP's closure sink, which records what it is handed.
-    type SubscriberRegistry = super::SubscriberRegistry<BoxedSink>;
+    type SubscriberRegistry = crate::pubsub::SubscriberRegistry<BoxedSink>;
 
     /// Everything a subscriber can read through the view, as owned values.
     #[derive(Debug, Clone, PartialEq)]
@@ -439,7 +452,8 @@ mod tests {
     #[test]
     fn a_peer_alias_resolves_as_the_owned_path_resolves_it() {
         let peer = |r: &mut SubscriberRegistry| {
-            r.peer_keyexpr_table.insert(5, "demo/a".to_string());
+            let literal = crate::id_map::key_text("demo/a").expect("fits");
+            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases, 5, literal);
         };
         for suffix in [None, Some("/b")] {
             let built = crate::push_build::build_push_aliased(5, suffix, b"v").expect("build");
@@ -545,15 +559,18 @@ mod tests {
     /// growable string on the growable backing, which never refuses.
     #[test]
     fn a_keyexpr_past_the_bound_is_counted_and_still_delivered() {
-        let long_base = "a".repeat(crate::caps::MAX_KEYEXPR_BYTES);
-        let base = alloc::format!("big/{long_base}/");
+        // The alias fits the table's text; the alias and the message's suffix
+        // together do not fit the buffer a keyexpr is composed in.
+        let long_base = "a".repeat(crate::caps::MAX_KEYEXPR_BYTES - 2);
+        let base = alloc::format!("{long_base}/");
         let peer = |r: &mut SubscriberRegistry| {
-            r.peer_keyexpr_table.insert(9, base.clone());
+            let literal = crate::id_map::key_text(&base).expect("the alias fits the table");
+            let _ = crate::id_map::IdMap::bind(&mut r.peer.naming.aliases, 9, literal);
         };
         let built = crate::push_build::build_push_aliased(9, Some("tail"), b"v").expect("build");
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
-        let (lent, owned, fallbacks) = both_ways(&push, "big/**", peer);
+        let (lent, owned, fallbacks) = both_ways(&push, "**", peer);
         assert_eq!(owned.len(), 1);
         assert_eq!(lent, owned);
         let refused = u32::from(crate::bounded::ENFORCES_CAPACITY);

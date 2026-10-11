@@ -12,14 +12,17 @@
 //! [`crate::keyexpr_match::keyexpr_intersect_patterns`] directly —
 //! no extension-trait split (R311dn-pre lift made this possible).
 
-// R311gb (Track 2) — String / Vec / HashMap back the `alloc` wire side
-// (the peer `declared` membership table + `has_matching` chunking + the
-// dispatch params); the no-alloc control plane stores observers in a
-// `BoundedVec` and fires through the borrowed `DeclView` seam.
+// R311gb (Track 2) — String / Vec back the `alloc` wire side (the dispatch
+// params); the peer `declared` membership table is a `DeclaredQueryables` (S9a):
+// the map it always was on the growable backing and a bounded table on the fixed
+// one. The no-alloc control plane stores observers in a `BoundedVec` and fires
+// through the borrowed `DeclView` seam.
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::id_map::key_text;
+#[cfg(feature = "alloc")]
+use crate::id_map::{DeclaredQueryable, DeclaredQueryables, IdMap};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-#[cfg(feature = "alloc")]
-use hashbrown::HashMap;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
@@ -39,33 +42,27 @@ use crate::locality::Locality;
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
+use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 
-/// R311y797 — one peer-declared queryable, as the membership table holds
-/// it: the resolved keyexpr AND the completeness the peer advertised on
-/// the declaration's `QueryableInfo` ext.
-///
-/// `complete` is not decoration. A querier targeting
-/// [`QueryTarget::AllComplete`](crate::query_mode::QueryTarget) is asking
-/// for responders that can answer its WHOLE keyexpr by themselves, so an
-/// incomplete peer queryable is not a match for it however well the
-/// keyexprs overlap — pico drops such a declaration from the write
-/// filter's target list outright
-/// (`vendor/zenoh-pico/src/net/filtering.c:206-207`). Until this round wz
-/// stored the keyexpr alone, so every peer queryable read as complete and
-/// an `AllComplete` querier was told `true` by responders that would
-/// answer it partially or not at all.
-#[cfg(feature = "alloc")]
-struct RemoteQueryable {
-    /// Resolved (alias-expanded) keyexpr the peer declared.
-    keyexpr: String,
-    /// The peer's advertised `QueryableInfo::complete` — zenoh's
-    /// `ext_info.complete` bit on `DeclareQueryable`
-    /// (`zenoh-protocol/src/network/declare.rs:440-460`). A declaration
-    /// carrying no such ext reads as `false`, which is upstream's own
-    /// default (`QueryableInfoType::DEFAULT`).
-    complete: bool,
-}
+// R311y797 — one peer-declared queryable, as the membership table holds
+// it, is a `DeclaredQueryable` (`crate::id_map`, S9a): the resolved keyexpr
+// AND the completeness the peer advertised on the declaration's
+// `QueryableInfo` ext.
+//
+// `complete` is not decoration. A querier targeting
+// [`QueryTarget::AllComplete`](crate::query_mode::QueryTarget) is asking
+// for responders that can answer its WHOLE keyexpr by themselves, so an
+// incomplete peer queryable is not a match for it however well the
+// keyexprs overlap — pico drops such a declaration from the write
+// filter's target list outright
+// (`vendor/zenoh-pico/src/net/filtering.c:206-207`). Until this round wz
+// stored the keyexpr alone, so every peer queryable read as complete and
+// an `AllComplete` querier was told `true` by responders that would
+// answer it partially or not at all. The flag is zenoh's
+// `ext_info.complete` bit on `DeclareQueryable`
+// (`zenoh-protocol/src/network/declare.rs:440-460`); a declaration carrying
+// no such ext reads as `false`, which is upstream's own default
+// (`QueryableInfoType::DEFAULT`).
 
 /// R311y797 — everything a querier's matching verdict depends on, as one
 /// value: the keyexpr it queries, the locality it is willing to be
@@ -160,11 +157,8 @@ impl QuerierCriterion {
 /// aggregate member (see the `declare-interest` atom) — so the waiver
 /// could only ever fire on a flag wz cannot emit.
 #[cfg(feature = "alloc")]
-fn declared_answers(
-    declared: &HashMap<u64, RemoteQueryable>,
-    criterion: &QuerierCriterion,
-) -> bool {
-    use alloc::vec::Vec;
+fn declared_answers(declared: &DeclaredQueryables, criterion: &QuerierCriterion) -> bool {
+    use crate::bounded::BoundedVec;
     // R311y797 — the querier's own locality gates this half BEFORE the
     // membership is consulted at all: a `Locality::SessionLocal` querier
     // is not answered by any peer, so no peer declaration can make it
@@ -173,14 +167,22 @@ fn declared_answers(
     if !criterion.locality.allows_remote() {
         return false;
     }
-    let target_chunks: Vec<&str> = criterion.keyexpr.split('/').collect();
+    // S9a — split into a bounded chunk view, not a `Vec`; a keyexpr deeper than
+    // the bound matches nothing, as the sibling scans answer an over-deep key.
+    let mut target_chunks: BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
+        BoundedVec::new();
+    for chunk in criterion.keyexpr.split('/') {
+        if target_chunks.push(chunk).is_err() {
+            return false;
+        }
+    }
     if criterion.complete_required {
         #[cfg(feature = "keyexpr-includes")]
         {
-            declared.values().any(|candidate| {
+            declared.entries().any(|(_, candidate)| {
                 candidate.complete
                     && crate::keyexpr_match::keyexpr_includes_target(
-                        &candidate.keyexpr,
+                        candidate.keyexpr.as_str(),
                         &target_chunks,
                     )
             })
@@ -195,8 +197,11 @@ fn declared_answers(
             false
         }
     } else {
-        declared.values().any(|candidate| {
-            crate::keyexpr_match::keyexpr_intersects_target(&candidate.keyexpr, &target_chunks)
+        declared.entries().any(|(_, candidate)| {
+            crate::keyexpr_match::keyexpr_intersects_target(
+                candidate.keyexpr.as_str(),
+                &target_chunks,
+            )
         })
     }
 }
@@ -217,116 +222,98 @@ fn declared_answers(
 /// boundary that matches zenoh-pico's
 /// `Z_FEATURE_SUBSCRIPTION` vs `Z_FEATURE_QUERYABLE` compile-time
 /// feature split.
+///
+/// S9a — as the subscriber twin: the registry is the application's
+/// [`RemoteQueryableTable`] and one peer's [`RemoteQueryablePeer`] together, the
+/// shape every AP session has always had, and a process serving several sessions
+/// holds the table once and a peer side per session.
 pub struct RemoteQueryableRegistry<D: DeclSink, U: UndeclSink> {
+    table: RemoteQueryableTable<D, U>,
+    peer: RemoteQueryablePeer,
+}
+
+/// The application's half of [`RemoteQueryableRegistry`]: the observer lists and
+/// the matching watches. Nothing a peer writes is here.
+pub struct RemoteQueryableTable<D: DeclSink, U: UndeclSink> {
     /// R311gb (Track 2) — shared 2-list observer machinery composed from
     /// [`crate::decl_sink::DeclObserverPair`] (SSOT across the three
     /// `DeclSink` registries). `D = BoxedDeclSink` / `U = BoxedUndeclSink`
     /// on AP, consumer-supplied closed `enum`s on MCU.
     observers: DeclObserverPair<D, U>,
-    /// R288 — peer-declared queryables tracked by `{id -> resolved
-    /// keyexpr}`. Populated on every inbound `DeclQueryable` whose
-    /// keyexpr resolves through `peer_keyexpr_table`, and entries
-    /// removed on the matching `UndeclQueryable`. Backbone for
-    /// `Querier::get_matching_status` which iterates this map at
-    /// consult time to decide whether any currently-declared peer
-    /// queryable's keyexpr intersects the querier's keyexpr.
-    ///
-    /// Why a HashMap (rather than a Vec or BTreeMap): the membership
-    /// invariant is by id, undeclare removal is keyed by id, and the
-    /// only iteration consumer ([`Self::has_matching`]) does not
-    /// depend on ordering. HashMap gives O(1) insert + remove + the
-    /// rare full-iteration on get_matching_status calls.
-    ///
-    /// R311gb (Track 2) — wire-side membership state (populated by
-    /// `dispatch_declare` consuming owned `Declare` records, read by
-    /// `has_matching`); `alloc`-gated per the borrow boundary.
-    /// R311y797 — the value is a [`RemoteQueryable`], not a bare keyexpr:
-    /// the peer's advertised completeness is part of the membership fact.
-    #[cfg(feature = "alloc")]
-    declared: HashMap<u64, RemoteQueryable>,
     /// R311kh — matching-listener watches (pico `Z_FEATURE_MATCHING`),
     /// the Q-side mirror of the subscriber registry's list: re-evaluated
-    /// against the `declared` table on every membership mutation, firing
+    /// against the peer's `declared` table on every membership mutation, firing
     /// each watch's sink on a verdict flip (the listener form of the
     /// polling `Querier::get_matching_status`).
     /// R311y797 — keyed by [`QuerierCriterion`] rather than a bare
     /// keyexpr, so an `AllComplete` querier's watch keeps re-evaluating
     /// under ITS target.
+    ///
+    /// A watch has no session key; see the subscriber twin for what that means
+    /// for a table that serves several peers.
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     matching_watches: MatchingWatchList<BoxedMatchingSink, QuerierCriterion>,
 }
 
-impl<D: DeclSink, U: UndeclSink> Default for RemoteQueryableRegistry<D, U> {
+/// What ONE peer has declared as queryables to this session: the table a peer
+/// writes. See [`RemoteQueryableRegistry`].
+pub struct RemoteQueryablePeer {
+    /// R288 — peer-declared queryables tracked by `{id -> resolved
+    /// keyexpr}`. Populated on every inbound `DeclQueryable` whose
+    /// keyexpr resolves through the peer's alias table, and entries
+    /// removed on the matching `UndeclQueryable`. Backbone for
+    /// `Querier::get_matching_status` which iterates this map at
+    /// consult time to decide whether any currently-declared peer
+    /// queryable's keyexpr intersects the querier's keyexpr.
+    ///
+    /// Why a by-id table (rather than a Vec or BTreeMap): the membership
+    /// invariant is by id, undeclare removal is keyed by id, and the
+    /// only iteration consumer ([`Self::has_matching`]) does not
+    /// depend on ordering.
+    ///
+    /// R311gb (Track 2) — wire-side membership state (populated by
+    /// `dispatch_declare` consuming owned `Declare` records, read by
+    /// `has_matching`); `alloc`-gated per the borrow boundary.
+    /// R311y797 — the value is a [`DeclaredQueryable`], not a bare keyexpr:
+    /// the peer's advertised completeness is part of the membership fact.
+    ///
+    /// S9a — a [`DeclaredQueryables`]: a `HashMap` on the growable backing and,
+    /// on the fixed one, a table of [`crate::caps::MAX_REMOTE_DECLS`] rows whose
+    /// full state refuses a NEW id, counts it, and announces nothing for it.
+    #[cfg(feature = "alloc")]
+    declared: DeclaredQueryables,
+    /// `DeclQueryable`s refused because their keyexpr is longer than a row's
+    /// text. Counted with the table's own refusals.
+    #[cfg(feature = "alloc")]
+    oversize: u32,
+}
+
+impl Default for RemoteQueryablePeer {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self::new()
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
-    /// New empty registry over explicit sink backings `D` / `U`. Both
-    /// observer lists start empty; an empty registry processes inbound
-    /// `Declare(Decl*Queryable)` records as no-ops.
-    ///
-    /// R311gb-3d — the generic constructor (no-`alloc` / MCU entry point,
-    /// paired with the `*_sink` installers). AP callers use the inferring
-    /// [`new`](RemoteQueryableRegistry::new) shorthand, which fixes
-    /// `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
-    pub fn with_sink_backing() -> Self {
+impl RemoteQueryablePeer {
+    /// A peer that has declared nothing. `const` on the fixed backing, so a
+    /// session slot that holds one can be a `static`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub const fn new() -> Self {
         Self {
-            observers: DeclObserverPair::new(),
             #[cfg(feature = "alloc")]
-            declared: HashMap::new(),
-            #[cfg(all(feature = "session-matching", feature = "alloc"))]
-            matching_watches: MatchingWatchList::new(),
+            declared: DeclaredQueryables::new(),
+            #[cfg(feature = "alloc")]
+            oversize: 0,
         }
     }
 
-    /// R311gb-3d — install an explicit [`DeclSink`] observer (the
-    /// seam-native entry point; works on every profile). The `alloc`-only
-    /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
-    /// convenience wrapper funnels through here. Duplicate sinks allowed;
-    /// dispatch fires them in registration order. R311lb — returns the
-    /// registry-local observer id for
-    /// [`remove_queryable_declared_sink`](Self::remove_queryable_declared_sink).
-    pub fn on_queryable_declared_sink(&mut self, sink: D) -> Result<u64, RegisterError> {
-        self.observers.install_decl(sink)
-    }
-
-    /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
-    /// `alloc`-only
-    /// [`on_queryable_undeclared`](RemoteQueryableRegistry::on_queryable_undeclared)
-    /// convenience wrapper funnels through here. R311lb — returns the
-    /// registry-local observer id for
-    /// [`remove_queryable_undeclared_sink`](Self::remove_queryable_undeclared_sink).
-    pub fn on_queryable_undeclared_sink(&mut self, sink: U) -> Result<u64, RegisterError> {
-        self.observers.install_undecl(sink)
-    }
-
-    /// R311lb — remove the declaration observer keyed by `id` (the
-    /// return of
-    /// [`on_queryable_declared_sink`](Self::on_queryable_declared_sink)).
-    /// Returns whether one was removed; double removal is a `false`
-    /// no-op. The removal half of the Session-tier decl-listener
-    /// surface (R311lc).
-    pub fn remove_queryable_declared_sink(&mut self, id: u64) -> bool {
-        self.observers.uninstall_decl(id)
-    }
-
-    /// R311lb — remove the undeclaration observer keyed by `id`. Same
-    /// contract as
-    /// [`remove_queryable_declared_sink`](Self::remove_queryable_declared_sink).
-    pub fn remove_queryable_undeclared_sink(&mut self, id: u64) -> bool {
-        self.observers.uninstall_undecl(id)
-    }
-
-    /// Number of installed `on_queryable_declared` callbacks.
-    pub fn on_decl_len(&self) -> usize {
-        self.observers.decl_len()
-    }
-
-    /// Number of installed `on_queryable_undeclared` callbacks.
-    pub fn on_undecl_len(&self) -> usize {
-        self.observers.undecl_len()
+    /// A peer that has declared nothing.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub fn new() -> Self {
+        Self {
+            declared: DeclaredQueryables::new(),
+            oversize: 0,
+        }
     }
 
     /// R288 — count of currently-declared peer queryables (those whose
@@ -337,20 +324,18 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// declared at all.
     #[cfg(feature = "alloc")]
     pub fn declared_count(&self) -> usize {
-        self.declared.len()
+        self.declared.count()
     }
 
     /// R288 — iterate over currently-declared peer queryables as
-    /// `(id, resolved_keyexpr)` pairs. Ordering is unspecified (the
-    /// backing storage is a `HashMap`). Useful for debug surfaces
-    /// that want to enumerate every peer-side declaration; the
-    /// `has_matching` accessor below is the production consult
-    /// path.
+    /// `(id, resolved_keyexpr)` pairs. Ordering is unspecified. Useful for
+    /// debug surfaces that want to enumerate every peer-side declaration; the
+    /// `has_matching` accessor below is the production consult path.
     #[cfg(feature = "alloc")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.declared
-            .iter()
-            .map(|(id, q)| (*id, q.keyexpr.as_str()))
+            .entries()
+            .map(|(id, q)| (id, q.keyexpr.as_str()))
     }
 
     /// R311y797 — [`Self::iter_declared`] carrying the third fact the
@@ -361,8 +346,17 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     #[cfg(feature = "alloc")]
     pub fn iter_declared_info(&self) -> impl Iterator<Item = (u64, &str, bool)> + '_ {
         self.declared
-            .iter()
-            .map(|(id, q)| (*id, q.keyexpr.as_str(), q.complete))
+            .entries()
+            .map(|(id, q)| (id, q.keyexpr.as_str(), q.complete))
+    }
+
+    /// How many `DeclQueryable` this peer's table refused: for a NEW id because
+    /// it was full ([`crate::caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer
+    /// than a row's text. Always zero on the growable backing, where nothing is
+    /// refused.
+    #[cfg(feature = "alloc")]
+    pub fn refusals(&self) -> u32 {
+        self.declared.refusals().saturating_add(self.oversize)
     }
 
     /// Backbone for `Querier::get_matching_status` (R288 surfaced
@@ -416,15 +410,303 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
         declared_answers(&self.declared, criterion)
     }
 
+    /// Drop everything the peer declared, in place; the refusal count is kept.
+    /// Returns how many declarations were dropped.
+    #[cfg(feature = "alloc")]
+    pub fn forget(&mut self) -> usize {
+        let dropped = self.declared.count();
+        self.declared.reset();
+        dropped
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> Default for RemoteQueryableRegistry<D, U> {
+    fn default() -> Self {
+        Self::with_sink_backing()
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> Default for RemoteQueryableTable<D, U> {
+    fn default() -> Self {
+        Self::with_sink_backing()
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> core::ops::Deref for RemoteQueryableRegistry<D, U> {
+    type Target = RemoteQueryableTable<D, U>;
+
+    fn deref(&self) -> &RemoteQueryableTable<D, U> {
+        &self.table
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> core::ops::DerefMut for RemoteQueryableRegistry<D, U> {
+    fn deref_mut(&mut self) -> &mut RemoteQueryableTable<D, U> {
+        &mut self.table
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
+    /// New empty registry over explicit sink backings `D` / `U`. Both
+    /// observer lists start empty; an empty registry processes inbound
+    /// `Declare(Decl*Queryable)` records as no-ops.
+    ///
+    /// R311gb-3d — the generic constructor (no-`alloc` / MCU entry point,
+    /// paired with the `*_sink` installers). AP callers use the inferring
+    /// [`new`](RemoteQueryableRegistry::new) shorthand, which fixes
+    /// `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
+    pub fn with_sink_backing() -> Self {
+        Self {
+            table: RemoteQueryableTable::with_sink_backing(),
+            peer: RemoteQueryablePeer::new(),
+        }
+    }
+
+    /// The peer's side of this registry, for a caller that wants its table or its
+    /// counters by name.
+    pub fn peer(&self) -> &RemoteQueryablePeer {
+        &self.peer
+    }
+
+    /// R288 — count of currently-declared peer queryables; see
+    /// [`RemoteQueryablePeer::declared_count`].
+    #[cfg(feature = "alloc")]
+    pub fn declared_count(&self) -> usize {
+        self.peer.declared_count()
+    }
+
+    /// R288 — iterate over currently-declared peer queryables; see
+    /// [`RemoteQueryablePeer::iter_declared`].
+    #[cfg(feature = "alloc")]
+    pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.peer.iter_declared()
+    }
+
+    /// R311y797 — see [`RemoteQueryablePeer::iter_declared_info`].
+    #[cfg(feature = "alloc")]
+    pub fn iter_declared_info(&self) -> impl Iterator<Item = (u64, &str, bool)> + '_ {
+        self.peer.iter_declared_info()
+    }
+
+    /// Backbone for `Querier::get_matching_status`; see
+    /// [`RemoteQueryablePeer::has_matching`].
+    #[cfg(feature = "alloc")]
+    pub fn has_matching(&self, query_keyexpr: &str) -> bool {
+        self.peer.has_matching(query_keyexpr)
+    }
+
+    /// R311y797 — the criterion-aware consult; see
+    /// [`RemoteQueryablePeer::has_matching_for`].
+    #[cfg(feature = "alloc")]
+    pub fn has_matching_for(&self, criterion: &QuerierCriterion) -> bool {
+        self.peer.has_matching_for(criterion)
+    }
+
+    /// R311kh — register a matching-listener watch over `keyexpr`; see
+    /// [`RemoteQueryableTable::declare_matching_listener`].
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
+        self.table
+            .declare_matching_listener(&self.peer, keyexpr, sink)
+    }
+
+    /// R311y797 — [`Self::declare_matching_listener`] carrying the querier's full
+    /// criterion and the session-local half of the current verdict.
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn declare_matching_listener_seeded(
+        &mut self,
+        criterion: QuerierCriterion,
+        local_matching: bool,
+        sink: BoxedMatchingSink,
+    ) -> u64 {
+        self.table
+            .declare_matching_listener_seeded(&self.peer, criterion, local_matching, sink)
+    }
+
+    /// R311y797 — re-evaluate every matching watch after a change this registry
+    /// cannot see; see [`RemoteQueryableTable::reevaluate_matching`].
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn reevaluate_matching(
+        &mut self,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) -> usize {
+        self.table.reevaluate_matching(&self.peer, local_matching)
+    }
+
+    /// R311y799 — the peer's link died: drop every declaration it had made; see
+    /// [`RemoteQueryableTable::flush_declarations_on_link_loss`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn flush_declarations_on_link_loss(
+        &mut self,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) -> usize {
+        self.table
+            .flush_declarations_on_link_loss(&mut self.peer, local_matching)
+    }
+
+    /// Route an inbound `Declare` envelope's inner body through the
+    /// remote-queryable callbacks; see [`RemoteQueryableTable::dispatch_declare`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_declare(&mut self.peer, body, peer_keyexpr_table);
+    }
+
+    /// R311y797 — [`Self::dispatch_declare`] with the SESSION-LOCAL half of the
+    /// matching verdict supplied by the caller.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare_with_local<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) {
+        self.table.dispatch_declare_with_local(
+            &mut self.peer,
+            body,
+            peer_keyexpr_table,
+            local_matching,
+        );
+    }
+
+    /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_messages<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_messages(&mut self.peer, messages, peer_keyexpr_table);
+    }
+
+    /// R311y797 — [`Self::dispatch_messages`] threading the session-local half.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_messages_with_local<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) {
+        self.table.dispatch_messages_with_local(
+            &mut self.peer,
+            messages,
+            peer_keyexpr_table,
+            local_matching,
+        );
+    }
+
+    /// `IterationEvent` adapter; mirror of the sibling registries.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_iteration_event<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_iteration_event(&mut self.peer, event, peer_keyexpr_table);
+    }
+
+    /// R311y797 — [`Self::dispatch_iteration_event`] threading the session-local
+    /// half.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_iteration_event_with_local<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&QuerierCriterion) -> bool,
+    ) {
+        self.table.dispatch_iteration_event_with_local(
+            &mut self.peer,
+            event,
+            peer_keyexpr_table,
+            local_matching,
+        );
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
+    /// New empty table over explicit sink backings `D` / `U`. Both observer lists
+    /// start empty.
+    pub fn with_sink_backing() -> Self {
+        Self {
+            observers: DeclObserverPair::new(),
+            #[cfg(all(feature = "session-matching", feature = "alloc"))]
+            matching_watches: MatchingWatchList::new(),
+        }
+    }
+
+    /// R311gb-3d — install an explicit [`DeclSink`] observer (the
+    /// seam-native entry point; works on every profile). The `alloc`-only
+    /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
+    /// convenience wrapper funnels through here. Duplicate sinks allowed;
+    /// dispatch fires them in registration order. R311lb — returns the
+    /// registry-local observer id for
+    /// [`remove_queryable_declared_sink`](Self::remove_queryable_declared_sink).
+    pub fn on_queryable_declared_sink(&mut self, sink: D) -> Result<u64, RegisterError> {
+        self.observers.install_decl(sink)
+    }
+
+    /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
+    /// `alloc`-only
+    /// [`on_queryable_undeclared`](RemoteQueryableRegistry::on_queryable_undeclared)
+    /// convenience wrapper funnels through here. R311lb — returns the
+    /// registry-local observer id for
+    /// [`remove_queryable_undeclared_sink`](Self::remove_queryable_undeclared_sink).
+    pub fn on_queryable_undeclared_sink(&mut self, sink: U) -> Result<u64, RegisterError> {
+        self.observers.install_undecl(sink)
+    }
+
+    /// R311lb — remove the declaration observer keyed by `id` (the
+    /// return of
+    /// [`on_queryable_declared_sink`](Self::on_queryable_declared_sink)).
+    /// Returns whether one was removed; double removal is a `false`
+    /// no-op. The removal half of the Session-tier decl-listener
+    /// surface (R311lc).
+    pub fn remove_queryable_declared_sink(&mut self, id: u64) -> bool {
+        self.observers.uninstall_decl(id)
+    }
+
+    /// R311lb — remove the undeclaration observer keyed by `id`. Same
+    /// contract as
+    /// [`remove_queryable_declared_sink`](Self::remove_queryable_declared_sink).
+    pub fn remove_queryable_undeclared_sink(&mut self, id: u64) -> bool {
+        self.observers.uninstall_undecl(id)
+    }
+
+    /// Number of installed `on_queryable_declared` callbacks.
+    pub fn on_decl_len(&self) -> usize {
+        self.observers.decl_len()
+    }
+
+    /// Number of installed `on_queryable_undeclared` callbacks.
+    pub fn on_undecl_len(&self) -> usize {
+        self.observers.undecl_len()
+    }
+
     /// R311kh — register a matching-listener watch over `keyexpr`, the
     /// Q-side mirror of the subscriber registry's
     /// `declare_matching_listener`: fires on every verdict flip of
-    /// [`Self::has_matching`]`(keyexpr)` caused by an inbound
+    /// [`RemoteQueryablePeer::has_matching`]`(keyexpr)` caused by an inbound
     /// `DeclQueryable` / `UndeclQueryable`, seeded with the current
     /// verdict (registration fires only when already matching).
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
-        self.declare_matching_listener_seeded(QuerierCriterion::intersecting(keyexpr), false, sink)
+    pub fn declare_matching_listener(
+        &mut self,
+        peer: &RemoteQueryablePeer,
+        keyexpr: &str,
+        sink: BoxedMatchingSink,
+    ) -> u64 {
+        self.declare_matching_listener_seeded(
+            peer,
+            QuerierCriterion::intersecting(keyexpr),
+            false,
+            sink,
+        )
     }
 
     /// R311y797 — [`Self::declare_matching_listener`] carrying the
@@ -442,11 +724,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener_seeded(
         &mut self,
+        peer: &RemoteQueryablePeer,
         criterion: QuerierCriterion,
         local_matching: bool,
         sink: BoxedMatchingSink,
     ) -> u64 {
-        let initial = self.has_matching_for(&criterion) || local_matching;
+        let initial = peer.has_matching_for(&criterion) || local_matching;
         self.matching_watches.register(criterion, initial, sink)
     }
 
@@ -459,30 +742,31 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn reevaluate_matching(
         &mut self,
+        peer: &RemoteQueryablePeer,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) -> usize {
         self.matching_watches
-            .reevaluate(|c| declared_answers(&self.declared, c) || local_matching(c))
+            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c))
     }
 
     /// R311y799 — the queryable-plane twin of
     /// [`RemoteSubscriberRegistry::flush_declarations_on_link_loss`](crate::declare::subscriber::RemoteSubscriberRegistry::flush_declarations_on_link_loss);
-    /// read that one for pico's arm, for why a purge needs no `peer` key on
-    /// a single-peer observer, and for why the decl-listener surface stays
-    /// silent. pico makes no distinction between the two planes here — its
+    /// read that one for pico's arm, for why a purge needs no `peer` key (the
+    /// side passed in is one session's), and for why the decl-listener surface
+    /// stays silent. pico makes no distinction between the two planes here — its
     /// connection-dropped sweep drops SUBSCRIBER and QUERYABLE targets
     /// alike, because both live in the same target list.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
+        peer: &mut RemoteQueryablePeer,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) -> usize {
         let _ = &local_matching;
-        let dropped = self.declared.len();
-        self.declared.clear();
+        let dropped = peer.forget();
         #[cfg(feature = "session-matching")]
         self.matching_watches
-            .reevaluate(|c| declared_answers(&self.declared, c) || local_matching(c));
+            .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
         dropped
     }
 
@@ -523,13 +807,17 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated wire dispatch;
     /// updates the `alloc` `declared` table then funnels through the
     /// no-heap fire SSOT.
+    ///
+    /// S9a — `peer` is the declaring peer's side (its `declared` table), passed in
+    /// so one table serves many sessions.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare<'a>(
         &mut self,
+        peer: &mut RemoteQueryablePeer,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_declare_with_local(body, peer_keyexpr_table, &|_| false)
+        self.dispatch_declare_with_local(peer, body, peer_keyexpr_table, &|_| false)
     }
 
     /// R311y797 — [`Self::dispatch_declare`] with the SESSION-LOCAL half
@@ -543,9 +831,17 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// queryable still answering must not flip the watch to `false`. The
     /// local half lives in a sibling observer field and is passed in
     /// rather than mirrored here, so the fact stays in one place.
+    ///
+    /// S9a — a `DeclQueryable` the peer's table has no room for, or whose keyexpr
+    /// is longer than a row's text, is REFUSED: counted
+    /// ([`RemoteQueryablePeer::refusals`]), not recorded and not announced, so what
+    /// the application is told is what the table holds. The keyexpr resolves into
+    /// a bounded buffer, so the fixed backing absorbs a declaration without the
+    /// heap.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare_with_local<'a>(
         &mut self,
+        peer: &mut RemoteQueryablePeer,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -555,9 +851,18 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(decl) => {
-                let resolved = match resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table) {
-                    Some(s) => s,
-                    None => return,
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_into(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        peer.oversize = peer.oversize.saturating_add(1);
+                        return;
+                    }
                 };
                 // R288 — track peer-declared queryable so
                 // get_matching_status can consult the membership at
@@ -576,35 +881,45 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
                 // `net/filtering.c:202`).
                 let complete =
                     crate::queryable_info::read_queryable_info(decl.extensions.as_ref()).complete;
-                self.declared.insert(
-                    decl.id,
-                    RemoteQueryable {
-                        keyexpr: resolved.clone(),
-                        complete,
-                    },
-                );
+                let Ok(text) = key_text(resolved) else {
+                    peer.oversize = peer.oversize.saturating_add(1);
+                    return;
+                };
+                if peer
+                    .declared
+                    .bind(
+                        decl.id,
+                        DeclaredQueryable {
+                            keyexpr: text,
+                            complete,
+                        },
+                    )
+                    .is_err()
+                {
+                    return;
+                }
                 let view = BorrowedDecl {
                     id: decl.id,
-                    keyexpr: &resolved,
+                    keyexpr: resolved,
                 };
                 self.dispatch_declared_borrowed(&view);
                 // R311kh — membership changed: flip-fire the matching
                 // watches (disjoint field borrows via the free-fn consult).
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|c| declared_answers(&self.declared, c) || local_matching(c));
+                    .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
             }
             DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
                 // R288 — drop the membership entry first so a
                 // get_matching_status fired from inside the
                 // on_undecl callback chain observes the post-
                 // undeclare state. Missing-id remove is silent.
-                self.declared.remove(&undecl.id);
+                peer.declared.unbind(undecl.id);
                 self.dispatch_undeclared(undecl.id);
                 // R311kh — see the DeclQueryable arm.
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|c| declared_answers(&self.declared, c) || local_matching(c));
+                    .reevaluate(|c| declared_answers(&peer.declared, c) || local_matching(c));
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -616,10 +931,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages<'a>(
         &mut self,
+        peer: &mut RemoteQueryablePeer,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_messages_with_local(messages, peer_keyexpr_table, &|_| false)
+        self.dispatch_messages_with_local(peer, messages, peer_keyexpr_table, &|_| false)
     }
 
     /// R311y797 — [`Self::dispatch_messages`] threading the session-local
@@ -627,6 +943,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages_with_local<'a>(
         &mut self,
+        peer: &mut RemoteQueryablePeer,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -634,7 +951,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
-                self.dispatch_declare_with_local(&decl.body, peer_keyexpr_table, local_matching);
+                self.dispatch_declare_with_local(
+                    peer,
+                    &decl.body,
+                    peer_keyexpr_table,
+                    local_matching,
+                );
             }
         }
     }
@@ -643,10 +965,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
+        peer: &mut RemoteQueryablePeer,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_iteration_event_with_local(event, peer_keyexpr_table, &|_| false)
+        self.dispatch_iteration_event_with_local(peer, event, peer_keyexpr_table, &|_| false)
     }
 
     /// R311y797 — [`Self::dispatch_iteration_event`] threading the
@@ -655,13 +978,14 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
+        peer: &mut RemoteQueryablePeer,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages_with_local(messages, peer_keyexpr_table, local_matching);
+            self.dispatch_messages_with_local(peer, messages, peer_keyexpr_table, local_matching);
         }
     }
 }

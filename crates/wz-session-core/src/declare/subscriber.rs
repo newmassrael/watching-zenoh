@@ -14,14 +14,17 @@
 //! directly — no extension-trait split (R311dn-pre lift made this
 //! possible).
 
-// R311gb (Track 2) — String / Vec / HashMap back the `alloc` wire side
-// (the peer `declared` membership table + `has_matching` chunking + the
-// dispatch params); the no-alloc control plane stores observers in a
+// R311gb (Track 2) — String / Vec back the `alloc` wire side
+// (the dispatch params); the peer `declared` membership table is a
+// `DeclaredKeys` (S9a): the map it always was on the growable backing and a
+// bounded table on the fixed one. The no-alloc control plane stores observers in a
 // `BoundedVec` and fires through the borrowed `DeclView` seam.
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::id_map::key_text;
+#[cfg(feature = "alloc")]
+use crate::id_map::{DeclaredKeys, IdMap};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-#[cfg(feature = "alloc")]
-use hashbrown::HashMap;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
@@ -46,7 +49,7 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
+use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 
 /// R311y797 — everything a publisher's matching verdict depends on, as
 /// one value: the keyexpr it publishes on and the locality it is willing
@@ -104,7 +107,7 @@ impl PublisherCriterion {
 /// consults the membership table while the watch list itself is mutably
 /// borrowed.
 #[cfg(feature = "alloc")]
-fn declared_reaches(declared: &HashMap<u64, String>, criterion: &PublisherCriterion) -> bool {
+fn declared_reaches(declared: &DeclaredKeys, criterion: &PublisherCriterion) -> bool {
     criterion.locality.allows_remote() && declared_intersects(declared, &criterion.keyexpr)
 }
 
@@ -118,7 +121,20 @@ fn declared_reaches(declared: &HashMap<u64, String>, criterion: &PublisherCriter
 /// `on_subscriber_declared` and / or `on_subscriber_undeclared`
 /// callback once at startup; every matching inbound declare fires
 /// every installed callback in registration order.
+///
+/// S9a — the registry is the application's [`RemoteSubscriberTable`] (the observer
+/// lists, the matching watches) and one peer's [`RemoteSubscriberPeer`] (what that
+/// peer has declared) together, the shape every AP session has always had. A
+/// process that serves several sessions holds the table once and one peer side
+/// per session, since the ids a peer declares are scoped to its own session.
 pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink> {
+    table: RemoteSubscriberTable<D, U>,
+    peer: RemoteSubscriberPeer,
+}
+
+/// The application's half of [`RemoteSubscriberRegistry`]: the observer lists and
+/// the matching watches. Nothing a peer writes is here.
+pub struct RemoteSubscriberTable<D: DeclSink, U: UndeclSink> {
     /// R311gb (Track 2) — the shared 2-list observer machinery
     /// (`on_decl` + `on_undecl`, install + fire), composed from
     /// [`crate::decl_sink::DeclObserverPair`] so the fan-out logic lives
@@ -126,17 +142,33 @@ pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink> {
     /// `U = BoxedUndeclSink` on AP (heap closures), consumer-supplied
     /// closed `enum`s on MCU.
     observers: DeclObserverPair<D, U>,
+    /// R311kh — matching-listener watches (pico `Z_FEATURE_MATCHING`):
+    /// re-evaluated against the peer's `declared` table on every membership
+    /// mutation, firing each watch's sink on a verdict flip. The
+    /// listener form of the polling `has_matching` consult.
+    ///
+    /// A watch has no session key, so a table that serves several peers
+    /// re-evaluates it against whichever peer's declaration just arrived: the
+    /// listener is a single-session facility, and no image that holds more than
+    /// one session selects `session-matching` (its sinks are heap closures).
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    matching_watches: MatchingWatchList<BoxedMatchingSink, PublisherCriterion>,
+}
+
+/// What ONE peer has declared as subscribers to this session: the table a peer
+/// writes. See [`RemoteSubscriberRegistry`].
+pub struct RemoteSubscriberPeer {
     /// R290 — peer-declared subscribers tracked by `{id -> resolved
     /// keyexpr}`. Pub-side analogue of the `declared` map landed on
     /// [`crate::declare::queryable::RemoteQueryableRegistry`] in R288.
     /// Populated on every inbound `DeclSubscriber` whose keyexpr
-    /// resolves through `peer_keyexpr_table`, and entries removed on
+    /// resolves through the peer's alias table, and entries removed on
     /// the matching `UndeclSubscriber`. Backbone for the publisher-
     /// side `get_matching_status` consult which iterates this map at
     /// query time to decide whether any currently-declared peer
     /// subscriber's keyexpr intersects the publisher's keyexpr.
     ///
-    /// Same HashMap rationale as the Q-side: by-id membership
+    /// Same by-id rationale as the Q-side: by-id membership
     /// invariant, by-id Undecl removal, no ordering dependency on
     /// the rare full-iteration consult path.
     ///
@@ -145,19 +177,133 @@ pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink> {
     /// `has_matching`); `alloc`-gated per the borrow boundary. The
     /// no-alloc control plane (observer lists + fan-out) does not depend
     /// on it.
+    ///
+    /// S9a — a [`DeclaredKeys`]: a `HashMap` on the growable backing and, on the
+    /// fixed one, a table of [`crate::caps::MAX_REMOTE_DECLS`] rows whose full
+    /// state refuses a NEW id, counts it, and announces nothing for it.
     #[cfg(feature = "alloc")]
-    declared: HashMap<u64, String>,
-    /// R311kh — matching-listener watches (pico `Z_FEATURE_MATCHING`):
-    /// re-evaluated against the `declared` table on every membership
-    /// mutation, firing each watch's sink on a verdict flip. The
-    /// listener form of the polling `has_matching` consult.
-    #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    matching_watches: MatchingWatchList<BoxedMatchingSink, PublisherCriterion>,
+    declared: DeclaredKeys,
+    /// `DeclSubscriber`s refused because their keyexpr is longer than the table's
+    /// text (a [`DeclaredKeys`] row holds [`crate::caps::MAX_KEYEXPR_BYTES`] bytes
+    /// on the fixed backing). Counted with the table's own refusals.
+    #[cfg(feature = "alloc")]
+    oversize: u32,
+}
+
+impl Default for RemoteSubscriberPeer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RemoteSubscriberPeer {
+    /// A peer that has declared nothing. `const` on the fixed backing, so a
+    /// session slot that holds one can be a `static`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub const fn new() -> Self {
+        Self {
+            #[cfg(feature = "alloc")]
+            declared: DeclaredKeys::new(),
+            #[cfg(feature = "alloc")]
+            oversize: 0,
+        }
+    }
+
+    /// A peer that has declared nothing.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub fn new() -> Self {
+        Self {
+            declared: DeclaredKeys::new(),
+            oversize: 0,
+        }
+    }
+
+    /// R290 — count of currently-declared peer subscribers (those
+    /// whose inbound `DeclSubscriber` has been dispatched and whose
+    /// `UndeclSubscriber` has not). Pub-side mirror of the Q-side
+    /// `declared_count`.
+    #[cfg(feature = "alloc")]
+    pub fn declared_count(&self) -> usize {
+        self.declared.count()
+    }
+
+    /// R290 — iterate over currently-declared peer subscribers as
+    /// `(id, resolved_keyexpr)` pairs. Pub-side mirror of the Q-side
+    /// `iter_declared`. Ordering is unspecified.
+    #[cfg(feature = "alloc")]
+    pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.declared.entries().map(|(id, ke)| (id, ke.as_str()))
+    }
+
+    /// How many `DeclSubscriber` this peer's table refused: for a NEW id because
+    /// it was full ([`crate::caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer
+    /// than a row's text. Always zero on the growable backing, where nothing is
+    /// refused.
+    #[cfg(feature = "alloc")]
+    pub fn refusals(&self) -> u32 {
+        self.declared.refusals().saturating_add(self.oversize)
+    }
+
+    /// Backbone for `Publisher::get_matching_status` (R290 surfaced
+    /// the API; R293 lifted the underlying matcher to honest
+    /// wildcard-vs-wildcard intersection). Pub-side mirror of the
+    /// Q-side `has_matching`; returns `true` iff at least one
+    /// currently-declared peer subscriber's keyexpr intersects
+    /// `publish_keyexpr` under
+    /// [`crate::keyexpr_match::keyexpr_intersect_patterns`] — i.e.
+    /// there exists at least one literal `/`-separated keyexpr that
+    /// both sides match. The Q-side has_matching doc-comment carries
+    /// the per-case textbook expansion (literal-literal byte-equal,
+    /// one-side wildcard, two-side wildcard overlap); the semantic
+    /// is symmetric across Pub-side and Q-side because the matcher
+    /// itself is symmetric.
+    #[cfg(feature = "alloc")]
+    pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
+        declared_intersects(&self.declared, publish_keyexpr)
+    }
+
+    /// R311y797 — the criterion-aware consult: the REMOTE half of a
+    /// publisher's matching verdict, gated by that publisher's own
+    /// locality. [`Self::has_matching`] is the locality-blind membership
+    /// question and stays exactly that for its other callers.
+    #[cfg(feature = "alloc")]
+    pub fn has_matching_for(&self, criterion: &PublisherCriterion) -> bool {
+        declared_reaches(&self.declared, criterion)
+    }
+
+    /// Drop everything the peer declared, in place; the refusal count is kept.
+    /// Returns how many declarations were dropped.
+    #[cfg(feature = "alloc")]
+    pub fn forget(&mut self) -> usize {
+        let dropped = self.declared.count();
+        self.declared.reset();
+        dropped
+    }
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for RemoteSubscriberRegistry<D, U> {
     fn default() -> Self {
         Self::with_sink_backing()
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> Default for RemoteSubscriberTable<D, U> {
+    fn default() -> Self {
+        Self::with_sink_backing()
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> core::ops::Deref for RemoteSubscriberRegistry<D, U> {
+    type Target = RemoteSubscriberTable<D, U>;
+
+    fn deref(&self) -> &RemoteSubscriberTable<D, U> {
+        &self.table
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> core::ops::DerefMut for RemoteSubscriberRegistry<D, U> {
+    fn deref_mut(&mut self) -> &mut RemoteSubscriberTable<D, U> {
+        &mut self.table
     }
 }
 
@@ -167,15 +313,187 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// `Declare(Decl*)` records as no-ops.
     ///
     /// R311gb-3d — the generic constructor (the no-`alloc` / MCU entry
-    /// point, paired with [`on_subscriber_declared_sink`](Self::on_subscriber_declared_sink)
-    /// / [`on_subscriber_undeclared_sink`](Self::on_subscriber_undeclared_sink)).
+    /// point, paired with [`on_subscriber_declared_sink`](RemoteSubscriberTable::on_subscriber_declared_sink)
+    /// / [`on_subscriber_undeclared_sink`](RemoteSubscriberTable::on_subscriber_undeclared_sink)).
     /// AP callers use the inferring [`new`](RemoteSubscriberRegistry::new)
     /// shorthand, which fixes `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
     pub fn with_sink_backing() -> Self {
         Self {
+            table: RemoteSubscriberTable::with_sink_backing(),
+            peer: RemoteSubscriberPeer::new(),
+        }
+    }
+
+    /// The peer's side of this registry, for a caller that wants its table or its
+    /// counters by name.
+    pub fn peer(&self) -> &RemoteSubscriberPeer {
+        &self.peer
+    }
+
+    /// R290 — count of currently-declared peer subscribers; see
+    /// [`RemoteSubscriberPeer::declared_count`].
+    #[cfg(feature = "alloc")]
+    pub fn declared_count(&self) -> usize {
+        self.peer.declared_count()
+    }
+
+    /// R290 — iterate over currently-declared peer subscribers; see
+    /// [`RemoteSubscriberPeer::iter_declared`].
+    #[cfg(feature = "alloc")]
+    pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.peer.iter_declared()
+    }
+
+    /// Backbone for `Publisher::get_matching_status`; see
+    /// [`RemoteSubscriberPeer::has_matching`].
+    #[cfg(feature = "alloc")]
+    pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
+        self.peer.has_matching(publish_keyexpr)
+    }
+
+    /// R311y797 — the criterion-aware consult; see
+    /// [`RemoteSubscriberPeer::has_matching_for`].
+    #[cfg(feature = "alloc")]
+    pub fn has_matching_for(&self, criterion: &PublisherCriterion) -> bool {
+        self.peer.has_matching_for(criterion)
+    }
+
+    /// R311kh — register a matching-listener watch over `keyexpr`; see
+    /// [`RemoteSubscriberTable::declare_matching_listener`].
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
+        self.table
+            .declare_matching_listener(&self.peer, keyexpr, sink)
+    }
+
+    /// R311y788 — [`Self::declare_matching_listener`] with the
+    /// session-local half of the current verdict supplied by the caller.
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn declare_matching_listener_seeded(
+        &mut self,
+        criterion: PublisherCriterion,
+        local_matching: bool,
+        sink: BoxedMatchingSink,
+    ) -> u64 {
+        self.table
+            .declare_matching_listener_seeded(&self.peer, criterion, local_matching, sink)
+    }
+
+    /// R311y788 — re-evaluate every matching watch after a change this
+    /// registry cannot see; see [`RemoteSubscriberTable::reevaluate_matching`].
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn reevaluate_matching(
+        &mut self,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) -> usize {
+        self.table.reevaluate_matching(&self.peer, local_matching)
+    }
+
+    /// R311y799 — the peer's link died: drop every declaration it had made; see
+    /// [`RemoteSubscriberTable::flush_declarations_on_link_loss`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn flush_declarations_on_link_loss(
+        &mut self,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) -> usize {
+        self.table
+            .flush_declarations_on_link_loss(&mut self.peer, local_matching)
+    }
+
+    /// Route an inbound `Declare` envelope's inner body through the
+    /// remote-subscriber callbacks; see
+    /// [`RemoteSubscriberTable::dispatch_declare`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_declare(&mut self.peer, body, peer_keyexpr_table);
+    }
+
+    /// R311y788 — [`Self::dispatch_declare`] with the SESSION-LOCAL half
+    /// of the matching verdict supplied by the caller.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare_with_local<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) {
+        self.table.dispatch_declare_with_local(
+            &mut self.peer,
+            body,
+            peer_keyexpr_table,
+            local_matching,
+        );
+    }
+
+    /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_messages<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_messages(&mut self.peer, messages, peer_keyexpr_table);
+    }
+
+    /// R311y788 — [`Self::dispatch_messages`] carrying the session-local
+    /// half of the matching verdict.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_messages_with_local<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) {
+        self.table.dispatch_messages_with_local(
+            &mut self.peer,
+            messages,
+            peer_keyexpr_table,
+            local_matching,
+        );
+    }
+
+    /// Convenience adapter over an `IterationEvent`; see
+    /// [`RemoteSubscriberTable::dispatch_iteration_event`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_iteration_event<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_iteration_event(&mut self.peer, event, peer_keyexpr_table);
+    }
+
+    /// R311y788 — [`Self::dispatch_iteration_event`] carrying the
+    /// session-local half of the matching verdict.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_iteration_event_with_local<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        local_matching: &dyn Fn(&PublisherCriterion) -> bool,
+    ) {
+        self.table.dispatch_iteration_event_with_local(
+            &mut self.peer,
+            event,
+            peer_keyexpr_table,
+            local_matching,
+        );
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
+    /// New empty table over explicit sink backings `D` / `U`. Both observer lists
+    /// start empty.
+    pub fn with_sink_backing() -> Self {
+        Self {
             observers: DeclObserverPair::new(),
-            #[cfg(feature = "alloc")]
-            declared: HashMap::new(),
             #[cfg(all(feature = "session-matching", feature = "alloc"))]
             matching_watches: MatchingWatchList::new(),
         }
@@ -230,61 +548,23 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         self.observers.undecl_len()
     }
 
-    /// R290 — count of currently-declared peer subscribers (those
-    /// whose inbound `DeclSubscriber` has been dispatched and whose
-    /// `UndeclSubscriber` has not). Pub-side mirror of the Q-side
-    /// `declared_count`.
-    #[cfg(feature = "alloc")]
-    pub fn declared_count(&self) -> usize {
-        self.declared.len()
-    }
-
-    /// R290 — iterate over currently-declared peer subscribers as
-    /// `(id, resolved_keyexpr)` pairs. Pub-side mirror of the Q-side
-    /// `iter_declared`. Ordering is unspecified (HashMap iteration).
-    #[cfg(feature = "alloc")]
-    pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
-        self.declared.iter().map(|(id, ke)| (*id, ke.as_str()))
-    }
-
-    /// Backbone for `Publisher::get_matching_status` (R290 surfaced
-    /// the API; R293 lifted the underlying matcher to honest
-    /// wildcard-vs-wildcard intersection). Pub-side mirror of the
-    /// Q-side `has_matching`; returns `true` iff at least one
-    /// currently-declared peer subscriber's keyexpr intersects
-    /// `publish_keyexpr` under
-    /// [`crate::keyexpr_match::keyexpr_intersect_patterns`] — i.e.
-    /// there exists at least one literal `/`-separated keyexpr that
-    /// both sides match. The Q-side has_matching doc-comment carries
-    /// the per-case textbook expansion (literal-literal byte-equal,
-    /// one-side wildcard, two-side wildcard overlap); the semantic
-    /// is symmetric across Pub-side and Q-side because the matcher
-    /// itself is symmetric.
-    #[cfg(feature = "alloc")]
-    pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
-        declared_intersects(&self.declared, publish_keyexpr)
-    }
-
-    /// R311y797 — the criterion-aware consult: the REMOTE half of a
-    /// publisher's matching verdict, gated by that publisher's own
-    /// locality. [`Self::has_matching`] is the locality-blind membership
-    /// question and stays exactly that for its other callers.
-    #[cfg(feature = "alloc")]
-    pub fn has_matching_for(&self, criterion: &PublisherCriterion) -> bool {
-        declared_reaches(&self.declared, criterion)
-    }
-
     /// R311kh — register a matching-listener watch over `keyexpr` (pico
     /// `Z_FEATURE_MATCHING`): the sink fires on every VERDICT FLIP of
-    /// [`Self::has_matching`]`(keyexpr)` caused by an inbound
+    /// [`RemoteSubscriberPeer::has_matching`]`(keyexpr)` caused by an inbound
     /// `DeclSubscriber` / `UndeclSubscriber`, seeded with the CURRENT
     /// verdict so registration itself never fires (pico transition-only
     /// semantics; `get_matching_status` remains the poll for the current
     /// value). Returns the watch id for
     /// [`Self::undeclare_matching_listener`].
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
-    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
+    pub fn declare_matching_listener(
+        &mut self,
+        peer: &RemoteSubscriberPeer,
+        keyexpr: &str,
+        sink: BoxedMatchingSink,
+    ) -> u64 {
         self.declare_matching_listener_seeded(
+            peer,
             PublisherCriterion::any_locality(keyexpr),
             false,
             sink,
@@ -309,11 +589,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener_seeded(
         &mut self,
+        peer: &RemoteSubscriberPeer,
         criterion: PublisherCriterion,
         local_matching: bool,
         sink: BoxedMatchingSink,
     ) -> u64 {
-        let initial = self.has_matching_for(&criterion) || local_matching;
+        let initial = peer.has_matching_for(&criterion) || local_matching;
         self.matching_watches.register(criterion, initial, sink)
     }
 
@@ -329,10 +610,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn reevaluate_matching(
         &mut self,
+        peer: &RemoteSubscriberPeer,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) -> usize {
         self.matching_watches
-            .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c))
+            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c))
     }
 
     /// R311y799 — the peer's link died: drop every declaration it had made
@@ -347,14 +629,15 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// flips a matching listener back to `false`.
     ///
     /// WHY "ALL" IS THE SAME AS "THIS PEER'S" HERE, and why wz needs no
-    /// `peer` key to do it: this registry lives on an
-    /// [`ApplicationLayerObserver`](crate::observer) whose peer alias table
-    /// (`SubscriberRegistry`'s `peer_keyexpr_table`) is a single unkeyed
-    /// `{mapping_id -> keyexpr}` map. Two peers' id spaces would collide in
-    /// it, so the observer is single-peer BY CONSTRUCTION and every entry
-    /// in `declared` belongs to the one link that just died. pico keys its
-    /// targets by peer because its write-filter ctx spans a session that
-    /// really can hold several transport peers.
+    /// `peer` key to do it: the `peer` side passed in is ONE session's, and what
+    /// it holds is `{declaration id -> keyexpr}` for the one peer on that link.
+    /// (Until S9a this registry sat on an
+    /// [`ApplicationLayerObserver`](crate::observer) whose single alias table
+    /// two peers' id spaces would have collided in, so the observer was
+    /// single-peer by construction; each session now has a side of its own, and
+    /// the flush is of the side whose link just died.) pico keys its targets by
+    /// peer because its write-filter ctx spans a session that really can hold
+    /// several transport peers.
     ///
     /// The decl-listener surface (`on_subscriber_undeclared`) is
     /// deliberately NOT fired: pico's connection-dropped arm touches the
@@ -366,14 +649,14 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
+        peer: &mut RemoteSubscriberPeer,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) -> usize {
         let _ = &local_matching;
-        let dropped = self.declared.len();
-        self.declared.clear();
+        let dropped = peer.forget();
         #[cfg(feature = "session-matching")]
         self.matching_watches
-            .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c));
+            .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
         dropped
     }
 
@@ -426,13 +709,17 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// `declared` table, then funnels the fan-out through the no-heap
     /// [`dispatch_declared_borrowed`](Self::dispatch_declared_borrowed) /
     /// [`dispatch_undeclared`](Self::dispatch_undeclared) SSOT.
+    ///
+    /// S9a — `peer` is the declaring peer's side (its `declared` table), passed
+    /// in so one table serves many sessions.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare<'a>(
         &mut self,
+        peer: &mut RemoteSubscriberPeer,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_declare_with_local(body, peer_keyexpr_table, &|_| false)
+        self.dispatch_declare_with_local(peer, body, peer_keyexpr_table, &|_| false)
     }
 
     /// R311y788 — [`Self::dispatch_declare`] with the SESSION-LOCAL half
@@ -451,9 +738,17 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// half, which is the honest answer for a caller that has no local
     /// subscriber table in reach. The production fan
     /// ([`crate::observer::SessionObserver`]) passes the real one.
+    ///
+    /// S9a — a `DeclSubscriber` whose id the peer's table has no room for, or whose
+    /// keyexpr is longer than the table's text, is REFUSED: counted
+    /// ([`RemoteSubscriberPeer::refusals`]), not recorded, and not announced to
+    /// the observers, so what the application is told is what the table holds.
+    /// The keyexpr is resolved into a bounded buffer, so on the fixed backing the
+    /// whole absorb allocates nothing.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare_with_local<'a>(
         &mut self,
+        peer: &mut RemoteSubscriberPeer,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -462,20 +757,35 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         let _ = &local_matching;
         match body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(decl) => {
-                let resolved = match resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table) {
-                    Some(s) => s,
-                    None => return,
+                let mut composed = KeyexprBuf::new();
+                let resolved = match resolve_wireexpr_into(
+                    &decl.keyexpr.body,
+                    peer_keyexpr_table,
+                    &mut composed,
+                ) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return,
+                    Err(_) => {
+                        peer.oversize = peer.oversize.saturating_add(1);
+                        return;
+                    }
                 };
                 // R290 — same membership-tracking pattern as the
                 // Q-side registry: same-id-replaces semantic, no
                 // explicit conflict surfacing.
-                self.declared.insert(decl.id, resolved.clone());
+                let Ok(text) = key_text(resolved) else {
+                    peer.oversize = peer.oversize.saturating_add(1);
+                    return;
+                };
+                if peer.declared.bind(decl.id, text).is_err() {
+                    return;
+                }
                 // R311gb-3d / Track 2 — fan through the DeclSink seam via
                 // the no-heap SSOT: build the `(id, resolved-keyexpr)`
                 // view once and hand each observer `&dyn DeclView`.
                 let view = BorrowedDecl {
                     id: decl.id,
-                    keyexpr: &resolved,
+                    keyexpr: resolved,
                 };
                 self.dispatch_declared_borrowed(&view);
                 // R311kh — membership changed: re-evaluate the matching
@@ -484,19 +794,19 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // through the free-fn consult.
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c));
+                    .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
                 // R290 — drop the membership entry first so a
                 // get_matching_status fired from inside the
                 // on_undecl callback chain observes the post-
                 // undeclare state.
-                self.declared.remove(&undecl.id);
+                peer.declared.unbind(undecl.id);
                 self.dispatch_undeclared(undecl.id);
                 // R311kh — see the DeclSubscriber arm.
                 #[cfg(feature = "session-matching")]
                 self.matching_watches
-                    .reevaluate(|c| declared_reaches(&self.declared, c) || local_matching(c));
+                    .reevaluate(|c| declared_reaches(&peer.declared, c) || local_matching(c));
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -511,10 +821,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages<'a>(
         &mut self,
+        peer: &mut RemoteSubscriberPeer,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_messages_with_local(messages, peer_keyexpr_table, &|_| false)
+        self.dispatch_messages_with_local(peer, messages, peer_keyexpr_table, &|_| false)
     }
 
     /// R311y788 — [`Self::dispatch_messages`] carrying the session-local
@@ -523,6 +834,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages_with_local<'a>(
         &mut self,
+        peer: &mut RemoteSubscriberPeer,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -530,7 +842,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
-                self.dispatch_declare_with_local(&decl.body, peer_keyexpr_table, local_matching);
+                self.dispatch_declare_with_local(
+                    peer,
+                    &decl.body,
+                    peer_keyexpr_table,
+                    local_matching,
+                );
             }
         }
     }
@@ -543,10 +860,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
+        peer: &mut RemoteSubscriberPeer,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_iteration_event_with_local(event, peer_keyexpr_table, &|_| false)
+        self.dispatch_iteration_event_with_local(peer, event, peer_keyexpr_table, &|_| false)
     }
 
     /// R311y788 — [`Self::dispatch_iteration_event`] carrying the
@@ -557,13 +875,14 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
+        peer: &mut RemoteSubscriberPeer,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages_with_local(messages, peer_keyexpr_table, local_matching);
+            self.dispatch_messages_with_local(peer, messages, peer_keyexpr_table, local_matching);
         }
     }
 }

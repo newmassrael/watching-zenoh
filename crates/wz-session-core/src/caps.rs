@@ -174,6 +174,48 @@ pub const MAX_PENDING_DECLARES: usize = 32;
 /// local declare.
 pub const MAX_INBOUND_SUB_INTERESTS: usize = 16;
 
+/// Maximum number of keyexpr aliases ONE peer may have declared to this session
+/// at a time (`DeclKexpr.id -> keyexpr`, the deploy `limits` key
+/// `peer_keyexpr_aliases`). Bounds [`crate::id_map::PeerAliases`] on the fixed
+/// backing: a `DeclKexpr` for a NEW id with the table full is refused and
+/// counted, the alias is not recorded, and a later reference to it resolves to
+/// nothing (the message naming it is dropped, as one naming an undeclared id
+/// always was) rather than growing a table the peer controls.
+///
+/// A fixed backing allocates this many rows of [`MAX_KEYEXPR_BYTES`] text per
+/// SESSION, which is why it is a number the deploy file states and not a hidden
+/// constant: `deploy/mcu_client_and_group.yaml` carries the same 16, and
+/// `tests/session_slot_pool_deploy.rs` holds the two equal.
+pub const MAX_PEER_KEYEXPR_ALIASES: usize = 16;
+
+/// Maximum number of declarations of ONE kind (subscribers, queryables, liveliness
+/// tokens) a peer may hold open to this session at a time (the deploy `limits`
+/// key `remote_decls`). Bounds each of [`crate::id_map::DeclaredKeys`] and
+/// [`crate::id_map::DeclaredQueryables`] on the fixed backing: a `Decl*` for a NEW
+/// id with its table full is refused and counted and is not announced to the
+/// application, as one whose keyexpr does not resolve never was.
+pub const MAX_REMOTE_DECLS: usize = 16;
+
+/// Maximum number of data replies a queryable's handlers may have staged for ONE
+/// session between two drains (the deploy `limits` key `pending_replies`). On the
+/// fixed backing a reply past it is refused with
+/// [`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
+/// made it is told, and nothing is built on the heap in its place.
+pub const MAX_PENDING_REPLIES: usize = 8;
+
+/// Maximum number of `ResponseFinal`s ONE session may owe between two drains (the
+/// deploy `limits` key `pending_finals`). A Request that would need a Final the
+/// table cannot hold is refused BEFORE its queryables run, and counted: a query
+/// that cannot be terminated is not answered, because a reply with no `Final`
+/// after it leaves the peer's `get` open until its own timeout.
+pub const MAX_PENDING_FINALS: usize = 8;
+
+/// Maximum byte length of the payload of ONE staged reply, and the bytes of an
+/// attachment it carries beside it (the deploy `limits` key
+/// `reply_payload_bytes`). A reply that does not fit is refused with
+/// [`crate::query_sink::ReplyError::PayloadTooLarge`], never truncated.
+pub const MAX_REPLY_PAYLOAD_BYTES: usize = 1024;
+
 /// Maximum byte length of one static-scouting peer locator string
 /// (`deploy.connect[]` entry, e.g. `"udp/192.168.1.10:7447"`). Bounds the
 /// [`crate::bounded::BoundedString`] each

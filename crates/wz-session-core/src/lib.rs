@@ -135,6 +135,14 @@ pub mod bounded;
 /// const-vs-type-parameter rationale.
 pub mod caps;
 
+/// Fixed-memory step S9a — the id-keyed tables a PEER writes (its keyexpr
+/// aliases, the subscribers, queryables and tokens it declares to us), as ONE
+/// container over two backings: the `hashbrown` map the AP always held, and
+/// [`id_map::FixedIdMap`] (inline rows, a full table is a counted refusal) on
+/// the fixed backing ([`bounded::ENFORCES_CAPACITY`]). Unconditional, like
+/// [`bounded`], so the registries name one backing-agnostic table.
+pub mod id_map;
+
 /// W3 bounded owned-mirror adapters (`owned_bytes` / `owned_string`) for
 /// the builders that copy caller data into SCE's no-alloc bounded codec
 /// owned fields (SCE pin 7a94d084a). Public so the AP runtime
