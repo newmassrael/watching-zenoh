@@ -16099,8 +16099,8 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
     # still allocate and the report is what stands in its way (the worklist of
     # the fixed-memory steps). The one gated image with a link tier in it,
     # mcu-link-noalloc-probe, is also booted under QEMU, so the proof is of an
-    # image that RUNS. After the gcc check above: every image here links lwIP,
-    # except the registry probe, which needs no C and is harmless to build late.
+    # image that RUNS. It sits after the gcc check above because all but the
+    # registry probe link lwIP (a C build); that probe is also built by Q.0.
     local noalloc_name noalloc_target noalloc_cpu noalloc_machine noalloc_bin
     if command -v arm-none-eabi-nm >/dev/null 2>&1; then
         while read -r noalloc_name noalloc_target; do
