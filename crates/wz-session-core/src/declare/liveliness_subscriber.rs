@@ -155,13 +155,31 @@ struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
 /// `Decl*Token` records to their keyexpr-matched callbacks. See
 /// module-level docs for the dispatch contract and the
 /// `peer_token_table` keyexpr-resolution mechanism.
+///
+/// S9a — the registry is the application's [`LivelinessSubscriberTable`] (the
+/// subscriber slots) and one peer's [`PeerTokens`] (what that peer has declared)
+/// together, the shape every AP session has always had. A process serving several
+/// sessions holds the table once and a [`PeerTokens`] per session, since a token
+/// id is scoped to the session it came in on.
 pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink> {
+    table: LivelinessSubscriberTable<C>,
+    peer: PeerTokens,
+}
+
+/// The application's half of [`LivelinessSubscriberRegistry`]: the subscriber
+/// slots and nothing a peer writes.
+pub struct LivelinessSubscriberTable<C: LivelinessSampleSink> {
     /// R311gb (Track 2) — bounded slot table (was a `HashMap` keyed by
     /// `interest_id`; now a linear `BoundedVec` with the id carried
     /// in-row, scanned on register / unregister / accessor lookup —
     /// `caps::MAX_LIVELINESS_SUBSCRIPTIONS` is small so the linear scan is
     /// cheaper than a no-alloc map).
     slots: BoundedVec<LivelinessSubscriberSlot<C>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
+}
+
+/// The tokens ONE peer has declared to this session: the table a peer writes.
+/// See [`LivelinessSubscriberRegistry`].
+pub struct PeerTokens {
     /// Peer-side token table: maps a `DeclToken.id` to the keyexpr it
     /// resolved to at `DeclToken` arrival time. Populated by
     /// [`Self::dispatch_declare`] on `DeclToken` reception and
@@ -180,21 +198,117 @@ pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink> {
     /// fixed one, a table of [`caps::MAX_REMOTE_DECLS`] rows whose full state
     /// refuses a NEW id, counts it, and announces nothing for it.
     ///
-    /// This registry is per SESSION as a whole, not only in this table: its
-    /// slots are keyed by interest ids the session minted, and a history replay
-    /// is owed from the tokens THIS session's peer holds, so a registry shared by
-    /// two sessions would replay one peer's tokens to the other's subscriber.
+    /// This table is per SESSION, and the subscriber slots next to it are
+    /// application-written: a history replay is owed from the tokens THIS
+    /// session's peer holds, so a replay run against another session's table
+    /// would hand one peer's tokens to a subscriber of the other.
     #[cfg(feature = "alloc")]
-    peer_token_table: DeclaredKeys,
+    table: DeclaredKeys,
     /// `DeclToken`s refused because their keyexpr is longer than a row's text.
-    /// Counted with the table's own refusals ([`Self::peer_token_refusals`]).
+    /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "alloc")]
-    peer_token_oversize: u32,
+    oversize: u32,
+}
+
+impl Default for PeerTokens {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PeerTokens {
+    /// A peer that has declared no token. `const` on the fixed backing, so a
+    /// session slot that holds one can be a `static`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub const fn new() -> Self {
+        Self {
+            #[cfg(feature = "alloc")]
+            table: DeclaredKeys::new(),
+            #[cfg(feature = "alloc")]
+            oversize: 0,
+        }
+    }
+
+    /// A peer that has declared no token.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub fn new() -> Self {
+        Self {
+            table: DeclaredKeys::new(),
+            oversize: 0,
+        }
+    }
+
+    /// Snapshot of how many peer-side `DeclToken` records are
+    /// currently tracked. Equal to the number of `DeclToken` arrivals
+    /// minus matching `UndeclToken` arrivals; bounded by the peer's
+    /// declared token set. Test / diagnostic surface only.
+    #[cfg(feature = "alloc")]
+    pub fn count(&self) -> usize {
+        self.table.count()
+    }
+
+    /// How many `DeclToken`s this table refused: for a NEW id because it was
+    /// full ([`caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer than a row's
+    /// text. Always zero on the growable backing, where nothing is refused.
+    #[cfg(feature = "alloc")]
+    pub fn refusals(&self) -> u32 {
+        self.table.refusals().saturating_add(self.oversize)
+    }
+
+    /// The peer tokens this session currently knows, as `(decl id, keyexpr)` —
+    /// the liveliness twin of `RemoteSubscriberRegistry::iter_declared`, and what
+    /// the pure-Session admin host's `token/**` leg folds (§5.23).
+    ///
+    /// ⚠ This table is the RIGHT one to fold and the obvious neighbour is not.
+    /// `LivelinessRegistry` — the declare-SINK registry next door — holds a
+    /// single observer pair and no table at all, so a reading that starts from
+    /// the name concludes this session records no tokens. It records them here,
+    /// next to the SUBSCRIBER registry, because the keyexpr has to survive from
+    /// the `DeclToken` that resolved it to the `UndeclToken` that carries none.
+    ///
+    /// It is the upstream fact, not a subset of it: the insert runs before the
+    /// callback fan and is not conditioned on a matching subscriber, mirroring
+    /// `zenoh`'s `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`. So
+    /// a session with no liveliness subscriber at all still reports what its
+    /// peer holds, which is what upstream's client hat does
+    /// (`zenoh/src/net/routing/hat/client/token.rs` @ `fn sourced_tokens`).
+    #[cfg(feature = "alloc")]
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.table
+            .entries()
+            .map(|(id, keyexpr)| (id, keyexpr.as_str()))
+    }
+
+    /// Drop every token the peer declared, in place; the refusal counts are kept.
+    #[cfg(feature = "alloc")]
+    pub fn forget(&mut self) {
+        self.table.reset();
+    }
 }
 
 impl<C: LivelinessSampleSink> Default for LivelinessSubscriberRegistry<C> {
     fn default() -> Self {
         Self::with_sink_backing()
+    }
+}
+
+impl<C: LivelinessSampleSink> Default for LivelinessSubscriberTable<C> {
+    fn default() -> Self {
+        Self::with_sink_backing()
+    }
+}
+
+impl<C: LivelinessSampleSink> core::ops::Deref for LivelinessSubscriberRegistry<C> {
+    type Target = LivelinessSubscriberTable<C>;
+
+    fn deref(&self) -> &LivelinessSubscriberTable<C> {
+        &self.table
+    }
+}
+
+impl<C: LivelinessSampleSink> core::ops::DerefMut for LivelinessSubscriberRegistry<C> {
+    fn deref_mut(&mut self) -> &mut LivelinessSubscriberTable<C> {
+        &mut self.table
     }
 }
 
@@ -208,11 +322,150 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// shorthand, which fixes `C = BoxedLivelinessSampleSink`.
     pub fn with_sink_backing() -> Self {
         Self {
+            table: LivelinessSubscriberTable::with_sink_backing(),
+            peer: PeerTokens::new(),
+        }
+    }
+
+    /// The peer's side of this registry, for a caller that wants its table or its
+    /// counters by name.
+    pub fn peer(&self) -> &PeerTokens {
+        &self.peer
+    }
+
+    /// [`LivelinessSubscriberTable::register`] against this registry's peer.
+    pub fn register(
+        &mut self,
+        interest_id: u64,
+        keyexpr: &str,
+        history: bool,
+        sink: C,
+    ) -> Result<bool, RegisterError> {
+        self.table
+            .register(&self.peer, interest_id, keyexpr, history, sink)
+    }
+
+    /// Snapshot of how many peer-side `DeclToken` records are currently tracked;
+    /// see [`PeerTokens::count`].
+    #[cfg(feature = "alloc")]
+    pub fn peer_token_count(&self) -> usize {
+        self.peer.count()
+    }
+
+    /// How many `DeclToken`s this registry refused; see [`PeerTokens::refusals`].
+    #[cfg(feature = "alloc")]
+    pub fn peer_token_refusals(&self) -> u32 {
+        self.peer.refusals()
+    }
+
+    /// The peer tokens this session currently knows; see [`PeerTokens::iter`].
+    #[cfg(feature = "alloc")]
+    pub fn iter_peer_tokens(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.peer.iter()
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_declare`] for this registry's peer.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_declare(&mut self.peer, body, peer_keyexpr_table);
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_declare_historical`] for this
+    /// registry's peer.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    pub fn dispatch_declare_historical<'a>(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        historical: bool,
+    ) {
+        self.table.dispatch_declare_historical(
+            &mut self.peer,
+            body,
+            peer_keyexpr_table,
+            historical,
+        );
+    }
+
+    /// [`LivelinessSubscriberTable::flush_peer_tokens_on_link_loss`] for this
+    /// registry's peer.
+    pub fn flush_peer_tokens_on_link_loss(&mut self) -> usize {
+        self.table.flush_peer_tokens_on_link_loss(&mut self.peer)
+    }
+
+    /// [`LivelinessSubscriberTable::replay_known_tokens`] for this registry's peer.
+    pub fn replay_known_tokens(&mut self, interest_id: u64) -> usize {
+        self.table.replay_known_tokens(&self.peer, interest_id)
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_messages`] for this registry's peer.
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_messages<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_messages(&mut self.peer, messages, peer_keyexpr_table);
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_messages_unclaimed`] for this
+    /// registry's peer.
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_messages_unclaimed<'a>(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
+        self.table.dispatch_messages_unclaimed(
+            &mut self.peer,
+            messages,
+            peer_keyexpr_table,
+            claimed,
+        );
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_iteration_event`] for this
+    /// registry's peer.
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_iteration_event<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+    ) {
+        self.table
+            .dispatch_iteration_event(&mut self.peer, event, peer_keyexpr_table);
+    }
+
+    /// [`LivelinessSubscriberTable::dispatch_iteration_event_unclaimed`] for this
+    /// registry's peer.
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_iteration_event_unclaimed<'a>(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        claimed: &dyn Fn(u64) -> bool,
+    ) {
+        self.table.dispatch_iteration_event_unclaimed(
+            &mut self.peer,
+            event,
+            peer_keyexpr_table,
+            claimed,
+        );
+    }
+}
+
+impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
+    /// New empty table over an explicit sink backing `C`. No slots.
+    pub fn with_sink_backing() -> Self {
+        Self {
             slots: BoundedVec::new(),
-            #[cfg(feature = "alloc")]
-            peer_token_table: DeclaredKeys::new(),
-            #[cfg(feature = "alloc")]
-            peer_token_oversize: 0,
         }
     }
 
@@ -243,8 +496,12 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// `interest_id` (no-op), `Err(TableFull)` = slot table at capacity,
     /// `Err(KeyexprTooLong)` = keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
     /// On the `alloc` backing the two `Err` arms are never returned.
+    ///
+    /// S9a — `peer` is the registering session's peer side: a history subscriber
+    /// is replayed the tokens THAT peer holds.
     pub fn register(
         &mut self,
+        peer: &PeerTokens,
         interest_id: u64,
         keyexpr: &str,
         history: bool,
@@ -281,7 +538,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         // (literal and aliased) correct with one rule instead of two
         // call-site copies that can drift.
         if history {
-            self.replay_known_tokens(interest_id);
+            self.replay_known_tokens(peer, interest_id);
         }
         Ok(true)
     }
@@ -338,40 +595,6 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
             .unwrap_or(false)
     }
 
-    /// Snapshot of how many peer-side `DeclToken` records are
-    /// currently tracked. Equal to the number of `DeclToken` arrivals
-    /// minus matching `UndeclToken` arrivals; bounded by the peer's
-    /// declared token set. Test / diagnostic surface only.
-    #[cfg(feature = "alloc")]
-    pub fn peer_token_count(&self) -> usize {
-        self.peer_token_table.count()
-    }
-
-    /// How many `DeclToken`s this registry refused: for a NEW id because the
-    /// peer-token table was full ([`caps::MAX_REMOTE_DECLS`]), or for a keyexpr
-    /// longer than a row's text. Always zero on the growable backing, where
-    /// nothing is refused.
-    #[cfg(feature = "alloc")]
-    pub fn peer_token_refusals(&self) -> u32 {
-        self.peer_token_table
-            .refusals()
-            .saturating_add(self.peer_token_oversize)
-    }
-
-    /// Route an inbound `Declare` envelope's inner body through the
-    /// matching subscriber slots. Updates `peer_token_table` on
-    /// `DeclToken` arrival (so a later `UndeclToken` can resolve back
-    /// to the same keyexpr) and removes the entry on `UndeclToken`
-    /// arrival.
-    ///
-    /// `peer_keyexpr_table` is the shared mapping table populated by
-    /// [`crate::pubsub::SubscriberRegistry`] from inbound
-    /// `Declare(DeclKexpr)` records. A `DeclToken` whose keyexpr
-    /// references an undeclared peer mapping silently drops (mirror
-    /// of [`crate::declare::LivelinessRegistry::dispatch_declare`]'s
-    /// "no resolved keyexpr → no fire" contract — recording the slot
-    /// match without the resolved keyexpr would surface a half-truth
-    /// to the callback).
     /// R311gb (Track 2) — no-heap fire entry: fan a borrowed liveliness
     /// sample `(kind, keyexpr, token_id)` to every slot whose pattern
     /// matches `keyexpr`, delivering the `LivelinessSample` view to each
@@ -420,10 +643,11 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare<'a>(
         &mut self,
+        peer: &mut PeerTokens,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_declare_historical(body, peer_keyexpr_table, false);
+        self.dispatch_declare_historical(peer, body, peer_keyexpr_table, false);
     }
 
     /// [`Self::dispatch_declare`], told whether the declaration is a
@@ -456,6 +680,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare_historical<'a>(
         &mut self,
+        peer: &mut PeerTokens,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
@@ -474,7 +699,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                     Ok(Some(s)) => s,
                     Ok(None) => return,
                     Err(_) => {
-                        self.peer_token_oversize = self.peer_token_oversize.saturating_add(1);
+                        peer.oversize = peer.oversize.saturating_add(1);
                         return;
                     }
                 };
@@ -493,7 +718,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // carries only the id — would then name a keyexpr the token was
                 // never declared on. Skipping the arm entirely is what keeps the
                 // retraction truthful.
-                if self.peer_token_table.find(decl.id).is_some() {
+                if peer.table.find(decl.id).is_some() {
                     return;
                 }
                 // S9a — a token the table has no room for (or whose keyexpr is
@@ -501,10 +726,10 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // announced to the subscribers: what they are told is what the
                 // table holds, so a later `UndeclToken` can name it.
                 let Ok(text) = key_text(resolved) else {
-                    self.peer_token_oversize = self.peer_token_oversize.saturating_add(1);
+                    peer.oversize = peer.oversize.saturating_add(1);
                     return;
                 };
-                if self.peer_token_table.bind(decl.id, text).is_err() {
+                if peer.table.bind(decl.id, text).is_err() {
                     return;
                 }
                 self.fan_to_matching_slots(
@@ -521,7 +746,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // both arms are read as a `&str` below and neither allocates
                 // there.
                 let mut composed = KeyexprBuf::new();
-                let removed = self.peer_token_table.unbind(undecl.id);
+                let removed = peer.table.unbind(undecl.id);
                 let resolved: &str = match removed.as_ref() {
                     Some(s) => s.as_str(),
                     // R311y769 — the id is unknown, so FALL BACK to the keyexpr
@@ -616,43 +841,18 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// shape one level up: a body-level cfg with a `0` fallback. `0` is the
     /// honest answer without `alloc` — there is no peer-token table, so
     /// nothing was flushed.
-    /// The peer tokens this session currently knows, as `(decl id, keyexpr)` —
-    /// the liveliness twin of `RemoteSubscriberRegistry::iter_declared`, and what
-    /// the pure-Session admin host's `token/**` leg folds (§5.23).
-    ///
-    /// ⚠ This table is the RIGHT one to fold and the obvious neighbour is not.
-    /// `LivelinessRegistry` — the declare-SINK registry next door — holds a
-    /// single observer pair and no table at all, so a reading that starts from
-    /// the name concludes this session records no tokens. It records them here,
-    /// on the SUBSCRIBER registry, because the keyexpr has to survive from the
-    /// `DeclToken` that resolved it to the `UndeclToken` that carries none.
-    ///
-    /// It is the upstream fact, not a subset of it: the insert runs before the
-    /// callback fan and is not conditioned on a matching subscriber, mirroring
-    /// `zenoh`'s `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`. So
-    /// a session with no liveliness subscriber at all still reports what its
-    /// peer holds, which is what upstream's client hat does
-    /// (`zenoh/src/net/routing/hat/client/token.rs` @ `fn sourced_tokens`).
-    #[cfg(feature = "alloc")]
-    pub fn iter_peer_tokens(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
-        self.peer_token_table
-            .entries()
-            .map(|(id, keyexpr)| (id, keyexpr.as_str()))
-    }
-
-    /// The link-loss flush the long note above `iter_peer_tokens` describes.
     ///
     /// S9a — drained one token at a time, lowest id first, each taken out of the
     /// table before its `Delete` fires: the order and the "no entry is being
     /// iterated while a sink runs" property are the ones a drain-then-sort gave,
     /// and nothing is collected, so a link loss allocates nothing on the fixed
-    /// backing.
-    pub fn flush_peer_tokens_on_link_loss(&mut self) -> usize {
+    /// backing. `peer` is the session whose link was lost.
+    pub fn flush_peer_tokens_on_link_loss(&mut self, peer: &mut PeerTokens) -> usize {
         #[cfg(feature = "alloc")]
         {
             let mut flushed = 0usize;
-            while let Some(id) = self.peer_token_table.entries().map(|(id, _)| id).min() {
-                let Some(keyexpr) = self.peer_token_table.unbind(id) else {
+            while let Some(id) = peer.table.entries().map(|(id, _)| id).min() {
+                let Some(keyexpr) = peer.table.unbind(id) else {
                     break;
                 };
                 // A link loss is a LIVE event — the peer's tokens are going
@@ -670,6 +870,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         }
         #[cfg(not(feature = "alloc"))]
         {
+            let _ = peer;
             0
         }
     }
@@ -716,14 +917,11 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// same shape as the sibling flush): `peer_token_table` is the wire-side
     /// resolution state and does not exist on the no-alloc control plane, so
     /// `0` is the honest answer there — nothing is known to replay.
-    pub fn replay_known_tokens(&mut self, interest_id: u64) -> usize {
+    pub fn replay_known_tokens(&mut self, peer: &PeerTokens, interest_id: u64) -> usize {
         #[cfg(feature = "alloc")]
         {
-            let Self {
-                slots,
-                peer_token_table,
-                ..
-            } = self;
+            let slots = &mut self.slots;
+            let peer_token_table = &peer.table;
             if !peer_token_table.is_bound() {
                 return 0;
             }
@@ -791,7 +989,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         }
         #[cfg(not(feature = "alloc"))]
         {
-            let _ = interest_id;
+            let _ = (peer, interest_id);
             0
         }
     }
@@ -868,10 +1066,11 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     #[cfg(feature = "alloc")]
     pub fn dispatch_messages<'a>(
         &mut self,
+        peer: &mut PeerTokens,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, &|_| false);
+        self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, &|_| false);
     }
 
     /// [`Self::dispatch_messages`], skipping any `Declare` whose outer
@@ -896,11 +1095,15 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     #[cfg(feature = "alloc")]
     pub fn dispatch_messages_unclaimed<'a>(
         &mut self,
+        peer: &mut PeerTokens,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
+        // As the table and `claimed` below: consumed only by the `Declare` arm.
+        #[cfg(not(feature = "codec-declare"))]
+        let _ = &peer;
         // R311q — `peer_keyexpr_table` is only consumed inside the
         // cfg-gated `NetworkMessage::Declare` arm below; the
         // explicit `let _ = ...` on the codec-declare-OFF build
@@ -957,6 +1160,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                     // pending GET owns, so what survives to here and carries an
                     // id is a SUBSCRIBER's own CURRENT replay.
                     self.dispatch_declare_historical(
+                        peer,
                         &decl.body,
                         peer_keyexpr_table,
                         decl.interest_id.is_some(),
@@ -993,10 +1197,11 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
+        peer: &mut PeerTokens,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
-        self.dispatch_iteration_event_unclaimed(event, peer_keyexpr_table, &|_| false);
+        self.dispatch_iteration_event_unclaimed(peer, event, peer_keyexpr_table, &|_| false);
     }
 
     /// [`Self::dispatch_iteration_event`] with the claim filter of
@@ -1004,13 +1209,14 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
+        peer: &mut PeerTokens,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
+            self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
         }
     }
 }
