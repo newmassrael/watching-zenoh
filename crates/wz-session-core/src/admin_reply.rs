@@ -11,8 +11,8 @@
 //! states (`session_pool.process.admin_reply_bytes`, [`crate::caps::MAX_ADMIN_REPLY_BYTES`]),
 //! and a document that does not fit is not cut to fit: it is REFUSED, COUNTED, and
 //! the querier is told, in a typed error reply, that its answer was too large for
-//! this node. [`AdminBuffer`] is the one trait both buffers are written through, and
-//! [`AdminReplyError`] is what a refusal is called.
+//! this node. [`crate::admin_reply::AdminBuffer`] is the one trait both buffers are
+//! written through, and [`crate::admin_reply::AdminReplyError`] is what a refusal is called.
 //!
 //! The refusal is per leg. A GET that intersects the node's root document and its
 //! config document gets each of them or the typed error for each, and one leg's

@@ -11,7 +11,7 @@
 //! ungated by any cfg so every emitter can reach it regardless of which admin /
 //! routing feature pulled it in.
 //!
-//! S9b -- every writer here takes any [`TextOut`], not a `String`: the same bytes
+//! S9b -- every writer here takes any [`crate::text_out::TextOut`], not a `String`: the same bytes
 //! go into a `String` on the growable profile and into a
 //! [`crate::text_out::FixedText`] on the fixed one, so the admin space can write
 //! a reply with no allocator while one escaper stays the SSOT for both.

@@ -33,14 +33,16 @@
 //! # S9b: written into any text sink, so a fixed node answers with no allocator
 //!
 //! Every writer here emits through [`crate::text_out::TextOut`], not into a
-//! `String`. The AP's entry points ([`answer_admin_query`],
-//! [`AdminLocalData::to_json`], [`admin_surface_json`], the `*_key` helpers) keep
+//! `String`. The AP's entry points ([`crate::adminspace::answer_admin_query`],
+//! [`crate::adminspace::AdminLocalData::to_json`],
+//! [`crate::adminspace::admin_surface_json`], the `*_key` helpers) keep
 //! their signatures and write the same bytes into a `String` they own; the
-//! allocation-free entry point is [`answer_admin_query_in`], which takes the
-//! buffers it writes into from its caller ([`crate::admin_reply::AdminBuffer`]:
+//! allocation-free entry point is [`crate::adminspace::answer_admin_query_in`],
+//! which takes the buffers it writes into from its caller
+//! ([`crate::admin_reply::AdminBuffer`]:
 //! `String`, or [`crate::text_out::FixedText`] that refuses what does not fit) and
-//! reads its node's state as borrowed rows ([`AdminSessionRef`],
-//! [`AdminMulticastPeerRef`]) instead of cloning it into owned ones. One writer,
+//! reads its node's state as borrowed rows ([`crate::adminspace::AdminSessionRef`],
+//! [`crate::adminspace::AdminMulticastPeerRef`]) instead of cloning it into owned ones. One writer,
 //! two sinks: the fixed node's reply is the AP's reply byte for byte, because it
 //! is the same code.
 
@@ -2015,7 +2017,7 @@ pub struct AdminNodeFacts<'a, S, M, L> {
 /// it refused, counted by why.
 ///
 /// A leg is refused, never cut: a body that does not fit its buffer is answered
-/// with a typed error reply and counted in [`AdminReplyRefusals::too_large`]; a key
+/// with a typed error reply and counted in [`crate::admin_reply::AdminReplyRefusals::too_large`]; a key
 /// that does not fit is counted in `key_too_long` and the leg is not answered; a
 /// reply the session's stage refused is counted in `refused_by_stage`. One leg's
 /// refusal leaves the others served.

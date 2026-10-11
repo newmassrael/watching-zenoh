@@ -26,7 +26,7 @@
 //!
 //! # A staged reply is bytes in the stage, not a record on the heap (S9b)
 //!
-//! A queryable describes a reply as [`ReplyParts`], every field BORROWED from the
+//! A queryable describes a reply as [`crate::reply_stage::ReplyParts`], every field BORROWED from the
 //! handler. On the growable backing the stage turns that into the owned
 //! [`crate::query::QueryReply`] it has always held. On the fixed backing it writes
 //! the reply's bytes (keyexpr, payload, attachment, encoding schema) into ONE byte

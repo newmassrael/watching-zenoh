@@ -8,22 +8,22 @@
 //! stays `no_std`). Until this module every one of those writers took a
 //! `&mut String`, so a node that wanted its admin reply without an allocator
 //! could not have it: the body, each reply key, the config document and the
-//! surface manifest were all `String`s that grew on the heap. [`TextOut`] is the
+//! surface manifest were all `String`s that grew on the heap. [`crate::text_out::TextOut`] is the
 //! one seam they now write through, and it has two sinks:
 //!
 //! - `String` (with `alloc`): grows, never refuses, is what the AP has always
 //!   used, and writes the same bytes it always wrote;
-//! - [`FixedText`]: `N` bytes inline, no allocation on any build, and a write that
+//! - [`crate::text_out::FixedText`]: `N` bytes inline, no allocation on any build, and a write that
 //!   does not fit is NOT dropped and NOT cut short silently. It is recorded: the
 //!   sink stops taking text (so what it holds is a prefix, never a prefix with a
 //!   hole), keeps COUNTING the bytes the writer asked for, and
-//!   [`FixedText::finish`] answers `Err(Overflow { needed, capacity })`, which is
+//!   [`crate::text_out::FixedText::finish`] answers `Err(Overflow { needed, capacity })`, which is
 //!   what the caller refuses and counts.
 //!
-//! The writers stay infallible in signature ([`TextOut::push_str`] returns
+//! The writers stay infallible in signature ([`crate::text_out::TextOut::push_str`] returns
 //! nothing), because a document of three hundred `push_str` calls with a `?` on
 //! each would hide its shape, and because a single check at the end is both
-//! cheaper and impossible to forget: [`FixedText::finish`] is the only way to
+//! cheaper and impossible to forget: [`crate::text_out::FixedText::finish`] is the only way to
 //! take the text out as a result, and it cannot answer `Ok` after a refused
 //! write. `core::fmt::Write` is the supertrait, so `write!` works on both sinks
 //! and a refusal surfaces there as `fmt::Error` too.
