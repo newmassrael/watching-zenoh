@@ -150,32 +150,55 @@ pub mod sync;
 #[cfg(feature = "alloc")]
 pub(crate) mod atomic;
 
-#[cfg(feature = "alloc")]
+// Fixed-memory step S6 -- under `session-slot` the task pool, its handles, the
+// local set and the timer queue are the STATIC forms in the `static_*` files: the
+// same modules under the same names with the same surface, over tables the image
+// declares instead of a heap (see `runtime_impl::RuntimeCell`). Every other build
+// keeps the heap forms exactly.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub mod executor;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "session-slot")]
+#[path = "static_executor.rs"]
+pub mod executor;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub mod join_handle;
+#[cfg(feature = "session-slot")]
+#[path = "static_join_handle.rs"]
 pub mod join_handle;
 // The `!Send` task pool. Separate from `executor` (the `Send` pool) because
 // the two differ in exactly one bound and that bound is what makes the AP
 // contract and the MCU session bundle incompatible — see the module doc.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub mod local;
+#[cfg(feature = "session-slot")]
+#[path = "static_local.rs"]
 pub mod local;
 #[cfg(feature = "alloc")]
 pub mod runtime_impl;
+#[cfg(all(test, feature = "session-slot"))]
+mod static_tests;
 #[cfg(feature = "alloc")]
 pub mod time;
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub mod timer;
-
+#[cfg(feature = "session-slot")]
+#[path = "static_timer.rs"]
+pub mod timer;
 #[cfg(feature = "alloc")]
-pub use executor::yield_now;
+mod yield_now;
+
 #[cfg(feature = "alloc")]
 pub use join_handle::CoopJoinHandle;
 #[cfg(feature = "alloc")]
 pub use local::{CoopLocalJoinHandle, CoopLocalSet};
 #[cfg(feature = "alloc")]
 pub use runtime_impl::CoopRuntime;
+#[cfg(feature = "session-slot")]
+pub use runtime_impl::RuntimeCell;
 #[cfg(feature = "alloc")]
 pub use time::{ClockSource, CoopTime};
+#[cfg(feature = "alloc")]
+pub use yield_now::{yield_now, YieldNow};
 
 // Stage 4a — session-tier `SessionRuntime` binding (the per-profile
 // `BoxedLinkDriver` link-sink storage) for the MCU profile. Gated on

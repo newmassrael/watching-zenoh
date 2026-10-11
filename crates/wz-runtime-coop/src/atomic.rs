@@ -68,9 +68,12 @@
 //! semantic vocabulary (`SeqCst`, `Relaxed`, `Acquire`, `Release`,
 //! `AcqRel`) so call sites are textually identical either way.
 
-#[cfg(target_has_atomic = "ptr")]
+// Nothing is shared by reference count under `session-slot` (the runtime's state
+// is a `static` cell and its handles are references), so there is no `Arc` to
+// alias there.
+#[cfg(all(target_has_atomic = "ptr", not(feature = "session-slot")))]
 pub(crate) use alloc::sync::Arc;
-#[cfg(not(target_has_atomic = "ptr"))]
+#[cfg(all(not(target_has_atomic = "ptr"), not(feature = "session-slot")))]
 pub(crate) use portable_atomic_util::Arc;
 
 #[cfg(target_has_atomic = "8")]
@@ -83,10 +86,10 @@ pub(crate) use portable_atomic::AtomicBool;
 // (`-D warnings`), so the alias carries an allow attribute. Future
 // production use (e.g. monotonic timer queue per R311bc) will drop
 // the allow.
-#[cfg_attr(not(test), allow(unused_imports))]
+#[cfg_attr(any(not(test), feature = "session-slot"), allow(unused_imports))]
 #[cfg(target_has_atomic = "64")]
 pub(crate) use core::sync::atomic::AtomicU64;
-#[cfg_attr(not(test), allow(unused_imports))]
+#[cfg_attr(any(not(test), feature = "session-slot"), allow(unused_imports))]
 #[cfg(not(target_has_atomic = "64"))]
 pub(crate) use portable_atomic::AtomicU64;
 

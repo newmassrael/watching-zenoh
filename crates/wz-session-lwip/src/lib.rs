@@ -103,7 +103,10 @@ mod tx_pool_session_tests;
 
 pub use driver::LwipUdpDriver;
 pub use links::LwipLinks;
-pub use session_drive::{
-    run_session, session_task, spawn_session, LwipSessionLink, SessionDriveConfig, SessionPump,
-    SessionRole,
-};
+#[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
+pub use session_drive::run_session;
+#[cfg(feature = "session-slot")]
+pub use session_drive::PumpSlots;
+#[cfg(not(feature = "session-slot"))]
+pub use session_drive::{session_task, spawn_session};
+pub use session_drive::{LwipSessionLink, SessionDriveConfig, SessionPump, SessionRole};

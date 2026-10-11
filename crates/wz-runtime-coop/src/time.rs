@@ -62,10 +62,12 @@
 //! lwIP RX, etc.). Under R311av the executor's self-wake busy-poll
 //! kept every pass active.
 
-use crate::atomic::Arc;
-use crate::runtime_impl::{CoopRuntime, RuntimeInner};
+use crate::runtime_impl::{share_inner, CoopRuntime, InnerRef};
+#[cfg(not(feature = "session-slot"))]
 use alloc::boxed::Box;
 use core::future::Future;
+#[cfg(feature = "session-slot")]
+use core::marker::PhantomPinned;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
@@ -99,7 +101,7 @@ pub trait ClockSource: Send + Sync + 'static {
 /// mirroring [`wz_runtime_tokio::TokioTime`] per-instance epoch
 /// semantics.
 pub struct CoopTime<C: ClockSource> {
-    inner: Arc<RuntimeInner<C>>,
+    inner: InnerRef<C>,
     epoch_us: u64,
 }
 
@@ -110,7 +112,7 @@ impl<C: ClockSource> CoopTime<C> {
     pub fn new(rt: &CoopRuntime<C>) -> Self {
         let epoch_us = rt.clock().now_us();
         Self {
-            inner: rt.inner.clone(),
+            inner: share_inner(&rt.inner),
             epoch_us,
         }
     }
@@ -119,7 +121,7 @@ impl<C: ClockSource> CoopTime<C> {
 impl<C: ClockSource> Clone for CoopTime<C> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner: share_inner(&self.inner),
             epoch_us: self.epoch_us,
         }
     }
@@ -140,7 +142,7 @@ impl<C: ClockSource> TimeSource for CoopTime<C> {
                 .clock
                 .now_us()
                 .saturating_add(ms.saturating_mul(1000)),
-            inner: self.inner.clone(),
+            inner: share_inner(&self.inner),
             registered: false,
         }
     }
@@ -160,10 +162,30 @@ impl<C: ClockSource> TimeSource for CoopTime<C> {
                 .clock
                 .now_us()
                 .saturating_add(ms.saturating_mul(1000)),
-            inner: self.inner.clone(),
+            inner: share_inner(&self.inner),
+            // Under `session-slot` the future is held where the timeout is, not
+            // in a box: the timeout is itself pinned wherever it is polled.
+            #[cfg(not(feature = "session-slot"))]
             fut: Box::pin(fut),
+            #[cfg(feature = "session-slot")]
+            fut,
+            #[cfg(feature = "session-slot")]
+            _pinned: PhantomPinned,
             registered: false,
         }
+    }
+}
+
+/// Register `waker` for `deadline_us` on the runtime's timer queue; when the queue
+/// has no entry to give (the static table of `session-slot` is full) wake the task
+/// for the next pass instead, so the sleep still ends, by polling, as it did
+/// before the queue existed. `true` when the deadline is registered.
+fn arm<C: ClockSource>(inner: &InnerRef<C>, deadline_us: u64, cx: &mut Context<'_>) -> bool {
+    if inner.timers.register(deadline_us, cx.waker().clone()) {
+        true
+    } else {
+        cx.waker().wake_by_ref();
+        false
     }
 }
 
@@ -180,7 +202,7 @@ impl<C: ClockSource> TimeSource for CoopTime<C> {
 /// `Send + Sync + 'static`).
 pub struct SleepFuture<C: ClockSource> {
     deadline_us: u64,
-    inner: Arc<RuntimeInner<C>>,
+    inner: InnerRef<C>,
     registered: bool,
 }
 
@@ -199,10 +221,7 @@ impl<C: ClockSource> Future for SleepFuture<C> {
             return Poll::Ready(());
         }
         if !this.registered {
-            this.inner
-                .timers
-                .register(this.deadline_us, cx.waker().clone());
-            this.registered = true;
+            this.registered = arm(&this.inner, this.deadline_us, cx);
         }
         Poll::Pending
     }
@@ -218,9 +237,10 @@ impl<C: ClockSource> Future for SleepFuture<C> {
 /// The inner future's own wakers drive most re-polls; the timer
 /// queue's deadline wake is the fallback when the inner stays
 /// Pending past the deadline.
+#[cfg(not(feature = "session-slot"))]
 pub struct TimeoutFuture<C: ClockSource, F: Future> {
     deadline_us: u64,
-    inner: Arc<RuntimeInner<C>>,
+    inner: InnerRef<C>,
     fut: Pin<Box<F>>,
     registered: bool,
 }
@@ -229,8 +249,10 @@ pub struct TimeoutFuture<C: ClockSource, F: Future> {
 // outer wrapper struct itself can be moved freely because moving
 // it copies the Box pointer, not F. Explicit Unpin to enable safe
 // field access in poll().
+#[cfg(not(feature = "session-slot"))]
 impl<C: ClockSource, F: Future> Unpin for TimeoutFuture<C, F> {}
 
+#[cfg(not(feature = "session-slot"))]
 impl<C: ClockSource, F: Future> Future for TimeoutFuture<C, F> {
     type Output = Result<F::Output, TimeoutElapsed>;
 
@@ -246,10 +268,46 @@ impl<C: ClockSource, F: Future> Future for TimeoutFuture<C, F> {
             return Poll::Ready(Err(TimeoutElapsed));
         }
         if !this.registered {
-            this.inner
-                .timers
-                .register(this.deadline_us, cx.waker().clone());
-            this.registered = true;
+            this.registered = arm(&this.inner, this.deadline_us, cx);
+        }
+        Poll::Pending
+    }
+}
+
+/// `session-slot` form: the inner future is held in the timeout itself instead of
+/// a box, so the timeout is NOT `Unpin` (`PhantomPinned`) and projects its pin to
+/// the field.
+#[cfg(feature = "session-slot")]
+pub struct TimeoutFuture<C: ClockSource, F: Future> {
+    deadline_us: u64,
+    inner: InnerRef<C>,
+    fut: F,
+    _pinned: PhantomPinned,
+    registered: bool,
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, F: Future> Future for TimeoutFuture<C, F> {
+    type Output = Result<F::Output, TimeoutElapsed>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `fut` is pinned in place because `self` is (the struct is
+        // `!Unpin`), it is never moved out of `self`, and no other field's
+        // address is taken as pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        // SAFETY: structural pinning of `fut`, as above.
+        let fut = unsafe { Pin::new_unchecked(&mut this.fut) };
+        // Poll inner first — fastest-path: inner Ready before the
+        // deadline check matters.
+        match fut.poll(cx) {
+            Poll::Ready(out) => return Poll::Ready(Ok(out)),
+            Poll::Pending => {}
+        }
+        if this.inner.clock.now_us() >= this.deadline_us {
+            return Poll::Ready(Err(TimeoutElapsed));
+        }
+        if !this.registered {
+            this.registered = arm(&this.inner, this.deadline_us, cx);
         }
         Poll::Pending
     }

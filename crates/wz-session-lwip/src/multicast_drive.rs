@@ -1053,7 +1053,12 @@ where
 /// Spawn one MCU multicast session onto `local` and return its join handle —
 /// [`multicast_session_task`] on the local set's own runtime, so the session
 /// cannot ride a different runtime from the one the set pumps. The multicast
-/// twin of [`crate::session_drive::spawn_session`].
+/// twin of `spawn_session` (absent under `session-slot`).
+///
+/// Under `session-slot` the task table can refuse the task, and the answer is the
+/// handle or the reason ([`wz_runtime_coop::executor::SpawnRefusal`]); the
+/// multicast loop's own state is not on the slot profile yet (its reassembly
+/// router and reply queue still allocate), so this is the task's half only.
 pub fn spawn_multicast_session<C, F, G, H, const MAX_PEERS: usize>(
     local: &CoopLocalSet<C>,
     link: Rc<LwipLink>,
@@ -1061,24 +1066,36 @@ pub fn spawn_multicast_session<C, F, G, H, const MAX_PEERS: usize>(
     on_event: F,
     next_tx: G,
     should_stop: H,
-) -> CoopLocalJoinHandle<MulticastOutcome>
+) -> Spawned
 where
     C: ClockSource + 'static,
     F: FnMut(IterationEvent<'_>) + 'static,
     G: FnMut() -> Option<MulticastTxItem> + 'static,
     H: FnMut() -> bool + 'static,
 {
-    local.spawn_local(multicast_session_task(
+    let spawned = local.spawn_local(multicast_session_task(
         local.runtime().clone(),
         link,
         session,
         on_event,
         next_tx,
         should_stop,
-    ))
+    ));
+    #[cfg(feature = "session-slot")]
+    let spawned = spawned.map_err(|refused| refused.why);
+    spawned
 }
 
-#[cfg(test)]
+/// What [`spawn_multicast_session`] answers: the task's handle.
+#[cfg(not(feature = "session-slot"))]
+pub type Spawned = CoopLocalJoinHandle<MulticastOutcome>;
+/// What [`spawn_multicast_session`] answers: the task's handle, or why the task
+/// table refused it.
+#[cfg(feature = "session-slot")]
+pub type Spawned =
+    Result<CoopLocalJoinHandle<MulticastOutcome>, wz_runtime_coop::executor::SpawnRefusal>;
+
+#[cfg(all(test, not(feature = "session-slot")))]
 mod tests {
     use super::*;
     use wz_link_lwip::lwip_test_link;

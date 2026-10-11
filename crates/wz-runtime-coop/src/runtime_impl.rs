@@ -96,19 +96,57 @@
 // R311bb — Arc + AtomicBool + Ordering routed through the crate's
 // polyfill alias so thumbv6m builds engage portable-atomic{,-util}
 // while native-atomic targets stay on the standard library types.
+#[cfg(not(feature = "session-slot"))]
 use crate::atomic::{Arc, AtomicBool, Ordering};
+#[cfg(not(feature = "session-slot"))]
 use alloc::boxed::Box;
 use core::cell::RefCell;
 use core::future::Future;
+#[cfg(not(feature = "session-slot"))]
 use core::task::{Context, Poll};
 
 use critical_section::Mutex;
 use wz_runtime_core::Runtime;
 
-use crate::executor::{make_waker, ExecutorState};
-use crate::join_handle::{CoopJoinHandle, JoinState};
+#[cfg(not(feature = "session-slot"))]
+use crate::executor::make_waker;
+use crate::executor::ExecutorState;
+#[cfg(feature = "session-slot")]
+use crate::executor::{TaskJoin, TaskTable};
+use crate::join_handle::CoopJoinHandle;
+#[cfg(not(feature = "session-slot"))]
+use crate::join_handle::JoinState;
 use crate::time::ClockSource;
 use crate::timer::TimerQueue;
+#[cfg(feature = "session-slot")]
+use crate::timer::TimerTable;
+#[cfg(feature = "session-slot")]
+use core::cell::{Cell, UnsafeCell};
+#[cfg(feature = "session-slot")]
+use core::mem::MaybeUninit;
+
+/// How a runtime handle and a time source hold the runtime's state: an `Arc` of it,
+/// or under `session-slot` a reference to the `static` cell that holds it
+/// ([`RuntimeCell`]). Both are cheap to clone; the second allocates nothing.
+#[cfg(not(feature = "session-slot"))]
+pub(crate) type InnerRef<C> = Arc<RuntimeInner<C>>;
+/// See the `Arc` form of this alias.
+#[cfg(feature = "session-slot")]
+pub(crate) type InnerRef<C> = &'static RuntimeInner<C>;
+
+/// Another handle on the same runtime state: a reference count taken, or a
+/// reference copied. One spelling for both, so no site says `.clone()` of a `Copy`
+/// reference on the slot profile.
+#[cfg(not(feature = "session-slot"))]
+pub(crate) fn share_inner<C: ClockSource>(inner: &InnerRef<C>) -> InnerRef<C> {
+    inner.clone()
+}
+
+/// See the `Arc` form of this function.
+#[cfg(feature = "session-slot")]
+pub(crate) fn share_inner<C: ClockSource>(inner: &InnerRef<C>) -> InnerRef<C> {
+    inner
+}
 
 /// Shared inner state held inside an `Arc` so `CoopRuntime` clones
 /// and `CoopTime::new(&runtime)` all reference the same executor,
@@ -128,13 +166,13 @@ pub(crate) struct RuntimeInner<C: ClockSource> {
 /// a `CoopRuntime` clone and call nested `spawn` (R311av-pre
 /// Decision 5).
 pub struct CoopRuntime<C: ClockSource> {
-    pub(crate) inner: Arc<RuntimeInner<C>>,
+    pub(crate) inner: InnerRef<C>,
 }
 
 impl<C: ClockSource> Clone for CoopRuntime<C> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner: share_inner(&self.inner),
         }
     }
 }
@@ -149,6 +187,11 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// retired because the runtime now owns the timer queue and
     /// timer-queue evaluation needs a clock reference at every
     /// `run_until_idle` pass.
+    ///
+    /// Absent under `session-slot`, whose runtime is made by
+    /// [`RuntimeCell::start`] over tables the image declares: this constructor
+    /// allocates the runtime's state.
+    #[cfg(not(feature = "session-slot"))]
     pub fn new(clock: C) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
@@ -225,6 +268,11 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// clock will hang in `block_on` (not panic) — the runtime
     /// cannot tell the difference between "deploy waiting for a
     /// timer to fire" and "test forgot to drive the clock".
+    ///
+    /// Absent under `session-slot`: it pins the outer future in a box and hands
+    /// the executor a waker that owns a flag from the heap. A local task is run to
+    /// completion with [`crate::CoopLocalSet::block_on_local`], which does neither.
+    #[cfg(not(feature = "session-slot"))]
     pub fn block_on<F: Future>(&self, fut: F) -> F::Output {
         let mut fut = Box::pin(fut);
         let flag = Arc::new(AtomicBool::new(true));
@@ -264,9 +312,115 @@ impl<C: ClockSource> CoopRuntime<C> {
     }
 }
 
+#[cfg(not(feature = "session-slot"))]
 impl<C: ClockSource + Default> Default for CoopRuntime<C> {
     fn default() -> Self {
         Self::new(C::default())
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource> CoopRuntime<C> {
+    /// The spawns the task table refused, by reason.
+    pub fn task_refusals(&self) -> crate::executor::Refusals {
+        self.inner.executor.refusals()
+    }
+
+    /// The sleeps the timer table refused an entry (each woke itself for the next
+    /// pass instead).
+    pub fn timer_refusals(&self) -> u32 {
+        self.inner.timers.refusals()
+    }
+
+    /// Cells of the task table that hold a task, or a result no handle has read.
+    pub fn live_task_count(&self) -> usize {
+        self.inner.executor.live_task_count()
+    }
+}
+
+/// The runtime of an image: its task table, its timer table and the runtime built
+/// over them, in ONE `static` the image declares. Under `session-slot` this is how
+/// a [`CoopRuntime`] comes to be: nothing is allocated, the image says how many
+/// tasks it hosts, how large each may be and how many deadlines may wait, and a
+/// spawn or a sleep past those is a counted refusal
+/// ([`CoopRuntime::task_refusals`], [`CoopRuntime::timer_refusals`]).
+///
+/// ```ignore
+/// static RUNTIME: RuntimeCell<BoardClock, 8, 256, 8> = RuntimeCell::new();
+/// let runtime = RUNTIME.start(BoardClock).expect("started once");
+/// ```
+///
+/// The cell is `Sync` by the profile's own rule (one executor on one core; an
+/// interrupt may only raise a task's wake flag), which no compiler can check.
+pub struct RuntimeCell<
+    C: ClockSource,
+    const TASKS: usize,
+    const TASK_BYTES: usize,
+    const TIMERS: usize,
+> {
+    tasks: TaskTable<TASKS, TASK_BYTES>,
+    timers: TimerTable<TIMERS>,
+    inner: UnsafeCell<MaybeUninit<RuntimeInner<C>>>,
+    started: Mutex<Cell<bool>>,
+}
+
+// SAFETY: the profile's rule, stated on the type: `inner` is written once, by the
+// call of `start` that wins the `started` flag inside a critical section, and read
+// only after that call returns; everything it holds is itself `Sync` by its own
+// rule (the tables) or because the clock is `Send + Sync`.
+unsafe impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: usize> Sync
+    for RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>
+{
+}
+
+impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: usize>
+    RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>
+{
+    /// A cell with every task cell free, every timer entry empty and no runtime
+    /// started.
+    pub const fn new() -> Self {
+        Self {
+            tasks: TaskTable::new(),
+            timers: TimerTable::new(),
+            inner: UnsafeCell::new(MaybeUninit::uninit()),
+            started: Mutex::new(Cell::new(false)),
+        }
+    }
+
+    /// Start the runtime over `clock`, or `None` when this cell has already been
+    /// started: one cell is one runtime, because a second would share the tables.
+    pub fn start(&'static self, clock: C) -> Option<CoopRuntime<C>> {
+        let first = critical_section::with(|cs| {
+            let started = self.started.borrow(cs);
+            !started.replace(true)
+        });
+        if !first {
+            return None;
+        }
+        let inner = RuntimeInner {
+            executor: self.tasks.link(),
+            timers: self.timers.queue(),
+            clock,
+        };
+        // SAFETY: the `started` flag above made this the only call that reaches
+        // here for this cell, so nothing else is writing `inner`, and nothing reads
+        // it before this call returns the handle that does.
+        let inner: &'static RuntimeInner<C> = unsafe { (*self.inner.get()).write(inner) };
+        Some(CoopRuntime { inner })
+    }
+
+    /// The bytes this cell takes in the image's `.bss`: both tables and the
+    /// runtime's own state.
+    pub const fn size_bytes() -> usize {
+        core::mem::size_of::<Self>()
+    }
+}
+
+impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: usize> Default
+    for RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -286,6 +440,24 @@ impl<C: ClockSource> Runtime for CoopRuntime<C> {
     where
         T: Send + Sync + 'static;
 
+    // Fixed-memory step S6 -- the future is written into a cell of the static task
+    // table and its result into the same cell. A spawn that no cell takes (the
+    // table is full, or the future does not fit a cell) is counted by the executor
+    // and answers `Err(Shutdown)` ("new work refused") through its handle: the
+    // `Runtime::spawn` contract has no failure to return.
+    #[cfg(feature = "session-slot")]
+    fn spawn<F>(&self, fut: F) -> Self::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        match self.inner.executor.spawn(fut) {
+            Ok(cell) => CoopJoinHandle::new(TaskJoin::attached(cell)),
+            Err(_refused) => CoopJoinHandle::new(TaskJoin::refused()),
+        }
+    }
+
+    #[cfg(not(feature = "session-slot"))]
     fn spawn<F>(&self, fut: F) -> Self::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -373,7 +545,10 @@ impl<C: ClockSource> Runtime for CoopRuntime<C> {
     }
 }
 
-#[cfg(test)]
+// These two modules build their runtimes with `CoopRuntime::new`, which
+// `session-slot` does not have; the static form's own tests are in
+// `static_tests`.
+#[cfg(all(test, not(feature = "session-slot")))]
 mod compile_time_assertions {
     use super::*;
     use crate::time::{ClockSource, CoopTime};
@@ -464,7 +639,7 @@ mod compile_time_assertions {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "session-slot")))]
 mod tests {
     use super::*;
     use crate::atomic::AtomicU64;

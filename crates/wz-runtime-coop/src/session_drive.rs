@@ -33,9 +33,15 @@
 //! seam (`wz_session_lwip::LwipSessionLink` over lwIP).
 
 use alloc::rc::Rc;
-#[cfg(feature = "rx-in-place")]
-use alloc::vec::Vec;
+#[cfg(feature = "session-slot")]
+use core::cell::{Cell, UnsafeCell};
+#[cfg(feature = "session-slot")]
+use core::mem::MaybeUninit;
+#[cfg(feature = "session-slot")]
+use core::ops::{Deref, DerefMut};
 
+#[cfg(feature = "session-slot")]
+use critical_section::Mutex;
 use wz_runtime_core::TimeSource;
 #[cfg(all(feature = "rx-in-place", not(feature = "reassembly")))]
 use wz_session_core::drive::dispatch_datagram;
@@ -54,7 +60,7 @@ use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::LinkEvent;
 use wz_session_core::link::{BoxedLinkDriver, RxFrame};
 #[cfg(feature = "rx-in-place")]
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::{new_record_buf, RecordBuf};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
@@ -254,6 +260,10 @@ pub struct SessionDriveConfig {
 /// - `config` — the static run parameterization ([`SessionDriveConfig`]).
 /// - `on_event` — the per-iteration observer (`Poll` with the decoded
 ///   `FramePayload` batch the application dispatches, or `Lease`).
+///
+/// Absent under `session-slot` with `reassembly`, where a pump is not built on
+/// the caller's stack with a heap table behind it: see `SessionPump::new`.
+#[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 pub fn run_session<C, L, F>(
     runtime: &CoopRuntime<C>,
     link: L,
@@ -317,8 +327,13 @@ pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
     /// `rx-in-place` — the one-record buffer each inbound record is decoded
     /// into and dispatched from. Allocated once, with the pump, for one
     /// record; a datagram costs it nothing however many records it carries.
+    ///
+    /// Under `session-slot` (which implies `bounded-heapless`) it is a fixed
+    /// buffer of one that lives in the pump, and the pump in a cell of a
+    /// `PumpSlots` table: a datagram costs the heap nothing and neither does
+    /// the pump that reads it.
     #[cfg(feature = "rx-in-place")]
-    record: Vec<NetworkMessage>,
+    record: RecordBuf,
     /// `rx-in-place` — how many units were read where the link held them, and
     /// how many went down the copying path and why.
     #[cfg(feature = "rx-in-place")]
@@ -416,7 +431,11 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// `rx-in-place` with `reassembly`: the session stages its fragments into a
     /// reassembly table of its OWN, allocated here once
     /// ([`PoolStorage::owned`]); [`Self::with_reassembly_arena`] takes one the
-    /// image placed instead.
+    /// image placed instead. Under `session-slot` that table is never the
+    /// pump's own heap allocation, so with `reassembly` this constructor is absent
+    /// and a pump is made by `PumpSlots::claim` (which places the table in the
+    /// pump's cell) or by [`Self::with_reassembly_arena`].
+    #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
     #[inline(never)]
     pub fn new(
         runtime: CoopRuntime<C>,
@@ -508,7 +527,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             #[cfg(feature = "reassembly")]
             reasm,
             #[cfg(feature = "rx-in-place")]
-            record: Vec::with_capacity(1),
+            record: new_record_buf(),
             #[cfg(feature = "rx-in-place")]
             rx_paths: RxPathCounts::default(),
             iter: 0,
@@ -710,6 +729,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
 /// turn each time round. The returned value is the same [`DriverOutcome`]
 /// [`run_session`] returns; reach it through the [`CoopLocalJoinHandle`] the
 /// spawn hands back.
+#[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 pub async fn session_task<C, L, F>(
     runtime: CoopRuntime<C>,
     link: L,
@@ -743,6 +763,11 @@ where
 /// any: a detached task cannot borrow the caller's stack. An observer that
 /// needs to publish out of the task should capture an `Rc<RefCell<..>>` —
 /// `!Send` is fine, which is the whole point of the local set.
+///
+/// Absent under `session-slot`: it builds the pump inside the task's future and
+/// answers a handle where a spawn can be refused. The slot profile's form is
+/// `PumpSlots::claim` and `spawn_pump`.
+#[cfg(not(feature = "session-slot"))]
 pub fn spawn_session<C, L, F>(
     local: &CoopLocalSet<C>,
     link: L,
@@ -764,4 +789,256 @@ where
         config,
         on_event,
     ))
+}
+
+// ───────────── the pump in a cell of a table the image declares ─────────────
+//
+// Fixed-memory step S6. A pump is the engine (1160 to 1264 bytes on the microbit
+// image), the handles it holds, the record buffer and, with `reassembly`, the
+// table its fragments are staged into. Built into a future by `session_task` it
+// lives wherever that future is spawned; here it lives in a CELL of a table the
+// image declares, one cell per session it can run, and the task that drives it is a
+// reference to that cell.
+
+/// Why a pump could not be put in a cell: every cell of the table is taken. The
+/// refusal is counted ([`PumpSlots::refused`]) and the session the pump was to run
+/// is dropped, which gives its own slot back.
+#[cfg(feature = "session-slot")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PumpsFull;
+
+/// A session that could not be run as a task, and why.
+#[cfg(feature = "session-slot")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSpawnRefused {
+    /// Every cell of the pump table is taken.
+    NoPumpCell,
+    /// The task table refused the task.
+    Task(crate::executor::SpawnRefusal),
+}
+
+/// One cell of a [`PumpSlots`] table.
+#[cfg(feature = "session-slot")]
+struct PumpCell<C: ClockSource, L: SessionDatagramLink> {
+    taken: Mutex<Cell<bool>>,
+    pump: UnsafeCell<MaybeUninit<SessionPump<C, L>>>,
+    /// With `reassembly`, the table the pump's fragments are staged into: one per
+    /// pump, in the pump's own cell.
+    #[cfg(feature = "reassembly")]
+    pool: UnsafeCell<MaybeUninit<crate::reassembly_pool_mcu::ReassemblyPoolMcu>>,
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, L: SessionDatagramLink> PumpCell<C, L> {
+    const fn new() -> Self {
+        Self {
+            taken: Mutex::new(Cell::new(false)),
+            pump: UnsafeCell::new(MaybeUninit::uninit()),
+            #[cfg(feature = "reassembly")]
+            pool: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+}
+
+/// The pump table an image declares: `N` cells, each holding the pump of one
+/// session, in a `static`. The pump's counterpart of `wz_session_core`'s
+/// `SessionSlots`, and declared the same way:
+///
+/// ```ignore
+/// static PUMPS: PumpSlots<BoardClock, LwipSessionLink<&'static LwipLink>, 3> = PumpSlots::new();
+/// let pump = PUMPS.claim(runtime.clone(), link, actions, clock, config)?;
+/// spawn_pump(&local, pump, on_event)?;
+/// ```
+///
+/// [`claim`](PumpSlots::claim) builds the pump IN a free cell, or refuses and
+/// counts. The pump is freed (dropped in place, its cell free for the next) when
+/// its [`PumpRef`] is dropped, which is when the task that drives it ends or is
+/// swept.
+///
+/// Like the session table, it is `Sync` by the profile's rule and not by any
+/// means a compiler can check: a pump is driven by ONE cooperative task on one
+/// core, and claiming and freeing are critical sections.
+#[cfg(feature = "session-slot")]
+pub struct PumpSlots<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> {
+    cells: [PumpCell<C, L>; N],
+    refused: Mutex<Cell<u32>>,
+}
+
+// SAFETY: the profile's rule, stated on the type. The cell's pump is written by the
+// one claimant of the cell (its `taken` flag, set inside a critical section) and
+// reached only through that claimant's `PumpRef`.
+#[cfg(feature = "session-slot")]
+unsafe impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> Sync
+    for PumpSlots<C, L, N>
+{
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> PumpSlots<C, L, N> {
+    /// A table of free cells.
+    pub const fn new() -> Self {
+        Self {
+            cells: [const { PumpCell::new() }; N],
+            refused: Mutex::new(Cell::new(0)),
+        }
+    }
+
+    /// How many cells the table has.
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+
+    /// How many cells hold a pump.
+    pub fn in_use(&self) -> usize {
+        self.cells
+            .iter()
+            .filter(|cell| critical_section::with(|cs| cell.taken.borrow(cs).get()))
+            .count()
+    }
+
+    /// How many claims were refused for want of a free cell.
+    pub fn refused(&self) -> u32 {
+        critical_section::with(|cs| self.refused.borrow(cs).get())
+    }
+
+    /// The bytes this table takes in the image's `.bss`, with each cell's pump (and,
+    /// with `reassembly`, its staging table).
+    pub const fn size_bytes() -> usize {
+        core::mem::size_of::<Self>()
+    }
+
+    /// Build the pump of one session in a free cell: the engine, the role's
+    /// activation, the handles. `None` of that is built when no cell is free, and
+    /// what the caller offered (the link and the handle to the session, which hold
+    /// their own slots) is dropped, so a refused pump leaves nothing taken.
+    ///
+    /// With `reassembly` the pump stages its fragments into a table that lies in the
+    /// same cell, handed to the pump as `PoolStorage::Static`.
+    pub fn claim(
+        &'static self,
+        runtime: CoopRuntime<C>,
+        link: L,
+        actions: SessionHandle<C>,
+        clock: CoopTime<C>,
+        config: SessionDriveConfig,
+    ) -> Result<PumpRef<C, L>, PumpsFull> {
+        let cell = self.cells.iter().find(|cell| {
+            critical_section::with(|cs| {
+                let taken = cell.taken.borrow(cs);
+                !taken.replace(true)
+            })
+        });
+        let Some(cell) = cell else {
+            critical_section::with(|cs| {
+                let refused = self.refused.borrow(cs);
+                refused.set(refused.get().saturating_add(1));
+            });
+            return Err(PumpsFull);
+        };
+        #[cfg(feature = "reassembly")]
+        let pump = {
+            // SAFETY: the cell is `taken` by this call alone, and its pool is only
+            // ever reached through the pump built here.
+            let place = unsafe { &mut *cell.pool.get() };
+            SessionPump::with_reassembly_arena(
+                runtime,
+                link,
+                actions,
+                clock,
+                config,
+                ReassemblyArena::new(PoolStorage::zeroed_in(place)),
+            )
+        };
+        #[cfg(not(feature = "reassembly"))]
+        let pump = SessionPump::new(runtime, link, actions, clock, config);
+        // SAFETY: the cell is `taken` by this call alone, and its pump is
+        // uninitialised: either it was never written or its last pump was dropped
+        // in place by the `PumpRef` that freed the cell.
+        unsafe { (*cell.pump.get()).write(pump) };
+        Ok(PumpRef { cell })
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> Default
+    for PumpSlots<C, L, N>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The exclusive handle to a pump in its cell. Dropping it drops the pump in place
+/// and frees the cell. The task that drives a pump ([`pump_task`]) owns it.
+#[cfg(feature = "session-slot")]
+pub struct PumpRef<C: ClockSource + 'static, L: SessionDatagramLink + 'static> {
+    cell: &'static PumpCell<C, L>,
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, L: SessionDatagramLink + 'static> Deref for PumpRef<C, L> {
+    type Target = SessionPump<C, L>;
+
+    fn deref(&self) -> &SessionPump<C, L> {
+        // SAFETY: a `PumpRef` exists only for a cell whose pump was written by
+        // `claim` and not yet dropped, and it is the cell's one reference.
+        unsafe { (*self.cell.pump.get()).assume_init_ref() }
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, L: SessionDatagramLink + 'static> DerefMut for PumpRef<C, L> {
+    fn deref_mut(&mut self) -> &mut SessionPump<C, L> {
+        // SAFETY: as for `deref`, and `&mut self` is the cell's one reference.
+        unsafe { (*self.cell.pump.get()).assume_init_mut() }
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<C: ClockSource, L: SessionDatagramLink + 'static> Drop for PumpRef<C, L> {
+    fn drop(&mut self) {
+        // SAFETY: the cell holds this handle's pump, written by `claim` and dropped
+        // only here; the flag is cleared after, so no claim can write over it first.
+        unsafe { (*self.cell.pump.get()).assume_init_drop() };
+        critical_section::with(|cs| self.cell.taken.borrow(cs).set(false));
+    }
+}
+
+/// The session AS A TASK over a pump in a cell: awaits [`yield_now`] between
+/// iterations as [`session_task`] does, and ends with the same [`DriverOutcome`].
+/// The future is the pump's handle and the observer and a loop's state, a few dozen
+/// bytes, and the pump stays where its table put it.
+#[cfg(feature = "session-slot")]
+pub async fn pump_task<C, L, F>(mut pump: PumpRef<C, L>, mut on_event: F) -> DriverOutcome
+where
+    C: ClockSource,
+    L: SessionDatagramLink + 'static,
+    F: FnMut(IterationEvent<'_>),
+{
+    loop {
+        if let Some(outcome) = pump.step(&mut on_event) {
+            return outcome;
+        }
+        yield_now().await;
+    }
+}
+
+/// Host the pump in `pump` as a task of `local` and return its join handle, or say
+/// why not. A refusal is counted (by the pump table when no cell was free, by the
+/// runtime's task table otherwise) and the pump, which this call owns, is dropped
+/// with its cell and the session it was to run.
+#[cfg(feature = "session-slot")]
+pub fn spawn_pump<C, L, F>(
+    local: &CoopLocalSet<C>,
+    pump: PumpRef<C, L>,
+    on_event: F,
+) -> Result<CoopLocalJoinHandle<DriverOutcome>, SessionSpawnRefused>
+where
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    F: FnMut(IterationEvent<'_>) + 'static,
+{
+    local
+        .spawn_local(pump_task(pump, on_event))
+        .map_err(|refused| SessionSpawnRefused::Task(refused.why))
 }

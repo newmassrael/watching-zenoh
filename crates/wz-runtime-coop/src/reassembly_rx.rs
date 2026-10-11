@@ -107,7 +107,8 @@ pub use in_place::{
 /// author API, a singleton). So the arena is a VALUE owned by the session that
 /// stages into it, built over storage handed to it: the image's own placed
 /// table ([`PoolStorage::Static`]) or one the arena owns on the heap
-/// ([`PoolStorage::owned`]), allocated once when the session is built.
+/// (`PoolStorage::owned`, absent under `session-slot`), allocated once when the
+/// session is built.
 ///
 /// The slot lifecycle is the generated one, walked by its own edges and
 /// nothing else: a chain's slot is taken `free -> cpu-mut`
@@ -122,6 +123,7 @@ pub use in_place::{
 /// sample does). The MCU profile has no shared-bytes storage to lend it as.
 #[cfg(feature = "rx-in-place")]
 mod in_place {
+    #[cfg(not(feature = "session-slot"))]
     use alloc::boxed::Box;
 
     use wz_session_core::chain_staging::{ChainStaging, StagingError};
@@ -144,11 +146,39 @@ mod in_place {
         /// two tables.
         Static(&'static mut ReassemblyPoolMcu),
         /// A table this arena owns on the heap. [`PoolStorage::owned`] builds
-        /// one.
+        /// one. Absent under `session-slot`: a session in a slot has a table in
+        /// its pump's cell, never one it allocates.
+        #[cfg(not(feature = "session-slot"))]
         Owned(Box<ReassemblyPoolMcu>),
     }
 
     impl PoolStorage {
+        /// A table of its own, every slot free, written in place into `place`: what
+        /// a pump in a cell of a `PumpSlots` table stages into under `session-slot`.
+        ///
+        /// All-zero IS the table's initial value (the storage is bytes, and
+        /// `SlotState::Free` is the explicit discriminant `0`), so the cell is
+        /// zeroed where it lies and nothing is built on the stack, which a 16 KiB
+        /// table built by value would be. The assertion re-establishes it against
+        /// the table that results.
+        #[cfg(feature = "session-slot")]
+        pub fn zeroed_in(place: &'static mut core::mem::MaybeUninit<ReassemblyPoolMcu>) -> Self {
+            // SAFETY: `place` is valid for a write of one table, and the all-zero
+            // pattern is a valid table (the assertion below is the witness for the
+            // one thing that could make it not be).
+            let pool = unsafe {
+                core::ptr::write_bytes(place.as_mut_ptr(), 0, 1);
+                place.assume_init_mut()
+            };
+            assert_eq!(
+                pool.free_count(),
+                SLOT_COUNT,
+                "the zero pattern is no longer the pool's initial state: the emit's \
+                 SlotState discriminants moved and PoolStorage::zeroed_in must be rewritten"
+            );
+            Self::Static(pool)
+        }
+
         /// A table of its own, every slot free, allocated once here and never
         /// again: what a session that is handed nothing stages into.
         ///
@@ -160,6 +190,7 @@ mod in_place {
         /// place instead, and all-zero IS `new`'s value: the storage is bytes,
         /// and `SlotState::Free` is the explicit discriminant `0`. The
         /// assertion re-establishes that against the built table.
+        #[cfg(not(feature = "session-slot"))]
         pub fn owned() -> Self {
             let layout = core::alloc::Layout::new::<ReassemblyPoolMcu>();
             // SAFETY: `alloc_zeroed` returns a block of `layout`, sized and
@@ -185,6 +216,7 @@ mod in_place {
         fn pool(&self) -> &ReassemblyPoolMcu {
             match self {
                 Self::Static(pool) => pool,
+                #[cfg(not(feature = "session-slot"))]
                 Self::Owned(pool) => pool,
             }
         }
@@ -192,6 +224,7 @@ mod in_place {
         fn pool_mut(&mut self) -> &mut ReassemblyPoolMcu {
             match self {
                 Self::Static(pool) => pool,
+                #[cfg(not(feature = "session-slot"))]
                 Self::Owned(pool) => pool,
             }
         }
@@ -346,7 +379,7 @@ mod in_place {
 /// the same fragments: identical outcomes, identical bytes delivered, and the
 /// generated pool's own slot accounting agreeing with the Router's at every
 /// quiescent point.
-#[cfg(all(test, feature = "rx-in-place"))]
+#[cfg(all(test, feature = "rx-in-place", not(feature = "session-slot")))]
 mod in_place_tests {
     use super::*;
     use alloc::vec::Vec;

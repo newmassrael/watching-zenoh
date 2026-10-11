@@ -7,10 +7,11 @@
 //! the network stack. This module is lwIP's side of that seam:
 //! [`LwipSessionLink`] implements `SessionDatagramLink` (pump lwIP's input
 //! path; take a datagram from the [`LwipUdpDriver`](crate::driver::LwipUdpDriver) and retarget replies to
-//! its source), and [`run_session`] / [`session_task`] / [`spawn_session`]
+//! its source), and [`run_session`] / [`session_task`] / `spawn_session`
 //! keep the lwIP-typed signatures every existing caller writes, building the
 //! link and handing it to the shared loop.
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
 use core::ops::Deref;
 
@@ -18,7 +19,9 @@ use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{self as coop_drive, SessionDatagramLink};
 pub use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
 use wz_runtime_coop::session_runtime::SessionHandle;
-use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
+#[cfg(not(feature = "session-slot"))]
+use wz_runtime_coop::{CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::RxFrame;
 
@@ -75,6 +78,12 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
 /// The shared pump, over an lwIP link held as `L`.
 pub type SessionPump<C, L> = coop_drive::SessionPump<C, LwipSessionLink<L>>;
 
+/// The pump table of an lwIP image under `session-slot`: `N` cells, each holding
+/// the pump of one session over an lwIP link held as `L` (a `&'static LwipLink`,
+/// the image's own). Declared in a `static`, as the session slot table is.
+#[cfg(feature = "session-slot")]
+pub type PumpSlots<C, L, const N: usize> = coop_drive::PumpSlots<C, LwipSessionLink<L>, N>;
+
 /// Drive one logical session over the lwIP link to a terminal FSM state (or
 /// the `config.max_iters` cap) — `wz_runtime_coop::session_drive::run_session`
 /// over [`LwipSessionLink`].
@@ -88,6 +97,9 @@ pub type SessionPump<C, L> = coop_drive::SessionPump<C, LwipSessionLink<L>>;
 ///   reference into the slot that holds both) for the outbound send seam.
 ///
 /// The other parameters are the shared loop's.
+///
+/// Absent under `session-slot` with `reassembly`, as the shared loop is.
+#[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 pub fn run_session<C, F>(
     runtime: &CoopRuntime<C>,
     link: &LwipLink,
@@ -115,6 +127,11 @@ where
 /// [`LwipSessionLink`]. Takes `Rc<LwipLink>` where [`run_session`] takes
 /// `&LwipLink`: a spawned task outlives the call that created it, so it must
 /// own its share of the link.
+///
+/// Absent under `session-slot`, whose pump lives in a cell of a table and whose
+/// task is `wz_runtime_coop::session_drive::pump_task`: the link of a pump there is
+/// a reference to the node's, not a share of it.
+#[cfg(not(feature = "session-slot"))]
 pub async fn session_task<C, F>(
     runtime: CoopRuntime<C>,
     link: Rc<LwipLink>,
@@ -140,7 +157,9 @@ where
 }
 
 /// Spawn one MCU session over lwIP onto `local` and return its join handle —
-/// the shared `spawn_session` over [`LwipSessionLink`].
+/// the shared `spawn_session` over [`LwipSessionLink`]. Absent under
+/// `session-slot`, for the reason [`session_task`] is.
+#[cfg(not(feature = "session-slot"))]
 pub fn spawn_session<C, F>(
     local: &CoopLocalSet<C>,
     link: Rc<LwipLink>,

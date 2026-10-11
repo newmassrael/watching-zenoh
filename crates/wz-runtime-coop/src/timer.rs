@@ -121,7 +121,11 @@ impl TimerQueue {
     /// Register `waker` to be woken when wall-clock micros reach
     /// `deadline_us`. Multiple wakers may register on the same
     /// deadline; FIFO by registration sequence within a deadline.
-    pub fn register(&self, deadline_us: u64, waker: Waker) {
+    ///
+    /// Always `true`: the heap grows. The answer is the static form's
+    /// (`session-slot`), whose table can be full, and is here so the callers are
+    /// written once.
+    pub fn register(&self, deadline_us: u64, waker: Waker) -> bool {
         critical_section::with(|cs| {
             let mut q = self.inner.borrow(cs).borrow_mut();
             let seq = q.next_seq;
@@ -132,6 +136,7 @@ impl TimerQueue {
                 waker,
             }));
         });
+        true
     }
 
     /// Wake every entry whose `deadline_us <= now_us`. Wakers fire
