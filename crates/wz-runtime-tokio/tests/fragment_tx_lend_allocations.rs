@@ -16,12 +16,25 @@
 //!
 //! The link's slots and its record of what it was handed are allocated before
 //! the count starts, and it returns each slot as it is sent, so a chain of any
-//! length runs in two slots. Host-test level.
+//! length runs in two slots.
+//!
+//! The count is PER THREAD. The whole send runs on the test's own thread (the
+//! session is driven synchronously, the link is a plain object, no task is
+//! spawned), so the allocations of that thread are exactly the measurement's.
+//! The counter used to be process-wide behind a lock that serialised only the
+//! two tests' windows; libtest starts, reports and joins tests on threads of
+//! its own, and an allocation of theirs landing inside a window moved a count
+//! by one. Measured before this change, 60 runs per row: 1 failed on two cores
+//! (the claim test, chain 2 against whole 3) and 2 on all 32 (the same, and the
+//! control, whole 4 against chain 17, the figures the hosted run printed). The
+//! two controls at the end pin the two halves of the attribution: an allocation
+//! on another thread is not counted, and one on the measuring thread is.
+//! Host-test level.
 #![cfg(all(feature = "codec-push", feature = "transport-fragmentation"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::{Cell, UnsafeCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -31,27 +44,31 @@ use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGran
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
+/// Counts the allocations made BY THE CURRENT THREAD.
 struct CountingAllocator;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
-// SAFETY: every call forwards to `System` unchanged; the only addition is an
-// atomic counter bump, which neither allocates nor unwinds.
+// SAFETY: every call forwards to `System` unchanged; the only addition is a
+// bump of a thread-local cell without a destructor, which neither allocates
+// nor unwinds.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
         // SAFETY: same contract as the caller's.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -65,19 +82,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-/// One measurement at a time in this binary: the counter is process-wide.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-/// Take [`SERIAL`]; a test that failed while holding it says nothing about the
-/// next one, so a poisoned lock is taken all the same.
-fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 fn allocations() -> usize {
-    ALLOCATIONS.load(Ordering::SeqCst)
+    ALLOCATIONS.with(Cell::get)
 }
 
 /// One slot's memory, lent to one party at a time (the contract
@@ -230,7 +236,6 @@ fn measure(link: Arc<PoolLink>, budget: u16) -> usize {
 /// counts are the same.
 #[test]
 fn a_chain_over_a_lending_link_allocates_nothing_the_whole_frame_does_not() {
-    let _one = one_at_a_time();
     let whole_link = PoolLink::new(true);
     let whole = measure(whole_link.clone(), WHOLE_BUDGET);
     assert_eq!(
@@ -265,7 +270,6 @@ fn a_chain_over_a_lending_link_allocates_nothing_the_whole_frame_does_not() {
 /// blind, and the claim above would be no evidence.
 #[test]
 fn a_chain_over_a_link_that_lends_nothing_is_seen_allocating() {
-    let _one = one_at_a_time();
     let whole = measure(PoolLink::new(false), WHOLE_BUDGET);
     let chain_link = PoolLink::new(false);
     let chain = measure(chain_link.clone(), CHAIN_BUDGET);
@@ -274,5 +278,55 @@ fn a_chain_over_a_link_that_lends_nothing_is_seen_allocating() {
         chain >= whole + fragments,
         "the heap chain allocates at least one vector per fragment: \
          whole {whole}, chain {chain}, {fragments} fragments"
+    );
+}
+
+/// THE ATTRIBUTION'S CONTROL, first half: the window sees what the measuring
+/// thread allocates. Without it a counter that read zero for every thread would
+/// pass the second half and the claim above.
+#[test]
+fn the_window_counts_what_its_own_thread_allocates() {
+    let before = allocations();
+    let boxed: Vec<Box<u64>> = (0..8u64).map(Box::new).collect();
+    let spent = allocations() - before;
+    assert!(
+        spent >= boxed.len(),
+        "eight boxes were allocated on this thread and the window saw {spent}"
+    );
+}
+
+/// THE ATTRIBUTION'S CONTROL, second half: another thread allocating while the
+/// window is open does not move it. The helper is started and told to go before
+/// and inside the window with flags alone (no allocation on this thread), and
+/// allocates a thousand times while this thread spins.
+#[test]
+fn the_window_does_not_count_what_another_thread_allocates() {
+    let go = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let helper = {
+        let (go, done) = (go.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !go.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+            let mut kept = Vec::new();
+            for i in 0..1000u64 {
+                kept.push(std::hint::black_box(Box::new(i)));
+            }
+            done.store(true, Ordering::SeqCst);
+            kept.len()
+        })
+    };
+    let before = allocations();
+    go.store(true, Ordering::SeqCst);
+    while !done.load(Ordering::SeqCst) {
+        std::hint::spin_loop();
+    }
+    let spent = allocations() - before;
+    let helper_made = helper.join().expect("the helper thread");
+    assert_eq!(helper_made, 1000, "the helper did allocate");
+    assert_eq!(
+        spent, 0,
+        "a thousand allocations on another thread moved this thread's window"
     );
 }

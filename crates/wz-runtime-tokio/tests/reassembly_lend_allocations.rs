@@ -20,7 +20,7 @@
 ))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_tokio::reassembly::TokioReassembly;
@@ -35,27 +35,33 @@ use wz_session_core::qos::Priority;
 use wz_session_core::reassembly_dispatch::ReassemblyConfig;
 use wz_session_core::reliability::Reliability;
 
+/// Counts the allocations made BY THE CURRENT THREAD: everything a test drives
+/// here runs on its own thread, so libtest's threads (which start, report and
+/// join tests) cannot move a count the way a process-wide counter let them.
 struct CountingAllocator;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
-// SAFETY: every call forwards to `System` unchanged; the only addition is an
-// atomic counter bump, which neither allocates nor unwinds.
+// SAFETY: every call forwards to `System` unchanged; the only addition is a
+// bump of a thread-local cell without a destructor, which neither allocates
+// nor unwinds.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
         // SAFETY: same contract as the caller's.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -69,7 +75,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-/// One measurement at a time in this binary: the counter is process-wide.
+/// One test at a time in this binary, as it was when the counter was
+/// process-wide; the counter is per thread now, so this no longer protects a
+/// count.
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Take [`SERIAL`]; a test that failed while holding it says nothing about the
@@ -81,7 +89,7 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn allocations() -> usize {
-    ALLOCATIONS.load(Ordering::SeqCst)
+    ALLOCATIONS.with(Cell::get)
 }
 
 type Actions = Arc<wz_session_core::session_actions::SessionLinkActions<TokioRuntime, TokioTime>>;
