@@ -10,8 +10,18 @@
 //! the two §5.23 admin-JSON surfaces. `alloc`-only (`String` + `core::fmt::Write`),
 //! ungated by any cfg so every emitter can reach it regardless of which admin /
 //! routing feature pulled it in.
+//!
+//! S9b -- every writer here takes any [`TextOut`], not a `String`: the same bytes
+//! go into a `String` on the growable profile and into a
+//! [`crate::text_out::FixedText`] on the fixed one, so the admin space can write
+//! a reply with no allocator while one escaper stays the SSOT for both.
 
+use core::fmt;
+
+#[cfg(test)]
 use alloc::string::String;
+
+use crate::text_out::TextOut;
 
 /// Push `s` onto `out` as a correct JSON string literal: a leading `"`, each
 /// character RFC-8259-escaped (all FIVE of §7's short forms — `"` `\` `\n`
@@ -37,8 +47,16 @@ use alloc::string::String;
 /// moves two characters' bytes on every surface that uses it — ``
 /// becomes `\b` — which no reader can tell apart and no test in this workspace
 /// pinned.
-pub fn escape_into(s: &str, out: &mut String) {
+pub fn escape_into<W: TextOut + ?Sized>(s: &str, out: &mut W) {
     out.push('"');
+    escape_body_into(s, out);
+    out.push('"');
+}
+
+/// `s` escaped as the BODY of a JSON string, with no quotes: the one place the
+/// escape table lives. [`escape_into`] writes the quotes around it, and
+/// [`JsonStringBody`] writes pieces through it.
+fn escape_body_into<W: TextOut + ?Sized>(s: &str, out: &mut W) {
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -52,14 +70,29 @@ pub fn escape_into(s: &str, out: &mut String) {
             '\u{08}' => out.push_str("\\b"),
             '\u{0C}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => {
-                use core::fmt::Write as _;
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
         }
     }
-    out.push('"');
 }
+
+/// A [`TextOut`] that escapes what is written through it as the BODY of a JSON
+/// string, without quotes: write `"`, then text through this, then `"`.
+///
+/// It exists so a string made of several pieces (a reply key is `@/`, a zid, a
+/// role and a leg name) can be written into a JSON document piece by piece, with
+/// no buffer to assemble it in first and the one escaper doing the escaping.
+pub struct JsonStringBody<'a, W: TextOut + ?Sized>(pub &'a mut W);
+
+impl<W: TextOut + ?Sized> fmt::Write for JsonStringBody<'_, W> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        escape_body_into(s, self.0);
+        Ok(())
+    }
+}
+
+impl<W: TextOut + ?Sized> TextOut for JsonStringBody<'_, W> {}
 
 /// Push a JSON array of escaped strings — `["a","b",...]` — onto `out`. The SSOT
 /// for the admin/config JSON string-array idiom: the bracket + comma-separator
@@ -68,10 +101,11 @@ pub fn escape_into(s: &str, out: &mut String) {
 /// hand-rolled per emit site (R311y60 — the `to_admin_json` / `local_data`
 /// emitters re-derived this 5×; consolidated here). Each item is escaped via
 /// [`escape_into`]. An empty iterator yields `[]`.
-pub fn push_str_array<I, S>(items: I, out: &mut String)
+pub fn push_str_array<I, S, W>(items: I, out: &mut W)
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
+    W: TextOut + ?Sized,
 {
     out.push('[');
     for (i, item) in items.into_iter().enumerate() {
@@ -115,8 +149,7 @@ pub const MAX_EXACT_INTEGER: u64 = (1 << 53) - 1;
 /// the host can hold: a protocol field's value, and a nanosecond instant since
 /// 1970 (about 1.7e18 today, past 2^53 and far under 2^63). Counters and offsets
 /// stay bare numbers because they count things that live in memory or on a disk.
-pub fn u64_into(v: u64, out: &mut String) {
-    use core::fmt::Write as _;
+pub fn u64_into<W: TextOut + ?Sized>(v: u64, out: &mut W) {
     if v <= MAX_EXACT_INTEGER {
         let _ = write!(out, "{v}");
     } else {
@@ -218,5 +251,63 @@ mod tests {
         let mut out = String::new();
         escape_into("mesh/data/**", &mut out);
         assert_eq!(out, "\"mesh/data/**\"");
+    }
+
+    /// The same bytes go into either sink, so the fixed one is the AP's document
+    /// and not a second encoder that could drift from it.
+    #[test]
+    fn the_fixed_sink_receives_the_bytes_the_string_does() {
+        use crate::text_out::FixedText;
+        let mut heap = String::new();
+        let mut fixed: FixedText<128> = FixedText::new();
+        for out in [
+            &mut heap as &mut dyn TextOut,
+            &mut fixed as &mut dyn TextOut,
+        ] {
+            escape_into("q\"b\\\n\u{1}", &mut *out);
+            out.push(',');
+            push_str_array(["a/b", "c\"d"], &mut *out);
+            out.push(',');
+            u64_into(1u64 << 60, &mut *out);
+        }
+        assert_eq!(fixed.finish(), Ok(heap.as_str()));
+    }
+
+    /// Pieces written through the string-body adapter come out as one escaped
+    /// string between the caller's quotes, no buffer in between.
+    #[test]
+    fn a_string_written_in_pieces_is_escaped_as_one() {
+        let mut out = String::new();
+        out.push('"');
+        {
+            let mut body = JsonStringBody(&mut out);
+            body.push_str("@/");
+            body.push_str("a\"b");
+            body.push('/');
+            body.push_str("peer");
+        }
+        out.push('"');
+        let mut whole = String::new();
+        escape_into("@/a\"b/peer", &mut whole);
+        assert_eq!(out, whole);
+    }
+
+    /// A refusal while writing an escape sequence is the sink's refusal, counted
+    /// by it, and the JSON the sink holds is not delivered as complete.
+    #[test]
+    fn a_fixed_sink_too_small_for_the_escaped_text_refuses_it() {
+        use crate::text_out::{FixedText, Overflow};
+        let mut fixed: FixedText<4> = FixedText::new();
+        escape_into("ab", &mut fixed); // 4 bytes: fits exactly
+        assert_eq!(fixed.finish(), Ok("\"ab\""));
+        fixed.clear();
+        escape_into("a\nb", &mut fixed); // 6 bytes
+        assert_eq!(
+            fixed.finish(),
+            Err(Overflow {
+                needed: 6,
+                capacity: 4
+            })
+        );
     }
 }

@@ -216,6 +216,30 @@ pub const MAX_PENDING_FINALS: usize = 8;
 /// [`crate::query_sink::ReplyError::PayloadTooLarge`], never truncated.
 pub const MAX_REPLY_PAYLOAD_BYTES: usize = 1024;
 
+/// Maximum byte length of ONE admin reply body (the deploy
+/// `session_pool.process.admin_reply_bytes` key): the buffer every admin leg is
+/// written into before it is handed to the session's reply stage
+/// (`admin_reply::AdminReplyArena`, under `adminspace-core`). A body that does not
+/// fit is refused, counted, and answered to the querier as a typed error; it is
+/// never cut short.
+///
+/// An admin reply is STAGED as an ordinary reply, so it is also bound by
+/// [`MAX_REPLY_PAYLOAD_BYTES`]: a number above that one would be a buffer that
+/// builds replies the stage then refuses. The deploy validator holds the two in
+/// that order, and this crate asserts it at compile time.
+pub const MAX_ADMIN_REPLY_BYTES: usize = 1024;
+
+const _: () = assert!(
+    MAX_ADMIN_REPLY_BYTES <= MAX_REPLY_PAYLOAD_BYTES,
+    "an admin reply is staged as a reply, so its bound cannot exceed the reply payload bound"
+);
+
+/// Maximum byte length of the keyexpr one admin reply is stamped with:
+/// `@/<zid>/<whatami>/<leg>` and, for a per-entity leg, the entity's own
+/// keyexpr of up to [`MAX_KEYEXPR_BYTES`], so two of them cover the prefix and
+/// any declared keyexpr. A key past it is refused as a typed error, not shortened.
+pub const MAX_ADMIN_KEY_BYTES: usize = 2 * MAX_KEYEXPR_BYTES;
+
 /// Maximum byte length of one static-scouting peer locator string
 /// (`deploy.connect[]` entry, e.g. `"udp/192.168.1.10:7447"`). Bounds the
 /// [`crate::bounded::BoundedString`] each

@@ -135,6 +135,12 @@ pub mod bounded;
 /// const-vs-type-parameter rationale.
 pub mod caps;
 
+/// Fixed-memory step S9b — where hand-written text goes: the [`text_out::TextOut`]
+/// seam the admin writers emit through, `String` on the growable profile and
+/// [`text_out::FixedText`] (inline bytes that refuse and count what does not fit,
+/// never cut short in silence) on the fixed one. Unconditional, like [`bounded`].
+pub mod text_out;
+
 /// Fixed-memory step S9a — the id-keyed tables a PEER writes (its keyexpr
 /// aliases, the subscribers, queryables and tokens it declares to us), as ONE
 /// container over two backings: the `hashbrown` map the AP always held, and
