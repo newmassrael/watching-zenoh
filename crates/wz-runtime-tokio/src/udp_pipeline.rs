@@ -1518,6 +1518,13 @@ mod tests {
     /// the sender is skipped by the kernel's lookup for any other source, so
     /// the number stays taken in the UDP table and a datagram from anyone else
     /// finds no socket and is refused.
+    ///
+    /// Observed on Linux and on macOS, and NOT on Windows: there the hosted run
+    /// of the test below saw neither a failed send nor a failed receive in
+    /// [`LOST_WITHIN`], so whatever the Windows stack does with a datagram that
+    /// reaches a connected socket from a stranger, it did not hand the sender a
+    /// refusal here. Both are gated off Windows with the test.
+    #[cfg(not(windows))]
     fn a_held_udp_number_that_refuses() -> std::net::UdpSocket {
         let held = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
         held.connect("127.0.0.1:1")
@@ -1534,6 +1541,18 @@ mod tests {
     /// (`ECONNREFUSED`), and a reader that starts after that has nothing left to
     /// be told: its `recv` simply waits. That reader was the whole of the link's
     /// loss reporting, so the session stayed up until its lease ran out.
+    ///
+    /// Not run on Windows, and that is a difference in what the platform shows,
+    /// not a skip of what the product does. Microsoft documents the ICMP
+    /// refusal of a UDP send as `WSAECONNRESET` on a LATER call of the sending
+    /// socket, and the link treats any failed send and any failed receive as its
+    /// loss, so a refusal that reaches either call ends it there too. What the
+    /// hosted Windows run measured is narrower: with the datagrams sent from a
+    /// socket that is not the held socket's peer, neither call failed within
+    /// [`LOST_WITHIN`]. The portable form of the same ordering, a failure the
+    /// writer took before the reader began to wait, is
+    /// `a_write_failure_taken_before_the_reader_waits_still_ends_the_dial_link`.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn a_refusal_taken_by_the_writer_still_ends_the_dial_link() {
         let refusing = a_held_udp_number_that_refuses();
@@ -1563,6 +1582,41 @@ mod tests {
                 })
             ),
             "a refusal the writer took must still end the link; got {event:?}"
+        );
+    }
+
+    /// Open-debt item 902 — the ordering the refusal test above witnesses, on a
+    /// failure every platform gives: the writer's send fails, and only AFTER that
+    /// does the reader begin to wait. The failure is not delivered to the reader
+    /// by any syscall of its own (its `recv` has nothing to be told), so the link
+    /// is lost only because the writer's failure outlives the writer's task in the
+    /// latch. The refused write is the one past what UDP carries, `EMSGSIZE` on
+    /// Linux and macOS and `WSAEMSGSIZE` on Windows, where the hosted run
+    /// measured it for the sibling tests that wait first.
+    #[tokio::test]
+    async fn a_write_failure_taken_before_the_reader_waits_still_ends_the_dial_link() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
+        let (mut read, write, writer) = wire_udp_socket(socket, peer_addr);
+
+        an_unwritable_datagram(&write);
+        // The writer takes the refusal and returns; nobody is receiving yet.
+        // `drain` seals the queue behind the one datagram and waits for the task.
+        tokio::time::timeout(LOST_WITHIN, writer.drain())
+            .await
+            .expect("the writer ends on the failed send");
+
+        let event = tokio::time::timeout(LOST_WITHIN, read.poll_event()).await;
+        assert!(
+            matches!(
+                event,
+                Ok(LinkEvent::Lost {
+                    cause: LostCause::OsError
+                })
+            ),
+            "a write failure taken before the reader waited must still end the link; \
+             got {event:?}"
         );
     }
 
