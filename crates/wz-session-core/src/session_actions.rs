@@ -4306,7 +4306,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session, which is the R121d immediate symptom this
     /// negotiation closes.
     pub fn init_ack_params(&self) -> SessionInitParams {
-        let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes();
+        // The slot is read HERE and the rule is applied by a function of the value:
+        // `negotiated_axis_witness_gate` derives a body axis's result accessors from
+        // the `pub fn`s that read the peer-caps slot themselves, so a private helper
+        // that did the read would leave the three body axes without an accessor.
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes(peer);
         let mut params = self.params.clone();
         params.seq_num_res = seq_num_res;
         params.req_id_res = req_id_res;
@@ -4318,9 +4323,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// one has been parsed ([`Self::init_ack_params`] puts them in a clone of the
     /// parameter bundle; [`Self::init_ack_caps`] names them without one). One
     /// rule, so the two cannot disagree: `(seq_num_res, req_id_res,
-    /// batch_size)`.
-    fn init_ack_sizes(&self) -> (u8, u8, u16) {
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+    /// batch_size)`. `peer` is the slot's value, read by the caller.
+    fn init_ack_sizes(&self, peer: Option<PeerInitCaps>) -> (u8, u8, u16) {
         let params = &self.params;
         match peer {
             Some(p) => (
@@ -4352,7 +4356,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
     ))]
     fn init_ack_caps(&self) -> crate::handshake_encode::InitCaps {
-        let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes();
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes(peer);
         crate::handshake_encode::InitCaps {
             seq_num_res,
             req_id_res,
