@@ -31,6 +31,13 @@
 //!
 //! Host-test level: no board runs it.
 
+// Not on the `session-slot` profile, whose sessions are made in a slot and not
+// through the `SessionLinks` and `Rc` seams this file builds them with: the
+// slot profile's link state is counted by `session_slot_allocations`, and with
+// `static-link-storage` also on it is the pool `LwipLinks::bind_driver` binds
+// from, which `wz-link-lwip`'s `link_storage_allocations` reads link-level.
+#![cfg(not(feature = "session-slot"))]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::rc::Rc;
