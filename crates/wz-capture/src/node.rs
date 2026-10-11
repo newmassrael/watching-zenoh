@@ -794,27 +794,26 @@ fn end_sending(d: Direction) -> FlowEnd {
 /// The zid a transport message names, if it names one.
 ///
 /// The handshake `cbyte` packs the zid length minus one in its top nibble and
-/// the 2-bit role below it; the decoded body already carries the zid as bytes,
-/// so the length is not re-derived here — reading it twice is how the two
-/// spellings drift.
+/// the 2-bit role in its LOW two bits; the decoded body already carries the zid
+/// as bytes, so the length is not re-derived here — reading it twice is how the
+/// two spellings drift. The role is read through the body's own `whatami()`
+/// accessor, the one place the codec's bit layout is written, and not through a
+/// mask of this module's: a private `(cbyte >> 1) & 0x03` here read a peer as a
+/// router and a client as a peer until the sweep in
+/// `the_role_a_handshake_names_is_the_role_the_census_states` was written.
 fn named_zid(frame: &PassiveFrame) -> Option<(Vec<u8>, Option<u8>, Named)> {
     let Ok(decoded) = &frame.frame else {
         return None;
     };
     match decoded {
         InboundFrame::Init { body, .. } => {
-            Some((body.zid.to_vec(), Some(whatami_of(body.cbyte)), Named::Init))
+            Some((body.zid.to_vec(), Some(body.whatami()), Named::Init))
         }
         InboundFrame::Join { body, .. } => {
-            Some((body.zid.to_vec(), Some(whatami_of(body.cbyte)), Named::Join))
+            Some((body.zid.to_vec(), Some(body.whatami()), Named::Join))
         }
         _ => None,
     }
-}
-
-/// The 2-bit role packed in a handshake cbyte.
-fn whatami_of(cbyte: u8) -> u8 {
-    (cbyte >> 1) & 0x03
 }
 
 /// R311y714 — the whole capture, read as nodes.
@@ -2380,6 +2379,160 @@ pub(crate) mod tests {
             json.contains("}}],\"ends\":[],\"attributed_bytes\":"),
             "the array is structural and the links before it are as they were: {json}"
         );
+    }
+
+    /// The three roles the handshake `cbyte` can carry, as the builder's word,
+    /// the raw 2-bit code the census states, and the name the report prints.
+    const ROLES: [(&str, u8, &str); 3] = [
+        ("router", 0, "router"),
+        ("peer", 1, "peer"),
+        ("client", 2, "client"),
+    ];
+
+    /// A zid of `len` distinct non-zero bytes, so the zid length (the high
+    /// nibble of the `cbyte`) is exercised at every width the wire holds.
+    fn zid_of_len(len: usize) -> Vec<u8> {
+        (0..len).map(|i| 0x10 + i as u8).collect()
+    }
+
+    /// One INIT (`ack` false) or INIT-ack naming `zid` in `role`, over a
+    /// stream, written by the codec's own encoder and its own `cbyte` setters
+    /// so the layout is the codec's and not a reading of it. (The `dissect`
+    /// builder door is feature-gated; this census test is not.)
+    fn built_init(ack: bool, role: u8, zid: &[u8]) -> Vec<u8> {
+        let cookie: &[u8] = &[0xAA, 0xBB];
+        let mut body = wz_codecs::init_body::InitBody {
+            version: 0x09,
+            zid,
+            cookie_len: ack.then_some(cookie.len() as u64),
+            cookie: ack.then_some(cookie),
+            ..Default::default()
+        };
+        body.set_whatami(role);
+        body.set_zid_len_m1(zid.len() as u8 - 1);
+        let mut wire = alloc::vec![if ack {
+            wz_session_core::wire_const::T_MID_INIT | wz_session_core::wire_const::FLAG_T_INIT_A
+        } else {
+            wz_session_core::wire_const::T_MID_INIT
+        }];
+        wire.extend_from_slice(&body.encode_to_vec(0, u8::from(ack)));
+        let mut framed = (wire.len() as u16).to_le_bytes().to_vec();
+        framed.extend_from_slice(&wire);
+        framed
+    }
+
+    /// One JOIN naming `zid` in `role`, written by the codec's own encoder and
+    /// its own `cbyte` setters, so the layout is the codec's and not a reading
+    /// of it.
+    fn built_join(role: u8, zid: &[u8]) -> Vec<u8> {
+        let mut join = wz_codecs::join::Join {
+            version: 0x09,
+            zid,
+            lease: 10,
+            ..Default::default()
+        };
+        join.set_whatami(role);
+        join.set_zid_len_m1(zid.len() as u8 - 1);
+        let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
+        wire.extend_from_slice(&join.encode_to_vec(0));
+        wire
+    }
+
+    /// Every census surface that states the role must state the role the
+    /// capture named, and all of them read the same node.
+    fn assert_role_stated(d: &Dissection, zid: &[u8], code: u8, name: &str, what: &str) {
+        let census = nodes(d);
+        assert_eq!(census.nodes().len(), 1, "{what}: {:?}", census.nodes());
+        assert_eq!(
+            census.node(zid).and_then(|n| n.whatami),
+            Some(code),
+            "{what}: the census struct must carry the raw 2-bit role"
+        );
+        let json = crate::census_json::nodes_json(&census);
+        assert!(
+            json.contains(&alloc::format!("\"whatami\":{code},")),
+            "{what}: the census document must say whatami {code}: {json}"
+        );
+        let report = crate::report::CaptureReport::of(d).with_nodes(&census);
+        assert!(
+            report
+                .to_json()
+                .contains(&alloc::format!("\"whatami\":\"{name}\"")),
+            "{what}: the report document must name the role {name}: {}",
+            report.to_json()
+        );
+        assert!(
+            report.to_text().contains(&alloc::format!("role {name} --")),
+            "{what}: the report text must name the role {name}: {}",
+            report.to_text()
+        );
+    }
+
+    /// THE ROLE A HANDSHAKE NAMES IS THE ROLE THE CENSUS STATES: INIT, INIT-ack
+    /// and JOIN, all three roles, every zid length.
+    ///
+    /// # Why nothing caught the shift before
+    ///
+    /// The census read `(cbyte >> 1) & 0x03` where the codec's two-bit role is
+    /// `cbyte & 0x03` (upstream's `flags & 0b11`, with the zid length minus one
+    /// in the top nibble). No test asserted `nodes[].whatami` for an INIT or a
+    /// JOIN at all: the fixtures in this module hand-lay a `cbyte` of
+    /// `(len - 1) << 4 | 0x02`, which the shift read as a PEER, and nobody
+    /// looked at the value. A fixture with a one-byte zid and a router would
+    /// have read 0 under either mask, which is how a router passed by accident;
+    /// a peer read 0 and a client read 1, and they were wrong only for a
+    /// capture that named one.
+    ///
+    /// # What this sweep rules out
+    ///
+    /// Each of the three roles, so a mask that is right for one is caught by the
+    /// other two; each of sixteen zid lengths, so the high nibble is non-zero
+    /// for fifteen of them and a mask that lets it leak into the role is caught;
+    /// and INIT-syn, INIT-ack and JOIN, which reach the census through two
+    /// different arms of one function.
+    #[test]
+    fn the_role_a_handshake_names_is_the_role_the_census_states() {
+        for (word, code, name) in ROLES {
+            for len in 1..=16usize {
+                let zid = zid_of_len(len);
+                for (message, ack) in [("init_syn", false), ("init_ack", true)] {
+                    let mut d = Dissection::new();
+                    d.push_packet(
+                        LINKTYPE_ETHERNET,
+                        0,
+                        &tcp_packet(1000, &built_init(ack, code, &zid)),
+                    );
+                    d.finish();
+                    assert_role_stated(
+                        &d,
+                        &zid,
+                        code,
+                        name,
+                        &alloc::format!("{message} {word} zid {len} bytes"),
+                    );
+                }
+                let mut d = Dissection::new();
+                d.push_packet(
+                    LINKTYPE_ETHERNET,
+                    0,
+                    &udp_packet(
+                        [10, 0, 0, 1],
+                        7447,
+                        [224, 0, 0, 224],
+                        7447,
+                        &built_join(code, &zid),
+                    ),
+                );
+                d.finish();
+                assert_role_stated(
+                    &d,
+                    &zid,
+                    code,
+                    name,
+                    &alloc::format!("join {word} zid {len} bytes"),
+                );
+            }
+        }
     }
 
     /// The one node this capture named, by zid.
