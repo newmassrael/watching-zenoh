@@ -10660,7 +10660,7 @@ layer_c1p_multicast() {
     # R2937 — 65 -> 67: `multicast_tx::push_tests` gains the held-conduit pair
     # (`a_held_conduit_takes_the_push_on_its_own_ring`, the refused mint), both
     # `codec-push`, so the arm above, which has no push codec, does not move.
-    # R3250 — 69 -> 72, the printed number: `multicast_tx::lend_tests` (the
+    # R3264 — 69 -> 72, the printed number: `multicast_tx::lend_tests` (the
     # push into a lending queue) is four cases, and the one that fragments
     # needs `transport-fragmentation`, which this arm leaves out, so three
     # of them compile here. The arm above has no push codec and does not move.
@@ -12331,7 +12331,7 @@ layer_c1bz_docs_resolve() {
     # multicast drive loop now imports `MulticastParams` (the task form owns
     # one), so the module doc's `MulticastParams::join_interval_ms` resolves.
     # The other three error lines are unchanged.
-    # R3250 -- wz-runtime-tokio 484 -> 478, by removal, diffed rather than
+    # R3264 -- wz-runtime-tokio 484 -> 478, by removal, diffed rather than
     # counted: the sorted `error` lines of this lane's command at `8be2ecb5`
     # (484) and on the tree (478) differ by six removals and no addition. The
     # websocket module's `//!` listed its pieces by short name, which resolves

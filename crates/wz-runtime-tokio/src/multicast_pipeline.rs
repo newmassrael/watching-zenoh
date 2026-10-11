@@ -93,7 +93,7 @@ fn new_stages(mask: u64) -> Arc<Stages> {
     Arc::new(std::array::from_fn(|_| Stage::new(mask)))
 }
 
-/// R3250 — the lanes a group's pipeline is built over: the datagram queue,
+/// R3264 — the lanes a group's pipeline is built over: the datagram queue,
 /// under `runtime-zero-copy` a two-class transmit pool whose budgets follow the
 /// group's shape (`OutboundTx::reshape`), into whose slots a push encodes each
 /// datagram (`StageQueue::enqueue_lent`). The ONE constructor the drive loop's
@@ -382,7 +382,7 @@ impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
         }
     }
 
-    // R3250 — ARCHITECTURE section 9.1: the datagram is encoded straight into a
+    // R3264 — ARCHITECTURE section 9.1: the datagram is encoded straight into a
     // slot of the link's transmit pool. The small class is tried first, since
     // most datagrams fit it and the frame's size is known only once written;
     // a frame that does not fit is given the slot `want` asks for. The slot's
@@ -490,7 +490,7 @@ impl MulticastTxPlane {
         };
         let (report, written) = tokio::sync::mpsc::unbounded_channel();
         let writer = crate::runtime_pool::WzRuntime::Tx.spawn(async move {
-            // R3250 — a pooled datagram is a slot of the link's transmit pool:
+            // R3264 — a pooled datagram is a slot of the link's transmit pool:
             // started as the send begins, home through the completion edge once
             // the send has returned.
             while let Some((priority, mut datagram)) = queued.recv_wire_tagged().await {
@@ -682,7 +682,7 @@ impl MulticastTxTap {
         Self::attach_over(params, crate::writer_queue::outbound_channel())
     }
 
-    /// R3250 — [`Self::attach`] over the lanes the drive loop's pipeline builds
+    /// R3264 — [`Self::attach`] over the lanes the drive loop's pipeline builds
     /// (`pipeline_lanes`, the pooled datagram queue under `runtime-zero-copy`),
     /// so what a push puts on them can be read as the slots it lies in
     /// ([`Self::try_next_wire`]).
@@ -748,7 +748,7 @@ impl MulticastTxTap {
             .map(crate::writer_queue::WireFrame::into_vec)
     }
 
-    /// R3250 — [`Self::try_next`] as the frame the lanes hold: on a pooled tap,
+    /// R3264 — [`Self::try_next`] as the frame the lanes hold: on a pooled tap,
     /// the slot of the link's transmit pool the push encoded it into, which goes
     /// home when it is dropped (or handed back with [`Self::written`]).
     pub fn try_next_wire(&mut self) -> Option<crate::writer_queue::WireFrame> {
@@ -778,14 +778,14 @@ impl MulticastTxTap {
         }
     }
 
-    /// R3250 — the holder has written `datagram` out, as a transmit task does:
+    /// R3264 — the holder has written `datagram` out, as a transmit task does:
     /// its slot goes home through the completion edge, counted as written.
     pub fn written(&self, mut datagram: crate::writer_queue::WireFrame) {
         datagram.begin_write();
         self.lanes.recycle_wire(datagram);
     }
 
-    /// R3250 — what the lanes' transmit pool has done and how many slots are
+    /// R3264 — what the lanes' transmit pool has done and how many slots are
     /// free, by the pool's own count; `None` on a heap tap.
     #[cfg(feature = "runtime-zero-copy")]
     pub fn tx_pool_stats(&self) -> Option<(crate::link_tx_pool::TxPoolStats, usize, usize)> {

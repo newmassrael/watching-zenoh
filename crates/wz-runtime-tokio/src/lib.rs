@@ -1748,7 +1748,7 @@ pub mod tls_keylog;
 /// `dial_ws`/`accept_ws` run the RFC6455 handshake ([`tokio_tungstenite`]);
 /// `wire_ws_stream` splits the TCP connection into the read driver (which
 /// reads through tungstenite) and the writer task (which writes the frames the
-/// write driver built in place, R3250). Reuses neither `stream_link` (no
+/// write driver built in place, R3264). Reuses neither `stream_link` (no
 /// StreamEnvelope) nor a codec; the WS protocol layer IS the framing. Gated
 /// `transport-link-ws`; the `session_open` DialedLink::Ws
 /// integration rides the `transport-link-tcp`-gated session-open module as an

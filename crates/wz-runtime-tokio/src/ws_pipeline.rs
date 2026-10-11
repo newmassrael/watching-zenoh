@@ -41,7 +41,7 @@
 //!   default (pico's `_z_get_link_mtu_ws` = 65535), so the write driver
 //!   overrides nothing.
 //! - [`WsWriteDriver`](crate::ws_pipeline::WsWriteDriver) — FRAMES each
-//!   outbound message itself (R3250): the
+//!   outbound message itself (R3264): the
 //!   RFC 6455 header in front of the payload and, on a client, the payload
 //!   masked, in the buffer the message already lies in (under
 //!   `runtime-zero-copy`, a slot of the link's transmit pool). tungstenite
@@ -80,7 +80,7 @@ use wz_session_core::link::{LinkKind, LinkSubject};
 use wz_session_core::link::{RxBytes, RxStorage};
 use wz_session_core::qos::Priority;
 
-/// R3250 — which end of the connection a link is. RFC 6455 section 5.3: a
+/// R3264 — which end of the connection a link is. RFC 6455 section 5.3: a
 /// client masks every frame it sends, with a fresh unpredictable key, and a
 /// server masks none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +112,7 @@ impl WsEnd {
     }
 }
 
-/// R3250 — the header of one binary message (one FIN frame) of `len` bytes.
+/// R3264 — the header of one binary message (one FIN frame) of `len` bytes.
 fn binary_header(mask: Option<[u8; 4]>) -> FrameHeader {
     FrameHeader {
         is_final: true,
@@ -124,7 +124,7 @@ fn binary_header(mask: Option<[u8; 4]>) -> FrameHeader {
     }
 }
 
-/// R3250 — frame, IN PLACE, the message of `len` bytes that lies at
+/// R3264 — frame, IN PLACE, the message of `len` bytes that lies at
 /// `buf[at..at + len]`: its header is written so that it ends at `at`, and the
 /// payload is masked with `mask` if there is one. Answers where the frame
 /// starts; `buf[start..at + len]` is then the frame as it goes on the wire.
@@ -151,7 +151,7 @@ fn apply_mask(payload: &mut [u8], key: [u8; 4]) {
     }
 }
 
-/// R3250 — the message `payload` as a frame in a vector of its own, for a queue
+/// R3264 — the message `payload` as a frame in a vector of its own, for a queue
 /// with no pool: the header and the (masked) payload.
 fn frame_vec(payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
     let header = binary_header(mask);
@@ -167,7 +167,7 @@ fn frame_vec(payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
     frame
 }
 
-/// R3250 — the closing frame the writer sends when the link's queue finishes:
+/// R3264 — the closing frame the writer sends when the link's queue finishes:
 /// a Close with no body, masked by a client.
 fn close_frame(end: WsEnd) -> Vec<u8> {
     let header = FrameHeader {
@@ -182,7 +182,7 @@ fn close_frame(end: WsEnd) -> Vec<u8> {
     frame
 }
 
-/// R3250 — the byte stream tungstenite runs over. Whole during the handshake;
+/// R3264 — the byte stream tungstenite runs over. Whole during the handshake;
 /// once [`wire_ws_stream`] has split the connection, tungstenite keeps the read
 /// half, and what it writes from then on (the Pong that answers a Ping, the
 /// Close that answers a Close: whole frames, masked as its end requires) is
@@ -299,7 +299,7 @@ impl AsyncWrite for WsIo {
     }
 }
 
-/// R3250 — a connected, handshaked WebSocket link, not yet wired: the protocol
+/// R3264 — a connected, handshaked WebSocket link, not yet wired: the protocol
 /// stream over the whole connection, and which end of it this is.
 pub struct WsLink {
     ws: WebSocketStream<WsIo>,
@@ -387,7 +387,7 @@ pub fn wire_ws_stream(link: WsLink) -> (WsReadDriver, Arc<WsWriteDriver>, Writer
     (inbound, outbound, writer_handle)
 }
 
-/// R3250 — a received binary message, which tungstenite 0.26 and later hands
+/// R3264 — a received binary message, which tungstenite 0.26 and later hands
 /// over as refcounted `Bytes`, as the frame's lent storage: the frame (and every
 /// sample taken from it) is a range of the library's own buffer, as a QUIC
 /// datagram's is (`quic_datagram_pipeline::frame_of_datagram`). The one `Arc`
@@ -483,7 +483,7 @@ impl LinkDriver for WsReadDriver {
 /// the unbounded 65535 default a stream link inherits.
 pub struct WsWriteDriver {
     tx: crate::writer_queue::OutboundTx,
-    /// R3250 — which end this is: whether each frame is masked.
+    /// R3264 — which end this is: whether each frame is masked.
     end: WsEnd,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
@@ -518,7 +518,7 @@ impl WsWriteDriver {
         }
     }
 
-    /// R3250 — the message of `len` bytes the lend holds behind this end's
+    /// R3264 — the message of `len` bytes the lend holds behind this end's
     /// headroom, framed in place and queued: the slot is the wire frame.
     #[cfg(feature = "runtime-zero-copy")]
     fn commit_framed(&self, lend: crate::writer_queue::TxLend, len: usize) -> LinkSendOutcome {
@@ -588,7 +588,7 @@ impl BoxedLinkDriver for WsWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // R3250 — a pooled queue takes the message by COPYING it into a slot,
+        // R3264 — a pooled queue takes the message by COPYING it into a slot,
         // behind the room for its header (one copy, which a byte door cannot
         // avoid, and no allocation); the frame is then made in the slot.
         #[cfg(feature = "runtime-zero-copy")]
@@ -612,7 +612,7 @@ impl BoxedLinkDriver for WsWriteDriver {
     }
 
     // R3240 — lend the session a slot of the link's transmit pool to encode one
-    // message into. R3250 — behind the room for its header: the frame is then
+    // message into. R3264 — behind the room for its header: the frame is then
     // made around the message in the slot (`commit_framed`), and the writer
     // writes the slot as it lies.
     #[cfg(feature = "runtime-zero-copy")]
@@ -674,7 +674,7 @@ impl BoxedLinkDriver for WsWriteDriver {
 /// and not sender liveness alone, is the teardown signal. The first two send a
 /// Close frame so the peer observes a clean WebSocket close.
 pub async fn ws_writer_task(mut write: OwnedWriteHalf, end: WsEnd, mut queue: OutboundQueue) {
-    // R3250 — no copy at this seam: the frame goes to the socket from the
+    // R3264 — no copy at this seam: the frame goes to the socket from the
     // memory it was built in, started as the write begins and home through the
     // completion edge once it has returned (`recycle_wire`, or the drop on
     // every other way out).

@@ -353,7 +353,7 @@ struct Batch {
     cap: usize,
     /// First byte of the slot, from the pool.
     base: usize,
-    /// R3250 — where the first frame starts in the slot: 0, except for a frame
+    /// R3264 — where the first frame starts in the slot: 0, except for a frame
     /// a link framed around its message in place ([`OutboundTx::commit_from`]),
     /// which starts where its header begins. Only a non-packing batch has any.
     offset: usize,
@@ -607,7 +607,7 @@ impl LaneState {
         true
     }
 
-    /// R3250 — [`Self::slot_room`] once the frame's size is known: a slot of a
+    /// R3264 — [`Self::slot_room`] once the frame's size is known: a slot of a
     /// class that holds `need` bytes, which is what a sender that is already
     /// waiting for a slot of its own must see before it goes on. Asking the
     /// question for ANY class here let a sender that needs the large class
@@ -1218,7 +1218,7 @@ impl OutboundTx {
         self.commit_at(lend, 0, len)
     }
 
-    /// R3250 — [`Self::commit`] for a frame that starts `start` bytes into the
+    /// R3264 — [`Self::commit`] for a frame that starts `start` bytes into the
     /// lend instead of at its first byte: a link that frames a message around
     /// its payload in place (the WebSocket link writes the RFC 6455 header just
     /// before the payload the session encoded, so the slot IS the wire frame)
@@ -1373,7 +1373,7 @@ impl LendTable {
         self.acquire_with_headroom(tx, want, max, 0, priority)
     }
 
-    /// R3250 — [`Self::acquire`] for a link that frames each message in place:
+    /// R3264 — [`Self::acquire`] for a link that frames each message in place:
     /// the lend is `headroom` bytes longer, and the grant says the message
     /// starts that far into the slot, so the link can write its header in front
     /// of it ([`OutboundTx::commit_from`]). `max` is the most the MESSAGE may be.
@@ -1538,7 +1538,7 @@ impl OutboundRx {
             .give_spare(frame);
     }
 
-    /// R3250 — the pool's counters, its free slots and its capacity, by the
+    /// R3264 — the pool's counters, its free slots and its capacity, by the
     /// pool's own count, read from the receiving half; `None` on a heap queue.
     #[cfg(feature = "runtime-zero-copy")]
     pub fn tx_pool_stats(&self) -> Option<(TxPoolStats, usize, usize)> {
@@ -1548,7 +1548,7 @@ impl OutboundRx {
             .map(|pool| (pool.stats(), pool.free_count(), pool.capacity()))
     }
 
-    /// R3250 — the writer has written `wire` out: a heap frame's buffer is kept
+    /// R3264 — the writer has written `wire` out: a heap frame's buffer is kept
     /// to be lent again ([`Self::recycle`]); a pooled frame's slot goes home
     /// through the completion edge, counted as written. For a writer that holds
     /// the receiving half itself (the multicast transmit task) as well as for

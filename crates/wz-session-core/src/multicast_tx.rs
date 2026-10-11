@@ -226,7 +226,7 @@ pub trait MulticastTxQueue {
     /// pool.
     fn enqueue(&mut self, datagram: MulticastTxDatagram);
 
-    /// R3250 — ARCHITECTURE section 9.1 on the multicast TX: put one datagram
+    /// R3264 — ARCHITECTURE section 9.1 on the multicast TX: put one datagram
     /// on `priority`'s lane by having it ENCODED straight into a slot the queue
     /// lends, so the frame is never a vector of its own. `fill` writes the
     /// frame into the slot it is handed and answers whether the slot now holds
@@ -658,7 +658,7 @@ struct FrameMeta {
 /// each further fragment. `body` encodes the network message the frame carries
 /// (at most `worst_case` bytes), behind the frame header the minted SN starts.
 ///
-/// R3250 — under `transport-tx-lend` the frame is first offered to the queue
+/// R3264 — under `transport-tx-lend` the frame is first offered to the queue
 /// to be encoded straight into a slot it lends
 /// ([`MulticastTxQueue::enqueue_lent`]), as the unicast send offers its link a
 /// lend; a queue that lends nothing, or a frame past the group's batch (which
@@ -1269,7 +1269,7 @@ mod push_tests {
     }
 }
 
-// R3250 — the multicast push into a queue that LENDS: the datagram is encoded
+// R3264 — the multicast push into a queue that LENDS: the datagram is encoded
 // straight into the lent slot, the bytes and the SN walk are the heap path's,
 // and every way the lend cannot take a frame falls back to the heap.
 #[cfg(all(test, feature = "codec-push", feature = "transport-tx-lend"))]

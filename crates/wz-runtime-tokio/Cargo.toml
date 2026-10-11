@@ -965,7 +965,7 @@ transport-link-tls-keylog = []
 # RFC6455 protocol layer) and frames what it sends itself. No tcp forward (the
 # session-open Ws arm rides the tcp+unicast-gated `session_open` like the udp
 # arm). NOT default — pico ships WS as an optional link (Z_FEATURE_LINK_WS).
-# R3250 — `rand` keys the mask of each frame a client sends (RFC 6455 5.3), as
+# R3264 — `rand` keys the mask of each frame a client sends (RFC 6455 5.3), as
 # tungstenite keys its own; the lock already carries it.
 transport-link-ws = ["link-interfaces", "dep:tokio-tungstenite", "dep:futures-util", "dep:bytes", "dep:rand"]
 # R311xi — host Unix-domain-stream link backend. Like TLS (and UNLIKE WS), it
@@ -1941,7 +1941,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring"], optio
 # read-driver / writer-task halves (a WebSocketStream needs `&mut` for both
 # directions, so unlike the UDP socket it cannot be shared by `Arc` — it is
 # split instead) plus `SinkExt::send` for the writer task.
-# R3250 — 0.29, for `Message::Binary(Bytes)` (0.26 and later): a message the
+# R3264 — 0.29, for `Message::Binary(Bytes)` (0.26 and later): a message the
 # writer sends can be a slot of the link's transmit pool as the `Bytes`' owner,
 # where 0.24's `Binary(Vec<u8>)` forced a copy into a vector at the seam. 0.29
 # is the newest whose MSRV (tungstenite 1.71) is within this crate's 1.81;

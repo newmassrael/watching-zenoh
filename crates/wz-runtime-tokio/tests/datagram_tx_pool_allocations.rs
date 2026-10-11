@@ -22,7 +22,7 @@
 //!   ONE allocation there, which is counted here and stated at the seam.
 //! - Websocket: tungstenite 0.29 takes `Message::Binary(Bytes)`, but it formats
 //!   whatever it sends into a write buffer of its own, a copy of the payload, so
-//!   the link frames each message itself (R3250). It writes the RFC 6455 header
+//!   the link frames each message itself (R3264). It writes the RFC 6455 header
 //!   in front of the message where it lies in the slot (and masks it there, on a
 //!   client) and the writer writes the slot as it is: a steady state, a burst
 //!   and messages past the small class allocate NOTHING, and every frame
@@ -433,7 +433,7 @@ mod seam {
     }
 }
 
-/// The websocket link's write half, which FRAMES each message itself (R3250):
+/// The websocket link's write half, which FRAMES each message itself (R3264):
 /// tungstenite formats whatever it sends into a write buffer of its own, a copy
 /// of the payload that the slot's own memory avoids, so the link writes the
 /// RFC 6455 header in front of the message where it lies in the slot (and masks
