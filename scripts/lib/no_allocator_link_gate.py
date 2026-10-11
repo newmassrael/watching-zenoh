@@ -155,6 +155,10 @@ class Build:
     features: tuple[str, ...] = ()
     env: tuple[tuple[str, str], ...] = ()
     label: str = ""
+    # `--no-default-features`: an image PROFILE is a feature set of an existing
+    # image whose default features include the allocator (`heap`), so the profile
+    # that has none is built without them (S9c).
+    no_default_features: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,6 +224,51 @@ IMAGES: dict[str, Image] = {
         ),
         "the session shell (Rc/RefCell shells, the pump's record Vec, spawn_local)"
         " and the e2e library still allocate: S6 and S8",
+    ),
+    # S9c -- the FIXED-MEMORY PROFILE of the same image: the session tier on the
+    # per-session slot, static link storage and the static pump and runtime, with no
+    # allocator and no `extern crate alloc` in the bin or the e2e library. It is the
+    # first image that is the SESSION tier (an acceptor with a pump) on that profile, and
+    # it does not link yet: the shell crates are clean (the census names none of them),
+    # and what stands in its way is `wz-session-core` (the session modules are gated on
+    # its `alloc` feature), `wz-runtime-core` (the `Runtime` error enum boxes a panic
+    # payload), the codec owned mirrors (`wz-codecs`, `sce-forge-runtime`,
+    # `sce-portable-bytes`) and the third party `portable-atomic-util`. Every one is the
+    # next step's; promote the row the day the toolchain stops refusing the link and the
+    # crate list is empty.
+    "mcu-session-acceptor-fixed": Image(
+        "deploy/mcu-session-acceptor/Cargo.toml",
+        "bin",
+        "mcu-session-acceptor",
+        "pending",
+        (
+            Build(
+                V7M,
+                "cross-test",
+                ("fixed-memory",),
+                label="mps2-fixed",
+                no_default_features=True,
+            ),
+        ),
+        "the session tier's own crates still carry `alloc`: wz-session-core (its session"
+        " modules are gated on the feature), wz-runtime-core, the codec owned mirrors"
+        " (wz-codecs, sce-forge-runtime, sce-portable-bytes): the next step",
+    ),
+    # S9c -- the same profile WITH an allocator, for the census alone: the image above
+    # cannot link, so the census reads no call site out of it, and this one is the
+    # same code plus the `heap` feature's allocator, which lets the ELF's line table
+    # name every branch to an allocation that is still LINKED (a branch the run never
+    # takes: the e2e run of this profile allocates nothing on the host). That list is
+    # the worklist of the step that makes the row above link.
+    "mcu-session-acceptor-fixed-census": Image(
+        "deploy/mcu-session-acceptor/Cargo.toml",
+        "bin",
+        "mcu-session-acceptor",
+        "pending",
+        (Build(V7M, "cross-test", ("fixed-memory",), label="mps2-fixed-heap"),),
+        "the linked allocation sites of the session tier on the fixed-memory profile,"
+        " read with an allocator present (census only): the worklist of the next step",
+        ci=False,
     ),
     "mcu-admin-node": Image(
         "deploy/mcu-admin-node/Cargo.toml",
@@ -1184,6 +1233,8 @@ def build_command(image: Image, build: Build, lines: bool) -> tuple[list[str], d
         cmd += ["--bin", image.artifact]
     else:
         cmd += ["--lib"]
+    if build.no_default_features:
+        cmd += ["--no-default-features"]
     if build.features:
         cmd += ["--features", ",".join(build.features)]
     if env.get("WZ_NOALLOC_TARGET_DIR"):

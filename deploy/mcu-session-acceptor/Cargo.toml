@@ -66,8 +66,10 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 
 # Heap allocator. The session stack (alloc-backed SessionLinkActions + the
 # engine + the codec byte buffers) needs a #[global_allocator];
-# embedded-alloc is the conventional Cortex-M choice.
-embedded-alloc = "0.6"
+# embedded-alloc is the conventional Cortex-M choice. Optional since S9c: the
+# `heap` feature (default) is the image that has one, and the `fixed-memory`
+# profile is the image that does not.
+embedded-alloc = { version = "0.6", optional = true }
 
 # Atomic backend parity with the wz session stack (M3/M4/M7 get native
 # LDREX/STREX; the feature set mirrors the wz-runtime-coop / session-core
@@ -88,9 +90,28 @@ wz-mcu-stack = { path = "../../crates/wz-mcu-stack" }
 # `ClockSource` trait this bin impls (SysTick) so the bin never names the
 # wz facade or wz-session-core directly — the lib is the composition
 # boundary (it enables session-lwip + the handshake codecs on the facade).
-wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor" }
+#
+# `default-features = false` and `lwip` named: the profile below turns on the
+# crate's `fixed-memory` form, which is the lwIP topology's replacement.
+wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor", default-features = false, features = ["lwip"] }
 
 [features]
+default = ["heap"]
+# The image with an allocator: the session stack on `embedded-alloc`'s heap, the
+# shape every image of this crate has had.
+heap = ["dep:embedded-alloc"]
+
+# S9c -- the FIXED-MEMORY PROFILE of this image: the session tier on the
+# per-session slot, static link storage and the static pump and runtime, with no
+# allocator and no `extern crate alloc` in this bin or in the e2e library under it
+# (`wz_mcu_session_acceptor::run_acceptor_e2e_fixed` over statics declared here).
+# Built with `--no-default-features --features fixed-memory`. The image does not
+# link yet, and says why: `wz-session-core` (which the session tier names with its
+# `alloc` feature, since its session modules are gated on it) and the codec owned
+# mirrors still carry `extern crate alloc`, so rustc refuses the link for want of a
+# global allocator. The S8 gate lists exactly those crates as this image's worklist.
+fixed-memory = ["wz-mcu-session-acceptor/fixed-memory"]
+
 # Tier B on-target reassembly: switches the boot scenario to
 # DataMode::FragmentChain and threads the reassembly slot pool into the
 # session stack (wz-mcu-session-acceptor -> wz/reassembly -> the lwIP loop).

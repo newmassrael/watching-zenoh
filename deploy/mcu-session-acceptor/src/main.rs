@@ -35,19 +35,26 @@
 #![no_std]
 #![no_main]
 
+// S9c -- the `fixed-memory` profile has no allocator and does not link `alloc`: a use
+// of the heap that crept into this bin would not compile.
+#[cfg(feature = "heap")]
 extern crate alloc;
 
+#[cfg(feature = "heap")]
 use core::mem::MaybeUninit;
 
 use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::{debug, hprintln};
+#[cfg(feature = "heap")]
 use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 use wz_mcu_clock::SystickClock;
 
-use wz_mcu_session_acceptor::{
-    run_acceptor_e2e_with_progress, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
-};
+#[cfg(feature = "fixed-memory")]
+use wz_mcu_session_acceptor::{run_acceptor_e2e_fixed, AcceptorStatics};
+#[cfg(not(feature = "fixed-memory"))]
+use wz_mcu_session_acceptor::run_acceptor_e2e_with_progress;
+use wz_mcu_session_acceptor::{AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy};
 
 // Heap sizing fork per target SRAM budget. The mps2 family (M3/M4/M7) has
 // 4 MB SRAM, so a generous 256 KB heap holds the alloc-backed session stack
@@ -57,13 +64,19 @@ use wz_mcu_session_acceptor::{
 // measured peak heap is ~3.15 KB (vs ~32 KB on the default pool), so a 4 KB
 // heap holds it (matching deploy/mcu-qemu-demo's microbit heap) while leaving
 // lwIP's static MEM_SIZE + stack + .bss inside the remaining ~12 KB.
-#[cfg(target_has_atomic = "32")]
+#[cfg(all(feature = "heap", target_has_atomic = "32"))]
 const HEAP_SIZE: usize = 1024 * 256;
-#[cfg(not(target_has_atomic = "32"))]
+#[cfg(all(feature = "heap", not(target_has_atomic = "32")))]
 const HEAP_SIZE: usize = 1024 * 4;
 
+#[cfg(feature = "heap")]
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
+
+/// The e2e's statics on the fixed-memory profile: the runtime, the session table, the
+/// pump table, the listener and the two socket pools, in `.bss`, sized by the types.
+#[cfg(feature = "fixed-memory")]
+static E2E: AcceptorStatics<SystickClockRef, FixtureEntropy> = AcceptorStatics::new();
 
 /// CPU clock per target (MHz) — QEMU clocks the mps2 family at 25 MHz and the
 /// `microbit` (nrf51) at 16 MHz. SysTick counts processor cycles when
@@ -128,6 +141,7 @@ fn main() -> ! {
     // current stack pointer is in use yet.
     unsafe { stack.paint(cortex_m::register::msp::read() as usize) };
 
+    #[cfg(feature = "heap")]
     init_heap();
     GLOBAL_CLOCK.init();
     hprintln!("Stage5: MCU acceptor session e2e starting");
@@ -141,7 +155,21 @@ fn main() -> ! {
     // R3189 (open-debt item 815) — each stage is printed as the e2e ENTERS it,
     // so a boot that stops making progress leaves the stage it stalled in as
     // its last console line, instead of only the `starting` line above.
+    #[cfg(not(feature = "fixed-memory"))]
     let report = run_acceptor_e2e_with_progress(
+        SystickClockRef,
+        FixtureEntropy,
+        DATA_MODE,
+        || {},
+        |stage| {
+            hprintln!("Stage5: stage {}", stage.name());
+        },
+    );
+    // S9c -- the same scenario over the statics above: the session is opened by the
+    // listener's admission and run as a task of the static runtime.
+    #[cfg(feature = "fixed-memory")]
+    let report = run_acceptor_e2e_fixed(
+        &E2E,
         SystickClockRef,
         FixtureEntropy,
         DATA_MODE,
@@ -203,6 +231,7 @@ fn main() -> ! {
 }
 
 /// Initialise the heap allocator backing `alloc::*` from a static BSS region.
+#[cfg(feature = "heap")]
 fn init_heap() {
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
     // SAFETY: `HEAP_MEM` is a `static mut` accessed only here, before any
