@@ -2803,8 +2803,11 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
 }
 
 /// The word `context.phase` carries, one per `SessionPhase` variant.
+///
+/// `pub(crate)` for the session table, whose `phase` cell is the same word: one
+/// walk for one vocabulary.
 #[derive(Clone, Copy)]
-enum PhaseWord {
+pub(crate) enum PhaseWord {
     Closed,
     Established,
     HalfInit,
@@ -2812,7 +2815,7 @@ enum PhaseWord {
     Unseen,
 }
 
-fn phase_word(phase: wz_session_core::passive::SessionPhase) -> PhaseWord {
+pub(crate) fn phase_word(phase: wz_session_core::passive::SessionPhase) -> PhaseWord {
     use wz_session_core::passive::SessionPhase;
     match phase {
         SessionPhase::Unseen => PhaseWord::Unseen,
@@ -2824,7 +2827,7 @@ fn phase_word(phase: wz_session_core::passive::SessionPhase) -> PhaseWord {
 }
 
 impl PhaseWord {
-    const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Closed => "closed",
             Self::Established => "established",
@@ -6745,7 +6748,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 39] = [
+        let live: [(&str, &str, Vec<&'static str>); 47] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6931,6 +6934,45 @@ mod tests {
                 rev::TRANSPORT_LAYOUT,
                 "relative_to",
                 crate::transport_layout::RelativeTo::names(),
+            ),
+            // The session table's eight. `link`, `family` and `phase` are the
+            // walks the census and the field document are held to, on a third
+            // document that renders the same flow object and the same phase;
+            // `cell` and `reason` are the two keys of an `unstated` entry, held
+            // to the cell list and to the reason enum, so a reason added to
+            // either is not a word a consumer's switch learns of by falling
+            // through.
+            (
+                rev::SESSION_TABLE,
+                "cell",
+                crate::session_table::Cell::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "encrypted",
+                crate::session_table::Encryption::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "family",
+                crate::link::AddrFamily::names(),
+            ),
+            (rev::SESSION_TABLE, "link", crate::link::LinkKind::names()),
+            (rev::SESSION_TABLE, "phase", PhaseWord::names()),
+            (
+                rev::SESSION_TABLE,
+                "reason",
+                crate::session_table::Unstated::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "refusal",
+                crate::session_table_json::Refusal::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "why",
+                crate::session_table::Why::names(),
             ),
             // The verdict document's two families, each held to the
             // SAME walk the field document's is. Two declarations of one
@@ -7570,7 +7612,12 @@ mod tests {
         // carries the same keys whatever its wire type, so the family must
         // measure as a passenger, over all four words.
         let open_docs = crate::proto_decode_tests::documents_for_the_carries_gate();
-        let docs: [(&str, Vec<&String>); 9] = [
+        // The session table, over every shape of row (each reason a cell can
+        // carry, each finding about the transport, a refusal of each kind): a
+        // word of one of its eight families must not bring keys another word
+        // lacks, and this is the population that would show it.
+        let session_docs = crate::session_table_tests::documents_for_the_carries_gate();
+        let docs: [(&str, Vec<&String>); 10] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -7586,6 +7633,7 @@ mod tests {
             (rev::TRANSPORT_BUILD, transport_docs.iter().collect()),
             (rev::TRANSPORT_LAYOUT, layout_docs.iter().collect()),
             (rev::E2E_OPEN, open_docs.iter().collect()),
+            (rev::SESSION_TABLE, session_docs.iter().collect()),
         ];
 
         // ⚠ R2185 — THE DOCUMENTS THIS GATE RENDERS ARE THE DOCUMENTS THAT

@@ -191,6 +191,18 @@ pub mod node;
 /// coordinates claiming to answer a question it cannot ask.
 #[cfg(all(feature = "dissect", feature = "network-codecs"))]
 pub mod selection_json;
+// The capture read as SESSIONS, one row per zid pair, and the document that
+// renders them. Each is documented by its own `//!` text and carries no outer
+// `///` here, for the reason the transport build modules give.
+//
+// The table is ungated, because its ingest facts are taken inside the flow
+// tables on every build. The document is gated on `dissect` with the field
+// document whose phase words it reuses.
+pub mod session_table;
+#[cfg(feature = "dissect")]
+pub mod session_table_json;
+#[cfg(all(test, feature = "dissect"))]
+mod session_table_tests;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.
@@ -835,6 +847,9 @@ pub struct DatagramDissection {
     pub quic_datagrams: messages::MessageList,
     /// Item 252 — the distinct ways this flow's packets ARRIVED.
     carriers: link::Carriers,
+    /// What the session table needs of this flow that no retention bound may
+    /// take away. See [`session_table::LinkIngest`].
+    ingest: session_table::LinkIngest,
 }
 
 /// R311y918 (open-debt item 270's prerequisite) — WHAT A LIST'S
@@ -1181,6 +1196,7 @@ impl DatagramDissection {
             quic_streams: Vec::new(),
             quic_datagrams: messages::MessageList::new(),
             carriers: link::Carriers::default(),
+            ingest: session_table::LinkIngest::default(),
         }
     }
 
@@ -1893,6 +1909,10 @@ pub struct FlowDissection {
     last_seen_ms: Option<u64>,
     /// Item 252 — the distinct ways this flow's packets ARRIVED.
     carriers: link::Carriers,
+    /// What the session table needs of this flow that no retention bound may
+    /// take away: the instants of its first and last packet and the zids of its
+    /// Inits. See [`session_table::LinkIngest`].
+    ingest: session_table::LinkIngest,
 }
 
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
@@ -1939,6 +1959,7 @@ impl FlowDissection {
             chain_loss: ChainLoss::default(),
             last_seen_ms: None,
             carriers: link::Carriers::default(),
+            ingest: session_table::LinkIngest::default(),
         }
     }
 
@@ -2742,6 +2763,7 @@ impl FlowDissection {
                 wz_session_core::passive::LinkHandshake::Present,
                 instant,
             );
+            self.ingest.observe_frames(&batch);
             self.frames.append(batch);
         }
     }
@@ -2761,6 +2783,7 @@ impl FlowDissection {
             session,
             frames,
             residue,
+            ingest,
             low_to_high,
             high_to_low,
             ..
@@ -2769,6 +2792,7 @@ impl FlowDissection {
             session,
             frames,
             residue,
+            ingest,
             direction,
             bytes,
             &|dir, offset| match dir {
@@ -2791,9 +2815,12 @@ impl FlowDissection {
             session,
             frames,
             residue,
+            ingest,
             ..
         } = self;
-        stream_into_session(session, frames, residue, direction, bytes, instant_of);
+        stream_into_session(
+            session, frames, residue, ingest, direction, bytes, instant_of,
+        );
     }
 }
 
@@ -2808,6 +2835,7 @@ fn stream_into_session(
     session: &mut PassiveSession,
     frames: &mut messages::MessageList,
     residue: &mut ByteResidue,
+    ingest: &mut session_table::LinkIngest,
     direction: Direction,
     bytes: &[u8],
     instant_of: &dyn Fn(Direction, usize) -> Option<u64>,
@@ -2823,6 +2851,7 @@ fn stream_into_session(
             loop {
                 match session.next_frame_with(dir, &|offset| instant_of(dir, offset)) {
                     Ok(frame) => {
+                        ingest.observe_frame(&frame);
                         frames.push(frame);
                         progressed = true;
                     }
@@ -3064,6 +3093,9 @@ mod message_list_census {
             // frame it came out of -- an origin, not a message.
             serial_origins: _,
             serial_session: _,
+            // The session table's ingest facts for the serial line: instants
+            // and zids, no decoded message.
+            serial_ingest: _,
             checksums: _,
             carry: _,
             fragments: _,
@@ -3125,6 +3157,9 @@ mod message_list_census {
             // wire, so no message plane reads it. `report::carriers_text` and
             // `carriers_json` are its two consumers.
             carriers: _,
+            // The session table's ingest facts: instants and zids, which are
+            // not messages and never become a list.
+            ingest: _,
         } = FlowDissection::new(FlowKey::serial_line(), None, None);
     }
 
@@ -3152,6 +3187,8 @@ mod message_list_census {
             // consumers, and it is on BOTH flow families because a tunnelled
             // UDP session is the shape a cloud overlay actually carries.
             carriers: _,
+            // The session table's ingest facts, the twin of the stream flow's.
+            ingest: _,
         } = DatagramDissection::new(FlowKey::serial_line(), None);
     }
 
@@ -3925,6 +3962,10 @@ pub struct Dissection {
     /// The zenoh session over that line. One, because a serial link is point
     /// to point: the two wires are its two directions, not two sessions.
     serial_session: PassiveSession,
+    /// What the session table needs of the serial line that no retention bound
+    /// may take away: its packets' instants and the zids of its Inits. The twin
+    /// of the field a flow carries; see [`session_table::LinkIngest`].
+    serial_ingest: session_table::LinkIngest,
     /// R311y605 (F5) — checksum verdicts, tallied as packets arrive. They must
     /// be counted here and not derived later: a `Checksums` rides on the
     /// `Segment` / `Datagram`, which is consumed by the assembler and gone.
@@ -4087,6 +4128,7 @@ impl Default for Dissection {
             serial_frames: messages::MessageList::new(),
             serial_origins: Vec::new(),
             serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
+            serial_ingest: session_table::LinkIngest::default(),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
             checksums: [0; 10],
@@ -5333,6 +5375,10 @@ impl Dissection {
                 loop {
                     match stream.session.next_frame(dir) {
                         Ok(frame) => {
+                            // The flow's own ingest, a field beside the
+                            // streams: a QUIC connection is one link and its
+                            // streams are its sessions' byte streams.
+                            dg.ingest.observe_frame(&frame);
                             stream.frames.push(frame);
                             progressed = true;
                         }
@@ -5488,6 +5534,7 @@ impl Dissection {
         );
         feed.messages += batch.len();
         let before = dg.quic_datagrams.len();
+        dg.ingest.observe_frames(&batch);
         dg.quic_datagrams.append(batch);
         // OFFERED with the payload still in hand, which is the only moment it
         // exists: the capture packet this came out of holds the QUIC
@@ -5790,7 +5837,9 @@ impl Dissection {
         if settled {
             self.decode_pending_serial();
         }
-        let _ = ts_nanos;
+        // The instant is not used to decode, and it is not lost: the session
+        // table dates the line from it.
+        self.serial_ingest.observe_packet(ts_nanos);
     }
 
     /// R311y722 — decode whatever the line is holding, under the mapping it has
@@ -5819,6 +5868,7 @@ impl Dissection {
                 // The two lists move together, here and nowhere else, which is
                 // what keeps the index correspondence a local invariant rather
                 // than a convention.
+                self.serial_ingest.observe_frame(&decoded);
                 self.serial_frames.push(decoded);
                 self.serial_origins.push(frame.clone());
             }
@@ -5963,6 +6013,7 @@ impl Dissection {
         flow.last_seen_ms = ts_nanos
             .map(|ns| ns / NANOS_PER_MILLI)
             .or(flow.last_seen_ms);
+        flow.ingest.observe_packet(ts_nanos);
         self.enforce_flow_limits(idx);
         self.evict_flows_beyond_cap();
     }
@@ -6152,6 +6203,7 @@ impl Dissection {
         flow.last_seen_ms = ts_nanos
             .map(|ns| ns / NANOS_PER_MILLI)
             .or(flow.last_seen_ms);
+        flow.ingest.observe_packet(ts_nanos);
         // Counted on this path too, even though both verdicts are `None` here:
         // a path that skipped the tally would make the six buckets disagree
         // about how many packets the dissection saw.
@@ -6209,6 +6261,13 @@ impl Dissection {
         flow.last_seen_ms = ts_nanos
             .map(|ns| ns / NANOS_PER_MILLI)
             .or(flow.last_seen_ms);
+        flow.ingest.observe_packet(ts_nanos);
+        // The dissector's own answer to "does a handshake happen on this
+        // link", taken once per datagram where it is made, so the session table
+        // does not decide it a second time from an address.
+        if link.handshake(&d) == wz_session_core::passive::LinkHandshake::Absent {
+            flow.ingest.observe_handshake_absent();
+        }
         // Item 252 — recorded for EVERY datagram, including one that turns out
         // to be QUIC or scouting. How a packet arrived is a fact about the
         // wire, and gating it on what the payload decoded to would report the
@@ -6318,6 +6377,7 @@ impl Dissection {
             d.packet_index,
             link.handshake(&d),
         );
+        flow.ingest.observe_frames(&batch);
         flow.frames.append(batch);
         self.enforce_datagram_message_cap(idx);
         self.evict_datagram_flows_beyond_cap();

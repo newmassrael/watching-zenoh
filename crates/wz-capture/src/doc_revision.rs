@@ -2417,6 +2417,42 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: TRANSPORT_LAYOUT_R1_CARRIES,
     },
+    // The capture read as SESSIONS: one row per zid pair, in the cells a
+    // sessions editor shows, from a capture container or from a live handle.
+    //
+    // A document of its own because its unit is the session and no other
+    // document's is: the census is keyed by node and by flow, the field document
+    // by flow, and a consumer that wanted a row per session had to join the two
+    // and decide for itself what a session with two links, a handshake that is
+    // not in the capture, or an encrypted transport looks like.
+    //
+    // EVERY KEY IS PRESENT ON EVERY ROW. A cell that cannot be stated is `null`
+    // and the row's `unstated` list holds one `{cell, reason}` for it, so a cell
+    // is `null` exactly when it is named there. The eight families below are
+    // PASSENGERS by construction. Which reasons a given cell can carry is
+    // narrower than the `reason` family and is held to every rendered row by the
+    // document's tests: a one-word family cannot be declared, because the carries
+    // gate refuses to classify a family it saw fewer than two words of.
+    //
+    // It takes the integer rule from its first revision, for the two clock
+    // instants of a row: `first_seen_ts_ns` and `last_seen_ts_ns` are
+    // nanoseconds since 1970, about 1.7e18, past what a reader on doubles holds
+    // exactly, so each is a number while it is exact and a string of the same
+    // digits beyond. `frames` and `bytes` count what the host holds and stay bare
+    // numbers.
+    //
+    // A container that does not read is `{"ok":false,"reason":...}` with a
+    // reason from the closed set the `reason` family declares, and the other
+    // branch's keys are absent there, as in the other documents that refuse.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 1,
+        keys: SESSION_TABLE_R1_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R1_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R1_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -2742,6 +2778,9 @@ pub const TRANSPORT_BUILD: &str = "transport_build";
 /// The structural report of transport message bytes that already exist, or why
 /// it could not be given (`wz_dissect_transport_layout`).
 pub const TRANSPORT_LAYOUT: &str = "transport_layout";
+/// The capture read as sessions, one row per zid pair, or why a container was
+/// refused (`wz_dissect_pcap_session_table`, `wz_dissect_live_session_table`).
+pub const SESSION_TABLE: &str = "session_table";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
@@ -9544,6 +9583,162 @@ pub const TRANSPORT_LAYOUT_R1_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The `session_table` document's key set at revision 1, over BOTH branches: the
+/// table (the rows, the flows left out, and the `dropped_by_limits` group every
+/// document carries) and the refusal of a container that does not read.
+///
+/// MEASURED off the documents by the pin test in `wz-capi-dissect`, which is the
+/// one that crosses the ABI, and pasted back. `flows`, `frames` and `link` each
+/// appear under more than one parent (a row's flows and the group's count; a
+/// row's `link` and its flow object's), which a flat key set cannot tell apart
+/// and the document's own tests read by path instead.
+pub const SESSION_TABLE_R1_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "bytes",
+    "caps",
+    "cell",
+    "count",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "excluded",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "initiator",
+    "last_seen_ts_ns",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "name",
+    "ok",
+    "phase",
+    "port",
+    "reason",
+    "refusal",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "unstated",
+    "why",
+];
+
+/// The `session_table` document's value families at revision 1.
+///
+/// Eight, and every one carries at least two words, which the carries gate
+/// requires of a family it is to classify. `cell` and `reason` are the two keys
+/// of an `unstated` entry: which cell is `null`, and why. `link` and `family`
+/// are the flow object's words, the vocabularies the census and the field
+/// document declare. `phase` is the field document's `context.phase`.
+/// `encrypted` is the finding about the transport. `refusal` is the closed set
+/// a container that does not read is refused with, and `why` the reason a flow
+/// is not a row.
+///
+/// What each cell can say is narrower than the `reason` family and is stated in
+/// the header and held to every rendered row by a test; a family of one word
+/// (`link` can only be `mixed`) could not be declared here.
+pub const SESSION_TABLE_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "cell",
+        values: &[
+            "acceptor",
+            "first_seen_ts_ns",
+            "frames",
+            "initiator",
+            "last_seen_ts_ns",
+            "link",
+            "phase",
+        ],
+    },
+    ValueFamily {
+        key: "encrypted",
+        values: &[
+            "clear",
+            "decrypted_quic",
+            "decrypted_tls",
+            "encrypted_unreadable",
+            "mixed",
+            "unknown",
+        ],
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: &["encrypted", "mixed", "no_clock", "not_in_capture"],
+    },
+    ValueFamily {
+        key: "refusal",
+        values: &["damaged", "not_a_capture", "truncated"],
+    },
+    ValueFamily {
+        key: "why",
+        values: &["multicast_group", "scouting_only"],
+    },
+];
+
+/// All eight families are PASSENGERS: every row carries every key, and an
+/// `unstated` entry is always the same two keys, so no word brings keys another
+/// word lacks. `link`, `family` and `encrypted` also sit in the flow object,
+/// whose keys differ from a row's, which is what the derivation reads as
+/// "something other than the word decides it".
+pub const SESSION_TABLE_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "cell",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "encrypted",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "refusal",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "why",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The selection document's key set at revision 1, over EVERY shape a row and
 /// the document take — the coordinates present or absent, `selected` present or
 /// absent.
@@ -13788,6 +13983,8 @@ mod tests {
             (TRANSPORT_BUILD, 1),
             // The same report for bytes that already exist.
             (TRANSPORT_LAYOUT, 1),
+            // The capture read as sessions, one row per zid pair.
+            (SESSION_TABLE, 1),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.
