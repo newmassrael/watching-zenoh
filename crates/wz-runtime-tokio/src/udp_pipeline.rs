@@ -73,14 +73,14 @@
 //! (`runtime_impl.rs:209`), so the abort is explicit — the same RAII idiom as
 //! the (private) `group.rs` `AbortOnDrop`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use wz_runtime_core::Runtime;
 
@@ -235,6 +235,153 @@ pub async fn bind_udp(listen: SocketAddr, link_socket: &LinkSocket<'_>) -> io::R
 /// overrun it is dropped, not queued without bound).
 pub(crate) const UDP_DEMUX_FACE_CHANNEL_CAP: usize = 256;
 
+/// R3260 — the bounded queue between the demux pump and ONE accepted face: the
+/// pump pushes this source's datagrams, the face's read driver takes them.
+///
+/// It replaces a tokio bounded `mpsc` channel, whose list of 32-entry blocks
+/// grows on demand and frees an emptied block it cannot hand back within three
+/// hops of the tail. A burst that let the pump run further ahead of the face's
+/// reader than any earlier one did therefore allocated a block in the middle of
+/// the receive, on the path `runtime-zero-copy` keeps free of allocation:
+/// measured as one allocation in `tokio::sync::mpsc::block::Block::grow`, from
+/// the pump's `try_send`, in 16 of 40 stressed runs of the accept bursts of
+/// `tests/datagram_rx_pool_allocations.rs`. Here the entries are one
+/// `VecDeque` that never shrinks, and under `runtime-zero-copy` it is sized to
+/// [`UDP_DEMUX_FACE_CHANNEL_CAP`] when the face opens, so a push never grows it;
+/// the receive pool's small class is sized to hold that whole queue (the
+/// compile-time check in `link_rx_datagram`). Without the feature every
+/// datagram is a copy into a vector of its own, and the queue grows to the
+/// depth a face reaches rather than reserving it.
+///
+/// The read side waits on a [`Notify`], whose `notify_one` keeps a permit for a
+/// reader that has not started waiting yet, so a push between the reader's look
+/// and its wait is not lost; neither the push, the wake nor the wait allocates.
+struct FaceQueue {
+    state: Mutex<FaceQueueState>,
+    ready: Notify,
+}
+
+struct FaceQueueState {
+    entries: VecDeque<RxBytes>,
+    /// The pump dropped this face's sender (the pump ended): the reader drains
+    /// what is queued, then reports the end.
+    sender_gone: bool,
+    /// The face's reader is gone: the pump reaps this source.
+    receiver_gone: bool,
+}
+
+impl FaceQueue {
+    fn state(&self) -> std::sync::MutexGuard<'_, FaceQueueState> {
+        // A panic while holding the lock leaves the deque consistent (every
+        // operation on it is a single push, pop or clear), so the state is
+        // still usable.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A new face's queue: the pump keeps the sender, the face's read driver the
+/// receiver.
+fn face_queue() -> (FaceSender, UdpFaceReceiver) {
+    let reserved = if cfg!(feature = "runtime-zero-copy") {
+        UDP_DEMUX_FACE_CHANNEL_CAP
+    } else {
+        0
+    };
+    let queue = Arc::new(FaceQueue {
+        state: Mutex::new(FaceQueueState {
+            entries: VecDeque::with_capacity(reserved),
+            sender_gone: false,
+            receiver_gone: false,
+        }),
+        ready: Notify::new(),
+    });
+    (
+        FaceSender {
+            queue: queue.clone(),
+        },
+        UdpFaceReceiver { queue },
+    )
+}
+
+/// Why the pump could not queue a datagram for a face.
+enum FacePushError {
+    /// The queue holds [`UDP_DEMUX_FACE_CHANNEL_CAP`] datagrams: this one is
+    /// dropped, as the kernel's receive buffer drops one when full.
+    Full,
+    /// The face's reader is gone.
+    Closed,
+}
+
+/// The pump's end of one face's queue.
+struct FaceSender {
+    queue: Arc<FaceQueue>,
+}
+
+impl FaceSender {
+    /// Queue `bytes` for the face, or say why not; never waits.
+    fn try_push(&self, bytes: RxBytes) -> Result<(), FacePushError> {
+        {
+            let mut state = self.queue.state();
+            if state.receiver_gone {
+                return Err(FacePushError::Closed);
+            }
+            if state.entries.len() >= UDP_DEMUX_FACE_CHANNEL_CAP {
+                return Err(FacePushError::Full);
+            }
+            state.entries.push_back(bytes);
+        }
+        self.queue.ready.notify_one();
+        Ok(())
+    }
+}
+
+impl Drop for FaceSender {
+    fn drop(&mut self) {
+        self.queue.state().sender_gone = true;
+        self.queue.ready.notify_one();
+    }
+}
+
+/// An accepted face's end of its queue from the demux pump: this source's
+/// datagrams, in arrival order, at most `UDP_DEMUX_FACE_CHANNEL_CAP` waiting.
+pub struct UdpFaceReceiver {
+    queue: Arc<FaceQueue>,
+}
+
+impl UdpFaceReceiver {
+    /// The next datagram, or `None` once the pump has ended and everything it
+    /// queued has been taken. Cancel-safe: a datagram stays queued until a call
+    /// returns it.
+    pub async fn recv(&mut self) -> Option<RxBytes> {
+        loop {
+            // Made before the look, so a push after the look and before the
+            // wait leaves a permit this wait takes.
+            let ready = self.queue.ready.notified();
+            {
+                let mut state = self.queue.state();
+                if let Some(bytes) = state.entries.pop_front() {
+                    return Some(bytes);
+                }
+                if state.sender_gone {
+                    return None;
+                }
+            }
+            ready.await;
+        }
+    }
+}
+
+impl Drop for UdpFaceReceiver {
+    fn drop(&mut self) {
+        let mut state = self.queue.state();
+        state.receiver_gone = true;
+        // The queued datagrams hold receive-pool slots under
+        // `runtime-zero-copy`; nobody will read them, so they go home now
+        // rather than when the pump next reaps this source.
+        state.entries.clear();
+    }
+}
+
 /// Backoff after a demux `recv_from` error before re-arming the receive — zenoh's
 /// `UDP_ACCEPT_THROTTLE_TIME` (`io/zenoh-links/zenoh-link-udp/src/unicast.rs`).
 /// A transient error (e.g. an ICMP port-unreachable surfacing as ECONNREFUSED on
@@ -274,7 +421,7 @@ pub struct NewUdpFace {
     /// — each is the frame's bytes as the pump read them: under
     /// `runtime-zero-copy` a range of the receive-pool slot the datagram landed
     /// in, otherwise an owned copy (`RxBytes` moves either across the channel).
-    pub inbound_rx: mpsc::Receiver<RxBytes>,
+    pub inbound_rx: UdpFaceReceiver,
 }
 
 /// The multi-peer datagram listener a `udp/..` acceptor binds to — replaces the
@@ -314,7 +461,7 @@ impl UdpDemux {
     /// Assemble the wire inputs for a face accepted from this listener: the src's
     /// inbound channel + a `send_socket` clone (egress `send_to(peer)`) + a pump
     /// keep-alive clone (so the pump outlives the listener while this face reads).
-    pub fn wire_inputs(&self, inbound_rx: mpsc::Receiver<RxBytes>) -> UdpAcceptedInputs {
+    pub fn wire_inputs(&self, inbound_rx: UdpFaceReceiver) -> UdpAcceptedInputs {
         UdpAcceptedInputs {
             inbound_rx,
             send_socket: self.send_socket.clone(),
@@ -332,7 +479,7 @@ impl UdpDemux {
 /// crate-private [`UdpDemuxPump`] guard type.
 pub struct UdpAcceptedInputs {
     /// This src's demultiplexed inbound datagrams (from [`NewUdpFace`]).
-    inbound_rx: mpsc::Receiver<RxBytes>,
+    inbound_rx: UdpFaceReceiver,
     /// The shared listener socket (egress `send_to(peer)`).
     send_socket: Arc<UdpSocket>,
     /// The shared pump keep-alive — keeps the demux pump alive while this face
@@ -388,8 +535,7 @@ pub async fn bind_udp_demux(
 /// faces keep being served. The zenoh `accept_read_task`
 /// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs:518`) mirror.
 async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSender<NewUdpFace>) {
-    use tokio::sync::mpsc::error::TrySendError;
-    let mut faces: HashMap<SocketAddr, mpsc::Sender<RxBytes>> = HashMap::new();
+    let mut faces: HashMap<SocketAddr, FaceSender> = HashMap::new();
     #[cfg(not(feature = "runtime-zero-copy"))]
     let mut buf = vec![0u8; MAX_UDP_PAYLOAD];
     loop {
@@ -424,25 +570,25 @@ async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSend
             }
         };
         if let Some(tx) = faces.get(&src) {
-            match tx.try_send(payload) {
+            match tx.try_push(payload) {
                 Ok(()) => {}
                 // Best-effort: the face consumer is behind, drop the datagram
                 // exactly as the kernel UDP receive buffer would on overflow.
-                Err(TrySendError::Full(_)) => {}
+                Err(FacePushError::Full) => {}
                 // The face was torn down (its read driver dropped the receiver);
                 // reap the entry so a later datagram from the same src opens a
                 // fresh face (a reconnect). NB: this triggering datagram is itself
                 // dropped — a same-src reconnect's first (InitSyn) datagram is lost
                 // and self-heals on FSM retransmit (the udp best-effort contract).
-                Err(TrySendError::Closed(_)) => {
+                Err(FacePushError::Closed) => {
                     faces.remove(&src);
                 }
             }
         } else {
-            let (tx, rx) = mpsc::channel(UDP_DEMUX_FACE_CHANNEL_CAP);
-            // The first datagram always fits (the channel is empty), so the
+            let (tx, rx) = face_queue();
+            // The first datagram always fits (the queue is empty), so the
             // InitSyn is never lost — it is queued for the face's first `recv`.
-            let _ = tx.try_send(payload);
+            let _ = tx.try_push(payload);
             // Keep the src ONLY if the listener accepted the new-face handoff. If
             // its receiver is gone (the one-shot path dropped the listener after
             // accepting), this src can never be accepted: drop its channel and keep
@@ -540,7 +686,7 @@ enum UdpRxSource {
     /// keeps the shared demux pump alive as long as this face reads (so the pump
     /// outlives the listener on the one-shot `accept_bound` path).
     Demux {
-        rx: mpsc::Receiver<RxBytes>,
+        rx: UdpFaceReceiver,
         peer: SocketAddr,
         _pump: Arc<UdpDemuxPump>,
     },
@@ -569,7 +715,7 @@ impl UdpReadDriver {
     /// The accept-demux read driver: read this src's datagrams from the pump's
     /// bounded channel, tagging each with the fixed `peer`. Holds a pump
     /// keep-alive clone so the demux pump lives as long as this face.
-    fn from_demux(rx: mpsc::Receiver<RxBytes>, peer: SocketAddr, pump: Arc<UdpDemuxPump>) -> Self {
+    fn from_demux(rx: UdpFaceReceiver, peer: SocketAddr, pump: Arc<UdpDemuxPump>) -> Self {
         Self {
             source: UdpRxSource::Demux {
                 rx,
@@ -1041,5 +1187,111 @@ mod tests {
         s1.send_to(b"hello-2", addr).await.expect("s1 send 2");
         let face1b = demux.recv_new_face().await.expect("re-accepted face");
         assert_eq!(face1b.peer, s1_addr, "same src re-accepted as a fresh face");
+    }
+
+    fn item(n: u8) -> RxBytes {
+        RxBytes::from(vec![n])
+    }
+
+    /// The queue holds [`UDP_DEMUX_FACE_CHANNEL_CAP`] datagrams: the one after
+    /// is refused as `Full`, and nothing grows the deque, under
+    /// `runtime-zero-copy` not even the first fill (it is sized when the face
+    /// opens, which is what keeps the pump's push off the allocator).
+    #[test]
+    fn face_queue_is_bounded_at_the_cap_and_never_grows_there() {
+        let (tx, _rx) = face_queue();
+        let reserved = tx.queue.state().entries.capacity();
+        if cfg!(feature = "runtime-zero-copy") {
+            assert!(reserved >= UDP_DEMUX_FACE_CHANNEL_CAP, "sized at open");
+        }
+        for n in 0..UDP_DEMUX_FACE_CHANNEL_CAP {
+            assert!(tx.try_push(item(n as u8)).is_ok(), "push {n} fits");
+        }
+        let full = tx.queue.state().entries.capacity();
+        assert!(matches!(tx.try_push(item(0xFF)), Err(FacePushError::Full)));
+        let state = tx.queue.state();
+        assert_eq!(state.entries.len(), UDP_DEMUX_FACE_CHANNEL_CAP);
+        assert_eq!(
+            state.entries.capacity(),
+            full,
+            "a refused push grows nothing"
+        );
+        if cfg!(feature = "runtime-zero-copy") {
+            assert_eq!(full, reserved, "filling to the cap grows nothing");
+        }
+    }
+
+    /// Once the pump's sender is gone the reader still takes what was queued,
+    /// in order, and only then sees the end.
+    #[tokio::test]
+    async fn face_queue_drains_what_was_queued_after_the_sender_drops() {
+        let (tx, mut rx) = face_queue();
+        for n in 0..3 {
+            assert!(tx.try_push(item(n)).is_ok());
+        }
+        drop(tx);
+        for n in 0..3 {
+            assert_eq!(rx.recv().await, Some(item(n)));
+        }
+        assert_eq!(rx.recv().await, None);
+    }
+
+    /// A reader that is gone refuses the next push as `Closed` and releases
+    /// what was queued for it at once.
+    #[test]
+    fn face_queue_receiver_drop_clears_and_closes() {
+        let (tx, rx) = face_queue();
+        assert!(tx.try_push(item(1)).is_ok());
+        drop(rx);
+        assert!(
+            tx.queue.state().entries.is_empty(),
+            "queued datagrams freed"
+        );
+        assert!(matches!(tx.try_push(item(2)), Err(FacePushError::Closed)));
+    }
+
+    /// A push between the reader's look at the queue and its wait is not
+    /// lost: the `Notified` the reader made before the look takes the permit
+    /// the push leaves, so the wait returns at once. This is the property the
+    /// receive loop relies on (it creates the `Notified` before it looks).
+    #[tokio::test]
+    async fn face_queue_push_between_the_look_and_the_wait_is_not_lost() {
+        let (tx, _rx) = face_queue();
+        let ready = tx.queue.ready.notified();
+        // The reader looked and found it empty ...
+        assert!(tx.queue.state().entries.is_empty());
+        // ... the pump pushes before the reader waits ...
+        assert!(tx.try_push(item(7)).is_ok());
+        // ... and the wait still completes.
+        tokio::time::timeout(Duration::from_secs(5), ready)
+            .await
+            .expect("the permit the push left wakes the wait");
+    }
+
+    /// A reader parked on an empty queue is woken by a push, and by the
+    /// sender dropping.
+    #[tokio::test]
+    async fn face_queue_wakes_a_parked_reader() {
+        let (tx, mut rx) = face_queue();
+        let reader = tokio::spawn(async move {
+            let first = rx.recv().await;
+            let end = rx.recv().await;
+            (first, end)
+        });
+        // Let the reader park on the empty queue.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(tx.try_push(item(9)).is_ok());
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        drop(tx);
+        let (first, end) = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("the reader was woken")
+            .expect("the reader task");
+        assert_eq!(first, Some(item(9)));
+        assert_eq!(end, None);
     }
 }
