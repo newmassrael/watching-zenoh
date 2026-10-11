@@ -189,19 +189,30 @@ pub fn split_value_body(value: &[u8]) -> Option<(EncodingHint, &[u8])> {
 /// `"mime;schema"` form splits the schema off; an UNKNOWN MIME falls back to the
 /// custom id ([`ID_CUSTOM`]) carrying the WHOLE string as the schema.
 pub fn encoding_from_mime(s: &str) -> EncodingHint {
+    let (packed_id, schema) = encoding_parts_from_mime(s);
+    EncodingHint {
+        packed_id,
+        schema: schema.map(String::from),
+    }
+}
+
+/// [`encoding_from_mime`] as BORROWED parts, `(packed_id, schema)`, with the schema a
+/// slice of `s`: the parse without the `String` an [`EncodingHint`] owns, for a
+/// caller that hands the parts straight to a reply
+/// ([`crate::query_sink::ReplyOut::reply_keyed_encoded_parts`]) and has no use
+/// for an owned hint. `encoding_from_mime` is this function plus that copy, so
+/// the two cannot differ.
+pub fn encoding_parts_from_mime(s: &str) -> (u32, Option<&str>) {
     let (mime, schema) = s.split_once(';').unwrap_or((s, ""));
     match id_for_mime(mime) {
         Some(id) => {
             let has_schema = !schema.is_empty();
-            EncodingHint {
-                packed_id: (packed_no_schema(id)) | (has_schema as u32),
-                schema: has_schema.then(|| String::from(schema)),
-            }
+            (
+                (packed_no_schema(id)) | (has_schema as u32),
+                has_schema.then_some(schema),
+            )
         }
-        None => EncodingHint {
-            packed_id: packed_no_schema(ID_CUSTOM) | 1,
-            schema: Some(String::from(s)),
-        },
+        None => (packed_no_schema(ID_CUSTOM) | 1, Some(s)),
     }
 }
 
@@ -209,20 +220,28 @@ pub fn encoding_from_mime(s: &str) -> EncodingHint {
 /// a predefined id -> its MIME name (plus `";schema"` when a schema is set); the
 /// custom id -> the schema string verbatim; an unknown predefined id -> empty.
 pub fn encoding_to_mime(e: &EncodingHint) -> String {
-    let id = e.id();
+    let mut out = String::new();
+    write_encoding_mime_parts(e.packed_id, e.schema.as_deref(), &mut out);
+    out
+}
+
+/// [`encoding_to_mime`] over borrowed parts and into any sink: the one place the
+/// id-to-MIME rendering is written, so the manifest an admin node writes into a
+/// fixed buffer and the string the AP builds name an encoding the same way.
+pub fn write_encoding_mime_parts<W: crate::text_out::TextOut + ?Sized>(
+    packed_id: u32,
+    schema: Option<&str>,
+    out: &mut W,
+) {
+    let id = (packed_id >> 1) as EncodingId;
     if id == ID_CUSTOM {
-        return e.schema.clone().unwrap_or_default();
+        out.push_str(schema.unwrap_or(""));
+        return;
     }
-    let base = mime_for_id(id).unwrap_or("");
-    match e.schema.as_deref() {
-        Some(schema) if !schema.is_empty() => {
-            let mut out = String::with_capacity(base.len() + 1 + schema.len());
-            out.push_str(base);
-            out.push(';');
-            out.push_str(schema);
-            out
-        }
-        _ => String::from(base),
+    out.push_str(mime_for_id(id).unwrap_or(""));
+    if let Some(schema) = schema.filter(|schema| !schema.is_empty()) {
+        out.push(';');
+        out.push_str(schema);
     }
 }
 

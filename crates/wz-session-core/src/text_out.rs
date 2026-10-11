@@ -52,6 +52,11 @@ pub trait TextOut: fmt::Write {
 #[cfg(feature = "alloc")]
 impl TextOut for alloc::string::String {}
 
+/// A writer that was handed `&mut W` writes through it as it would through `W`, so
+/// a function generic over the sink can pass its own `&mut W` on without caring
+/// that the callee takes the sink by value or by reference.
+impl<W: TextOut + ?Sized> TextOut for &mut W {}
+
 /// The bytes a fixed sink was asked to hold and what it can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Overflow {

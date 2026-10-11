@@ -683,6 +683,14 @@ pub mod admin_connect;
 #[cfg(feature = "adminspace-core")]
 pub mod adminspace;
 
+/// Fixed-memory step S9b — the buffers an admin reply is built in
+/// ([`admin_reply::AdminBuffer`]: a `String` that grows, or a fixed buffer that
+/// refuses what does not fit), the typed refusal ([`admin_reply::AdminReplyError`])
+/// and its counters, and the per-process arena a node with no allocator answers
+/// from ([`admin_reply::AdminReplyArena`]).
+#[cfg(feature = "adminspace-core")]
+pub mod admin_reply;
+
 /// Shared slice-based VLE decoder (the `SceCursor::read_vle_u64` borrowed-slice
 /// twin) — the SSOT for parsing a varint out of an already-buffered ext body.
 /// `pub` for the `read_zbuf` / `write_zbuf` "one zenoh ZBuf" framing primitive,

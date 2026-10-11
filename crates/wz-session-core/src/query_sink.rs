@@ -439,6 +439,31 @@ pub trait ReplyOut {
         let _ = encoding;
         self.reply_keyed(keyexpr, payload)
     }
+    /// [`Self::reply_keyed_encoded`] with the encoding given as borrowed PARTS, the
+    /// wire `packed_id` and the optional schema, instead of an owned
+    /// [`crate::sample::EncodingHint`] (whose schema is a `String`).
+    ///
+    /// The seam a replier uses when it has an encoding and no hint to lend, and
+    /// must not allocate to make one: the admin space replies in three media types,
+    /// one of which carries a schema, and builds none of them as an owned hint. The
+    /// default builds the hint (allocating only when there is a schema) and calls
+    /// [`Self::reply_keyed_encoded`], so every sink that implements that arm takes
+    /// this one with its meaning; a sink that can stage the parts without an owned
+    /// hint overrides it.
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_encoded_parts(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        packed_id: u32,
+        schema: Option<&str>,
+    ) -> Result<(), ReplyError> {
+        let hint = crate::sample::EncodingHint {
+            packed_id,
+            schema: schema.map(alloc::string::String::from),
+        };
+        self.reply_keyed_encoded(keyexpr, payload, Some(&hint))
+    }
     /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
     /// an optional value `encoding`) under an explicit concrete `keyexpr`.
     /// The faithful shape a storage **aligner** answers a query with: the

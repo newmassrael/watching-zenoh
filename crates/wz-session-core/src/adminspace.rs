@@ -29,9 +29,26 @@
 //! The serializer is manual (no `serde_json`) so the builder stays `alloc`-only
 //! and no_std-feasible (R311xu scoped adminspace-core's data paths as
 //! no_std-feasible) while emitting the same key set a zenoh admin client expects.
+//!
+//! # S9b: written into any text sink, so a fixed node answers with no allocator
+//!
+//! Every writer here emits through [`crate::text_out::TextOut`], not into a
+//! `String`. The AP's entry points ([`answer_admin_query`],
+//! [`AdminLocalData::to_json`], [`admin_surface_json`], the `*_key` helpers) keep
+//! their signatures and write the same bytes into a `String` they own; the
+//! allocation-free entry point is [`answer_admin_query_in`], which takes the
+//! buffers it writes into from its caller ([`crate::admin_reply::AdminBuffer`]:
+//! `String`, or [`crate::text_out::FixedText`] that refuses what does not fit) and
+//! reads its node's state as borrowed rows ([`AdminSessionRef`],
+//! [`AdminMulticastPeerRef`]) instead of cloning it into owned ones. One writer,
+//! two sinks: the fixed node's reply is the AP's reply byte for byte, because it
+//! is the same code.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use crate::admin_reply::{AdminBuffer, AdminReplyError};
+use crate::text_out::{Overflow, TextOut};
 
 /// One link of a connected transport — the `{src,dst}` pair zenoh's
 /// `link_to_json` emits (`adminspace.rs:608-613`).
@@ -121,18 +138,106 @@ pub struct AdminMulticastPeer {
     pub links: Vec<AdminLink>,
 }
 
+/// The links of one transport as the `local_data` writer reads them: the
+/// `(src, dst)` pairs, by position.
+///
+/// A trait, not a slice of [`AdminLink`], because a node that holds its rows in
+/// fixed storage (no `String`) has no `AdminLink` to lend: it implements this on
+/// the row it has, and the one writer reads both. `Vec<AdminLink>` is the AP's.
+pub trait AdminLinkList {
+    /// How many links the transport has.
+    fn link_count(&self) -> usize;
+    /// The `index`-th link as `(src, dst)`, or `None` past the end.
+    fn link(&self, index: usize) -> Option<(&str, &str)>;
+}
+
+impl AdminLinkList for Vec<AdminLink> {
+    fn link_count(&self) -> usize {
+        self.len()
+    }
+
+    fn link(&self, index: usize) -> Option<(&str, &str)> {
+        self.get(index)
+            .map(|link| (link.src.as_str(), link.dst.as_str()))
+    }
+}
+
+/// One `sessions[]` row of the unicast kind, BORROWED: what the writer reads of a
+/// connected peer, with every text field a `&str` into wherever the node keeps it.
+///
+/// [`AdminSession`] is the AP's owned row; a node that holds its peers in fixed
+/// storage builds this from the row it has and clones nothing, which is what lets
+/// [`answer_admin_query_in`] answer without allocating. Field for field it is
+/// [`AdminSession`], see there for what each means.
+pub struct AdminSessionRef<'a> {
+    /// [`AdminSession::peer_zid_hex`].
+    pub peer_zid_hex: &'a str,
+    /// [`AdminSession::whatami`].
+    pub whatami: Option<&'a str>,
+    /// [`AdminSession::links`].
+    pub links: &'a dyn AdminLinkList,
+    /// [`AdminSession::shm`].
+    pub shm: bool,
+    /// [`AdminSession::weight`].
+    pub weight: Option<AdminLinkWeight>,
+    /// [`AdminSession::region`].
+    pub region: Option<&'a str>,
+}
+
+impl AdminSession {
+    /// This row as the writer reads it, borrowing every field.
+    pub fn view(&self) -> AdminSessionRef<'_> {
+        AdminSessionRef {
+            peer_zid_hex: &self.peer_zid_hex,
+            whatami: self.whatami.as_deref(),
+            links: &self.links,
+            shm: self.shm,
+            weight: self.weight,
+            region: self.region.as_deref(),
+        }
+    }
+}
+
+/// One `sessions[]` row of the multicast kind, BORROWED: the twin of
+/// [`AdminSessionRef`] for [`AdminMulticastPeer`].
+pub struct AdminMulticastPeerRef<'a> {
+    /// [`AdminMulticastPeer::peer_zid_hex`].
+    pub peer_zid_hex: &'a str,
+    /// [`AdminMulticastPeer::whatami`].
+    pub whatami: Option<&'a str>,
+    /// [`AdminMulticastPeer::group`].
+    pub group: Option<&'a str>,
+    /// [`AdminMulticastPeer::links`].
+    pub links: &'a dyn AdminLinkList,
+}
+
+impl AdminMulticastPeer {
+    /// This row as the writer reads it, borrowing every field.
+    pub fn view(&self) -> AdminMulticastPeerRef<'_> {
+        AdminMulticastPeerRef {
+            peer_zid_hex: &self.peer_zid_hex,
+            whatami: self.whatami.as_deref(),
+            group: self.group.as_deref(),
+            links: &self.links,
+        }
+    }
+}
+
 /// A transport's links as upstream's `link_to_json` writes each one,
 /// `{"dst":…,"src":…}`, in an array. Shared by both kinds of `sessions[]` row.
-fn push_admin_links(links: &[AdminLink], out: &mut String) {
+fn push_admin_links<W: TextOut + ?Sized>(links: &dyn AdminLinkList, out: &mut W) {
     out.push('[');
-    for (j, link) in links.iter().enumerate() {
+    for j in 0..links.link_count() {
+        let Some((src, dst)) = links.link(j) else {
+            break;
+        };
         if j > 0 {
             out.push(',');
         }
         out.push_str("{\"dst\":");
-        push_json_str(&link.dst, out);
+        push_json_str(dst, out);
         out.push_str(",\"src\":");
-        push_json_str(&link.src, out);
+        push_json_str(src, out);
         out.push('}');
     }
     out.push(']');
@@ -141,14 +246,13 @@ fn push_admin_links(links: &[AdminLink], out: &mut String) {
 /// R2637 — a `u16` as JSON, and its optional twin. Written out rather than
 /// `format!`ed for the reason the whole builder is hand-rolled: it stays
 /// `alloc`-only and no_std-feasible, with no `serde_json` in the session kernel.
-fn push_u16(v: u16, out: &mut String) {
-    use core::fmt::Write as _;
+fn push_u16<W: TextOut + ?Sized>(v: u16, out: &mut W) {
     let _ = write!(out, "{v}");
 }
 
 /// `None` renders `null` — the JSON `serde` would emit for an `Option<u16>`,
 /// which is what upstream serializes this through.
-fn push_opt_u16(v: Option<u16>, out: &mut String) {
+fn push_opt_u16<W: TextOut + ?Sized>(v: Option<u16>, out: &mut W) {
     match v {
         Some(v) => push_u16(v, out),
         None => out.push_str("null"),
@@ -348,21 +452,29 @@ impl AdminPlugin {
     /// always `null`. `report` is the default `{"level":"Info"}` (zenoh
     /// `PluginReport::default`; `messages` skipped when empty) — wz subsystems
     /// surface no health report (an extension point).
+    #[cfg(test)]
     fn to_status_json(&self) -> String {
-        let mut out = String::from("{\"name\":");
-        crate::json::escape_into(&self.name, &mut out);
+        let mut out = String::new();
+        self.write_status_json(&mut out);
+        out
+    }
+
+    /// [`Self::to_status_json`] into any sink: the writer, which the answerer
+    /// calls with the buffer it was given.
+    fn write_status_json<W: TextOut + ?Sized>(&self, out: &mut W) {
+        out.push_str("{\"name\":");
+        crate::json::escape_into(&self.name, out);
         out.push_str(",\"id\":");
-        crate::json::escape_into(&self.id, &mut out);
+        crate::json::escape_into(&self.id, out);
         if let Some(v) = &self.version {
             out.push_str(",\"version\":");
-            crate::json::escape_into(v, &mut out);
+            crate::json::escape_into(v, out);
         }
         out.push_str(",\"long_version\":null,\"path\":");
-        crate::json::escape_into(&self.path, &mut out);
+        crate::json::escape_into(&self.path, out);
         out.push_str(",\"state\":");
-        crate::json::escape_into(self.state.as_str(), &mut out);
+        crate::json::escape_into(self.state.as_str(), out);
         out.push_str(",\"report\":{\"level\":\"Info\"}}");
-        out
     }
 }
 
@@ -373,16 +485,37 @@ impl AdminPlugin {
 /// object keys are id-SORTED (zenoh's `serde_json` `Map` is a `BTreeMap`, no
 /// `preserve_order`), and each value's `name`/`path` keys are alphabetical (the
 /// `json!` macro form). Emits `{}` when no plugin is started.
+///
+/// S9b — the id-sorted order is produced by selection, not by collecting the
+/// started plugins into a `Vec` and sorting it: each round emits the started plugin
+/// that comes next by `(id, position)`, so equal ids keep their given order, which
+/// is the order the stable sort this replaced gave. It is quadratic in the number
+/// of plugins, which is a handful, and it allocates nothing.
 #[cfg(feature = "adminspace-plugins-handlers")]
-fn push_plugins_object(plugins: &[AdminPlugin], out: &mut String) {
-    let mut started: Vec<&AdminPlugin> = plugins
-        .iter()
-        .filter(|p| p.state == AdminPluginState::Started)
-        .collect();
-    started.sort_by(|a, b| a.id.cmp(&b.id));
+fn push_plugins_object<W: TextOut + ?Sized>(plugins: &[AdminPlugin], out: &mut W) {
     out.push('{');
-    for (i, p) in started.iter().enumerate() {
-        if i > 0 {
+    // The `(id, position)` of the plugin emitted last; the next one is the smallest
+    // started pair strictly after it.
+    let mut last: Option<(&str, usize)> = None;
+    loop {
+        let mut next: Option<(&str, usize)> = None;
+        for (position, p) in plugins.iter().enumerate() {
+            if p.state != AdminPluginState::Started {
+                continue;
+            }
+            let candidate = (p.id.as_str(), position);
+            if last.is_some_and(|last| candidate <= last) {
+                continue;
+            }
+            if next.map_or(true, |best| candidate < best) {
+                next = Some(candidate);
+            }
+        }
+        let Some((_, position)) = next else {
+            break;
+        };
+        let p = &plugins[position];
+        if last.is_some() {
             out.push(',');
         }
         // The object KEY is the plugin id as a quoted JSON string.
@@ -392,6 +525,7 @@ fn push_plugins_object(plugins: &[AdminPlugin], out: &mut String) {
         out.push_str(",\"path\":");
         crate::json::escape_into(&p.path, out);
         out.push('}');
+        last = next;
     }
     out.push('}');
 }
@@ -602,9 +736,18 @@ pub enum AdminAnswerOutcome {
 /// describes: this crate is `no_std` + `alloc` and links no logger.
 #[must_use]
 pub fn denied_read_diagnostic(keyexpr: &str) -> alloc::string::String {
-    alloc::format!(
-        "Received GET on '{keyexpr}' but adminspace.permissions.read=false in configuration"
-    )
+    let mut out = String::new();
+    write_denied_read_diagnostic(&mut out, keyexpr);
+    out
+}
+
+/// [`denied_read_diagnostic`] written into any sink, for a host that logs from a
+/// fixed buffer: the sentence is spelled here once and the `String` form above
+/// is this one.
+pub fn write_denied_read_diagnostic<W: TextOut + ?Sized>(out: &mut W, keyexpr: &str) {
+    out.push_str("Received GET on '");
+    out.push_str(keyexpr);
+    out.push_str("' but adminspace.permissions.read=false in configuration");
 }
 
 impl AdminLocalData {
@@ -653,32 +796,73 @@ impl AdminLocalData {
     /// speak them.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
+        Self::write_json(
+            &mut out,
+            &self.zid_hex,
+            &self.version,
+            &self.metadata_json,
+            self.locators.iter().map(String::as_str),
+            self.sessions.iter().map(AdminSession::view),
+            self.multicast_peers.iter().map(AdminMulticastPeer::view),
+            &self.plugins,
+        );
+        out
+    }
+
+    /// [`Self::to_json`] for a node that does not hold its state as an
+    /// [`AdminLocalData`]: the same object, written into any sink, from the rows as
+    /// borrowed views. `to_json` is this function called over an owned
+    /// `AdminLocalData`, so the two cannot differ.
+    ///
+    /// `sessions` and `multicast_peers` are walked once, in order, and a refusal of
+    /// the sink is the sink's to report ([`crate::text_out::FixedText::finish`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_json<'a, W, S, M, L>(
+        mut out: &mut W,
+        zid_hex: &str,
+        version: &str,
+        metadata_json: &str,
+        locators: L,
+        sessions: S,
+        multicast_peers: M,
+        plugins: &[AdminPlugin],
+    ) where
+        W: TextOut + ?Sized,
+        S: Iterator<Item = AdminSessionRef<'a>>,
+        M: Iterator<Item = AdminMulticastPeerRef<'a>>,
+        L: Iterator<Item = &'a str>,
+    {
+        // Under a build without the plugin legs `plugins` is read by nobody.
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let _ = plugins;
         // R311y60 — the locators string array via the json::push_str_array SSOT.
         out.push_str("{\"locators\":");
-        crate::json::push_str_array(&self.locators, &mut out);
+        crate::json::push_str_array(locators, &mut out);
         // `metadata` is the host's rendered config value (`null` when unset);
         // `plugins` is the started-plugins object under
         // `adminspace-plugins-handlers`, else `null` (the original behavior).
         out.push_str(",\"metadata\":");
-        out.push_str(&self.metadata_json);
+        out.push_str(metadata_json);
         out.push_str(",\"plugins\":");
         #[cfg(feature = "adminspace-plugins-handlers")]
-        push_plugins_object(&self.plugins, &mut out);
+        push_plugins_object(plugins, &mut out);
         #[cfg(not(feature = "adminspace-plugins-handlers"))]
         out.push_str("null");
         out.push_str(",\"sessions\":[");
-        for (i, session) in self.sessions.iter().enumerate() {
-            if i > 0 {
+        let mut wrote_a_row = false;
+        for session in sessions {
+            if wrote_a_row {
                 out.push(',');
             }
+            wrote_a_row = true;
             out.push_str("{\"links\":");
-            push_admin_links(&session.links, &mut out);
+            push_admin_links(session.links, &mut out);
             out.push_str(",\"peer\":");
-            push_json_str(&session.peer_zid_hex, &mut out);
+            push_json_str(session.peer_zid_hex, &mut out);
             // R2858 — `region` between `peer` and `shm`: the same BTreeMap
             // order that places every other key here.
             out.push_str(",\"region\":");
-            push_json_str(session.region.as_deref().unwrap_or("unknown"), &mut out);
+            push_json_str(session.region.unwrap_or("unknown"), &mut out);
             // R2415 — `shm` sits between `peer` and `weight` because upstream's
             // serde_json Map is a BTreeMap and emits keys ALPHABETICALLY; inserting
             // it anywhere else would be a different byte stream for the same facts.
@@ -705,7 +889,7 @@ impl AdminLocalData {
                 None => out.push_str("null"),
             }
             out.push_str(",\"whatami\":");
-            match &session.whatami {
+            match session.whatami {
                 Some(w) => push_json_str(w, &mut out),
                 None => push_json_str("unknown", &mut out),
             }
@@ -715,26 +899,26 @@ impl AdminLocalData {
         // unicast row: upstream's second loop over
         // `get_transports_multicast()`. Keys alphabetical as above, and only
         // the four upstream writes for this kind of row.
-        for (i, member) in self.multicast_peers.iter().enumerate() {
-            if i > 0 || !self.sessions.is_empty() {
+        for member in multicast_peers {
+            if wrote_a_row {
                 out.push(',');
             }
+            wrote_a_row = true;
             out.push_str("{\"group\":");
-            push_json_str(member.group.as_deref().unwrap_or("unknown"), &mut out);
+            push_json_str(member.group.unwrap_or("unknown"), &mut out);
             out.push_str(",\"links\":");
-            push_admin_links(&member.links, &mut out);
+            push_admin_links(member.links, &mut out);
             out.push_str(",\"peer\":");
-            push_json_str(&member.peer_zid_hex, &mut out);
+            push_json_str(member.peer_zid_hex, &mut out);
             out.push_str(",\"whatami\":");
-            push_json_str(member.whatami.as_deref().unwrap_or("unknown"), &mut out);
+            push_json_str(member.whatami.unwrap_or("unknown"), &mut out);
             out.push('}');
         }
         out.push_str("],\"version\":");
-        push_json_str(&self.version, &mut out);
+        push_json_str(version, &mut out);
         out.push_str(",\"zid\":");
-        push_json_str(&self.zid_hex, &mut out);
+        push_json_str(zid_hex, &mut out);
         out.push('}');
-        out
     }
 }
 
@@ -743,28 +927,48 @@ impl AdminLocalData {
 /// built-in queryable answers a GET against.
 pub fn admin_root_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = String::with_capacity(2 + zid_hex.len() + 1 + whatami.len());
-    s.push_str("@/");
-    s.push_str(zid_hex);
-    s.push('/');
-    s.push_str(whatami);
+    write_admin_root_key(&mut s, zid_hex, whatami);
     s
+}
+
+/// [`admin_root_key`] written into any sink. Every admin key in this module is
+/// this prefix and a tail, and every `String`-returning key function below is its
+/// writer called over a `String`, so the fixed node's reply key and the AP's are
+/// the same bytes by construction.
+pub fn write_admin_root_key<W: TextOut + ?Sized>(out: &mut W, zid_hex: &str, whatami: &str) {
+    out.push_str("@/");
+    out.push_str(zid_hex);
+    out.push('/');
+    out.push_str(whatami);
+}
+
+/// The root key, then `/` and `tail`: `@/<zid>/<whatami>/<tail>`.
+fn write_admin_leg_key<W: TextOut + ?Sized>(out: &mut W, zid_hex: &str, whatami: &str, tail: &str) {
+    write_admin_root_key(out, zid_hex, whatami);
+    out.push('/');
+    out.push_str(tail);
 }
 
 /// The built-in admin queryable keyexpr `@/<zid>/<whatami>/**` — zenoh declares
 /// its admin queryable on `[root_key, "/**"].concat()` (`adminspace.rs:341`), so
 /// any admin GET under the node prefix routes to it.
 pub fn admin_queryable_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/**");
+    let mut s = String::new();
+    write_admin_queryable_key(&mut s, zid_hex, whatami);
     s
+}
+
+/// [`admin_queryable_key`] written into any sink.
+pub fn write_admin_queryable_key<W: TextOut + ?Sized>(out: &mut W, zid_hex: &str, whatami: &str) {
+    write_admin_leg_key(out, zid_hex, whatami, "**");
 }
 
 /// The admin metrics keyexpr `@/<zid>/<whatami>/metrics` — zenoh's `metrics`
 /// handler key (`adminspace.rs:164`).
 #[cfg(feature = "adminspace-metrics")]
 pub fn admin_metrics_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/metrics");
+    let mut s = String::new();
+    write_admin_leg_key(&mut s, zid_hex, whatami, "metrics");
     s
 }
 
@@ -776,8 +980,8 @@ pub fn admin_metrics_key(zid_hex: &str, whatami: &str) -> String {
 /// mirror of a zenoh read path). Ungated (part of adminspace-core): a config GET
 /// is core admin introspection, not a metrics-gated handler.
 pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/config");
+    let mut s = String::new();
+    write_admin_leg_key(&mut s, zid_hex, whatami, "config");
     s
 }
 
@@ -804,8 +1008,8 @@ pub const METRICS_ENCODING: &str = "application/openmetrics-text; version=1.0.0;
 /// carries a name upstream also uses, so a wz-native leg needs a namespace of its
 /// own or it becomes a name upstream can later collide with.
 pub fn admin_surface_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/wz/surface");
+    let mut s = String::new();
+    write_admin_leg_key(&mut s, zid_hex, whatami, "wz/surface");
     s
 }
 
@@ -880,8 +1084,50 @@ pub struct AdminLeg {
 /// among them, and re-joins a schema with `;`), so deriving from it means a leg
 /// that changes encoding cannot change what the document says about it without
 /// the two disagreeing.
+#[cfg(test)]
 fn leg_encoding_name(hint: &crate::sample::EncodingHint) -> String {
     crate::encoding::encoding_to_mime(hint)
+}
+
+/// The media type an admin leg replies in.
+///
+/// One value for both uses, the reply and the manifest row: the answerer hands its
+/// parts to the reply ([`crate::query_sink::ReplyOut::reply_keyed_encoded_parts`])
+/// and the manifest writes the name the encoding SSOT gives the same parts
+/// ([`crate::encoding::write_encoding_mime_parts`]), so a leg cannot say one thing
+/// and reply another. The parts are borrowed from constants, so choosing an
+/// encoding allocates nothing, which an owned `EncodingHint` of the metrics type
+/// (its schema is a `String`) could not promise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminLegEncoding {
+    /// `application/json`.
+    Json,
+    /// `text/plain`.
+    Text,
+    /// The OpenMetrics type, [`METRICS_ENCODING`].
+    #[cfg(feature = "adminspace-metrics")]
+    Metrics,
+}
+
+impl AdminLegEncoding {
+    /// The wire `(packed_id, schema)` of this encoding.
+    pub fn parts(self) -> (u32, Option<&'static str>) {
+        match self {
+            Self::Json => (
+                crate::sample::EncodingHint::APPLICATION_JSON.packed_id,
+                None,
+            ),
+            Self::Text => (crate::sample::EncodingHint::TEXT_PLAIN.packed_id, None),
+            #[cfg(feature = "adminspace-metrics")]
+            Self::Metrics => crate::encoding::encoding_parts_from_mime(METRICS_ENCODING),
+        }
+    }
+
+    /// The media type string of this encoding, written into any sink.
+    pub fn write_name<W: TextOut + ?Sized>(self, out: &mut W) {
+        let (packed_id, schema) = self.parts();
+        crate::encoding::write_encoding_mime_parts(packed_id, schema, out);
+    }
 }
 
 /// R2413 (open-debt item 676) — every admin leg THIS BUILD answers, in reply
@@ -906,95 +1152,123 @@ fn leg_encoding_name(hint: &crate::sample::EncodingHint) -> String {
 /// answerers for one GET (see the router-hat adminspace integration test) and a
 /// consumer sees one surface, not two. A peer never serves them, which is what the
 /// role predicate encodes.
+///
+/// S9b — the list is produced by [`visit_admin_legs`], which writes each key into
+/// a buffer its caller supplies and hands it over; this is that visitor called over
+/// `String`s, collected. The manifest document ([`write_admin_surface_json`]) is the
+/// same visitor over a fixed buffer, so the owned list and the written document
+/// cannot disagree about which legs exist.
 pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
-    use crate::sample::EncodingHint;
     let mut legs = Vec::new();
-    // Closures, not values: each row owns its rendered name, and the rendering
-    // stays a call into the encoding SSOT rather than a constant captured once.
-    let json = || leg_encoding_name(&EncodingHint::APPLICATION_JSON);
-    let text = || leg_encoding_name(&EncodingHint::TEXT_PLAIN);
+    let mut key = String::new();
+    // A `String` key buffer never refuses, so the visit cannot end early.
+    let _ = visit_admin_legs(
+        &mut key,
+        zid_hex,
+        whatami,
+        &mut |key, encoding, cardinality| {
+            let mut name = String::new();
+            encoding.write_name(&mut name);
+            legs.push(AdminLeg {
+                key: String::from(key),
+                // Rendered through the encoding SSOT from the same parts the reply
+                // uses, not captured once as a constant.
+                encoding: name,
+                cardinality,
+            });
+        },
+    );
+    legs
+}
 
+/// Every admin leg THIS BUILD answers, in reply order, one call of `visit` per leg
+/// with the leg's key (written into `key`), its encoding and its cardinality.
+///
+/// The one place the list of legs is written: [`admin_legs`] collects it and
+/// [`write_admin_surface_json`] writes it as the manifest document. `key` is the
+/// caller's buffer, reset before each leg, so a node with no allocator passes a
+/// fixed one; a key that does not fit it ends the visit with that buffer's
+/// [`Overflow`], having visited the legs before it, because a manifest that
+/// silently left a leg out would be the ambiguity it exists to remove.
+pub fn visit_admin_legs<K: AdminBuffer>(
+    key: &mut K,
+    zid_hex: &str,
+    whatami: &str,
+    visit: &mut dyn FnMut(&str, AdminLegEncoding, AdminLegCardinality),
+) -> Result<(), Overflow> {
+    /// One leg: build its key in `key`, then visit it.
+    fn leg<K: AdminBuffer>(
+        key: &mut K,
+        visit: &mut dyn FnMut(&str, AdminLegEncoding, AdminLegCardinality),
+        encoding: AdminLegEncoding,
+        cardinality: AdminLegCardinality,
+        build: impl FnOnce(&mut K),
+    ) -> Result<(), Overflow> {
+        key.reset();
+        build(key);
+        visit(key.contents()?, encoding, cardinality);
+        Ok(())
+    }
+
+    use AdminLegCardinality::Single;
+    use AdminLegEncoding::Json;
     // `local_data` — ungated, the one leg every adminspace build answers.
-    legs.push(AdminLeg {
-        key: admin_root_key(zid_hex, whatami),
-        encoding: json(),
-        cardinality: AdminLegCardinality::Single,
-    });
+    leg(key, visit, Json, Single, |k| {
+        write_admin_root_key(k, zid_hex, whatami)
+    })?;
     #[cfg(feature = "adminspace-metrics")]
-    legs.push(AdminLeg {
-        key: admin_metrics_key(zid_hex, whatami),
-        // Derived from the SAME constant the reply uses, through the same SSOT.
-        encoding: leg_encoding_name(&crate::encoding::encoding_from_mime(METRICS_ENCODING)),
-        cardinality: AdminLegCardinality::Single,
-    });
-    legs.push(AdminLeg {
-        key: admin_config_key(zid_hex, whatami),
-        encoding: json(),
-        cardinality: AdminLegCardinality::Single,
-    });
+    leg(key, visit, AdminLegEncoding::Metrics, Single, |k| {
+        write_admin_leg_key(k, zid_hex, whatami, "metrics")
+    })?;
+    leg(key, visit, Json, Single, |k| {
+        write_admin_leg_key(k, zid_hex, whatami, "config")
+    })?;
     // R2691 — DERIVED from the kind set, not listed. A literal here was a second
     // place the variant set lived, and the gate that compares this manifest to the
     // answerer could not catch an omission: its population is the fixture, so a
     // kind nothing exercises is vacuous in both directions.
     #[cfg(feature = "adminspace-introspection-handlers")]
     for kind in AdminEntityKind::ALL {
-        legs.push(AdminLeg {
-            key: admin_entity_key(zid_hex, whatami, kind.as_str(), "**"),
-            encoding: json(),
-            cardinality: AdminLegCardinality::PerItem,
-        });
+        leg(key, visit, Json, AdminLegCardinality::PerItem, |k| {
+            write_admin_entity_key(k, zid_hex, whatami, kind.as_str(), "**")
+        })?;
     }
     #[cfg(feature = "adminspace-plugins-handlers")]
     {
-        legs.push(AdminLeg {
-            key: admin_plugin_key(zid_hex, whatami, "*"),
-            encoding: json(),
-            cardinality: AdminLegCardinality::PerItem,
-        });
-        legs.push(AdminLeg {
-            key: admin_plugin_status_path_key(zid_hex, whatami, "*"),
-            encoding: text(),
-            cardinality: AdminLegCardinality::PerItem,
-        });
-        let mut leaves = admin_plugin_status_root_key(zid_hex, whatami, "*");
-        leaves.push_str("/**");
-        legs.push(AdminLeg {
-            key: leaves,
-            encoding: json(),
-            cardinality: AdminLegCardinality::PerItem,
-        });
+        leg(key, visit, Json, AdminLegCardinality::PerItem, |k| {
+            write_admin_plugin_key(k, zid_hex, whatami, "*")
+        })?;
+        leg(
+            key,
+            visit,
+            AdminLegEncoding::Text,
+            AdminLegCardinality::PerItem,
+            |k| write_admin_plugin_status_path_key(k, zid_hex, whatami, "*"),
+        )?;
+        leg(key, visit, Json, AdminLegCardinality::PerItem, |k| {
+            write_admin_plugin_status_root_key(k, zid_hex, whatami, "*");
+            k.push_str("/**");
+        })?;
     }
     // The surface document itself. Listed because a leg a consumer can GET and
     // cannot find in the manifest is exactly the ambiguity this document exists to
     // remove — including when that leg is this one.
-    legs.push(AdminLeg {
-        key: admin_surface_key(zid_hex, whatami),
-        encoding: json(),
-        cardinality: AdminLegCardinality::Single,
-    });
+    leg(key, visit, Json, Single, |k| {
+        write_admin_leg_key(k, zid_hex, whatami, "wz/surface")
+    })?;
     #[cfg(feature = "adminspace-router-linkstate")]
     if whatami == "router" {
-        legs.push(AdminLeg {
-            key: admin_linkstate_routers_key(zid_hex, whatami),
-            encoding: text(),
-            cardinality: AdminLegCardinality::Single,
-        });
-        legs.push(AdminLeg {
-            key: admin_linkstate_peers_key(zid_hex, whatami),
-            encoding: text(),
-            cardinality: AdminLegCardinality::Single,
-        });
-        let mut successors = admin_route_successor_prefix(zid_hex, whatami);
-        successors.push_str("/**");
-        legs.push(AdminLeg {
-            key: successors,
-            encoding: json(),
-            cardinality: AdminLegCardinality::PerItem,
-        });
+        leg(key, visit, AdminLegEncoding::Text, Single, |k| {
+            write_admin_leg_key(k, zid_hex, whatami, "linkstate/routers")
+        })?;
+        leg(key, visit, AdminLegEncoding::Text, Single, |k| {
+            write_admin_leg_key(k, zid_hex, whatami, "linkstate/peers")
+        })?;
+        leg(key, visit, Json, AdminLegCardinality::PerItem, |k| {
+            write_admin_leg_key(k, zid_hex, whatami, "route/successor/**")
+        })?;
     }
-    // Silence the unused binding in a build that compiles no text/plain leg.
-    let _ = text;
-    legs
+    Ok(())
 }
 
 /// R2413 (open-debt item 676) — the root document fields this build emits as
@@ -1032,7 +1306,10 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
 /// silence. It is no longer silent: a router fills it from its own `links_info`,
 /// and where it is `null` that is an ANSWER ("no weighted link to this peer"),
 /// which is what the pin reports too. A consumer SHOULD wait for it.
-pub fn admin_unspoken_fields() -> Vec<&'static str> {
+///
+/// S9b — a static slice, not a `Vec`: the list is a constant of the build, and a
+/// node with no allocator writes it into its manifest without making one.
+pub fn admin_unspoken_fields() -> &'static [&'static str] {
     // R2637 — SPELLED OUT PER BUILD rather than accumulated with pushes. The
     // accumulator earned its keep while this list had two conditional members;
     // with `sessions[].weight` gone only `plugins` is conditional, so a build
@@ -1048,9 +1325,9 @@ pub fn admin_unspoken_fields() -> Vec<&'static str> {
     // §5.23 `adminspace-core` — `metadata` LEFT both literals, so a build that
     // speaks plugins now declares NO silence at all.
     #[cfg(feature = "adminspace-plugins-handlers")]
-    let fields = alloc::vec![];
+    let fields: &'static [&'static str] = &[];
     #[cfg(not(feature = "adminspace-plugins-handlers"))]
-    let fields = alloc::vec!["plugins"];
+    let fields: &'static [&'static str] = &["plugins"];
     // `sessions[].weight` LEFT this list, unconditionally, and the reason
     // is semantic rather than a feature question. Once the field can be filled, a
     // `null` weight means "this node holds no weighted link to that peer" — which
@@ -1099,6 +1376,25 @@ pub fn admin_unspoken_fields() -> Vec<&'static str> {
 /// Merging the two into one row was the alternative and it loses the encoding
 /// axis, which is question two of the three this document exists to answer.
 pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
+    let mut out = String::new();
+    let mut key = String::new();
+    // `String` sinks never refuse, so the write cannot end early.
+    let _ = write_admin_surface_json(&mut out, &mut key, zid_hex, whatami);
+    out
+}
+
+/// [`admin_surface_json`] written into any sink, with the buffer the leg keys are
+/// assembled in supplied by the caller: the manifest of a node with no allocator.
+///
+/// `Err` only when a LEG KEY does not fit `key` ([`visit_admin_legs`]); the
+/// document is then not complete and must not be sent. A refusal of `out` itself is
+/// `out`'s to report, as for every writer here.
+pub fn write_admin_surface_json<W: TextOut + ?Sized, K: AdminBuffer>(
+    mut out: &mut W,
+    key: &mut K,
+    zid_hex: &str,
+    whatami: &str,
+) -> Result<(), Overflow> {
     // R2637 — revision 1 -> 2. Moved by this document's OWN rule: it moves "when a
     // consumer that parsed the previous shape would misread this one". A consumer
     // of revision 1 read `sessions[].weight` in `unspoken` and therefore knew the
@@ -1110,23 +1406,32 @@ pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
     // same kind of reason: a consumer of revision 2 read `metadata` in
     // `unspoken` and knew it was permanently `null`, and it is now the node
     // config's value.
-    let mut out = String::from("{\"revision\":3,\"legs\":[");
-    for (i, leg) in admin_legs(zid_hex, whatami).iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"key\":");
-        push_json_str(&leg.key, &mut out);
-        out.push_str(",\"encoding\":");
-        push_json_str(&leg.encoding, &mut out);
-        out.push_str(",\"cardinality\":");
-        push_json_str(leg.cardinality.as_str(), &mut out);
-        out.push('}');
-    }
+    out.push_str("{\"revision\":3,\"legs\":[");
+    let mut first = true;
+    visit_admin_legs(
+        key,
+        zid_hex,
+        whatami,
+        &mut |leg_key, encoding, cardinality| {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push_str("{\"key\":");
+            push_json_str(leg_key, &mut out);
+            out.push_str(",\"encoding\":\"");
+            // The media type is written through the escaper piece by piece, so it
+            // needs no buffer of its own: `"` + name + `"`, escaped as one string.
+            encoding.write_name(&mut crate::json::JsonStringBody(&mut out));
+            out.push_str("\",\"cardinality\":");
+            push_json_str(cardinality.as_str(), &mut out);
+            out.push('}');
+        },
+    )?;
     out.push_str("],\"unspoken\":");
     crate::json::push_str_array(admin_unspoken_fields(), &mut out);
     out.push('}');
-    out
+    Ok(())
 }
 
 /// The declaring-node buckets for an admin introspection entry — the wz analogue of
@@ -1156,15 +1461,14 @@ impl AdminSources {
     /// Zenoh's `Sources` JSON: `{"routers":[..],"peers":[..],"clients":[..]}` (serde
     /// field order), each bucket a JSON array of hex-zid strings. Built via the same
     /// `json::push_str_array` SSOT [`AdminLocalData::to_json`] uses (quote + escape).
-    fn to_json(&self) -> String {
-        let mut out = String::from("{\"routers\":");
+    fn write_json<W: TextOut + ?Sized>(&self, mut out: &mut W) {
+        out.push_str("{\"routers\":");
         crate::json::push_str_array(&self.routers, &mut out);
         out.push_str(",\"peers\":");
         crate::json::push_str_array(&self.peers, &mut out);
         out.push_str(",\"clients\":");
         crate::json::push_str_array(&self.clients, &mut out);
         out.push('}');
-        out
     }
 }
 
@@ -1303,14 +1607,27 @@ pub struct AdminDeclaration {
 /// ill-formed target that [`keyexpr_match::keyexpr_intersects_target`] treats as
 /// no-match (silently skipped) — wz's no-panic posture, NOT zenoh's
 /// `.try_into().unwrap()`.
-#[cfg(feature = "adminspace-introspection-handlers")]
+#[cfg(all(test, feature = "adminspace-introspection-handlers"))]
 fn admin_entity_key(zid_hex: &str, whatami: &str, kind: &str, pattern: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push('/');
-    s.push_str(kind);
-    s.push('/');
-    s.push_str(pattern);
+    let mut s = String::new();
+    write_admin_entity_key(&mut s, zid_hex, whatami, kind, pattern);
     s
+}
+
+/// [`admin_entity_key`] written into any sink.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn write_admin_entity_key<W: TextOut + ?Sized>(
+    out: &mut W,
+    zid_hex: &str,
+    whatami: &str,
+    kind: &str,
+    pattern: &str,
+) {
+    write_admin_root_key(out, zid_hex, whatami);
+    out.push('/');
+    out.push_str(kind);
+    out.push('/');
+    out.push_str(pattern);
 }
 
 // R2824 — the two constants, and the membership decision below, moved to the
@@ -1513,11 +1830,15 @@ impl AdminConfigWriteSpace {
 /// (`adminspace.rs:934`); the `id` here is the wz subsystem id (`storage_manager`,
 /// `rest`).
 #[cfg(feature = "adminspace-plugins-handlers")]
-fn admin_plugin_key(zid_hex: &str, whatami: &str, id: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/plugins/");
-    s.push_str(id);
-    s
+fn write_admin_plugin_key<W: TextOut + ?Sized>(
+    out: &mut W,
+    zid_hex: &str,
+    whatami: &str,
+    id: &str,
+) {
+    write_admin_root_key(out, zid_hex, whatami);
+    out.push_str("/plugins/");
+    out.push_str(id);
 }
 
 /// R311y237 (§5.23 `adminspace-plugins-handlers`) — the per-plugin status-path
@@ -1525,10 +1846,14 @@ fn admin_plugin_key(zid_hex: &str, whatami: &str, id: &str) -> String {
 /// `plugins_status` handler replies each STARTED plugin's `path()` under this
 /// `__path__` leaf as `text/plain` (`adminspace.rs:963-969`).
 #[cfg(feature = "adminspace-plugins-handlers")]
-fn admin_plugin_status_path_key(zid_hex: &str, whatami: &str, id: &str) -> String {
-    let mut s = admin_plugin_status_root_key(zid_hex, whatami, id);
-    s.push_str("/__path__");
-    s
+fn write_admin_plugin_status_path_key<W: TextOut + ?Sized>(
+    out: &mut W,
+    zid_hex: &str,
+    whatami: &str,
+    id: &str,
+) {
+    write_admin_plugin_status_root_key(out, zid_hex, whatami, id);
+    out.push_str("/__path__");
 }
 
 /// R311y828 (§5.23 `adminspace-plugins-handlers`) — the per-plugin STATUS ROOT
@@ -1538,11 +1863,15 @@ fn admin_plugin_status_path_key(zid_hex: &str, whatami: &str, id: &str) -> Strin
 /// `adminspace_getter` as `plugin_status_key` (`adminspace.rs:961, 987`), which is
 /// why the getter's own keys are relative to it.
 #[cfg(feature = "adminspace-plugins-handlers")]
-fn admin_plugin_status_root_key(zid_hex: &str, whatami: &str, id: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/status/plugins/");
-    s.push_str(id);
-    s
+fn write_admin_plugin_status_root_key<W: TextOut + ?Sized>(
+    out: &mut W,
+    zid_hex: &str,
+    whatami: &str,
+    id: &str,
+) {
+    write_admin_root_key(out, zid_hex, whatami);
+    out.push_str("/status/plugins/");
+    out.push_str(id);
 }
 
 /// R311y45 (§5.23 Phase 2b) — the node-identity + version + locators + GET
@@ -1613,165 +1942,400 @@ pub struct AdminAnswerCtx<'a> {
 
 /// Stage one admin-space reply, logging a refusal the way upstream logs it.
 ///
-/// Every admin reply goes through `ReplyOut::reply_keyed_encoded`, which can
-/// refuse a key the query does not cover. The handlers below only reply under a
-/// key they have already matched against the query, so a refusal here is a
-/// handler defect rather than a caller's choice — and upstream treats it the
-/// same way: `zenoh/src/net/runtime/adminspace.rs`
+/// Every admin reply goes through `ReplyOut::reply_keyed_encoded_parts`, which can
+/// refuse a key the query does not cover, and, on the fixed backing, a reply the
+/// session's stage has no room for. The handlers below only reply under a key they
+/// have already matched against the query, so a key refusal here is a handler
+/// defect rather than a caller's choice — and upstream treats it the same way:
+/// `zenoh/src/net/runtime/adminspace.rs`
 /// @ `tracing::error!("Error sending AdminSpace reply: {:?}", e);`. One helper
-/// keeps the eleven replies from each owning a copy of that wording.
-fn reply_admin(
+/// keeps the replies from each owning a copy of that wording; the refusal is
+/// handed back so the answerer counts it.
+fn reply_leg(
     out: &mut dyn crate::query_sink::ReplyOut,
     key: &str,
-    body: &[u8],
-    encoding: Option<&crate::sample::EncodingHint>,
-) {
-    if let Err(e) = out.reply_keyed_encoded(key, body, encoding) {
+    body: &str,
+    encoding: AdminLegEncoding,
+) -> Result<(), crate::query_sink::ReplyError> {
+    let (packed_id, schema) = encoding.parts();
+    let staged = out.reply_keyed_encoded_parts(key, body.as_bytes(), packed_id, schema);
+    if let Err(e) = &staged {
         log::error!("Error sending AdminSpace reply: {:?}", e);
+    }
+    staged
+}
+
+/// Whether the GET `query` intersects the admin key `key`.
+///
+/// The key is split into a chunk view on the stack, bounded as every keyexpr scan
+/// in this crate is ([`crate::keyexpr_match::MAX_KEYEXPR_CHUNKS`]): unbounded on the
+/// growable backing, so the AP answers exactly as before, and a key deeper than the
+/// bound is not a match on a no-heap node.
+fn key_intersects_query(query: &str, key: &str) -> bool {
+    let mut chunks: crate::bounded::BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
+        crate::bounded::BoundedVec::new();
+    for chunk in key.split('/') {
+        if chunks.push(chunk).is_err() {
+            return false;
+        }
+    }
+    crate::keyexpr_match::keyexpr_intersects_target(query, &chunks)
+}
+
+/// What a node tells in its admin replies, for [`answer_admin_query_in`]: its
+/// identity and the rows it holds, each as a borrowed view or an iterator over
+/// them. Nothing here is copied into an owned record, so a node that keeps its
+/// peers in fixed storage answers without allocating.
+///
+/// `sessions`, `multicast_peers` and `locators` are walked once, in order, by the
+/// root document, which is the only leg that reads them.
+pub struct AdminNodeFacts<'a, S, M, L> {
+    /// This node's zid in zenoh hex form.
+    pub zid_hex: &'a str,
+    /// This node's role string (`WhatAmI::to_str`).
+    pub whatami: &'a str,
+    /// The embedder-supplied version string.
+    pub version: &'a str,
+    /// The node config's `metadata` as JSON text, `"null"` when unset; see
+    /// [`AdminLocalData::metadata_json`].
+    pub metadata_json: &'a str,
+    /// The admin GET permission: `false` answers nothing ([`AdminAnswerCtx::read`]).
+    pub read: bool,
+    /// This node's stats registry, if it has one ([`AdminAnswerCtx::stats`]).
+    pub stats: Option<&'a crate::stats_registry::StatsRegistry>,
+    /// The node's listening locators.
+    pub locators: L,
+    /// The connected unicast peers.
+    pub sessions: S,
+    /// The members of the multicast groups this node is on.
+    pub multicast_peers: M,
+}
+
+/// What [`answer_admin_query_in`] did: the outcome of the read gate, and every leg
+/// it refused, counted by why.
+///
+/// A leg is refused, never cut: a body that does not fit its buffer is answered
+/// with a typed error reply and counted in [`AdminReplyRefusals::too_large`]; a key
+/// that does not fit is counted in `key_too_long` and the leg is not answered; a
+/// reply the session's stage refused is counted in `refused_by_stage`. One leg's
+/// refusal leaves the others served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "an admin answer reports the legs it refused"]
+pub struct AdminAnswer {
+    /// Whether the `read` gate served the GET or denied it.
+    pub outcome: AdminAnswerOutcome,
+    /// The legs this call refused, by why.
+    pub refusals: crate::admin_reply::AdminReplyRefusals,
+    /// The first refusal, for a caller that wants one value to act on.
+    pub first_error: Option<AdminReplyError>,
+}
+
+impl AdminAnswer {
+    fn served() -> Self {
+        Self {
+            outcome: AdminAnswerOutcome::Served,
+            refusals: crate::admin_reply::AdminReplyRefusals::default(),
+            first_error: None,
+        }
+    }
+
+    fn note(&mut self, error: AdminReplyError) {
+        self.refusals.note(&error);
+        self.first_error.get_or_insert(error);
+    }
+
+    /// The outcome, or the first refusal: `Ok` means every leg the GET reached was
+    /// replied to whole.
+    pub fn into_result(self) -> Result<AdminAnswerOutcome, AdminReplyError> {
+        match self.first_error {
+            Some(error) => Err(error),
+            None => Ok(self.outcome),
+        }
     }
 }
 
-/// R311y45 (§5.23 Phase 2b) — the Session-INDEPENDENT admin-query answerer: the
-/// match+reply SSOT BOTH the Session-level adminspace queryable AND the
-/// forwarder-hosted routing-peer admin call, so both emit byte-identical replies.
-/// Fires every admin handler whose key INTERSECTS the GET keyexpr (zenoh's
-/// `for (key, handler) in handlers { if key_expr.intersects(key) { .. } }`,
-/// `adminspace.rs:499-503`): root `local_data`, `metrics` (under
-/// `adminspace-metrics`), `config`, the per-entity `subscriber`/`queryable`
-/// introspection (under `adminspace-introspection-handlers`), and the
-/// `plugins`/`status/plugins` legs (under `adminspace-plugins-handlers`).
-/// `read=false` answers NOTHING (the dispatch SSOT still emits the terminating
-/// Final — zenoh's bare ResponseFinal on deny, `:462-467`) and RETURNS
-/// [`AdminAnswerOutcome::DeniedRead`], which is the host's cue to emit the deny
-/// diagnostic zenoh logs inside its own gate. The reply path is the same
-/// `reply_keyed_encoded` the Session queryable uses.
+/// The typed refusal a querier receives in place of a body that did not fit: an
+/// Err reply (JSON) naming what was refused and the two sizes, so an operator reads
+/// from the querier's side how large the node's reply buffer would have to be.
+fn refuse_too_large(out: &mut dyn crate::query_sink::ReplyOut, overflow: Overflow) {
+    use core::fmt::Write as _;
+    let mut message: crate::text_out::FixedText<128> = crate::text_out::FixedText::new();
+    let _ = write!(
+        message,
+        "{{\"error\":\"admin_reply_too_large\",\"needed\":{},\"capacity\":{}}}",
+        overflow.needed, overflow.capacity
+    );
+    // 128 bytes hold the longest message a 64-bit `usize` makes, so this is the
+    // whole message; if it were not, an Err reply with a cut message is the one
+    // thing not worth sending.
+    if let Ok(text) = message.finish() {
+        out.reply_err(
+            Some(u32::from(crate::encoding::ID_APPLICATION_JSON)),
+            None,
+            text.as_bytes(),
+        );
+    }
+}
+
+/// One GET's run over the admin legs: the buffers each leg is written into, the
+/// reply sink, the query's keyexpr, and what has been refused so far.
+struct LegRun<'r, K: AdminBuffer, B: AdminBuffer> {
+    key: &'r mut K,
+    body: &'r mut B,
+    out: &'r mut dyn crate::query_sink::ReplyOut,
+    query: &'r str,
+    report: AdminAnswer,
+}
+
+impl<K: AdminBuffer, B: AdminBuffer> LegRun<'_, K, B> {
+    /// Serve one leg whose body is WRITTEN: build its key, and if the GET
+    /// intersects it, build the body and reply.
+    ///
+    /// `write_key` runs again after the body is written, because the manifest leg
+    /// uses the key buffer to assemble the keys it lists and a key that has to
+    /// survive the body is rebuilt, not kept: that is what lets the leg run in
+    /// exactly the two buffers a node was given.
+    fn serve(
+        &mut self,
+        encoding: AdminLegEncoding,
+        write_key: impl Fn(&mut K),
+        write_body: impl FnOnce(&mut B, &mut K) -> Result<(), Overflow>,
+    ) {
+        self.key.reset();
+        write_key(self.key);
+        match self.key.contents() {
+            Ok(key) if !key_intersects_query(self.query, key) => return,
+            Ok(_) => {}
+            Err(overflow) => {
+                self.report.note(AdminReplyError::KeyTooLong(overflow));
+                return;
+            }
+        }
+        self.body.reset();
+        let scratch = write_body(self.body, self.key);
+        self.key.reset();
+        write_key(self.key);
+        // A document that listed a key which did not fit the key buffer is not the
+        // whole document, whatever its own buffer says: the leg is not answered.
+        if let Err(overflow) = scratch {
+            self.report.note(AdminReplyError::KeyTooLong(overflow));
+            return;
+        }
+        // The key fit a moment ago and the same writer wrote it again, so it fits;
+        // were that ever not so, it is counted like any other key that did not.
+        let key = match self.key.contents() {
+            Ok(key) => key,
+            Err(overflow) => {
+                self.report.note(AdminReplyError::KeyTooLong(overflow));
+                return;
+            }
+        };
+        match self.body.contents() {
+            Ok(body) => {
+                if let Err(e) = reply_leg(self.out, key, body, encoding) {
+                    self.report.note(AdminReplyError::Refused(e));
+                }
+            }
+            Err(overflow) => {
+                refuse_too_large(self.out, overflow);
+                self.report.note(AdminReplyError::TooLarge(overflow));
+            }
+        }
+    }
+
+    /// Serve one leg whose body is ALREADY text (a rendered config, a plugin's
+    /// path, a leaf the host rendered): build its key, and if the GET intersects
+    /// it, reply with `body` as it is. Nothing is copied.
+    ///
+    /// `body` is a result because a host that rendered it into a fixed buffer
+    /// hands over that buffer's refusal with it: a leg whose document did not fit
+    /// is refused, counted and answered with the typed error, and it is the leg
+    /// that is refused, not the whole GET.
+    fn serve_text(
+        &mut self,
+        encoding: AdminLegEncoding,
+        write_key: impl FnOnce(&mut K),
+        body: Result<&str, Overflow>,
+    ) {
+        self.key.reset();
+        write_key(self.key);
+        match (self.key.contents(), body) {
+            (Ok(key), _) if !key_intersects_query(self.query, key) => {}
+            (Ok(key), Ok(body)) => {
+                if let Err(e) = reply_leg(self.out, key, body, encoding) {
+                    self.report.note(AdminReplyError::Refused(e));
+                }
+            }
+            (Ok(_), Err(overflow)) => {
+                refuse_too_large(self.out, overflow);
+                self.report.note(AdminReplyError::TooLarge(overflow));
+            }
+            (Err(overflow), _) => self.report.note(AdminReplyError::KeyTooLong(overflow)),
+        }
+    }
+}
+
+/// The admin-query answerer written into buffers its caller supplies, and reading
+/// its node's state as borrowed rows: the allocation-free form of
+/// [`answer_admin_query`], which is this function called with `String` buffers over
+/// an owned [`AdminAnswerCtx`].
 ///
-/// `plugins` is the node's compiled-in subsystem registry (surface A/B/C); it is
-/// consumed by [`AdminLocalData::plugins`] unconditionally (so the parameter is
-/// always used) and by the `plugins/**` + `status/plugins/**` reply blocks under
-/// the feature.
-pub fn answer_admin_query(
+/// `key` receives each leg's reply key and `body` each leg's document, one leg at a
+/// time. With a fixed buffer ([`crate::text_out::FixedText`]) nothing is allocated
+/// here; a leg that does not fit is refused, counted in the returned
+/// [`AdminAnswer`] and answered to the querier as a typed error, never cut short. See
+/// [`answer_admin_query`] for the legs and their gates.
+///
+/// `config_json` is the `config` leg's document as a RESULT, because a node that
+/// rendered it into a fixed buffer hands that buffer's refusal over with it
+/// ([`crate::text_out::FixedText::finish`]): the leg is then refused, counted and
+/// answered with the typed error, and the other legs of the GET are served.
+#[allow(clippy::too_many_arguments)]
+pub fn answer_admin_query_in<'a, K, B, S, M, L>(
+    key: &mut K,
+    body: &mut B,
     view: &dyn crate::query_sink::QueryView,
     out: &mut dyn crate::query_sink::ReplyOut,
-    ctx: &AdminAnswerCtx,
-    sessions: &[AdminSession],
+    node: AdminNodeFacts<'a, S, M, L>,
     declarations: &[AdminDeclaration],
     plugins: &[AdminPlugin],
-    config_json: &str,
-) -> AdminAnswerOutcome {
-    if !ctx.read {
-        return AdminAnswerOutcome::DeniedRead;
+    config_json: Result<&str, Overflow>,
+) -> AdminAnswer
+where
+    K: AdminBuffer,
+    B: AdminBuffer,
+    S: Iterator<Item = AdminSessionRef<'a>>,
+    M: Iterator<Item = AdminMulticastPeerRef<'a>>,
+    L: Iterator<Item = &'a str>,
+{
+    let mut run = LegRun {
+        key,
+        body,
+        out,
+        query: view.keyexpr(),
+        report: AdminAnswer::served(),
+    };
+    if !node.read {
+        run.report.outcome = AdminAnswerOutcome::DeniedRead;
+        return run.report;
     }
+    let AdminNodeFacts {
+        zid_hex,
+        whatami,
+        version,
+        metadata_json,
+        stats,
+        locators,
+        sessions,
+        multicast_peers,
+        read: _,
+    } = node;
     // `declarations` is consumed ONLY by the `adminspace-introspection-handlers`
     // reply block below; keep the parameter unconditional (signature stability) and
     // consume it here when the feature is off.
     #[cfg(not(feature = "adminspace-introspection-handlers"))]
     let _ = declarations;
-    let ke = view.keyexpr();
+    #[cfg(not(feature = "adminspace-metrics"))]
+    let _ = (stats, version);
 
     // `local_data` (root key `@/<zid>/<whatami>`).
-    let root_key = admin_root_key(ctx.zid_hex, ctx.whatami);
-    let root_chunks: Vec<&str> = root_key.split('/').collect();
-    if crate::keyexpr_match::keyexpr_intersects_target(ke, &root_chunks) {
-        let data = AdminLocalData {
-            zid_hex: String::from(ctx.zid_hex),
-            version: String::from(ctx.version),
-            locators: ctx.locators.to_vec(),
-            sessions: sessions.to_vec(),
-            multicast_peers: ctx.multicast_peers.to_vec(),
-            // Surface A: the `plugins` field object (started-only) — always set so
-            // `plugins` is a used parameter regardless of the feature; `to_json`
+    run.serve(
+        AdminLegEncoding::Json,
+        |k| write_admin_root_key(k, zid_hex, whatami),
+        |b, _| {
+            // Surface A: the `plugins` field object (started-only) — always passed so
+            // `plugins` is a used parameter regardless of the feature; the writer
             // emits `null` when `adminspace-plugins-handlers` is off.
-            plugins: plugins.to_vec(),
-            metadata_json: String::from(ctx.metadata_json),
-        };
-        reply_admin(
-            out,
-            &root_key,
-            data.to_json().as_bytes(),
-            Some(&crate::sample::EncodingHint::APPLICATION_JSON),
-        );
-    }
+            AdminLocalData::write_json(
+                b,
+                zid_hex,
+                version,
+                metadata_json,
+                locators,
+                sessions,
+                multicast_peers,
+                plugins,
+            );
+            Ok(())
+        },
+    );
 
     // `metrics` (`@/<zid>/<whatami>/metrics`, OpenMetrics text) — under
     // adminspace-metrics. R2414 moved the encoding to the pin's own
     // `METRICS_ENCODING` and the document now closes with `# EOF`.
     #[cfg(feature = "adminspace-metrics")]
     {
-        let metrics_key = admin_metrics_key(ctx.zid_hex, ctx.whatami);
-        let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
-        if crate::keyexpr_match::keyexpr_intersects_target(ke, &metrics_chunks) {
-            let parameters = view.parameters();
-            let param = |key: &str| crate::selector_params::param_value_bytes(parameters, key);
-            // R2843 — the two bodies upstream serves, chosen by the VALUE the
-            // host passed, not by a `#[cfg]` (the same shape `ctx.read` uses).
-            // With a registry the body IS its document, build info first and
-            // `# EOF` last, under the four partition parameters upstream reads
-            // (`zenoh/src/net/runtime/adminspace.rs` @ `.encode_metrics(`).
-            // Without one it is the build-info block alone, upstream's
-            // `not(feature = "stats")` arm. Both are whole documents, so the
-            // terminator is part of each rather than appended after it.
-            let mut body = match ctx.stats {
-                Some(registry) => {
-                    let mut doc = String::new();
-                    registry.encode_metrics(
-                        &mut doc,
-                        crate::stats_registry::MetricsQuery::from_parameters(param),
-                    );
-                    doc
+        // The one leg whose document is NOT written by the writers of this module:
+        // a stats registry renders itself into a `String` (`StatsRegistry::encode_metrics`),
+        // so this leg builds that `String` and copies it into the buffer. It is an
+        // AP leg (a registry is a heap structure the host owns, and a node without
+        // an allocator holds none); it is the only leg here that allocates.
+        let parameters = view.parameters();
+        run.serve(
+            AdminLegEncoding::Metrics,
+            |k| write_admin_leg_key(k, zid_hex, whatami, "metrics"),
+            |b, _| {
+                let param = |key: &str| crate::selector_params::param_value_bytes(parameters, key);
+                // R2843 — the two bodies upstream serves, chosen by the VALUE the
+                // host passed, not by a `#[cfg]` (the same shape `ctx.read` uses).
+                // With a registry the body IS its document, build info first and
+                // `# EOF` last, under the four partition parameters upstream reads
+                // (`zenoh/src/net/runtime/adminspace.rs` @ `.encode_metrics(`).
+                // Without one it is the build-info block alone, upstream's
+                // `not(feature = "stats")` arm. Both are whole documents, so the
+                // terminator is part of each rather than appended after it.
+                let doc = match stats {
+                    Some(registry) => {
+                        let mut doc = String::new();
+                        registry.encode_metrics(
+                            &mut doc,
+                            crate::stats_registry::MetricsQuery::from_parameters(param),
+                        );
+                        doc
+                    }
+                    None => {
+                        let mut doc = metrics_text(zid_hex, whatami, version);
+                        doc.push_str(metrics_eof());
+                        doc
+                    }
+                };
+                // R2494 (open-debt item 677) — upstream's `descriptors` parameter.
+                // Upstream's own arm drops every `#` line and re-appends the
+                // terminator it dropped with them:
+                // `zenoh/src/net/runtime/adminspace.rs` @ `if query.parameters().get("descriptors") == Some("false") {`
+                //
+                // EQUALITY against `"false"`, not a presence test:
+                // [`crate::selector_params::param_value`] documents that a VALUELESS
+                // key yields `Some("")` (zenoh's own `get` semantics), so a bare
+                // `?descriptors` must leave the descriptors ON. Upstream's `==
+                // Some("false")` says the same; `is_some()` would not.
+                //
+                // ⚠ R2843: the re-append is now upstream's step for upstream's
+                // reason. Until this round wz appended `metrics_eof()` AFTER the
+                // filter and could skip it; both bodies above are now whole
+                // documents with the terminator inside the filtered text, which is
+                // the shape upstream's `.chain(["# EOF\n"])` exists for.
+                if param("descriptors") == Some("false") {
+                    for line in doc.lines().filter(|l| !l.starts_with('#')) {
+                        b.push_str(line);
+                        b.push('\n');
+                    }
+                    b.push_str(metrics_eof());
+                } else {
+                    b.push_str(&doc);
                 }
-                None => {
-                    let mut doc = metrics_text(ctx.zid_hex, ctx.whatami, ctx.version);
-                    doc.push_str(metrics_eof());
-                    doc
-                }
-            };
-            // R2494 (open-debt item 677) — upstream's `descriptors` parameter.
-            // Upstream's own arm drops every `#` line and re-appends the
-            // terminator it dropped with them:
-            // `zenoh/src/net/runtime/adminspace.rs` @ `if query.parameters().get("descriptors") == Some("false") {`
-            //
-            // EQUALITY against `"false"`, not a presence test:
-            // [`crate::selector_params::param_value`] documents that a VALUELESS
-            // key yields `Some("")` (zenoh's own `get` semantics), so a bare
-            // `?descriptors` must leave the descriptors ON. Upstream's `==
-            // Some("false")` says the same; `is_some()` would not.
-            //
-            // ⚠ R2843: the re-append is now upstream's step for upstream's
-            // reason. Until this round wz appended `metrics_eof()` AFTER the
-            // filter and could skip it; both bodies above are now whole
-            // documents with the terminator inside the filtered text, which is
-            // the shape upstream's `.chain(["# EOF\n"])` exists for.
-            if param("descriptors") == Some("false") {
-                let mut kept: alloc::string::String = body
-                    .lines()
-                    .filter(|l| !l.starts_with('#'))
-                    .map(|l| alloc::format!("{l}\n"))
-                    .collect();
-                kept.push_str(metrics_eof());
-                body = kept;
-            }
-            reply_admin(
-                out,
-                &metrics_key,
-                body.as_bytes(),
-                Some(&crate::encoding::encoding_from_mime(METRICS_ENCODING)),
-            );
-        }
+                Ok(())
+            },
+        );
     }
 
     // `config` (`@/<zid>/<whatami>/config`): the typed WzConfig read-at-open JSON
     // the caller supplies (a routing peer reads its LIVE shared instance per query).
-    let config_key = admin_config_key(ctx.zid_hex, ctx.whatami);
-    let config_chunks: Vec<&str> = config_key.split('/').collect();
-    if crate::keyexpr_match::keyexpr_intersects_target(ke, &config_chunks) {
-        reply_admin(
-            out,
-            &config_key,
-            config_json.as_bytes(),
-            Some(&crate::sample::EncodingHint::APPLICATION_JSON),
-        );
-    }
+    run.serve_text(
+        AdminLegEncoding::Json,
+        |k| write_admin_leg_key(k, zid_hex, whatami, "config"),
+        config_json,
+    );
 
     // `subscriber` / `queryable` per-entity introspection (`@/<zid>/<whatami>/
     // {subscriber,queryable}/<keyexpr>`) — under `adminspace-introspection-handlers`.
@@ -1782,19 +2346,16 @@ pub fn answer_admin_query(
     // matcher's well-formed guard (wz never replicates zenoh's `.unwrap()` panic).
     #[cfg(feature = "adminspace-introspection-handlers")]
     for decl in declarations {
-        let entity_key =
-            admin_entity_key(ctx.zid_hex, ctx.whatami, decl.kind.as_str(), &decl.keyexpr);
-        let entity_chunks: Vec<&str> = entity_key.split('/').collect();
-        if crate::keyexpr_match::keyexpr_intersects_target(ke, &entity_chunks) {
-            // Body = the entity's `Sources` (`{routers,peers,clients}`) — the SAME
-            // struct zenoh serializes for BOTH subscriber and queryable admin replies.
-            reply_admin(
-                out,
-                &entity_key,
-                decl.sources.to_json().as_bytes(),
-                Some(&crate::sample::EncodingHint::APPLICATION_JSON),
-            );
-        }
+        // Body = the entity's `Sources` (`{routers,peers,clients}`) — the SAME
+        // struct zenoh serializes for BOTH subscriber and queryable admin replies.
+        run.serve(
+            AdminLegEncoding::Json,
+            |k| write_admin_entity_key(k, zid_hex, whatami, decl.kind.as_str(), &decl.keyexpr),
+            |b, _| {
+                decl.sources.write_json(b);
+                Ok(())
+            },
+        );
     }
 
     // `plugins/**` (surface B) + `status/plugins/**` (surface C) — under
@@ -1810,16 +2371,14 @@ pub fn answer_admin_query(
         // adminspace.rs:930-934). The wz registry is the compiled-subsystem list,
         // so "declared" = "compiled in" (every entry the host passes).
         for p in plugins {
-            let key = admin_plugin_key(ctx.zid_hex, ctx.whatami, &p.id);
-            let chunks: Vec<&str> = key.split('/').collect();
-            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                reply_admin(
-                    out,
-                    &key,
-                    p.to_status_json().as_bytes(),
-                    Some(&crate::sample::EncodingHint::APPLICATION_JSON),
-                );
-            }
+            run.serve(
+                AdminLegEncoding::Json,
+                |k| write_admin_plugin_key(k, zid_hex, whatami, &p.id),
+                |b, _| {
+                    p.write_status_json(b);
+                    Ok(())
+                },
+            );
         }
         // Surface C — `@/<zid>/<whatami>/status/plugins/<id>/**`: for each STARTED
         // plugin, the `__path__` leg (text/plain, the plugin path) followed by the
@@ -1835,33 +2394,21 @@ pub fn answer_admin_query(
             if p.state != AdminPluginState::Started {
                 continue;
             }
-            let key = admin_plugin_status_path_key(ctx.zid_hex, ctx.whatami, &p.id);
-            let chunks: Vec<&str> = key.split('/').collect();
-            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                reply_admin(
-                    out,
-                    &key,
-                    p.path.as_bytes(),
-                    Some(&crate::sample::EncodingHint::TEXT_PLAIN),
-                );
-            }
-            if p.status_leaves.is_empty() {
-                continue;
-            }
-            let status_root = admin_plugin_status_root_key(ctx.zid_hex, ctx.whatami, &p.id);
+            run.serve_text(
+                AdminLegEncoding::Text,
+                |k| write_admin_plugin_status_path_key(k, zid_hex, whatami, &p.id),
+                Ok(&p.path),
+            );
             for leaf in &p.status_leaves {
-                let mut leaf_key = status_root.clone();
-                leaf_key.push('/');
-                leaf_key.push_str(&leaf.suffix);
-                let leaf_chunks: Vec<&str> = leaf_key.split('/').collect();
-                if crate::keyexpr_match::keyexpr_intersects_target(ke, &leaf_chunks) {
-                    reply_admin(
-                        out,
-                        &leaf_key,
-                        leaf.json_body.as_bytes(),
-                        Some(&crate::sample::EncodingHint::APPLICATION_JSON),
-                    );
-                }
+                run.serve_text(
+                    AdminLegEncoding::Json,
+                    |k| {
+                        write_admin_plugin_status_root_key(k, zid_hex, whatami, &p.id);
+                        k.push('/');
+                        k.push_str(&leaf.suffix);
+                    },
+                    Ok(&leaf.json_body),
+                );
             }
         }
     }
@@ -1874,27 +2421,80 @@ pub fn answer_admin_query(
     // straight back to guessing, which is the whole defect. Emitted LAST so it
     // does not displace an upstream-shaped reply from the position a consumer
     // reading upstream's fan-out expects.
-    let surface_key = admin_surface_key(ctx.zid_hex, ctx.whatami);
-    let surface_chunks: Vec<&str> = surface_key.split('/').collect();
-    if crate::keyexpr_match::keyexpr_intersects_target(ke, &surface_chunks) {
-        reply_admin(
-            out,
-            &surface_key,
-            admin_surface_json(ctx.zid_hex, ctx.whatami).as_bytes(),
-            Some(&crate::sample::EncodingHint::APPLICATION_JSON),
-        );
-    }
-    AdminAnswerOutcome::Served
+    run.serve(
+        AdminLegEncoding::Json,
+        |k| write_admin_leg_key(k, zid_hex, whatami, "wz/surface"),
+        |b, k| write_admin_surface_json(b, k, zid_hex, whatami),
+    );
+    run.report
+}
+
+/// R311y45 (§5.23 Phase 2b) — the Session-INDEPENDENT admin-query answerer: the
+/// match+reply SSOT BOTH the Session-level adminspace queryable AND the
+/// forwarder-hosted routing-peer admin call, so both emit byte-identical replies.
+/// Fires every admin handler whose key INTERSECTS the GET keyexpr (zenoh's
+/// `for (key, handler) in handlers { if key_expr.intersects(key) { .. } }`,
+/// `adminspace.rs:499-503`): root `local_data`, `metrics` (under
+/// `adminspace-metrics`), `config`, the per-entity `subscriber`/`queryable`
+/// introspection (under `adminspace-introspection-handlers`), and the
+/// `plugins`/`status/plugins` legs (under `adminspace-plugins-handlers`).
+/// `read=false` answers NOTHING (the dispatch SSOT still emits the terminating
+/// Final — zenoh's bare ResponseFinal on deny, `:462-467`) and RETURNS
+/// [`AdminAnswerOutcome::DeniedRead`], which is the host's cue to emit the deny
+/// diagnostic zenoh logs inside its own gate. The reply path is the same
+/// `reply_keyed_encoded_parts` the Session queryable uses.
+///
+/// `plugins` is the node's compiled-in subsystem registry (surface A/B/C); it is
+/// consumed by [`AdminLocalData::plugins`] unconditionally (so the parameter is
+/// always used) and by the `plugins/**` + `status/plugins/**` reply blocks under
+/// the feature.
+///
+/// S9b — this is [`answer_admin_query_in`] over `String` buffers it makes and an
+/// owned context, so the AP and a node with no allocator write one set of legs.
+pub fn answer_admin_query(
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    ctx: &AdminAnswerCtx,
+    sessions: &[AdminSession],
+    declarations: &[AdminDeclaration],
+    plugins: &[AdminPlugin],
+    config_json: &str,
+) -> AdminAnswerOutcome {
+    let mut key = String::new();
+    let mut body = String::new();
+    // On the AP no refusal is possible (`String` buffers do not fill and the
+    // growable stage takes every reply), and a stage refusal has been logged.
+    answer_admin_query_in(
+        &mut key,
+        &mut body,
+        view,
+        out,
+        AdminNodeFacts {
+            zid_hex: ctx.zid_hex,
+            whatami: ctx.whatami,
+            version: ctx.version,
+            metadata_json: ctx.metadata_json,
+            read: ctx.read,
+            stats: ctx.stats,
+            locators: ctx.locators.iter().map(String::as_str),
+            sessions: sessions.iter().map(AdminSession::view),
+            multicast_peers: ctx.multicast_peers.iter().map(AdminMulticastPeer::view),
+        },
+        declarations,
+        plugins,
+        Ok(config_json),
+    )
+    .outcome
 }
 
 /// The ROUTER-tier admin `linkstate/routers` key `@/<zid>/<whatami>/linkstate/routers`
 /// (zenoh `zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data`).
 /// Router-only in zenoh; the wz router host
 /// (whatami `"router"`) is the sole caller.
-#[cfg(feature = "adminspace-router-linkstate")]
+#[cfg(all(test, feature = "adminspace-router-linkstate"))]
 fn admin_linkstate_routers_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/linkstate/routers");
+    let mut s = String::new();
+    write_admin_leg_key(&mut s, zid_hex, whatami, "linkstate/routers");
     s
 }
 
@@ -1902,35 +2502,46 @@ fn admin_linkstate_routers_key(zid_hex: &str, whatami: &str) -> String {
 /// `adminspace.rs:181`). zenoh registers this for any non-Client linkstate node
 /// (a Router AND a plain linkstate peer); the wz router serves it from its
 /// peer-tier `linkstatepeers_net`. Peer-host serving is a NAMED deferral.
-#[cfg(feature = "adminspace-router-linkstate")]
+#[cfg(all(test, feature = "adminspace-router-linkstate"))]
 fn admin_linkstate_peers_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/linkstate/peers");
+    let mut s = String::new();
+    write_admin_leg_key(&mut s, zid_hex, whatami, "linkstate/peers");
     s
 }
 
 /// The admin route-successor key PREFIX `@/<zid>/<whatami>/route/successor` — zenoh
 /// declares the handler on `.../route/successor/**` (`adminspace.rs:213`) and each
 /// reply hangs `/src/<src>/dst/<dst>` under this prefix (`:891,:909`). Router-only.
-#[cfg(feature = "adminspace-router-linkstate")]
+#[cfg(all(test, feature = "adminspace-router-linkstate"))]
 fn admin_route_successor_prefix(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_root_key(zid_hex, whatami);
-    s.push_str("/route/successor");
+    let mut s = String::new();
+    write_admin_leg_key(&mut s, zid_hex, whatami, "route/successor");
     s
 }
 
 /// One route-successor entry key `<prefix>/src/<src>/dst/<dst>` — the key zenoh
 /// replies each `SuccessorEntry` under (`adminspace.rs:909-913`). Both zids are
 /// already in zenoh `ZenohId` Display (hex) form.
-#[cfg(feature = "adminspace-router-linkstate")]
+#[cfg(all(test, feature = "adminspace-router-linkstate"))]
 fn route_successor_entry_key(prefix: &str, src_hex: &str, dst_hex: &str) -> String {
     let mut s = String::with_capacity(prefix.len() + 10 + src_hex.len() + dst_hex.len());
     s.push_str(prefix);
-    s.push_str("/src/");
-    s.push_str(src_hex);
-    s.push_str("/dst/");
-    s.push_str(dst_hex);
+    write_route_successor_entry_suffix(&mut s, src_hex, dst_hex);
     s
+}
+
+/// The part of a route-successor entry key after the prefix, `/src/<src>/dst/<dst>`,
+/// written into any sink.
+#[cfg(feature = "adminspace-router-linkstate")]
+fn write_route_successor_entry_suffix<W: TextOut + ?Sized>(
+    out: &mut W,
+    src_hex: &str,
+    dst_hex: &str,
+) {
+    out.push_str("/src/");
+    out.push_str(src_hex);
+    out.push_str("/dst/");
+    out.push_str(dst_hex);
 }
 
 /// R311y204 (§5.23 `adminspace-router-linkstate`) — the pre-rendered ROUTER-tier
@@ -1973,69 +2584,79 @@ pub struct AdminRouterCtx<'a> {
 /// terminating Final). The reply path is the same `reply_keyed_encoded` the Session
 /// queryable uses. The signature is feature-toggle-independent; the reply BODY is
 /// `#[cfg]`-gated (the caller passes an empty/`None` ctx with the feature off).
+///
+/// S9b — this is [`answer_router_admin_query_in`] over `String` buffers it makes.
 pub fn answer_router_admin_query(
     view: &dyn crate::query_sink::QueryView,
     out: &mut dyn crate::query_sink::ReplyOut,
     ctx: &AdminRouterCtx,
 ) -> AdminAnswerOutcome {
+    let mut key = String::new();
+    let mut body = String::new();
+    answer_router_admin_query_in(&mut key, &mut body, view, out, ctx).outcome
+}
+
+/// [`answer_router_admin_query`] written into buffers its caller supplies, with
+/// the refusals reported as [`answer_admin_query_in`] reports them.
+pub fn answer_router_admin_query_in<K: AdminBuffer, B: AdminBuffer>(
+    key: &mut K,
+    body: &mut B,
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    ctx: &AdminRouterCtx,
+) -> AdminAnswer {
+    let mut run = LegRun {
+        key,
+        body,
+        out,
+        query: view.keyexpr(),
+        report: AdminAnswer::served(),
+    };
     if !ctx.read {
-        return AdminAnswerOutcome::DeniedRead;
+        run.report.outcome = AdminAnswerOutcome::DeniedRead;
+        return run.report;
     }
     // The reply legs are consumed ONLY under the feature; keep the signature
     // stable and consume the params here when the feature is off.
-    #[cfg(not(feature = "adminspace-router-linkstate"))]
-    let _ = (view, out);
     #[cfg(feature = "adminspace-router-linkstate")]
     {
-        let ke = view.keyexpr();
+        let (zid_hex, whatami) = (ctx.zid_hex, ctx.whatami);
 
         // `linkstate/routers` (`@/<zid>/router/linkstate/routers`, text/plain DOT).
         if let Some(dot) = ctx.routers_dot {
-            let key = admin_linkstate_routers_key(ctx.zid_hex, ctx.whatami);
-            let chunks: Vec<&str> = key.split('/').collect();
-            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                reply_admin(
-                    out,
-                    &key,
-                    dot.as_bytes(),
-                    Some(&crate::sample::EncodingHint::TEXT_PLAIN),
-                );
-            }
+            run.serve_text(
+                AdminLegEncoding::Text,
+                |k| write_admin_leg_key(k, zid_hex, whatami, "linkstate/routers"),
+                Ok(dot),
+            );
         }
 
         // `linkstate/peers` (`@/<zid>/router/linkstate/peers`, text/plain DOT).
         if let Some(dot) = ctx.peers_dot {
-            let key = admin_linkstate_peers_key(ctx.zid_hex, ctx.whatami);
-            let chunks: Vec<&str> = key.split('/').collect();
-            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                reply_admin(
-                    out,
-                    &key,
-                    dot.as_bytes(),
-                    Some(&crate::sample::EncodingHint::TEXT_PLAIN),
-                );
-            }
+            run.serve_text(
+                AdminLegEncoding::Text,
+                |k| write_admin_leg_key(k, zid_hex, whatami, "linkstate/peers"),
+                Ok(dot),
+            );
         }
 
         // `route/successor/**` — ONE reply per (src,dst) triple whose entry key
         // intersects the GET; body = the successor zid as a JSON string `"<hex>"`.
-        let prefix = admin_route_successor_prefix(ctx.zid_hex, ctx.whatami);
         for (src_hex, dst_hex, successor_hex) in ctx.successors {
-            let key = route_successor_entry_key(&prefix, src_hex, dst_hex);
-            let chunks: Vec<&str> = key.split('/').collect();
-            if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                let mut body = String::new();
-                crate::json::escape_into(successor_hex, &mut body);
-                reply_admin(
-                    out,
-                    &key,
-                    body.as_bytes(),
-                    Some(&crate::sample::EncodingHint::APPLICATION_JSON),
-                );
-            }
+            run.serve(
+                AdminLegEncoding::Json,
+                |k| {
+                    write_admin_leg_key(k, zid_hex, whatami, "route/successor");
+                    write_route_successor_entry_suffix(k, src_hex, dst_hex);
+                },
+                |b, _| {
+                    crate::json::escape_into(successor_hex, b);
+                    Ok(())
+                },
+            );
         }
     }
-    AdminAnswerOutcome::Served
+    run.report
 }
 
 /// R311y51 (§5.23 `adminspace-write`) — the typed intent a recognized admin
@@ -2965,7 +3586,7 @@ pub fn metrics_eof() -> &'static str {
 /// the [`crate::json::escape_into`] SSOT escaper (hoisted so it is not duplicated
 /// by the `config`-side admin-JSON emitter); the thin local name is kept because
 /// the `local_data` builder above calls it at ~8 sites.
-fn push_json_str(s: &str, out: &mut String) {
+fn push_json_str<W: TextOut + ?Sized>(s: &str, out: &mut W) {
     crate::json::escape_into(s, out);
 }
 
