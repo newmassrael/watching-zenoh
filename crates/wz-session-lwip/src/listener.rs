@@ -62,7 +62,7 @@ use wz_link_lwip::LwipLink;
 use wz_session_core::inbound::is_init_syn;
 
 use crate::driver::{LwipUdpDriver, SessionSocket};
-use crate::session_open::OpenRefused;
+use crate::session_host::OpenRefused;
 
 /// A remote end as lwIP names it: the address word and the port.
 type Peer = (u32, u16);
@@ -276,7 +276,7 @@ impl<const LANES: usize> SessionListener<LANES> {
     /// session and answers whether it built the session. It must claim everything
     /// the session needs before it returns `Ok`, and build nothing it does not
     /// keep: that is the whole of the claim-before-answer rule, since the
-    /// listener sends nothing itself and a session that was not built cannot.
+    /// listener sends nothing itself and a session that does not exist cannot.
     /// Call it once per executor pass.
     pub fn accept_pass(
         &'static self,

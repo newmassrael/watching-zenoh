@@ -52,7 +52,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::WhatAmI;
 use wz_session_lwip::driver::LwipUdpDriver;
-use wz_session_lwip::session_open::{DialRefused, OpenRefused, OpenedSession, SessionHost};
+use wz_session_lwip::session_host::{DialRefused, OpenRefused, OpenedSession, SessionHost};
 use wz_session_lwip::{LwipLinks, LwipSessionLink};
 
 #[path = "support/alloc_count.rs"]

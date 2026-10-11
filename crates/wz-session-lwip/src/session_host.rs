@@ -24,6 +24,10 @@
 //! dial that is refused a task cell has sent nothing. An accepted session sends
 //! nothing until it has read the `InitSyn` that asked for it, and the listener
 //! leaves that datagram unread unless `open` said yes.
+//!
+//! The file is named for the host, not for the opening, because `session_open.rs`
+//! of `wz-runtime-tokio` is cited by that name in the store's reasons, and a second
+//! file of that name would make every one of those citations ambiguous.
 
 use core::ops::Deref;
 

@@ -58,7 +58,7 @@ use wz_session_core::signing_key::SigningKey;
 use wz_session_core::WhatAmI;
 use wz_session_lwip::driver::{share_socket, LwipUdpDriver};
 use wz_session_lwip::listener::{AcceptPass, SessionListener};
-use wz_session_lwip::session_open::{OpenRefused, OpenedSession, SessionHost};
+use wz_session_lwip::session_host::{OpenRefused, OpenedSession, SessionHost};
 use wz_session_lwip::LwipSessionLink;
 
 #[path = "support/alloc_count.rs"]
