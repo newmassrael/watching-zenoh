@@ -561,10 +561,25 @@ pub mod common {
         }
     }
 
-    /// `cargo tree` for `wz-ap-demo` under exactly `features`. Offline and
-    /// read-only: it resolves from the committed lockfile and takes no build
+    /// `cargo tree` for `wz-ap-demo` under exactly `features`. Read-only and
+    /// pinned to the committed lockfile (`--locked`: it refuses to change the
+    /// lock, so the answer is the one the lock states), and it takes no build
     /// lock, which is the reason this is not a `cargo build` (a build inside a
     /// test would serialise the fixtures and hide compile errors in test output).
+    ///
+    /// It is NOT `--offline`, and that is deliberate. `cargo tree` has to read
+    /// the manifest of every package the feature set activates, so it downloads
+    /// any such package the registry cache lacks, and the set it activates is
+    /// larger than the set any earlier step of a lane has fetched: the demo's
+    /// full preset reaches optional links (ws, tls) that `cargo test
+    /// --workspace` never compiles. With `--offline` the test therefore passed
+    /// only while a restored cache happened to hold the crates, and went red the
+    /// first time a dependency of that set moved (the ws link's
+    /// `tokio-tungstenite` 0.24 to 0.29 on hosted run 38120179516), with no
+    /// later step able to repair it because the step that would have fetched
+    /// the crate is the one that failed. `--locked` alone fetches exactly the
+    /// missing packages and nothing else, and needs no network when the cache is
+    /// complete.
     pub(crate) fn cargo_tree_of_demo(
         crates_dir: &Path,
         features: &[String],
@@ -573,7 +588,7 @@ pub mod common {
         let mut cmd = Command::new(&cargo);
         cmd.current_dir(crates_dir)
             .args(["tree", "-p", "wz-ap-demo", "--edges", "normal,build"])
-            .args(["--prefix", "none", "--no-default-features", "--offline"]);
+            .args(["--prefix", "none", "--no-default-features", "--locked"]);
         if !features.is_empty() {
             cmd.arg("--features").arg(features.join(","));
         }
