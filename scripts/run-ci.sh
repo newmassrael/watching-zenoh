@@ -9855,6 +9855,14 @@ layer_c1g_cargo_test_observer() {
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-compression,transport-keepalive,tx-lend-only --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-init-body,session-unicast-accept,transport-tx-lend --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-batching,transport-fragmentation,transport-tx-lend --quiet -- -D warnings) || return 1
+    # Round 3278 -- the generated session-slot table says what the deploy file
+    # says: the validator's report of deploy/mcu_client_and_group.yaml is read by
+    # running it (python3 with PyYAML, a host without them FAILS) and each number
+    # is held equal to the committed `session_slot_pool_mcu` constant. 3 = what
+    # that command PRINTED: the equality, the comparison's own control, and the
+    # fit of every declared session in the generated slot.
+    _runci_guarded_test C1g 3 \
+        cargo test -p wz-session-core --test session_slot_pool_deploy --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }
