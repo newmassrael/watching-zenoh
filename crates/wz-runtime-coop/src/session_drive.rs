@@ -444,6 +444,10 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// pump's own heap allocation, so with `reassembly` this constructor is absent
     /// and a pump is made by `PumpSlots::claim` (which places the table in the
     /// pump's cell) or by [`Self::with_reassembly_arena`].
+    ///
+    /// Under `session-slot` the role is NOT activated here: the first
+    /// [`Self::step`] activates it, so a dialling pump's `InitSyn` leaves only
+    /// once the task that steps it exists (`pending_role`).
     #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
     #[inline(never)]
     pub fn new(

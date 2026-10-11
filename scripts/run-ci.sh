@@ -11281,13 +11281,15 @@ layer_c1m_session_lwip() {
     # counted (once per table that can be the full one: the lanes, the session
     # table, the pump table, the task table), what the refusal took is given back,
     # each session reads only its own peer's datagrams, a closed session's cell takes
-    # the next peer, and no window allocates: 4 = what that command PRINTED, and
-    # again with `reassembly`, where a pump cell also holds its staging table.
-    _runci_guarded_test "C1m session pool exhaustion" 4 \
+    # the next peer, and no window allocates; and a flood of datagrams that are not
+    # an InitSyn fills the shared queue, is dropped and counted, and takes no cell:
+    # 5 = what that command PRINTED, and again with `reassembly`, where a pump cell
+    # also holds its staging table.
+    _runci_guarded_test "C1m session pool exhaustion" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
         --test session_pool_exhaustion --quiet || return 1
-    _runci_guarded_test "C1m session pool exhaustion reassembly" 4 \
+    _runci_guarded_test "C1m session pool exhaustion reassembly" 5 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
         --test session_pool_exhaustion --quiet || return 1

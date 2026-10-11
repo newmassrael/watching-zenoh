@@ -45,7 +45,8 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
+use wz_link_lwip::rx_sockets::SESSION_RX_SLOTS;
+use wz_link_lwip::{ipv4_addr_from_octets, ipv4_addr_loopback, LwipLink};
 use wz_runtime_coop::session_drive::{PumpSlots, SessionDriveConfig, SessionRole};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::close_reason::CloseReason;
@@ -134,7 +135,7 @@ const KEY: &str = "pool/put";
 /// that dialled as peer `k` is `DIALLED + k`.
 const DIALLED: usize = 32;
 const BLOCK: usize = 64;
-static PUTS: [AtomicUsize; 4 * BLOCK] = [const { AtomicUsize::new(0) }; 4 * BLOCK];
+static PUTS: [AtomicUsize; 8 * BLOCK] = [const { AtomicUsize::new(0) }; 8 * BLOCK];
 
 fn puts(session: usize) -> usize {
     PUTS[session].load(Ordering::SeqCst)
@@ -451,6 +452,15 @@ fn fill_then_refuse<
             .actions
             .send_close_with_reason(CloseReason::Generic);
         rig.turns_until("the close", |rig| rig.accepted[0].task.is_finished());
+        // The session's lane, pump cell and (once its handles go) slot are freed by
+        // the END of its task, not by whoever still holds a handle to it: a peer
+        // whose session has ended cannot hold the shared queue by lingering.
+        assert_eq!(
+            rig.listener.in_use(),
+            fill - 1,
+            "the lane went with the task"
+        );
+        assert_eq!(rig.pumps.in_use(), fill - 1, "the pump cell went with it");
         // The closed session is let go on both sides.
         drop(rig.accepted.swap_remove(0));
         let closed = dialled.swap_remove(0);
@@ -582,4 +592,85 @@ fn a_full_task_table_refuses_the_next_initsyn_and_gives_everything_back() {
         &DIAL_PUMPS,
     );
     fill_then_refuse(rig, N, Why::Task);
+}
+
+/// The cheapest thing to throw at a listener is a flood of datagrams that are not an
+/// `InitSyn`, from a peer it has no session for, and it must cost the node no table
+/// cell: the listening socket's queue (the shared queue every session reads) takes
+/// what it holds and DROPS and COUNTS the rest, the listener drops each stray it
+/// reads and counts it, and no lane, session slot, pump cell or task cell is taken
+/// for any of it, and none of it allocates. The next real `InitSyn` is admitted as
+/// if nothing had happened.
+#[test]
+fn a_flood_of_strays_fills_the_queue_and_is_dropped_and_counted_and_takes_no_cell() {
+    static RUNTIME: RuntimeCell<Frozen, 16, 256, 4> = RuntimeCell::new();
+    static LISTENER: SessionListener<N> = SessionListener::new();
+    static SESSIONS: Slots<N> = SessionSlots::new();
+    static PUMPS: Pumps<N> = PumpSlots::new();
+    static DIAL_SESSIONS: Slots<{ N + 1 }> = SessionSlots::new();
+    static DIAL_PUMPS: Pumps<{ N + 1 }> = PumpSlots::new();
+    const PORT: u16 = 7805;
+    // The queue holds one datagram fewer than its slot count (a ring of `Q` entries).
+    const QUEUED: usize = SESSION_RX_SLOTS - 1;
+    const SENT: usize = SESSION_RX_SLOTS + 10;
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link: LinkRef = Box::leak(Box::new(link));
+    let mut rig = Rig::new(
+        link,
+        PORT,
+        &RUNTIME,
+        &LISTENER,
+        &SESSIONS,
+        &PUMPS,
+        &DIAL_SESSIONS,
+        &DIAL_PUMPS,
+    );
+    let flooder = wz_link_lwip::test_bind::session_rx(link, 0).expect("bind the flooder");
+    let m = Measurement::new();
+
+    // A Frame header and an InitAck header, alternately: neither opens a session.
+    let (pass, n) = m.count("a flood of strays", || {
+        for i in 0..SENT {
+            let stray = if i % 2 == 0 {
+                [0x05u8, 0, 0, 0]
+            } else {
+                [0x21u8, 0, 0, 0]
+            };
+            flooder
+                .send_to(ipv4_addr_loopback(), PORT, &stray)
+                .expect("the stray leaves");
+            link.poll_loopback();
+        }
+        rig.turn()
+    });
+    assert_eq!(n, 0, "a flood of strays costs the heap nothing");
+    assert_eq!(
+        pass.strays as usize, QUEUED,
+        "the listener read, dropped and counted every stray the queue held"
+    );
+    assert_eq!(
+        pass.admitted + pass.refused,
+        0,
+        "and admitted or refused none"
+    );
+    assert_eq!(rig.listener.counts().strays as usize, QUEUED);
+    assert_eq!(
+        rig.listener.rx_drops() as usize,
+        SENT - QUEUED,
+        "the socket dropped and counted what its queue could not hold"
+    );
+    assert_eq!(rig.listener.in_use(), 0, "no lane");
+    assert_eq!(rig.sessions.in_use(), 0, "no session slot");
+    assert_eq!(rig.pumps.in_use(), 0, "no pump cell");
+    assert_eq!(rig.accepted.len(), 0);
+    assert_eq!(rig.runtime.task_refusals().no_task_cell, 0);
+
+    // The listener is as it was: a real InitSyn is admitted and shaken hands with.
+    let (_, opened) = rig.dial();
+    let dialled = opened.unwrap_or_else(|why| panic!("the dial was refused: {why:?}"));
+    rig.turns_until("a handshake after the flood", |rig| {
+        rig.accepted.len() == 1 && rig.established(&dialled) && rig.established(&rig.accepted[0])
+    });
+    assert_eq!(rig.listener.counts().admitted, 1);
+    assert_eq!(rig.listener.refused(), 0);
 }
