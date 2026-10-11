@@ -54,6 +54,7 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
+use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::WhatAmI;
 
@@ -68,8 +69,20 @@ const GROUP_JOIN_INTERVAL_MS: u64 = 2_500;
 
 /// The unicast parameters. The router's and the client's zids differ from
 /// each other and from the group session's.
-fn unicast_params(zid: u8) -> SessionInitParams {
-    SessionInitParams {
+///
+/// The cookie key is drawn through the board's entropy hook, the port the
+/// router's cookie nonce already uses, as a shipped acceptor draws it
+/// (`SigningKey::from_entropy`, as the acceptor e2e image does). On this QEMU
+/// board the hook is a fixture (see `board::xApplicationGetRandomNumber`); the
+/// image exercises the seam a real board fills with its TRNG, so the profile
+/// code here does not change between the two. A literal key here would be
+/// published with the repository, which `scripts/lib/literal_key_gate.py`
+/// refuses outside a test-gated item. A hook that yields nothing fails the
+/// scenario rather than running with a key it did not draw.
+fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
+    let cookie_signing_key = SigningKey::from_entropy(&mut FreertosEntropy)
+        .map_err(|e| format!("draw the cookie signing key: {:?}", e))?;
+    Ok(SessionInitParams {
         version: 0x09,
         whatami: WhatAmI::Peer,
         zid: vec![zid; 4],
@@ -80,9 +93,8 @@ fn unicast_params(zid: u8) -> SessionInitParams {
         initial_sn: 0,
         cookie: vec![],
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
-        cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
-            .expect("a 32-byte key"),
-    }
+        cookie_signing_key,
+    })
 }
 
 /// The group parameters: the group session's own, and the member's.
@@ -219,7 +231,7 @@ impl TwoSessions {
         let router_cost = before.saturating_sub(heap_free_bytes());
         let router = new_session_actions(
             sink,
-            unicast_params(0xa1),
+            unicast_params(0xa1)?,
             CoopTime::new(&runtime),
             FreertosEntropy,
         );
@@ -249,7 +261,7 @@ impl TwoSessions {
         let client_cost = before.saturating_sub(heap_free_bytes());
         let client = SessionLinkActions::<CoopRuntime<Clock>, CoopTime<Clock>>::new_generic(
             sink,
-            unicast_params(0xb1),
+            unicast_params(0xb1)?,
             CoopTime::new(&runtime),
         );
         let client_task = spawn_session(
