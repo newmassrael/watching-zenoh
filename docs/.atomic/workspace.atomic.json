@@ -271208,6 +271208,84 @@
         "A defect of the previous push, found by that push's final preflight and absent from the frozen Round 3276: the udp listener helper register_on_acceptor (Round 3276, from the listener-outlives-its-reactor repair) created a socket outside the link options seam, which the upstream link config keys gate and Layer C0 both flagged. It was fixed in 6c55e873 by the gate's own LINK-SOCKET-SEAM-NOT-APPLICABLE marker and a written reason; that round's code verification ran on b7f30e83, a comment-only difference."
       ]
     },
+    "Round 3278": {
+      "decision_summary": "Design and prototype of the N-session pool schema for the fixed-memory MCU profile. Decided: the table is an SCE buffer-pool document (session_slot_pool_mcu: slot-count = MAX_SESSIONS, slot-size = one session slot's byte ceiling), because SCE's bounded-collection needs a codec element and wz_codegen_build has no path for it; a deploy file reaches it by `session_pool: { ref }`, with the numbers living only in the document. The validator reads the new keys (session_pool, process caps, per-session limit vocabulary) and budgets sessions against the table; --report prints the resolved numbers as JSON for the analyzer's editor. Peer-written tables go per session, application registries stay process-wide. SLOT_SIZE 98304 is a provisional ceiling, not a measurement. Nothing in a product path reads the pool.",
+      "changes_bullets": [
+        "sources/network/session_slot_pool_mcu.scxml (new): buffer-pool, 3 x 98304, sram1, align 32, cache none, with the derivation of both numbers in its header.",
+        "xtask/src/main.rs: one row in the pool list (consuming crate wz-session-core); out/wz-session-core/session_slot_pool_mcu.rs emitted. The regen also rewrote the source-hash header line of 13 other emits (SCE hashes every scxml under sources/network), nothing else in them.",
+        "crates/wz-session-core/src/lib.rs: module session_slot_pool_mcu includes the emit; nothing reads it yet.",
+        "scripts/lib/deploy_sessions.py: session_pool block (ref or inline max_sessions + slot_bytes, process caps), limit-key vocabulary, session-count and per-session pool budget, per-session limits may only lower the machine's, session_pool refused on an AP; session_pool_report and `--report <yaml> <machine>` (JSON); new selftest group (28 cases) beside the existing ones.",
+        "deploy/mcu_client_and_group.yaml: the new limit keys and the session_pool block.",
+        "crates/wz-session-core/tests/session_slot_pool_deploy.rs (new): 3 host tests that run the validator's report and hold each number to the generated constant.",
+        "scripts/run-ci.sh: C1g runs the new test file, count 3 pinned."
+      ],
+      "verification_bullets": [
+        "Build hosts only (bx; hkl002, pc2, pc3 chosen by bx); nothing built on the coordinator host. No hardware.",
+        "Red first: before out/wz-session-core/session_slot_pool_mcu.rs existed, a build of wz-session-core failed with \"couldn't read .../session_slot_pool_mcu.rs\" (the include of the not-yet-generated file). After regen: the new test file passes 3 of 3.",
+        "Mutation, reverted: slot-count 3 -> 4 in the document without regenerating: the equality test FAILED naming \"max_sessions / SLOT_COUNT: the deploy file's table has 4, the generated file 3\" and the total; the other two passed. The first mutation run also turned the control red (it started from the live report); fixed by building the control from the constants, rerun gave exactly 1 failed, 2 passed.",
+        "scripts/lib/deploy_sessions.py --selftest: OK, 0 failing (81 ok lines: 29 pre-existing cases, 28 new pool cases, 24 AP shared cases). scripts/validate-deploy.sh: all 5 deploy yamls OK. --report on deploy/mcu_client_and_group.yaml mcu_node: exit 0, 3 sessions x 98304 = 294912, sessions use 40960 and 65536 B of their slot.",
+        "Regen: `scripts/regen-codegen.sh` on a build host exit 0; the regenerated out/ was copied back by rsync (file copy). Diff vs committed: new file + 13 source-hash lines only.",
+        "clippy -p wz-session-core --all-targets -D warnings: rc 0, no warning. rustfmt on the new test file applied.",
+        "Layer A4: pass (cross-impl proof audit OK).",
+        "Layer B2: pass (committed out/** == regenerated, no absolute source path), 1170 s, on the final commit. C1bz WZ_C1BZ_ONLY=wz-session-core: pass (subset run; the stale-budget-line check needs the full lane, not run).",
+        "Size probes: x86_64 by cargo test printing size_of; thumbv7m-none-eabi by a const array-length mismatch, on the fs5 tip with its uncommitted slot_bytes(); the probe worktree was removed, never committed.",
+        "NOT run: the count-guard oracle, the hook gate array, Layer C0, the full C1g lane end to end (only the new file and its pinned count 3, which the test run printed), clippy of other crates, any QEMU or board boot, the typed slot's size with the socket and staging inside it (not built), lwIP option cross-checks (not built), nothing at runtime uses the pool.",
+        "ON THE MERGED TREE (this push: origin/main 6c55e873 plus fs7, fs5 and fpool; build hosts only): session_slot_pool_deploy 3 passed, wz-session-core bounded_heapless_backing 6 passed, clippy -D warnings --all-targets with all features clean, and Layer B2 passed on the merged tree (committed out/** equals a fresh regeneration), which is the check that the 13 source-hash lines still agree after the other two branches landed beside it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "docs/reason-review-pins.md: reason_review_pin_gate reports ONE row moved: atom runtime-zero-copy cites out/wz-runtime-tokio/session_rx_pool_ap.rs, whose hash changed from 66d005a9ed to d1e97f7520 (its source-hash header line only, from the regen). Not edited here; the coordinator re-reads the reason against the file and moves the row with the real round id.",
+        "Round label: new comments and the scxml header name Round 3278, which is the round this entry is filed under (checked when appending).",
+        "Any other branch that adds an scxml under sources/network conflicts on the 13 source-hash lines; resolve by re-running the regen on the merged tree.",
+        "SLOT_SIZE 98304 is provisional (pools 65536 + 32768 headroom). The commit that makes the slot own its socket and staging adds the const assert size_of::<SlotCell> <= SLOT_SIZE and moves the number, with the measurement above it. Measured today (thumbv7m): SlotCell 1816 B, driver 176, bundle 1624, rx queue 24776 (behind the socket Box, not in the 1816).",
+        "Build-host installs: none. bx pulled and pruned its own trees; the throwaway size probe used a detached worktree that was deleted.",
+        "Next steps, in order: S5 fixes the slot shape, then announce the schema to the consumer (the keys and the --report JSON are in design.txt sections 3 and 9); S6 acceptor claims a slot before InitAck (test R1); per-session peer tables into the slot (R3); fallible send_reply (R4); the open questions Q1-Q8 in design.txt need the owner.",
+        "Module session_slot_pool_mcu is compiled unconditionally in wz-session-core; gate it with the session-slot selector when fpool meets fs5.",
+        "Integration (this push): fpool was cherry-picked onto origin/main 6c55e873 after fs7 and fs5. The Layer C1g leg that pins the new test file at 3 sits beside fs4's and fs5's legs in the same function. The regenerated out/** (the new emit and the 13 source-hash lines) was held against a fresh regen of the merged tree by Layer B2 on a build host. The pin row named in the first item was re-read and re-pinned in the push that landed this round. The label Round 3278 in the new source comments names this round.",
+        "Owner question still open (design.txt Q7): peer-written tables per session slot, or one partitioned observer. It moves the shape of step S9's observer, so it needs the owner before the exhaustion tests R1-R7 are written."
+      ],
+      "publishable_decision_summary": "Design and prototype of the N-session pool schema for the fixed-memory MCU profile. Decided: the table is an SCE buffer-pool document (session_slot_pool_mcu: slot-count = MAX_SESSIONS, slot-size = one session slot's byte ceiling), because SCE's bounded-collection needs a codec element and wz_codegen_build has no path for it; a deploy file reaches it by `session_pool: { ref }`, with the numbers living only in the document. The validator reads the new keys (session_pool, process caps, per-session limit vocabulary) and budgets sessions against the table; --report prints the resolved numbers as JSON for the analyzer's editor. Peer-written tables go per session, application registries stay process-wide. SLOT_SIZE 98304 is a provisional ceiling, not a measurement. Nothing in a product path reads the pool.",
+      "publishable_changes_bullets": [
+        "sources/network/session_slot_pool_mcu.scxml (new): buffer-pool, 3 x 98304, sram1, align 32, cache none, with the derivation of both numbers in its header.",
+        "xtask/src/main.rs: one row in the pool list (consuming crate wz-session-core); out/wz-session-core/session_slot_pool_mcu.rs emitted. The regen also rewrote the source-hash header line of 13 other emits (SCE hashes every scxml under sources/network), nothing else in them.",
+        "crates/wz-session-core/src/lib.rs: module session_slot_pool_mcu includes the emit; nothing reads it yet.",
+        "scripts/lib/deploy_sessions.py: session_pool block (ref or inline max_sessions + slot_bytes, process caps), limit-key vocabulary, session-count and per-session pool budget, per-session limits may only lower the machine's, session_pool refused on an AP; session_pool_report and `--report <yaml> <machine>` (JSON); new selftest group (28 cases) beside the existing ones.",
+        "deploy/mcu_client_and_group.yaml: the new limit keys and the session_pool block.",
+        "crates/wz-session-core/tests/session_slot_pool_deploy.rs (new): 3 host tests that run the validator's report and hold each number to the generated constant.",
+        "scripts/run-ci.sh: C1g runs the new test file, count 3 pinned."
+      ],
+      "publishable_verification_bullets": [
+        "Build hosts only (bx; hkl002, pc2, pc3 chosen by bx); nothing built on the coordinator host. No hardware.",
+        "Red first: before out/wz-session-core/session_slot_pool_mcu.rs existed, a build of wz-session-core failed with \"couldn't read .../session_slot_pool_mcu.rs\" (the include of the not-yet-generated file). After regen: the new test file passes 3 of 3.",
+        "Mutation, reverted: slot-count 3 -> 4 in the document without regenerating: the equality test FAILED naming \"max_sessions / SLOT_COUNT: the deploy file's table has 4, the generated file 3\" and the total; the other two passed. The first mutation run also turned the control red (it started from the live report); fixed by building the control from the constants, rerun gave exactly 1 failed, 2 passed.",
+        "scripts/lib/deploy_sessions.py --selftest: OK, 0 failing (81 ok lines: 29 pre-existing cases, 28 new pool cases, 24 AP shared cases). scripts/validate-deploy.sh: all 5 deploy yamls OK. --report on deploy/mcu_client_and_group.yaml mcu_node: exit 0, 3 sessions x 98304 = 294912, sessions use 40960 and 65536 B of their slot.",
+        "Regen: `scripts/regen-codegen.sh` on a build host exit 0; the regenerated out/ was copied back by rsync (file copy). Diff vs committed: new file + 13 source-hash lines only.",
+        "clippy -p wz-session-core --all-targets -D warnings: rc 0, no warning. rustfmt on the new test file applied.",
+        "Layer A4: pass (cross-impl proof audit OK).",
+        "Layer B2: pass (committed out/** == regenerated, no absolute source path), 1170 s, on the final commit. C1bz WZ_C1BZ_ONLY=wz-session-core: pass (subset run; the stale-budget-line check needs the full lane, not run).",
+        "Size probes: x86_64 by cargo test printing size_of; thumbv7m-none-eabi by a const array-length mismatch, on the fs5 tip with its uncommitted slot_bytes(); the probe worktree was removed, never committed.",
+        "NOT run: the count-guard oracle, the hook gate array, Layer C0, the full C1g lane end to end (only the new file and its pinned count 3, which the test run printed), clippy of other crates, any QEMU or board boot, the typed slot's size with the socket and staging inside it (not built), lwIP option cross-checks (not built), nothing at runtime uses the pool.",
+        "ON THE MERGED TREE (this push: origin/main 6c55e873 plus fs7, fs5 and fpool; build hosts only): session_slot_pool_deploy 3 passed, wz-session-core bounded_heapless_backing 6 passed, clippy -D warnings --all-targets with all features clean, and Layer B2 passed on the merged tree (committed out/** equals a fresh regeneration), which is the check that the 13 source-hash lines still agree after the other two branches landed beside it."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "docs/reason-review-pins.md: reason_review_pin_gate reports ONE row moved: atom runtime-zero-copy cites out/wz-runtime-tokio/session_rx_pool_ap.rs, whose hash changed from 66d005a9ed to d1e97f7520 (its source-hash header line only, from the regen). Not edited here; the coordinator re-reads the reason against the file and moves the row with the real round id.",
+        "Round label: new comments and the scxml header name Round 3278, which is the round this entry is filed under (checked when appending).",
+        "Any other branch that adds an scxml under sources/network conflicts on the 13 source-hash lines; resolve by re-running the regen on the merged tree.",
+        "SLOT_SIZE 98304 is provisional (pools 65536 + 32768 headroom). The commit that makes the slot own its socket and staging adds the const assert size_of::<SlotCell> <= SLOT_SIZE and moves the number, with the measurement above it. Measured today (thumbv7m): SlotCell 1816 B, driver 176, bundle 1624, rx queue 24776 (behind the socket Box, not in the 1816).",
+        "Build-host installs: none. bx pulled and pruned its own trees; the throwaway size probe used a detached worktree that was deleted.",
+        "Next steps, in order: S5 fixes the slot shape, then announce the schema to the consumer (the keys and the --report JSON are in design.txt sections 3 and 9); S6 acceptor claims a slot before InitAck (test R1); per-session peer tables into the slot (R3); fallible send_reply (R4); the open questions Q1-Q8 in design.txt need the owner.",
+        "Module session_slot_pool_mcu is compiled unconditionally in wz-session-core; gate it with the session-slot selector when fpool meets fs5.",
+        "Integration (this push): fpool was cherry-picked onto origin/main 6c55e873 after fs7 and fs5. The Layer C1g leg that pins the new test file at 3 sits beside fs4's and fs5's legs in the same function. The regenerated out/** (the new emit and the 13 source-hash lines) was held against a fresh regen of the merged tree by Layer B2 on a build host. The pin row named in the first item was re-read and re-pinned in the push that landed this round. The label Round 3278 in the new source comments names this round.",
+        "Owner question still open (design.txt Q7): peer-written tables per session slot, or one partitioned observer. It moves the shape of step S9's observer, so it needs the owner before the exhaustion tests R1-R7 are written."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
