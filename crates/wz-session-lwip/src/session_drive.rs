@@ -7,7 +7,7 @@
 //! the network stack. This module is lwIP's side of that seam:
 //! [`LwipSessionLink`] implements `SessionDatagramLink` (pump lwIP's input
 //! path; take a datagram from the [`LwipUdpDriver`](crate::driver::LwipUdpDriver) and retarget replies to
-//! its source), and [`run_session`] / [`session_task`] / `spawn_session`
+//! its source), and `run_session` / `session_task` / `spawn_session`
 //! keep the lwIP-typed signatures every existing caller writes, building the
 //! link and handing it to the shared loop.
 

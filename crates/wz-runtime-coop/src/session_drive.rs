@@ -222,13 +222,13 @@ impl SessionRole {
     }
 }
 
-/// R311lw — the static parameterization of one [`run_session`] drive: the
+/// R311lw — the static parameterization of one `run_session` drive: the
 /// handshake-deadline budget, the FSM activation role, and the test-only
 /// iteration cap, separated from the loop's live collaborators (the
 /// runtime / link / actions / clock handles + the `on_event` observer) via
 /// the Introduce-Parameter-Object refactor. The unicast MCU sibling of
 /// `wz_session_core::multicast_params::MulticastDriveConfig` (R311ls/R311lt):
-/// it brings [`run_session`] within clippy's argument-count bound. All three
+/// it brings `run_session` within clippy's argument-count bound. All three
 /// fields are `Copy`, so this owns them by value and carries no lifetime.
 pub struct SessionDriveConfig {
     /// The handshake deadline budget ([`SessionTimeouts::spec_defaults`]);
@@ -298,11 +298,11 @@ where
 
 /// One MCU session, ready to be advanced one iteration at a time.
 ///
-/// R2364 — extracted from [`run_session`], whose body this used to be
+/// R2364 — extracted from `run_session`, whose body this used to be
 /// inline. The extraction exists so that the sequencing of an iteration —
 /// link input, parked-unit drain, inbound dispatch, handshake / lease
 /// deadline, keepalive deadline — is written ONCE and both drivers share
-/// it: the synchronous [`run_session`] loop, and [`session_task`], the
+/// it: the synchronous `run_session` loop, and `session_task`, the
 /// `!Send` future that runs the session as a task ON the cooperative
 /// executor via [`CoopLocalSet::spawn_local`].
 ///
@@ -413,7 +413,7 @@ impl RxPathCounts {
 
 impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// Build the engine, activate the configured role, and arm the
-    /// handshake deadline tracker — everything [`run_session`] does before
+    /// handshake deadline tracker — everything `run_session` does before
     /// entering its loop.
     ///
     /// Takes its collaborators BY VALUE. Every one of them is a cheap
@@ -457,7 +457,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         )
     }
 
-    /// [`Self::new`] over a reassembly arena the caller built: the image hands
+    /// `Self::new` over a reassembly arena the caller built: the image hands
     /// the session the table it placed ([`PoolStorage::Static`]), one per
     /// session, so two sessions in one program each stage into their own.
     #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
@@ -488,7 +488,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         &self.reasm
     }
 
-    /// What [`Self::new`] and [`Self::with_reassembly_arena`] share.
+    /// What `Self::new` and [`Self::with_reassembly_arena`] share.
     #[inline(always)]
     fn build(
         runtime: CoopRuntime<C>,
@@ -555,8 +555,8 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     ///
     /// Deliberately does NOT pump the runtime. Who drives the executor is
     /// the DRIVER's question and the two drivers answer it differently:
-    /// [`run_session`] owns its loop and so takes the pass itself, while
-    /// [`session_task`] runs INSIDE the executor — pumping from there would
+    /// `run_session` owns its loop and so takes the pass itself, while
+    /// `session_task` runs INSIDE the executor — pumping from there would
     /// have the session drive the pool that is currently polling it, which
     /// is precisely the inversion [`CoopLocalSet`] exists to remove.
     pub fn step<F>(&mut self, on_event: &mut F) -> Option<DriverOutcome>
@@ -727,7 +727,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
 /// Awaits [`yield_now`] between iterations rather than spinning, so every
 /// other task in the pool — and the local set's own runtime pass — gets a
 /// turn each time round. The returned value is the same [`DriverOutcome`]
-/// [`run_session`] returns; reach it through the [`CoopLocalJoinHandle`] the
+/// `run_session` returns; reach it through the [`CoopLocalJoinHandle`] the
 /// spawn hands back.
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 pub async fn session_task<C, L, F>(
@@ -754,12 +754,12 @@ where
 
 /// Spawn one MCU session onto `local` and return its join handle.
 ///
-/// The convenience form of [`session_task`] + [`CoopLocalSet::spawn_local`],
+/// The convenience form of `session_task` + [`CoopLocalSet::spawn_local`],
 /// and the call site a deploy `main()` writes. The runtime the session is
 /// built against is the local set's own, so a caller cannot accidentally
 /// pump one runtime while the session rides another.
 ///
-/// `link` and `on_event` must be `'static` here where [`run_session`] takes
+/// `link` and `on_event` must be `'static` here where `run_session` takes
 /// any: a detached task cannot borrow the caller's stack. An observer that
 /// needs to publish out of the task should capture an `Rc<RefCell<..>>` —
 /// `!Send` is fine, which is the whole point of the local set.
@@ -1005,7 +1005,7 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static> Drop for PumpRef<C, L> {
 }
 
 /// The session AS A TASK over a pump in a cell: awaits [`yield_now`] between
-/// iterations as [`session_task`] does, and ends with the same [`DriverOutcome`].
+/// iterations as `session_task` does, and ends with the same [`DriverOutcome`].
 /// The future is the pump's handle and the observer and a loop's state, a few dozen
 /// bytes, and the pump stays where its table put it.
 #[cfg(feature = "session-slot")]

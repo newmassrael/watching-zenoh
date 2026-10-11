@@ -6,7 +6,7 @@
 //! The MCU analog of
 //! [`wz_runtime_tokio::multicast_glue::drive_multicast_session`], minus the
 //! `tokio::select!`: a cooperative single-task polling loop, the same shape as
-//! [`crate::session_drive::run_session`] (the unicast MCU loop) but driving the
+//! `session_drive::run_session` (the unicast MCU loop) but driving the
 //! engine-free [`MulticastDispatcher`] instead of the unicast FSM engine. Every
 //! decision PRIMITIVE is the shared `wz_session_core` SSOT (JOIN encode /
 //! decode / validate, the §3.2 peer-table arithmetic, the §2.3 per-channel SN
@@ -340,7 +340,7 @@ fn peer_key(src_addr: u32, src_port: u16) -> SocketAddr {
 ///   (`run_until_idle` + `poll_loopback` + `check_timeouts`), the loopback /
 ///   QEMU shape (a real-NIC deploy drives netif input from the RX ISR instead).
 ///   The loop derives its monotonic clock from `runtime` directly: unlike the
-///   unicast [`run_session`](crate::session_drive::run_session) (which takes an
+///   unicast `run_session` (which takes an
 ///   external clock so its epoch matches the R263 actions clock-clone), the
 ///   multicast loop has no actions bundle, so the runtime is its only time
 ///   source and a separate `clock` parameter would just be a redundant
@@ -1000,7 +1000,7 @@ pub struct MulticastSession<const MAX_PEERS: usize> {
 /// [`CoopLocalSet`] hosts beside other sessions.
 ///
 /// Open-debt item 900. The multicast twin of
-/// [`wz_runtime_coop::session_drive::session_task`]: it runs
+/// `wz_runtime_coop::session_drive::session_task`: it runs
 /// [`MulticastPump::step`] once per executor pass and awaits [`yield_now`]
 /// between steps, so every other task in the set (a unicast client session,
 /// for one) gets a turn each time round. The synchronous

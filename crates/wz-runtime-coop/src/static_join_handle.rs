@@ -25,7 +25,7 @@ use wz_runtime_core::RuntimeError;
 
 use crate::executor::TaskJoin;
 
-/// Handle returned by [`crate::CoopRuntime::spawn`]. Implements
+/// Handle returned by `CoopRuntime::spawn`. Implements
 /// `Future<Output = Result<T, RuntimeError>>` per the
 /// [`wz_runtime_core::Runtime::JoinHandle`] GAT contract.
 pub struct CoopJoinHandle<T> {

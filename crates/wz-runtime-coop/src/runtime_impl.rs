@@ -36,7 +36,7 @@
 //!   actually sleeps now — under R311av the executor was always
 //!   ready and `wfi()` returned immediately on the next pass.
 //!
-//! - [`CoopRuntime::block_on`] — drive a single outer future to
+//! - `CoopRuntime::block_on` — drive a single outer future to
 //!   completion. Used by host tests + by deploy code that needs a
 //!   synchronous entry point. Polls the outer future first; if it
 //!   returns `Pending`, calls `run_until_idle` to fan out work to

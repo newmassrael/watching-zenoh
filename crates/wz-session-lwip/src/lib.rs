@@ -20,7 +20,7 @@
 //! - [`driver::LwipUdpDriver`] — the MCU [`wz_session_core::link::BoxedLinkDriver`]
 //!   adapter over a shared [`wz_link_lwip::LwipUdpSocket`]. The genuinely
 //!   MCU-specific piece (the AP `TokioLinkDriverAdapter` is async).
-//! - [`session_drive::run_session`] — the synchronous, `tokio::select!`-free
+//! - `session_drive::run_session` — the synchronous, `tokio::select!`-free
 //!   drive loop. Loop STRUCTURE only: every drive-loop primitive
 //!   (`dispatch_link_event` / `report_outcome_reassembling` /
 //!   `check_lease_deadline` / `new_session_engine` / `HandshakeDeadlineTracker`)

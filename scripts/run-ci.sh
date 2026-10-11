@@ -12562,6 +12562,20 @@ layer_c1bz_docs_resolve() {
     # The same selector removes the `dial`, `admin_node` and `memory` modules of
     # wz-session-mcu, whose crate-level docs linked them: four links became code
     # spans so the all-features doc of that crate stays at its budget of zero.
+    # Fixed-memory step S6 -- wz-runtime-coop 11 -> 7, by removal: this lane's
+    # command is `--all-features`, which turns `session-slot` on, and under it the
+    # task pool, the join handles, the local set and the timer queue are the static
+    # forms (`static_*.rs`), so the heap forms' docs, five of whose links were
+    # broken, are not built in this lane at all. The seven errors left are the ones
+    # the crate root, `sync`, `time` and `reassembly_rx` carried before and still
+    # carry (`CoopRuntime::spawn`, `CoopTime::now_monotonic_ms`, `Runtime::Mutex`,
+    # `wz_runtime_tokio::TokioTime` and three bracketed numbers). The links the
+    # static forms and the pump table add resolve, and the five docs that named
+    # items the slot profile removes (`run_session`, `session_task`, `Self::new`,
+    # `CoopRuntime::new`, `block_on`) are code spans now. COUNTED on this lane's
+    # command, not diffed against the old error list.
+    # wz-session-lwip stays 3 for the same reason: the six links its drive docs
+    # made to items the slot profile removes are code spans.
     budget="
         wz:2
         wz-ap-demo:25
@@ -12571,7 +12585,7 @@ layer_c1bz_docs_resolve() {
         wz-link-lwip:9
         wz-mcu-session-acceptor:3
         wz-routing-graph:5
-        wz-runtime-coop:11
+        wz-runtime-coop:7
         wz-runtime-tokio:478
         wz-session-core:510
         wz-session-lwip:3
