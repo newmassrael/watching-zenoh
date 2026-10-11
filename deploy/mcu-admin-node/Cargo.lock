@@ -425,8 +425,11 @@ dependencies = [
  "panic-semihosting",
  "wz",
  "wz-eth-mac-lan9118",
+ "wz-link-lwip",
  "wz-mcu-clock",
+ "wz-runtime-coop",
  "wz-session-core",
+ "wz-session-lwip",
 ]
 
 [[package]]

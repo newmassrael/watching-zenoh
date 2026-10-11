@@ -59,8 +59,11 @@ extern crate std;
 // the paths it always had, so a firmware that names `wz_session_lwip::admin_node`
 // still does. Only the lwIP half stays in this crate: the driver, the links that
 // open it, the multicast drive loop.
-// The dialer and the admin node are not on the `session-slot` profile yet (see
-// `wz-session-mcu`'s `session-slot`).
+// The growable dialer and admin node are not on the `session-slot` profile: its
+// admin node is `slot_node` below, over the fixed rows of `admin_fixed`, and its dialer
+// is the one of that module (see `wz-session-mcu`'s `session-slot`).
+#[cfg(all(feature = "adminspace-core", feature = "session-slot"))]
+pub use wz_session_mcu::admin_fixed;
 #[cfg(all(
     feature = "adminspace-core",
     feature = "adminspace-write",

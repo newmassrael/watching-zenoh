@@ -278,6 +278,39 @@ IMAGES: dict[str, Image] = {
         (Build(V7M, "cross-test", label="mps2"),),
         "the admin node shell, the observer tables and the JSON replies: S6, S9",
     ),
+    # S9c -- the fixed-memory profile of the admin node image: the node of `fixed.rs`
+    # over the slot profile's pieces, no allocator and no `extern crate alloc` in the
+    # bin. `pending` for the reason the acceptor's profile is: the crates of the session
+    # tier carry `alloc` and the toolchain refuses the link for want of an allocator.
+    "mcu-admin-node-fixed": Image(
+        "deploy/mcu-admin-node/Cargo.toml",
+        "bin",
+        "mcu-admin-node",
+        "pending",
+        (
+            Build(
+                V7M,
+                "cross-test",
+                ("fixed-memory",),
+                label="mps2-fixed",
+                no_default_features=True,
+            ),
+        ),
+        "the session tier's own crates still carry `alloc` (wz-session-core, wz-runtime-core,"
+        " the codec owned mirrors: wz-codecs, sce-forge-runtime, sce-portable-bytes): the next"
+        " step",
+    ),
+    # The same profile with an allocator, for the census alone (see the acceptor's).
+    "mcu-admin-node-fixed-census": Image(
+        "deploy/mcu-admin-node/Cargo.toml",
+        "bin",
+        "mcu-admin-node",
+        "pending",
+        (Build(V7M, "cross-test", ("fixed-memory", "heap"), label="mps2-fixed-heap"),),
+        "the linked allocation sites of the admin node on the fixed-memory profile, read"
+        " with an allocator present (census only): the worklist of the next step",
+        ci=False,
+    ),
     "mcu-multicast-e2e": Image(
         "deploy/mcu-multicast-e2e/Cargo.toml",
         "bin",

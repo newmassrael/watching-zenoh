@@ -18,37 +18,68 @@
 #![no_std]
 #![no_main]
 
+// S9c -- the `fixed-memory` profile has no allocator and does not link `alloc`: a use of
+// the heap that crept into this image would not compile. Its node is `fixed.rs`.
+// (Built WITH `heap` as well, for the S8 census alone, it has the allocator and the
+// growable node is still off.)
+#[cfg(feature = "heap")]
 extern crate alloc;
 
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::rc::Rc;
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::string::String;
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::vec;
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::vec::Vec;
+#[cfg(feature = "heap")]
 use core::mem::MaybeUninit;
 
 use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::{debug, hprintln};
+#[cfg(feature = "heap")]
 use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
+#[cfg(not(feature = "fixed-memory"))]
 use wz::link_lwip::ethernet::{EthernetIf, Ipv4Config};
+#[cfg(not(feature = "fixed-memory"))]
 use wz::link_lwip::LwipLink;
+#[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::session_runtime::new_session_actions;
-use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
+use wz::runtime_coop::ClockSource;
+#[cfg(not(feature = "fixed-memory"))]
+use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
+#[cfg(not(feature = "fixed-memory"))]
 use wz::session_lwip::admin_host::ConnectControl;
+#[cfg(not(feature = "fixed-memory"))]
 use wz::session_lwip::admin_node::AdminNode;
+#[cfg(not(feature = "fixed-memory"))]
 use wz::session_lwip::admin_status::{NodeIdentity, NodeStatus};
+#[cfg(not(feature = "fixed-memory"))]
 use wz::session_lwip::LwipLinks;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_eth_mac_lan9118::{Lan9118, MPS2_BASE};
 use wz_mcu_clock::SystickClock;
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::session_init_params::SessionInitParams;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::session_timeouts::SessionTimeouts;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::signing_key::SigningKey;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::WhatAmI;
 
+#[cfg(feature = "fixed-memory")]
+mod fixed;
+
+#[cfg(feature = "heap")]
 const HEAP_SIZE: usize = 1024 * 256;
 
+#[cfg(feature = "heap")]
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
@@ -82,7 +113,9 @@ const LISTEN_PORT: u16 = 7447;
 
 /// Writes are PERMITTED on this node: upstream's default is to refuse, and
 /// the node opts in, because being reconfigured is what it is for.
+#[cfg(not(feature = "fixed-memory"))]
 static CONTROL: ConnectControl = ConnectControl::new(true);
+#[cfg(not(feature = "fixed-memory"))]
 static STATUS: NodeStatus = NodeStatus::new(true);
 
 /// NOT a TRNG. QEMU's mps2 machines have none, so the acceptor's cookie
@@ -111,6 +144,7 @@ impl EntropySource for ClockSeededXorshift {
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's 1536-byte receive
 /// slot holds whole.
+#[cfg(not(feature = "fixed-memory"))]
 fn params(signing_key: &[u8]) -> SessionInitParams {
     SessionInitParams {
         version: 0x09,
@@ -127,6 +161,7 @@ fn params(signing_key: &[u8]) -> SessionInitParams {
     }
 }
 
+#[cfg(feature = "heap")]
 fn init_heap() {
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
     // SAFETY: `HEAP_MEM` is touched only here, as the entry point's first
@@ -144,9 +179,24 @@ fn fail(what: &str) -> ! {
     loop {}
 }
 
+#[cfg(not(any(feature = "heap", feature = "fixed-memory")))]
+compile_error!("build with the `heap` feature (the default) or the `fixed-memory` one");
+
 #[entry]
 fn main() -> ! {
+    // The census build has both features: the allocator is there, the node is not.
+    #[cfg(feature = "heap")]
     init_heap();
+    #[cfg(feature = "fixed-memory")]
+    fixed::run();
+    #[cfg(not(feature = "fixed-memory"))]
+    run_heap()
+}
+
+/// The growable node: the heap, `Rc` handles and `Vec`s, the shape this image has always
+/// had.
+#[cfg(not(feature = "fixed-memory"))]
+fn run_heap() -> ! {
     GLOBAL_CLOCK.init();
 
     let link = Rc::new(LwipLink::init());

@@ -38,7 +38,7 @@ cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 cortex-m-semihosting = "0.5"
 panic-semihosting = { version = "0.6", features = ["exit"] }
-embedded-alloc = "0.6"
+embedded-alloc = { version = "0.6", optional = true }
 wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
 # The chip's driver, a crate of its own since the `EthernetMac` seam moved to the
 # dependency-free trait tier: it depends on that tier and on nothing else, so
@@ -65,6 +65,38 @@ wz-session-core = { path = "../../crates/wz-session-core", default-features = fa
     "session-unicast",
     "no_std",
 ] }
+# S9c -- named only to turn the selectors on through the `fixed-memory` feature below:
+# the facade deliberately forwards neither `session-slot` nor `static-link-storage`
+# (a forward would let workspace feature unification take the heap constructors away
+# from the AP host tests), and both are the final binary's to choose. They are the SAME
+# instances the facade pulls, so no second copy of either crate is built.
+wz-session-lwip = { path = "../../crates/wz-session-lwip", optional = true, default-features = false }
+wz-link-lwip = { path = "../../crates/wz-link-lwip", optional = true, default-features = false }
+wz-runtime-coop = { path = "../../crates/wz-runtime-coop", optional = true, default-features = false }
+
+[features]
+default = ["heap"]
+# The image with an allocator: the growable node on `embedded-alloc`'s heap, the shape
+# this image has always had.
+heap = ["dep:embedded-alloc"]
+# S9c -- the FIXED-MEMORY PROFILE of this image: the node of `src/fixed.rs`, over the
+# slot profile's pieces (session slots, a pump table, a static runtime, a socket pool,
+# a listener, the fixed status and admin rows, the Ethernet pool), with no allocator
+# and no `extern crate alloc` in the bin. Built with `--no-default-features --features
+# fixed-memory`. The image does not link yet, for the reason the acceptor's profile does
+# not: the session tier's own crates still carry `extern crate alloc`, and the S8 gate
+# lists them. (With `heap` as well it is the census-only build, which has an allocator
+# and so links.)
+fixed-memory = [
+    "dep:wz-session-lwip",
+    "dep:wz-link-lwip",
+    "dep:wz-runtime-coop",
+    "wz-session-lwip/session-slot",
+    "wz-session-lwip/static-link-storage",
+    "wz-session-lwip/session-unicast-accept",
+    "wz-runtime-coop/session-slot",
+    "wz-session-core/session-slot",
+]
 
 [profile.release]
 codegen-units = 1
