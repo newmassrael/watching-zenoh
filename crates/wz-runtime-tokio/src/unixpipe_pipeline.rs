@@ -111,7 +111,7 @@ const DEDICATE_TRIES: usize = 100;
 /// hostile peer) so it cannot hold a dedicated pipe pair — or wedge the acceptor —
 /// forever. Matches zenoh's `transport.unicast.accept_timeout` default (10000ms);
 /// zenoh's `UnicastPipeListener` loop has NO such bound (serial + unbounded), so the
-/// timeout wrapper in [`unixpipe_acceptor_task`] is a SUPERSET hardening.
+/// timeout wrapper in [`serve_invitations`] is a SUPERSET hardening.
 ///
 /// NOT-THIS-KEY: transport/unicast/accept_timeout
 ///
@@ -354,12 +354,6 @@ fn open_sender_rw(path: &str) -> io::Result<Sender> {
     Sender::from_file(open_rdwr_nonblock(path)?)
 }
 
-/// Open the BASE request channel's reader: `O_RDWR`, so it is its own writer and
-/// never reads EOF across client churn.
-fn open_base_reader(path: &str) -> io::Result<Receiver> {
-    Receiver::from_file(open_rdwr_nonblock(path)?)
-}
-
 /// Open a DEDICATED FIFO read end. Linux opens it read-only, which is what the
 /// Linux tests measure and what lets the end read EOF when its peer closes. Every
 /// other Unix opens it `O_RDWR` as upstream does on all of them
@@ -374,7 +368,7 @@ fn open_read_end(path: &str) -> io::Result<Receiver> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        open_base_reader(path)
+        Receiver::from_file(open_rdwr_nonblock(path)?)
     }
 }
 
@@ -626,7 +620,7 @@ pub async fn dial_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
 /// `P_uplink{suffix}` reader (the client unlinked its transient reservation), open
 /// `P_downlink{suffix}` as sender, and run the 3-way suffix confirm. Returns the
 /// connected listener-side [`UnixpipeLink`] (reads `P_uplink{suffix}`, writes
-/// `P_downlink{suffix}`). Driven by [`unixpipe_acceptor_task`] under a
+/// `P_downlink{suffix}`). Driven by [`serve_invitations`] under a
 /// [`HANDSHAKE_TIMEOUT`] wrapper (NOT in `accept_raw`'s cancel-prone `select!`), so
 /// a peer that stalls mid-handshake is bounded to the timeout rather than wedging
 /// the acceptor forever.
@@ -733,13 +727,19 @@ impl Drop for UnixpipeAcceptor {
 /// is serial with NO timeout, so one such peer wedges it INDEFINITELY. Acceptance is
 /// still serial (one base reader), so a stalled peer delays other clients by up to
 /// the timeout, not forever — a bounded, honest limitation, not the unbounded wedge
-/// zenoh has. A malformed invitation (bad magic) errors on the read and is logged;
-/// the loop keeps reading (the base reader is O_RDWR, so it never EOFs on client
-/// churn). The only loop termination is the [`UnixpipeAcceptorPump`] abort (when the
-/// listener drops) or the receiver closing (`tx.send` errors — its link's
-/// `FifoReadEnd::Drop` then cleans the dedicated nodes).
-async fn unixpipe_acceptor_task(
-    mut base_reader: Receiver,
+/// zenoh has. A malformed invitation (bad magic, `InvalidData`) is logged and the
+/// loop keeps reading: the 8 bytes it consumed were that peer's alone, so the next
+/// read is a new question. Any OTHER read error is not about an invitation but
+/// about the channel, answers the same way on every read, and ends the loop: a
+/// loop that logged it and read again would never reach an await that yields, and
+/// this runs on the ONE thread of the process's acceptor subsystem, so every other
+/// listener's handshake in the process would starve behind it. The listener sees
+/// the end as `recv_new_link` answering `None`. The other terminations are the
+/// [`UnixpipeAcceptorPump`] abort (when the listener drops) and the receiver
+/// closing (`tx.send` errors — its link's `FifoReadEnd::Drop` then cleans the
+/// dedicated nodes).
+async fn serve_invitations<R: AsyncRead + Unpin>(
+    mut base_reader: R,
     base: String,
     mode: libc::mode_t,
     tx: mpsc::UnboundedSender<UnixpipeLink>,
@@ -747,9 +747,16 @@ async fn unixpipe_acceptor_task(
     loop {
         let suffix = match recv_invitation(&mut base_reader).await {
             Ok(suffix) => suffix,
-            Err(e) => {
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                 log::warn!("wz unixpipe accept: bad invitation: {e}");
                 continue;
+            }
+            Err(e) => {
+                log::error!(
+                    "wz unixpipe accept: the request channel of {base} cannot be read ({e}); \
+                     the listener stops"
+                );
+                break;
             }
         };
         match tokio::time::timeout(HANDSHAKE_TIMEOUT, finish_handshake(&base, suffix, mode)).await {
@@ -765,6 +772,37 @@ async fn unixpipe_acceptor_task(
             }
         }
     }
+}
+
+/// The task [`bind_unixpipe`] spawns on the acceptor subsystem: it turns the base
+/// request channel `base_file` into the tokio read end and serves it.
+///
+/// The conversion is done HERE, on the acceptor runtime, and not by the caller of
+/// `bind_unixpipe`, because `Receiver::from_file` registers the descriptor with
+/// the reactor of the runtime it is called on, and the runtime that reads this
+/// channel is this one. Registered by the caller it lived exactly as long as the
+/// caller's runtime: when that ended (a test's runtime at the end of the test, a
+/// host that binds from a short-lived runtime) every later read failed at once
+/// with "a Tokio 1.x context was found, but it is being shutdown". The advisory
+/// lock is already held by the file, so a bind that loses the race for the path
+/// still fails in `bind_unixpipe`, before any task exists.
+async fn unixpipe_acceptor_task(
+    base_file: File,
+    base: String,
+    mode: libc::mode_t,
+    tx: mpsc::UnboundedSender<UnixpipeLink>,
+) {
+    let base_reader = match Receiver::from_file(base_file) {
+        Ok(reader) => reader,
+        Err(e) => {
+            log::error!(
+                "wz unixpipe accept: the request channel of {base} cannot be registered ({e}); \
+                 the listener stops"
+            );
+            return;
+        }
+    };
+    serve_invitations(base_reader, base, mode, tx).await;
 }
 
 /// Bind a multi-client unixpipe LISTENER on base `path`: create + O_RDWR-open +
@@ -789,10 +827,12 @@ pub async fn bind_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
     let (base_uplink, _base_downlink) = base_channels(path);
 
     create_fifo_tolerant(&base_uplink, mode)?;
-    // O_RDWR so the base reader is its own writer -> never EOFs across client churn.
-    let base_reader = open_base_reader(&base_uplink)?;
+    // O_RDWR so the base reader is its own writer -> never EOFs across client
+    // churn. Kept a plain `File` here: the acceptor task registers it with ITS
+    // reactor (see `unixpipe_acceptor_task`), not this caller's.
+    let base_file = open_rdwr_nonblock(&base_uplink)?;
     // Single-listener invariant + the listener-detection lock a dialer probes.
-    lock_read_end(base_reader.as_raw_fd()).map_err(|_| {
+    lock_read_end(base_file.as_raw_fd()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::AddrInUse,
             format!("another unixpipe listener already owns {base_uplink}"),
@@ -807,7 +847,7 @@ pub async fn bind_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
     // (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs`
     // @ `ZRuntime::Acceptor.block_on(`).
     let handle = PartitionedRuntime::ACCEPTOR.spawn(unixpipe_acceptor_task(
-        base_reader,
+        base_file,
         path.to_string(),
         mode,
         tx,
@@ -883,7 +923,7 @@ pub fn wire_unixpipe_stream(
 mod tests {
     use super::*;
     use std::os::unix::fs::FileTypeExt;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     use crate::{LinkDriver, LinkEvent, Reliability};
     use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
@@ -946,9 +986,77 @@ mod tests {
         }
     }
 
+    /// The dedicated FIFO node `link` READS. Every link this module hands out
+    /// reads a named node (`FifoReadEnd::new` always sets one).
+    fn read_node(link: &UnixpipeLink) -> &str {
+        link.read
+            .node_path()
+            .expect("a dedicated unixpipe link reads a named node")
+    }
+
+    /// Pair every dialer link with the acceptor link that is the OTHER end of
+    /// its dedicated FIFO pair, found by the nodes they share: the node a dialer
+    /// reads (`P_downlink{suffix}`) is the node its acceptor partner writes.
+    ///
+    /// The order the listener hands links out in is the order their invitations
+    /// reached the shared request channel, and that is NOT the order a test
+    /// started its dialers in -- two dialers racing for the channel arrive in
+    /// either order. Pairing links by position therefore pairs a dialer with
+    /// somebody else's acceptor half about half the time, and a frame sent on
+    /// one pair is then awaited on the other, forever. The pair is a fact of the
+    /// FIFO names, so it is read off the names.
+    fn pair_by_dedicated_nodes(
+        dialers: Vec<UnixpipeLink>,
+        mut acceptors: Vec<UnixpipeLink>,
+    ) -> Vec<(UnixpipeLink, UnixpipeLink)> {
+        dialers
+            .into_iter()
+            .map(|dialer| {
+                let at = acceptors
+                    .iter()
+                    .position(|acceptor| acceptor.write_node == read_node(&dialer))
+                    .expect("every dialer has exactly one acceptor-side partner");
+                (dialer, acceptors.swap_remove(at))
+            })
+            .collect()
+    }
+
+    /// Send `payload` from `dialer` and receive it on `acceptor`. The two links
+    /// must be the two ends of ONE dedicated pair -- asserted FIRST, so a wrong
+    /// pairing is a failure that names the nodes and never a frame awaited on a
+    /// pair nobody wrote to.
+    async fn round_trip_on_one_pair(dialer: UnixpipeLink, acceptor: UnixpipeLink, payload: &[u8]) {
+        assert_eq!(
+            acceptor.write_node,
+            read_node(&dialer),
+            "the acceptor writes the node the dialer reads"
+        );
+        assert_eq!(
+            read_node(&acceptor),
+            dialer.write_node,
+            "the acceptor reads the node the dialer writes"
+        );
+        let (_d_in, d_out, _d_writer) = wire_unixpipe_stream(dialer);
+        let (mut a_in, _a_out, _a_writer) = wire_unixpipe_stream(acceptor);
+        assert_eq!(
+            d_out.send_blocking(payload, Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        match a_in.poll_event().await {
+            LinkEvent::Rx(frame) => assert_eq!(frame.bytes, payload),
+            other => panic!("expected Rx, got {other:?}"),
+        }
+        drop(d_out);
+    }
+
     /// TWO dialers against ONE bound listener each complete the invitation
     /// handshake, get a DISTINCT dedicated pair, and round-trip a frame — the
     /// multi-client discriminator (the old single-connection acceptor held one).
+    ///
+    /// The dialers race, so the listener may hand out their links in either
+    /// order; each acceptor link is matched to its dialer by the pair's nodes.
+    /// (This test used to match them by position and hung on about two runs in
+    /// five, parked in `block_on` with all eight FIFO ends open.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_dialers_get_distinct_dedicated_pairs() {
         let base = unique_pipe_base();
@@ -969,22 +1077,162 @@ mod tests {
         let c1 = d1.await.unwrap().expect("dial 1");
         let c2 = d2.await.unwrap().expect("dial 2");
 
-        // Each dialer's link carries the SAME payload end to end on its own pair.
-        for (dialer, acceptor, payload) in [
-            (c1, a1, b"unixpipe-client-1".as_slice()),
-            (c2, a2, b"unixpipe-client-2".as_slice()),
-        ] {
-            let (_d_in, d_out, _d_writer) = wire_unixpipe_stream(dialer);
-            let (mut a_in, _a_out, _a_writer) = wire_unixpipe_stream(acceptor);
-            assert_eq!(
-                d_out.send_blocking(payload, Reliability::Reliable),
-                LinkSendOutcome::Sent
-            );
-            match a_in.poll_event().await {
-                LinkEvent::Rx(frame) => assert_eq!(frame.bytes, payload),
-                other => panic!("expected Rx, got {other:?}"),
+        // The two dedicated pairs share no node.
+        assert_ne!(c1.write_node, c2.write_node, "distinct dedicated uplinks");
+        assert_ne!(
+            read_node(&c1),
+            read_node(&c2),
+            "distinct dedicated downlinks"
+        );
+
+        // Each dialer's link carries ITS payload end to end on its own pair.
+        let payloads = [
+            b"unixpipe-client-1".as_slice(),
+            b"unixpipe-client-2".as_slice(),
+        ];
+        for ((dialer, acceptor), payload) in pair_by_dedicated_nodes(vec![c1, c2], vec![a1, a2])
+            .into_iter()
+            .zip(payloads)
+        {
+            round_trip_on_one_pair(dialer, acceptor, payload).await;
+        }
+        drop(acc);
+    }
+
+    /// A request channel that cannot be read: every read fails, for the first
+    /// three, and then the read never completes, so a loop that retries a failed
+    /// read is seen retrying (the count passes one) instead of spinning the test.
+    struct UnreadableChannel {
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for UnreadableChannel {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.reads.fetch_add(1, Ordering::Relaxed) < 3 {
+                Poll::Ready(Err(io::Error::other("the request channel is unreadable")))
+            } else {
+                Poll::Pending
             }
-            drop(d_out);
+        }
+    }
+
+    /// A read error that repeats is not "a bad invitation": the next read fails
+    /// the same way at once, so a loop that logs it and reads again never reaches
+    /// an await that yields. The acceptor runs on the ONE thread of the process's
+    /// acceptor subsystem, so that loop would starve every other listener's
+    /// handshake in the process, not only its own. The acceptor stops instead, and
+    /// its listener reports the end (`recv_new_link` answers `None`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_request_channel_ends_the_acceptor_instead_of_spinning() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (tx, mut rx) = mpsc::unbounded_channel::<UnixpipeLink>();
+        let task = tokio::spawn(serve_invitations(
+            UnreadableChannel {
+                reads: Arc::clone(&reads),
+            },
+            unique_pipe_base(),
+            DEFAULT_FILE_MASK as libc::mode_t,
+            tx,
+        ));
+        let ended = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert!(
+            ended.is_ok(),
+            "the acceptor kept reading a request channel that fails ({} reads)",
+            reads.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "one failed read is the end of the acceptor, not a reason to read again"
+        );
+        assert!(
+            rx.recv().await.is_none(),
+            "the listener sees the acceptor's end"
+        );
+    }
+
+    /// A listener belongs to the process's acceptor runtime, not to the runtime
+    /// that happened to call `bind_unixpipe`: the request channel is read there,
+    /// so it is registered with THAT runtime's reactor. Registered with the
+    /// caller's, it died with the caller -- every read after the caller's runtime
+    /// ended failed with "a Tokio 1.x context was found, but it is being
+    /// shutdown", the acceptor retried it in a loop that never yielded, and the
+    /// one acceptor thread of the process was lost to it (every test that
+    /// listened after it hung).
+    #[test]
+    fn a_listener_outlives_the_runtime_that_bound_it() {
+        let base = unique_pipe_base();
+        let binder = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the binding runtime");
+        let mut acc = binder
+            .block_on(bind_unixpipe(&base, None))
+            .expect("bind on the short-lived runtime");
+        drop(binder);
+
+        let user = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("the using runtime");
+        user.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (dialed, accepted) =
+                    tokio::join!(dial_unixpipe(&base, None), acc.recv_new_link());
+                round_trip_on_one_pair(
+                    dialed.expect("dial the listener"),
+                    accepted.expect("the listener accepts"),
+                    b"unixpipe-after-the-binder-ended",
+                )
+                .await;
+            })
+            .await
+            .expect("a listener keeps accepting after the runtime that bound it has ended");
+        });
+        drop(acc);
+    }
+
+    /// The listener hands links out in the order their invitations arrived, so
+    /// when the dialer that arrived SECOND is the one listed first, position and
+    /// pair disagree. Forced here instead of left to the race: the first dial
+    /// completes before the second one starts, so the arrival order is known,
+    /// and the dialers are then listed in the opposite order. A pairing by
+    /// position fails the node assertion on the first pair, every run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn links_pair_by_their_nodes_when_the_arrival_order_is_reversed() {
+        let base = unique_pipe_base();
+        let mut acc = bind_unixpipe(&base, None).await.expect("bind");
+
+        let (dialed_first, accepted_first) =
+            tokio::join!(dial_unixpipe(&base, None), acc.recv_new_link());
+        let (dialed_second, accepted_second) =
+            tokio::join!(dial_unixpipe(&base, None), acc.recv_new_link());
+        let dialed_first = dialed_first.expect("first dial");
+        let dialed_second = dialed_second.expect("second dial");
+        let accepted_first = accepted_first.expect("first accept");
+        let accepted_second = accepted_second.expect("second accept");
+
+        // The hostile interleaving is really in force: listed in accept order,
+        // the acceptor links do not sit opposite their own dialers.
+        let dialers = vec![dialed_second, dialed_first];
+        let acceptors = vec![accepted_first, accepted_second];
+        assert_ne!(
+            acceptors[0].write_node,
+            read_node(&dialers[0]),
+            "position pairs the first acceptor link with the wrong dialer"
+        );
+
+        let payloads = [b"unixpipe-second".as_slice(), b"unixpipe-first".as_slice()];
+        for ((dialer, acceptor), payload) in pair_by_dedicated_nodes(dialers, acceptors)
+            .into_iter()
+            .zip(payloads)
+        {
+            round_trip_on_one_pair(dialer, acceptor, payload).await;
         }
         drop(acc);
     }
