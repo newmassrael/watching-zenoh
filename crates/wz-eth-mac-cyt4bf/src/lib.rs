@@ -294,9 +294,11 @@ pub struct Config {
     /// states it as the field's reset (`emac_regs_macro.h`), a CYT4BF8CEE kit read
     /// `DMA_CONFIG` as `0x0018_0704` before any driver code ran, and Infineon's
     /// Ethernet connection manager for KIT_T2G-B-H_LITE configures it
-    /// (`CY_ETHIF_DMA_DBUR_LEN_4`). The kit has run this driver with
-    /// [`DmaBurst::Single`]; INCR4 has not yet run on silicon under it. Single
-    /// beats stay selectable for a board that has a reason to want them.
+    /// (`CY_ETHIF_DMA_DBUR_LEN_4`). The kit ran this driver with
+    /// [`DmaBurst::Single`] first and with INCR4 on 2026-10-11: `DMA_CONFIG` read
+    /// `0x0118_0704` on a running node, the transmit status held no AMBA error,
+    /// and the pool steps of the admin node's hardware verdict all held.
+    /// Single beats stay selectable for a board that has a reason to want them.
     pub dma_burst: DmaBurst,
     /// Accept every multicast frame (the hash filter all ones). A node that does
     /// zenoh multicast scouting needs it; a unicast-only node can refuse it.
