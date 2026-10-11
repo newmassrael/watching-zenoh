@@ -316,8 +316,14 @@ fn application(actions: &Handle) -> (impl FnMut(IterationEvent<'_>) + 'static, A
 /// Where each profile keeps what the windows build, and how it makes it. The slot
 /// profile's tables are `static`s the image declares; the others have no table and
 /// make everything the way every image does today.
+///
+/// The two forms are two modules of two names and `placing` is the alias of the
+/// one the profile builds: one name declared twice in one scope is a defect under
+/// every feature combination, whatever the `cfg`s say.
 #[cfg(feature = "session-slot")]
-mod placing {
+use placing_in_slot as placing;
+#[cfg(feature = "session-slot")]
+mod placing_in_slot {
     use super::*;
     use wz_runtime_coop::session_drive::{PumpRef, PumpSlots};
     use wz_runtime_coop::session_runtime::new_session_in_slot;
@@ -429,7 +435,9 @@ mod placing {
 
 /// See the slot form of this module.
 #[cfg(not(feature = "session-slot"))]
-mod placing {
+use placing_on_the_heap as placing;
+#[cfg(not(feature = "session-slot"))]
+mod placing_on_the_heap {
     use super::*;
     use wz_runtime_coop::session_runtime::new_session_actions;
     use wz_session_core::link::BoxedLinkDriver;
