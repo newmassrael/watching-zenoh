@@ -141,5 +141,29 @@ mac-rx-pool = []
 # the receive queue and its callback are as they were.
 rx-hold = []
 
+# Round 3277 -- fixed-memory step S7: the link keeps nothing on a heap. A
+# SELECTOR, as `bounded-heapless` (wz-session-core) and `tx-lend-only`
+# (wz-session-lwip) are: the constructors that put a socket's state in a
+# `Pin<Box<..>>` and an interface's MAC in a leaked `Box` (`LwipUdpSocket::bind`,
+# `PooledUdpRx::bind`, `EthernetIf::add`, and the helpers over them) are
+# compiled out, and the ones that take a cell of a `static` pool the image
+# declares replace them (`bind_in`, `add_in`; `static_slots`). A bind or an
+# addition that finds every cell taken is a counted refusal, never a heap
+# fallback. With it on the crate does not link `alloc`, so a use of the heap that
+# creeps back is a compile error.
+#
+# It must be turned on by an MCU final binary only, never by a library crate's
+# dependency line: workspace feature unification would take the constructors that
+# allocate away from every image in the same build, the AP host tests among them.
+# It implies nothing else, and `alloc` keeps its meaning.
+static-link-storage = []
+
+# Round 3277 -- what opening, using and closing the link costs the heap, counted:
+# sockets, the session socket, an Ethernet interface, and on `static-link-storage`
+# the refusals of a full pool. `test-support` is the lwIP init-once harness.
+[[test]]
+name = "link_storage_allocations"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

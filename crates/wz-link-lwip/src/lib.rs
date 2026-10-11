@@ -44,6 +44,10 @@
 //!   the recv callback with the Inner's pinned address as the
 //!   callback's `recv_arg`. Drop reverses the registration before
 //!   removing the pcb so the dangling-arg window never opens.
+//! - With `static-link-storage` (Round 3277, the MCU final binary's selector)
+//!   the `Pin<Box<Inner>>` is a cell of a `static` pool the image declares
+//!   ([`static_slots`], `LwipUdpSocket::bind_in`): the same address stability,
+//!   a fixed capacity, a counted refusal when every cell is taken, and no heap.
 //!
 //! ## Callback safety (R311az-pre D4 + D5)
 //!
@@ -55,8 +59,15 @@
 //! mutates it. The unsafe cast `(arg as *mut Inner) -> &mut Inner`
 //! is therefore well-formed under the NO_SYS=1 invariant.
 
+// Round 3277 -- `static-link-storage` is the MCU final binary's selector: with it
+// on, nothing this crate builds for a firmware reaches the heap, and the crate
+// does not link `alloc` at all (a use that crept back is a compile error, not a
+// silent allocation). The tests keep it: their MAC and cable doubles are host
+// code and use `alloc::rc` and `alloc::collections`.
+#[cfg(any(not(feature = "static-link-storage"), test))]
 extern crate alloc;
 
+#[cfg(not(feature = "static-link-storage"))]
 use alloc::boxed::Box;
 use core::ffi::c_void;
 use core::marker::PhantomPinned;
@@ -245,6 +256,11 @@ pub mod rx_ring;
 /// node reaches anything outside its own process through.
 pub mod ethernet;
 
+/// Round 3277 -- fixed-memory step S7: address-stable storage for what lwIP
+/// keeps a pointer to (a socket's state, a netif's MAC), claimed out of a
+/// `static` the image declares, so the link owns no heap.
+pub mod static_slots;
+
 // The SMSC LAN9118 MAC (R2836) is no longer a module here: a chip's driver is a
 // crate of its own, `wz-eth-mac-lan9118`, that implements the `EthernetMac`
 // seam from the dependency-free trait tier. A firmware that drives that chip
@@ -307,6 +323,101 @@ pub fn lwip_test_link() -> (std::sync::MutexGuard<'static, ()>, LwipLink) {
             _no_send_sync: core::marker::PhantomData,
         },
     )
+}
+
+/// Round 3277 -- the binders a host test uses, so that one test body runs on both
+/// profiles.
+///
+/// On the default profile each is the constructor the test always called. With
+/// `static-link-storage` those constructors do not exist, and each of these
+/// claims its socket or interface out of a pool of one cell that it leaks, which
+/// is what a test (host code, free to allocate) may do and a firmware may not. A
+/// test that is ABOUT the fixed storage (its capacity, its refusals, that it
+/// allocates nothing) declares a real pool and calls `bind_in` / `add_in`
+/// itself; this is for the rest, which are about something else and need a socket.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_bind {
+    use crate::ethernet::{EthernetIf, EthernetIfError, EthernetMac, Ipv4Config};
+    use crate::{LinkError, LwipLink, LwipUdpSocket};
+
+    #[cfg(feature = "static-link-storage")]
+    fn leaked<T>(pool: T) -> &'static T {
+        std::boxed::Box::leak(std::boxed::Box::new(pool))
+    }
+
+    /// A socket of the shape `N`, `Q`.
+    pub fn bind<const N: usize, const Q: usize>(
+        link: &LwipLink,
+        port: u16,
+    ) -> Result<LwipUdpSocket<N, Q>, LinkError> {
+        #[cfg(not(feature = "static-link-storage"))]
+        {
+            LwipUdpSocket::bind(link, port)
+        }
+        #[cfg(feature = "static-link-storage")]
+        {
+            LwipUdpSocket::bind_in(link, port, leaked(crate::UdpSocketPool::<N, Q, 1>::new()))
+        }
+    }
+
+    /// The session socket, as `rx_sockets::bind_session_rx` binds it.
+    pub fn session_rx(
+        link: &LwipLink,
+        port: u16,
+    ) -> Result<crate::rx_sockets::SessionRxSocket, LinkError> {
+        bind(link, port)
+    }
+
+    /// The scout socket, with its group joined, as `rx_sockets::bind_scout_rx`
+    /// binds it.
+    pub fn scout_rx(
+        link: &LwipLink,
+        port: u16,
+    ) -> Result<crate::rx_sockets::ScoutRxSocket, LinkError> {
+        let socket = bind(link, port)?;
+        link.join_multicast_group(crate::rx_sockets::SCOUT_MULTICAST_GROUP)?;
+        Ok(socket)
+    }
+
+    /// The multicast session socket, with `group` joined, as
+    /// `rx_sockets::bind_session_multicast_rx` binds it.
+    pub fn session_multicast_rx(
+        link: &LwipLink,
+        group: u32,
+        port: u16,
+    ) -> Result<crate::rx_sockets::SessionMulticastRxSocket, LinkError> {
+        let socket = bind(link, port)?;
+        link.join_multicast_group(group)?;
+        Ok(socket)
+    }
+
+    /// Where a link opener binds session sockets from, for a test of the opener
+    /// (`static-link-storage`): a leaked pool of eight, more than any one test holds.
+    #[cfg(feature = "static-link-storage")]
+    pub fn session_sockets() -> &'static dyn crate::rx_sockets::SessionSocketSource {
+        leaked(crate::rx_sockets::SessionRxPool::<8>::new())
+    }
+
+    /// An Ethernet interface over `mac`.
+    pub fn add_netif<M: EthernetMac + 'static>(
+        link: &LwipLink,
+        mac: M,
+        ip: Ipv4Config,
+    ) -> Result<EthernetIf<M>, EthernetIfError> {
+        #[cfg(not(feature = "static-link-storage"))]
+        {
+            EthernetIf::add(link, mac, ip)
+        }
+        #[cfg(feature = "static-link-storage")]
+        {
+            EthernetIf::add_in(
+                link,
+                mac,
+                ip,
+                leaked(crate::ethernet::EthernetPool::<M, 1>::new()),
+            )
+        }
+    }
 }
 
 /// R2390 (transport-multicast) — drive every interface's CARRIER, the injector
@@ -385,6 +496,10 @@ pub enum LinkError {
     /// err_t — no `NETIF_FLAG_IGMP` netif is up, or the IGMP group pool
     /// (`MEMP_NUM_IGMP_GROUP`) is exhausted.
     MulticastJoinFailed(i8),
+    /// Round 3277 (`static-link-storage`) -- every cell of the static pool a
+    /// socket is bound out of is taken. The pool counts it
+    /// ([`static_slots::SlotPool::refusals`]); nothing is allocated instead.
+    SlotsExhausted,
     /// [`LwipLink::route_multicast_over_loopback`] was called in a build
     /// WITHOUT the `loopif-multicast` feature (the loopback multicast egress
     /// routing is compiled out). A typed no-op result — never a silent success —
@@ -585,6 +700,78 @@ struct Inner<const N: usize, const Q: usize> {
     _pin: PhantomPinned,
 }
 
+impl<const N: usize, const Q: usize> Inner<N, Q> {
+    /// A socket's state before its pcb exists: nothing queued, nothing dropped.
+    fn new() -> Self {
+        Self {
+            pcb: NonNull::dangling(),
+            rx_queue: Queue::new(),
+            rx_drops: 0,
+            #[cfg(feature = "rx-hold")]
+            hold_lent: false,
+            _pin: PhantomPinned,
+        }
+    }
+}
+
+/// Where a socket's [`Inner`] lives: a heap box by default, and with
+/// `static-link-storage` a cell of the static pool the socket was bound out of.
+/// Either way it is pinned, because lwIP holds its address as the receive
+/// callback's argument.
+#[cfg(not(feature = "static-link-storage"))]
+type InnerBox<const N: usize, const Q: usize> = Box<Inner<N, Q>>;
+#[cfg(feature = "static-link-storage")]
+type InnerBox<const N: usize, const Q: usize> = static_slots::Slot<Inner<N, Q>>;
+
+/// Round 3277 (`static-link-storage`) -- the static storage for `S` sockets of
+/// one shape (`N`, `Q`), declared by the image that owns the capacity decision:
+///
+/// ```ignore
+/// static SESSION_SOCKETS: UdpSocketPool<SESSION_RX_SLOT_SIZE, SESSION_RX_SLOTS, 2> =
+///     UdpSocketPool::new();
+/// let socket = LwipUdpSocket::bind_in(&link, 7447, &SESSION_SOCKETS)?;
+/// ```
+///
+/// Each cell is one socket's whole state, receive queue included, which is why
+/// it is large: about `Q * (N + 12)` bytes (a session socket of the default
+/// profile is 16 cells of 1536 bytes, 24.7 KB). A socket that drops gives its
+/// cell back; a bind that finds every cell taken is [`LinkError::SlotsExhausted`],
+/// counted in [`refusals`](Self::refusals).
+#[cfg(feature = "static-link-storage")]
+pub struct UdpSocketPool<const N: usize, const Q: usize, const S: usize>(
+    static_slots::SlotPool<Inner<N, Q>, S>,
+);
+
+#[cfg(feature = "static-link-storage")]
+impl<const N: usize, const Q: usize, const S: usize> UdpSocketPool<N, Q, S> {
+    /// An empty pool, for a `static`.
+    pub const fn new() -> Self {
+        Self(static_slots::SlotPool::new())
+    }
+
+    /// How many sockets the pool holds at once.
+    pub const fn capacity(&self) -> usize {
+        S
+    }
+
+    /// How many of them are bound now.
+    pub fn in_use(&self) -> usize {
+        self.0.in_use()
+    }
+
+    /// How many binds found every cell taken, since boot.
+    pub fn refusals(&self) -> u32 {
+        self.0.refusals()
+    }
+}
+
+#[cfg(feature = "static-link-storage")]
+impl<const N: usize, const Q: usize, const S: usize> Default for UdpSocketPool<N, Q, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One received datagram in a socket's receive queue.
 ///
 /// Without `rx-hold` this has one variant and is laid out as the [`Datagram`] it
@@ -692,7 +879,7 @@ unsafe impl<const N: usize, const Q: usize> Send for Inner<N, Q> {}
 /// The default `LwipUdpSocket` (no turbofish) keeps the R311az-2 shape
 /// for code that does not need to slim the footprint.
 pub struct LwipUdpSocket<const N: usize = MAX_DATAGRAM, const Q: usize = RX_QUEUE_DEPTH> {
-    inner: Pin<Box<Inner<N, Q>>>,
+    inner: Pin<InnerBox<N, Q>>,
 }
 
 unsafe extern "C" fn recv_thunk<const N: usize, const Q: usize>(
@@ -793,16 +980,47 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     ///   (`MEMP_NUM_UDP_PCB` exhausted; bump the pool in lwipopts.h).
     /// - [`LinkError::BindFailed`] if `udp_bind` rejects the port
     ///   (e.g. already in use within the lwIP stack).
-    pub fn bind(_link: &LwipLink, port: u16) -> Result<Self, LinkError> {
-        let mut inner: Pin<Box<Inner<N, Q>>> = Box::pin(Inner {
-            pcb: NonNull::dangling(),
-            rx_queue: Queue::new(),
-            rx_drops: 0,
-            #[cfg(feature = "rx-hold")]
-            hold_lent: false,
-            _pin: PhantomPinned,
-        });
+    #[cfg(not(feature = "static-link-storage"))]
+    pub fn bind(link: &LwipLink, port: u16) -> Result<Self, LinkError> {
+        Self::attach(link, Box::pin(Inner::new()), port)
+    }
 
+    /// Round 3277 (`static-link-storage`) -- `bind` over a cell of
+    /// `pool`, a `static` the image declares, instead of a heap box.
+    ///
+    /// The cell is claimed first and given back if the bind fails, so a refused
+    /// bind leaves the pool as it found it. A socket that drops frees its cell.
+    ///
+    /// # Errors
+    ///
+    /// - [`LinkError::SlotsExhausted`] if every cell of `pool` is taken, counted in
+    ///   [`UdpSocketPool::refusals`]; nothing is allocated instead.
+    /// - Otherwise as `bind` is on the default build: the pcb is lwIP's, so
+    ///   [`LinkError::PcbExhausted`] and [`LinkError::BindFailed`] stay.
+    #[cfg(feature = "static-link-storage")]
+    pub fn bind_in<const S: usize>(
+        link: &LwipLink,
+        port: u16,
+        pool: &'static UdpSocketPool<N, Q, S>,
+    ) -> Result<Self, LinkError> {
+        let slot = pool
+            .0
+            .claim_with(Inner::new)
+            .ok_or(LinkError::SlotsExhausted)?;
+        // SAFETY: a slot's value stays in its cell of a `static` until the slot
+        // drops, and the cell is not reused before the value is dropped in place,
+        // which is the pinning guarantee.
+        Self::attach(link, unsafe { Pin::new_unchecked(slot) }, port)
+    }
+
+    /// Create the pcb, bind it, and hand lwIP the pinned state's address as the
+    /// receive callback's argument. Shared by both constructors, so the order
+    /// that keeps the callback from outliving its argument is written once.
+    fn attach(
+        _link: &LwipLink,
+        mut inner: Pin<InnerBox<N, Q>>,
+        port: u16,
+    ) -> Result<Self, LinkError> {
         // SAFETY: udp_new is a no-arg allocator from MEMP_NUM_UDP_PCB.
         let pcb_raw = unsafe { udp_new() };
         let Some(pcb) = NonNull::new(pcb_raw) else {
@@ -1276,7 +1494,7 @@ mod smoke {
         let port: u16 = 12345;
         // R311bq: `LwipUdpSocket` (no turbofish) resolves to the
         // default generic args `<MAX_DATAGRAM, RX_QUEUE_DEPTH>`.
-        let mut sock: LwipUdpSocket = LwipUdpSocket::bind(&link, port).expect("bind ANY:12345");
+        let mut sock: LwipUdpSocket = crate::test_bind::bind(&link, port).expect("bind ANY:12345");
 
         let payload: &[u8] = b"hello-r311az-2";
         sock.send_to(ipv4_addr_loopback(), port, payload)

@@ -19,6 +19,7 @@
 //! into lwIP. A firmware calls it each time round its main loop, beside the
 //! link's timer pump, which is also what drives ARP's timers.
 
+#[cfg(not(feature = "static-link-storage"))]
 use alloc::boxed::Box;
 use core::cell::{Cell, RefCell};
 use core::ffi::c_void;
@@ -72,6 +73,10 @@ pub enum EthernetIfError {
     /// lwIP refused the interface, or this build's interface table
     /// (`WZ_ETHIF_MAX` in `shim.c`) is full.
     Refused,
+    /// Round 3277 (`static-link-storage`) -- every cell of the static pool the
+    /// interface is added out of is taken. The pool counts it
+    /// (`EthernetPool::refusals`); nothing is allocated instead.
+    NoStorage,
 }
 
 /// An IPv4 address, mask and gateway, as dotted quads.
@@ -104,12 +109,89 @@ struct Shared<M> {
     deferred_rx_len: Cell<usize>,
 }
 
+impl<M> Shared<M> {
+    /// The MAC with nothing parked.
+    fn new(mac: M) -> Self {
+        Self {
+            mac: RefCell::new(mac),
+            deferred_rx: [const { Cell::new(0) }; RX_HELD_MAX],
+            deferred_rx_len: Cell::new(0),
+        }
+    }
+}
+
+/// The frame buffer [`EthernetIf::poll`] receives into when the MAC does not
+/// lend: a heap box by default, and with `static-link-storage` the interface's
+/// own cell of the pool it was added out of.
+#[cfg(not(feature = "static-link-storage"))]
+type RxBuf = Box<[u8; FRAME_MAX]>;
+#[cfg(feature = "static-link-storage")]
+type RxBuf = &'static mut [u8; FRAME_MAX];
+
+/// Round 3277 (`static-link-storage`) -- everything an interface owns that lwIP
+/// holds a pointer into or the poll receives into: the MAC with its parked
+/// returns, and the frame buffer.
+#[cfg(feature = "static-link-storage")]
+struct EthState<M> {
+    shared: Shared<M>,
+    rx: [u8; FRAME_MAX],
+}
+
+/// Round 3277 (`static-link-storage`) -- the static storage for up to `S`
+/// interfaces driven by one MAC type, declared by the firmware:
+///
+/// ```ignore
+/// static ETH0: EthernetPool<BoardMac, 1> = EthernetPool::new();
+/// let eth = EthernetIf::add_in(&link, mac, config, &ETH0)?;
+/// ```
+///
+/// An interface lives as long as the firmware (lwIP keeps pointers to it, so it is
+/// never removed), so a cell, once claimed, is claimed for good: the pool is the
+/// firmware's interface count, fixed. One cell is the MAC and its parked returns
+/// and one frame buffer, about 1.5 KB beside the MAC. A claim that finds every
+/// cell taken is [`EthernetIfError::NoStorage`], counted in
+/// [`refusals`](Self::refusals).
+#[cfg(feature = "static-link-storage")]
+pub struct EthernetPool<M: EthernetMac + 'static, const S: usize>(
+    crate::static_slots::SlotPool<EthState<M>, S>,
+);
+
+#[cfg(feature = "static-link-storage")]
+impl<M: EthernetMac + 'static, const S: usize> EthernetPool<M, S> {
+    /// An empty pool, for a `static`.
+    pub const fn new() -> Self {
+        Self(crate::static_slots::SlotPool::new())
+    }
+
+    /// How many interfaces the pool holds.
+    pub const fn capacity(&self) -> usize {
+        S
+    }
+
+    /// How many are added now.
+    pub fn in_use(&self) -> usize {
+        self.0.in_use()
+    }
+
+    /// How many additions found every cell taken, since boot.
+    pub fn refusals(&self) -> u32 {
+        self.0.refusals()
+    }
+}
+
+#[cfg(feature = "static-link-storage")]
+impl<M: EthernetMac + 'static, const S: usize> Default for EthernetPool<M, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An Ethernet interface added to lwIP. Lives as long as the firmware:
 /// lwIP keeps pointers to it, so it is never removed.
 pub struct EthernetIf<M: EthernetMac + 'static> {
     netif: NonNull<netif>,
     shared: &'static Shared<M>,
-    rx: Box<[u8; FRAME_MAX]>,
+    rx: RxBuf,
 }
 
 unsafe extern "C" fn transmit_trampoline<M: EthernetMac>(
@@ -211,13 +293,70 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
     /// Takes the link as the witness that lwIP is initialised. The MAC is
     /// moved into storage that lives for the rest of the program, because
     /// lwIP holds the pointer to it.
+    #[cfg(not(feature = "static-link-storage"))]
     pub fn add(_link: &LwipLink, mac: M, ip: Ipv4Config) -> Result<Self, EthernetIfError> {
-        let hwaddr = mac.mac_address();
-        let shared: &'static Shared<M> = Box::leak(Box::new(Shared {
-            mac: RefCell::new(mac),
-            deferred_rx: [const { Cell::new(0) }; RX_HELD_MAX],
-            deferred_rx_len: Cell::new(0),
-        }));
+        let shared: &'static Shared<M> = Box::leak(Box::new(Shared::new(mac)));
+        let netif = Self::register(shared, ip)?;
+        Ok(Self {
+            netif,
+            shared,
+            rx: Box::new([0u8; FRAME_MAX]),
+        })
+    }
+
+    /// Round 3277 (`static-link-storage`) -- `add` with the MAC and
+    /// the frame buffer in a cell of `pool`, a `static` the firmware declares,
+    /// instead of leaked heap boxes. The cell is the interface's for the rest of
+    /// the program, as the leaked boxes were; one claimed for an addition lwIP
+    /// refuses is given back.
+    ///
+    /// # Errors
+    ///
+    /// - [`EthernetIfError::NoStorage`] if every cell of `pool` is taken, counted
+    ///   in [`EthernetPool::refusals`]; nothing is allocated instead, and `mac` is
+    ///   dropped.
+    /// - [`EthernetIfError::Refused`] as the default build's `add` gives it.
+    #[cfg(feature = "static-link-storage")]
+    pub fn add_in<const S: usize>(
+        _link: &LwipLink,
+        mac: M,
+        ip: Ipv4Config,
+        pool: &'static EthernetPool<M, S>,
+    ) -> Result<Self, EthernetIfError> {
+        let mut slot = pool
+            .0
+            .claim_with(|| EthState {
+                shared: Shared::new(mac),
+                rx: [0u8; FRAME_MAX],
+            })
+            .ok_or(EthernetIfError::NoStorage)?;
+        // Both halves of the cell are reached through this one pointer and never
+        // through a reference to the whole cell, so the MAC lwIP is given and the
+        // buffer the poll writes are disjoint borrows of one allocation.
+        let state: *mut EthState<M> = &mut *slot;
+        // SAFETY: the cell is in a `static`, and the slot is not dropped (which would
+        // drop the MAC) before registration has succeeded; on failure lwIP kept no
+        // pointer, and the slot drops here with `shared` unused.
+        let shared: &'static Shared<M> = unsafe { &*core::ptr::addr_of!((*state).shared) };
+        let netif = Self::register(shared, ip)?;
+        // The cell is lwIP's from here, for good: lwIP keeps the pointer, so the
+        // slot is never dropped and the claim never given back.
+        core::mem::forget(slot);
+        // SAFETY: the buffer is the cell's own and nothing else names it; the cell
+        // now lives for the rest of the program.
+        let rx: &'static mut [u8; FRAME_MAX] =
+            unsafe { &mut *core::ptr::addr_of_mut!((*state).rx) };
+        Ok(Self { netif, shared, rx })
+    }
+
+    /// Tell lwIP about the interface: its address, the transmit trampoline with
+    /// `shared` as its context, and the gather and receive-release callbacks the
+    /// MAC asks for. `shared` must stay where it is for the rest of the program.
+    fn register(
+        shared: &'static Shared<M>,
+        ip: Ipv4Config,
+    ) -> Result<NonNull<netif>, EthernetIfError> {
+        let hwaddr = shared.mac.borrow().mac_address();
         // SAFETY: `hwaddr` outlives the call (the netif copies it); the
         // callback and its context are valid for the program's lifetime.
         let raw = unsafe {
@@ -240,11 +379,7 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
             // SAFETY: as above, for the release callback.
             unsafe { wz_ethif_set_rx_release(netif.as_ptr(), Some(rx_release_trampoline::<M>)) };
         }
-        Ok(Self {
-            netif,
-            shared,
-            rx: Box::new([0u8; FRAME_MAX]),
-        })
+        Ok(netif)
     }
 
     /// Give lwIP back every chain the MAC has finished reading in place, and
@@ -376,11 +511,15 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
     use alloc::collections::VecDeque;
     use alloc::rc::Rc;
     use alloc::vec::Vec;
 
-    use crate::rx_sockets::bind_session_rx;
+    // Round 3277 -- one test body on both profiles: the binders of `test_bind` are
+    // the constructors themselves on the default profile and a leaked pool of one
+    // on `static-link-storage`.
+    use crate::test_bind::{add_netif as add, session_rx as bind_session_rx};
     use wz_runtime_core::RxLoan;
 
     /// The buffers a loaning MAC double has lent and not yet had returned, by
@@ -521,7 +660,7 @@ mod tests {
         let (_serial, link) = crate::lwip_test_link();
         let out = Rc::new(RefCell::new(VecDeque::new()));
         let inbox = Rc::new(RefCell::new(VecDeque::new()));
-        let mut node = EthernetIf::add(
+        let mut node = add(
             &link,
             CableEnd {
                 address: NODE_MAC,
@@ -580,7 +719,7 @@ mod tests {
     ) -> (EthernetIf<CableEnd>, Cable, Cable) {
         let out: Cable = Rc::new(RefCell::new(VecDeque::new()));
         let inbox: Cable = Rc::new(RefCell::new(VecDeque::new()));
-        let iface = EthernetIf::add(
+        let iface = add(
             link,
             CableEnd {
                 address: net.node_mac,
@@ -778,7 +917,7 @@ mod tests {
         let flat: Cable = Rc::new(RefCell::new(VecDeque::new()));
         let gathered = Rc::new(RefCell::new(Vec::new()));
         let released = Rc::new(RefCell::new(Vec::new()));
-        let node = EthernetIf::add(
+        let node = add(
             link,
             GatherEnd {
                 address: NODE_MAC,
@@ -1141,7 +1280,7 @@ mod tests {
         let mut rig = gather_node(&link, TxGather::Queued);
         // A socket wider than a slot whatever the session socket's build-time
         // width is (the slim profile's is narrower than a slot).
-        let socket = crate::LwipUdpSocket::<2048, 4>::bind(&link, 7602).expect("bind");
+        let socket = crate::test_bind::bind::<2048, 4>(&link, 7602).expect("bind");
         socket
             .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
             .expect("send");
@@ -1290,7 +1429,7 @@ mod tests {
         let lent = Rc::new(RefCell::new(Vec::new()));
         let returned = Rc::new(RefCell::new(Vec::new()));
         let out: Cable = Rc::new(RefCell::new(VecDeque::new()));
-        let node = EthernetIf::add(
+        let node = add(
             link,
             LoanEnd {
                 address: NODE_MAC,
@@ -1517,7 +1656,7 @@ mod tests {
         let ring: SharedRing = Rc::new(RefCell::new(crate::mac_rx_pool::install(storage)));
         let inbox: Cable = Rc::new(RefCell::new(VecDeque::new()));
         let returned = Rc::new(RefCell::new(Vec::new()));
-        let node = EthernetIf::add(
+        let node = add(
             link,
             PoolEnd {
                 address: NODE_MAC,

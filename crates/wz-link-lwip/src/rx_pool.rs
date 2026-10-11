@@ -52,6 +52,7 @@
 //! return path died on first use, and no consumer could see it because no
 //! consumer counted. The tests below count.
 
+#[cfg(not(feature = "static-link-storage"))]
 use alloc::boxed::Box;
 
 use core::ffi::c_void;
@@ -130,6 +131,19 @@ struct PooledInner<P: RxSlots, const Q: usize> {
     _pin: PhantomPinned,
 }
 
+impl<P: RxSlots, const Q: usize> PooledInner<P, Q> {
+    /// A socket's state before its pcb exists: every slot free, nothing queued.
+    fn new() -> Self {
+        Self {
+            pcb: NonNull::dangling(),
+            pool: P::new(),
+            queue: Queue::new(),
+            rx_drops: 0,
+            _pin: PhantomPinned,
+        }
+    }
+}
+
 // Same rationale as `Inner`: referenced only under lwIP's NO_SYS=1
 // cooperative model, and the raw pcb pointer is what rules out the automatic
 // impl.
@@ -149,7 +163,54 @@ unsafe impl<P: RxSlots, const Q: usize> Send for PooledInner<P, Q> {}
 /// under-run. Note `heapless::spsc::Queue<T, Q>` holds `Q - 1`, so the
 /// pool always has at least one slot spare for the in-flight fill.
 pub struct PooledUdpRx<P: RxSlots, const Q: usize> {
-    inner: Pin<Box<PooledInner<P, Q>>>,
+    inner: Pin<PooledBox<P, Q>>,
+}
+
+/// Where a pooled socket's state lives: a heap box by default, and with
+/// `static-link-storage` a cell of the static pool it was bound out of
+/// ([`PooledSocketPool`]). Pinned either way: lwIP holds its address.
+#[cfg(not(feature = "static-link-storage"))]
+type PooledBox<P, const Q: usize> = Box<PooledInner<P, Q>>;
+#[cfg(feature = "static-link-storage")]
+type PooledBox<P, const Q: usize> = crate::static_slots::Slot<PooledInner<P, Q>>;
+
+/// Round 3277 (`static-link-storage`) -- the static storage for `S` pooled
+/// sockets, declared by the image, as [`crate::UdpSocketPool`] is for the
+/// heapless-queue sockets. A cell holds the socket's whole [`RxSlots`] pool
+/// beside its queue.
+#[cfg(feature = "static-link-storage")]
+pub struct PooledSocketPool<P: RxSlots, const Q: usize, const S: usize>(
+    crate::static_slots::SlotPool<PooledInner<P, Q>, S>,
+);
+
+#[cfg(feature = "static-link-storage")]
+impl<P: RxSlots, const Q: usize, const S: usize> PooledSocketPool<P, Q, S> {
+    /// An empty pool, for a `static`.
+    pub const fn new() -> Self {
+        Self(crate::static_slots::SlotPool::new())
+    }
+
+    /// How many sockets the pool holds at once.
+    pub const fn capacity(&self) -> usize {
+        S
+    }
+
+    /// How many of them are bound now.
+    pub fn in_use(&self) -> usize {
+        self.0.in_use()
+    }
+
+    /// How many binds found every cell taken, since boot.
+    pub fn refusals(&self) -> u32 {
+        self.0.refusals()
+    }
+}
+
+#[cfg(feature = "static-link-storage")]
+impl<P: RxSlots, const Q: usize, const S: usize> Default for PooledSocketPool<P, Q, S> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 unsafe extern "C" fn pooled_recv_thunk<P: RxSlots, const Q: usize>(
@@ -233,19 +294,50 @@ impl<P: RxSlots, const Q: usize> PooledUdpRx<P, Q> {
     ///
     /// - [`LinkError::PcbExhausted`] if `udp_new` returns NULL.
     /// - [`LinkError::BindFailed`] if `udp_bind` rejects the port.
-    pub fn bind(_link: &LwipLink, port: u16) -> Result<Self, LinkError> {
+    #[cfg(not(feature = "static-link-storage"))]
+    pub fn bind(link: &LwipLink, port: u16) -> Result<Self, LinkError> {
         assert!(
             Q <= P::SLOT_COUNT,
             "rx queue depth exceeds the pool's slot count"
         );
-        let mut inner: Pin<Box<PooledInner<P, Q>>> = Box::pin(PooledInner {
-            pcb: NonNull::dangling(),
-            pool: P::new(),
-            queue: Queue::new(),
-            rx_drops: 0,
-            _pin: PhantomPinned,
-        });
+        Self::attach(link, Box::pin(PooledInner::new()), port)
+    }
 
+    /// Round 3277 (`static-link-storage`) -- `bind` over a cell of
+    /// `pool`, a `static` the image declares, instead of a heap box. A bind that
+    /// finds every cell taken is [`LinkError::SlotsExhausted`], counted in
+    /// [`PooledSocketPool::refusals`]; the cell of a refused bind is given back.
+    ///
+    /// # Panics
+    ///
+    /// As `bind` does, if `Q > P::SLOT_COUNT`.
+    #[cfg(feature = "static-link-storage")]
+    pub fn bind_in<const S: usize>(
+        link: &LwipLink,
+        port: u16,
+        pool: &'static PooledSocketPool<P, Q, S>,
+    ) -> Result<Self, LinkError> {
+        assert!(
+            Q <= P::SLOT_COUNT,
+            "rx queue depth exceeds the pool's slot count"
+        );
+        let slot = pool
+            .0
+            .claim_with(PooledInner::new)
+            .ok_or(LinkError::SlotsExhausted)?;
+        // SAFETY: a slot's value stays in its cell of a `static` until the slot
+        // drops, and the cell is not reused before the value is dropped in place,
+        // which is the pinning guarantee.
+        Self::attach(link, unsafe { Pin::new_unchecked(slot) }, port)
+    }
+
+    /// Create the pcb, bind it, and hand lwIP the pinned state's address as the
+    /// receive callback's argument; shared by both constructors.
+    fn attach(
+        _link: &LwipLink,
+        mut inner: Pin<PooledBox<P, Q>>,
+        port: u16,
+    ) -> Result<Self, LinkError> {
         // SAFETY: no-arg allocator out of MEMP_NUM_UDP_PCB.
         let pcb_raw = unsafe { udp_new() };
         let Some(pcb) = NonNull::new(pcb_raw) else {
@@ -336,6 +428,27 @@ impl<P: RxSlots, const Q: usize> Drop for PooledUdpRx<P, Q> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pooled socket of the shape `P`, `Q`: the constructor itself on the default
+    /// profile, and on `static-link-storage` a cell of a pool of one that the test
+    /// leaks (a test is host code and may allocate; a firmware may not).
+    fn bind_pooled<P: RxSlots + 'static, const Q: usize>(
+        link: &LwipLink,
+        port: u16,
+    ) -> Result<PooledUdpRx<P, Q>, LinkError> {
+        #[cfg(not(feature = "static-link-storage"))]
+        {
+            PooledUdpRx::bind(link, port)
+        }
+        #[cfg(feature = "static-link-storage")]
+        {
+            PooledUdpRx::bind_in(
+                link,
+                port,
+                std::boxed::Box::leak(std::boxed::Box::new(PooledSocketPool::<P, Q, 1>::new())),
+            )
+        }
+    }
 
     // The ACTIVE unicast session pool under either feature arm, so the slim
     // lane runs these tests too rather than compiling them out. A `#[cfg]` on
@@ -476,7 +589,7 @@ mod tests {
         let (_serial, link) = crate::lwip_test_link();
         let port: u16 = 7451;
         let mut sock: PooledUdpRx<ActiveSessionPool, 4> =
-            PooledUdpRx::bind(&link, port).expect("bind pooled rx");
+            bind_pooled(&link, port).expect("bind pooled rx");
         let full = <ActiveSessionPool as RxSlots>::SLOT_COUNT;
         std::assert_eq!(sock.free_slots(), full);
 
@@ -517,7 +630,7 @@ mod tests {
         let (_serial, link) = crate::lwip_test_link();
         let port: u16 = 7452;
         let mut sock: PooledUdpRx<ActiveSessionPool, 2> =
-            PooledUdpRx::bind(&link, port).expect("bind pooled rx");
+            bind_pooled(&link, port).expect("bind pooled rx");
         let full = <ActiveSessionPool as RxSlots>::SLOT_COUNT;
 
         for i in 0..4u8 {

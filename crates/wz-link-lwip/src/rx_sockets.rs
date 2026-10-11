@@ -34,6 +34,8 @@
 //! [`MAX_DATAGRAM`]: crate::MAX_DATAGRAM
 //! [`RX_QUEUE_DEPTH`]: crate::RX_QUEUE_DEPTH
 
+#[cfg(feature = "static-link-storage")]
+use crate::UdpSocketPool;
 use crate::{LinkError, LwipLink, LwipUdpSocket};
 
 /// Scout-rx queue depth (`Q`) — the dispatcher-side rx-queue slot count,
@@ -92,16 +94,83 @@ pub type SessionRxSocket = LwipUdpSocket<SESSION_RX_SLOT_SIZE, SESSION_RX_SLOTS>
 ///   underlying `udp_bind`.
 /// - [`LinkError::MulticastJoinFailed`] if the IGMP join fails (no
 ///   IGMP-capable netif is up).
+#[cfg(not(feature = "static-link-storage"))]
 pub fn bind_scout_rx(link: &LwipLink, port: u16) -> Result<ScoutRxSocket, LinkError> {
     let sock = ScoutRxSocket::bind(link, port)?;
     link.join_multicast_group(SCOUT_MULTICAST_GROUP)?;
     Ok(sock)
 }
 
+/// The static storage for `S` scout sockets (`static-link-storage`), declared by
+/// the image: `static SCOUT: ScoutRxPool<1> = ScoutRxPool::new();`.
+#[cfg(feature = "static-link-storage")]
+pub type ScoutRxPool<const S: usize> = UdpSocketPool<SCOUT_RX_SLOT_SIZE, SCOUT_RX_SLOTS, S>;
+
+/// Round 3277 (`static-link-storage`) -- `bind_scout_rx` over a cell of `pool`:
+/// bind, then join the scouting group. A bind that finds every cell taken is
+/// [`LinkError::SlotsExhausted`]; a join that fails gives the cell back (the
+/// socket drops).
+#[cfg(feature = "static-link-storage")]
+pub fn bind_scout_rx_in<const S: usize>(
+    link: &LwipLink,
+    port: u16,
+    pool: &'static ScoutRxPool<S>,
+) -> Result<ScoutRxSocket, LinkError> {
+    let sock = ScoutRxSocket::bind_in(link, port, pool)?;
+    link.join_multicast_group(SCOUT_MULTICAST_GROUP)?;
+    Ok(sock)
+}
+
 /// Bind the session-link receive socket on `port` with the session pool's
 /// dims (the deploy's `udp_session` unicast endpoint, `0.0.0.0:7447`).
+#[cfg(not(feature = "static-link-storage"))]
 pub fn bind_session_rx(link: &LwipLink, port: u16) -> Result<SessionRxSocket, LinkError> {
     SessionRxSocket::bind(link, port)
+}
+
+/// The static storage for `S` session sockets (`static-link-storage`), declared by
+/// the image: `static SESSION: SessionRxPool<2> = SessionRxPool::new();`. One cell
+/// is a whole session socket, its receive queue included: `SESSION_RX_SLOTS`
+/// datagrams of `SESSION_RX_SLOT_SIZE` bytes, 24.7 KB in the default profile.
+#[cfg(feature = "static-link-storage")]
+pub type SessionRxPool<const S: usize> = UdpSocketPool<SESSION_RX_SLOT_SIZE, SESSION_RX_SLOTS, S>;
+
+/// Round 3277 (`static-link-storage`) -- `bind_session_rx` over a cell of `pool`.
+/// A bind that finds every cell taken is [`LinkError::SlotsExhausted`], counted
+/// in [`SessionRxPool::refusals`](crate::UdpSocketPool::refusals); the socket's
+/// drop gives its cell back.
+#[cfg(feature = "static-link-storage")]
+pub fn bind_session_rx_in<const S: usize>(
+    link: &LwipLink,
+    port: u16,
+    pool: &'static SessionRxPool<S>,
+) -> Result<SessionRxSocket, LinkError> {
+    SessionRxSocket::bind_in(link, port, pool)
+}
+
+/// Where a link opener binds the session sockets it opens, with the pool's
+/// capacity erased (`static-link-storage`): the opener holds a
+/// `&'static dyn SessionSocketSource`, a reference to a `static` and a vtable, so
+/// the type of the opener does not carry the image's socket count.
+#[cfg(feature = "static-link-storage")]
+pub trait SessionSocketSource {
+    /// Bind a session socket on `port` out of this source's cells.
+    fn bind_session_rx(
+        &'static self,
+        link: &LwipLink,
+        port: u16,
+    ) -> Result<SessionRxSocket, LinkError>;
+}
+
+#[cfg(feature = "static-link-storage")]
+impl<const S: usize> SessionSocketSource for SessionRxPool<S> {
+    fn bind_session_rx(
+        &'static self,
+        link: &LwipLink,
+        port: u16,
+    ) -> Result<SessionRxSocket, LinkError> {
+        bind_session_rx_in(link, port, self)
+    }
 }
 
 /// Multicast-session-rx queue depth (`Q`) — from the multicast session-rx
@@ -148,6 +217,7 @@ pub const SESSION_MULTICAST_GROUP_DEFAULT: u32 = SCOUT_MULTICAST_GROUP;
 ///   underlying `udp_bind`.
 /// - [`LinkError::MulticastJoinFailed`] if the IGMP join fails (no
 ///   IGMP-capable netif is up).
+#[cfg(not(feature = "static-link-storage"))]
 pub fn bind_session_multicast_rx(
     link: &LwipLink,
     group: u32,
@@ -158,10 +228,41 @@ pub fn bind_session_multicast_rx(
     Ok(sock)
 }
 
+/// The static storage for `S` multicast session sockets (`static-link-storage`),
+/// declared by the image. A cell is 32 datagrams of 1536 bytes, 49 KB: the
+/// largest socket this crate has, which is why the capacity is the image's to
+/// choose.
+#[cfg(feature = "static-link-storage")]
+pub type SessionMulticastRxPool<const S: usize> =
+    UdpSocketPool<SESSION_MULTICAST_RX_SLOT_SIZE, SESSION_MULTICAST_RX_SLOTS, S>;
+
+/// Round 3277 (`static-link-storage`) -- `bind_session_multicast_rx` over a cell
+/// of `pool`: bind, then join `group`. A bind that finds every cell taken is
+/// [`LinkError::SlotsExhausted`]; a join that fails gives the cell back.
+#[cfg(feature = "static-link-storage")]
+pub fn bind_session_multicast_rx_in<const S: usize>(
+    link: &LwipLink,
+    group: u32,
+    port: u16,
+    pool: &'static SessionMulticastRxPool<S>,
+) -> Result<SessionMulticastRxSocket, LinkError> {
+    let sock = SessionMulticastRxSocket::bind_in(link, port, pool)?;
+    link.join_multicast_group(group)?;
+    Ok(sock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipv4_addr_loopback;
+    // Round 3277 -- on `static-link-storage` the pool-less binders above do not
+    // exist; these tests are about the socket's dims and loopback, not about where
+    // its state lives, so they bind through the helpers that leak a pool of one.
+    #[cfg(feature = "static-link-storage")]
+    use crate::test_bind::{
+        scout_rx as bind_scout_rx, session_multicast_rx as bind_session_multicast_rx,
+        session_rx as bind_session_rx,
+    };
 
     /// The socket dims come from the buffer-pool SSOTs: scout 8 / 256
     /// (`scout_rx_pool_mcu.scxml`); session 16 / 1536 by default
