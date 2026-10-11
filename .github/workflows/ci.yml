@@ -5707,11 +5707,19 @@ jobs:
         # filesystem, so a failure here is a genuine host-portability defect in
         # wz's own logic (a byte-order assumption, a `usize` width, a
         # `char`-vs-byte slip) rather than a platform integration gap.
+        #
+        # One suite of the crate is not host-independent: it compares the
+        # generated session-slot table with the deploy file by running a python3
+        # validator that needs PyYAML, which these hosts do not provide. It
+        # SKIPS here (libtest prints that as ok) unless WZ_DEPLOY_REPORT_REQUIRE
+        # is set, which only the Linux Layer C1g sets; the `skip:` lines it
+        # writes are echoed below so the skip is in this log and not only a
+        # missing comparison.
         shell: bash
         run: |
           set -o pipefail
           out="$( (cd crates && cargo test -p wz-session-core) 2>&1 )" || { echo "$out"; exit 1; }
-          echo "$out" | grep -E '^test result' || true
+          echo "$out" | grep -E '^test result|skip: WZ_DEPLOY_REPORT_REQUIRE' || true
           grep -qE '^test result: ok\. [1-9][0-9]* passed' <<< "$out" || {
             echo "portability FAIL: wz-session-core selected NO tests on ${{ runner.os }}" >&2
             echo "$out" >&2
