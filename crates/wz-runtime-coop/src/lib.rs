@@ -155,24 +155,52 @@ pub(crate) mod atomic;
 // same modules under the same names with the same surface, over tables the image
 // declares instead of a heap (see `runtime_impl::RuntimeCell`). Every other build
 // keeps the heap forms exactly.
+//
+// Each pair is declared under two DIFFERENT names and the public name is an alias
+// of whichever the build keeps, because two `mod` declarations of one name in one
+// scope are a defect under every feature combination (rustc says so only for a
+// build that enables both, and `duplicate_module_lint` says so for the tree). The
+// two forms are `#[doc(hidden)]`: the module the crate documents and its users
+// name is `executor`, `join_handle`, `local` and `timer`.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub mod executor;
+#[doc(hidden)]
+#[path = "executor.rs"]
+pub mod executor_heap;
 #[cfg(feature = "session-slot")]
+#[doc(hidden)]
 #[path = "static_executor.rs"]
-pub mod executor;
+pub mod executor_static;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub mod join_handle;
+pub use executor_heap as executor;
 #[cfg(feature = "session-slot")]
+pub use executor_static as executor;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[doc(hidden)]
+#[path = "join_handle.rs"]
+pub mod join_handle_heap;
+#[cfg(feature = "session-slot")]
+#[doc(hidden)]
 #[path = "static_join_handle.rs"]
-pub mod join_handle;
+pub mod join_handle_static;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub use join_handle_heap as join_handle;
+#[cfg(feature = "session-slot")]
+pub use join_handle_static as join_handle;
 // The `!Send` task pool. Separate from `executor` (the `Send` pool) because
 // the two differ in exactly one bound and that bound is what makes the AP
 // contract and the MCU session bundle incompatible — see the module doc.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub mod local;
+#[doc(hidden)]
+#[path = "local.rs"]
+pub mod local_heap;
 #[cfg(feature = "session-slot")]
+#[doc(hidden)]
 #[path = "static_local.rs"]
-pub mod local;
+pub mod local_static;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub use local_heap as local;
+#[cfg(feature = "session-slot")]
+pub use local_static as local;
 #[cfg(feature = "alloc")]
 pub mod runtime_impl;
 #[cfg(all(test, feature = "session-slot"))]
@@ -180,10 +208,17 @@ mod static_tests;
 #[cfg(feature = "alloc")]
 pub mod time;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub mod timer;
+#[doc(hidden)]
+#[path = "timer.rs"]
+pub mod timer_heap;
 #[cfg(feature = "session-slot")]
+#[doc(hidden)]
 #[path = "static_timer.rs"]
-pub mod timer;
+pub mod timer_static;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub use timer_heap as timer;
+#[cfg(feature = "session-slot")]
+pub use timer_static as timer;
 #[cfg(feature = "alloc")]
 mod yield_now;
 
