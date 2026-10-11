@@ -107,6 +107,11 @@ pub type HandshakeStorage = sce_forge_runtime::storage::Inline;
 /// on the codegen'd `*Owned` mirrors, whose derive set is SCE's
 /// (`rust_derive_policy::RustDeriveCategory::CodecStruct`) and whose tree
 /// is read-only from this workspace.
+// Under `session-slot` a handshake message's extension chain is an inline array
+// (`ExtChainOwned`), so the variants that carry one are much larger than the
+// ones that do not. Boxing them would put the allocation back that the array is
+// there to remove, so the size spread is the profile's deliberate trade.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum InboundFrame {
     /// `_Z_MID_T_INIT` (0x01). `is_ack` mirrors the

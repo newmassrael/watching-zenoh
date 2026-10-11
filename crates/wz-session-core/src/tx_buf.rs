@@ -232,6 +232,15 @@ pub type EncodeBuf<'a> = alloc::vec::Vec<u8>;
 /// the AP's own configuration could see.
 pub const TX_LEND_ONLY: bool = cfg!(feature = "tx-lend-only");
 
+/// Whether this build compiled the per-session slot profile (`session-slot`,
+/// fixed-memory step S5): `false` on every build the AP links. A crate that
+/// shares this one with an MCU build and cannot work on that profile asserts it
+/// `false` at compile time, so a build graph that unifies the selector into it
+/// fails to build instead of misbehaving: `wz-runtime-tokio` does, as it does
+/// for [`TX_LEND_ONLY`]. (Here, beside that constant, because this module is
+/// compiled in every build and the session bundle's is not.)
+pub const SESSION_SLOT: bool = cfg!(feature = "session-slot");
+
 impl<'a> TxSink<'a, EncodeBuf<'a>> {
     /// Wrap `buf`; the position starts at the buffer's current length.
     pub fn new(buf: &'a mut EncodeBuf<'a>) -> Self {

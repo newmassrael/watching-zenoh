@@ -997,14 +997,6 @@ impl FrameTxConduits {
     }
 }
 
-/// Whether this build compiled the per-session slot profile (`session-slot`,
-/// fixed-memory step S5). `false` on every build the AP links, and a crate that
-/// shares this one with an MCU build and cannot work on the slot profile asserts
-/// it `false` at compile time, so a build graph that unifies the selector into it
-/// fails to build instead of misbehaving: `wz-runtime-tokio` does, as it does for
-/// `tx_buf::TX_LEND_ONLY`.
-pub const SESSION_SLOT: bool = cfg!(feature = "session-slot");
-
 /// The entropy source a session re-draws its cookie nonce from, as the session
 /// holds it: the §2.5 plugin-tier port behind a `Box` on every profile but
 /// `session-slot`.

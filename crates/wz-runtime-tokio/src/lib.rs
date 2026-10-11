@@ -60,6 +60,20 @@ const _: () = assert!(
      `wz-session-core/tx-lend-only` (the MCU lend-only profile) was unified into an AP build"
 );
 
+// And for the session itself (fixed-memory step S5). A `session-slot` build holds a
+// session in a slot of a static table: its handle is a counted reference to the
+// slot, its sink a reference to the driver the slot holds, its parameters and
+// extension chains arrays. The AP builds sessions with `Arc`s and growable
+// vectors, shares a kernel between links (multilink), and opens them per
+// connection without a table to take them from, so a build graph that unified the
+// selector into this crate would not compile its sessions, or would refuse the
+// ones it could.
+const _: () = assert!(
+    !wz_session_core::tx_buf::SESSION_SLOT,
+    "wz-runtime-tokio builds its sessions on the heap; \
+     `wz-session-core/session-slot` (the MCU per-session slot profile) was unified into an AP build"
+);
+
 // R311mk — `session_glue` is the unicast handshake driver (it names the
 // `SessionFsmUnicast{Policy,Event}` types + drives `session_actions` /
 // `session_timeouts` / `drive`, all `session-unicast`-gated in

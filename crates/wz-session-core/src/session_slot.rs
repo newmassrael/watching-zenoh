@@ -19,7 +19,11 @@
 //! - the bundle, by value, which holds the kernel and the link state as its own
 //!   fields (see `SessionLinkActions`'s `session-slot` form).
 //!
-//! The bundle reaches the driver through a [`SlotSink`] (the runtime's
+//! (Full paths in the links below, and not `Self`-relative ones: `lib.rs` carries
+//! an outer `///` on this module's `pub mod` line, rustdoc merges it with this
+//! `//!` and resolves the merged text at the crate root.)
+//!
+//! The bundle reaches the driver through a [`SlotSink`](crate::session_slot::SlotSink) (the runtime's
 //! `R::LinkSink`) and the entropy source through the `&'static mut` its
 //! `CookieEntropy` is, both of them references into this same slot. They are
 //! references and not owners, so the slot is the only thing that owns any of it
@@ -27,18 +31,22 @@
 //!
 //! ## Where a slot lives, and who may free it
 //!
-//! A [`SessionSlots`] is a `static`: a table of `N` slots the image places, the
-//! way it places its other pools (`wz-link-lwip`'s transmit pool is installed the
-//! same way). [`SessionSlots::claim`] takes a free slot and moves the driver and
-//! the entropy source into it, or refuses and COUNTS it
-//! ([`SessionSlots::refused`]), giving the values back so the caller can close
-//! what it opened: that is the acceptor's "no slot free, answer nothing" and the
-//! dialer's "exhausted, retry later". [`SlotClaim::open`] then builds the bundle
-//! in place and hands out the first [`SlotRef`].
+//! A [`SessionSlots`](crate::session_slot::SessionSlots) is a `static`: a table of
+//! `N` slots the image places, the way it places its other pools
+//! (`wz-link-lwip`'s transmit pool is installed the same way).
+//! [`claim`](crate::session_slot::SessionSlots::claim) takes a free slot and moves
+//! the driver and the entropy source into it, or refuses and COUNTS it
+//! ([`refused`](crate::session_slot::SessionSlots::refused)), giving the values
+//! back so the caller can close what it opened: that is the acceptor's "no slot
+//! free, answer nothing" and the dialer's "exhausted, retry later".
+//! [`open`](crate::session_slot::SlotClaim::open) then builds the bundle in place
+//! and hands out the first [`SlotRef`](crate::session_slot::SlotRef).
 //!
 //! A slot is freed when the LAST handle to it is dropped, never before: every
-//! handle ([`SlotRef`], [`SlotSink`] once it is cloned out of the bundle,
-//! [`SlotDriver`], an unopened [`SlotClaim`]) holds a count, and the body is
+//! handle ([`SlotRef`](crate::session_slot::SlotRef),
+//! [`SlotSink`](crate::session_slot::SlotSink) once it is cloned out of the bundle,
+//! [`SlotDriver`](crate::session_slot::SlotDriver), an unopened
+//! [`SlotClaim`](crate::session_slot::SlotClaim)) holds a count, and the body is
 //! dropped in order (bundle, entropy source, driver) when the count reaches zero.
 //! That is what makes a handle a safe thing to hold: it cannot outlive what it
 //! points at. The bundle's own sink is the one reference that holds no count,
@@ -57,7 +65,7 @@
 //!
 //! It does not own the pump, the engine or the runtime (step S6), nor the
 //! socket's own storage (step S7): the socket is bound before it reaches
-//! [`SessionSlots::claim`] and arrives by value. And the slot is as large as the
+//! [`claim`](crate::session_slot::SessionSlots::claim) and arrives by value. And the slot is as large as the
 //! bundle it holds; the size is not capped here and is not measured on a board
 //! (the stack the in-place build takes is the Q lane's to catch).
 
@@ -195,7 +203,7 @@ unsafe fn release_cell<R: SessionRuntime, T: TimeSource, D, E>(head: &'static Sl
 ///
 /// Declare it as a `static`:
 ///
-/// ```ignore
+/// ```text
 /// static SESSIONS: SessionSlots<CoopRuntime<Clock>, CoopTime<Clock>, LwipUdpDriver, Trng, 2> =
 ///     SessionSlots::new();
 /// ```
@@ -210,6 +218,14 @@ pub struct SessionSlots<R: SessionRuntime, T: TimeSource, D, E, const N: usize> 
 unsafe impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> Sync
     for SessionSlots<R, T, D, E, N>
 {
+}
+
+impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> Default
+    for SessionSlots<R, T, D, E, N>
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> SessionSlots<R, T, D, E, N> {
