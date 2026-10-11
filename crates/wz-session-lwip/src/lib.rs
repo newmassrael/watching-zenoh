@@ -92,6 +92,17 @@ pub mod session_drive;
 pub mod listener;
 #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
 pub mod session_host;
+// Fixed-memory step S9c -- the admin node of the slot profile: the connect manager's
+// dialler over the session host, and the node that listens, dials, declares and
+// reports out of storage the image declared. It needs the admin surface on both of
+// its halves, beside the listener and host it is written over.
+#[cfg(all(
+    feature = "session-slot",
+    feature = "session-unicast-accept",
+    feature = "adminspace-core",
+    feature = "adminspace-write"
+))]
+pub mod slot_node;
 // Open-debt item 900 — one program, two sessions: the fault-isolation baseline
 // (a client session to a router and a group session on one local set). It needs
 // both handshake halves, the multicast loop and a payload to carry.

@@ -430,6 +430,24 @@ required-features = [
     "static-link-storage",
 ]
 
+# Fixed-memory step S9c -- the admin node of the slot profile, whole: two nodes on one
+# lwIP loopback, a written endpoint dialled, a remote write that makes the other node
+# dial back, a node with fewer slots than endpoints, and the heap counted over all of
+# it. It needs both halves of the admin surface beside the selectors and the pooled
+# sockets.
+[[test]]
+name = "admin_node_slot"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "codec-close",
+    "session-slot",
+    "static-link-storage",
+    "adminspace-core",
+    "adminspace-write",
+]
+
 # Fixed-memory step S9c -- the multicast pump on the slot profile: its reply queue
 # refuses and counts, and the pump lives in a cell of a table the image declares.
 # It needs the group transport with a reply variant that inhabits the queue (a

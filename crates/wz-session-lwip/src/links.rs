@@ -19,6 +19,7 @@ use core::ops::Deref;
 
 #[cfg(not(feature = "static-link-storage"))]
 use wz_link_lwip::rx_sockets::bind_session_rx;
+use wz_link_lwip::rx_sockets::SessionRxSocket;
 #[cfg(feature = "static-link-storage")]
 use wz_link_lwip::rx_sockets::SessionSocketSource;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
@@ -89,6 +90,19 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     /// address, which its first inbound datagram overwrites; an initiator its
     /// configured peer.
     pub fn bind_driver(&self, port: u16, peer: UdpPeer) -> Result<LwipUdpDriver, LinkOpenError> {
+        let socket = self.bind_socket(port)?;
+        Ok(LwipUdpDriver::new(
+            share_socket(socket),
+            ipv4_addr_from_octets(peer.addr),
+            peer.port,
+        ))
+    }
+
+    /// Bind a session socket on `port` (0 asks lwIP for a free one) and hand it over
+    /// bare: what a listener takes (`SessionListener::listen`), which reads and sends
+    /// for every session it accepts through the one socket, and what
+    /// [`Self::bind_driver`] wraps for a session that owns its own.
+    pub fn bind_socket(&self, port: u16) -> Result<SessionRxSocket, LinkOpenError> {
         // Round 3277 (`static-link-storage`): the socket's state is a cell of the
         // pool the image handed to `new`, and a full pool is the same
         // `Exhausted` a port lwIP refuses is.
@@ -96,12 +110,7 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
         let socket = bind_session_rx(&self.link, port);
         #[cfg(feature = "static-link-storage")]
         let socket = self.sockets.bind_session_rx(&self.link, port);
-        let socket = socket.map_err(|_| LinkOpenError::Exhausted)?;
-        Ok(LwipUdpDriver::new(
-            share_socket(socket),
-            ipv4_addr_from_octets(peer.addr),
-            peer.port,
-        ))
+        socket.map_err(|_| LinkOpenError::Exhausted)
     }
 
     /// The pump the drive loop services for a session whose driver is `driver`.
