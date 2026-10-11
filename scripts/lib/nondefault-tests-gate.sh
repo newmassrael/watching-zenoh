@@ -565,6 +565,24 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # sees it), and `static-link-storage` is the subject (it must not).
     "wz-link-lwip|hook|test-support|--test=link_storage_allocations"
     "wz-link-lwip|hook|static-link-storage,test-support|--test=link_storage_allocations"
+    # Fixed-memory step S5 — the same crate under the PER-SESSION SLOT profile, a
+    # separate row because `session-slot` is a selector that CHANGES the types of
+    # the session (its handle, its sink, its parameters, its extension chains) and
+    # drops the tests that build sessions out of `Rc`s. What only it reaches is
+    # `tests/session_slot_allocations.rs`: a session counted from its slot to its
+    # close (zero under the slot, nonzero on the heap profile as the instrument's
+    # control) and the slot table's own tests (a full table refuses and counts,
+    # the last handle frees a slot, what it held is dropped once). The features
+    # are the file's `required-features`; the profile implies the lend-only send
+    # and the in-place receive.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive\
+        |"
     # R3080 — the MCU session shell, split out of the row above with its tests.
     # Seventeen of its twenty tests are feature-gated (the admin node and its host
     # and status documents need both adminspace features, the application layer

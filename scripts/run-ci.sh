@@ -9827,6 +9827,21 @@ layer_c1g_cargo_test_observer() {
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,tx-lend-only,bounded-heapless --quiet || return 1
     _runci_guarded_test C1g 8 \
         cargo test -p wz-session-core --test tx_lend_only_encode --features codec-init-body,codec-open-body,codec-close,tx-lend-only --quiet || return 1
+    # Fixed-memory step S5 — the PER-SESSION SLOT profile (`session-slot`, which
+    # implies the two selectors above): the crate's lib suite at the same MCU
+    # unicast set with the slot on (`+`, for the reason the legs above give), and
+    # the encoder proof file again on it, 8 = what that command PRINTED (the
+    # parameters, the captured peer facts and the extension chains are arrays
+    # there, and the same encoders must write the same bytes). The wire-side count
+    # is Layer C1m's `session slot alloc`, which needs a link.
+    _runci_guarded_test C1g + \
+        cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet || return 1
+    _runci_guarded_test C1g 8 \
+        cargo test -p wz-session-core --test tx_lend_only_encode --features codec-init-body,codec-open-body,codec-close,session-slot --quiet || return 1
+    (cd crates \
+        && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,session-unicast,session-unicast-accept,codec-init-body,codec-open-body,session-slot --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,session-unicast,codec-close,session-slot --quiet -- -D warnings) || return 1
     # Every combination the selector touches must compile and be clean WITH and
     # WITHOUT it: a symbol the lend-only profile stops using is dead there, and one
     # the heap profile stops using after a refactor is dead there. `--all-features`
@@ -11184,6 +11199,35 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only \
+            --quiet -- -D warnings) || return 1
+    # Fixed-memory step S5 — a SESSION counted from its slot to its close
+    # (`tests/session_slot_allocations.rs`, which cargo builds only with both
+    # handshake halves, the Put arm, keep-alive, the Close encoder and the
+    # lend-only send and in-place receive): creation of the per-session state, the
+    # handshake, a Put each way at four sizes, a KeepAlive, idle turns and the Close
+    # are each counted. Under `session-slot` every one must cost the heap nothing
+    # and the slot table's own three tests run beside it (a full table refuses and
+    # counts, the last handle frees a slot, what it held is dropped once): 4 =
+    # what that command PRINTED. Beside it, the same file on the selectors the
+    # slot is built from but without it, which is the instrument's control: there
+    # the same windows must cost the heap something, 1 = what that PRINTED.
+    _runci_guarded_test "C1m session slot alloc" 4 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
+        --test session_slot_allocations --quiet || return 1
+    _runci_guarded_test "C1m session slot alloc heap control" 1 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
+        --test session_slot_allocations --quiet || return 1
+    (cd crates \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-mcu --all-targets \
+            --features adminspace-core,adminspace-write,session-slot \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-coop --all-targets \
+            --features session-slot,reassembly \
             --quiet -- -D warnings) || return 1
     (cd crates \
         && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
