@@ -271856,6 +271856,66 @@
         "5. The runtime-zero-copy reason is not rewritten here; it is owed after S9 and the first gated image."
       ]
     },
+    "Round 3288": {
+      "decision_summary": "The hosted C1bn red of b4f30b18 (uring_reactor two_frames_of_one_completion_are_ranges_of_its_slot, 63 vs 64) is a product ordering defect that CPU contention exposes, not a regression and not a leak. deliver_completion sent the delivery from inside the function that still held the worker's own Arc on the completion's slot, so the slot came home only when the worker thread was scheduled again after the send. Measured: with 8 copies on 2 cores the unchanged code fails 25 percent of single-test runs on both 6c55e873 and b4f30b18 (no difference), 0 of 150 unloaded; an instrumented copy always reads 63 first and 64 within 5 ms (50 ms when a 50 ms sleep is injected after the send), never leaked. Fix: completion_delivery takes the frame by value and returns the Delivery, so the worker holds nothing on the slot when the link can see the delivery; the send follows. The test needs no wait. A witness reads the pool at that instant; a leak mutant and a late-hold mutant both redden it.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/uring_reactor.rs (one commit):",
+        "deliver_completion no longer builds and sends in one body. The new fn completion_delivery(frame: LinkRxFrame, result, ctx) -> Delivery owns the error, end-of-stream and data arms; the frame, the slot Arc and the range closure are all dropped before it returns. deliver_completion sends the returned value. The lost-link arms now also release the slot before the send (they used to send first).",
+        "A comment at the last assertion of two_frames_of_one_completion_are_ranges_of_its_slot says the check is exact, not eventual, and why.",
+        "New unit test a_built_delivery_leaves_the_worker_holding_nothing_on_its_slot: runs completion_delivery on the test thread and reads the arena at the instant the delivery exists (two frames: one slot out; dropping the ranges: all home; read error, end of stream and oversize prefix: slot home on return). It needs no io_uring.",
+        "No other file touched by this change. The reason-review pin row of atom runtime-zero-copy for this file moves with any edit to the file; the integration round re-reads the reason and re-pins it."
+      ],
+      "verification_bullets": [
+        "Measured through bx on pc3 (22 cores) and hkl002 (8 cores), kernel 7.0, io_uring enabled; the test does not self-skip, it expects a reactor.",
+        "A/B on pc3, exact C1bn 82-feature lib binaries, old 6c55e873 vs b4f30b18, alternating: single test unloaded 0/150 vs 0/150; single test 8 copies on 2 cores 204/800 vs 209/800 (no difference between the two heads); whole lib unloaded 0/100 vs 0/100; whole lib 8 copies on 2 cores 1/96 (two_frames, left 63) vs 4/96 (all four accept_loop::tests::accept_loop_holds_n_concurrent_peers, LinkLost(PeerClosed), another test).",
+        "Instrumented copy of b4f30b18 on hkl002: unloaded 0/300; 8 copies on 2 cores 259/960, every failure first=63 then 64 within 5 ms, none leaked; a 50 ms sleep injected after the send 20/20 red, home at 50.2 ms. So the slot is late, not leaked.",
+        "Repair on hkl002: uring_reactor:: 13 passed (serialized); single test 8 copies on 2 cores 0/960, unloaded 0/300; the new witness 0/960 contended. Mutant 1 (slot leaked by forgetting a clone): witness, two_frames and every_slot_goes_home all red 63 vs 64. Mutant 2 (handle kept until after the send): witness red every run, two_frames 113/480 contended. Both mutants reverted.",
+        "Repair at the exact 82-feature set on pc3, b4f30b18 vs repair alternating, 8 copies on 2 cores: single test 102/800 vs 0/800; uring_reactor:: module 34/480 vs 0/480; whole lib 0/96 vs 0/96; whole lib unloaded 1/100 vs 0/100.",
+        "clippy -D warnings --all-targets -p wz-runtime-tokio --features runtime-tokio-uring: clean. cargo fmt --all --check: clean.",
+        "On the integrated tree (hkl002, runtime-tokio-uring lib test binary): uring_reactor:: 13 passed; two_frames single test 8 copies on 2 cores 0/960 and unloaded 0/200; the witness 8 copies on 2 cores 0/960.",
+        "Not run: Layer C0, A4, the full hook. Hosted C1bn is the only proof under runner contention."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "1. The whole-lib contention run on b4f30b18 failed accept_loop::tests::accept_loop_holds_n_concurrent_peers 4 of 96 (initiator LinkLost(PeerClosed), accept_loop.rs line 3849), 0 of 96 on 6c55e873; all four in one round, cause not examined. A worker is attributing it with a single-test loop, old against new; register a debt item only if it reproduces.",
+        "2. Hosted C1bn on the integrated push is the real check of the repair under runner contention; read that job and quote it.",
+        "3. Sibling check by grep: the only other test asserting free_slots equality after a worker-thread delivery is every_slot_goes_home_when_the_links_do (reads after the worker is joined, exact). uring.rs, link_rx_arena.rs, link_rx_datagram.rs and link_tx_pool.rs assert on one thread. No other test shares the race.",
+        "4. Open product question, not changed: one frame per delivery lets a slot be held by ranges for as long as a session holds them.",
+        "5. The runtime-zero-copy reason is re-pinned for uring_reactor.rs in the integration round after a re-read; its text is not rewritten."
+      ],
+      "publishable_decision_summary": "The hosted C1bn red of b4f30b18 (uring_reactor two_frames_of_one_completion_are_ranges_of_its_slot, 63 vs 64) is a product ordering defect that CPU contention exposes, not a regression and not a leak. deliver_completion sent the delivery from inside the function that still held the worker's own Arc on the completion's slot, so the slot came home only when the worker thread was scheduled again after the send. Measured: with 8 copies on 2 cores the unchanged code fails 25 percent of single-test runs on both 6c55e873 and b4f30b18 (no difference), 0 of 150 unloaded; an instrumented copy always reads 63 first and 64 within 5 ms (50 ms when a 50 ms sleep is injected after the send), never leaked. Fix: completion_delivery takes the frame by value and returns the Delivery, so the worker holds nothing on the slot when the link can see the delivery; the send follows. The test needs no wait. A witness reads the pool at that instant; a leak mutant and a late-hold mutant both redden it.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/uring_reactor.rs (one commit):",
+        "deliver_completion no longer builds and sends in one body. The new fn completion_delivery(frame: LinkRxFrame, result, ctx) -> Delivery owns the error, end-of-stream and data arms; the frame, the slot Arc and the range closure are all dropped before it returns. deliver_completion sends the returned value. The lost-link arms now also release the slot before the send (they used to send first).",
+        "A comment at the last assertion of two_frames_of_one_completion_are_ranges_of_its_slot says the check is exact, not eventual, and why.",
+        "New unit test a_built_delivery_leaves_the_worker_holding_nothing_on_its_slot: runs completion_delivery on the test thread and reads the arena at the instant the delivery exists (two frames: one slot out; dropping the ranges: all home; read error, end of stream and oversize prefix: slot home on return). It needs no io_uring.",
+        "No other file touched by this change. The reason-review pin row of atom runtime-zero-copy for this file moves with any edit to the file; the integration round re-reads the reason and re-pins it."
+      ],
+      "publishable_verification_bullets": [
+        "Measured through bx on pc3 (22 cores) and hkl002 (8 cores), kernel 7.0, io_uring enabled; the test does not self-skip, it expects a reactor.",
+        "A/B on pc3, exact C1bn 82-feature lib binaries, old 6c55e873 vs b4f30b18, alternating: single test unloaded 0/150 vs 0/150; single test 8 copies on 2 cores 204/800 vs 209/800 (no difference between the two heads); whole lib unloaded 0/100 vs 0/100; whole lib 8 copies on 2 cores 1/96 (two_frames, left 63) vs 4/96 (all four accept_loop::tests::accept_loop_holds_n_concurrent_peers, LinkLost(PeerClosed), another test).",
+        "Instrumented copy of b4f30b18 on hkl002: unloaded 0/300; 8 copies on 2 cores 259/960, every failure first=63 then 64 within 5 ms, none leaked; a 50 ms sleep injected after the send 20/20 red, home at 50.2 ms. So the slot is late, not leaked.",
+        "Repair on hkl002: uring_reactor:: 13 passed (serialized); single test 8 copies on 2 cores 0/960, unloaded 0/300; the new witness 0/960 contended. Mutant 1 (slot leaked by forgetting a clone): witness, two_frames and every_slot_goes_home all red 63 vs 64. Mutant 2 (handle kept until after the send): witness red every run, two_frames 113/480 contended. Both mutants reverted.",
+        "Repair at the exact 82-feature set on pc3, b4f30b18 vs repair alternating, 8 copies on 2 cores: single test 102/800 vs 0/800; uring_reactor:: module 34/480 vs 0/480; whole lib 0/96 vs 0/96; whole lib unloaded 1/100 vs 0/100.",
+        "clippy -D warnings --all-targets -p wz-runtime-tokio --features runtime-tokio-uring: clean. cargo fmt --all --check: clean.",
+        "On the integrated tree (hkl002, runtime-tokio-uring lib test binary): uring_reactor:: 13 passed; two_frames single test 8 copies on 2 cores 0/960 and unloaded 0/200; the witness 8 copies on 2 cores 0/960.",
+        "Not run: Layer C0, A4, the full hook. Hosted C1bn is the only proof under runner contention."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "1. The whole-lib contention run on b4f30b18 failed accept_loop::tests::accept_loop_holds_n_concurrent_peers 4 of 96 (initiator LinkLost(PeerClosed), accept_loop.rs line 3849), 0 of 96 on 6c55e873; all four in one round, cause not examined. A worker is attributing it with a single-test loop, old against new; register a debt item only if it reproduces.",
+        "2. Hosted C1bn on the integrated push is the real check of the repair under runner contention; read that job and quote it.",
+        "3. Sibling check by grep: the only other test asserting free_slots equality after a worker-thread delivery is every_slot_goes_home_when_the_links_do (reads after the worker is joined, exact). uring.rs, link_rx_arena.rs, link_rx_datagram.rs and link_tx_pool.rs assert on one thread. No other test shares the race.",
+        "4. Open product question, not changed: one frame per delivery lets a slot be held by ranges for as long as a session holds them.",
+        "5. The runtime-zero-copy reason is re-pinned for uring_reactor.rs in the integration round after a re-read; its text is not rewritten."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
