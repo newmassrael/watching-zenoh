@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R0000 (no register item) -- a final MCU image that claims to run without a
+"""R3285 (no register item) -- a final MCU image that claims to run without a
 heap must LINK without an allocator, and the gate keeps that true.
-
-(The round label above is a placeholder: the coordinator replaces it with the
-real round number when this change is integrated.)
 
 ## The claim and why a library test cannot carry it
 
