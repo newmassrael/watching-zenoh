@@ -18,9 +18,10 @@
 //! - [`admin_status`] (`adminspace-core`) — the node answers upstream's admin GET.
 //! - [`connect_manager`] (`adminspace-write`) — the node holds a session with every
 //!   endpoint its control names and re-dials the ones that drop.
-//! - [`dial`] (`adminspace-write`) — the dialer that opens a written
-//!   `udp/<ipv4>:<port>` as an initiator session.
-//! - [`admin_node`] (both) — those pieces as one thing a firmware ticks, and
+//! - `dial` (`adminspace-write`, absent under `session-slot`) — the dialer that
+//!   opens a written `udp/<ipv4>:<port>` as an initiator session.
+//! - `admin_node` (both, absent under `session-slot`) — those pieces as one
+//!   thing a firmware ticks, and
 //!   the acceptor session a host reaches the node on.
 //!
 //! ## Why a crate of its own, and what it is generic over
@@ -32,7 +33,7 @@
 //! became [`wz_runtime_coop::session_drive::SessionLinks`] — a link that accepts
 //! on a port, a link that dials an address — and the shell is generic over it.
 //! lwIP supplies its links from `wz-session-lwip`, Zephyr from
-//! `wz-runtime-zephyr`, and the shell's own tests from [`memory`], which is
+//! `wz-runtime-zephyr`, and the shell's own tests from `memory`, which is
 //! neither.
 //!
 //! The crate depends on no link crate, for the reason the runtime tier does not:

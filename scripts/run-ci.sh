@@ -12499,6 +12499,17 @@ layer_c1bz_docs_resolve() {
     # is now a full path, together with the `WebSocketStream` link that the
     # rewrite retired. The three links and the private-item link the rewrite
     # first wrote read 487 and are not in the set.
+    #
+    # Round 3279: wz-runtime-coop 12 -> 11, a count that FELL because code left
+    # this build and not because prose was edited. `--all-features` turns on
+    # `session-slot`, which compiles out `new_session_actions`, and the one finding
+    # that function's doc carried (an unresolved link to `EntropySource`, at
+    # session_runtime.rs) went with it; the other eleven are the same eleven, read
+    # on `6c55e873` and on this tree. The default build still compiles the function
+    # and its link, so this is the all-features count the lane measures, not a repair.
+    # The same selector removes the `dial`, `admin_node` and `memory` modules of
+    # wz-session-mcu, whose crate-level docs linked them: four links became code
+    # spans so the all-features doc of that crate stays at its budget of zero.
     budget="
         wz:2
         wz-ap-demo:25
@@ -12508,7 +12519,7 @@ layer_c1bz_docs_resolve() {
         wz-link-lwip:9
         wz-mcu-session-acceptor:3
         wz-routing-graph:5
-        wz-runtime-coop:12
+        wz-runtime-coop:11
         wz-runtime-tokio:478
         wz-session-core:510
         wz-session-lwip:3

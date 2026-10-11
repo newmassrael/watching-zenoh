@@ -59,7 +59,15 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use wz_link_lwip::rx_sockets::{bind_session_rx, SessionRxSocket};
+use wz_link_lwip::rx_sockets::SessionRxSocket;
+// Round 3277 -- the binder of `test_bind`: the constructor itself by default, and
+// with `static-link-storage` also on (the two selectors compose) a socket claimed
+// from a pool of one cell that the test leaks. Every bind in this file is outside
+// a counting window, so the leak is not read as a cost.
+#[cfg(not(feature = "static-link-storage"))]
+use wz_link_lwip::rx_sockets::bind_session_rx;
+#[cfg(feature = "static-link-storage")]
+use wz_link_lwip::test_bind::session_rx as bind_session_rx;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionPump, SessionRole};
 use wz_runtime_coop::session_runtime::SessionHandle;

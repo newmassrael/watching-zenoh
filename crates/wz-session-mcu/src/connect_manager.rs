@@ -21,7 +21,7 @@
 //!
 //! The dialling itself is behind [`crate::connect_manager::Dialer`], so the
 //! bookkeeping above is decided (and tested) without a network. The dialer that
-//! opens a session over a network stack is [`crate::dial::UdpDialer`].
+//! opens a session over a network stack is `crate::dial::UdpDialer`.
 //!
 //! An endpoint this build cannot dial at all (a scheme it has no link for, an
 //! address it cannot parse) is REFUSED rather than retried: retrying cannot
