@@ -315,8 +315,18 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # emit) at the crate root, a firmware's to install; `mac-rx-pool` the
         # receive pool (`pub mod mac_rx_pool` and its emit) the same way, and
         # `rx-hold` the sockets that hold lent frames (`pub mod rx_hold`).
+        # Round 3277 -- `static-link-storage` joins: a SELECTOR for the MCU final
+        # binary (it takes the allocating constructors out and puts the pool-taking
+        # ones in), gating `pub mod static_slots` and the `*_in` binders.
         frozenset(
-            {"buffer-pool-session-rx-slim", "mac-rx-pool", "rx-hold", "test-support", "tx-pool"}
+            {
+                "buffer-pool-session-rx-slim",
+                "mac-rx-pool",
+                "rx-hold",
+                "static-link-storage",
+                "test-support",
+                "tx-pool",
+            }
         ),
     ),
     "wz-packet-socket": (
@@ -343,12 +353,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # and its re-exports, `SessionPump::reassembly`). No site is at the
         # crate root; each sits in a `pub mod` or an `impl`, the shape
         # `AXIS_REACHABLE`'s second clause reads off the sites.
+        # Round 3279 -- `session-slot` joins: the per-session-slot SELECTOR for the
+        # MCU final binary, gating `session_runtime::new_session_in_slot` and the
+        # slot handle bindings in `pub mod`s (the shape the sites above have).
         frozenset(
             {
                 "alloc",
                 "reassembly",
                 "rx-in-place",
                 "scouting-static",
+                "session-slot",
                 "session-unicast",
                 "switchboard",
             }
@@ -406,6 +420,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # read whole attributes. The facade weak-forwards all three
     # (`wz-session-lwip?/codec-response` and its two siblings), so they are
     # reached through it exactly as the first three are.
+    # Round 3277 / 3279 -- `static-link-storage` (S7) and `session-slot` (S5) join.
+    # They are SELECTORS an MCU final binary turns on, never a library's
+    # dependency line, and the facade deliberately does not forward them (a
+    # forward would let workspace feature unification take the heap constructors
+    # away from the AP host tests). The predicate this row is held to measures the
+    # WORKSPACE edges into the crate, which is the facade's alone; the firmware
+    # images that name these two are deploy crates outside this workspace, and the
+    # predicate does not speak for them.
     "wz-session-lwip": (
         "the lwip session glue; its consumers are MCU firmware images and "
         "deploy probes built with a fixed feature set",
@@ -416,6 +438,8 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "codec-response",
                 "codec-response-final",
                 "liveliness-token",
+                "session-slot",
+                "static-link-storage",
                 "transport-multicast",
             }
         ),
@@ -433,7 +457,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     "wz-session-mcu": (
         "the MCU session shell; its consumers are the lwip session crate and "
         "MCU firmware images built with a fixed feature set",
-        frozenset({"adminspace-core", "adminspace-write", "test-support"}),
+        # Round 3279 -- `session-slot` joins: the selector that takes `dial`,
+        # `admin_node` and `memory` out of the shell and lets a slot handle stand in
+        # for the `Rc` one (`app_layer::dispatch_to` takes either).
+        frozenset({"adminspace-core", "adminspace-write", "session-slot", "test-support"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -695,6 +722,8 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
             "codec-response",
             "codec-response-final",
             "liveliness-token",
+            "session-slot",
+            "static-link-storage",
             "transport-multicast",
         }
     ),
@@ -744,6 +773,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "reassembly",
             "rx-in-place",
             "scouting-static",
+            "session-slot",
             "session-unicast",
             "switchboard",
         }
@@ -759,13 +789,22 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # the simple shape the derivation names, and so do `mac-rx-pool` (the
     # receive pool's emit and `mac_rx_pool`) and `rx-hold` (`rx_hold`).
     "wz-link-lwip": frozenset(
-        {"buffer-pool-session-rx-slim", "mac-rx-pool", "rx-hold", "test-support", "tx-pool"}
+        {
+            "buffer-pool-session-rx-slim",
+            "mac-rx-pool",
+            "rx-hold",
+            "static-link-storage",
+            "test-support",
+            "tx-pool",
+        }
     ),
     # R3080 — the MCU session shell. Its row is the same three features the
     # derivation either names (a crate-root `pub mod`) or reads as compound
     # (`any(test, feature = ..)`, `all(core, write)`), which is the second
     # clause's subject; the row is excused only while that stays true.
-    "wz-session-mcu": frozenset({"adminspace-core", "adminspace-write", "test-support"}),
+    "wz-session-mcu": frozenset(
+        {"adminspace-core", "adminspace-write", "session-slot", "test-support"}
+    ),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz": frozenset(
         {

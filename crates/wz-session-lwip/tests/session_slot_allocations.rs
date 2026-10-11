@@ -306,7 +306,10 @@ struct Seen {
 /// The table the two ends of the test take their slots from, and the way an end's
 /// state is made on each profile.
 #[cfg(feature = "session-slot")]
-mod placing {
+use placing_in_slot as placing;
+
+#[cfg(feature = "session-slot")]
+mod placing_in_slot {
     use super::*;
     use wz_runtime_coop::session_runtime::new_session_in_slot;
     use wz_session_core::session_slot::SessionSlots;
@@ -340,9 +343,13 @@ mod placing {
     }
 }
 
-/// See the slot form of this module.
+/// See the slot form of this module (two names, because a module declared twice
+/// in one scope is a defect the duplicate-module lint reads whatever the cfgs say).
 #[cfg(not(feature = "session-slot"))]
-mod placing {
+use placing_on_the_heap as placing;
+
+#[cfg(not(feature = "session-slot"))]
+mod placing_on_the_heap {
     use super::*;
     use wz_runtime_coop::session_runtime::new_session_actions;
     use wz_session_core::link::BoxedLinkDriver;
