@@ -9829,6 +9829,13 @@ layer_c1g_cargo_test_observer() {
     # what that command PRINTED.
     _runci_guarded_test C1g 4 \
         cargo test -p wz-session-core --test reply_budget_refusal --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+    # S9a, decision Q7 end to end -- one application observer serving two
+    # sessions, each with its own peer tables: the same alias id from two peers
+    # names two keyexprs (the second reason of the decision, inferred when it was
+    # taken and driven here), and a peer that filled its alias table loses its own
+    # pushes and no one else's. 2 = what that command PRINTED.
+    _runci_guarded_test C1g 2 \
+        cargo test -p wz-session-core --test slot_observer_sessions --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # Fixed-memory step S4 — the LEND-ONLY send profile (`tx-lend-only`, the MCU
     # selector: every frame is encoded into a slot the link lends, and a send
     # with no slot is a counted refusal, never a heap frame). The crate's own lib

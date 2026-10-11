@@ -1528,6 +1528,15 @@ pub mod response_sink;
 #[cfg(feature = "alloc")]
 pub mod observer;
 
+/// Fixed-memory step S9a — the observer of the fixed-memory profile: what the
+/// APPLICATION registers, once per process, with every table a peer writes taken
+/// out into the session slot ([`peer_tables`]) and the requester-side registries
+/// beside the session ([`slot_observer::Requesters`]). Its dispatch and drain take
+/// the session's tables as arguments, in the AP observer's order and by its rules.
+/// Only on the fixed backing (`bounded-heapless`, which `session-slot` implies).
+#[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
+pub mod slot_observer;
+
 /// SCE-generated reassembly slot state machine. The emit comes from
 /// `sources/network/reassembly_slot.scxml`; R311y22b: COMMITTED at
 /// `out/wz-session-core/reassembly_slot_sm.rs`, `include!`-ed from there
