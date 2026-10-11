@@ -2175,6 +2175,41 @@ impl<K: AdminBuffer, B: AdminBuffer> LegRun<'_, K, B> {
     }
 }
 
+/// Serve ONE extra leg a host owns (a wz-native key under the node's admin root,
+/// such as the connection status a node reports beside upstream's legs) through the
+/// same machinery as every leg of [`answer_admin_query_in`]: its key is built and
+/// matched against the GET, its body written into `body`, and a key or a body that
+/// does not fit is refused and counted exactly as theirs are.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn serve_one_leg<K: AdminBuffer, B: AdminBuffer>(
+    key: &mut K,
+    body: &mut B,
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    zid_hex: &str,
+    whatami: &str,
+    tail: &str,
+    encoding: AdminLegEncoding,
+    write_body: impl FnOnce(&mut B),
+) -> AdminAnswer {
+    let mut run = LegRun {
+        key,
+        body,
+        out,
+        query: view.keyexpr(),
+        report: AdminAnswer::served(),
+    };
+    run.serve(
+        encoding,
+        |k| write_admin_leg_key(k, zid_hex, whatami, tail),
+        |b, _| {
+            write_body(b);
+            Ok(())
+        },
+    );
+    run.report
+}
+
 /// The admin-query answerer written into buffers its caller supplies, and reading
 /// its node's state as borrowed rows: the allocation-free form of
 /// [`answer_admin_query`], which is this function called with `String` buffers over

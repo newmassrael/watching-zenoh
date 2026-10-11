@@ -93,8 +93,6 @@
 // `codec-request` + `alloc` dispatch / responder path.
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
-use alloc::string::ToString;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
@@ -113,7 +111,10 @@ use crate::reply_acceptance::ReplyKeyExpr;
 // S9a — the replies a queryable stages and the Finals owed after them: a `Vec`
 // on the growable backing and tables that refuse and count on the fixed one.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage, ReplyStaging};
+use crate::reply_stage::{
+    EncodingParts, FinalStage, FinalStaging, PartsBody, PartsKind, ReplyParts, ReplyStage,
+    ReplyStaging,
+};
 // `CodecError` is referenced only by `into_response`, which lives in the
 // `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
 // so the import must carry the same gate — otherwise a
@@ -157,7 +158,9 @@ use crate::wire::{RequestOwned, RequestOwnedVariant};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::ResponseOwned;
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
+use crate::wireexpr_resolve::{
+    resolve_wireexpr_in, resolve_wireexpr_into, KeyexprBuf, KeyexprPastBound, MappingSpaces,
+};
 
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
@@ -655,6 +658,52 @@ type ShmDescriptorArg = Option<core::convert::Infallible>;
 
 #[cfg(feature = "alloc")]
 impl QueryReply {
+    /// The owned record of a reply described by borrowed parts
+    /// ([`crate::reply_stage::ReplyParts`]): the one place a described reply becomes
+    /// a [`QueryReply`], for the growable stage that holds it so and for the fixed
+    /// stage's drain that rebuilds it from a row.
+    pub fn from_parts(parts: &crate::reply_stage::ReplyParts<'_>) -> Self {
+        use crate::reply_stage::{PartsBody, PartsKind};
+        let keyexpr_literal = String::from(parts.keyexpr);
+        let responder = parts.responder.map(|(zid, eid)| (zid.to_vec(), eid));
+        match &parts.kind {
+            PartsKind::Reply {
+                body,
+                encoding,
+                timestamp,
+                attachment,
+                source_info,
+            } => QueryReply::Reply {
+                rid: parts.rid,
+                keyexpr_literal,
+                body: match body {
+                    PartsBody::Put(payload) => ReplyBody::Put(payload.to_vec()),
+                    PartsBody::Del => ReplyBody::Del,
+                    #[cfg(feature = "transport-shm")]
+                    PartsBody::Shared(handle) => ReplyBody::PutShared((*handle).clone()),
+                },
+                encoding: encoding.map(|e| EncodingHint {
+                    packed_id: e.packed_id,
+                    schema: e.schema.map(String::from),
+                }),
+                timestamp: timestamp.cloned(),
+                responder,
+                attachment: attachment.map(<[u8]>::to_vec),
+                source_info: source_info.cloned(),
+                qos: parts.qos,
+            },
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { encoding, payload } => QueryReply::Err {
+                rid: parts.rid,
+                keyexpr_literal,
+                encoding: encoding.map(|(id, schema)| (id, schema.map(String::from))),
+                payload: payload.to_vec(),
+                responder,
+                qos: parts.qos,
+            },
+        }
+    }
+
     /// Compose the wire-form [`Response`] for this Reply / Err using
     /// the existing layered builders. Consumes `self` so the
     /// allocated payload bytes flow directly into the builder
@@ -855,7 +904,10 @@ pub struct QueryResponder<'a> {
     /// [`ResponseReplyBuilder::responder`] /
     /// [`crate::response_build::ResponseErrBuilder::responder`].
     /// Set via [`Self::with_responder`]; clears via [`Self::clear_responder`].
-    responder: Option<(Vec<u8>, u32)>,
+    ///
+    /// Held inline (a `zid` is at most 16 bytes on the wire), so attaching an
+    /// identity allocates nothing.
+    responder: Option<(heapless::Vec<u8, 16>, u32)>,
     /// R311y834 — which replies THIS query accepts, read off its own selector
     /// parameters exactly as the requester side reads them
     /// ([`crate::reply_acceptance::ReplyKeyExpr::from_parameters`]).
@@ -968,17 +1020,18 @@ impl<'a> QueryResponder<'a> {
     /// ([`ReplyError::PayloadTooLarge`], [`ReplyError::StagingFull`]) and
     /// counted, and nothing is staged. The growable backing refuses nothing.
     pub fn send_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
-        self.replies.admit_payload(payload.len())?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: String::from(&*self.keyexpr_literal),
-            body: ReplyBody::Put(payload.to_vec()),
-            encoding: None,
-            timestamp: None,
-            responder: self.responder.clone(),
+            keyexpr: &self.keyexpr_literal,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
         })
     }
 
@@ -996,17 +1049,18 @@ impl<'a> QueryResponder<'a> {
     /// `_anyke`, and nothing is staged — as for every keyed method here.
     pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(payload.len())?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Put(payload.to_vec()),
-            encoding: None,
-            timestamp: None,
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
         })
     }
 
@@ -1028,17 +1082,18 @@ impl<'a> QueryResponder<'a> {
         timestamp: &TimestampHint,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(payload.len())?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Put(payload.to_vec()),
-            encoding: encoding.cloned(),
-            timestamp: Some(timestamp.clone()),
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: encoding.map(EncodingParts::of),
+                timestamp: Some(timestamp),
+                attachment: None,
+                source_info: None,
+            },
         })
     }
 
@@ -1063,17 +1118,18 @@ impl<'a> QueryResponder<'a> {
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(payload.len())?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Put(payload.to_vec()),
-            encoding: encoding.cloned(),
-            timestamp: Some(timestamp.clone()),
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: source_info.cloned(),
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: encoding.map(EncodingParts::of),
+                timestamp: Some(timestamp),
+                attachment: None,
+                source_info,
+            },
         })
     }
 
@@ -1100,18 +1156,18 @@ impl<'a> QueryResponder<'a> {
         attachment: &[u8],
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(payload.len())?;
-        self.replies.admit_payload(attachment.len())?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Put(payload.to_vec()),
-            encoding: encoding.cloned(),
-            timestamp: None,
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: Some(attachment.to_vec()),
-            source_info: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: encoding.map(EncodingParts::of),
+                timestamp: None,
+                attachment: Some(attachment),
+                source_info: None,
+            },
         })
     }
 
@@ -1131,17 +1187,43 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(payload.len())?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Put(payload.to_vec()),
-            encoding: encoding.cloned(),
-            timestamp: None,
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: encoding.map(EncodingParts::of),
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        })
+    }
+
+    /// [`Self::send_reply_keyed_encoded`] with the encoding given as borrowed
+    /// parts, so a handler with an encoding and no owned hint stages its reply
+    /// without making one. The same reply, the same refusals.
+    pub fn send_reply_keyed_encoded_parts(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: EncodingParts<'_>,
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
+        self.replies.stage_parts(ReplyParts {
+            rid: self.rid,
+            keyexpr,
+            responder: responder_parts(&self.responder),
+            qos: self.qos,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: Some(encoding),
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
         })
     }
 
@@ -1150,17 +1232,18 @@ impl<'a> QueryResponder<'a> {
     /// (the inner `MsgDel` body carries only a header + optional
     /// timestamp). Fallible for the reason [`Self::send_reply`] is.
     pub fn send_reply_del(&mut self) -> Result<(), ReplyError> {
-        self.replies.admit_payload(0)?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: String::from(&*self.keyexpr_literal),
-            body: ReplyBody::Del,
-            encoding: None,
-            timestamp: None,
-            responder: self.responder.clone(),
+            keyexpr: &self.keyexpr_literal,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Del,
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
         })
     }
 
@@ -1188,17 +1271,18 @@ impl<'a> QueryResponder<'a> {
     /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
     pub fn send_reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(0)?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.into(),
-            body: ReplyBody::Del,
-            encoding: None,
-            timestamp: None,
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: None,
+            kind: PartsKind::Reply {
+                body: PartsBody::Del,
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
         })
     }
 
@@ -1219,17 +1303,18 @@ impl<'a> QueryResponder<'a> {
         &mut self,
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
-        self.replies.admit_payload(0)?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: String::from(&*self.keyexpr_literal),
-            body: ReplyBody::Del,
-            encoding: None,
-            timestamp: None,
-            responder: self.responder.clone(),
+            keyexpr: &self.keyexpr_literal,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: source_info.cloned(),
+            kind: PartsKind::Reply {
+                body: PartsBody::Del,
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info,
+            },
         })
     }
 
@@ -1257,17 +1342,18 @@ impl<'a> QueryResponder<'a> {
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(0)?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Del,
-            encoding: None,
-            timestamp: Some(timestamp.clone()),
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
-            attachment: None,
-            source_info: source_info.cloned(),
+            kind: PartsKind::Reply {
+                body: PartsBody::Del,
+                encoding: None,
+                timestamp: Some(timestamp),
+                attachment: None,
+                source_info,
+            },
         })
     }
 
@@ -1291,32 +1377,30 @@ impl<'a> QueryResponder<'a> {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.admit_payload(payload.len())?;
-        if let Some(attachment) = meta.attachment {
-            self.replies.admit_payload(attachment.len())?;
-        }
         // R3062 -- a payload that is a buffer of shared memory is staged AS the buffer, not as
         // a copy of its bytes: the copy is what the descriptor exists to avoid, and the
         // bytes stay one call away on the handle for a peer that cannot map the segment.
         #[cfg(feature = "transport-shm")]
         let body = match meta.shared {
-            Some(shared) => ReplyBody::PutShared(shared.clone()),
-            None => ReplyBody::Put(payload.to_vec()),
+            Some(shared) => PartsBody::Shared(shared),
+            None => PartsBody::Put(payload),
         };
         #[cfg(not(feature = "transport-shm"))]
-        let body = ReplyBody::Put(payload.to_vec());
-        self.replies.stage(QueryReply::Reply {
+        let body = PartsBody::Put(payload);
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body,
-            encoding: meta.encoding.cloned(),
-            timestamp: meta.timestamp.cloned(),
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             // R2596 — a per-reply override BEATS the query's QoS; absent one,
             // the reply inherits, which is what R2594 built.
             qos: meta.qos.unwrap_or(self.qos),
-            attachment: meta.attachment.map(<[u8]>::to_vec),
-            source_info: meta.source_info.cloned(),
+            kind: PartsKind::Reply {
+                body,
+                encoding: meta.encoding.map(EncodingParts::of),
+                timestamp: meta.timestamp,
+                attachment: meta.attachment,
+                source_info: meta.source_info,
+            },
         })
     }
 
@@ -1350,20 +1434,20 @@ impl<'a> QueryResponder<'a> {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies
-            .admit_payload(meta.attachment.map_or(0, <[u8]>::len))?;
-        self.replies.stage(QueryReply::Reply {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Del,
-            encoding: None,
-            timestamp: meta.timestamp.cloned(),
-            responder: self.responder.clone(),
+            keyexpr,
+            responder: responder_parts(&self.responder),
             // R2596 — the Del arm honours the override too: a cache replays a
             // cached DELETE on its own terms exactly as it replays a Put.
             qos: meta.qos.unwrap_or(self.qos),
-            attachment: meta.attachment.map(<[u8]>::to_vec),
-            source_info: meta.source_info.cloned(),
+            kind: PartsKind::Reply {
+                body: PartsBody::Del,
+                encoding: None,
+                timestamp: meta.timestamp,
+                attachment: meta.attachment,
+                source_info: meta.source_info,
+            },
         })
     }
 
@@ -1385,15 +1469,15 @@ impl<'a> QueryResponder<'a> {
         schema: Option<&str>,
         payload: &[u8],
     ) -> Result<(), ReplyError> {
-        self.replies.admit_payload(payload.len())?;
-        let encoding = encoding_id.map(|id| (id, schema.map(str::to_string)));
-        self.replies.stage(QueryReply::Err {
+        self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr_literal: String::from(&*self.keyexpr_literal),
-            encoding,
-            payload: payload.to_vec(),
-            responder: self.responder.clone(),
+            keyexpr: &self.keyexpr_literal,
+            responder: responder_parts(&self.responder),
             qos: self.qos,
+            kind: PartsKind::Err {
+                encoding: encoding_id.map(|id| (id, schema)),
+                payload,
+            },
         })
     }
 
@@ -1423,7 +1507,10 @@ impl<'a> QueryResponder<'a> {
             "QueryResponder::with_responder requires zid length 1..=16 \
              (zenoh-pico ZenohId wire constraint)"
         );
-        self.responder = Some((zid.to_vec(), eid));
+        let mut inline = heapless::Vec::new();
+        // The length was asserted above: at most 16 bytes.
+        let _ = inline.extend_from_slice(zid);
+        self.responder = Some((inline, eid));
         self
     }
 
@@ -1456,10 +1543,14 @@ impl<'a> QueryResponder<'a> {
     /// [`Self::clear_responder`]. Exposed for diagnostic surfaces and
     /// tests; user closures typically only set and forget.
     pub fn responder(&self) -> Option<(&[u8], u32)> {
-        self.responder
-            .as_ref()
-            .map(|(zid, eid)| (zid.as_slice(), *eid))
+        responder_parts(&self.responder)
     }
+}
+
+/// The responder identity as the borrowed `(zid, eid)` a staged reply carries.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+fn responder_parts(responder: &Option<(heapless::Vec<u8, 16>, u32)>) -> Option<(&[u8], u32)> {
+    responder.as_ref().map(|(zid, eid)| (zid.as_slice(), *eid))
 }
 
 /// R311gb-3b-cleanup — `QueryResponder` is the reply accumulator the
@@ -1541,6 +1632,15 @@ impl ReplyOut for QueryResponder<'_> {
         encoding: Option<&EncodingHint>,
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_encoded(keyexpr, payload, encoding)
+    }
+    fn reply_keyed_encoded_parts(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        packed_id: u32,
+        schema: Option<&str>,
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_encoded_parts(keyexpr, payload, EncodingParts { packed_id, schema })
     }
     fn reply_keyed_attached(
         &mut self,
@@ -2115,11 +2215,29 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // None -> drop, covering the empty form + an undeclared id).
         // zenoh's twin exit: `Err(err) => error!("Received Query for unknown
         // key_expr")` returns before `handle_query`, so no Final is owed.
-        let resolved: String = match resolve_wireexpr_in(&request.keyexpr.body, peer_keyexpr_table)
-        {
-            Some(r) => r,
-            None => return DispatchOutcome::NOT_DISPATCHED,
-        };
+        //
+        // S9b — resolved into a buffer on this frame ([`KeyexprBuf`]) and not into a
+        // `String`: the keyexpr is lent from the request when one string IS it (an
+        // `id == 0` reference, or the peer's literal for an id with no suffix), which
+        // costs nothing, and composed in the buffer otherwise. On the fixed backing
+        // the buffer is [`caps::MAX_KEYEXPR_BYTES`]; a keyexpr composed past it is
+        // still ROUTED, resolved into a `String` as this path always did (the lent
+        // path's documented fallback: such a query is delivered, not dropped), and
+        // that one case is the only one that allocates.
+        let mut composed = KeyexprBuf::new();
+        let long;
+        let resolved: &str =
+            match resolve_wireexpr_into(&request.keyexpr.body, peer_keyexpr_table, &mut composed) {
+                Ok(Some(r)) => r,
+                Ok(None) => return DispatchOutcome::NOT_DISPATCHED,
+                Err(KeyexprPastBound) => {
+                    long = match resolve_wireexpr_in(&request.keyexpr.body, peer_keyexpr_table) {
+                        Some(r) => r,
+                        None => return DispatchOutcome::NOT_DISPATCHED,
+                    };
+                    &long
+                }
+            };
 
         // zenoh session.rs:2430 — the completeness filter reads the query's
         // `ext_target`. Absent / BestMatching / All -> None or All (every
@@ -2152,7 +2270,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         };
         let matched = self.fire_matching_queryables(
             envelope,
-            &resolved,
+            resolved,
             query,
             unswapped_value,
             replies,
@@ -3075,7 +3193,7 @@ mod tests {
 
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(replies.len(), 1);
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Reply {
                 rid,
                 keyexpr_literal,
@@ -3499,7 +3617,7 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 1);
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Reply {
                 keyexpr_literal,
                 encoding,
@@ -3563,7 +3681,7 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         // Staging: the QueryReply carries the attachment + value + encoding.
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Reply {
                 keyexpr_literal,
                 body: ReplyBody::Put(payload),
@@ -3624,7 +3742,7 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 1);
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Reply {
                 rid,
                 keyexpr_literal,
@@ -3654,7 +3772,7 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 1);
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Err {
                 rid,
                 keyexpr_literal,
@@ -3692,8 +3810,9 @@ mod tests {
             3,
             "queryable may emit many replies per query"
         );
-        for (i, reply) in replies.iter().enumerate() {
-            match reply {
+        for i in 0..replies.len() {
+            let reply = replies.nth(i).expect("a staged reply");
+            match &reply {
                 QueryReply::Reply { rid, body, .. } => {
                     assert_eq!(*rid, 123, "every reply echoes the same rid");
                     let expected = format!("sample-{}", i + 1);
@@ -3731,7 +3850,7 @@ mod tests {
         assert_eq!(replies.len(), 4, "all four pushes recorded");
         let unstamped_expected: Option<(Vec<u8>, u32)> = None;
         let stamped_expected: Option<(Vec<u8>, u32)> = Some((vec![0xAA; 4], 11));
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Reply {
                 body, responder, ..
             } => {
@@ -3743,7 +3862,7 @@ mod tests {
             }
             other => panic!("expected Reply::Put, got {other:?}"),
         }
-        match &replies[1] {
+        match &replies.nth(1).expect("a staged reply") {
             QueryReply::Reply {
                 body, responder, ..
             } => {
@@ -3755,7 +3874,7 @@ mod tests {
             }
             other => panic!("expected Reply::Put, got {other:?}"),
         }
-        match &replies[2] {
+        match &replies.nth(2).expect("a staged reply") {
             QueryReply::Reply {
                 body, responder, ..
             } => {
@@ -3767,7 +3886,7 @@ mod tests {
             }
             other => panic!("expected Reply::Del, got {other:?}"),
         }
-        match &replies[3] {
+        match &replies.nth(3).expect("a staged reply") {
             QueryReply::Reply {
                 body, responder, ..
             } => {
@@ -3801,7 +3920,7 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 1);
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Err {
                 encoding,
                 payload,
@@ -4861,7 +4980,7 @@ mod tests {
 
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(replies.len(), 1);
-        match &replies[0] {
+        match &replies.nth(0).expect("a staged reply") {
             QueryReply::Reply {
                 rid,
                 keyexpr_literal,

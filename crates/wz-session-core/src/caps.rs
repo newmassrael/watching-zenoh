@@ -216,6 +216,17 @@ pub const MAX_PENDING_FINALS: usize = 8;
 /// [`crate::query_sink::ReplyError::PayloadTooLarge`], never truncated.
 pub const MAX_REPLY_PAYLOAD_BYTES: usize = 1024;
 
+/// The bytes ONE session's reply stage holds for what its queryables have staged
+/// between two drains: the room for [`MAX_PENDING_REPLIES`] replies of
+/// [`MAX_REPLY_PAYLOAD_BYTES`] of payload and a keyexpr of [`MAX_KEYEXPR_BYTES`]
+/// each, derived from those three limits and so from the deploy keys that state
+/// them (`pending_replies`, `reply_payload_bytes`, `keyexpr_bytes`). On the fixed
+/// backing a staged reply's keyexpr, payload, attachment and encoding schema are
+/// bytes of this one arena ([`crate::reply_stage::ReplyStage`]); a reply that does
+/// not fit what is left is refused and counted.
+pub const REPLY_STAGE_BYTES: usize =
+    MAX_PENDING_REPLIES * (MAX_REPLY_PAYLOAD_BYTES + MAX_KEYEXPR_BYTES);
+
 /// Maximum byte length of ONE admin reply body (the deploy
 /// `session_pool.process.admin_reply_bytes` key): the buffer every admin leg is
 /// written into before it is handed to the session's reply stage
@@ -233,6 +244,18 @@ const _: () = assert!(
     MAX_ADMIN_REPLY_BYTES <= MAX_REPLY_PAYLOAD_BYTES,
     "an admin reply is staged as a reply, so its bound cannot exceed the reply payload bound"
 );
+
+/// Maximum number of listening locators a node with no allocator reports in its
+/// admin `local_data` (the deploy `session_pool.process.admin_locators` key). The
+/// node's identity holds that many locator rows of [`MAX_LOCATOR_LEN`] bytes; one
+/// more is refused when the identity is built, never dropped.
+pub const MAX_ADMIN_LOCATORS: usize = 4;
+
+/// Maximum number of links one admin `sessions[]` row lists (the deploy
+/// `session_pool.process.admin_session_links` key). A unicast transport has one;
+/// the number covers a session that holds a second. A row with more links than this
+/// is refused and counted, not listed in part.
+pub const MAX_ADMIN_SESSION_LINKS: usize = 2;
 
 /// Maximum byte length of the keyexpr one admin reply is stamped with:
 /// `@/<zid>/<whatami>/<leg>` and, for a per-entity leg, the entity's own

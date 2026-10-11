@@ -19,8 +19,8 @@
 //! refusal never takes another's reply with it.
 
 use crate::adminspace::{
-    answer_admin_query_in, AdminAnswerOutcome, AdminDeclaration, AdminMulticastPeerRef,
-    AdminNodeFacts, AdminPlugin, AdminSessionRef,
+    answer_admin_query_in, serve_one_leg, AdminAnswerOutcome, AdminDeclaration, AdminLegEncoding,
+    AdminMulticastPeerRef, AdminNodeFacts, AdminPlugin, AdminSessionRef,
 };
 use crate::query_sink::ReplyError;
 use crate::text_out::{FixedText, Overflow, TextOut};
@@ -214,6 +214,37 @@ impl<const BODY: usize> AdminReplyArena<BODY> {
         );
         refusals.add(&report.refusals);
         report.into_result()
+    }
+
+    /// Serve ONE leg the host owns, `@/<zid>/<whatami>/<tail>` (a wz-native key
+    /// beside upstream's, such as a node's connection status), in this arena's
+    /// buffers: the key is matched against the GET and the body `write_body` writes is
+    /// replied as `encoding`, and a key or body that does not fit is refused and
+    /// counted as an upstream leg's is. `Ok` also when the GET does not reach the leg.
+    #[allow(clippy::too_many_arguments)]
+    pub fn serve_leg(
+        &mut self,
+        view: &dyn crate::query_sink::QueryView,
+        out: &mut dyn crate::query_sink::ReplyOut,
+        zid_hex: &str,
+        whatami: &str,
+        tail: &str,
+        encoding: AdminLegEncoding,
+        write_body: impl FnOnce(&mut FixedText<BODY>),
+    ) -> Result<(), AdminReplyError> {
+        let report = serve_one_leg(
+            &mut self.key,
+            &mut self.body,
+            view,
+            out,
+            zid_hex,
+            whatami,
+            tail,
+            encoding,
+            write_body,
+        );
+        self.refusals.add(&report.refusals);
+        report.first_error.map_or(Ok(()), Err)
     }
 }
 
