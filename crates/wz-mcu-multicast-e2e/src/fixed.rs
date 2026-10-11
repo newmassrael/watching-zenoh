@@ -25,14 +25,121 @@ use wz::link_lwip::rx_sockets::{
 };
 use wz::runtime_coop::RuntimeCell;
 use wz::session_lwip::multicast_drive::{LwipMulticastDriver, MulticastSession, MulticastSlots};
-use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-use wz_session_core::multicast_tx::{multicast_put_literal, MulticastTxItem};
+use wz_session_core::multicast_join::encode_join;
+use wz_session_core::multicast_params::MulticastParams;
+use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
+use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::sn::{self, MulticastTxConduits};
 
 use crate::{
-    own_params, payload, peer_join, tx_fragments, ClockSource, LwipLink, MulticastE2eReport,
-    MulticastOutcome, MulticastStage, Observed, KEYEXPR, MAX_ITERS, MAX_PEERS, PORT,
+    params, ClockSource, LwipLink, MulticastE2eReport, MulticastOutcome, MulticastStage,
+    BATCH_SIZE, KEYEXPR, MAX_ITERS, MAX_PEERS, PAYLOAD_LEN, PEER_ZID, PORT, SELF_ZID,
 };
+
+impl MulticastE2eReport {
+    /// The report of a run whose group socket could not be bound or joined: the loop
+    /// never ran and the rest of the report is inert.
+    fn no_join() -> Self {
+        Self {
+            outcome: None,
+            join_ok: false,
+            tx_fragmented: false,
+            peer_admitted: false,
+            active_peers: 0,
+            saw_push: false,
+            saw_drop: false,
+            departed: false,
+        }
+    }
+
+    /// The report of a run that joined, from what its two drives observed.
+    fn joined(
+        outcome: MulticastOutcome,
+        tx_fragmented: bool,
+        active_peers: usize,
+        seen: &Observed,
+        departed: bool,
+    ) -> Self {
+        Self {
+            outcome: Some(outcome),
+            join_ok: true,
+            tx_fragmented,
+            peer_admitted: active_peers == 1,
+            active_peers,
+            saw_push: seen.saw_push,
+            saw_drop: seen.saw_drop,
+            departed,
+        }
+    }
+}
+
+/// What the bounded drive's events showed: the reassembled `Push` and a dropped chain.
+/// The heap form reads the same two signals off the same events in its own closure.
+#[derive(Default)]
+struct Observed {
+    saw_push: bool,
+    saw_drop: bool,
+}
+
+impl Observed {
+    fn observe(&mut self, event: IterationEvent<'_>) {
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                if messages
+                    .iter()
+                    .any(|m| matches!(m, NetworkMessage::Push(_)))
+                {
+                    self.saw_push = true;
+                }
+            }
+            IterationEvent::ReassemblyDropped(_) => self.saw_drop = true,
+            _ => {}
+        }
+    }
+}
+
+/// The oversize payload: deterministic bytes, `PAYLOAD_LEN` of them, in an array (the
+/// heap form collects the same bytes into a `Vec`).
+fn payload() -> [u8; PAYLOAD_LEN] {
+    let mut bytes = [0u8; PAYLOAD_LEN];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = (i as u32).wrapping_mul(13) as u8;
+    }
+    bytes
+}
+
+/// Probe that the TX side fragments `payload` at this budget BEFORE the loop, so a
+/// passing `saw_push` is known to have exercised the Fragment RX arm (a single frame
+/// would ride the whole-Frame admit path instead).
+fn tx_fragments(payload: &[u8], own: &MulticastParams) -> bool {
+    let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(own.seq_num_res));
+    match multicast_put_literal(KEYEXPR, payload) {
+        Ok(item) => multicast_tx_emit(item, &mut probe_sn, own).datagrams.len() > 1,
+        Err(_) => false,
+    }
+}
+
+/// The JOIN of the pre-admitted peer: a zid distinct from ours (so it is admitted, not
+/// own-zid-filtered) advertising `next_sn 0` on a fresh ring, and the SAME `batch_size`
+/// as ours (a mismatch would fail `validate_join` and the echoed fragments would hit an
+/// `UnknownPeer` drop).
+fn peer_join() -> impl core::ops::Deref<Target = [u8]> {
+    let mut peer = params(PEER_ZID);
+    peer.batch_size = BATCH_SIZE;
+    encode_join(
+        &peer,
+        &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+    )
+}
+
+/// This node's parameters: the fixture at the tiny batch budget.
+fn own_params() -> MulticastParams {
+    let mut own = params(SELF_ZID);
+    own.batch_size = BATCH_SIZE;
+    own
+}
 
 /// Tasks the runtime holds. The pump is stepped by hand, so no task is spawned; the
 /// table is the smallest the runtime's cell has.

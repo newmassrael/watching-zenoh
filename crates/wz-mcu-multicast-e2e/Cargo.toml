@@ -96,9 +96,9 @@ loopif-multicast = ["wz/loopif-multicast"]
 # S9c -- the fixed-memory profile of the e2e: the multicast session on the per-session
 # slot (a pump in a cell of `MulticastSlots`), the group socket in a static pool and
 # the runtime in a static cell, through `run_multicast_e2e_fixed` over statics the image
-# declares. The crate links no `alloc` on either form; this one replaces the heap form
-# (`run_multicast_e2e`), which draws its socket and runtime from the heap: a build has
-# one of them.
+# declares. The crate links no `alloc` under it; it replaces the heap form
+# (`run_multicast_e2e`, which links `alloc` as it always did and draws its socket and
+# runtime from the heap): a build has one of them.
 fixed-memory = [
     "dep:wz-session-lwip",
     "dep:wz-link-lwip",
