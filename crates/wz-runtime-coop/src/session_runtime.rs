@@ -42,6 +42,7 @@
 //! lets the MCU session stack — handshake + reassembly consumer — reach
 //! ARMv6-M, the no-alloc M0 session reach the AP `Arc` blocked.
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
 
 use wz_runtime_core::TimeSource;
@@ -53,6 +54,35 @@ use wz_session_core::session_slot::{SlotClaim, SlotRef, SlotSink};
 
 use crate::runtime_impl::CoopRuntime;
 use crate::time::{ClockSource, CoopTime};
+
+/// What [`SessionRuntime::Shared`] is on the slot profile: a pointer that cannot
+/// exist. It has no value, so the claims the seam makes of it (it clones, it reads
+/// as the value behind it) hold of nothing and cost nothing.
+#[cfg(feature = "session-slot")]
+pub enum NoShared<U> {
+    #[doc(hidden)]
+    Never(core::convert::Infallible, core::marker::PhantomData<U>),
+}
+
+#[cfg(feature = "session-slot")]
+impl<U> Clone for NoShared<U> {
+    fn clone(&self) -> Self {
+        match self {
+            NoShared::Never(never, _) => match *never {},
+        }
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<U> core::ops::Deref for NoShared<U> {
+    type Target = U;
+
+    fn deref(&self) -> &U {
+        match self {
+            NoShared::Never(never, _) => match *never {},
+        }
+    }
+}
 
 /// MCU-profile [`SessionRuntime`] binding. The link sink is a
 /// `Rc<dyn BoxedLinkDriver>` shared by the single-task drive loop and
@@ -75,7 +105,16 @@ impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
     // (`alloc::sync::Arc` requires `target_has_atomic = "ptr"`, absent on
     // ARMv6-M; `Rc` lowers to plain loads / stores). The MCU profile is
     // rsa-AP-only and always N=1, so this is only ever a refcount-1 pointer here.
+    #[cfg(not(feature = "session-slot"))]
     type Shared<U> = Rc<U>;
+
+    // Fixed-memory step S9c -- the slot profile holds no shared pointer: the bundle
+    // is one value in its slot, with its kernel and its link as its own fields
+    // (`SessionLinkActions::hold_core` / `hold_link` have a slot form that never asks
+    // the runtime to share), so there is no value of this type and a build that made
+    // one would be asking the profile for an aggregation it has no form of.
+    #[cfg(feature = "session-slot")]
+    type Shared<U> = NoShared<U>;
 
     // R2708 (open-debt item 785) — the MCU profile owes its loop NOTHING each
     // iteration, and `()` says so at zero cost: no field, no branch, no future
@@ -84,8 +123,20 @@ impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
     // could name itself.
     type IterationWork = ();
 
+    #[cfg(not(feature = "session-slot"))]
     fn share<U>(value: U) -> Self::Shared<U> {
         Rc::new(value)
+    }
+
+    // The slot profile has no pointer to share a value behind, and a value cannot
+    // be kept without one, so this is the one entry of the seam that does not
+    // return: nothing on the profile calls it (the unicast bundle's slot forms do
+    // not, and `transport-multilink`, the only other caller, is an AP feature that
+    // the slot profile does not compile), and a caller that did would be told so
+    // at the call and not by a pointer that dangled.
+    #[cfg(feature = "session-slot")]
+    fn share<U>(_value: U) -> Self::Shared<U> {
+        panic!("session-slot holds no shared pointer: the bundle owns its kernel and link")
     }
 
     // R311ja — the MCU action handle is `Rc`, not `Arc`: the single-task

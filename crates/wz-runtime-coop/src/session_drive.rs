@@ -32,6 +32,7 @@
 //! link — [`SessionDatagramLink`] — and each network stack implements that
 //! seam (`wz_session_lwip::LwipSessionLink` over lwIP).
 
+#[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
@@ -56,9 +57,11 @@ use wz_session_core::drive::{
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::drive::{CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
+#[cfg(not(feature = "session-slot"))]
+use wz_session_core::link::BoxedLinkDriver;
 #[cfg(not(feature = "rx-in-place"))]
 use wz_session_core::link::LinkEvent;
-use wz_session_core::link::{BoxedLinkDriver, RxFrame};
+use wz_session_core::link::RxFrame;
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::network_message::{new_record_buf, RecordBuf};
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
@@ -126,6 +129,11 @@ pub trait SessionDatagramLink {
 
 /// A shared link is a link: the same object is usually the session's
 /// `Rc<dyn BoxedLinkDriver>` sink too, so the loop takes a clone of that `Rc`.
+///
+/// Absent under `session-slot`, where nothing is shared by a pointer: the driver
+/// is a value in the session's slot and the pump reads it through a handle to that
+/// slot (fixed-memory step S9c).
+#[cfg(not(feature = "session-slot"))]
 impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     fn service(&self) {
         (**self).service()
@@ -162,6 +170,11 @@ pub enum LinkOpenError {
 /// the session's action bundle sends through and the inbound half the drive loop
 /// pumps. One object often is both (Zephyr's socket driver); lwIP's are two
 /// (its stack handle, pumped, and its UDP driver, read).
+///
+/// Absent under `session-slot`: its sink is an `Rc` of a driver, and a link on that
+/// profile is a driver moved into a slot of the session table with a pump over a
+/// handle to it (fixed-memory step S9c; `wz_session_lwip::session_host::SessionHost`).
+#[cfg(not(feature = "session-slot"))]
 pub struct OpenedLink<P> {
     /// What the session's actions send through.
     pub sink: Rc<dyn BoxedLinkDriver>,
@@ -177,6 +190,9 @@ pub struct OpenedLink<P> {
 /// admin node is the first user: it accepts one session on a port and dials
 /// whatever endpoints a host writes, and neither is any stack's business but the
 /// socket under it.
+///
+/// Absent under `session-slot`, with [`OpenedLink`] (see there).
+#[cfg(not(feature = "session-slot"))]
 pub trait SessionLinks {
     /// What the drive loop pumps for a link this stack opened.
     type Pump: SessionDatagramLink + 'static;

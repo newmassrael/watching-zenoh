@@ -138,7 +138,14 @@
 //! [`CoopJoinHandle`]: join_handle::CoopJoinHandle
 //! [`CoopTime`]: time::CoopTime
 
-#[cfg(feature = "alloc")]
+// Fixed-memory step S9c -- under `session-slot` the crate does not link `alloc` at
+// all, so a use that creeps back into the slot profile is a compile error and not a
+// silent allocation (the rule `wz-link-lwip` keeps under `static-link-storage`). The
+// tests keep it: their clocks, links and sinks are host code.
+#[cfg(any(
+    all(feature = "alloc", not(feature = "session-slot")),
+    all(test, feature = "alloc")
+))]
 extern crate alloc;
 
 pub mod sync;
