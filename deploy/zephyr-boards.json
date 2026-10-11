@@ -76,12 +76,18 @@
       "app": "zephyr-admin-node",
       "network": "lwip-mac",
       "rust_target": "thumbv7em-none-eabi",
-      "grade": "BUILT",
-      "witness": {"lane": "Qzb"},
+      "grade": "HARDWARE",
+      "witness": {
+        "record": "Round 3270",
+        "image_sha256": "04c92d9d354c6d6ac0730fec59829a9e13b928c1025143dcb61eb7eee2705c0e",
+        "verdict": "HW.26 to HW.30 held on the transmit pool image with the launcher, each step ending OK",
+        "date": "2026-10-11",
+        "by": "the lab session of the bench host the board is attached to, with the owner's permission"
+      },
       "requires": ["zephyr-cm0p-launcher"],
       "conf_overlay": ["overlays/t2g_tx_pool.conf"],
       "verdict_steps": "HW.26 to HW.30",
-      "note": "The onboard RMII image with the transmit pool (ARCHITECTURE section 9.1, CONFIG_WZ_CYT4BF_TX_POOL): 8 slots of 1536 bytes from sources/network/session_tx_pool_mcu.scxml, placed in Zephyr's non-cacheable section beside the MAC's rings. The session encodes each outbound datagram into a slot, lwIP writes its headers in front of it in the same slot, and the MAC's transmit descriptor is written with the slot's address; frames lwIP sends from its own heap are copied into the ring, because the board reads in place only inside the pool's window and cleans no cache. The generated pool's transmit edges (armed, started, complete, un-armed) follow each frame, and the console prints the pool's place beside the section's bounds and, every 10 seconds when they moved, the MAC's in-place and copied counts, the last in-place descriptor's address and the pool's own counts. Nothing has run on silicon with it: not a frame read out of a slot by the controller, not a frame that starts 2 bytes past a word boundary inside a slot (as lwIP's own heap frames do; the vendor reference driver checks no transmit buffer alignment), not the bytes on the wire. The row stays BUILT until a lab records HW.26 to HW.30 of HARDWARE_VERDICT.md on this image; HW.26 carries the onboard verdict for this image without naming its steps, so that the row's steps are one range."
+      "note": "The onboard RMII image with the transmit pool (ARCHITECTURE section 9.1, CONFIG_WZ_CYT4BF_TX_POOL): 8 slots of 1536 bytes from sources/network/session_tx_pool_mcu.scxml, placed in Zephyr's non-cacheable section beside the MAC's rings. The session encodes each outbound datagram into a slot, lwIP writes its headers in front of it in the same slot, and the MAC's transmit descriptor is written with the slot's address; frames lwIP sends from its own heap are copied into the ring, because the board reads in place only inside the pool's window and cleans no cache. The generated pool's transmit edges (armed, started, complete, un-armed) follow each frame, and the console prints the pool's place beside the section's bounds and, every 10 seconds when they moved, the MAC's in-place and copied counts, the last in-place descriptor's address and the pool's own counts. HARDWARE is the record's run of this image with the CM0+ launcher on a bench kit, the five steps HW.26 to HW.30 of HARDWARE_VERDICT.md (the row's verdict_steps), each ending OK: the pool sat at 0x2800c860 to 0x2800f860 inside the non-cacheable section, 43 frames left from slots read in place by the controller (every slot came home: free 8 of 8, started equal to completed), and the capture on the host's adapter held 43 of 43 datagrams from the node with valid IPv4 and UDP checksums. The last in-place descriptor was written with an address 2 bytes past a word boundary inside a slot, so frames that start there were read by the controller and came out right. What the record does not settle: a start after the board's power is removed completely, the pool running dry under load, and a frame that needs IP fragmentation. HW.26 carries the onboard verdict for this image without naming its steps, so that the row's steps are one range."
     },
     {
       "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
@@ -89,12 +95,18 @@
       "app": "zephyr-admin-node",
       "network": "lwip-mac",
       "rust_target": "thumbv7em-none-eabi",
-      "grade": "BUILT",
-      "witness": {"lane": "Qzb"},
+      "grade": "HARDWARE",
+      "witness": {
+        "record": "Round 3270",
+        "image_sha256": "091b918c2b2fd70bba0a6906914a591764d31ad2bbc0bc3368130cb7d647410e",
+        "verdict": "HW.31 to HW.35 held on the receive pool image with the launcher, each step ending OK",
+        "date": "2026-10-11",
+        "by": "the lab session of the bench host the board is attached to, with the owner's permission"
+      },
       "requires": ["zephyr-cm0p-launcher"],
       "conf_overlay": ["overlays/t2g_rx_pool.conf"],
       "verdict_steps": "HW.31 to HW.35",
-      "note": "The onboard RMII image with the receive pool (ARCHITECTURE section 9.2, CONFIG_WZ_CYT4BF_RX_POOL): 16 slots of 1536 bytes from sources/network/eth_rx_pool_mcu.scxml, placed in Zephyr's non-cacheable section beside the MAC's rings, which then hold no receive buffer of their own. Each receive descriptor is armed with a slot; a received frame is lent to lwIP in the slot the controller wrote it into and the descriptor is armed again with another slot; the session socket keeps a lent datagram as the pbuf it arrived in, and the session loop's in-place receive dispatches it from the slot, so a datagram that fits one frame crosses from the wire to the session dispatch with no copy. A datagram lwIP reassembles from fragments, and a frame past the eight lwIP may hold lent, is copied, and counted. The generated pool's receive edges (armed, started, complete, returned) follow each frame, a descriptor left unarmed because every slot is out is counted as a refusal, and the console prints the pool's place beside the section's bounds and, every 10 seconds when they moved, the MAC's, the pool's, lwIP's and the session socket's counts. Nothing has run on silicon with it: not a frame written into a slot by the controller, not a frame read in place from uncached memory, not the session's stack with the in-place receive. The row stays BUILT until a lab records HW.31 to HW.35 of HARDWARE_VERDICT.md on this image; HW.31 carries the onboard verdict for this image without naming its steps, so that the row's steps are one range."
+      "note": "The onboard RMII image with the receive pool (ARCHITECTURE section 9.2, CONFIG_WZ_CYT4BF_RX_POOL): 16 slots of 1536 bytes from sources/network/eth_rx_pool_mcu.scxml, placed in Zephyr's non-cacheable section beside the MAC's rings, which then hold no receive buffer of their own. Each receive descriptor is armed with a slot; a received frame is lent to lwIP in the slot the controller wrote it into and the descriptor is armed again with another slot; the session socket keeps a lent datagram as the pbuf it arrived in, and the session loop's in-place receive dispatches it from the slot, so a datagram that fits one frame crosses from the wire to the session dispatch with no copy. A datagram lwIP reassembles from fragments, and a frame past the eight lwIP may hold lent, is copied, and counted. The generated pool's receive edges (armed, started, complete, returned) follow each frame, a descriptor left unarmed because every slot is out is counted as a refusal, and the console prints the pool's place beside the section's bounds and, every 10 seconds when they moved, the MAC's, the pool's, lwIP's and the session socket's counts. HARDWARE is the record's run of this image with the CM0+ launcher on a bench kit, the five steps HW.31 to HW.35 of HARDWARE_VERDICT.md (the row's verdict_steps), each ending OK: the pool sat at 0x28009860 to 0x2800f860 inside the non-cacheable section, the controller wrote 49 frames into slots that lwIP took lent (none copied), the session read 36 datagrams in place and none copied, and every slot came home (free 8, in the ring 8 of 16, refused 0). The session's stack peaked at 20352 of 32768 bytes with the in-place receive. What the record does not settle: a start after the board's power is removed completely, the pool running dry under load, and a datagram reassembled from fragments. HW.31 carries the onboard verdict for this image without naming its steps, so that the row's steps are one range."
     }
   ],
   "companions": [
