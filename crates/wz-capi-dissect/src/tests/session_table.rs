@@ -276,6 +276,17 @@ fn a_session_table_can_be_bounded_and_says_what_the_bound_cost() {
         bounded.contains(LIVE_TAP_ONE_FLOW_BIT),
         "the live-tap flow cap must bite and the table must say so: {bounded}"
     );
+    // The key itself, and the one axis that bit, spelled here and not only
+    // through the shared constants: `"dropped_by_limits"` carries `flows` 0
+    // unbounded and 1 under the tap's ceiling.
+    assert!(
+        unbounded.contains(
+            "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\"flows\":0,"
+        ) && bounded.contains(
+            "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\"flows\":1,"
+        ),
+        "{bounded}"
+    );
     let rows = |doc: &str| doc.matches("{\"initiator\":").count();
     assert_eq!(rows(&unbounded), OVER_TAP_CAP, "a row per flow");
     assert_eq!(
