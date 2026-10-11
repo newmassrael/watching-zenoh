@@ -9892,7 +9892,18 @@ layer_c1g_cargo_test_observer() {
         cargo test -p wz-session-core --lib --features codec-declare,declare-final,codec-response-final --quiet -- lent_control:: || return 1
     _runci_guarded_test C1g 1 \
         cargo test -p wz-session-core --test lent_control_alloc --features codec-declare,declare-final,codec-response-final --quiet || return 1
+    # S9d -- the multicast JOIN beacon through a sink the caller holds
+    # (`encode_join_into`, of which `encode_join` is the `VecSink` form): the same
+    # datagram across the shapes the beacon takes, read back by the decoders, a sink
+    # one byte short refused (1 = what the first command PRINTED); and the heap
+    # counted over the array form, zero, against the `Vec` form, nonzero, as the
+    # instrument's control (1 = what the second PRINTED).
+    _runci_guarded_test C1g 1 \
+        cargo test -p wz-session-core --lib --features session-multicast,codec-join,transport-qos,transport-fragmentation,reassembly --quiet -- encode_join_into || return 1
+    _runci_guarded_test C1g 1 \
+        cargo test -p wz-session-core --test join_into_alloc --features session-multicast,codec-join,transport-qos,transport-fragmentation --quiet || return 1
     (cd crates \
+        && cargo clippy -p wz-session-core --all-targets --features session-multicast,codec-join,transport-qos,transport-fragmentation,reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --features codec-declare,declare-final,codec-response-final --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,declare-subscriber,declare-queryable,query-queryable,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet -- -D warnings \

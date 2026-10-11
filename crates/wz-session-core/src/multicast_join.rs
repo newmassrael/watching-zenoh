@@ -27,6 +27,9 @@ use alloc::vec::Vec;
 // `-D warnings` (measured by `--features alloc,session-multicast,codec-join`).
 #[cfg(feature = "transport-qos")]
 use sce_forge_runtime::codec::SceCursor;
+#[cfg(feature = "transport-qos")]
+use sce_forge_runtime::codec::SliceSink;
+use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
 use wz_codecs::join::Join;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
@@ -93,6 +96,30 @@ const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_hea
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
 /// before these, so the next data frame this node mints is admitted).
 pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec<u8> {
+    let mut dgram = Vec::with_capacity(Join::MAX_ENCODED_BYTES + 1);
+    encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram))
+        .expect("VecSink is growable, so the JOIN never overflows it");
+    dgram
+}
+
+/// [`encode_join`] into a sink the caller holds: the same datagram, byte for
+/// byte, written through the codec's own sink seam and with nothing built on a
+/// heap, so a node with no allocator can beacon from an array on its stack or a
+/// slot its link lends (fixed-memory step S9d; this is the "sink-based encode"
+/// the module header names as the MCU follow-up).
+///
+/// [`encode_join`] is this over a `VecSink`, so the two cannot disagree about a
+/// byte, and the byte-for-byte pins against zenoh-pico (`layer3_join`,
+/// `layer3_join_qos`) hold for both. `MulticastTxConduits` and the params are read
+/// exactly as the owned form reads them. `CodecError::BufferOverflow` is the one
+/// refusal, from a sink too small for the datagram; nothing is truncated and
+/// nothing falls back to a heap. [`JOIN_MAX_BYTES`] is a bound that fits every
+/// datagram this function writes whatever the zid, QoS and patch settings.
+pub fn encode_join_into<S: SceSink>(
+    params: &MulticastParams,
+    tx_sn: &MulticastTxConduits,
+    out: &mut S,
+) -> Result<(), CodecError> {
     let zid = &params.zid;
     let mut join = Join::new();
     join.version = params.version;
@@ -133,9 +160,6 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
     );
     join.next_sn_reliable = base_r;
     join.next_sn_best_effort = base_be;
-    let body = join.encode_to_vec(u8::from(advertises));
-
-    let mut dgram = Vec::with_capacity(1 + body.len());
     let mut flags = if advertises {
         wire_const::FLAG_T_JOIN_S
     } else {
@@ -178,18 +202,29 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
     if emits_qos_ext || has_patch {
         flags |= wire_const::FLAG_T_Z;
     }
-    dgram.push(flags | wire_const::T_MID_JOIN);
-    dgram.extend_from_slice(&body);
+    out.write_u8(flags | wire_const::T_MID_JOIN)?;
+    join.encode(out, u8::from(advertises))?;
     #[cfg(feature = "transport-qos")]
     if emits_qos_ext {
-        write_join_qos_ext(&mut dgram, &tx_sn.advertise_per_priority(), has_patch);
+        write_join_qos_ext(out, &tx_sn.advertise_per_priority(), has_patch)?;
     }
     #[cfg(feature = "transport-fragmentation")]
     if has_patch {
-        write_join_patch_ext(&mut dgram, crate::extpatch::CURRENT_PATCH);
+        write_join_patch_ext(out, crate::extpatch::CURRENT_PATCH)?;
     }
-    dgram
+    Ok(())
 }
+
+/// A bound on one JOIN datagram [`encode_join_into`] writes, for a caller that
+/// holds an array for it: the flags byte, the longest base body the codec writes
+/// (`Join::MAX_ENCODED_BYTES`), the QoS extension (header, length and
+/// `Priority::NUM * 2` SNs of at most nine VLE bytes each) and the Patch
+/// extension (header and a one-byte level).
+pub const JOIN_MAX_BYTES: usize = 1 + Join::MAX_ENCODED_BYTES + 2 + QOS_EXT_BODY_BYTES + 2;
+
+/// The body of the JOIN QoS extension at its widest: `Priority::NUM * 2` SNs,
+/// each a VLE of at most nine bytes.
+const QOS_EXT_BODY_BYTES: usize = crate::qos::Priority::NUM * 2 * 9;
 
 /// R311y227 — append the JOIN QoS-SN extension: `[0x51][VLE(len)][NUM*2 VLE SNs]`
 /// (the zenoh `join::ext::QoS` / pico `_Z_MSG_EXT_ID_JOIN_QOS` ZBUF). The body is
@@ -207,22 +242,29 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec
 /// in the chain, not of its identity — the same reason
 /// [`crate::ext_chain::encode_ext_chain`] patches it per position.
 #[cfg(feature = "transport-qos")]
-fn write_join_qos_ext(
-    out: &mut Vec<u8>,
+fn write_join_qos_ext<S: SceSink>(
+    out: &mut S,
     conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM],
     more: bool,
-) {
-    out.push(if more {
+) -> Result<(), CodecError> {
+    out.write_u8(if more {
         JOIN_QOS_EXT_HEADER | crate::ext_header::EXT_FLAG_Z
     } else {
         JOIN_QOS_EXT_HEADER
-    });
-    let mut body = Vec::new();
+    })?;
+    // The body is length-prefixed and its length is only known once its SNs are
+    // written, so they are written into an array on the stack first: at the
+    // widest, `Priority::NUM * 2` VLEs of nine bytes.
+    let mut body = [0u8; QOS_EXT_BODY_BYTES];
+    let mut sns = SliceSink::new(&mut body);
     for c in conduits.iter() {
-        crate::vle::encode_vle_u64_into(&mut body, c.next_reliable);
-        crate::vle::encode_vle_u64_into(&mut body, c.next_best_effort);
+        sns.write_vle_u64(c.next_reliable)?;
+        sns.write_vle_u64(c.next_best_effort)?;
     }
-    crate::vle::write_zbuf(out, &body);
+    let len = sns.position();
+    // A ZBuf: a VLE length, then that many bytes (`crate::vle::write_zbuf`'s framing).
+    out.write_vle_u64(len as u64)?;
+    out.write_bytes(&body[..len])
 }
 
 /// R2417 — append the JOIN Patch extension: `[0x27][VLE(level)]`, the LAST ext
@@ -235,9 +277,9 @@ fn write_join_qos_ext(
 /// [`encode_join`] gates it on the feature that makes those markers reach the
 /// wire rather than on the one that reads them.
 #[cfg(feature = "transport-fragmentation")]
-fn write_join_patch_ext(out: &mut Vec<u8>, level: u8) {
-    out.push(JOIN_PATCH_EXT_HEADER);
-    crate::vle::encode_vle_u64_into(out, u64::from(level));
+fn write_join_patch_ext<S: SceSink>(out: &mut S, level: u8) -> Result<(), CodecError> {
+    out.write_u8(JOIN_PATCH_EXT_HEADER)?;
+    out.write_vle_u64(u64::from(level))
 }
 
 /// R2417 — the announcer's protocol PATCH level from a JOIN's extension chain,
@@ -407,6 +449,99 @@ mod tests {
             is_qos: false,
             tx_queue: crate::session_init_params::TxQueueConf::default(),
         }
+    }
+
+    /// `encode_join_into` an array of the caller's own writes the datagram
+    /// `encode_join` writes, byte for byte, across the settings that change its
+    /// shape: the zid width, a protocol-default config (no S optionals) against a
+    /// departing one, a whole-second lease (the `T` flag) against a millisecond one,
+    /// and, where the build emits them, the QoS and Patch extensions with SNs that
+    /// are one and several VLE bytes wide. A sink one byte short is REFUSED, never
+    /// cut, and every datagram fits [`JOIN_MAX_BYTES`].
+    #[test]
+    fn encode_join_into_writes_the_datagram_encode_join_writes() {
+        use sce_forge_runtime::codec::SliceSink;
+        let mut compared = 0usize;
+        let mut widest = 0usize;
+        for zid_len in [1usize, 4, 16] {
+            let zid = std::vec![0x5a; zid_len];
+            for config in [protocol_default_params(&zid), params(&zid)] {
+                for lease_ms in [10_000u64, 5_001] {
+                    for is_qos in [false, true] {
+                        let p = MulticastParams {
+                            lease_ms,
+                            is_qos,
+                            ..config.clone()
+                        };
+                        for advance in [0usize, 1, 200] {
+                            let mut tx = MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res));
+                            for _ in 0..advance {
+                                for wire in 0..crate::qos::Priority::NUM as u8 {
+                                    let priority = crate::qos::Priority::from_wire(wire);
+                                    tx.mint(priority, true);
+                                    tx.mint(priority, false);
+                                }
+                            }
+                            let owned = encode_join(&p, &tx);
+                            let mut slot = [0u8; JOIN_MAX_BYTES];
+                            let mut sink = SliceSink::new(&mut slot);
+                            encode_join_into(&p, &tx, &mut sink).expect("fits its bound");
+                            let written = sink.position();
+                            assert_eq!(
+                                &slot[..written],
+                                &owned[..],
+                                "zid {zid_len} lease {lease_ms} qos {is_qos} advance {advance}"
+                            );
+                            // An oracle that is not this encoder: what the decoders
+                            // read back out of the written datagram is what the
+                            // params and the conduits said.
+                            assert_eq!(decode_join_zid(&slot[..written]), Some(&zid[..]));
+                            #[cfg(feature = "transport-qos")]
+                            if is_qos {
+                                let advertised = tx.advertise_per_priority();
+                                let read = decode_join_qos(&slot[..written]).expect("a qos JOIN");
+                                for (priority, (seen, said)) in
+                                    read.iter().zip(advertised.iter()).enumerate()
+                                {
+                                    assert_eq!(
+                                        (seen.reliable, seen.best_effort),
+                                        (said.next_reliable, said.next_best_effort),
+                                        "priority {priority}, advance {advance}"
+                                    );
+                                }
+                            }
+                            // The extension that FOLLOWS the QoS body is what shows a
+                            // body length that is one off: it is read from where the
+                            // length says the body ends.
+                            #[cfg(all(
+                                feature = "transport-fragmentation",
+                                feature = "reassembly"
+                            ))]
+                            assert_eq!(
+                                decode_join_patch(&slot[..written]),
+                                crate::extpatch::CURRENT_PATCH,
+                                "the patch level after the body is read back"
+                            );
+                            widest = widest.max(written);
+                            // One byte short of the datagram is refused, not cut.
+                            let mut short = std::vec![0u8; written - 1];
+                            let mut sink = SliceSink::new(&mut short);
+                            assert_eq!(
+                                encode_join_into(&p, &tx, &mut sink),
+                                Err(CodecError::BufferOverflow),
+                                "a sink one byte short is refused"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 2 * 2 * 2 * 3, "the matrix ran");
+        assert!(
+            widest <= JOIN_MAX_BYTES,
+            "the bound fits the widest datagram written ({widest})"
+        );
     }
 
     /// A fresh announcer's JOIN datagram (both advertised next SNs = 0) —
