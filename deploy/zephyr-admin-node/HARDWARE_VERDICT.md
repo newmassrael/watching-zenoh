@@ -442,8 +442,11 @@ outbound datagram into a slot of a transmit pool in Zephyr's non-cacheable secti
 lwIP writes the headers in front of it in the same slot, and the MAC's transmit
 descriptor is written with the slot's address. What these steps have to show is that
 a frame left the board from a pool slot read by the controller, and not from a copy
-in the MAC's ring, and that its bytes were right. Nothing here has run on a board when
-this is written: every line quoted was read out of the firmware source.
+in the MAC's ring, and that its bytes were right. The five steps ran on the T2G kit on
+2026-10-11, on this image alone and on the image built with both pool overlays, from
+the console, onboard and capture files of one boot each; the row's `witness` cites the
+entry that holds that record, and the lines quoted here are the ones the program
+printed then.
 
 The row for this image names HW.26 to HW.30 in its `verdict_steps`. HW.26 stands for
 the onboard verdict on THIS image, which is another image than the onboard row's, and
@@ -541,8 +544,10 @@ frame is lent to lwIP in the slot the controller wrote it into, the descriptor i
 again with another slot, and the session socket keeps a lent datagram as it arrived, so
 the session loop dispatches it from the slot. What these steps have to show is that
 frames arrived in pool slots, that the session read its datagrams there and not from a
-copy, and that no slot was lost. Nothing here has run on a board when this is written:
-every line quoted was read out of the firmware source.
+copy, and that no slot was lost. The five steps ran on the T2G kit on 2026-10-11, on
+this image alone and on the image built with both pool overlays, from the console and
+onboard files of one boot each; the row's `witness` cites the entry that holds that
+record, and the lines quoted here are the ones the program printed then.
 
 The row for this image names HW.31 to HW.35 in its `verdict_steps`. HW.31 stands for
 the onboard verdict on THIS image, which is another image than the onboard row's, and
