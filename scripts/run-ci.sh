@@ -9882,7 +9882,18 @@ layer_c1g_cargo_test_observer() {
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,declare-final,codec-response-final,session-slot --quiet -- record_walk_tests::control || return 1
     _runci_guarded_test C1g 8 \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,codec-request,codec-response,codec-response-final,declare-subscriber,declare-queryable,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- lent_tests || return 1
+    # S9d -- the control messages WRITTEN from the caller's own text
+    # (`lent_control`): every writer byte-equal to the owned builder it mirrors across
+    # the inputs the builder takes, what it writes decoded back, the refusals (8 = what
+    # that command PRINTED); and the heap counted over each writer and its encode into
+    # an array, zero, against the owned builder's, nonzero, as the instrument's
+    # control (1 = what that PRINTED). Default features, the three the writers need.
+    _runci_guarded_test C1g 8 \
+        cargo test -p wz-session-core --lib --features codec-declare,declare-final,codec-response-final --quiet -- lent_control:: || return 1
+    _runci_guarded_test C1g 1 \
+        cargo test -p wz-session-core --test lent_control_alloc --features codec-declare,declare-final,codec-response-final --quiet || return 1
     (cd crates \
+        && cargo clippy -p wz-session-core --all-targets --features codec-declare,declare-final,codec-response-final --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,declare-subscriber,declare-queryable,query-queryable,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,session-unicast,session-unicast-accept,codec-init-body,codec-open-body,session-slot --quiet -- -D warnings \

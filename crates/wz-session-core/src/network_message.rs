@@ -2285,6 +2285,8 @@ mod record_walk_tests {
                         NetworkMessage::Interest(i) => ('i', i.interest_id),
                         NetworkMessage::ResponseFinal(r) => ('r', r.request_id),
                         NetworkMessage::Oam(_) | NetworkMessage::Unknown { .. } => ('-', 0),
+                        // The data kinds, in a build that selects their codecs.
+                        #[allow(unreachable_patterns)]
                         other => panic!("an unexpected record {other:?}"),
                     });
                 }
