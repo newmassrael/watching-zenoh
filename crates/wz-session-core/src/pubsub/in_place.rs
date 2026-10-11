@@ -30,7 +30,7 @@
 //! instead, counted in [`InPlaceFallbacks`]: a Put whose payload is a list of
 //! slices (joined or resolved into a buffer of its own by
 //! `put_payload::collect_wire_payload`), and a Put whose resolved keyexpr is
-//! longer than [`KeyexprBuf`](crate::wireexpr_resolve::KeyexprBuf), which only
+//! longer than [`crate::wireexpr_resolve::KeyexprBuf`], which only
 //! the fixed bounded backing refuses. Each is still delivered, as the copying
 //! path delivers it.
 

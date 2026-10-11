@@ -892,8 +892,8 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
 /// wrappers live here (on the `BoxedDeclSink` / `BoxedUndeclSink`
 /// instantiation only) because they heap-box the closures; the no-`alloc`
 /// profile installs consumer-supplied sinks through the generic
-/// [`on_subscriber_declared_sink`](RemoteSubscriberRegistry::on_subscriber_declared_sink)
-/// / [`on_subscriber_undeclared_sink`](RemoteSubscriberRegistry::on_subscriber_undeclared_sink)
+/// [`on_subscriber_declared_sink`](RemoteSubscriberTable::on_subscriber_declared_sink)
+/// / [`on_subscriber_undeclared_sink`](RemoteSubscriberTable::on_subscriber_undeclared_sink)
 /// instead.
 ///
 /// R311gb (Track 2) — gated on `alloc` only (not `codec-declare`): the
@@ -921,14 +921,14 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// Duplicate callbacks are allowed; dispatch fires them in
     /// registration order. The closure is heap-boxed via [`BoxedDeclSink`].
     /// R311lb — returns the registry-local observer id (see
-    /// [`Self::remove_subscriber_declared_sink`]); existing callers that
+    /// [`RemoteSubscriberTable::remove_subscriber_declared_sink`]); existing callers that
     /// never remove may ignore it.
     ///
     /// GROWABLE BACKING ONLY: under `bounded-heapless` the observer list is
     /// fixed and the `.expect` inside would be a panic at the first full
     /// list, so this wrapper is not compiled there (except for this crate's
     /// own tests and docs). A fixed-backing build installs through
-    /// [`Self::on_subscriber_declared_sink`] and handles the `Err`.
+    /// [`RemoteSubscriberTable::on_subscriber_declared_sink`] and handles the `Err`.
     #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn on_subscriber_declared(
         &mut self,
@@ -946,7 +946,7 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// order + duplicates-allowed contract as
     /// [`Self::on_subscriber_declared`]. The closure is heap-boxed via
     /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
-    /// id (see [`Self::remove_subscriber_undeclared_sink`]).
+    /// id (see [`RemoteSubscriberTable::remove_subscriber_undeclared_sink`]).
     ///
     /// GROWABLE BACKING ONLY, for the reason
     /// [`Self::on_subscriber_declared`] gives.

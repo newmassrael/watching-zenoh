@@ -1009,13 +1009,13 @@ impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// contract replaces the prior `(&DeclQueryableOwned, &str)`
     /// ([`feedback_signature_stability`] wire-data exemption). Heap-boxed
     /// via [`BoxedDeclSink`]. R311lb — returns the registry-local
-    /// observer id (see [`Self::remove_queryable_declared_sink`]).
+    /// observer id (see [`RemoteQueryableTable::remove_queryable_declared_sink`]).
     ///
     /// GROWABLE BACKING ONLY: under `bounded-heapless` the observer list is
     /// fixed and the `.expect` inside would be a panic at the first full
     /// list, so this wrapper is not compiled there (except for this crate's
     /// own tests and docs). A fixed-backing build installs through
-    /// [`Self::on_queryable_declared_sink`] and handles the `Err`.
+    /// [`RemoteQueryableTable::on_queryable_declared_sink`] and handles the `Err`.
     #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn on_queryable_declared(
         &mut self,
@@ -1030,7 +1030,7 @@ impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// Install a closure fired on every inbound `Declare(UndeclQueryable)`.
     /// The closure receives the bare `id` (`u64`). Heap-boxed via
     /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
-    /// id (see [`Self::remove_queryable_undeclared_sink`]).
+    /// id (see [`RemoteQueryableTable::remove_queryable_undeclared_sink`]).
     ///
     /// GROWABLE BACKING ONLY, for the reason
     /// [`Self::on_queryable_declared`] gives.

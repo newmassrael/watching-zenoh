@@ -12644,6 +12644,16 @@ layer_c1bz_docs_resolve() {
     # command, not diffed against the old error list.
     # wz-session-lwip stays 3 for the same reason: the six links its drive docs
     # made to items the slot profile removes are code spans.
+    # Fixed-memory step S9a -- wz-session-core 510 -> 505, by removal, diffed
+    # rather than counted: the sorted `error` lines of this lane's command at
+    # `df9f2466` (510) and on the tree (505) differ by five removals and no
+    # addition. The registries' methods moved onto their table types; the docs
+    # that linked `dispatch_push` privately (`own_zid`, `set_own_zid`,
+    # `register_with_locality`, `Sample`) now name it in a code span or the
+    # table, and one `LivelinessRegistry::dispatch_declare` link went with a
+    # rewritten paragraph. The links the new modules' `//!` docs make are full
+    # paths, because lib.rs also documents each module from outside and the
+    # merged text resolves against the crate root.
     budget="
         wz:2
         wz-ap-demo:25
@@ -12655,7 +12665,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:5
         wz-runtime-coop:7
         wz-runtime-tokio:478
-        wz-session-core:510
+        wz-session-core:505
         wz-session-lwip:3
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

@@ -557,7 +557,7 @@ pub use crate::reliability::Reliability;
 
 /// Application-layer view of a single inbound Push record.
 ///
-/// Constructed by [`crate::pubsub::SubscriberRegistry::dispatch_push`]
+/// Constructed by `crate::pubsub::SubscriberTable::dispatch_push`
 /// from the decoded `Push` + the registry's peer keyexpr table + the
 /// matching body's extension chain. Handed to user-registered callbacks
 /// by reference.

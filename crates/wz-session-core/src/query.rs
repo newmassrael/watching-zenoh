@@ -1821,7 +1821,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `true` iff at least one queryable registered on THIS session would
     /// be reached by a local query on `query_keyexpr` under the querier's
     /// target. The queryable-plane twin of
-    /// [`crate::pubsub::SubscriberRegistry::has_local_matching`] (R311y788),
+    /// [`crate::pubsub::SubscriberTable::has_local_matching`] (R311y788),
     /// and the fact `Querier::get_matching_status` was missing: the poll
     /// consulted the REMOTE registry alone while this session's own
     /// `query` already dispatched into this table.
@@ -2213,7 +2213,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     }
 
     /// R238 — in-process query loopback mirror of
-    /// [`crate::pubsub::SubscriberRegistry::local_publish`]. Fans the
+    /// [`crate::pubsub::SubscriberTable::local_publish`]. Fans the
     /// `(rid, keyexpr, query)` triple into every matching queryable
     /// that allows `Locality::SessionLocal` (or `Locality::Any`),
     /// pushing each callback's emitted [`QueryReply`] records into

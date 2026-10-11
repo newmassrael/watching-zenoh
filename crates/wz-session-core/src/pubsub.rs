@@ -450,7 +450,7 @@ pub struct InPlaceFallbacks {
     /// owned path's (`put_payload::collect_wire_payload`).
     pub sliced: u32,
     /// A Put whose resolved keyexpr is longer than
-    /// [`KeyexprBuf`](crate::wireexpr_resolve::KeyexprBuf) holds. Only the
+    /// [`crate::wireexpr_resolve::KeyexprBuf`] holds. Only the
     /// fixed bounded backing refuses one; the owned path resolves it into a
     /// `String`.
     pub keyexpr_past_bound: u32,
@@ -2766,7 +2766,7 @@ impl SubscriberRegistry<BoxedSink> {
 
     /// R223 — variant of [`register`](Self::register) that pins the
     /// locality filter explicitly. Stores `allowed_origin` on the
-    /// subscriber record; [`dispatch_push`](Self::dispatch_push)
+    /// subscriber record; `dispatch_push`
     /// consults the filter before firing the closure.
     ///
     /// wz today treats every Push reaching `dispatch_push` as
