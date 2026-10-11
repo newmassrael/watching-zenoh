@@ -299,6 +299,35 @@ fn the_peer_table_limits_are_the_deploy_files_numbers() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// The numbers the admin node's buffer and tables are compiled with (S9b) are the
+/// deploy file's: the reply buffer, the locators a node reports and the links one
+/// `sessions[]` row lists; and the reply buffer is not larger than the reply
+/// payload bound its replies are staged under.
+#[test]
+fn the_admin_limits_are_the_deploy_files_numbers() {
+    use wz_session_core::caps;
+    let report = report();
+    let process = &report["process"];
+    let mut drift = Vec::new();
+    for (key, constant) in [
+        ("admin_reply_bytes", caps::MAX_ADMIN_REPLY_BYTES),
+        ("admin_locators", caps::MAX_ADMIN_LOCATORS),
+        ("admin_session_links", caps::MAX_ADMIN_SESSION_LINKS),
+    ] {
+        if process[key].as_u64() != Some(constant as u64) {
+            drift.push(format!(
+                "session_pool.process.{key}: the deploy file states {}, the code is compiled with {constant}",
+                process[key]
+            ));
+        }
+    }
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+    assert!(
+        caps::MAX_ADMIN_REPLY_BYTES <= caps::MAX_REPLY_PAYLOAD_BYTES,
+        "an admin reply is staged as a reply"
+    );
+}
+
 /// Every session the machine declares takes pools that fit the generated slot,
 /// by the report's own sums and by this crate's constant, and the slot is a whole
 /// number of the alignment SCE carries into the slot type.

@@ -466,6 +466,30 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         pubsub-delete,\
         bounded-heapless\
         |"
+    # S9b: the same fixed backing WITH the admin surface and the Err reply, a
+    # separate row because `adminspace-core` and `query-reply-err` add the admin
+    # writers, the bounded answerer and the typed refusal, and the proof file
+    # `tests/admin_reply_fits.rs` (an admin reply of the bound delivered at zero
+    # allocations, one byte more refused) needs all of it on the fixed backing.
+    "wz-session-core|hook|\
+        adminspace-core,\
+        bounded-heapless,\
+        codec-push,\
+        codec-declare,\
+        codec-request,\
+        codec-response,\
+        codec-response-final,\
+        declare-queryable,\
+        declare-subscriber,\
+        declare-undeclare,\
+        liveliness-get,\
+        liveliness-subscriber,\
+        liveliness-token,\
+        pubsub-delete,\
+        pubsub-put,\
+        query-queryable,\
+        query-reply-err\
+        |"
     # Fixed-memory step S4 — the LEND-ONLY send profile, a SEPARATE row for the
     # reason the fixed bounded backing is one: `tx-lend-only` is a selector, not
     # an addition. It compiles the heap send paths out (the frame vector, the
@@ -626,6 +650,16 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         query-queryable,\
         test-support,\
         transport-keepalive\
+        |"
+    # S9b: the shell on the slot profile with the admin surface, for
+    # `tests/admin_reply_fits.rs` and the fixed admin node (`admin_fixed`): the
+    # node's admin GET at zero allocations through its own queryable, status and
+    # host, and the refusals of a leg, a status row and an identity. `session-slot`
+    # is a selector that drops the tests built on `Rc` handles, so the row is its own.
+    "wz-session-mcu|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        session-slot\
         |"
     # ── R2156 (item 543): wz-ap-demo's SECOND leg, and the HANDOFF ──────
     #

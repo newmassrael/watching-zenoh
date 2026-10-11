@@ -80,7 +80,14 @@ machines:
       process:
         max_tasks: 8
         max_timers: 16
+        # The buffer one admin reply is built in: a reply past it is refused,
+        # counted and answered to the querier as a typed error. An admin reply is
+        # staged as a reply, so it may not exceed `limits.reply_payload_bytes`.
         admin_reply_bytes: 1024
+        # The listening locators the node reports, and the links one admin
+        # `sessions[]` row lists.
+        admin_locators: 4
+        admin_session_links: 2
 
     sessions:                          # one entry per session, in start order
       - name: to_router

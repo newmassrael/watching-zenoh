@@ -90,7 +90,11 @@ machines.<m>.session_pool
                 budgeted here and generates nothing; `ref` and the inline pair
                 together are refused.
     process     numbers that belong to no session: `max_tasks`, `max_timers`,
-                `admin_reply_bytes`, each a positive integer.
+                `admin_reply_bytes`, `admin_locators`, `admin_session_links`,
+                each a positive integer. `admin_reply_bytes` is the buffer one
+                admin reply is built in; an admin reply is staged as a reply, so
+                it may not exceed `limits.reply_payload_bytes` (the machine's,
+                nor a session's own, lower one).
 
 What the table adds to the checks above:
 
@@ -178,7 +182,22 @@ GROUP_KEYS = frozenset({"endpoint", "join_interval_ms", "lease_ms"})
 # deploy can state; NEW means the limit has no constant yet (it is a growable
 # table or an unbounded buffer on the MCU profile today).
 POOL_KEYS = frozenset({"ref", "max_sessions", "slot_bytes", "process"})
-PROCESS_KEYS = frozenset({"max_tasks", "max_timers", "admin_reply_bytes"})
+PROCESS_KEYS = frozenset(
+    {
+        "max_tasks",
+        "max_timers",
+        # The buffer one admin reply is built in. S9b: EXISTING
+        # caps::MAX_ADMIN_REPLY_BYTES; a reply past it is refused, counted and
+        # answered as a typed error. An admin reply is staged as a reply, so it may
+        # not exceed `limits.reply_payload_bytes` (see session_pool_problems).
+        "admin_reply_bytes",
+        # S9b: the listening locators a node reports in its admin `local_data`
+        # (EXISTING caps::MAX_ADMIN_LOCATORS) and the links one `sessions[]` row
+        # lists (EXISTING caps::MAX_ADMIN_SESSION_LINKS).
+        "admin_locators",
+        "admin_session_links",
+    }
+)
 LIMIT_KEYS = frozenset(
     {
         # The seven keys every deploy has declared since the first skeleton.
@@ -734,6 +753,21 @@ def session_pool_problems(
         elif not _positive_int(value):
             errors.append(f"{base}.limits.{key}: a positive integer")
 
+    # S9b: an admin reply is STAGED as a reply, so a buffer for admin replies
+    # larger than the reply payload bound would build replies the stage refuses.
+    admin_bytes = process.get("admin_reply_bytes") if isinstance(process, dict) else None
+    payload_bytes = machine_limits.get("reply_payload_bytes")
+    if (
+        _positive_int(admin_bytes)
+        and _positive_int(payload_bytes)
+        and admin_bytes > payload_bytes
+    ):
+        errors.append(
+            f"{path}.process.admin_reply_bytes: {admin_bytes} exceeds "
+            f"limits.reply_payload_bytes {payload_bytes}; an admin reply is staged "
+            "as a reply, so a larger buffer builds replies the stage refuses"
+        )
+
     sessions = machine.get("sessions")
     sessions = sessions if isinstance(sessions, list) else []
     single_accept = platform.get("class") == "mcu" or platform.get("os") == "zephyr"
@@ -744,6 +778,17 @@ def session_pool_problems(
         claimed += _slots_claimed(s, single_accept)
         lim = s.get("limits")
         if isinstance(lim, dict):
+            own_payload = lim.get("reply_payload_bytes")
+            if (
+                _positive_int(admin_bytes)
+                and _positive_int(own_payload)
+                and own_payload < admin_bytes
+            ):
+                errors.append(
+                    f"{base}.sessions[{i}].limits.reply_payload_bytes: {own_payload} "
+                    f"is below process.admin_reply_bytes {admin_bytes}; an admin reply "
+                    "built for this session would be refused by its stage"
+                )
             for key, value in lim.items():
                 declared = machine_limits.get(key)
                 if (
@@ -1209,6 +1254,43 @@ def _pool_selftest(repo_root: Path) -> int:
         "a zero process number is refused",
         mutate(lambda m: m["session_pool"]["process"].update(max_tasks=0)),
         "session_pool.process.max_tasks: a positive integer",
+    )
+    # S9b: the admin node's tables and its reply buffer.
+    check(
+        "the admin node's two table sizes are process keys",
+        mutate(
+            lambda m: m["session_pool"]["process"].update(
+                admin_locators=4, admin_session_links=2
+            )
+        ),
+        None,
+    )
+    check(
+        "a zero admin table size is refused",
+        mutate(lambda m: m["session_pool"]["process"].update(admin_locators=0)),
+        "session_pool.process.admin_locators: a positive integer",
+    )
+    check(
+        "an admin reply buffer of exactly the reply payload bound is accepted",
+        mutate(lambda m: m["limits"].update(reply_payload_bytes=1024)),
+        None,
+    )
+    check(
+        "an admin reply buffer larger than the reply payload bound is refused",
+        mutate(lambda m: m["limits"].update(reply_payload_bytes=1023)),
+        "session_pool.process.admin_reply_bytes: 1024 exceeds "
+        "limits.reply_payload_bytes 1023",
+    )
+    check(
+        "a session that lowers the payload bound below the admin buffer is refused",
+        mutate(
+            lambda m: (
+                m["limits"].update(reply_payload_bytes=2048),
+                m["sessions"][0]["limits"].update(reply_payload_bytes=512),
+            )
+        ),
+        "sessions[0].limits.reply_payload_bytes: 512 is below "
+        "process.admin_reply_bytes 1024",
     )
     check(
         "a table that is not a mapping is refused",

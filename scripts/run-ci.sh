@@ -9836,6 +9836,18 @@ layer_c1g_cargo_test_observer() {
     # pushes and no one else's. 2 = what that command PRINTED.
     _runci_guarded_test C1g 2 \
         cargo test -p wz-session-core --test slot_observer_sessions --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+    # S9b, row R7 -- the admin space with no allocator. The crate's lib suite on the
+    # fixed backing WITH the admin surface and the Err reply (`+`, for the reason the
+    # legs above give: the writers, the bounded answerer, the staged-reply arena and
+    # the parity of the fixed buffer with the `String` path are all in it), and the
+    # proof file pinned EXACTLY: an admin reply of exactly the bound is delivered
+    # with zero allocations through the real query path, one byte more is refused,
+    # counted and answered as a typed error at zero allocations, and the refusal is
+    # one leg's, not the session's or another session's. 3 = what that command PRINTED.
+    _runci_guarded_test C1g + \
+        cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless,adminspace-core,query-reply-err --quiet || return 1
+    _runci_guarded_test C1g 3 \
+        cargo test -p wz-session-core --test admin_reply_fits --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless,adminspace-core,query-reply-err --quiet || return 1
     # Fixed-memory step S4 — the LEND-ONLY send profile (`tx-lend-only`, the MCU
     # selector: every frame is encoded into a slot the link lends, and a send
     # with no slot is a counted refusal, never a heap frame). The crate's own lib
@@ -9885,14 +9897,16 @@ layer_c1g_cargo_test_observer() {
     # (the macOS and Windows portability legs have neither), and libtest prints a
     # skip as `ok`. So THIS lane, which owns the capability, arms
     # WZ_DEPLOY_REPORT_REQUIRE=1, which turns the skip into a failure, and the
-    # count below can only be read from comparisons that ran. 9 = what that
+    # count below can only be read from comparisons that ran. 10 = what that
     # command PRINTED: the equality, the comparison's own control, the fit of
     # every declared session in the generated slot, (S9a) the five limits of the
     # tables a peer writes held equal to the constants they are compiled with,
-    # and the five witnesses of the skip decision itself (they need no Python).
+    # (S9b) the admin node's three numbers (the reply buffer, the locators, the
+    # links of a row) held equal to the constants too, and the five witnesses
+    # of the skip decision itself (they need no Python).
     # `cargo` stays on the line of the `env` prefix: that is the shape
     # `armed_oracle_census.py` reads as an arming.
-    _runci_guarded_test C1g 9 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
+    _runci_guarded_test C1g 10 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
         --test session_slot_pool_deploy --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
@@ -11276,6 +11290,15 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,session-slot \
         --test session_peer_tables --quiet || return 1
+    # S9b -- the node's admin GET with no allocator, through the node's own queryable
+    # (`admin_fixed`), status and host and a session's own tables: the whole admin
+    # surface from one wildcard GET at zero allocations, a leg past the reply buffer
+    # refused, counted and typed while the others and a second session are served,
+    # and the status table's and the identity's bounds. 4 = what that command PRINTED.
+    _runci_guarded_test "C1m admin reply fits" 4 \
+        cargo test -p wz-session-mcu \
+        --features adminspace-core,adminspace-write,session-slot \
+        --test admin_reply_fits --quiet || return 1
     # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
     # (`tests/session_pump_allocations.rs`): the same real pair, each end run as a
     # task of one local set, from the runtime's making to the last task's end. Under
