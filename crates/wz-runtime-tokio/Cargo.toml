@@ -961,11 +961,13 @@ transport-link-tls-keylog = []
 # `FLOW_STREAM`, src/transport/common/tx.c:347), so each zenoh batch rides one
 # WebSocket BINARY message whose frame boundary delimits it — exactly the UDP
 # model, NOT a custom byte codec. So `ws_pipeline` reuses neither `stream_link`
-# nor a codec; it wraps a `tokio_tungstenite::WebSocketStream` (the RFC6455
-# protocol layer) split via `futures_util`. No tcp forward (the session-open
-# Ws arm rides the tcp+unicast-gated `session_open` like the udp arm). NOT
-# default — pico ships WS as an optional link (Z_FEATURE_LINK_WS).
-transport-link-ws = ["link-interfaces", "dep:tokio-tungstenite", "dep:futures-util", "dep:bytes"]
+# nor a codec; it reads through a `tokio_tungstenite::WebSocketStream` (the
+# RFC6455 protocol layer) and frames what it sends itself. No tcp forward (the
+# session-open Ws arm rides the tcp+unicast-gated `session_open` like the udp
+# arm). NOT default — pico ships WS as an optional link (Z_FEATURE_LINK_WS).
+# R3250 — `rand` keys the mask of each frame a client sends (RFC 6455 5.3), as
+# tungstenite keys its own; the lock already carries it.
+transport-link-ws = ["link-interfaces", "dep:tokio-tungstenite", "dep:futures-util", "dep:bytes", "dep:rand"]
 # R311xi — host Unix-domain-stream link backend. Like TLS (and UNLIKE WS), it
 # forwards `transport-link-tcp` because a unix socket is a reliable byte STREAM
 # (zenoh's `unixsock_stream` link: `is_streamed() = true`, MTU 65535) that

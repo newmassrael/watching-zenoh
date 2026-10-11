@@ -1746,10 +1746,11 @@ pub mod tls_keylog;
 /// `Z_LINK_CAP_FLOW_DATAGRAM`, so each batch rides one WebSocket BINARY
 /// message with no length prefix (the message boundary delimits the frame).
 /// `dial_ws`/`accept_ws` run the RFC6455 handshake ([`tokio_tungstenite`]);
-/// `wire_ws_stream` splits the `WebSocketStream` (Sink+Stream) via
-/// `futures_util` into the read-driver + writer-task halves. Reuses neither
-/// `stream_link` (no StreamEnvelope) nor a codec; the WS protocol layer IS the
-/// framing. Gated `transport-link-ws`; the `session_open` DialedLink::Ws
+/// `wire_ws_stream` splits the TCP connection into the read driver (which
+/// reads through tungstenite) and the writer task (which writes the frames the
+/// write driver built in place, R3250). Reuses neither `stream_link` (no
+/// StreamEnvelope) nor a codec; the WS protocol layer IS the framing. Gated
+/// `transport-link-ws`; the `session_open` DialedLink::Ws
 /// integration rides the `transport-link-tcp`-gated session-open module as an
 /// additive WS arm, like udp (and — no cert — dials from a `ws/...` locator).
 #[cfg(feature = "transport-link-ws")]

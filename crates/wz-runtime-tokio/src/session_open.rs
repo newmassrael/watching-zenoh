@@ -196,13 +196,11 @@ use crate::quic_datagram_pipeline::{
 };
 
 // R311ob — the WS arm, like udp, rides this tcp+unicast-gated module as an
-// additive DATAGRAM transport. The stream type is the RFC6455
-// `WebSocketStream<TcpStream>` produced by `ws_pipeline::dial_ws`/`accept_ws`.
+// additive DATAGRAM transport. The link type is the handshaked RFC6455
+// `WsLink` produced by `ws_pipeline::dial_ws`/`accept_ws`.
 // UNLIKE tls, `dial_locator` DOES build it (a `ws/...` locator needs no cert).
 #[cfg(feature = "transport-link-ws")]
-use crate::ws_pipeline::{accept_ws, dial_ws, wire_ws_stream, WsReadDriver};
-#[cfg(feature = "transport-link-ws")]
-use tokio_tungstenite::WebSocketStream;
+use crate::ws_pipeline::{accept_ws, dial_ws, wire_ws_stream, WsLink, WsReadDriver};
 
 // R311xi — the unixsock arm, like serial/tls, rides this tcp+unicast-gated
 // module as an additive STREAM transport (transport-link-unixsock forwards
@@ -708,11 +706,11 @@ pub enum DialedLink {
     /// TLS, a `ws/...` locator DOES dial through [`dial_locator`] (no cert
     /// config), so this is produced both there and by an explicit caller.
     ///
-    /// `Box`ed: a `WebSocketStream` carries the RFC6455 protocol buffers, so
+    /// `Box`ed: a [`WsLink`] carries the RFC6455 protocol buffers, so
     /// an unboxed variant would bloat every `DialedLink` value on the stack
     /// (clippy `large_enum_variant`).
     #[cfg(feature = "transport-link-ws")]
-    Ws(Box<WebSocketStream<TcpStream>>),
+    Ws(Box<WsLink>),
     /// A connected unix-domain stream, split downstream via
     /// [`wire_unixsock_stream`] (R311xi). A reliable byte STREAM like TCP, so
     /// the steady-state split is uniform with [`Self::Tcp`]. NOT `Box`ed: a

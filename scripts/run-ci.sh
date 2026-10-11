@@ -12327,6 +12327,17 @@ layer_c1bz_docs_resolve() {
     # multicast drive loop now imports `MulticastParams` (the task form owns
     # one), so the module doc's `MulticastParams::join_interval_ms` resolves.
     # The other three error lines are unchanged.
+    # R3250 -- wz-runtime-tokio 484 -> 478, by removal, diffed rather than
+    # counted: the sorted `error` lines of this lane's command at `8be2ecb5`
+    # (484) and on the tree (478) differ by six removals and no addition. The
+    # websocket module's `//!` listed its pieces by short name, which resolves
+    # at the crate root because lib.rs also documents the module from outside;
+    # five of those links (`dial_ws`, `accept_ws`, `wire_ws_stream`,
+    # `WsReadDriver`, `ws_writer_task`) had been broken since the module was
+    # written, the rewrite for the framed send touched every bullet, and each
+    # is now a full path, together with the `WebSocketStream` link that the
+    # rewrite retired. The three links and the private-item link the rewrite
+    # first wrote read 487 and are not in the set.
     budget="
         wz:2
         wz-ap-demo:25
@@ -12337,7 +12348,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:3
         wz-routing-graph:5
         wz-runtime-coop:12
-        wz-runtime-tokio:484
+        wz-runtime-tokio:478
         wz-session-core:510
         wz-session-lwip:3
         wz-switchboard-codegen:8
@@ -12648,9 +12659,10 @@ layer_c1bq_zero_copy_arena() {
         echo "  C1bq FAIL: the serial transmit allocation suite ran no test"; echo "$out"; return 1; }
     tests=$((tests + n))
     # The datagram links' write halves over their two-class pools (UDP end to
-    # end, and the quinn and tungstenite seams), each its own feature.
+    # end, the quinn and tungstenite seams, and a multicast group's pipeline
+    # with its fragmented residue), each its own feature.
     out="$(cd crates && cargo test -p wz-runtime-tokio \
-        --features runtime-zero-copy,transport-link-udp,transport-link-ws,transport-link-quic-datagram \
+        --features runtime-zero-copy,transport-link-udp,transport-link-ws,transport-link-quic-datagram,transport-multicast,transport-fragmentation \
         --test datagram_tx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
     n="$(_runci_passed_count <<<"$out")"
     (( n > 0 )) || {
