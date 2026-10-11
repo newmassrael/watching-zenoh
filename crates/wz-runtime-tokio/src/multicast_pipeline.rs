@@ -93,6 +93,19 @@ fn new_stages(mask: u64) -> Arc<Stages> {
     Arc::new(std::array::from_fn(|_| Stage::new(mask)))
 }
 
+/// R3250 — the lanes a group's pipeline is built over: the datagram queue,
+/// under `runtime-zero-copy` a two-class transmit pool whose budgets follow the
+/// group's shape (`OutboundTx::reshape`), into whose slots a push encodes each
+/// datagram (`StageQueue::enqueue_lent`). The ONE constructor the drive loop's
+/// pipeline and [`MulticastTxTap::attach_pooled`] share, so what the tap proves
+/// is the queue the drive loop writes from.
+fn pipeline_lanes() -> (
+    crate::writer_queue::OutboundTx,
+    crate::writer_queue::OutboundRx,
+) {
+    crate::writer_queue::datagram_outbound_channel()
+}
+
 /// Why [`MulticastTxProducer::push`] did not put a message on a pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MulticastTxRefused {
@@ -368,6 +381,50 @@ impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
             self.queued.push_back(Some((reliable, sn)));
         }
     }
+
+    // R3250 — ARCHITECTURE section 9.1: the datagram is encoded straight into a
+    // slot of the link's transmit pool. The small class is tried first, since
+    // most datagrams fit it and the frame's size is known only once written;
+    // a frame that does not fit is given the slot `want` asks for. The slot's
+    // place in the lane is the order it was lent in, which is the SN order of
+    // this conduit, because the conduit's stage is held for the whole push.
+    #[cfg(feature = "runtime-zero-copy")]
+    fn enqueue_lent(
+        &mut self,
+        priority: Priority,
+        reliable: bool,
+        sn: u64,
+        want: usize,
+        fill: &mut dyn FnMut(&mut wz_session_core::tx_buf::SliceTxBuf<'_>) -> bool,
+    ) -> bool {
+        let small = crate::session_tx_pool_ap_small::SLOT_SIZE;
+        let tries = [want.min(small), want];
+        let tries = if tries[0] == tries[1] {
+            &tries[..1]
+        } else {
+            &tries[..]
+        };
+        for &need in tries {
+            let Some(lend) = self.lanes.lend(priority, need) else {
+                return false;
+            };
+            // SAFETY: the lend is this push's alone until it is committed or
+            // given back, and `capacity` bytes from `base` lie in its slot.
+            let region = unsafe { std::slice::from_raw_parts_mut(lend.base(), lend.capacity()) };
+            let mut slot = wz_session_core::tx_buf::SliceTxBuf::new(region);
+            if fill(&mut slot) {
+                let len = wz_session_core::tx_buf::TxBuf::len(&slot);
+                if self.lanes.commit(lend, len).is_ok() {
+                    self.queued.push_back(Some((reliable, sn)));
+                }
+                // Committed or lost with a closed link: either way the datagram
+                // is the queue's, as `enqueue` treats a closed queue.
+                return true;
+            }
+            self.lanes.abort_lend(lend);
+        }
+        false
+    }
 }
 
 /// R2929 / R2937 — the drive loop's side of one link's pipeline: the lanes'
@@ -418,7 +475,7 @@ impl MulticastTxPlane {
             &wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr,
         >,
     ) -> Self {
-        let (lanes, mut queued) = crate::writer_queue::outbound_channel();
+        let (lanes, mut queued) = pipeline_lanes();
         lanes.reshape(
             params
                 .tx_queue
@@ -433,17 +490,28 @@ impl MulticastTxPlane {
         };
         let (report, written) = tokio::sync::mpsc::unbounded_channel();
         let writer = crate::runtime_pool::WzRuntime::Tx.spawn(async move {
-            while let Some((priority, datagram)) = queued.recv_tagged().await {
+            // R3250 — a pooled datagram is a slot of the link's transmit pool:
+            // started as the send begins, home through the completion edge once
+            // the send has returned.
+            while let Some((priority, mut datagram)) = queued.recv_wire_tagged().await {
                 // Best-effort, as every multicast send is: a datagram the
                 // socket refuses is not counted and is not retried. It is
                 // still REPORTED, as done with: the record of what each queued
                 // datagram carries is in queue order, and a datagram left
                 // unreported would shift every later report onto the wrong one.
+                datagram.begin_write();
                 let wrote = match sender.as_ref() {
                     Some(sender) => sender.send(&datagram).await.is_ok(),
                     None => false,
                 };
-                let _ = report.send((priority, wrote.then_some(datagram.len())));
+                let len = datagram.len();
+                if wrote {
+                    queued.recycle_wire(datagram);
+                } else {
+                    // Dropped: a refused send has ended too (completed, failed).
+                    drop(datagram);
+                }
+                let _ = report.send((priority, wrote.then_some(len)));
             }
         });
         let mask = sn::mask_from_res(params.seq_num_res);
@@ -599,13 +667,38 @@ pub struct MulticastTxTap {
     /// The stages' records of what they queued, consumed as the tap reads, as
     /// a transmit task's reports consume them.
     stages: Arc<Stages>,
+    /// Per priority, the datagrams read whose stage record is not consumed yet
+    /// ([`Self::settle_records`]).
+    unsettled: [usize; Priority::NUM],
 }
 
 impl MulticastTxTap {
     /// A producer with a pipeline for `params` attached, and the tap on it.
+    ///
+    /// The tap's lanes are the HEAP queue: a reader that drains at its own pace
+    /// keeps the byte bound it always had. [`Self::attach_pooled`] is the same
+    /// over the transmit pool the drive loop's pipeline uses.
     pub fn attach(params: &MulticastParams) -> (MulticastTxProducer, Self) {
+        Self::attach_over(params, crate::writer_queue::outbound_channel())
+    }
+
+    /// R3250 — [`Self::attach`] over the lanes the drive loop's pipeline builds
+    /// (`pipeline_lanes`, the pooled datagram queue under `runtime-zero-copy`),
+    /// so what a push puts on them can be read as the slots it lies in
+    /// ([`Self::try_next_wire`]).
+    #[cfg(feature = "runtime-zero-copy")]
+    pub fn attach_pooled(params: &MulticastParams) -> (MulticastTxProducer, Self) {
+        Self::attach_over(params, pipeline_lanes())
+    }
+
+    fn attach_over(
+        params: &MulticastParams,
+        (lanes, rx): (
+            crate::writer_queue::OutboundTx,
+            crate::writer_queue::OutboundRx,
+        ),
+    ) -> (MulticastTxProducer, Self) {
         let producer = MulticastTxProducer::new();
-        let (lanes, rx) = crate::writer_queue::outbound_channel();
         lanes.reshape(
             params
                 .tx_queue
@@ -639,18 +732,64 @@ impl MulticastTxTap {
             #[cfg(feature = "routing-namespace")]
             namespace: None,
         }));
-        (producer, Self { lanes: rx, stages })
+        (
+            producer,
+            Self {
+                lanes: rx,
+                stages,
+                unsettled: [0; Priority::NUM],
+            },
+        )
     }
 
     /// The next datagram a push put on the lanes, if any.
     pub fn try_next(&mut self) -> Option<Vec<u8>> {
-        let (priority, datagram) = self.lanes.try_recv_tagged()?;
-        self.stages[priority as usize]
-            .lock()
-            .expect("multicast stage poisoned")
-            .queued
-            .pop_front();
+        self.try_next_wire()
+            .map(crate::writer_queue::WireFrame::into_vec)
+    }
+
+    /// R3250 — [`Self::try_next`] as the frame the lanes hold: on a pooled tap,
+    /// the slot of the link's transmit pool the push encoded it into, which goes
+    /// home when it is dropped (or handed back with [`Self::written`]).
+    pub fn try_next_wire(&mut self) -> Option<crate::writer_queue::WireFrame> {
+        self.settle_records();
+        let (priority, datagram) = self.lanes.try_recv_wire_tagged()?;
+        self.unsettled[priority as usize] += 1;
+        self.settle_records();
         Some(datagram)
+    }
+
+    /// Consume the records of the datagrams read so far, from every stage that
+    /// is not held at this moment. A stage is held for the whole of a push, and
+    /// a push on a pooled queue may be WAITING for the slot of a datagram this
+    /// tap has just read: taking the stage's lock here would then wait for the
+    /// push while the push waits for the reader to write what it holds. The
+    /// record is bookkeeping, so one that cannot be consumed now is consumed by
+    /// a later read, in the order the datagrams were read.
+    fn settle_records(&mut self) {
+        for (priority, owed) in self.unsettled.iter_mut().enumerate() {
+            while *owed > 0 {
+                let Ok(mut stage) = self.stages[priority].try_lock() else {
+                    break;
+                };
+                stage.queued.pop_front();
+                *owed -= 1;
+            }
+        }
+    }
+
+    /// R3250 — the holder has written `datagram` out, as a transmit task does:
+    /// its slot goes home through the completion edge, counted as written.
+    pub fn written(&self, mut datagram: crate::writer_queue::WireFrame) {
+        datagram.begin_write();
+        self.lanes.recycle_wire(datagram);
+    }
+
+    /// R3250 — what the lanes' transmit pool has done and how many slots are
+    /// free, by the pool's own count; `None` on a heap tap.
+    #[cfg(feature = "runtime-zero-copy")]
+    pub fn tx_pool_stats(&self) -> Option<(crate::link_tx_pool::TxPoolStats, usize, usize)> {
+        self.lanes.tx_pool_stats()
     }
 }
 
