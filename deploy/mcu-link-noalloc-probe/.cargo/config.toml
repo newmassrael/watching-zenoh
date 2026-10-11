@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-link-noalloc-probe .cargo/config.toml: pins the crate to the Cortex-M3
+# target and lets `cargo run` boot it in QEMU. The `-Tlink.x` link-arg is NOT
+# repeated here: build.rs emits it (cwd-invariant), and passing it twice makes
+# the linker process cortex-m-rt's `link.x` twice ("region 'FLASH' already
+# defined").
+
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"

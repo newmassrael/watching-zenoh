@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-link-noalloc-probe -- the smallest image that carries the link tier and
+# proves it needs no allocator.
+#
+# It binds a UDP socket out of a `static` pool (`static-link-storage`), sends a
+# datagram to itself over lwIP's loopback interface and reads it back, with no
+# `#[global_allocator]` and no `extern crate alloc` anywhere in its dependency
+# graph. It is the POSITIVE CONTROL of `scripts/lib/no_allocator_link_gate.py`:
+# the gate must pass on this image, and the day it does not the gate has lost
+# its subject or the link tier has taken the heap back. It is also the proof of
+# the claim step S7 made on the library alone: with `static-link-storage` the
+# link crate links no allocator, shown on a LINKED image rather than on an rlib
+# (an rlib never needs an allocator, so it cannot show it).
+#
+# The session crates are not here on purpose: today they still allocate (shell
+# `Rc`s, the pump's record `Vec`, the multicast drive loop's boxed items). The
+# gate reports them for the real images; this image is what stays true while
+# they are repaid.
+#
+# Standalone workspace, as every other deploy/mcu-* crate: cargo must not pull a
+# thumb crate into crates/Cargo.toml's host build.
+
+[workspace]
+
+[package]
+name = "mcu-link-noalloc-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+publish = false
+description = "Link-tier no-allocator proof image: a static-pool UDP socket sends and receives a datagram over lwIP loopback with no allocator linked."
+
+[[bin]]
+name = "mcu-link-noalloc-probe"
+path = "src/main.rs"
+
+[dependencies]
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+# The SysTick clock lwIP's `sys_now()` reads (the SSOT every deploy/mcu-* shares).
+wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
+
+# The unit under test: the link tier with its storage in statics. No other wz
+# crate is named, so no session crate can bring `alloc` in behind it.
+wz-link-lwip = { path = "../../crates/wz-link-lwip", features = ["static-link-storage"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
