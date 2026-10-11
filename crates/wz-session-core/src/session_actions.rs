@@ -7840,7 +7840,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             //
             // A frame past the budget is not built on the heap either: it is cut
             // into a chain whose fragments are each encoded straight into a slot
-            // of their own (`Self::emit_fragments_encoded`).
+            // of their own (`Self::emit_fragments_encoded`, R3251).
             #[cfg(feature = "transport-tx-lend")]
             match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
                 FrameLend::Sent => return Ok(PushOutcome::Pushed),
