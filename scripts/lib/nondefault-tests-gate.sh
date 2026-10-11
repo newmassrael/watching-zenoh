@@ -459,6 +459,31 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         pubsub-delete,\
         bounded-heapless\
         |"
+    # Fixed-memory step S4 — the LEND-ONLY send profile, a SEPARATE row for the
+    # reason the fixed bounded backing is one: `tx-lend-only` is a selector, not
+    # an addition. It compiles the heap send paths out (the frame vector, the
+    # batching stage, the fragment vectors, `encode_init`'s owned body, the
+    # compressed copy) and the refusals in, so added to a row above it would
+    # change what every test of that row means. The tests only it reaches are the
+    # proof file `tests/tx_lend_only_encode.rs` (the lend-only encoders against an
+    # oracle written from the codec's own facade) and the chain writer's two unit
+    # tests in `ext_chain`. The features are the MCU unicast set the profile is
+    # built with, named; the filter is EMPTY so a test added later is claimed
+    # without touching this row.
+    "wz-session-core|hook|\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |"
     # Open-debt item 900 — `session-unicast-open` and `session-unicast-accept`
     # join. 88fe33b9 added both features and the four `two_session_tests::`
     # (gated on them with `transport-multicast` and `codec-push`) and widened
@@ -502,6 +527,22 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-fragmentation,\
         transport-keepalive,\
         transport-multicast\
+        |"
+    # Fixed-memory step S4 — the same crate under the LEND-ONLY send profile, a
+    # separate row because `tx-lend-only` (forwarded to wz-session-core) turns the
+    # heap fallback of every send into a counted refusal and so changes what the
+    # row above's sessions would do if a pool ran dry. What only it reaches is
+    # `tests/tx_allocations.rs`: the outbound path counted under a counting
+    # allocator, the profile's zero per message and the refusals. Its features
+    # are the file's own `required-features`, `codec-close` being this crate's
+    # forward of the Close encoder (no other row names it), plus the profile.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        pubsub-put,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
         |"
     # R3080 — the MCU session shell, split out of the row above with its tests.
     # Seventeen of its twenty tests are feature-gated (the admin node and its host

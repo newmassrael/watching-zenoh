@@ -9814,6 +9814,32 @@ layer_c1g_cargo_test_observer() {
         cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     _runci_guarded_test C1g 6 \
         cargo test -p wz-session-core --test bounded_heapless_backing --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+    # Fixed-memory step S4 — the LEND-ONLY send profile (`tx-lend-only`, the MCU
+    # selector: every frame is encoded into a slot the link lends, and a send
+    # with no slot is a counted refusal, never a heap frame). The crate's own lib
+    # suite at the MCU unicast feature set with the profile and the fixed backing
+    # both on (`+`, for the reason the legs above give), and the proof file pinned
+    # EXACTLY: the lend-only encoders against an oracle written from the codec's
+    # own facade, every shorter buffer refusing, the cookie minted into a stack
+    # array. 8 = what that command PRINTED. The wire-side count (zero allocations
+    # per message) is Layer C1m's `tx alloc lend-only`, which needs a link.
+    _runci_guarded_test C1g + \
+        cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,tx-lend-only,bounded-heapless --quiet || return 1
+    _runci_guarded_test C1g 8 \
+        cargo test -p wz-session-core --test tx_lend_only_encode --features codec-init-body,codec-open-body,codec-close,tx-lend-only --quiet || return 1
+    # Every combination the selector touches must compile and be clean WITH and
+    # WITHOUT it: a symbol the lend-only profile stops using is dead there, and one
+    # the heap profile stops using after a refactor is dead there. `--all-features`
+    # holds both profiles at once, the subsets below hold each alone.
+    (cd crates \
+        && cargo clippy -p wz-session-core --all-targets --all-features --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-close,tx-lend-only --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-init-body,session-unicast-accept,tx-lend-only --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,tx-lend-only --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-batching,transport-fragmentation,tx-lend-only --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-compression,transport-keepalive,tx-lend-only --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-init-body,session-unicast-accept,transport-tx-lend --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-batching,transport-fragmentation,transport-tx-lend --quiet -- -D warnings) || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }
@@ -11081,6 +11107,39 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features transport-keepalive,session-unicast-open,session-unicast-accept \
         --quiet || return 1
+    # Fixed-memory step S4 — the OUTBOUND path under a counting allocator
+    # (`tests/tx_allocations.rs`, which cargo builds only with both handshake
+    # halves, the Put arm, the keep-alive and the Close encoder, so no leg above
+    # runs it): the four handshake messages, a Close from both its senders, a
+    # KeepAlive and a Put at four sizes, each counted. Once on the heap profile
+    # every shipped image and the AP run today, where each message that is built
+    # in a vector must cost the heap something (the instrument's own control: a
+    # zero there would prove nothing about the profile meant to read zero), once
+    # under `tx-lend-only`, where every message must cost it nothing and a send
+    # the link lends no slot for is an explicit, counted refusal. 4 and 6 = what
+    # each command PRINTED.
+    _runci_guarded_test "C1m tx alloc heap" 4 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close \
+        --test tx_allocations --quiet || return 1
+    _runci_guarded_test "C1m tx alloc lend-only" 6 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only \
+        --test tx_allocations --quiet || return 1
+    # The library's own tests under the lend-only profile, which drives the lwIP
+    # driver through the strict lend (`+`: a whole-suite leg, pinned by its own
+    # arms above and not by a number that every unrelated test would move).
+    _runci_guarded_test "C1m lib lend-only" + \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only \
+        --lib --quiet || return 1
+    (cd crates \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only \
+            --quiet -- -D warnings) || return 1
     (cd crates \
         && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-mcu --all-targets \
