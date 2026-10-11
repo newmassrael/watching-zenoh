@@ -45,9 +45,12 @@ pub trait ReplyStaging {
     /// Stage one reply, or refuse it ([`ReplyError::StagingFull`]) and count it.
     fn stage(&mut self, reply: QueryReply) -> Result<(), ReplyError>;
 
-    /// Whether a reply payload of `len` bytes fits, counting the refusal when it
-    /// does not ([`ReplyError::PayloadTooLarge`]). Asked BEFORE the payload is
-    /// copied, so a refusal costs nothing.
+    /// Whether a reply with `len` bytes of payload (0 for a reply with none) can
+    /// be staged at all, counting the refusal when it cannot: no room
+    /// ([`ReplyError::StagingFull`]) or a payload past the bound
+    /// ([`ReplyError::PayloadTooLarge`]). Asked BEFORE the reply record is built,
+    /// so a refusal costs nothing, not even the allocation of a record that is
+    /// then dropped.
     fn admit_payload(&mut self, len: usize) -> Result<(), ReplyError>;
 
     /// How many replies are staged.
@@ -201,6 +204,10 @@ impl ReplyStaging for ReplyStage {
     }
 
     fn admit_payload(&mut self, len: usize) -> Result<(), ReplyError> {
+        if self.rows.free_slots() == 0 {
+            self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
+            return Err(ReplyError::StagingFull);
+        }
         if len > caps::MAX_REPLY_PAYLOAD_BYTES {
             self.refusals.payload_too_large = self.refusals.payload_too_large.saturating_add(1);
             return Err(ReplyError::PayloadTooLarge);

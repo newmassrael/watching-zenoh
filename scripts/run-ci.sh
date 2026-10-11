@@ -9823,6 +9823,12 @@ layer_c1g_cargo_test_observer() {
         cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     _runci_guarded_test C1g 16 \
         cargo test -p wz-session-core --test bounded_heapless_backing --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+    # S9a, row R4 -- replies are fallible: the reply past the table or the payload
+    # bound is an Err and costs the heap nothing, the request whose Final cannot
+    # be owed never reaches a queryable, and a second session is untouched. 4 =
+    # what that command PRINTED.
+    _runci_guarded_test C1g 4 \
+        cargo test -p wz-session-core --test reply_budget_refusal --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # Fixed-memory step S4 — the LEND-ONLY send profile (`tx-lend-only`, the MCU
     # selector: every frame is encoded into a slot the link lends, and a send
     # with no slot is a counted refusal, never a heap frame). The crate's own lib

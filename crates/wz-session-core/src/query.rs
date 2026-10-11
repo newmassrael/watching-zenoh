@@ -1150,6 +1150,7 @@ impl<'a> QueryResponder<'a> {
     /// (the inner `MsgDel` body carries only a header + optional
     /// timestamp). Fallible for the reason [`Self::send_reply`] is.
     pub fn send_reply_del(&mut self) -> Result<(), ReplyError> {
+        self.replies.admit_payload(0)?;
         self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: String::from(&*self.keyexpr_literal),
@@ -1187,6 +1188,7 @@ impl<'a> QueryResponder<'a> {
     /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
     pub fn send_reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
+        self.replies.admit_payload(0)?;
         self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.into(),
@@ -1217,6 +1219,7 @@ impl<'a> QueryResponder<'a> {
         &mut self,
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
+        self.replies.admit_payload(0)?;
         self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: String::from(&*self.keyexpr_literal),
@@ -1254,6 +1257,7 @@ impl<'a> QueryResponder<'a> {
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
+        self.replies.admit_payload(0)?;
         self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -1346,9 +1350,8 @@ impl<'a> QueryResponder<'a> {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        if let Some(attachment) = meta.attachment {
-            self.replies.admit_payload(attachment.len())?;
-        }
+        self.replies
+            .admit_payload(meta.attachment.map_or(0, <[u8]>::len))?;
         self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),

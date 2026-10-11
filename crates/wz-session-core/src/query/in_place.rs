@@ -388,4 +388,42 @@ mod tests {
         }
         assert_eq!(finals, cases.len() - 1, "every case but the unroutable one");
     }
+
+    /// The fixed backing's refusal holds on the lent path too: a Query that would
+    /// owe a Final the table has no room for is refused before a queryable runs,
+    /// and counted.
+    #[cfg(feature = "bounded-heapless")]
+    #[test]
+    fn a_lent_query_past_pending_finals_is_refused_before_a_queryable_runs() {
+        let request = RequestQueryBuilder::new(21, 0, Some("demo/a"))
+            .build()
+            .expect("build");
+        let wire = request
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec();
+        let decoded = Request::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let (mut reg, log) = recording();
+        let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());
+        for rid in 0..crate::caps::MAX_PENDING_FINALS as u64 {
+            finals.owe(rid, QosLevel::DEFAULT);
+        }
+        reg.dispatch_iteration_event(
+            IterationEvent::InPlace(InPlaceRecord::request_of_frame(
+                &decoded,
+                true,
+                0,
+                crate::qos::Priority::DEFAULT,
+            )),
+            &peer(),
+            &mut replies,
+            &mut finals,
+        );
+        let ran = log.lock().expect("not poisoned").len();
+        assert_eq!(
+            (ran, replies.staged(), finals.owed(), finals.refusals()),
+            (0, 0, crate::caps::MAX_PENDING_FINALS, 1),
+            "(handler runs, replies staged, finals owed, requests refused)"
+        );
+    }
 }
