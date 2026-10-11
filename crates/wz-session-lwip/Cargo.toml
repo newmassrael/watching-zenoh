@@ -376,5 +376,23 @@ required-features = [
     "rx-in-place",
 ]
 
+# Fixed-memory step S6 -- the pump and the runtime under it, counted: the same
+# real pair as `session_slot_allocations`, each end run as a TASK of one local
+# set, from the runtime's making to the last task's end. The same features, for
+# the same reason: a pair needs both handshake halves, the Put arm, the
+# keep-alive and Close encoders, and the lend-only send and in-place receive the
+# slot profile is made of.
+[[test]]
+name = "session_pump_allocations"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "transport-keepalive",
+    "codec-close",
+    "tx-lend-only",
+    "rx-in-place",
+]
+
 [lints]
 workspace = true

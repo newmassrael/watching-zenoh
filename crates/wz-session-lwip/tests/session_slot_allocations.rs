@@ -502,6 +502,14 @@ impl Costs {
 fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
+    // The runtime of the profile: a cell of tables on the slot profile (step S6),
+    // an `Arc` of its pools on the others.
+    #[cfg(feature = "session-slot")]
+    static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+        wz_runtime_coop::RuntimeCell::new();
+    #[cfg(feature = "session-slot")]
+    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    #[cfg(not(feature = "session-slot"))]
     let runtime = CoopRuntime::new(Frozen);
     let port = 7701;
 
@@ -766,7 +774,9 @@ mod table {
         static TABLE: Table = SessionSlots::new();
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
-        let runtime = CoopRuntime::new(Frozen);
+        static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+            wz_runtime_coop::RuntimeCell::new();
+        let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
         let dropped = || DROPPED.with(Cell::get);
         let before = dropped();
 
