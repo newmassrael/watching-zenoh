@@ -658,26 +658,42 @@ fn deliver_completion(
         // kernel invented is not something a link can be told about.
         return;
     };
-    let mut frame = entry.frame;
-    // The frame drops at the end of this function either way, which is what
-    // sends its slot home.
+    // A detached link, or one already gone, has nothing to be told: the frame
+    // drops here, which is what sends its slot home.
     let Some(link) = entry.link else {
         return; // detached while its read was in flight
     };
     let Some(ctx) = links.get_mut(&link) else {
         return;
     };
+    // The delivery is built to completion BEFORE it is sent, and the function
+    // that builds it takes the frame by value. That order is the contract, and
+    // the signature is what keeps it: when the link can see the delivery, this
+    // worker holds no handle on the slot, so the slot is home the instant the
+    // last range of it drops. Sending from inside the function that holds the
+    // slot made "the slot is home" depend on whether the worker thread had been
+    // scheduled again since the send.
+    let delivery = completion_delivery(entry.frame, result, ctx);
+    let _ = ctx.deliver.send(delivery);
+}
+
+/// What one read completion means for the link that asked for it.
+///
+/// Takes `frame` BY VALUE and returns only a [`Delivery`], so everything this
+/// function holds on the completion's slot -- the frame, the `Arc` the ranges
+/// are cut from -- is released before its caller can send anything. The only
+/// handles left on the slot are the ranges inside the returned delivery (none
+/// at all for a lost link, whose slot is home on return).
+fn completion_delivery(mut frame: LinkRxFrame, result: i32, ctx: &mut LinkCtx) -> Delivery {
     if result < 0 {
-        let _ = ctx.deliver.send(Delivery::Lost(LostCause::OsError));
-        return;
+        return Delivery::Lost(LostCause::OsError);
     }
     let n = result as usize;
     if n == 0 {
         // EOF. Between frames it is a clean close; anywhere else the peer cut a
         // frame in half — and both lose the link, which is what
         // `crate::poll_framed` answers for the same two cases.
-        let _ = ctx.deliver.send(Delivery::Lost(LostCause::PeerClosed));
-        return;
+        return Delivery::Lost(LostCause::PeerClosed);
     }
     frame.truncate(n);
     // R3037 -- THE COMPLETION EDGE, on the row where the bus master is real: the
@@ -723,15 +739,11 @@ fn deliver_completion(
         ctx.width = crate::prefix_width(ctx.lowlatency.load(Ordering::Acquire));
     }
     match ctx.window.push(whole, ctx.width, &mut collect) {
-        Ok(()) => {
-            let _ = ctx.deliver.send(Delivery::Frames(frames));
-        }
-        Err(_) => {
-            // An oversize length prefix. `crate::poll_framed` answers a prefix
-            // naming more than a frame may hold with `Lost { PeerClosed }`, and
-            // the two bodies must agree about what a link means.
-            let _ = ctx.deliver.send(Delivery::Lost(LostCause::PeerClosed));
-        }
+        Ok(()) => Delivery::Frames(frames),
+        // An oversize length prefix. `crate::poll_framed` answers a prefix
+        // naming more than a frame may hold with `Lost { PeerClosed }`, and
+        // the two bodies must agree about what a link means.
+        Err(_) => Delivery::Lost(LostCause::PeerClosed),
     }
 }
 
@@ -876,6 +888,10 @@ mod tests {
         );
         assert_eq!(arena.slot_state(slot), Some(SlotState::CpuRef));
         drop(beta);
+        // Exact, not eventual: the worker thread has been releasing its own
+        // handle on the slot since before it sent the delivery these frames
+        // came in (`completion_delivery` takes the frame by value), so no
+        // scheduling of that thread can leave the slot out here.
         assert_eq!(
             arena.free_slots(),
             SLOT_COUNT,
@@ -885,6 +901,84 @@ mod tests {
 
         drop(rx);
         drop((wr, rd));
+    }
+
+    /// WHEN A DELIVERY EXISTS, THE WORKER HOLDS NOTHING ON ITS SLOT.
+    ///
+    /// The witness for the ordering the test above depends on and cannot
+    /// observe: the worker is another thread, and between sending a delivery
+    /// and returning it used to keep its own handle on the slot, so "the last
+    /// range dropped" and "the slot is home" were two instants whose gap was
+    /// the scheduler's. Here the building function runs on this thread, so the
+    /// instant after it returns is the instant a link may see the delivery, and
+    /// the arena is read at exactly that point: the ranges inside the delivery
+    /// are the only holders (one slot out), a lost link's slot is already home,
+    /// and dropping the ranges brings the last one back.
+    ///
+    /// The control is a handle that outlives the function (a leaked clone of
+    /// the slot's `Arc`, or a frame held past its return): the count stays one
+    /// short and this reds on the line naming which delivery it was.
+    #[test]
+    fn a_built_delivery_leaves_the_worker_holding_nothing_on_its_slot() {
+        use crate::session_rx_pool_ap::SLOT_COUNT;
+
+        let arena = LinkRxArena::new();
+        let (deliver, _frames) = frame_chan::unbounded_channel();
+        let mut ctx = LinkCtx {
+            fd: -1,
+            lowlatency: universal(),
+            width: crate::prefix_width(false),
+            window: RxWindow::new(),
+            deliver,
+        };
+        let mut taker = arena.clone();
+        let mut filled = |wire: &[u8]| {
+            let mut frame = taker.take(SLOT_SIZE);
+            assert!(frame.is_pooled(), "a fresh table lends a slot");
+            frame.as_mut()[..wire.len()].copy_from_slice(wire);
+            frame
+        };
+
+        let mut wire = framed(b"alpha");
+        wire.extend_from_slice(&framed(b"beta"));
+        let Delivery::Frames(ranges) =
+            completion_delivery(filled(&wire), wire.len() as i32, &mut ctx)
+        else {
+            panic!("two whole frames are a delivery of frames");
+        };
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT - 1,
+            "the ranges are the slot's only holders"
+        );
+        drop(ranges);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT,
+            "the last range is gone, so the slot is home"
+        );
+
+        // The three arms that lose the link hand up no range of the slot.
+        let oversize = (u16::MAX as u32 + 1).to_le_bytes();
+        ctx.lowlatency.store(true, Ordering::Release);
+        ctx.width = crate::prefix_width(true);
+        for (what, wire, result) in [
+            ("a read error", &[][..], -5),
+            ("an end of stream", &[][..], 0),
+            ("an oversize prefix", &oversize[..], 4),
+        ] {
+            let delivery = completion_delivery(filled(wire), result, &mut ctx);
+            assert!(
+                matches!(delivery, Delivery::Lost(_)),
+                "{what} loses the link"
+            );
+            assert_eq!(
+                arena.free_slots(),
+                SLOT_COUNT,
+                "{what}: the slot is home before the delivery is sent"
+            );
+        }
     }
 
     /// THE REACTOR'S OWN CLAIM: two links on ONE ring each get their own bytes.
