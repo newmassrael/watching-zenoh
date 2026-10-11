@@ -589,17 +589,24 @@ mod refusal {
     use wz_session_core::send_wire_error::SendWireError;
     use wz_session_core::session_actions::TxRefusalCounts;
 
-    /// Take every slot the driver will lend, and hold them: the driver has two.
+    /// Take every slot the driver will lend, and hold them: the driver has
+    /// `LENT_MAX` (two), and the table is exactly that full when the next ask is
+    /// refused, which is the fill-to-N half of the exhaustion case R5 (the
+    /// refusals counted below are its N+1).
     fn hold_every_slot(side: &Side) -> Vec<wz_session_core::link::TxSlotGrant> {
         let mut held = Vec::new();
         while let Some(grant) = side.sink.tx_slot_acquire(8, Priority::DEFAULT) {
             held.push(grant);
             assert!(
-                held.len() <= 8,
+                held.len() <= wz_session_lwip::driver::LENT_MAX,
                 "the driver lends a bounded number of slots"
             );
         }
-        assert!(!held.is_empty(), "the driver lent at least one slot");
+        assert_eq!(
+            held.len(),
+            wz_session_lwip::driver::LENT_MAX,
+            "the driver lends exactly the slots its lend table has"
+        );
         held
     }
 

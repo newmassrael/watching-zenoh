@@ -394,5 +394,36 @@ required-features = [
     "rx-in-place",
 ]
 
+# Fixed-memory step S6 (exhaustion case R1) -- the node's session pool filled to the
+# generated `MAX_SESSIONS` through real handshakes and asked for one more, by each
+# table that can be the full one. The listener it drives is the `session-slot`
+# profile's, so the selector itself is required, beside what a pair needs.
+[[test]]
+name = "session_pool_exhaustion"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "transport-keepalive",
+    "codec-close",
+    "session-slot",
+]
+
+# Fixed-memory step S6 (exhaustion case R2) -- the dialling side: a node dials
+# `MAX_SESSIONS` sessions and is asked for one more, by each table that can be the
+# full one (the socket pool, the session table, the pump table, the task table). On
+# the node's real profile, with both selectors: a socket bound out of a heap box
+# allocates when a refused dial gives it back.
+[[test]]
+name = "session_dial_exhaustion"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "codec-close",
+    "session-slot",
+    "static-link-storage",
+]
+
 [lints]
 workspace = true

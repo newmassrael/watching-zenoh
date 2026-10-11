@@ -11273,7 +11273,38 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m coop static runtime" 16 \
         cargo test -p wz-runtime-coop --features session-slot \
         --lib static_tests:: --quiet || return 1
+    # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
+    # a node holds at most the generated MAX_SESSIONS sessions, and every table a
+    # session needs is claimed before it can speak. The acceptor's side
+    # (`tests/session_pool_exhaustion.rs`): N peers dial in through real handshakes
+    # on one listening socket, the N+1th InitSyn is answered with nothing and
+    # counted (once per table that can be the full one: the lanes, the session
+    # table, the pump table, the task table), what the refusal took is given back,
+    # each session reads only its own peer's datagrams, a closed session's cell takes
+    # the next peer, and no window allocates: 4 = what that command PRINTED, and
+    # again with `reassembly`, where a pump cell also holds its staging table.
+    _runci_guarded_test "C1m session pool exhaustion" 4 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
+        --test session_pool_exhaustion --quiet || return 1
+    _runci_guarded_test "C1m session pool exhaustion reassembly" 4 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
+        --test session_pool_exhaustion --quiet || return 1
+    # The dialler's side (`tests/session_dial_exhaustion.rs`), on the node's real
+    # profile with the socket pool as well: N dials succeed, the N+1th is refused as
+    # a typed error naming the full table (the socket pool, the session table, the
+    # pump table, the task table), counted by that table only, sends no InitSyn,
+    # gives back what it took and costs the heap nothing, and succeeds again once a
+    # session is released: 4 = what that command PRINTED.
+    _runci_guarded_test "C1m session dial exhaustion" 4 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage \
+        --test session_dial_exhaustion --quiet || return 1
     (cd crates \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage \
+            --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
             --quiet -- -D warnings \

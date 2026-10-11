@@ -590,6 +590,20 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         session-unicast-open,\
         transport-keepalive\
         |"
+    # Fixed-memory step S6, the exhaustion cases of the N-session pool: the row above
+    # also runs `tests/session_pool_exhaustion.rs` (the acceptor's side, which needs
+    # the listener the slot profile compiles in). The dialler's side,
+    # `tests/session_dial_exhaustion.rs`, needs the socket pool as well
+    # (`static-link-storage`, whose own row above is a different profile), so it is a
+    # row of its own: the file's `required-features`, and the target by name.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage\
+        |--test=session_dial_exhaustion"
     # R3080 — the MCU session shell, split out of the row above with its tests.
     # Seventeen of its twenty tests are feature-gated (the admin node and its host
     # and status documents need both adminspace features, the application layer
