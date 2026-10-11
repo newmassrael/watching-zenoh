@@ -1849,6 +1849,55 @@ mod record_walk_tests {
         );
     }
 
+    /// Exhaustion of the pump's record buffer, case R5 of the pool design. The
+    /// buffer holds ONE record whatever the peer put in the frame: a frame of many
+    /// records goes through it one record at a time, so what a peer sends cannot
+    /// fill it.
+    #[test]
+    fn a_frame_of_many_records_goes_through_the_one_record_buffer_one_at_a_time() {
+        const RECORDS: u64 = 64;
+        let payload: Vec<u8> = (0..RECORDS).flat_map(oam_record).collect();
+        assert_eq!(
+            new_record_buf().capacity(),
+            1,
+            "the buffer holds one record, however many a frame carries"
+        );
+        let (seen, result) = walk(&payload);
+        assert!(result.is_ok());
+        assert_eq!(seen.len(), RECORDS as usize, "every record was handed over");
+        assert_eq!(seen.last(), Some(&('o', RECORDS - 1)), "in wire order");
+    }
+
+    /// The other half: a caller that does NOT hand the buffer back (the walk
+    /// clears it before every decode, so only a caller that decodes past it can
+    /// meet this) is refused the next record as `TooManyElements`, an explicit
+    /// error, and the record the buffer holds is kept. On the fixed backing the
+    /// buffer cannot grow, so there is nothing else it could do.
+    #[cfg(feature = "bounded-heapless")]
+    #[test]
+    fn a_record_buffer_that_is_full_refuses_the_next_record_and_keeps_its_own() {
+        let payload = [oam_record(1), oam_record(2)].concat();
+        let mut cursor = SceCursor::new(&payload);
+        let mut record = new_record_buf();
+        assert!(matches!(
+            decode_one_record(&mut cursor, &mut record, NO_ORIGIN),
+            Ok(true)
+        ));
+        assert_eq!(record.len(), 1, "the buffer is full");
+        assert!(
+            matches!(
+                decode_one_record(&mut cursor, &mut record, NO_ORIGIN),
+                Err(CodecError::TooManyElements)
+            ),
+            "the second record has nowhere to go"
+        );
+        assert_eq!(record.len(), 1, "a refusal grows nothing");
+        match &record[0] {
+            NetworkMessage::Oam(oam) => assert_eq!(oam.id, 1, "and keeps the record it held"),
+            other => panic!("unexpected record {other:?}"),
+        }
+    }
+
     /// A Push record as a peer sends it, on `key`.
     #[cfg(feature = "codec-push")]
     fn push_record(key: &str) -> Vec<u8> {

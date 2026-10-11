@@ -11127,14 +11127,16 @@ layer_c1m_session_lwip() {
     # count must SEE them (the instrument's control), once under
     # `static-link-storage`, where they are cells of a static pool and the count
     # must be zero, with the refusals of a full pool witnessed (three extra tests
-    # in the link file, one in the session file). 5, 8, 1 and 2 = what each
-    # command PRINTED.
+    # in the link file, one in the session file). The link file also holds the
+    # receive queue's exhaustion test, which runs on both profiles and costs the
+    # heap nothing on either (a full queue drops, counts and never grows). 6, 9, 1
+    # and 2 = what each command PRINTED.
     # The two lib legs run the whole host suites over the fixed storage, pinned by
     # their own arms and not by a number every unrelated test would move.
-    _runci_guarded_test "C1m link alloc heap" 5 \
+    _runci_guarded_test "C1m link alloc heap" 6 \
         cargo test -p wz-link-lwip --features test-support \
         --test link_storage_allocations --quiet || return 1
-    _runci_guarded_test "C1m link alloc fixed" 8 \
+    _runci_guarded_test "C1m link alloc fixed" 9 \
         cargo test -p wz-link-lwip --features test-support,static-link-storage \
         --test link_storage_allocations --quiet || return 1
     _runci_guarded_test "C1m link lib fixed" + \

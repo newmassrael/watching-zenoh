@@ -307,6 +307,97 @@ fn the_session_socket_is_bound_used_and_dropped_without_the_heap() {
     }
 }
 
+/// Exhaustion of a session's receive queue, case R5 of the pool design: the queue
+/// is a fixed ring inside the socket, so a peer that sends faster than the session
+/// reads cannot grow it. The datagram that finds it full is DROPPED and COUNTED
+/// (`rx_drop_count`), never queued, never kept on a heap; what was queued is
+/// read out whole and in order; and the queue takes datagrams again once it has
+/// room. The window is the fill, the overflow and the drain, and it costs the
+/// heap nothing on either profile (the socket, and so its queue, is bound before
+/// it opens).
+///
+/// The ring is `heapless::spsc::Queue<_, SESSION_RX_SLOTS>`, which holds one entry
+/// fewer than its length, so a session socket takes `SESSION_RX_SLOTS - 1`
+/// datagrams. The test measures the capacity (the number queued before the first
+/// drop) and pins it to that, so a change to the ring's shape is seen.
+#[test]
+fn a_full_session_receive_queue_drops_counts_and_never_grows() {
+    const CAPACITY: usize = SESSION_RX_SLOTS - 1;
+    const EXTRA: usize = 3;
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let mut sock = open_session(&link, 7704).expect("bind the session socket");
+    let port = sock.local_port();
+    let m = Measurement::new();
+
+    let ((queued, drops_at_full, drops_after, read, drops_end, again), cost) = m.count(|| {
+        // Fill: send until the first drop is counted; what got in is the capacity.
+        let mut queued = 0usize;
+        while sock.rx_drop_count() == 0 {
+            loop_back(&link, &sock, port, &[queued as u8; 8]);
+            if sock.rx_drop_count() == 0 {
+                queued += 1;
+            }
+            assert!(
+                queued <= SESSION_RX_SLOTS,
+                "the queue is bounded by the pool's slot count"
+            );
+        }
+        let drops_at_full = sock.rx_drop_count();
+        // Past the capacity: every further datagram is dropped and counted once.
+        for _ in 0..EXTRA {
+            loop_back(&link, &sock, port, &[0xee; 8]);
+        }
+        let drops_after = sock.rx_drop_count();
+        // Drain: exactly what was queued, in order, none of the dropped ones.
+        let mut read = 0usize;
+        let mut in_order = true;
+        while let Some(got) = sock.try_recv() {
+            in_order &= got.data.as_slice() == [read as u8; 8];
+            read += 1;
+        }
+        let drops_end = sock.rx_drop_count();
+        // Room again: the next datagram is queued, not dropped.
+        loop_back(&link, &sock, port, &[0x77; 8]);
+        let again = sock.try_recv().is_some_and(|got| got.data[0] == 0x77);
+        assert!(
+            in_order,
+            "the queued datagrams were read out whole, in order"
+        );
+        (
+            queued,
+            drops_at_full,
+            drops_after,
+            read,
+            drops_end,
+            again && sock.rx_drop_count() == drops_end,
+        )
+    });
+    assert_eq!(
+        queued, CAPACITY,
+        "a ring of {SESSION_RX_SLOTS} holds one fewer"
+    );
+    assert_eq!(
+        drops_at_full, 1,
+        "the datagram that found it full is counted"
+    );
+    assert_eq!(
+        drops_after,
+        1 + EXTRA as u32,
+        "each datagram past capacity is counted once"
+    );
+    assert_eq!(read, CAPACITY, "the dropped datagrams were never queued");
+    assert_eq!(drops_end, drops_after, "reading drops nothing");
+    assert!(again, "the queue takes a datagram again once it has room");
+    assert_eq!(
+        cost,
+        Cost {
+            allocations: 0,
+            bytes: 0
+        },
+        "filling, overflowing and draining a receive queue costs the heap nothing"
+    );
+}
+
 // ---- the interface ---------------------------------------------------------
 
 const NODE_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x0a];
