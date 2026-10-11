@@ -11253,7 +11253,9 @@ layer_c1m_session_lwip() {
     # slot is made of without it, the instrument's control (the windows that make or
     # host something must cost the heap something): 1 = what that PRINTED. And the
     # static pool's own tests (a full table refuses and counts, a finished task's
-    # cell is reused, what a task held is dropped once): 13 = what that PRINTED.
+    # cell is reused, what a task held is dropped once, a table filled to its
+    # capacity refuses every spawn or sleep past it and counts each, by cause, only
+    # upward): 16 = what that PRINTED.
     _runci_guarded_test "C1m session pump alloc" 2 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
@@ -11266,7 +11268,7 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
         --test session_pump_allocations --quiet || return 1
-    _runci_guarded_test "C1m coop static runtime" 13 \
+    _runci_guarded_test "C1m coop static runtime" 16 \
         cargo test -p wz-runtime-coop --features session-slot \
         --lib static_tests:: --quiet || return 1
     (cd crates \

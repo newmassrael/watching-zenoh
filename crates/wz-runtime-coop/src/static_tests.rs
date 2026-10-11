@@ -146,6 +146,120 @@ fn a_full_task_table_refuses_counts_and_hands_the_future_back() {
     drop(second);
 }
 
+/// Exhaustion of the task table, case R6 of the pool design: a table of `TASKS`
+/// cells takes exactly `TASKS` tasks, and every spawn past that is a refusal that is
+/// counted, hands the future back and takes no cell, however many are tried.
+#[test]
+fn a_task_table_fills_to_its_capacity_and_every_spawn_past_it_is_refused_and_counted() {
+    const TASKS: usize = 4;
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+    static CELL: RuntimeCell<Hand, TASKS, 64, 1> = RuntimeCell::new();
+    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let local = CoopLocalSet::new(&runtime);
+
+    // Fill to N: every one of the N cells is a task, and nothing is refused yet.
+    let mut held = [const { None }; TASKS];
+    for (taken, slot) in held.iter_mut().enumerate() {
+        assert_eq!(local.live_local_task_count(), taken);
+        *slot = Some(local.spawn_local(forever()).expect("a free cell"));
+    }
+    assert_eq!(local.live_local_task_count(), TASKS, "every cell is a task");
+    assert_eq!(runtime.task_refusals().no_task_cell, 0);
+
+    // N+1, N+2, N+3: each is refused, counted once, and gives its future back
+    // unspent; none takes a cell.
+    for attempt in 1..=3u32 {
+        let Err(refused) = local.spawn_local({
+            let guard = Counted(&DROPS);
+            async move {
+                let _guard = guard;
+            }
+        }) else {
+            panic!("all {TASKS} cells are taken");
+        };
+        assert_eq!(refused.why, SpawnRefusal::NoTaskCell);
+        assert_eq!(runtime.task_refusals().no_task_cell, attempt);
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            attempt - 1,
+            "the refused future was not run or dropped by the table"
+        );
+        drop(refused);
+        assert_eq!(DROPS.load(Ordering::SeqCst), attempt);
+        assert_eq!(
+            local.live_local_task_count(),
+            TASKS,
+            "a refusal takes no cell"
+        );
+    }
+    assert_eq!(runtime.task_refusals().too_large, 0);
+
+    // Each cell given back lets exactly one more task in, and the refusals so far
+    // stay counted.
+    for slot in &mut held {
+        let handle = slot.take().expect("held");
+        handle.abort();
+        local.run_until_idle();
+        drop(handle);
+        let again = local.spawn_local(async { 1u8 }).expect("the freed cell");
+        assert_eq!(local.block_on_local(again).expect("ran"), 1);
+        assert_eq!(runtime.task_refusals().no_task_cell, 3);
+    }
+}
+
+/// The refusal counters are the table's own accounting, and each refusal is
+/// counted under its own cause, only ever upward: a cell coming free does not reset
+/// them, a refusal of one cause does not move the other, and a future that is both
+/// too large and meets a full table is counted as too large (the cause that does
+/// not go away by waiting).
+#[test]
+fn the_task_refusal_counters_are_split_by_cause_and_only_rise() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
+    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let local = CoopLocalSet::new(&runtime);
+    let big = [1u8; 512];
+    let too_big = |big: [u8; 512]| async move {
+        yield_now().await;
+        big[0]
+    };
+    let counts = || {
+        let refusals = runtime.task_refusals();
+        (refusals.no_task_cell, refusals.too_large)
+    };
+    assert_eq!(
+        counts(),
+        (0, 0),
+        "nothing is refused before anything is tried"
+    );
+
+    assert!(local.spawn_local(too_big(big)).is_err());
+    assert_eq!(counts(), (0, 1));
+
+    let taken = local.spawn_local(forever()).expect("the one cell");
+    assert!(local.spawn_local(forever()).is_err());
+    assert_eq!(counts(), (1, 1), "a full table is the other cause");
+
+    let Err(both) = local.spawn_local(too_big(big)) else {
+        panic!("too large and the table is full");
+    };
+    assert_eq!(both.why, SpawnRefusal::TooLarge);
+    assert_eq!(
+        counts(),
+        (1, 2),
+        "the cause that does not wait out is named"
+    );
+    drop(both);
+
+    taken.abort();
+    local.run_until_idle();
+    drop(taken);
+    let ran = local.spawn_local(async { 5u8 }).expect("the freed cell");
+    assert_eq!(local.block_on_local(ran).expect("ran"), 5);
+    assert_eq!(counts(), (1, 2), "a cell coming free resets nothing");
+}
+
 #[test]
 fn a_task_too_large_for_a_cell_is_refused_and_counted() {
     static NOW: AtomicU64 = AtomicU64::new(0);
@@ -318,6 +432,91 @@ fn a_full_timer_table_refuses_counts_and_the_sleep_still_ends_by_polling() {
             .block_on_local(second)
             .expect("by polling, then by its deadline"),
         2
+    );
+}
+
+/// Exhaustion of the timer table, case R6: a table of `TIMERS` entries holds
+/// `TIMERS` deadlines, a sleep past that is refused an entry and counted (it wakes
+/// itself instead, so it still ends), the count rises with every pass the sleep
+/// is still without an entry and never falls, and the sleep moves into the table
+/// the moment an entry is free: the table is never grown and never lost a sleep.
+#[test]
+fn a_timer_table_fills_to_its_capacity_and_a_sleep_past_it_takes_an_entry_once_one_is_free() {
+    const TIMERS: usize = 3;
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static CELL: RuntimeCell<Hand, 6, 64, TIMERS> = RuntimeCell::new();
+    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let local = CoopLocalSet::new(&runtime);
+    assert_eq!(runtime.timers().capacity(), TIMERS);
+    let sleeper = |ms: u64, answer: u32| {
+        let time = CoopTime::new(&runtime);
+        local
+            .spawn_local(async move {
+                time.sleep(ms).await;
+                answer
+            })
+            .expect("a task cell")
+    };
+
+    // Fill to M: the three earliest deadlines are the three entries.
+    let first = sleeper(5, 1);
+    let second = sleeper(6, 2);
+    let third = sleeper(7, 3);
+    local.run_until_idle();
+    assert_eq!(
+        runtime.timers().pending_count(),
+        TIMERS,
+        "the table is full"
+    );
+    assert_eq!(runtime.timer_refusals(), 0, "nothing was refused yet");
+
+    // M+1 and M+2 are refused an entry; each is counted every time it tries, which
+    // is every pass until an entry is free, and the count never falls.
+    let fourth = sleeper(100, 4);
+    let fifth = sleeper(100, 5);
+    local.run_until_idle();
+    let after_first_pass = runtime.timer_refusals();
+    assert_eq!(after_first_pass, 2, "two sleeps were each refused once");
+    local.run_until_idle();
+    let after_second_pass = runtime.timer_refusals();
+    assert!(
+        after_second_pass > after_first_pass,
+        "a sleep still without an entry tries again on the next pass, and is counted"
+    );
+    assert_eq!(
+        runtime.timers().pending_count(),
+        TIMERS,
+        "a refusal takes no entry and grows nothing"
+    );
+
+    // The three registered deadlines pass: their sleeps end, and the two that were
+    // waiting by polling take the freed entries on their next pass.
+    NOW.store(10_000, Ordering::SeqCst);
+    assert_eq!(local.block_on_local(first).expect("woken"), 1);
+    assert_eq!(local.block_on_local(second).expect("woken"), 2);
+    assert_eq!(local.block_on_local(third).expect("woken"), 3);
+    local.run_until_idle();
+    assert_eq!(
+        runtime.timers().pending_count(),
+        2,
+        "both waiting sleeps now hold an entry"
+    );
+    let settled = runtime.timer_refusals();
+    assert!(settled >= after_second_pass, "the counter only rises");
+    local.run_until_idle();
+    assert_eq!(
+        runtime.timer_refusals(),
+        settled,
+        "a sleep with an entry is not refused again"
+    );
+
+    NOW.store(200_000, Ordering::SeqCst);
+    assert_eq!(local.block_on_local(fourth).expect("woken"), 4);
+    assert_eq!(local.block_on_local(fifth).expect("woken"), 5);
+    assert_eq!(
+        runtime.timers().pending_count(),
+        0,
+        "every entry is free again"
     );
 }
 
