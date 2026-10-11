@@ -16173,8 +16173,15 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
     # mcu-link-noalloc-probe, is also booted under QEMU, so the proof is of an
     # image that RUNS. It sits after the gcc check above because all but the
     # registry probe link lwIP (a C build); that probe is also built by Q.0.
-    local noalloc_name noalloc_target noalloc_cpu noalloc_machine noalloc_bin
-    if command -v arm-none-eabi-nm >/dev/null 2>&1; then
+    #
+    # Which `nm` reads the ELF is the gate's own decision (`--nm`): the
+    # toolchain's llvm-nm first, then a host nm that passes a v0 demangle probe.
+    # An `arm-none-eabi-nm` that cannot demangle is not an nm the gate can judge
+    # with, so a machine that has only that one is unprovisioned for this lane
+    # (SKIP, or FAIL under WZ_Q_REQUIRE) rather than red on every image.
+    local noalloc_name noalloc_target noalloc_cpu noalloc_machine noalloc_bin noalloc_nm
+    if noalloc_nm="$(python3 scripts/lib/no_allocator_link_gate.py --nm)"; then
+        echo "  Q.0n reads symbols with ${noalloc_nm}"
         # The list is read on fd 3: a QEMU boot below reads stdin (`-nographic`)
         # and would swallow the rest of it.
         while read -r noalloc_name noalloc_target <&3; do
@@ -16209,7 +16216,7 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
             fi
         done 3< <(python3 scripts/lib/no_allocator_link_gate.py --list)
     else
-        _q_unavailable "Q.0n" "arm-none-eabi-nm not on PATH" || fail=1
+        _q_unavailable "Q.0n" "no nm that demangles Rust v0 symbols (rustup component llvm-tools)" || fail=1
     fi
 
     # Sub-lane matrix: machine|cpu|target|run_policy. Parallel

@@ -736,6 +736,99 @@ def find_tool(env_var: str, candidates: tuple[str, ...]) -> str | None:
     return None
 
 
+# The symbol table is only readable through a `nm` that demangles the v0 Rust
+# mangling (`_R...`): a mangled name matches no alloc pattern, so an `nm` that
+# cannot would read every image as clean. `classify` refuses such a table, but
+# which `nm` the gate reads is decided HERE, from what the machine can show it
+# does, not from which name happens to be first on PATH: the hosted cross runner
+# carried an `arm-none-eabi-nm` too old for v0 and every Q.0n image failed
+# closed on it. The toolchain's own `llvm-nm` (rustup component `llvm-tools`,
+# declared in rust-toolchain.toml) reads both manglings and comes first.
+PROBE_SYMBOL = "_RNvCs1_5probe4main"
+PROBE_DEMANGLED = "probe::main"
+
+
+def probe_object() -> bytes:
+    """A 32-bit little-endian ARM relocatable ELF whose one symbol is PROBE_SYMBOL.
+
+    Hand-built so the probe needs no compiler: a null section, `.symtab`,
+    `.strtab` and `.shstrtab`; the symbol is absolute, so it needs no code section.
+    """
+    import struct
+
+    strtab = b"\0" + PROBE_SYMBOL.encode() + b"\0"
+    shstrtab = b"\0.symtab\0.strtab\0.shstrtab\0"
+    symtab = struct.pack("<IIIBBH", 0, 0, 0, 0, 0, 0)
+    symtab += struct.pack("<IIIBBH", 1, 0x100, 4, 0x12, 0, 0xFFF1)
+    sym_off = 52
+    str_off = sym_off + len(symtab)
+    shstr_off = str_off + len(strtab)
+    sh_off = (shstr_off + len(shstrtab) + 3) & ~3
+    ident = b"\x7fELF" + bytes([1, 1, 1, 0]) + bytes(8)
+    header = struct.pack("<16sHHIIIIIHHHHHH", ident, 1, 40, 1, 0, 0, sh_off, 0x05000000, 52, 0, 0, 40, 4, 3)
+    shdrs = struct.pack("<IIIIIIIIII", *([0] * 10))
+    shdrs += struct.pack("<IIIIIIIIII", 1, 2, 0, 0, sym_off, len(symtab), 2, 1, 4, 16)
+    shdrs += struct.pack("<IIIIIIIIII", 9, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0)
+    shdrs += struct.pack("<IIIIIIIIII", 17, 3, 0, 0, shstr_off, len(shstrtab), 0, 0, 1, 0)
+    body = symtab + strtab + shstrtab
+    return header + body + bytes(sh_off - (shstr_off + len(shstrtab))) + shdrs
+
+
+def nm_demangles(nm: str) -> bool:
+    """True when `nm` lists PROBE_SYMBOL mangled, and as PROBE_DEMANGLED under -C."""
+    with tempfile.TemporaryDirectory() as tmp:
+        obj = Path(tmp) / "probe.o"
+        obj.write_bytes(probe_object())
+        outs = []
+        for extra in ((), ("-C",)):
+            try:
+                proc = subprocess.run([nm, "-S", "-p", *extra, str(obj)], capture_output=True, text=True)
+            except OSError:
+                return False
+            if proc.returncode != 0:
+                return False
+            outs.append(proc.stdout)
+    return PROBE_SYMBOL in outs[0] and PROBE_DEMANGLED in outs[1] and PROBE_SYMBOL not in outs[1]
+
+
+def rustup_llvm_nm() -> str | None:
+    """`llvm-nm` of the active toolchain (component `llvm-tools`), when installed."""
+    try:
+        sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True)
+        version = subprocess.run(["rustc", "-vV"], capture_output=True, text=True)
+    except OSError:
+        return None
+    if sysroot.returncode != 0 or version.returncode != 0:
+        return None
+    host = next((l.split(":", 1)[1].strip() for l in version.stdout.splitlines() if l.startswith("host:")), "")
+    cand = Path(sysroot.stdout.strip()) / "lib" / "rustlib" / host / "bin" / "llvm-nm"
+    return str(cand) if host and cand.is_file() else None
+
+
+def nm_candidates() -> list[str]:
+    """Every `nm` this machine offers, in the order the gate prefers them."""
+    if os.environ.get("NM"):
+        return [os.environ["NM"]]
+    found = [rustup_llvm_nm()]
+    found += [shutil.which(c) for c in ("arm-none-eabi-nm", "llvm-nm", "nm")]
+    seen: list[str] = []
+    for c in found:
+        if c and c not in seen:
+            seen.append(c)
+    return seen
+
+
+def resolve_nm(candidates: list[str] | None = None, probe=nm_demangles) -> tuple[str | None, str]:
+    """The first candidate that passes `probe`, else None and the reason."""
+    cands = nm_candidates() if candidates is None else candidates
+    if not cands:
+        return None, "no nm on this machine (rustup component llvm-tools, arm-none-eabi-nm or llvm-nm)"
+    for c in cands:
+        if probe(c):
+            return c, ""
+    return None, "no nm demangles Rust v0 symbols; tried " + ", ".join(cands)
+
+
 def parse_nm(mangled_text: str, demangled_text: str) -> list[Sym]:
     """Zip the mangled and the demangled `nm -S -p` listings (same order)."""
     syms: list[Sym] = []
@@ -1263,12 +1356,12 @@ def render(report: Report, verbose: bool = True) -> str:
 def judge_build(
     name: str, image: Image, build: Build, args: argparse.Namespace
 ) -> Report:
-    nm = find_tool("NM", ("arm-none-eabi-nm", "llvm-nm"))
+    nm, nm_reason = resolve_nm()
     objdump = find_tool("OBJDUMP", ("arm-none-eabi-objdump", "llvm-objdump"))
     addr2line = find_tool("ADDR2LINE", ("arm-none-eabi-addr2line", "llvm-addr2line"))
     problems: list[str] = []
     if nm is None:
-        raise SystemExit("no_allocator_link_gate: no arm-none-eabi-nm or llvm-nm on PATH (cannot judge)")
+        raise SystemExit(f"no_allocator_link_gate: {nm_reason} (cannot judge)")
 
     refused = ""
     if args.units:
@@ -1573,6 +1666,34 @@ def _selftest() -> int:
     except ValueError:
         pass
 
+    # which `nm` is read: one that does not demangle is refused, one that does is taken
+    with tempfile.TemporaryDirectory() as tmp:
+        shims = {}
+        for label, body in (
+            ("old", f'echo "00000100 00000004 A {PROBE_SYMBOL}"'),
+            (
+                "new",
+                f'case " $* " in *" -C "*) echo "00000100 00000004 A {PROBE_DEMANGLED}";; '
+                f'*) echo "00000100 00000004 A {PROBE_SYMBOL}";; esac',
+            ),
+            ("broken", "exit 1"),
+        ):
+            shim = Path(tmp) / f"nm-{label}"
+            shim.write_text("#!/bin/sh\n" + body + "\n")
+            shim.chmod(0o755)
+            shims[label] = str(shim)
+        check(not nm_demangles(shims["old"]), "an nm that leaves v0 names mangled fails the probe")
+        check(nm_demangles(shims["new"]), "an nm that demangles passes the probe")
+        check(not nm_demangles(shims["broken"]), "an nm that fails fails the probe")
+        check(not nm_demangles(str(Path(tmp) / "absent")), "a missing nm fails the probe")
+        check(resolve_nm([shims["old"]])[0] is None, "only an old nm: the gate has none to read with")
+        check("tried" in resolve_nm([shims["old"]])[1], "the refusal names what it tried")
+        check(resolve_nm([shims["old"], shims["new"]])[0] == shims["new"], "an old nm is passed over for one that demangles")
+        check(resolve_nm([shims["new"], shims["old"]])[0] == shims["new"], "the first nm that demangles is kept")
+        check(resolve_nm([])[0] is None, "no nm at all resolves to none")
+    elf = probe_object()
+    check(elf[:4] == b"\x7fELF" and len(elf) % 4 == 0, "the probe object is a well-formed ELF header")
+
     # call sites
     check(list(parse_branches("   640:\tbl\t400 <x>\n   650:\tb.w\t401 <x>\n   670:\tbx\tlr\n")) == [(0x640, 0x400), (0x650, 0x401)], "branches are parsed")
     hs = parse_nm(HEAP_NM, HEAP_NM_C)
@@ -1784,6 +1905,7 @@ def main() -> int:
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--population", action="store_true")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--nm", action="store_true", help="print the nm the gate would read with")
     parser.add_argument("--image")
     parser.add_argument("--expect", choices=("gated", "pending"))
     parser.add_argument("--target")
@@ -1795,6 +1917,15 @@ def main() -> int:
     args = parser.parse_args()
     if args.selftest:
         return _selftest()
+    if args.nm:
+        # Exit 3 when the machine has no nm the gate can judge with, so a lane
+        # can tell "not provisioned" (skip, or fail when required) from a verdict.
+        nm, reason = resolve_nm()
+        if nm is None:
+            print(f"no-allocator-gate: {reason}", file=sys.stderr)
+            return 3
+        print(nm)
+        return 0
     if args.list:
         # The builds a lane runs the gate on: one `<image> <target>` row each.
         for name, image in IMAGES.items():

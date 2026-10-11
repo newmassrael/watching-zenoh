@@ -36,11 +36,17 @@
 # targets — and run-ci.sh SKIPs a target it cannot find, so the footprint gate
 # would go quietly green instead of failing.
 #
+# `llvm-tools` supplies `llvm-nm`, which reads both Rust manglings. The
+# no-allocator link gate (scripts/lib/no_allocator_link_gate.py, Layer Q.0n)
+# judges a linked ELF's symbol table and refuses a table its `nm` left
+# mangled; a distribution `arm-none-eabi-nm` can predate the v0 mangling, as the
+# hosted cross runner's did. The gate takes this component's `llvm-nm` first.
+#
 # workspace MSRV (crates/Cargo.toml rust-version = 1.81) is a separate,
 # lower-bound contract for downstream consumers; this pin is the build compiler.
 [toolchain]
 channel = "1.97.0"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "llvm-tools"]
 targets = [
     "thumbv6m-none-eabi",
     "thumbv7m-none-eabi",
