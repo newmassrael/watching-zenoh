@@ -48,6 +48,14 @@
 //! Host-test level: no board runs it, and the stack the slot takes is not
 //! measured here.
 
+// Not on the slot profile WITH `reassembly`: there `SessionPump::new` does not
+// exist, because the pump's staging table must lie in a cell of the pump table
+// (`PumpSlots::claim`), and this file builds its pumps with `new`. The same windows
+// on that profile are `session_pump_allocations`', whose pumps are claimed from a
+// table. The slot profile without `reassembly` is this file's and is built and run
+// by the C1m leg that names it; clippy builds the other, which is why the gate is
+// here and not at the use.
+#![cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 // A refused claim hands back what it was offered, a whole driver and its socket,
 // which is what makes the refusal free of the heap; boxing it would allocate.
 #![allow(clippy::result_large_err)]
