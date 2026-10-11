@@ -1681,6 +1681,145 @@ static int check_transport_build_door(void) {
     return 0;
 }
 
+/* (ABI 32) -- the SAME report for a unit the consumer already holds.
+ *
+ * The unit is a captured Frame typed by hand (a 16-bit prefix, then R set,
+ * sequence number 5, payload dead). What is held here is what a LINKING
+ * consumer that mutates captured frames needs: the rows say where a field is
+ * and what it is, a field changed from the report alone is read back changed
+ * and nothing else is, the report is the build door's for the same message, a
+ * lie about the length is a refusal that says so, and a caller's bug is a code
+ * and no string. */
+static int check_transport_layout_door(void) {
+    static const unsigned char captured[6] = {0x04, 0x00, 0x25, 0x05, 0xDE, 0xAD};
+    static const char opening[] =
+        "{\"document\":{\"name\":\"transport_layout\",\"revision\":1},"
+        "\"ok\":true,\"prefix_bytes\":2,\"body_bytes\":4,\"layout\":["
+        "{\"name\":\"unit_length\",\"kind\":\"length\",\"offset\":0,\"width\":2,"
+        "\"relative_to\":\"unit\",\"encoding\":\"fixed\",\"value\":4,";
+    static const char description[] =
+        "{\"message\":\"frame\",\"reliable\":true,\"sn\":5,\"payload\":\"dead\"}";
+    unsigned char unit[6];
+    char *doc = NULL;
+    char *built = NULL;
+    char *json = NULL;
+    const char *at;
+    unsigned offset = 0;
+    unsigned width = 0;
+    int rc;
+
+    memcpy(unit, captured, sizeof unit);
+    rc = wz_dissect_transport_layout(unit, sizeof unit,
+                                     WZ_DISSECT_FRAMING_TCP_STREAM, NULL, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "transport_layout rc=%d", rc);
+    CHECK(doc != NULL, "OK came back with no string");
+    CHECK(strncmp(doc, opening, sizeof opening - 1) == 0,
+          "unexpected opening: %s", doc);
+
+    /* The report is the build door's, row for row: the text from `"layout"` to
+     * the end is the same for the same message and framing. */
+    rc = wz_dissect_transport_build(description, WZ_DISSECT_FRAMING_TCP_STREAM,
+                                    &built);
+    CHECK(rc == WZ_DISSECT_OK, "transport_build rc=%d", rc);
+    at = strstr(doc, "\"layout\":[");
+    CHECK(at != NULL, "no layout in the document: %s", doc);
+    CHECK(strstr(built, at) != NULL && strcmp(strstr(built, "\"layout\":["), at) == 0,
+          "the two doors must report the same rows:\n%s\n%s", doc, built);
+    wz_dissect_string_free(built);
+
+    /* Find the sequence number in the REPORT, and replace it with a value of
+     * the width the report gives. The offset is relative to the body, and the
+     * body is behind the prefix: no position is computed here. */
+    at = strstr(doc, "{\"name\":\"sn\",\"kind\":\"sequence_number\",\"offset\":");
+    CHECK(at != NULL, "no sn row in the report: %s", doc);
+    CHECK(sscanf(at, "{\"name\":\"sn\",\"kind\":\"sequence_number\",\"offset\":%u,"
+                     "\"width\":%u",
+                 &offset, &width) == 2,
+          "the sn row must give an offset and a width: %s", at);
+    CHECK(width == 1 && strstr(at, "\"encoding\":\"vle\",\"value\":5,\"min\":0,"
+                                   "\"max\":127,\"bit_mask\":null,\"carrier\":null,"
+                                   "\"stored\":null,\"measures\":null,"
+                                   "\"ring_max\":null") != NULL,
+          "the row must say the sn is a one-byte VLE that 0..127 keeps: %s", at);
+    wz_dissect_string_free(doc);
+    unit[2 + offset] = 9;
+    doc = NULL;
+    rc = wz_dissect_transport_layout(unit, sizeof unit,
+                                     WZ_DISSECT_FRAMING_TCP_STREAM, "16bit", &doc);
+    CHECK(rc == WZ_DISSECT_OK, "mutated unit rc=%d", rc);
+    at = strstr(doc, "{\"name\":\"sn\",\"kind\":\"sequence_number\"");
+    CHECK(at != NULL && strstr(at, "\"value\":9,\"min\":0,\"max\":127") != NULL &&
+              strstr(at, "\"ring_max\":16383,\"ring_max_width\":2") != NULL,
+          "the replaced unit must report sn 9 on the named ring: %s", doc);
+    wz_dissect_string_free(doc);
+    /* The reading door agrees: only the sequence number changed. */
+    rc = wz_dissect_transport_message(unit + 2, sizeof unit - 2, 0, &json);
+    CHECK(rc == WZ_DISSECT_OK, "reading the mutated body rc=%d", rc);
+    CHECK(strstr(json, "\"name\":\"sn\",\"start\":1,\"end\":2,\"kind\":\"uint\","
+                       "\"value\":9}") != NULL &&
+              strstr(json, "\"name\":\"payload\"") != NULL,
+          "the replacement must change the sn and nothing else: %s", json);
+    wz_dissect_string_free(json);
+
+    /* A length that no longer matches is a REFUSAL, a value and not a code:
+     * the report says `unit_length` measures the body, and would be lying. */
+    unit[0] = 5;
+    doc = NULL;
+    rc = wz_dissect_transport_layout(unit, sizeof unit,
+                                     WZ_DISSECT_FRAMING_TCP_STREAM, NULL, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "a lying prefix is answered, rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false,\"reason\":\"") != NULL &&
+              strstr(doc, "announces 5 bytes and 4 follow it") != NULL &&
+              strstr(doc, "\"layout\"") == NULL,
+          "the refusal must say what the prefix and the bytes disagree about: %s",
+          doc);
+    wz_dissect_string_free(doc);
+
+    /* Bytes cut inside a field, and a message the report does not cover. */
+    doc = NULL;
+    /* The Frame's header byte alone: its sequence number is missing. */
+    rc = wz_dissect_transport_layout(captured + 2, 1,
+                                     WZ_DISSECT_FRAMING_DATAGRAM, NULL, &doc);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(doc, "\"ok\":false,\"reason\":\"") != NULL &&
+              strstr(doc, "\"layout\"") == NULL,
+          "a cut message is a refusal: rc=%d %s", rc, doc ? doc : "(null)");
+    wz_dissect_string_free(doc);
+    {
+        static const unsigned char join[8] = {0x07, 0, 0, 0, 0, 0, 0, 0};
+        doc = NULL;
+        rc = wz_dissect_transport_layout(join, sizeof join,
+                                         WZ_DISSECT_FRAMING_DATAGRAM, NULL, &doc);
+        CHECK(rc == WZ_DISSECT_OK && strstr(doc, "\"ok\":false") != NULL &&
+                  strstr(doc, "`Join`") != NULL,
+              "a Join is refused by name: rc=%d %s", rc, doc ? doc : "(null)");
+        wz_dissect_string_free(doc);
+    }
+
+    /* A caller's bug is a code and no string. */
+    doc = NULL;
+    rc = wz_dissect_transport_layout(captured, sizeof captured, 3, NULL, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "an unnamed framing rc=%d", rc);
+    rc = wz_dissect_transport_layout(captured, sizeof captured,
+                                     WZ_DISSECT_FRAMING_TCP_STREAM, "7bit", &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "an unknown ring rc=%d", rc);
+    rc = wz_dissect_transport_layout(NULL, 3, WZ_DISSECT_FRAMING_DATAGRAM, NULL,
+                                     &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "null bytes with a length rc=%d", rc);
+    rc = wz_dissect_transport_layout(captured, sizeof captured,
+                                     WZ_DISSECT_FRAMING_TCP_STREAM, NULL, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+    rc = wz_dissect_transport_layout(NULL, 0, WZ_DISSECT_FRAMING_DATAGRAM, NULL,
+                                     &doc);
+    CHECK(rc == WZ_DISSECT_OK && strstr(doc, "\"ok\":false") != NULL,
+          "no bytes at all is a refusal: rc=%d", rc);
+    wz_dissect_string_free(doc);
+    return 0;
+}
+
 /* (ABI 27) -- ONE message, read in the light of its session's context.
  *
  * The messages are the smallest complete ones of two network MIDs, laid out
@@ -2484,7 +2623,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[11];
+    } revisioned[12];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -2873,6 +3012,19 @@ int main(void) {
                                     WZ_DISSECT_FRAMING_DATAGRAM,
                                     &revisioned[10].doc);
     CHECK(rc == WZ_DISSECT_OK, "transport_build document rc=%d", rc);
+    /* (ABI 32) -- the layout document of a unit already held. 1: the first
+     * revision a consumer could read. Built from a KeepAlive, the smallest
+     * message there is, as the build document above is. */
+    revisioned[11].name = "transport_layout";
+    revisioned[11].revision = 1;
+    revisioned[11].doc = NULL;
+    {
+        static const unsigned char keepalive_unit[1] = {0x04};
+        rc = wz_dissect_transport_layout(keepalive_unit, sizeof keepalive_unit,
+                                         WZ_DISSECT_FRAMING_DATAGRAM, NULL,
+                                         &revisioned[11].doc);
+        CHECK(rc == WZ_DISSECT_OK, "transport_layout document rc=%d", rc);
+    }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -2990,6 +3142,12 @@ int main(void) {
     /* (ABI 30) -- and a transport message built from the fields the consumer
      * sets, whose report says where each of them sits. */
     if (check_transport_build_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 32) -- and the same report for a unit the consumer already holds,
+     * which is what a program that mutates captured frames asks. */
+    if (check_transport_layout_door() != 0) {
         return 1;
     }
 

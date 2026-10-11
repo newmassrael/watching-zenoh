@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -865,14 +865,15 @@
  * latency object (keys that exist from census revision 17 and take the rule
  * from their first appearance: `total_ns` is a SUM, and 2^53 nanoseconds is 104
  * days of summed latency, which a long capture of many exchanges reaches); to
- * the `value`, `min`, `max`, `stored` and `ring_max` of a `transport_build`
- * layout row (that document takes the rule from its first revision: a sequence
- * number or a lease can be eight bytes, and the top of a nine-byte VLE is
- * 2^64 - 1); and to
+ * the `value`, `min`, `max`, `stored` and `ring_max` of a `transport_build` or
+ * `transport_layout` layout row (those documents take the rule from their first
+ * revision: a sequence number or a lease can be eight bytes, and the top of a
+ * nine-byte VLE is 2^64 - 1); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
- * 16, summary 5, retention 2, e2e_wrap 1, e2e_open 1, transport_build 1.
+ * 16, summary 5, retention 2, e2e_wrap 1, e2e_open 1, transport_build 1,
+ * transport_layout 1.
  * The gap total saturates at the top of `u64` instead of wrapping.
  *
  * @values fields carried_state
@@ -1524,7 +1525,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 31
+#define WZ_DISSECT_ABI_REVISION 32
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -3522,6 +3523,142 @@ int wz_dissect_e2e_open_body(const char *profile_json, const char *body_json,
  * callback runs. */
 int wz_dissect_transport_build(const char *description_json, int framing,
                                char **out);
+
+/* (ABI 32) -- THE REPORT OF A TRANSPORT MESSAGE THAT ALREADY EXISTS: the rows
+ * wz_dissect_transport_build gives the bytes it built, for a unit you hold.
+ *
+ * WHY IT IS HERE. wz_dissect_transport_message says, for a captured message,
+ * each field's name, span and value. It does not say what a field IS (a length,
+ * a sequence number, reserved bits, a flag), which bits of a byte it owns, or
+ * what a length counts, and that is exactly what a program that MUTATES a
+ * captured frame has to know before it changes one. The report existed, and
+ * only for bytes wz_dissect_transport_build had just made. A program without a
+ * door for existing bytes rebuilt the frame from dissected values, which puts a
+ * second decoder and a second encoder of the format in its tree, or kept its own
+ * table of what each field means. This door answers for the bytes as they
+ * stand, by the function and the renderer the build door answers by: ONE row
+ * shape, ONE set of closed vocabularies, ONE integer rule, so what you read for
+ * a built unit you read for a captured one, and a unit you build and feed back
+ * here reports the same rows byte for byte.
+ *
+ * ARGUMENTS.
+ *
+ *   bytes, len      ONE unit as the framing writes it: the framing's length
+ *                   prefix, if it has one, then a transport message. `bytes`
+ *                   may be NULL when `len` is 0 (the answer is then a refusal).
+ *                   Splitting a stream into units is yours, or the field
+ *                   document's.
+ *   framing         one of the WZ_DISSECT_FRAMING_* constants, as for
+ *                   wz_dissect_transport_build, and refused the same way
+ *                   (WZ_DISSECT_ERR_INVALID_ARG, never a quiet fall back to
+ *                   datagram).
+ *   sn_resolution   the ring the session's sequence numbers live on, as one of
+ *                   "8bit", "16bit", "32bit" or "64bit" -- the words a
+ *                   handshake's `sn_res_frame_sn` reads as, so a resolution read
+ *                   off a captured INIT passes through unchanged -- or NULL when
+ *                   you do not know it. Named, a sequence number's row carries
+ *                   `ring_max` and `ring_max_width` as the build document does;
+ *                   NULL, it carries null, and nothing else in the document
+ *                   moves. Any other string is WZ_DISSECT_ERR_INVALID_ARG: the
+ *                   words are the library's, so one it does not know is a bug
+ *                   and not a ring.
+ *
+ * THE DOCUMENT (revision 1). The same rows as the transport_build document's
+ * `layout`, key for key, in the same order, rendered by the same function:
+ *
+ *     {"document":{"name":"transport_layout","revision":1},"ok":true,
+ *      "prefix_bytes":2,"body_bytes":4,
+ *      "layout":[{"name":"unit_length","kind":"length","offset":0,"width":2,
+ *                 "relative_to":"unit","encoding":"fixed","value":4,"min":0,
+ *                 "max":65535,"bit_mask":null,"carrier":null,"stored":null,
+ *                 "measures":"body","ring_max":null,"ring_max_width":null},
+ *                ...]}
+ *
+ * for the unit 04 00 25 05 de ad as WZ_DISSECT_FRAMING_TCP_STREAM (a Frame, R
+ * set, sequence number 5, payload dead). `prefix_bytes` is the width of the
+ * framing's prefix and `body_bytes` the bytes behind it, so a row relative to
+ * `body` is at `prefix_bytes + offset` in the unit you passed. The row keys, and
+ * the three vocabularies `kind`, `encoding` and `relative_to`, are described at
+ * wz_dissect_transport_build above: the same words with the same meaning, and the
+ * same revision rule -- a word added to one of them moves the document revision
+ * of BOTH documents in the round it is added, and the library holds the two
+ * documents to the same sets, so one cannot gain a word the other lacks. An
+ * integer cell past 2^53 is a string, as there.
+ *
+ * TO MUTATE A FIELD USING ONLY THE REPORT is the build document's recipe, to the
+ * letter: write `value` into `width` bytes at the offset, little-endian for a
+ * `fixed` row and as a VLE for a `vle` row, and into `bit_mask` of the byte at
+ * the offset for a bit-field. A value in `min`..`max` keeps the field's width. A
+ * length, a flag that says a part is present and the message id change what the
+ * REST of the message means when you replace them; the report says which they are
+ * by `kind` and name. Feed the mutated unit back to this door: a unit that still
+ * reads reports its new rows, and one that no longer reads is a refusal that says
+ * why, which is the answer a mutation tool wants.
+ *
+ * A REFUSAL IS A VALUE. For bytes the report cannot be given for, the door
+ * returns WZ_DISSECT_OK and writes
+ *
+ *     {"document":{"name":"transport_layout","revision":1},"ok":false,
+ *      "reason":"the tcp_stream framing's length prefix announces 4 bytes and 3 follow it: the unit is cut short or holds more than one message",
+ *      "message":"..."}
+ *
+ * for 04 00 25 05 de as WZ_DISSECT_FRAMING_TCP_STREAM, with `message` the
+ * one-line form (today the same text as `reason`). It is never a truncated
+ * report, never a report with some rows guessed, and never a null at the top
+ * level. The keys are `document`, `ok`, `reason` and `message` and nothing else,
+ * because the refusal is about the bytes as a whole and the walker does not name
+ * where a read gave out. `reason` is for a person: do not parse it. The bytes are
+ * refused when
+ *
+ *   - they do not read as a transport message (they end inside a field, a
+ *     length runs past the end, an extension chain is too long);
+ *   - their Z flag says an extension chain follows and no byte does (a message
+ *     cut at the end of its fixed part);
+ *   - they read as a message the report does not cover: Join, Oam, or a message
+ *     id the transport space does not name. The report covers Init, Open, Close,
+ *     KeepAlive, Frame and Fragment, which is every message transport_build
+ *     builds. On a LowLatency link the messages after the handshake are NETWORK
+ *     messages, which are not transport messages: wz_dissect_transport_message_in
+ *     reads those;
+ *   - a stream framing's prefix does not announce exactly the bytes behind it.
+ *     The report says `unit_length` measures `body`, and a prefix that does not
+ *     would make that a lie, so a capture cut short, or one that holds the start
+ *     of the next unit, is refused with both numbers. Pass the message alone as
+ *     WZ_DISSECT_FRAMING_DATAGRAM to have its rows regardless;
+ *   - bytes follow a message that has no tail (everything but Frame and
+ *     Fragment). A Frame or a Fragment keeps its tail as ONE row, `payload`, so
+ *     bytes after it are payload, and a datagram cut inside the payload is a
+ *     shorter message and is reported as one;
+ *   - a VLE is not the shortest encoding of its value (a sequence number 5
+ *     written in two bytes). The format reads it and the row's `min` and `max`
+ *     would be wrong about its width, so it is refused by field and not reported
+ *     with wrong bounds.
+ *
+ * A network message carried by a Frame is the `payload` row, as for the build
+ * door: the carried bytes are yours, and wz_dissect_transport_message reads them.
+ * A sequence number above the ring you named is REPORTED: `value` above
+ * `ring_max` is a fact about the session and not about the bytes, and you compare
+ * the two.
+ *
+ * `kind`, `encoding` and `relative_to` are PASSENGERS here as they are there:
+ * every row carries every key whichever word it has.
+ *
+ * @values transport_layout kind
+ * @values transport_layout encoding
+ * @values transport_layout relative_to
+ * @carries transport_layout encoding passenger
+ * @carries transport_layout kind passenger
+ * @carries transport_layout relative_to passenger
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a caller bug: a null
+ * `out`, a null `bytes` with a non-zero `len`, a `framing` no constant names, or
+ * an `sn_resolution` that is not NULL and not one of the four words. The memory
+ * rule does not move: the document is a `char*` released by
+ * wz_dissect_string_free, the bytes are read for the call and not kept, nothing
+ * is retained between calls, and no callback runs. */
+int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
+                                int framing, const char *sn_resolution,
+                                char **out);
 
 /* R311y913 (ABI 9) — what this build can READ, without a capture.
  *

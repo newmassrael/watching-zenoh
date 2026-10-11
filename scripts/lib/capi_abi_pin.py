@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 31
+EXPECTED_VERSION = 32
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -280,6 +280,15 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, the frame crosses as bytes the CALLER holds,
     # nothing is retained between calls, and no callback runs.
     "wz_dissect_e2e_open_body",
+    # (ABI 32) -- the STRUCTURAL REPORT of a transport message that ALREADY
+    # EXISTS (a captured frame), in the rows `wz_dissect_transport_build` gives
+    # the bytes it built, so a consumer that mutates a captured frame knows what
+    # each field means without rebuilding the frame from dissected values. The
+    # unit crosses as bytes the CALLER holds and the ring as one of four words
+    # (or null), so no struct. The memory rule does not move: the document is a
+    # `char*` released by `wz_dissect_string_free`, nothing is retained between
+    # calls, and no callback runs.
+    "wz_dissect_transport_layout",
     # (ABI 28) -- ONE key expression, judged. A consumer asking about a single
     # pattern had to build a declaration line (`pattern=format`) to reach the
     # diagnostic door above, which reads a `:` in the pattern as a field-name

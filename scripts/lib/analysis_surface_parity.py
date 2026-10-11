@@ -431,6 +431,19 @@ ONLY_CAPI = {
         "a capture already holds; neither builds a message from fields.",
         (),
     ),
+    "the structural report of a transport message that already exists": (
+        "wz_dissect_transport_layout",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and mutates a captured frame (a length, a sequence number, reserved "
+        "bits) must know what each field MEANS without rebuilding the frame "
+        "from dissected values, which would put a second decoder and encoder in "
+        "its tree. It is the reading half of the report "
+        "`wz_dissect_transport_build` gives the bytes it built, in the same rows "
+        "and the same closed vocabularies. The command line analyses captures "
+        "and mutates nothing, and `wz-replay` mutates bytes without asking what "
+        "a field is; neither reports a message's fields by kind.",
+        (),
+    ),
     "declarations written from a .proto schema": (
         "wz_dissect_declarations_from_proto",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "

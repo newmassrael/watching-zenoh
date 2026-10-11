@@ -360,6 +360,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // where each field sits.
     // 31, for `wz_dissect_e2e_open_body`: a protected frame opened with its
     // body read by the types of a `.proto` schema.
+    // 32, for `wz_dissect_transport_layout`: the structural report of a
+    // transport message that already exists, in the row shape the build door
+    // reports the bytes it built.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -377,7 +380,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 31;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 32;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2246,6 +2249,100 @@ pub unsafe extern "C" fn wz_dissect_transport_build(
     )
 }
 
+/// THE STRUCTURAL REPORT OF A TRANSPORT MESSAGE THAT ALREADY EXISTS: the same
+/// rows [`wz_dissect_transport_build`] gives the bytes it builds, for a unit a
+/// caller holds (a captured frame).
+///
+/// # Why this is a door
+///
+/// [`wz_dissect_transport_message`] reads a message and says each field's name,
+/// span and value; it does not say what a field IS (a length, a sequence number,
+/// reserved bits, a flag), which bits of a byte it owns, or what a length counts.
+/// That is the build door's report, and it was given only for bytes the door had
+/// just built. A program that mutates a captured frame (a length, a sequence
+/// number, a reserved bit) and has to know what each field means either rebuilt
+/// the frame from the dissected values, which puts a second decoder and encoder
+/// in its tree, or kept its own table of the format. This door reports bytes as
+/// they stand, by the function and the renderer the build door reports by, so the
+/// two answer the same bytes with the same rows: the closed vocabularies (`kind`,
+/// `encoding`, `relative_to`), the cells, the integer rule and the revision rule
+/// are the build document's, held equal by the library's own gates.
+///
+/// # Arguments
+///
+/// * `bytes`, `len` -- ONE unit as the framing writes it: the framing's length
+///   prefix, if it has one, then a transport message. `bytes` may be null when
+///   `len` is 0 (the answer is then a refusal). Splitting a stream into units is
+///   the caller's.
+/// * `framing` -- one of the `WZ_DISSECT_FRAMING_*` constants, as for the build
+///   door.
+/// * `sn_resolution` -- the ring the session's sequence numbers live on, as one of
+///   the words `"8bit"`, `"16bit"`, `"32bit"`, `"64bit"` (the words a handshake's
+///   `sn_res_frame_sn` reads as), or null when the caller does not know it. Named,
+///   the sequence-number rows carry `ring_max` and `ring_max_width`; null, they
+///   carry `null`, and nothing else in the document changes.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a `transport_layout` document for any bytes this
+/// function was handed: `ok:true` with `prefix_bytes`, `body_bytes` and `layout`,
+/// or `ok:false` with a `reason` when the bytes cannot be reported, a refusal as
+/// a VALUE and never a truncated report. The refusals are bytes that do not read
+/// as a transport message, a message id the report does not cover (`Join`, `Oam`
+/// and ids the transport space does not name), a stream prefix that does not
+/// announce exactly the bytes behind it, bytes after a message that has no tail,
+/// a Z flag with no extension after it, and a VLE that is not the shortest
+/// encoding of its value. See `wz_dissect.h` for each.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `out`, a null `bytes` with a non-zero
+/// `len`, a `framing` no constant names, or a `sn_resolution` that is not null,
+/// UTF-8 and one of the four words: the caller's own bug and not bytes a link
+/// delivered.
+///
+/// # Safety
+/// `bytes` must be readable for `len` bytes (or null when `len` is 0),
+/// `sn_resolution` null or a NUL-terminated C string, and `out` a writable
+/// pointer to a `*mut c_char`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_transport_layout(
+    bytes: *const u8,
+    len: usize,
+    framing: c_int,
+    sn_resolution: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if out.is_null() || (bytes.is_null() && len != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(framing) = framing_from_abi(framing) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let ring_max = if sn_resolution.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above; non-null was checked just now.
+        let Ok(word) = (unsafe { std::ffi::CStr::from_ptr(sn_resolution) }).to_str() else {
+            return WZ_DISSECT_ERR_INVALID_ARG;
+        };
+        match wz_capture::transport_layout_json::ring_max_of(word) {
+            Some(ring) => Some(ring),
+            None => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    let unit: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null was checked just now.
+        unsafe { core::slice::from_raw_parts(bytes, len) }
+    };
+    write_string(
+        wz_capture::transport_layout_json::layout_document(unit, framing, ring_max),
+        out,
+    )
+}
+
 /// R311y854 — the census NARROWED by a selector, wz's own filter language.
 ///
 /// `selector` is a NUL-terminated expression in the dialect
@@ -3728,6 +3825,10 @@ mod tests {
     /// `wz_dissect_transport_build` across the boundary: the mechanism is held in
     /// `wz-capture`, and this file holds what the ABI adds to it.
     mod transport_build;
+
+    /// `wz_dissect_transport_layout` across the boundary: the same report for
+    /// bytes that already exist, held against the build door through this ABI.
+    mod transport_layout;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -7158,7 +7259,10 @@ mod tests {
         // 31, for `wz_dissect_e2e_open_body`: one symbol, a `char*` released by
         // `wz_dissect_string_free`, and no struct; the schema crosses as JSON
         // text the caller already holds.
-        assert_eq!(wz_dissect_abi_version(), 31);
+        // 32, for `wz_dissect_transport_layout`: one symbol, a `char*` released
+        // by `wz_dissect_string_free`, and no struct; the unit crosses as bytes
+        // the caller already holds and the ring as a word.
+        assert_eq!(wz_dissect_abi_version(), 32);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -7903,6 +8007,10 @@ mod tests {
             // Every shape the transport build door writes: a built message in
             // each framing, and the refusals by key, by value and by framing.
             (rev::TRANSPORT_BUILD, transport_build::documents()),
+            // Every shape the layout door writes: a report in each framing and
+            // the refusals for bytes that do not read, a prefix that lies and a
+            // message the report does not cover.
+            (rev::TRANSPORT_LAYOUT, transport_layout::documents()),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
             (rev::RETENTION, retention_documents()),
@@ -8073,6 +8181,14 @@ mod tests {
                     .next()
                     .expect("a document"),
             ),
+            // Declares no plane either, for the same reason: the same rows.
+            (
+                rev::TRANSPORT_LAYOUT,
+                transport_layout::documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             // Declares no plane, so it contributes no `@planes` marker,
             // and being in this table is what makes that a checked fact.
             (
@@ -8230,6 +8346,9 @@ mod tests {
             // a built message, a refusal by key and one that names no key, and
             // the `null` cells of a layout row are not a top-level plane.
             (rev::TRANSPORT_BUILD, transport_build::documents()),
+            // Every shape the layout door writes, for the same reason: a report
+            // and each refusal, and neither writes a top-level `null`.
+            (rev::TRANSPORT_LAYOUT, transport_layout::documents()),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
             // With a clock and without, for the reason `retention_documents` gives.

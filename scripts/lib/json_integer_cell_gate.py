@@ -88,6 +88,7 @@ RULE_REVISION: dict[str, int] = {
     "e2e_wrap": 1,
     "e2e_open": 1,
     "transport_build": 1,
+    "transport_layout": 1,
 }
 
 
@@ -230,12 +231,17 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ),
     # ONE call writes every integer cell of a layout row, through the helper
     # that also writes the `null` of a cell that does not apply, so the five keys
-    # are declared as the one cell the call is.
-    ("crates/wz-capture/src/transport_build_json.rs", "push_cell"): (
+    # are declared as the one cell the call is. The helper is in the module that
+    # renders the rows of BOTH layout documents (`transport_build` and
+    # `transport_layout`), so the cell is declared once, under the first of them,
+    # and the header phrase and the `transport_layout` row name it as well, on
+    # the precedent the protected-frame documents set for their shared field
+    # helper.
+    ("crates/wz-capture/src/transport_layout_json.rs", "push_cell"): (
         Cell(
             "transport_build",
             "a layout row's value, min, max, stored and ring_max",
-            "the `value`, `min`, `max`, `stored` and `ring_max` of a `transport_build` layout row",
+            "the `value`, `min`, `max`, `stored` and `ring_max` of a `transport_build` or `transport_layout` layout row",
             "a layout row's `value`, `min`, `max`, `stored` and `ring_max`",
         ),
     ),
