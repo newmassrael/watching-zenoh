@@ -88,6 +88,16 @@ pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
     docs
 }
 
+/// The corpus as (label, description, the ring its description names), for the
+/// tests of the door that reads bytes that already exist: the messages it is
+/// held against are the ones the build door is held against, not a second list.
+pub(crate) fn corpus_descriptions() -> Vec<(String, String, Option<u64>)> {
+    corpus()
+        .into_iter()
+        .map(|case| (case.label, case.json, case.ring))
+        .collect()
+}
+
 // ----------------------------------------------------------------- corpus
 
 /// What a dissection must read.

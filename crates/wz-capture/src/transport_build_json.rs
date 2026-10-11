@@ -19,6 +19,10 @@
 //!
 //! # One shape for every row
 //!
+//! The rows are rendered by `transport_layout_json::push_layout`, which
+//! the `transport_layout` document (the same report for bytes that already
+//! exist) renders by as well.
+//!
 //! Every row carries EVERY key. A key that does not apply to the row is `null`
 //! inside the row, and the row keeps its shape: a consumer reads `bit_mask` of
 //! a length or of a flag without asking which it has, and a revision that adds
@@ -45,69 +49,19 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use wz_session_core::json::{escape_into, u64_into};
+use wz_session_core::json::escape_into;
 use wz_session_core::transport_compose::Framing;
 
 use crate::doc_revision::{envelope, TRANSPORT_BUILD};
 use crate::e2e_profile::DocError;
 use crate::transport_build::{build, BuildError, Built};
-use crate::transport_layout::{LayoutError, Row};
+use crate::transport_layout::LayoutError;
+use crate::transport_layout_json::push_layout;
 
 fn push_hex(bytes: &[u8], out: &mut String) {
     for b in bytes {
         let _ = write!(out, "{b:02x}");
     }
-}
-
-/// One integer cell: the number, a string past 2^53, or `null`.
-fn push_cell(key: &str, cell: Option<u64>, out: &mut String) {
-    let _ = write!(out, ",\"{key}\":");
-    match cell {
-        Some(v) => u64_into(v, out),
-        None => out.push_str("null"),
-    }
-}
-
-fn push_text_cell(key: &str, cell: Option<&str>, out: &mut String) {
-    let _ = write!(out, ",\"{key}\":");
-    match cell {
-        Some(text) => escape_into(text, out),
-        None => out.push_str("null"),
-    }
-}
-
-fn push_row(row: &Row, out: &mut String) {
-    out.push_str("{\"name\":");
-    escape_into(&row.name, out);
-    let _ = write!(
-        out,
-        ",\"kind\":\"{}\",\"offset\":{},\"width\":{},\"relative_to\":\"{}\",\"encoding\":\"{}\"",
-        row.kind.word(),
-        row.offset,
-        row.width,
-        row.relative_to.word(),
-        row.encoding.word(),
-    );
-    push_cell("value", row.value, out);
-    push_cell("min", row.min, out);
-    push_cell("max", row.max, out);
-    match row.bit_mask {
-        Some(mask) => {
-            let _ = write!(out, ",\"bit_mask\":{mask}");
-        }
-        None => out.push_str(",\"bit_mask\":null"),
-    }
-    push_text_cell("carrier", row.carrier.as_deref(), out);
-    push_cell("stored", row.stored, out);
-    push_text_cell("measures", row.measures.as_deref(), out);
-    push_cell("ring_max", row.ring_max, out);
-    match row.ring_max_width {
-        Some(width) => {
-            let _ = write!(out, ",\"ring_max_width\":{width}");
-        }
-        None => out.push_str(",\"ring_max_width\":null"),
-    }
-    out.push('}');
 }
 
 fn refuse_text(head: &str, error: &DocError) -> String {
@@ -154,6 +108,9 @@ fn layout_reason(error: &LayoutError) -> String {
         LayoutError::Unreadable(why) => {
             alloc::format!("the bytes built could not be read back for the layout: {why}")
         }
+        LayoutError::NotCovered { name, mid } => alloc::format!(
+            "the bytes built read as message id {mid} (`{name}`), which the report does not cover"
+        ),
         LayoutError::Unclassified { name } => alloc::format!(
             "the layout has a field `{name}` this build does not classify; the bytes are \
              built but their report cannot be given"
@@ -179,14 +136,9 @@ fn success(head: &str, built: &Built) -> String {
     push_hex(&built.unit, &mut out);
     out.push_str("\",\"body\":\"");
     push_hex(&built.body, &mut out);
-    out.push_str("\",\"layout\":[");
-    for (i, row) in built.layout.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        push_row(row, &mut out);
-    }
-    out.push_str("]}");
+    out.push_str("\",");
+    push_layout(&built.layout, &mut out);
+    out.push('}');
     out
 }
 

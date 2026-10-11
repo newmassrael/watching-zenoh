@@ -390,6 +390,12 @@ pub mod transport_build_json;
 mod transport_build_tests;
 #[cfg(feature = "dissect")]
 pub mod transport_layout;
+// The same report for bytes that already exist (a captured frame): the document
+// that renders `transport_layout`'s rows, which the build document renders by too.
+#[cfg(feature = "dissect")]
+pub mod transport_layout_json;
+#[cfg(all(test, feature = "dissect"))]
+mod transport_layout_json_tests;
 /// A fragment chain read by a reader that never saw the session's InitAck, so
 /// does not know the sequence-number ring: the chains whose every step is `+1`
 /// are reassembled, and a step only a ring could judge ends the chain as

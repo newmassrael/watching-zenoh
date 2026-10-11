@@ -2392,6 +2392,31 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: TRANSPORT_BUILD_R1_CARRIES,
     },
+    // The structural report of transport message bytes that ALREADY EXIST (a
+    // captured frame), in the row shape `transport_build` gives the bytes it
+    // built, or the reason the bytes could not be reported.
+    //
+    // Its two branches share the envelope and `ok`. The refusal is about the
+    // bytes as a whole, so it names no position: `reason` and `message` only. The
+    // success branch is the same list of rows, every key present on every row,
+    // with `prefix_bytes` and `body_bytes` beside it. The three vocabularies
+    // (`kind`, `encoding`, `relative_to`) are the SAME three as `transport_build`
+    // declares, passengers by the same construction, held to the same walks by
+    // `the_declared_value_families_match_the_librarys_own_vocabularies` and to
+    // each other by `the_layout_documents_vocabularies_are_the_build_documents`.
+    //
+    // It takes the integer rule from its first revision, for the cells that can
+    // reach 2^53: a layout row's `value`, `min`, `max`, `stored` and `ring_max`,
+    // written by the one function that writes the rows of both documents.
+    DocumentShape {
+        document: TRANSPORT_LAYOUT,
+        revision: 1,
+        keys: TRANSPORT_LAYOUT_R1_KEYS,
+        retiring: &[],
+        families: TRANSPORT_LAYOUT_R1_FAMILIES,
+        planes: &[],
+        carries: TRANSPORT_LAYOUT_R1_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -2714,6 +2739,9 @@ pub const PROTO_ENCODE: &str = "proto_encode";
 /// A transport message built from a description, with the structural report of
 /// its bytes, or why it was refused (`wz_dissect_transport_build`).
 pub const TRANSPORT_BUILD: &str = "transport_build";
+/// The structural report of transport message bytes that already exist, or why
+/// it could not be given (`wz_dissect_transport_layout`).
+pub const TRANSPORT_LAYOUT: &str = "transport_layout";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
@@ -9443,6 +9471,79 @@ pub const TRANSPORT_BUILD_R1_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The `transport_layout` document's key set at revision 1, over BOTH branches:
+/// the report with its row keys, and the refusal.
+///
+/// Spelled out beside `TRANSPORT_BUILD_R1_KEYS` and not built from it, for the
+/// reason `CENSUS_R3_KEYS` gives: a pin that follows its subject is not a pin.
+/// `the_layout_documents_vocabularies_are_the_build_documents` holds the row keys
+/// of the two documents to each other.
+pub const TRANSPORT_LAYOUT_R1_KEYS: &[&str] = &[
+    "bit_mask",
+    "body_bytes",
+    "carrier",
+    "document",
+    "encoding",
+    "kind",
+    "layout",
+    "max",
+    "measures",
+    "message",
+    "min",
+    "name",
+    "offset",
+    "ok",
+    "prefix_bytes",
+    "reason",
+    "relative_to",
+    "revision",
+    "ring_max",
+    "ring_max_width",
+    "stored",
+    "value",
+    "width",
+];
+
+/// The `transport_layout` document's value families at revision 1: the SAME
+/// three, with the same words, as `TRANSPORT_BUILD_R1_FAMILIES`, because the rows
+/// are the same rows. Each is walked against the type the report is built with
+/// (`transport_layout::Kind`, `Encoding`, `RelativeTo`) by
+/// `the_declared_value_families_match_the_librarys_own_vocabularies`, and the two
+/// documents' tables are held equal by
+/// `the_layout_documents_vocabularies_are_the_build_documents`, so a word added
+/// to one document cannot arrive without the other.
+pub const TRANSPORT_LAYOUT_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "encoding",
+        values: &["fixed", "vle"],
+    },
+    ValueFamily {
+        key: "kind",
+        values: &["flag", "length", "other", "reserved", "sequence_number"],
+    },
+    ValueFamily {
+        key: "relative_to",
+        values: &["body", "unit"],
+    },
+];
+
+/// All three families are PASSENGERS, as `transport_build`'s are: every layout
+/// row carries every key, so no word brings keys another word lacks.
+pub const TRANSPORT_LAYOUT_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "encoding",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "relative_to",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The selection document's key set at revision 1, over EVERY shape a row and
 /// the document take — the coordinates present or absent, `selected` present or
 /// absent.
@@ -13685,6 +13786,8 @@ mod tests {
             // A transport message built from a description, with the report
             // of its bytes.
             (TRANSPORT_BUILD, 1),
+            // The same report for bytes that already exist.
+            (TRANSPORT_LAYOUT, 1),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

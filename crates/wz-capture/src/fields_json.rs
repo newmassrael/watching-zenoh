@@ -6745,7 +6745,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 36] = [
+        let live: [(&str, &str, Vec<&'static str>); 39] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6910,6 +6910,25 @@ mod tests {
             ),
             (
                 rev::TRANSPORT_BUILD,
+                "relative_to",
+                crate::transport_layout::RelativeTo::names(),
+            ),
+            // The same three, declared again by the layout document that reports
+            // bytes which already exist, each held to the SAME walk the build
+            // document's is: two declarations of one vocabulary and one type
+            // behind both.
+            (
+                rev::TRANSPORT_LAYOUT,
+                "kind",
+                crate::transport_layout::Kind::names(),
+            ),
+            (
+                rev::TRANSPORT_LAYOUT,
+                "encoding",
+                crate::transport_layout::Encoding::names(),
+            ),
+            (
+                rev::TRANSPORT_LAYOUT,
                 "relative_to",
                 crate::transport_layout::RelativeTo::names(),
             ),
@@ -7543,12 +7562,15 @@ mod tests {
         // declares must measure as passengers, and this is the population that
         // would show a row that did not.
         let transport_docs = crate::transport_build_tests::documents_for_the_carries_gate();
+        // The layout document over the same population: every unit the build
+        // door makes, fed back through the door that reads existing bytes.
+        let layout_docs = crate::transport_layout_json_tests::documents_for_the_carries_gate();
         // The open door's document with a body read by its schema, over fields
         // the schema does not know in each of the four wire types: the field
         // carries the same keys whatever its wire type, so the family must
         // measure as a passenger, over all four words.
         let open_docs = crate::proto_decode_tests::documents_for_the_carries_gate();
-        let docs: [(&str, Vec<&String>); 8] = [
+        let docs: [(&str, Vec<&String>); 9] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -7562,6 +7584,7 @@ mod tests {
             ),
             (rev::KEYEXPR_DIAGNOSE, keyexpr_verdicts.iter().collect()),
             (rev::TRANSPORT_BUILD, transport_docs.iter().collect()),
+            (rev::TRANSPORT_LAYOUT, layout_docs.iter().collect()),
             (rev::E2E_OPEN, open_docs.iter().collect()),
         ];
 

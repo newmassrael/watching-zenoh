@@ -213,6 +213,16 @@ pub struct Row {
 pub enum LayoutError {
     /// The bytes do not dissect as a transport message this report covers.
     Unreadable(String),
+    /// The bytes read as a transport message whose fields this report does not
+    /// classify: `Join`, `Oam`, or a message id the transport space does not
+    /// name. The report covers [`COVERED_MESSAGES`] and nothing else, and says
+    /// so by refusing the rest, never by a guess at what their fields are.
+    NotCovered {
+        /// The dissector's name for the message (`Join`, `Oam`, `Unknown`).
+        name: String,
+        /// The message id, the low five bits of the first byte.
+        mid: u8,
+    },
     /// The dissector emitted a name the classification table does not hold.
     Unclassified {
         /// The dissector's name for it.
@@ -261,6 +271,10 @@ const SCOPES: [Scope; 7] = [
     Scope::Fragment,
     Scope::ExtEntry,
 ];
+
+/// The transport messages the report covers, by the words the dissector names
+/// them with: `scope_of` is the one table, and a test holds this list to it.
+pub const COVERED_MESSAGES: [&str; 6] = ["Init", "Open", "Close", "KeepAlive", "Frame", "Fragment"];
 
 fn scope_of(root: &str) -> Option<Scope> {
     Some(match MessageName::named(root)? {
@@ -617,6 +631,17 @@ fn level(
         }
         match &child.value {
             FieldValue::Nested(entries) if name == "extensions" => {
+                // The walker emits this group only for a message whose Z flag
+                // is set, and reads an empty chain when no byte is left to
+                // read one from. The flag says an entry follows, so bytes that
+                // end there are a message cut short and not one with no
+                // extensions: the report refuses them rather than describe a Z
+                // that points at nothing.
+                if entries.is_empty() {
+                    return Err(LayoutError::Unreadable(String::from(
+                        "the Z flag announces an extension chain and no byte follows it",
+                    )));
+                }
                 for (i, entry) in entries.iter().enumerate() {
                     let FieldValue::Nested(parts) = &entry.value else {
                         return Err(unclassified(&entry.name));
@@ -708,11 +733,10 @@ pub fn layout(
     let (head, body) = unit.split_at(prefix);
     let root = dissect_transport_message(body, 0)
         .map_err(|e| LayoutError::Unreadable(format!("{e:?}")))?;
-    let scope = scope_of(&root.name).ok_or_else(|| {
-        LayoutError::Unreadable(format!(
-            "`{}` is not one of the eight messages the report covers",
-            root.name
-        ))
+    let scope = scope_of(&root.name).ok_or_else(|| LayoutError::NotCovered {
+        name: String::from(&*root.name),
+        // The dissector read a header byte to name the message at all.
+        mid: body.first().map_or(0, |h| h & MID_MASK),
     })?;
     let FieldValue::Nested(children) = &root.value else {
         return Err(unclassified(&root.name));
