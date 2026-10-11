@@ -272148,6 +272148,78 @@
         "6. Layer C0 was red on the first preflight reading and I first took it for the machine's known stale oracle pin; it was the own-space lint, and it is green after the repair. Read a layer's log for the gate that failed before attributing a red to a standing cause."
       ]
     },
+    "Round 3293": {
+      "decision_summary": "Admin replies are built by one writer set into any TextOut: a String on the AP (bytes unchanged), a FixedText arena on the slot profile. The arena is per process, sized by process.admin_reply_bytes, because it is scratch (a GET is answered whole into the asking session's own stage before the next), not peer state, so Q7's per-session rule does not apply. A leg past the bound is refused, counted (AdminReplyRefusals) and answered as a typed Err reply; never cut, never a heap fallback. A staged reply is now bytes in the session's stage arena plus a fixed row (the owned record is built at the drain: codec mirrors, S9d), and dispatch_request lends the keyexpr (it was the one allocation per query). Node state is fixed rows (FixedNodeStatus/Identity, AdminHost) in admin_fixed behind session-slot. Validator: admin_reply_bytes <= reply_payload_bytes; new keys admin_locators, admin_session_links. Kept heap: the metrics leg (String registry) and the image shell (S9c).",
+      "changes_bullets": [
+        "wz-session-core:",
+        "text_out.rs (new): TextOut seam (String | FixedText<N>); FixedText latches overflow, counts needed bytes, finish() is Err past N; never cuts silently, never allocates. json.rs writers and escaper generic over TextOut; JsonStringBody escapes a string written in pieces.",
+        "adminspace.rs: every writer (local_data, keys, legs manifest, plugin/entity/status bodies, router legs) writes into any TextOut; rows read as borrowed views (AdminSessionRef, AdminMulticastPeerRef, AdminLinkList); one leg visitor (visit_admin_legs) feeds admin_legs() and the surface document; answer_admin_query_in builds into caller buffers and returns AdminAnswer; answer_admin_query and answer_router_admin_query are the same code over Strings (bytes unchanged); admin_unspoken_fields is a static slice; the metrics leg still builds a String (registry rendering).",
+        "admin_reply.rs (new): AdminBuffer, AdminReplyError (TooLarge, KeyTooLong, Refused), AdminReplyRefusals, AdminReplyArena<BODY> (per-process scratch; answer(), serve_leg()).",
+        "encoding.rs: encoding_parts_from_mime / write_encoding_mime_parts (borrowed parts, one MIME rendering). query_sink.rs: ReplyOut::reply_keyed_encoded_parts.",
+        "reply_stage.rs: ReplyParts funnel; fixed ReplyStage is rows + one byte arena (caps::REPLY_STAGE_BYTES); stage_parts refuses and counts; drain builds the owned QueryReply. query.rs: the 13 send_* arms build ReplyParts; QueryReply::from_parts; responder identity inline; dispatch_request lends the keyexpr (KeyexprBuf) instead of a String.",
+        "caps.rs: MAX_ADMIN_REPLY_BYTES, MAX_ADMIN_KEY_BYTES, MAX_ADMIN_LOCATORS, MAX_ADMIN_SESSION_LINKS, REPLY_STAGE_BYTES.",
+        "tests: admin_reply_fits.rs (3), admin_reply unit tests (7), json/text_out tests, session_slot_pool_deploy +1.",
+        "wz-session-mcu: admin_fixed.rs (new, session-slot): FixedNodeIdentity, FixedAdminSession, FixedNodeStatus, AdminHost, host_admin_queryable_fixed; ConfigView/ConnectStatusSource take &mut dyn TextOut; write_connect_status; CONNECT_STATUS_TAIL; adminspace-core implies query-reply-err; tests/admin_reply_fits.rs (4).",
+        "docs: the new module docs link by full crate path; wz-session-mcu lib.rs/connect_manager.rs name dial/admin_node/memory in code spans (absent under session-slot).",
+        "scripts/deploy: deploy_sessions.py (keys admin_locators, admin_session_links; admin_reply_bytes <= reply_payload_bytes; selftest cases), deploy/mcu_client_and_group.yaml, run-ci.sh (C1g 2 legs, C1m 1 leg, deploy guard 4->5), nondefault-tests-gate.sh (2 rows)."
+      ],
+      "verification_bullets": [
+        "RAN on the branch before integration (all through bx on build hosts, this host built nothing):",
+        "wz-session-core lib: default 542 passed; the adminspace set (metrics, stats, introspection, router-linkstate, plugins, config-hotreload) 706; fixed backing with adminspace-core and query-reply-err 1012, with the tests admin_reply_fits 3, reply_budget_refusal 4, bounded_heapless_backing 16, slot_observer_sessions 2, session_slot_pool_deploy 5; the session-slot set of the C1g leg 691.",
+        "wz-session-mcu: adminspace-core with adminspace-write default lib 20; session-slot with both adminspace features lib 8 and admin_reply_fits 4.",
+        "clippy -D warnings --all-targets clean: wz-session-core all features, fixed backing with adminspace-core and query-reply-err, the adminspace union with transport-shm; wz-session-mcu adminspace-core. fmt clean. deploy_sessions.py --selftest ok with 7 new cases; validate-deploy ok.",
+        "MUTANTS, each red then reverted: FixedText::finish answering Ok after overflow (a truncated reply delivered): 9 tests red; a heap copy of the body on the success path: the exact-bound test red (1 allocation against 0); the refusal counter removed from AdminAnswer::note: 2 of 3 admin_reply_fits red.",
+        "census (nondefault-tests-gate.sh --census) rc 0, wz-session-mcu 12 of 12 run by a leg. Layer A4 passes. C1bz command counted by hand: wz-session-core 521 first, fixed to full crate paths, recount 505 = budget; wz-session-mcu 4 first, four links made code spans, recount 0; no budget moved.",
+        "NOT RUN on the branch: the mcu clippy for session-slot, the thumbv7m cross check, the S8 gate selftest, the C1g and C1m legs through run-ci.sh itself, QEMU stack peak (the arena is static: 1 KiB body, 1 KiB config, 512 B key; 128 B message on the refusal path), interrupt-off time of one admin answer, hardware, hosted CI, Zephyr, the deploy image mcu-admin-node."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "1. S9c: the admin node shell (admin_node.rs, dial.rs, memory.rs are off under session-slot) must write FixedNodeStatus::set_sessions and set_endpoints from its session table and call host_admin_queryable_fixed on the slot-profile observer's queryables registry (SlotObserver::queryables is a QueryableRegistry<BoxedQuerySink>); the image (deploy/mcu-admin-node main.rs) still allocates and is not moved; build FixedNodeIdentity, AdminHost and FixedNodeStatus as statics sized by the generated pool (SESSIONS = SLOT_COUNT, BODY = admin_reply_bytes).",
+        "2. S9d: staging is allocation-free but the drain (QueryReply::into_response, ResponseOwned) still builds owned String and Vec values; the metrics leg builds a String (StatsRegistry::encode_metrics); the registration of the queryable boxes one closure.",
+        "3. Interrupt-off time of one admin answer (the node lock is held while legs render) is unmeasured; if too long, copy rows out under the lock.",
+        "4. The deploy keys admin_locators and admin_session_links exist in the validator and are held equal to caps by tests; the caps are still constants, not generated from the deploy file.",
+        "5. The C1g deploy guard now reads 10 witnesses (the S9b admin limits test is the tenth); the C1m leg admin reply fits reads 4."
+      ],
+      "publishable_decision_summary": "Admin replies are built by one writer set into any TextOut: a String on the AP (bytes unchanged), a FixedText arena on the slot profile. The arena is per process, sized by process.admin_reply_bytes, because it is scratch (a GET is answered whole into the asking session's own stage before the next), not peer state, so Q7's per-session rule does not apply. A leg past the bound is refused, counted (AdminReplyRefusals) and answered as a typed Err reply; never cut, never a heap fallback. A staged reply is now bytes in the session's stage arena plus a fixed row (the owned record is built at the drain: codec mirrors, S9d), and dispatch_request lends the keyexpr (it was the one allocation per query). Node state is fixed rows (FixedNodeStatus/Identity, AdminHost) in admin_fixed behind session-slot. Validator: admin_reply_bytes <= reply_payload_bytes; new keys admin_locators, admin_session_links. Kept heap: the metrics leg (String registry) and the image shell (S9c).",
+      "publishable_changes_bullets": [
+        "wz-session-core:",
+        "text_out.rs (new): TextOut seam (String | FixedText<N>); FixedText latches overflow, counts needed bytes, finish() is Err past N; never cuts silently, never allocates. json.rs writers and escaper generic over TextOut; JsonStringBody escapes a string written in pieces.",
+        "adminspace.rs: every writer (local_data, keys, legs manifest, plugin/entity/status bodies, router legs) writes into any TextOut; rows read as borrowed views (AdminSessionRef, AdminMulticastPeerRef, AdminLinkList); one leg visitor (visit_admin_legs) feeds admin_legs() and the surface document; answer_admin_query_in builds into caller buffers and returns AdminAnswer; answer_admin_query and answer_router_admin_query are the same code over Strings (bytes unchanged); admin_unspoken_fields is a static slice; the metrics leg still builds a String (registry rendering).",
+        "admin_reply.rs (new): AdminBuffer, AdminReplyError (TooLarge, KeyTooLong, Refused), AdminReplyRefusals, AdminReplyArena<BODY> (per-process scratch; answer(), serve_leg()).",
+        "encoding.rs: encoding_parts_from_mime / write_encoding_mime_parts (borrowed parts, one MIME rendering). query_sink.rs: ReplyOut::reply_keyed_encoded_parts.",
+        "reply_stage.rs: ReplyParts funnel; fixed ReplyStage is rows + one byte arena (caps::REPLY_STAGE_BYTES); stage_parts refuses and counts; drain builds the owned QueryReply. query.rs: the 13 send_* arms build ReplyParts; QueryReply::from_parts; responder identity inline; dispatch_request lends the keyexpr (KeyexprBuf) instead of a String.",
+        "caps.rs: MAX_ADMIN_REPLY_BYTES, MAX_ADMIN_KEY_BYTES, MAX_ADMIN_LOCATORS, MAX_ADMIN_SESSION_LINKS, REPLY_STAGE_BYTES.",
+        "tests: admin_reply_fits.rs (3), admin_reply unit tests (7), json/text_out tests, session_slot_pool_deploy +1.",
+        "wz-session-mcu: admin_fixed.rs (new, session-slot): FixedNodeIdentity, FixedAdminSession, FixedNodeStatus, AdminHost, host_admin_queryable_fixed; ConfigView/ConnectStatusSource take &mut dyn TextOut; write_connect_status; CONNECT_STATUS_TAIL; adminspace-core implies query-reply-err; tests/admin_reply_fits.rs (4).",
+        "docs: the new module docs link by full crate path; wz-session-mcu lib.rs/connect_manager.rs name dial/admin_node/memory in code spans (absent under session-slot).",
+        "scripts/deploy: deploy_sessions.py (keys admin_locators, admin_session_links; admin_reply_bytes <= reply_payload_bytes; selftest cases), deploy/mcu_client_and_group.yaml, run-ci.sh (C1g 2 legs, C1m 1 leg, deploy guard 4->5), nondefault-tests-gate.sh (2 rows)."
+      ],
+      "publishable_verification_bullets": [
+        "RAN on the branch before integration (all through bx on build hosts, this host built nothing):",
+        "wz-session-core lib: default 542 passed; the adminspace set (metrics, stats, introspection, router-linkstate, plugins, config-hotreload) 706; fixed backing with adminspace-core and query-reply-err 1012, with the tests admin_reply_fits 3, reply_budget_refusal 4, bounded_heapless_backing 16, slot_observer_sessions 2, session_slot_pool_deploy 5; the session-slot set of the C1g leg 691.",
+        "wz-session-mcu: adminspace-core with adminspace-write default lib 20; session-slot with both adminspace features lib 8 and admin_reply_fits 4.",
+        "clippy -D warnings --all-targets clean: wz-session-core all features, fixed backing with adminspace-core and query-reply-err, the adminspace union with transport-shm; wz-session-mcu adminspace-core. fmt clean. deploy_sessions.py --selftest ok with 7 new cases; validate-deploy ok.",
+        "MUTANTS, each red then reverted: FixedText::finish answering Ok after overflow (a truncated reply delivered): 9 tests red; a heap copy of the body on the success path: the exact-bound test red (1 allocation against 0); the refusal counter removed from AdminAnswer::note: 2 of 3 admin_reply_fits red.",
+        "census (nondefault-tests-gate.sh --census) rc 0, wz-session-mcu 12 of 12 run by a leg. Layer A4 passes. C1bz command counted by hand: wz-session-core 521 first, fixed to full crate paths, recount 505 = budget; wz-session-mcu 4 first, four links made code spans, recount 0; no budget moved.",
+        "NOT RUN on the branch: the mcu clippy for session-slot, the thumbv7m cross check, the S8 gate selftest, the C1g and C1m legs through run-ci.sh itself, QEMU stack peak (the arena is static: 1 KiB body, 1 KiB config, 512 B key; 128 B message on the refusal path), interrupt-off time of one admin answer, hardware, hosted CI, Zephyr, the deploy image mcu-admin-node."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "1. S9c: the admin node shell (admin_node.rs, dial.rs, memory.rs are off under session-slot) must write FixedNodeStatus::set_sessions and set_endpoints from its session table and call host_admin_queryable_fixed on the slot-profile observer's queryables registry (SlotObserver::queryables is a QueryableRegistry<BoxedQuerySink>); the image (deploy/mcu-admin-node main.rs) still allocates and is not moved; build FixedNodeIdentity, AdminHost and FixedNodeStatus as statics sized by the generated pool (SESSIONS = SLOT_COUNT, BODY = admin_reply_bytes).",
+        "2. S9d: staging is allocation-free but the drain (QueryReply::into_response, ResponseOwned) still builds owned String and Vec values; the metrics leg builds a String (StatsRegistry::encode_metrics); the registration of the queryable boxes one closure.",
+        "3. Interrupt-off time of one admin answer (the node lock is held while legs render) is unmeasured; if too long, copy rows out under the lock.",
+        "4. The deploy keys admin_locators and admin_session_links exist in the validator and are held equal to caps by tests; the caps are still constants, not generated from the deploy file.",
+        "5. The C1g deploy guard now reads 10 witnesses (the S9b admin limits test is the tenth); the C1m leg admin reply fits reads 4."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
