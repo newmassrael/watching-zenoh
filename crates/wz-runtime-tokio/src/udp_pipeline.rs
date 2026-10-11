@@ -85,7 +85,7 @@ use tokio::sync::{mpsc, watch, Notify};
 use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::TokioJoinHandle;
-use crate::runtime_pool::PartitionedRuntime;
+use crate::runtime_pool::{PartitionedRuntime, WzRuntime};
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 // R311mk — import `BoxedLinkDriver` from its SSOT home (the shared
 // `wz_session_core::link` tier) rather than via the `crate::session_glue`
@@ -599,6 +599,28 @@ pub struct UdpAcceptedInputs {
     pump: Arc<UdpDemuxPump>,
 }
 
+/// Register `socket` with the acceptor runtime's reactor, whichever runtime
+/// created it.
+///
+/// A tokio socket is registered with the reactor of the runtime that was current
+/// when it was made, and it works only while that runtime lives: once it has
+/// ended, every read and write on the socket fails with "a Tokio 1.x context
+/// was found, but it is being shutdown". The listener's socket is read by the
+/// pump on the acceptor runtime and written by every accepted face from the
+/// transmit runtime, and the acceptor runtime is the process-wide one that does
+/// not end, so the socket has to be registered with that one and not with
+/// whichever runtime the caller of [`bind_udp_demux`] happened to run on (a
+/// short-lived one, for a caller that binds from a `block_on` of its own).
+///
+/// The hand-over is through a `std` socket, which belongs to no reactor:
+/// `into_std` leaves the caller's registration, and `from_std` registers with
+/// the runtime entered here. The guard is held across no await.
+fn register_on_acceptor(socket: UdpSocket) -> io::Result<UdpSocket> {
+    let socket = socket.into_std()?;
+    let _acceptor = WzRuntime::Acceptor.handle().enter();
+    UdpSocket::from_std(socket)
+}
+
 /// Bind a UDP demux LISTENER on `listen` and spawn its [`udp_demux_task`] pump —
 /// the multi-peer datagram acceptor the scheme-keyed accept seam
 /// ([`crate::session_open::bind_locator`]) wraps in `BoundListener::Udp`.
@@ -609,7 +631,7 @@ pub async fn bind_udp_demux(
     listen: SocketAddr,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<UdpDemux> {
-    let socket = bind_udp(listen, link_socket).await?;
+    let socket = register_on_acceptor(bind_udp(listen, link_socket).await?)?;
     let local_addr = socket.local_addr()?;
     let socket = Arc::new(socket);
     let (new_face_tx, new_face_rx) = mpsc::unbounded_channel::<NewUdpFace>();
@@ -1263,6 +1285,64 @@ mod tests {
         }
         drop(a_out);
         let _ = a_writer.into_join().await;
+    }
+
+    /// A demux listener belongs to the process's acceptor runtime, not to the
+    /// runtime that happened to call `bind_udp_demux`: the pump reads the socket
+    /// there and every accepted face writes to it from the transmit runtime, so
+    /// the socket has to be registered with a reactor that outlives both. Bound
+    /// on the caller's runtime it died with it: every `recv_from` after that
+    /// runtime ended failed with "a Tokio 1.x context was found, but it is being
+    /// shutdown", the pump logged it and slept in a loop that never recovered,
+    /// and the listener stayed bound to its port while accepting nothing.
+    #[test]
+    fn a_demux_listener_outlives_the_runtime_that_bound_it() {
+        let listen: SocketAddr = "127.0.0.1:0".parse().expect("listen addr");
+        let binder = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the binding runtime");
+        let mut demux = binder
+            .block_on(bind_udp_demux(listen, &LinkSocket::NONE))
+            .expect("bind on the short-lived runtime");
+        drop(binder);
+
+        let user = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("the using runtime");
+        user.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let addr = demux.local_addr();
+                let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
+                let peer_addr = peer.local_addr().expect("peer addr");
+
+                peer.send_to(b"after-the-binder-ended", addr)
+                    .await
+                    .expect("peer send");
+                let face = demux.recv_new_face().await.expect("the pump ended");
+                assert_eq!(face.peer, peer_addr, "the face is keyed on the peer");
+                let mut inputs = demux.wire_inputs(face.inbound_rx);
+                assert_eq!(
+                    inputs.inbound_rx.recv().await.as_deref(),
+                    Some(b"after-the-binder-ended".as_slice()),
+                    "the face's first datagram is the one the peer sent"
+                );
+
+                // The way back: a face writes to the shared listener socket.
+                inputs
+                    .send_socket
+                    .send_to(b"reply", peer_addr)
+                    .await
+                    .expect("the listener socket sends");
+                let mut buf = [0u8; 16];
+                let (n, from) = peer.recv_from(&mut buf).await.expect("peer receive");
+                assert_eq!((&buf[..n], from), (b"reply".as_slice(), addr));
+            })
+            .await
+            .expect("a demux listener keeps accepting after the runtime that bound it ended");
+        });
     }
 
     /// R311y382 — the F1 DISCRIMINATOR: the demux keys faces by SOURCE, so two
