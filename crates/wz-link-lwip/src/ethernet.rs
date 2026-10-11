@@ -519,7 +519,7 @@ mod tests {
     // Round 3277 -- one test body on both profiles: the binders of `test_bind` are
     // the constructors themselves on the default profile and a leaked pool of one
     // on `static-link-storage`.
-    use crate::test_bind::{add_netif as add, session_rx as bind_session_rx};
+    use crate::test_bind::{add_netif as add, bind as bind_shaped, session_rx as bind_session_rx};
     use wz_runtime_core::RxLoan;
 
     /// The buffers a loaning MAC double has lent and not yet had returned, by
@@ -1821,20 +1821,36 @@ mod tests {
         std::assert_eq!(crate::rx_hold::counts(), (in_place, copied + 1));
     }
 
+    /// The shape of the sockets the two tests below bind, and not the session
+    /// socket's, because what the first measures is a bound of the SHIM and the
+    /// session socket's own queue is a different bound that moves with the
+    /// profile: 16 deep by default, 4 under `buffer-pool-session-rx-slim`. A queue
+    /// of `Q` holds `Q - 1` datagrams, and a socket that holds lent frames holds
+    /// them in that queue, so a socket whose queue is shallower than the shim's
+    /// bound is full before it reaches that bound (3 of 8 on the slim profile).
+    /// Two more than the shim's bound leaves room for the eight it lends and the
+    /// one it copies after them.
+    const SHIM_BOUND_QUEUE: usize = RX_HELD_MAX + 2;
+    /// The datagram size of those sockets: more than the longest payload they get.
+    const SHIM_BOUND_SLOT: usize = 16;
+    /// The shallow queue of the control below: it holds two.
+    const SHALLOW_QUEUE: usize = 3;
+
     /// The shim lends at most `RX_HELD_MAX` frames at once, so a socket that holds
     /// that many leaves the next frame to the copying input: it is copied in, the
     /// MAC's slot goes home at once, and the frame reaches the socket all the same.
     /// Nothing is dropped, and nothing reaches for memory but the pool and lwIP's.
+    ///
+    /// The socket is shaped from the shim's bound ([`SHIM_BOUND_QUEUE`]) and not
+    /// taken from the session profile, so the test means the same on every
+    /// profile; the bound of a socket whose queue is shallower is the next test's.
     #[test]
     fn past_the_shims_bound_a_held_socket_falls_back_to_the_copy() {
+        const { assert!(SHIM_BOUND_QUEUE - 1 > RX_HELD_MAX) };
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = pool_node(&link);
-        // A socket whose receive queue holds more than the shim's bound, whatever
-        // the session socket's build-time depth is: the slim profile's queue holds
-        // four, so on it this test stopped at three held frames and never reached
-        // the bound it is about (`held_rx` read 3 against 8). The default profile's
-        // sixteen hid that.
-        let mut socket = crate::LwipUdpSocket::<256, 16>::bind(&link, 7602).expect("bind");
+        let mut socket =
+            bind_shaped::<SHIM_BOUND_SLOT, SHIM_BOUND_QUEUE>(&link, 7602).expect("bind");
         socket.hold_lent_rx(true);
         let taken = rx_frames_taken();
         for i in 0..RX_HELD_MAX as u8 {
@@ -1863,6 +1879,50 @@ mod tests {
         }
         let ninth = socket.try_recv().expect("the ninth");
         std::assert_eq!(ninth.data.as_slice(), b"ninth");
+        std::assert_eq!(socket.rx_drop_count(), 0, "nothing was dropped");
+        std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT);
+    }
+
+    /// CONTROL for the test above, and the bound it does not reach on a profile
+    /// whose session queue is shallow: a socket that holds lent frames holds them
+    /// in its own queue, and a frame that finds the queue full is dropped (and
+    /// counted) with its buffer given back to the MAC at once, not parked. This is
+    /// what the slim session socket does at its third held frame, so the bound is
+    /// the queue's and the shim's bound is never involved.
+    #[test]
+    fn a_held_socket_with_a_full_queue_drops_the_frame_and_gives_the_slot_back() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = pool_node(&link);
+        let mut socket = bind_shaped::<SHIM_BOUND_SLOT, SHALLOW_QUEUE>(&link, 7602).expect("bind");
+        socket.hold_lent_rx(true);
+        let taken = rx_frames_taken();
+        let room = SHALLOW_QUEUE - 1;
+        for i in 0..room as u8 {
+            rig.inbox
+                .borrow_mut()
+                .push_back(udp_frame(7601, 7602, &[i; 4]));
+            rig.node.poll();
+        }
+        std::assert_eq!(rig.node.held_rx(), room, "the queue holds what it can");
+        std::assert!(rig.returned.borrow().is_empty());
+        rig.inbox
+            .borrow_mut()
+            .push_back(udp_frame(7601, 7602, b"over"));
+        rig.node.poll();
+        std::assert_eq!(socket.rx_drop_count(), 1, "the full queue refused it");
+        std::assert_eq!(
+            rx_frames_taken(),
+            (taken.0 + room as u32 + 1, taken.1),
+            "it was lent like the rest; the queue, not the shim, refused it"
+        );
+        std::assert_eq!(rig.node.held_rx(), room, "and nothing more is held");
+        std::assert_eq!(rig.returned.borrow().len(), 1, "its slot went home");
+        for i in 0..room as u8 {
+            let view = socket.peek_recv().expect("held");
+            std::assert_eq!(view.data, &[i; 4]);
+            std::assert!(socket.consume_recv());
+        }
+        std::assert!(socket.try_recv().is_none(), "the refused frame is gone");
         std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT);
     }
 
