@@ -16765,6 +16765,16 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         _runci_guarded_test "M scout fan-out reaches a second interface" 1 \
             cargo test -p wz-integration-tests \
             --test wz_scout_fanout_netns -- --ignored || return 1
+        # Open-debt item 902 -- a datagram link whose interface is removed is LOST
+        # at its next failed write, group link and dial link both. Behind the same
+        # probe, because removing the interface is the point and needs the same
+        # privilege. Each leg asserts that the read half stays silent after the
+        # removal, so a stack whose `recvfrom` does fail cannot pass it. Count
+        # guarded at 2 (the group leg and the dial leg): the legs are `#[ignore]`,
+        # so a dropped attribute or a rename would select zero and pass.
+        _runci_guarded_test "M datagram link lost at a failed write" 2 \
+            cargo test -p wz-integration-tests \
+            --test wz_datagram_carrier_loss_netns -- --ignored --test-threads=1 || return 1
     fi
     # R311y193 — router-multicast-faces S4: a wz `--router-hat` egresses a routed,
     # re-literalized Put over the data-plane multicast group to a foreign pico
