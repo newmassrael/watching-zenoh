@@ -584,12 +584,16 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # and the in-place receive.
     "wz-session-lwip|hook|\
         codec-close,\
+        declare-subscriber,\
         pubsub-put,\
         session-slot,\
         session-unicast-accept,\
         session-unicast-open,\
         transport-keepalive\
         |"
+    # S9a: `declare-subscriber` joins the row above for `tests/session_peer_tables.rs`
+    # (a peer's subscriber interests, answered from the session's own
+    # subscriptions, filled through a slot's tables).
     # Fixed-memory step S6, the exhaustion cases of the N-session pool: the row above
     # also runs `tests/session_pool_exhaustion.rs` (the acceptor's side, which needs
     # the listener the slot profile compiles in). The dialler's side,

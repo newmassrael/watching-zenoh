@@ -408,6 +408,7 @@ impl<'a> MappingSpaces<'a> {
     /// for a reader whose wire form carries no mapping bit to pick a space with
     /// (the `ext_keyexpr` of an undeclaration), which has only ever read the
     /// peer's.
+    #[cfg(feature = "codec-declare")]
     pub(crate) fn peer_literal(&self, id: u64) -> Option<&'a str> {
         self.peer.literal(id)
     }

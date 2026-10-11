@@ -1313,6 +1313,14 @@ pub mod query;
 #[cfg(feature = "alloc")]
 pub mod reply_stage;
 
+/// Fixed-memory step S9a — every table a PEER writes, or that is owed to one
+/// peer, for ONE session: its keyexpr aliases, the declarations it made to us, its
+/// interests and what is staged back, the replies and `Final`s its queries owe.
+/// The per-session half of what the observer used to hold process-wide; the
+/// session slot owns one under `session-slot`.
+#[cfg(feature = "alloc")]
+pub mod peer_tables;
+
 /// R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
 /// [`storage_backend::StorageBackend`] seam + an in-memory backend
 /// ([`storage_backend::MemoryStorage`]). A faithful mirror of zenoh's

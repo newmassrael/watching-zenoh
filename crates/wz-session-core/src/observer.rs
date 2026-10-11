@@ -170,7 +170,9 @@ use crate::switchboard::{EventInjector, SwitchboardRegistry};
 // query-queryable-off subset compiles.)
 #[cfg(feature = "query-queryable")]
 use crate::query::QueryableRegistry;
-use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage, ReplyStaging};
+use crate::reply_stage::{FinalStage, ReplyStage};
+#[cfg(feature = "query-queryable")]
+use crate::reply_stage::{FinalStaging, ReplyStaging};
 // R311dy — `ReplyRegistry` stays always-compiled (alloc): its loopback
 // delivery + timeout sweep are codec-agnostic, mirroring
 // `SubscriberRegistry`. The dispatch fan-out + wire-emit drain stay

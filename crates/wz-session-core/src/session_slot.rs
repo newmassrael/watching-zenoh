@@ -69,7 +69,7 @@
 //! bundle it holds; the size is not capped here and is not measured on a board
 //! (the stack the in-place build takes is the Q lane's to catch).
 
-use core::cell::{Cell, UnsafeCell};
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::mem::MaybeUninit;
 use core::ops::Deref;
 
@@ -77,6 +77,7 @@ use wz_runtime_core::TimeSource;
 
 use crate::entropy::EntropySource;
 use crate::link::{BoxedLinkDriver, SessionRuntime};
+use crate::peer_tables::PeerTables;
 use crate::session_actions::SessionLinkActions;
 use crate::session_init_params::SessionInitParams;
 
@@ -154,6 +155,12 @@ struct SlotCell<R: SessionRuntime, T: TimeSource, D, E> {
     driver: UnsafeCell<MaybeUninit<D>>,
     entropy: UnsafeCell<MaybeUninit<E>>,
     actions: UnsafeCell<MaybeUninit<SessionLinkActions<R, T>>>,
+    /// Every table the session's PEER writes, or that is owed to it: its keyexpr
+    /// aliases, the declarations it made, its interests, the replies and `Final`s
+    /// its queries owe (S9a, decision Q7). The slot's own, so a session's peer can
+    /// fill nothing but its own, and so each session's memory is this slot's size.
+    /// Empty whenever the slot is free: a release forgets it in place.
+    peers: RefCell<PeerTables>,
 }
 
 impl<R: SessionRuntime, T: TimeSource, D, E> SlotCell<R, T, D, E> {
@@ -167,6 +174,7 @@ impl<R: SessionRuntime, T: TimeSource, D, E> SlotCell<R, T, D, E> {
             driver: UnsafeCell::new(MaybeUninit::uninit()),
             entropy: UnsafeCell::new(MaybeUninit::uninit()),
             actions: UnsafeCell::new(MaybeUninit::uninit()),
+            peers: RefCell::new(PeerTables::new()),
         }
     }
 }
@@ -195,6 +203,10 @@ unsafe fn release_cell<R: SessionRuntime, T: TimeSource, D, E>(head: &'static Sl
             (*cell.driver.get()).assume_init_drop();
         }
     }
+    // What the departed peer said is nobody's now: the next session this slot
+    // holds starts from empty tables, and a peer's aliases never leak into it.
+    // Nothing holds a borrow of the tables once the last handle has gone.
+    cell.peers.borrow_mut().forget_peer();
     cell.state.set(CellState::Free);
 }
 
@@ -378,6 +390,7 @@ where
         SlotRef {
             guard: SlotGuard { head: &cell.head },
             actions: placed,
+            peers: &cell.peers,
         }
     }
 }
@@ -405,12 +418,26 @@ pub struct SlotsFull<D, E> {
 pub struct SlotRef<R: SessionRuntime + 'static, T: TimeSource + 'static> {
     guard: SlotGuard,
     actions: &'static SessionLinkActions<R, T>,
+    peers: &'static RefCell<PeerTables>,
 }
 
 impl<R: SessionRuntime + 'static, T: TimeSource + 'static> SlotRef<R, T> {
     /// Where the bundle lies, for a caller that compares two handles.
     pub fn as_ptr(&self) -> *const SessionLinkActions<R, T> {
         self.actions
+    }
+
+    /// The tables this session's PEER writes, or that are owed to it: its keyexpr
+    /// aliases, the declarations it made, its interests, the replies and `Final`s
+    /// its queries owe. The slot's own, never another session's, and bounded by
+    /// the deploy `limits` ([`PeerTables`]).
+    ///
+    /// A `RefCell`: the profile drives a session from one cooperative task, so a
+    /// borrow is held across no suspension and never contended; a borrow taken
+    /// while another is live is the caller's bug and panics, as it would on any
+    /// other `RefCell`.
+    pub fn peers(&self) -> &RefCell<PeerTables> {
+        self.peers
     }
 }
 
@@ -419,6 +446,7 @@ impl<R: SessionRuntime + 'static, T: TimeSource + 'static> Clone for SlotRef<R, 
         Self {
             guard: self.guard.clone(),
             actions: self.actions,
+            peers: self.peers,
         }
     }
 }

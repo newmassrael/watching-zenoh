@@ -18,9 +18,9 @@
 // one. The no-alloc control plane stores observers in a `BoundedVec` and fires
 // through the borrowed `DeclView` seam.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::id_map::key_text;
+use crate::id_map::{key_text, DeclaredQueryable};
 #[cfg(feature = "alloc")]
-use crate::id_map::{DeclaredQueryable, DeclaredQueryables, IdMap};
+use crate::id_map::{DeclaredQueryables, IdMap};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 

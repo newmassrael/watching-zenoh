@@ -11253,6 +11253,14 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
         --test session_slot_allocations --quiet || return 1
+    # S9a -- the tables a peer writes live in the session slot: two sessions have
+    # two sets, a flood through one is refused and counted there and not in the
+    # other, a slot comes back empty, and the tables count in the slot's size. 3 =
+    # what that command PRINTED.
+    _runci_guarded_test "C1m session peer tables" 3 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,session-slot \
+        --test session_peer_tables --quiet || return 1
     # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
     # (`tests/session_pump_allocations.rs`): the same real pair, each end run as a
     # task of one local set, from the runtime's making to the last task's end. Under

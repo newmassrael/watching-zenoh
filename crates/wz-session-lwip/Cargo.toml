@@ -127,6 +127,11 @@ loopif-multicast = ["wz-link-lwip/loopif-multicast"]
 # names it.
 codec-close = ["wz-session-core/codec-close"]
 
+# Fixed-memory step S9a -- the peer's subscriber interests, answered from the
+# session's own subscriptions (`wz-session-core`'s `declare-subscriber`). Only the
+# slot's peer-table test names it; an image that answers interests turns it on.
+declare-subscriber = ["wz-session-core/declare-subscriber"]
+
 # Round 3277 -- fixed-memory step S7: the link keeps nothing on a heap. Forwards
 # wz-link-lwip's `static-link-storage` SELECTOR: the session sockets this crate
 # opens are cells of a `static` pool the image declares and hands to
@@ -423,6 +428,21 @@ required-features = [
     "codec-close",
     "session-slot",
     "static-link-storage",
+]
+
+# Fixed-memory step S9a -- the tables a peer writes live in the session slot: two
+# real sessions in two slots, a flood through one handle refused and counted
+# there and not in the other, and a slot that comes back empty. It needs the slot
+# (the file is empty without it) and the session halves a pair of sessions is
+# built from.
+[[test]]
+name = "session_peer_tables"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "declare-subscriber",
+    "session-slot",
 ]
 
 [lints]
