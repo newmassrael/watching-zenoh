@@ -13,7 +13,7 @@
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use core::task::{Context, Poll, Waker};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource};
 
@@ -36,9 +36,22 @@ impl Drop for Counted {
     }
 }
 
+/// A waker that does nothing (`Waker::noop` is newer than this crate's MSRV).
+fn noop_waker() -> Waker {
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(core::ptr::null(), &VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+    // SAFETY: every function of the vtable ignores its data pointer.
+    unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }
+}
+
 /// Poll `handle` once with a waker that does nothing.
 fn poll_once<F: Future + Unpin>(handle: &mut F) -> Poll<F::Output> {
-    let mut cx = Context::from_waker(Waker::noop());
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
     Pin::new(handle).poll(&mut cx)
 }
 

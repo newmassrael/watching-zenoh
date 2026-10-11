@@ -113,7 +113,7 @@ impl TimerQueue {
                 for (index, slot) in self.slots.iter().enumerate() {
                     if let Some(entry) = slot.0.borrow(cs).borrow().as_ref() {
                         if entry.deadline_us <= now_us
-                            && best.is_none_or(|(_, deadline, seq)| {
+                            && best.map_or(true, |(_, deadline, seq)| {
                                 (entry.deadline_us, entry.seq) < (deadline, seq)
                             })
                         {

@@ -607,10 +607,11 @@ impl<T> TaskJoin<T> {
             Seen::Output(at, ops, aborted) => {
                 self.taken = true;
                 let answer = if aborted {
-                    // SAFETY: a done cell that holds an output holds it live; it is
-                    // dropped once and the handle is over.
-                    cell.with_meta(|meta| meta.has_output)
-                        .then(|| unsafe { (ops.drop_output)(at) });
+                    if cell.with_meta(|meta| meta.has_output) {
+                        // SAFETY: a done cell that holds an output holds it live;
+                        // it is dropped once and the handle is over.
+                        unsafe { (ops.drop_output)(at) };
+                    }
                     Err(RuntimeError::JoinCancelled)
                 } else {
                     // SAFETY: a task that ended without an abort left one `T` here,
@@ -630,17 +631,16 @@ impl<T> Drop for TaskJoin<T> {
         let Some(cell) = self.cell.filter(|_| !self.taken) else {
             return;
         };
+        /// How to drop an output nobody read: the function and where it lies.
+        type Unread = Option<(unsafe fn(*mut u8), *mut u8)>;
         enum Left {
             Detached,
-            Done(Option<(unsafe fn(*mut u8), *mut u8)>),
+            Done(Unread),
         }
         let left = cell.with_meta(|meta| {
             if meta.state == State::Done {
-                let output = meta
-                    .has_output
-                    .then(|| meta.ops)
-                    .flatten()
-                    .map(|ops| (ops.drop_output, meta.buf.wrapping_add(meta.out_off)));
+                let ops = if meta.has_output { meta.ops } else { None };
+                let output = ops.map(|ops| (ops.drop_output, meta.buf.wrapping_add(meta.out_off)));
                 Left::Done(output)
             } else {
                 meta.handle = false;
