@@ -1855,16 +1855,48 @@ pub mod common {
     /// and R311y505's defect (wz reading zenoh's `Shm` ZBuf as its own UNIT offer)
     /// is invisible without it.
     ///
-    /// Returns `None` rather than panicking: unlike the unixpipe oracle this one
-    /// is not provisioned in hosted CI, so its legs SKIP where it is absent (the
-    /// vsock precedent).
+    /// Returns `None` rather than panicking where the runner is not declared to
+    /// provision it, so a developer's machine without the source build SKIPs
+    /// (the vsock precedent). A job that DOES provision it sets
+    /// `WZ_ZENOHD_SHM_REQUIRE`, and there an absent oracle PANICS: see the
+    /// private helper `shm_oracle_or_refusal` just below.
     pub fn zenohd_shm_binary() -> Option<PathBuf> {
         if let Ok(p) = std::env::var("WZ_ZENOHD_SHM_BIN") {
-            let p = PathBuf::from(p);
-            return p.is_file().then_some(p);
+            return shm_oracle_or_refusal(PathBuf::from(p));
         }
-        let path = project_root().join("target/zenohd-shm/zenohd");
-        path.is_file().then_some(path)
+        shm_oracle_or_refusal(project_root().join("target/zenohd-shm/zenohd"))
+    }
+
+    /// Open-debt item 901 -- what an ABSENT shared-memory oracle means.
+    ///
+    /// Every leg that needs one of these binaries returns early with a note when
+    /// the helper says `None`, and a `return` inside a test prints `ok`. Ten legs
+    /// of Layer C1cc did exactly that on every hosted run, in 0.00 s, because no
+    /// job built the oracle, and the lane's count guard read their `1 passed` as
+    /// ten legs that ran. `--quiet` hid the note.
+    ///
+    /// So the job that PROVISIONS the oracle declares it, with
+    /// `WZ_ZENOHD_SHM_REQUIRE`, and an oracle that is then absent is a failure
+    /// here, at the one door every leg goes through, instead of a decision each of
+    /// the legs would have to remember to make. A runner that does not provision
+    /// it (a laptop without the source build) leaves the flag unset and skips, as
+    /// before. The job that sets it builds the oracle in the same job, behind
+    /// `ensure_zenohd_at_pin.py`, so the arming is a statement and not a hope.
+    fn shm_oracle_or_refusal(path: PathBuf) -> Option<PathBuf> {
+        if path.is_file() {
+            return Some(path);
+        }
+        let required = std::env::var("WZ_ZENOHD_SHM_REQUIRE").is_ok_and(|v| !v.is_empty());
+        assert!(
+            !required,
+            "WZ_ZENOHD_SHM_REQUIRE is set and {} is absent. This job provisions the \
+             shared-memory zenoh oracle, so its absence is a provisioning regression and \
+             not a reason to skip: every leg that needs it would otherwise return early \
+             and report `ok`. Build it with `ZENOHD_SHM=1 ZENOHD_ALLOW_CLONE=1 bash \
+             scripts/build-zenohd.sh`.",
+            path.display()
+        );
+        None
     }
 
     /// Locate one of upstream's own SHM examples (`z_pub_shm`, `z_sub_shm`): the
@@ -1876,15 +1908,14 @@ pub mod common {
     /// upstream's metadata segment and READ one back (`zenohd` relays an SHM
     /// buffer and never makes one), so a wz reader or writer of that segment is
     /// graded against nothing but wz's own counterpart without them. Returns
-    /// `None` rather than panicking for the reason [`zenohd_shm_binary`] does: the
-    /// shared-memory oracle is a source build that hosted CI does not provision.
+    /// `None` rather than panicking, and panics under `WZ_ZENOHD_SHM_REQUIRE`,
+    /// for the reason [`zenohd_shm_binary`] gives.
     pub fn zenoh_shm_example_binary(name: &str) -> Option<PathBuf> {
         let dir = match std::env::var("WZ_ZENOH_SHM_EXAMPLES_DIR") {
             Ok(dir) => PathBuf::from(dir),
             Err(_) => project_root().join("target/zenohd-shm"),
         };
-        let path = dir.join(name);
-        path.is_file().then_some(path)
+        shm_oracle_or_refusal(dir.join(name))
     }
 
     /// Locate the VSOCK-enabled `zenohd` (R311y400): the `WZ_ZENOHD_VSOCK_BIN`

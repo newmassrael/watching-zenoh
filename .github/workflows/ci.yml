@@ -5076,6 +5076,62 @@ jobs:
           path: target/zenoh-c-unstable
           key: ${{ steps.zenoh-c-unstable-cache.outputs.cache-primary-key }}
 
+      - name: Install Rust toolchain 1.97.1 (zenoh 1.10.1's pinned channel, for the SHM oracle)
+        # Open-debt item 901. `scripts/build-zenohd.sh` builds zenoh with ITS
+        # release's channel and hard-errors without it; the steps above install
+        # zenoh-c's own channel, which is a different one. The literal is the
+        # `interop` job's, and `upstream_release_distance.py` holds every
+        # `toolchain install` line in this file against the pinned release.
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Cache the shared-memory zenohd oracle (pinned 1.10.1)
+        # Open-debt item 901. Ten legs of Layer C1cc
+        # (zenoh_c_shm_and_advanced_on_wz_capi_c) drive upstream's own `z_pub_shm`,
+        # `z_sub_shm`, `z_queryable_shm` and `z_get_shm`, which only
+        # `ZENOHD_SHM=1 scripts/build-zenohd.sh` builds. No job built them, each
+        # leg returned early on their absence and reported `ok` in 0.00 s, and
+        # `--quiet` hid the note: a green hosted run said nothing about whether
+        # those legs passed. This job now provisions them and arms
+        # `WZ_ZENOHD_SHM_REQUIRE` on the C1cc step, so an absent oracle is a red.
+        # Restore/save split and the key's script binding are `zenohd-cache`'s.
+        id: zenohd-shm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target/zenohd-shm
+          key: zenohd-shm-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+
+      - name: Build the shared-memory zenohd and its four examples (cache miss only)
+        if: steps.zenohd-shm-cache.outputs.cache-hit != 'true'
+        # ZENOHD_ALLOW_CLONE=1 forces the SOURCE path: the examples exist only in a
+        # source tree, and `cargo install` yields no examples.
+        env:
+          ZENOHD_SHM: "1"
+          ZENOHD_ALLOW_CLONE: "1"
+        run: bash scripts/build-zenohd.sh
+
+      - name: Ensure the shared-memory zenohd ANSWERS at the pin and carries its examples
+        id: zenohd-shm-ensure
+        # The restore is trusted for what its KEY promised, and only the binary
+        # knows what it is (R2647); the four examples are asserted present for the
+        # reason the `interop` job's assert gives: a restored cache quietly
+        # becoming a missing one.
+        run: |
+          python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd-shm \
+            || { echo "::error::the shared-memory zenohd is not at the pin and could not be rebuilt"; exit 1; }
+          for ex in z_pub_shm z_sub_shm z_queryable_shm z_get_shm; do
+            test -x "target/zenohd-shm/$ex" \
+              || { echo "::error::$ex missing from target/zenohd-shm - ten Layer C1cc legs cannot run"; exit 1; }
+          done
+
+      - name: Save the shared-memory zenohd (cache miss only)
+        # Gated on the ensure step, which rebuilds a poisoned restore and so is the
+        # only step whose success says the binary is the one this key names.
+        if: always() && github.ref == 'refs/heads/main' && steps.zenohd-shm-cache.outputs.cache-hit != 'true' && steps.zenohd-shm-ensure.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: target/zenohd-shm
+          key: ${{ steps.zenohd-shm-cache.outputs.cache-primary-key }}
+
       - name: Cache the opaque-type size tables
         # Only the generator's STDERR is cached, not its target dirs. The stderr
         # IS the artifact — `check-capi-c-opaque-arms.sh` reuses any arm whose
@@ -5189,8 +5245,14 @@ jobs:
         # it BOTH ways, requiring one wz subscriber to observe both arms; and the
         # COVERAGE report prints how many upstream examples link, so a slice stays
         # a measured fraction rather than a declared milestone.
+        #
+        # WZ_ZENOHD_SHM_REQUIRE=1 (open-debt item 901) for the same reason, about
+        # the ten shared-memory legs: this job builds the oracle they drive (the
+        # steps above) and `wz-integration-tests`' `shm_oracle_or_refusal` turns
+        # its absence into a panic at the one door every leg goes through.
         env:
           WZ_C1CC_REQUIRE: "1"
+          WZ_ZENOHD_SHM_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1cc
 
       - name: Layer C1ce — api-compat-c against the UNSTABLE oracle
