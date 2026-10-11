@@ -39,13 +39,16 @@ use wz_session_core::locality::Locality;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::query_sink::BoxedQuerySink;
 use wz_session_core::registry_error::RegisterError;
+use wz_session_core::text_out::TextOut;
 
 /// What the `config` leg of the admin GET answers from. The node's
 /// connection control implements it when the write surface is compiled in;
 /// a node without one answers an empty object.
 pub trait ConfigView {
-    /// Write this node's config document, as JSON, into `out`.
-    fn write_config_json(&self, out: &mut String);
+    /// Write this node's config document, as JSON, into `out`: a `String` on the
+    /// growable profile, a fixed buffer that refuses what does not fit on the slot
+    /// profile (S9b), through the one [`TextOut`] seam.
+    fn write_config_json(&self, out: &mut dyn TextOut);
 }
 
 /// Who the node is, as the `local_data` leg reports it.
@@ -98,7 +101,7 @@ pub trait ConnectStatusSource {
     fn write_permit(&self) -> bool;
     /// The verdict on the most recent write, as a JSON value; `null` before
     /// the first.
-    fn write_last_write_json(&self, out: &mut String);
+    fn write_last_write_json(&self, out: &mut dyn TextOut);
 }
 
 /// R2846 — the key of the connection status leg:
@@ -111,9 +114,14 @@ pub trait ConnectStatusSource {
 /// upstream's shape exactly.
 pub fn admin_connect_status_key(zid_hex: &str, whatami: &str) -> String {
     let mut key = wz_session_core::adminspace::admin_root_key(zid_hex, whatami);
-    key.push_str("/status/connect");
+    key.push('/');
+    key.push_str(CONNECT_STATUS_TAIL);
     key
 }
+
+/// The part of the connection status key after the node's admin root:
+/// `status/connect`. One spelling, for the `String` key above and the fixed node's.
+pub const CONNECT_STATUS_TAIL: &str = "status/connect";
 
 /// R2846 — the `status/connect` document:
 /// `{"permissions":{"write":…},"last_write":…,"endpoints":[{…},…]}`, each
@@ -123,9 +131,23 @@ pub fn admin_connect_status_key(zid_hex: &str, whatami: &str) -> String {
 pub fn connect_status_json(
     source: &dyn ConnectStatusSource,
     endpoints: &[EndpointStatus],
-    out: &mut String,
+    out: &mut dyn TextOut,
 ) {
-    use core::fmt::Write as _;
+    write_connect_status(
+        source,
+        endpoints.iter().map(|e| (e.endpoint.as_str(), &e.status)),
+        out,
+    );
+}
+
+/// [`connect_status_json`] over endpoint rows given as `(endpoint, status)`, into
+/// any sink: the document is written once, whether the node holds its rows as
+/// `String`s or in fixed storage.
+pub fn write_connect_status<'a>(
+    source: &dyn ConnectStatusSource,
+    endpoints: impl Iterator<Item = (&'a str, &'a DialStatus)>,
+    out: &mut dyn TextOut,
+) {
     use wz_session_core::json::escape_into;
     out.push_str(r#"{"permissions":{"write":"#);
     out.push_str(if source.write_permit() {
@@ -136,13 +158,13 @@ pub fn connect_status_json(
     out.push_str(r#"},"last_write":"#);
     source.write_last_write_json(out);
     out.push_str(r#","endpoints":["#);
-    for (i, e) in endpoints.iter().enumerate() {
+    for (i, (endpoint, status)) in endpoints.enumerate() {
         if i > 0 {
             out.push(',');
         }
         out.push_str(r#"{"endpoint":"#);
-        escape_into(&e.endpoint, out);
-        match &e.status {
+        escape_into(endpoint, out);
+        match status {
             DialStatus::Live { established } => {
                 out.push_str(r#","state":"live","established":"#);
                 out.push_str(if *established { "true" } else { "false" });
@@ -337,7 +359,7 @@ mod tests {
 
     struct FixedConfig;
     impl ConfigView for FixedConfig {
-        fn write_config_json(&self, out: &mut String) {
+        fn write_config_json(&self, out: &mut dyn TextOut) {
             out.push_str(r#"{"connect":{"endpoints":["tcp/10.0.0.9:7447"]}}"#);
         }
     }
@@ -349,7 +371,7 @@ mod tests {
         fn write_permit(&self) -> bool {
             false
         }
-        fn write_last_write_json(&self, out: &mut String) {
+        fn write_last_write_json(&self, out: &mut dyn TextOut) {
             out.push_str(r#"{"verdict":"denied"}"#);
         }
     }

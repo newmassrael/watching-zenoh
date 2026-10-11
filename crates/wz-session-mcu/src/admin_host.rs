@@ -43,6 +43,8 @@ use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BoxedSink, SampleView};
+#[cfg(feature = "adminspace-core")]
+use wz_session_core::text_out::TextOut;
 
 struct State {
     permit_write: bool,
@@ -148,7 +150,7 @@ impl ConnectControl {
 /// spells them; only the part this node holds is present.
 #[cfg(feature = "adminspace-core")]
 impl crate::admin_status::ConfigView for ConnectControl {
-    fn write_config_json(&self, out: &mut String) {
+    fn write_config_json(&self, out: &mut dyn TextOut) {
         let (permit_write, list) = critical_section::with(|cs| {
             let s = self.state.borrow(cs).borrow();
             (s.permit_write, s.live.clone())
@@ -177,8 +179,7 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
     /// before it writes (`null` reads as 0) knows a verdict with a HIGHER
     /// `seq` answers a write made after that read. Verdict and number are read
     /// under one lock, so they always belong to the same write.
-    fn write_last_write_json(&self, out: &mut String) {
-        use core::fmt::Write as _;
+    fn write_last_write_json(&self, out: &mut dyn TextOut) {
         let (last, seq) = critical_section::with(|cs| {
             let s = self.state.borrow(cs).borrow();
             (s.last.clone(), s.writes)
@@ -220,7 +221,10 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
 /// its `Locators`, strategy in camelCase), so what was written reads back in
 /// the form it was written, an empty group included.
 #[cfg(feature = "adminspace-core")]
-fn push_connect_endpoints(list: &[wz_session_core::admin_connect::ConnectEntry], out: &mut String) {
+fn push_connect_endpoints(
+    list: &[wz_session_core::admin_connect::ConnectEntry],
+    out: &mut dyn TextOut,
+) {
     // R2843 — the entry type is named HERE, not in the module's `use` list:
     // this function is its only user and exists only under `adminspace-core`,
     // so a module-scope import was unused in an `adminspace-write`-only build

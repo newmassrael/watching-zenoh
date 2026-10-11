@@ -81,6 +81,10 @@ adminspace-core = [
     "query-queryable",
     "codec-response",
     "codec-response-final",
+    # S9b — a leg the node refuses (a reply past its buffer) reaches the querier as
+    # a typed Err reply, which is the Err-reply feature; without it the refusal is
+    # counted and the querier sees only the terminating Final.
+    "wz-session-core/query-reply-err",
     # R2838 — and the same for the GET: the node declares `<root>/**` as a
     # queryable on every session, or a router has nowhere to route it.
     "wz-session-core/declare-queryable",
