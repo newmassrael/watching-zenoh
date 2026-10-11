@@ -10660,7 +10660,11 @@ layer_c1p_multicast() {
     # R2937 — 65 -> 67: `multicast_tx::push_tests` gains the held-conduit pair
     # (`a_held_conduit_takes_the_push_on_its_own_ring`, the refused mint), both
     # `codec-push`, so the arm above, which has no push codec, does not move.
-    _runci_guarded_test C1p 69 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # R3250 — 69 -> 72, the printed number: `multicast_tx::lend_tests` (the
+    # push into a lending queue) is four cases, and the one that fragments
+    # needs `transport-fragmentation`, which this arm leaves out, so three
+    # of them compile here. The arm above has no push codec and does not move.
+    _runci_guarded_test C1p 72 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
