@@ -730,7 +730,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// (the keyexpr by [`resolve_wireexpr_view`], the retraction's extension chain by
     /// [`crate::declare_ext_keyexpr::resolve_ext_keyexpr_in`], each the rule the
     /// owned form's resolver shares); what is done with the result is
-    /// [`Self::apply_token_declared`] / [`Self::apply_token_undeclared`] for both.
+    /// `apply_token_declared` / `apply_token_undeclared` for both.
     #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
     pub fn dispatch_declare_view_historical<'a>(
         &mut self,

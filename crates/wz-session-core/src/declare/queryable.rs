@@ -892,7 +892,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     /// keyexpr is resolved by [`resolve_wireexpr_view`] and the completeness is
     /// read by the projection both forms share
     /// ([`crate::queryable_info::read_queryable_info_in`]); what is done with them
-    /// is [`Self::apply_declared`] for both.
+    /// is `apply_declared` for both.
     #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
     pub fn dispatch_declare_view_with_local<'a>(
         &mut self,

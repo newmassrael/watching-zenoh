@@ -567,7 +567,7 @@ pub struct InPlaceRecord<'a> {
         feature = "codec-push",
         feature = "codec-request",
         feature = "codec-response",
-        feature = "session-slot"
+        all(feature = "session-slot", feature = "codec-frame")
     ))]
     record: LentRecord<'a>,
     _frame: core::marker::PhantomData<&'a [u8]>,
@@ -583,7 +583,7 @@ pub struct InPlaceRecord<'a> {
     feature = "codec-push",
     feature = "codec-request",
     feature = "codec-response",
-    feature = "session-slot"
+    all(feature = "session-slot", feature = "codec-frame")
 ))]
 #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
 #[derive(Clone, Copy, Debug)]
@@ -596,9 +596,13 @@ enum LentRecord<'a> {
     Response(&'a wz_codecs::response::Response<'a>),
     #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
     Declare(&'a wz_codecs::declare::Declare<'a>),
-    #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-frame",
+        feature = "codec-response-final"
+    ))]
     ResponseFinal(&'a wz_codecs::response_final::ResponseFinal<'a>),
-    #[cfg(feature = "session-slot")]
+    #[cfg(all(feature = "session-slot", feature = "codec-frame"))]
     Interest(&'a wz_codecs::interest::Interest<'a>),
 }
 
@@ -612,7 +616,7 @@ impl<'a> InPlaceRecord<'a> {
             feature = "codec-push",
             feature = "codec-request",
             feature = "codec-response",
-            feature = "session-slot"
+            all(feature = "session-slot", feature = "codec-frame")
         )
     ))]
     #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
@@ -686,6 +690,7 @@ impl<'a> InPlaceRecord<'a> {
     /// A ResponseFinal record of a frame, on the slot profile.
     #[cfg(all(
         feature = "session-slot",
+        feature = "codec-frame",
         feature = "codec-response-final",
         any(test, feature = "session-unicast")
     ))]
@@ -705,7 +710,11 @@ impl<'a> InPlaceRecord<'a> {
     }
 
     /// An Interest record of a frame, on the slot profile.
-    #[cfg(all(feature = "session-slot", any(test, feature = "session-unicast")))]
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-frame",
+        any(test, feature = "session-unicast")
+    ))]
     #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
     pub(crate) fn interest_of_frame(
         interest: &'a wz_codecs::interest::Interest<'a>,
@@ -778,7 +787,11 @@ impl<'a> InPlaceRecord<'a> {
 
     /// The ResponseFinal, as it is decoded (slot profile). `None` when the
     /// record is of another kind.
-    #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-frame",
+        feature = "codec-response-final"
+    ))]
     pub fn response_final(&self) -> Option<&'a wz_codecs::response_final::ResponseFinal<'a>> {
         match self.record {
             LentRecord::ResponseFinal(response_final) => Some(response_final),
@@ -789,7 +802,7 @@ impl<'a> InPlaceRecord<'a> {
 
     /// The Interest, as it is decoded, its keyexpr and extensions ranges of the
     /// frame (slot profile). `None` when the record is of another kind.
-    #[cfg(feature = "session-slot")]
+    #[cfg(all(feature = "session-slot", feature = "codec-frame"))]
     pub fn interest(&self) -> Option<&'a wz_codecs::interest::Interest<'a>> {
         match self.record {
             LentRecord::Interest(interest) => Some(interest),

@@ -788,7 +788,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     /// refusals and the same fan-out, over the declaration as it is decoded where
     /// its frame lies. Only the reading differs (the keyexpr is resolved by
     /// [`resolve_wireexpr_view`], the rule the owned form's resolver shares); what is
-    /// done with the resolved keyexpr is [`Self::apply_declared`] for both, so a
+    /// done with the resolved keyexpr is `apply_declared` for both, so a
     /// rule lives in one place.
     #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
     pub fn dispatch_declare_view_with_local<'a>(

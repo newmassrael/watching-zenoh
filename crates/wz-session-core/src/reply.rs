@@ -1562,14 +1562,22 @@ impl<C: ReplySink> ReplyRegistry<C> {
             // and nothing else of it.
             #[cfg(any(
                 feature = "codec-response",
-                all(feature = "session-slot", feature = "codec-response-final")
+                all(
+                    feature = "session-slot",
+                    feature = "codec-frame",
+                    feature = "codec-response-final"
+                )
             ))]
             IterationEvent::InPlace(record) => {
                 #[cfg(feature = "codec-response")]
                 if let Some(response) = record.response() {
                     self.dispatch_response_in_place(response, peer_keyexpr_table);
                 }
-                #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+                #[cfg(all(
+                    feature = "session-slot",
+                    feature = "codec-frame",
+                    feature = "codec-response-final"
+                ))]
                 if let Some(response_final) = record.response_final() {
                     self.fire_final_for(response_final.request_id);
                 }

@@ -2206,6 +2206,7 @@ mod record_walk_tests {
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-declare",
+        feature = "declare-final",
         feature = "codec-response-final"
     ))]
     mod control {
