@@ -20,8 +20,10 @@ use wz_session_core::reliability::Reliability;
 /// How many outbound payloads this driver may have lent at once. The session
 /// encodes and sends one frame under its conduit lock, so one is in flight at a
 /// time; the second is for a lend that is open while another path reaches the
-/// driver, and a lend beyond them is simply not granted (the session encodes on
-/// the heap).
+/// driver, and a lend beyond them is simply not granted: the session encodes on
+/// the heap, or under `tx-lend-only` (fixed-memory step S4) refuses the send as a
+/// counted `LinkDropCause::NoTxSlot`, which `tests/tx_allocations.rs` fills both
+/// slots to witness.
 const LENT_MAX: usize = 2;
 
 /// The session socket shared by the drive loop (inbound `try_recv` /

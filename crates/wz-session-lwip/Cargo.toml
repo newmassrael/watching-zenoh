@@ -55,6 +55,13 @@ default = []
 # ROM (the MCU multicast image does not lend, Round 3170). A unicast image
 # whose link is this crate's lwIP driver turns it on.
 transport-tx-lend = ["wz-session-core/transport-tx-lend"]
+# Fixed-memory step S4 — the strict form of the lend: every frame the session
+# sends is encoded into a pbuf this crate's driver lends, and a send for which
+# no pbuf is lent (both lend slots out, or lwIP's pool dry) is a counted refusal
+# (`wz-session-core`'s `tx-lend-only`), never a frame built on the heap. A
+# unicast image whose whole link is this driver turns it on beside
+# `transport-tx-lend`'s users; a library crate never does.
+tx-lend-only = ["transport-tx-lend", "wz-session-core/tx-lend-only"]
 # The drive loop dispatches each inbound datagram where the session socket
 # holds it, record by record (`wz-runtime-coop`'s `rx-in-place`), with this
 # crate's link lending the socket's queued datagram instead of copying it out.
@@ -99,6 +106,12 @@ buffer-pool-session-rx-slim = ["wz-link-lwip/buffer-pool-session-rx-slim"]
 # node built with this + a testmode port runs a real on-target IGMP-join +
 # multicast-loopback roundtrip. Off by default; requires a testmode lwIP port.
 loopif-multicast = ["wz-link-lwip/loopif-multicast"]
+
+# The Close transport message (`send_close_with_reason`, and the FSM's Closing
+# action): forwards wz-session-core's `codec-close`. `transport-multicast`
+# already pulls it for the group loop; a unicast node that closes its session
+# names it.
+codec-close = ["wz-session-core/codec-close"]
 
 # R311kx — keepalive TX emitter on the MCU session loop. Forwards to the
 # wz-session-core transport-keepalive capability (the shared
@@ -299,6 +312,20 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 [[test]]
 name = "rx_frame_allocations"
 required-features = ["session-unicast-open", "session-unicast-accept", "pubsub-put"]
+
+# Fixed-memory step S4 — the outbound path counted the same way: every message a
+# session sends (the four handshake messages, a close, a keep-alive, a Put), and
+# the refusal of a send the link lends no slot for. Both handshake halves, the
+# Put arm and the close and keep-alive encoders are what it drives.
+[[test]]
+name = "tx_allocations"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "transport-keepalive",
+    "codec-close",
+]
 
 [lints]
 workspace = true
