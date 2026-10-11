@@ -270882,6 +270882,88 @@
         "The extension-chain refusal lives in transport_layout::layout, so the build door shares it; the build door never writes a chain with Z set and no entry, so its output is unchanged (204 units compared)."
       ]
     },
+    "Round 3274": {
+      "decision_summary": "The consumer chose one new door for its Sessions editor, so the library now emits one row per session with no join left to the consumer. Two symbols, one document session_table 1 (ABI 33): wz_dissect_pcap_session_table(bytes, len, limits, out) takes the preset as an argument like the census where_limited door; wz_dissect_live_session_table(handle, out) takes the handle's ceiling. A session is the zid pair; role is the observed InitSyn sender. Totals, instants and zids are taken at ingest in the flow tables, so a retention ceiling moves nothing. Every null cell is named under unstated with a closed reason word. Multicast groups and scouting-only flows are not rows; they are counted under excluded. A bad container is ok:false with a refusal word. The fuzz found a real debug panic in tcp.rs (i32::MIN negated); fixed at the root. No premise failed to reproduce.",
+      "changes_bullets": [
+        "crates/wz-capture/src/session_table.rs (new): LinkIngest (per flow: min and max packet instant, the zid each direction's Init named and whether it was an InitAck, handshake-absent seen, an understood-message flag), Roles, Unstated, Cell, Encryption, Why, Excluded, Link, SessionRow, session_table(): groups flows by the unordered zid pair; a flow with no known pair is its own row.",
+        "crates/wz-capture/src/session_table_json.rs (new): the document, Refusal (not_a_capture, truncated, damaged, from an exhaustive match over both readers' errors), refusal_json.",
+        "crates/wz-capture/src/lib.rs: an ingest field on FlowDissection and DatagramDissection and serial_ingest on Dissection, fed where packets and messages arrive (stream_into_session, feed_websocket, feed_quic_stream, feed_quic_datagram, push_datagram, push_segment, push_vsock, push_serial, decode_pending_serial); the field-classification tests name the new fields; modules declared.",
+        "crates/wz-capture/src/doc_revision.rs: document SESSION_TABLE revision 1, keys, eight value families and passenger carries rows, history row.",
+        "crates/wz-capture/src/fields_json.rs: PhaseWord and phase_word made pub(crate); the family-walk table gains the eight session_table families; the carries gate renders the new document.",
+        "crates/wz-capture/src/session_table_tests.rs (new): 38 tests, oracle against census and fields, retention invariance, every reason word, refusals, a fuzz of more than 4000 inputs.",
+        "crates/wz-capture/src/tcp.rs: the sequence distance is read with unsigned_abs so i32::MIN is a duplicate rather than an overflow; one pinning test.",
+        "crates/wz-capi-dissect/src/lib.rs, live.rs: the two doors, a Door::SessionTable entry in the doors walk, ABI constants (33), registration of the document in the pin, plane and refusal-shape tables.",
+        "crates/wz-capi-dissect/src/tests/session_table.rs (new): 9 boundary tests.",
+        "crates/wz-capi-dissect/include/wz_dissect.h: both doors documented, @values, @carries and @bound markers, the integer paragraph and the document-name list extended, revision macro 33.",
+        "crates/wz-capi-dissect/tests/c_abi_consumer.c: a C leg for both doors and the revision table entry.",
+        "scripts/lib/capi_abi_pin.py (version 33, two symbols), analysis_surface_parity.py (two rows), bounded_output_parity.py (door row and emitter), json_integer_cell_gate.py (document revision and the push_instant cell)."
+      ],
+      "verification_bullets": [
+        "All builds and tests ran on pc2 (and pc3 where named) through bx, none locally. Numbers marked (int) were re-measured on the integration tree (the layout door under it, the lend-only profile over it), the others were measured on the branch alone.",
+        "wz-capture --features dissect,fixtures --lib on the branch: 1312 passed, 0 failed, 6 ignored, run again at the final HEAD after the formatting and lifetime edits with the same result. (int) Integration tree: 1333 passed, 0 failed, 6 ignored. Includes 38 session_table tests, the families, carries and key-pin gates for the new document, and the fuzz (more than 4000 damaged and garbage containers under both presets: every answer a JSON document, readable and refused branches both reached).",
+        "Red first for tcp.rs: the pinning test failed with 'attempt to negate with overflow' before the fix and passes after.",
+        "wz-capi-dissect --lib on the branch: 183 passed. (int) Integration tree: 187 passed (9 session_table tests; header and library agreement for @values, @carries, revisions, doors).",
+        "(int) scripts/run-ci.sh --layer C1bo on pc2: pass (release cdylib, the C consumer compiled -Wall -Wextra -Werror and run, C++ header syntax, capi_abi_pin at ABI 33 with 45 symbols (42 at the base, plus the layout door, plus the two session table symbols), header subsumption (13 doors, 6 subsumed), bound names, unknown-value policy). On the branch alone it read 44 symbols because the layout door was not under it.",
+        "(int) --layer C1bz for wz-capture, wz-capi-dissect, wz-session-core, wz-session-lwip and wz-runtime-tokio on pc2: pass, budgets unchanged. Layer A4 pass.",
+        "cargo clippy -D warnings --all-targets: wz-capture clean with dissect,fixtures and with default features, wz-capi-dissect clean (integration tree). One doc sentence in wz-capi-dissect that the self-report lint read as an undone claim ('not built') was reworded in the integration (the lint is a hook gate that the branch's own run had not covered).",
+        "Python gates run locally (no build): analysis_surface_parity, bounded_output_parity, json_integer_cell_gate (all pass on the integration tree), reason_review_pin_gate (this set moves no pin row).",
+        "Mutants on the branch, each run on pc2 and reverted: frames counted from the retained list (1 test red, the retention invariance test); InitSyn and InitAck roles swapped (14 tests red).",
+        "Not run: hosted CI, Windows and macOS, real zenohd captures (every capture is built by the repository's own packet builders or is a tracked sample), Layer C0, a no-default-features wz-capture build, a live tap on a real interface."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "ABI number: settled in the integration. The layout door took 32 (first set) and this set took 33; the merge was textual only and every line carrying the number reads 33 (lib.rs constant, comment and test assert, wz_dissect.h macro, capi_abi_pin.py EXPECTED_VERSION, the c_abi_consumer.c comments), checked by the artifact: capi_abi_pin reports ABI 33 with 45 symbols. In c_abi_consumer.c the revisioned[] array is 13 entries: index 11 is transport_layout, index 12 is session_table.",
+        "The consumer should learn: decrypted_tls and decrypted_quic cannot be produced by a capture handed to these doors, which do not decrypt; an encrypted flow is a row with encrypted_unreadable, and a whole-network capture lists every TCP and UDP flow with bytes (as unknown when nothing zenoh-shaped decoded), so filter the capture to the deployment's ports.",
+        "Reconnect count is not provided, as asked. Local role, certificate names and established time stay out of the dissect ABI.",
+        "A flow evicted by the flow-table ceiling has no row and its counters go with it; only dropped_by_limits.flows says so. Next step if a long-lived tap needs it: carry evicted flows' totals per zid pair.",
+        "Counters are per flow and are not carried across a flow's eviction and return; the returning flow is a new flow.",
+        "Hosted CI has not seen any of this; the platform legs were not built."
+      ],
+      "publishable_decision_summary": "The consumer chose one new door for its Sessions editor, so the library now emits one row per session with no join left to the consumer. Two symbols, one document session_table 1 (ABI 33): wz_dissect_pcap_session_table(bytes, len, limits, out) takes the preset as an argument like the census where_limited door; wz_dissect_live_session_table(handle, out) takes the handle's ceiling. A session is the zid pair; role is the observed InitSyn sender. Totals, instants and zids are taken at ingest in the flow tables, so a retention ceiling moves nothing. Every null cell is named under unstated with a closed reason word. Multicast groups and scouting-only flows are not rows; they are counted under excluded. A bad container is ok:false with a refusal word. The fuzz found a real debug panic in tcp.rs (i32::MIN negated); fixed at the root. No premise failed to reproduce.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/session_table.rs (new): LinkIngest (per flow: min and max packet instant, the zid each direction's Init named and whether it was an InitAck, handshake-absent seen, an understood-message flag), Roles, Unstated, Cell, Encryption, Why, Excluded, Link, SessionRow, session_table(): groups flows by the unordered zid pair; a flow with no known pair is its own row.",
+        "crates/wz-capture/src/session_table_json.rs (new): the document, Refusal (not_a_capture, truncated, damaged, from an exhaustive match over both readers' errors), refusal_json.",
+        "crates/wz-capture/src/lib.rs: an ingest field on FlowDissection and DatagramDissection and serial_ingest on Dissection, fed where packets and messages arrive (stream_into_session, feed_websocket, feed_quic_stream, feed_quic_datagram, push_datagram, push_segment, push_vsock, push_serial, decode_pending_serial); the field-classification tests name the new fields; modules declared.",
+        "crates/wz-capture/src/doc_revision.rs: document SESSION_TABLE revision 1, keys, eight value families and passenger carries rows, history row.",
+        "crates/wz-capture/src/fields_json.rs: PhaseWord and phase_word made pub(crate); the family-walk table gains the eight session_table families; the carries gate renders the new document.",
+        "crates/wz-capture/src/session_table_tests.rs (new): 38 tests, oracle against census and fields, retention invariance, every reason word, refusals, a fuzz of more than 4000 inputs.",
+        "crates/wz-capture/src/tcp.rs: the sequence distance is read with unsigned_abs so i32::MIN is a duplicate rather than an overflow; one pinning test.",
+        "crates/wz-capi-dissect/src/lib.rs, live.rs: the two doors, a Door::SessionTable entry in the doors walk, ABI constants (33), registration of the document in the pin, plane and refusal-shape tables.",
+        "crates/wz-capi-dissect/src/tests/session_table.rs (new): 9 boundary tests.",
+        "crates/wz-capi-dissect/include/wz_dissect.h: both doors documented, @values, @carries and @bound markers, the integer paragraph and the document-name list extended, revision macro 33.",
+        "crates/wz-capi-dissect/tests/c_abi_consumer.c: a C leg for both doors and the revision table entry.",
+        "scripts/lib/capi_abi_pin.py (version 33, two symbols), analysis_surface_parity.py (two rows), bounded_output_parity.py (door row and emitter), json_integer_cell_gate.py (document revision and the push_instant cell)."
+      ],
+      "publishable_verification_bullets": [
+        "All builds and tests ran on pc2 (and pc3 where named) through bx, none locally. Numbers marked (int) were re-measured on the integration tree (the layout door under it, the lend-only profile over it), the others were measured on the branch alone.",
+        "wz-capture --features dissect,fixtures --lib on the branch: 1312 passed, 0 failed, 6 ignored, run again at the final HEAD after the formatting and lifetime edits with the same result. (int) Integration tree: 1333 passed, 0 failed, 6 ignored. Includes 38 session_table tests, the families, carries and key-pin gates for the new document, and the fuzz (more than 4000 damaged and garbage containers under both presets: every answer a JSON document, readable and refused branches both reached).",
+        "Red first for tcp.rs: the pinning test failed with 'attempt to negate with overflow' before the fix and passes after.",
+        "wz-capi-dissect --lib on the branch: 183 passed. (int) Integration tree: 187 passed (9 session_table tests; header and library agreement for @values, @carries, revisions, doors).",
+        "(int) scripts/run-ci.sh --layer C1bo on pc2: pass (release cdylib, the C consumer compiled -Wall -Wextra -Werror and run, C++ header syntax, capi_abi_pin at ABI 33 with 45 symbols (42 at the base, plus the layout door, plus the two session table symbols), header subsumption (13 doors, 6 subsumed), bound names, unknown-value policy). On the branch alone it read 44 symbols because the layout door was not under it.",
+        "(int) --layer C1bz for wz-capture, wz-capi-dissect, wz-session-core, wz-session-lwip and wz-runtime-tokio on pc2: pass, budgets unchanged. Layer A4 pass.",
+        "cargo clippy -D warnings --all-targets: wz-capture clean with dissect,fixtures and with default features, wz-capi-dissect clean (integration tree). One doc sentence in wz-capi-dissect that the self-report lint read as an undone claim ('not built') was reworded in the integration (the lint is a hook gate that the branch's own run had not covered).",
+        "Python gates run locally (no build): analysis_surface_parity, bounded_output_parity, json_integer_cell_gate (all pass on the integration tree), reason_review_pin_gate (this set moves no pin row).",
+        "Mutants on the branch, each run on pc2 and reverted: frames counted from the retained list (1 test red, the retention invariance test); InitSyn and InitAck roles swapped (14 tests red).",
+        "Not run: hosted CI, Windows and macOS, real zenohd captures (every capture is built by the repository's own packet builders or is a tracked sample), Layer C0, a no-default-features wz-capture build, a live tap on a real interface."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "ABI number: settled in the integration. The layout door took 32 (first set) and this set took 33; the merge was textual only and every line carrying the number reads 33 (lib.rs constant, comment and test assert, wz_dissect.h macro, capi_abi_pin.py EXPECTED_VERSION, the c_abi_consumer.c comments), checked by the artifact: capi_abi_pin reports ABI 33 with 45 symbols. In c_abi_consumer.c the revisioned[] array is 13 entries: index 11 is transport_layout, index 12 is session_table.",
+        "The consumer should learn: decrypted_tls and decrypted_quic cannot be produced by a capture handed to these doors, which do not decrypt; an encrypted flow is a row with encrypted_unreadable, and a whole-network capture lists every TCP and UDP flow with bytes (as unknown when nothing zenoh-shaped decoded), so filter the capture to the deployment's ports.",
+        "Reconnect count is not provided, as asked. Local role, certificate names and established time stay out of the dissect ABI.",
+        "A flow evicted by the flow-table ceiling has no row and its counters go with it; only dropped_by_limits.flows says so. Next step if a long-lived tap needs it: carry evicted flows' totals per zid pair.",
+        "Counters are per flow and are not carried across a flow's eviction and return; the returning flow is a new flow.",
+        "Hosted CI has not seen any of this; the platform legs were not built."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
