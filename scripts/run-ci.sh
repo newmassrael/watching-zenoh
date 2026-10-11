@@ -11337,6 +11337,14 @@ layer_c1n_mcu_session_acceptor() {
     _runci_guarded_test "C1n slim e2e" 1 \
         cargo test -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim \
         --test host_acceptor_e2e --quiet || return 1
+    # The link tier's own lib suite on the slim profile. Clippy below compiled it
+    # and Layer C1 runs it at the default profile, so nothing RAN it here, and a
+    # test that assumed the default queue depth (16 against the slim 4) was red
+    # for a while with nothing saying so. `+` = at least one passed; the whole
+    # suite is the pin, and what it prints is the number of tests of the lib.
+    _runci_guarded_test "C1n link lib slim" + \
+        cargo test -p wz-link-lwip --features buffer-pool-session-rx-slim \
+        --lib --quiet || return 1
     _runci_guarded_test "C1n reassembly completion" 1 \
         cargo test -p wz-mcu-session-acceptor --features reassembly \
         --test host_acceptor_reassembly_e2e --quiet || return 1
