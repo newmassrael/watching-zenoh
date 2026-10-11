@@ -249,10 +249,25 @@ impl Side {
     }
 }
 
+/// The links the test opens its sockets with: `LwipLinks::new` by default, and with
+/// `static-link-storage` over a leaked pool, since a test is host code and may
+/// allocate where a firmware declares a `static` pool. The counts below read the
+/// send path, which the pool does not touch.
+fn new_links(link: Rc<LwipLink>) -> LwipLinks {
+    #[cfg(not(feature = "static-link-storage"))]
+    {
+        LwipLinks::new(link)
+    }
+    #[cfg(feature = "static-link-storage")]
+    {
+        LwipLinks::new(link, wz_link_lwip::test_bind::session_sockets())
+    }
+}
+
 /// An acceptor on `port` and an initiator dialling it.
 fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
     let runtime = CoopRuntime::new(Frozen);
-    let links = LwipLinks::new(link.clone());
+    let links = new_links(link.clone());
 
     let opened = links.open_acceptor(port).expect("bind the acceptor");
     let acceptor = Side {

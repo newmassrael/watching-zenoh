@@ -26,7 +26,14 @@
 
 use std::rc::Rc;
 
+// The binder of `test_bind`: the constructor itself by default, and with
+// `static-link-storage` also on (`--all-features` turns both selectors on) a socket
+// claimed from a pool of one cell that the test leaks. The binds are outside any
+// count, so the leak is not read as a cost.
+#[cfg(not(feature = "static-link-storage"))]
 use wz_link_lwip::rx_sockets::bind_session_rx;
+#[cfg(feature = "static-link-storage")]
+use wz_link_lwip::test_bind::session_rx as bind_session_rx;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 use wz_runtime_coop::session_runtime::new_session_in_slot;
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
