@@ -80,7 +80,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 
 use wz_runtime_core::Runtime;
 
@@ -128,6 +128,118 @@ pub(crate) const MAX_UDP_PAYLOAD: usize = 65507;
 /// assert `negotiated_batch_mtu() == UDP_LINK_MTU` against the named constant
 /// rather than a magic `1450`, the same way serial's e2e pins `SERIAL_MTU`.
 pub const UDP_LINK_MTU: usize = 1450;
+
+/// Open-debt item 902 — the latch a datagram link's WRITER sets when a write
+/// fails, and the READER reads as a lost link ([`DatagramWriteWatch`]).
+///
+/// Upstream ends a transport on the first failed write exactly as it does on the
+/// first failed read: the TX task's error and the RX task's error both reach
+/// `del_link` (`io/zenoh-transport/src/unicast/universal/link.rs` @
+/// `tracing::debug!("TX task failed: {}", e);`), and the multicast TX task's
+/// reaches `delete` (`io/zenoh-transport/src/multicast/link.rs` @
+/// `c_transport.delete().await`). For a stream the two are one event, since a
+/// connection that cannot be written cannot be read either. A datagram socket
+/// has no connection. The kernel reports a send error and a receive that never
+/// completes independently, and a link whose interface went away or whose
+/// route was withdrawn does both at once: every `sendto` fails (`ENODEV`,
+/// `ENETUNREACH`) and `recvfrom` has nothing to say. The one report that does
+/// reach a connected socket, an ICMP refusal, is taken by whichever of the two
+/// syscalls runs first, so a writer that takes it leaves a reader that waits
+/// for ever.
+///
+/// The writer used to log the failure and return, and the session ran on until
+/// its lease expired. The latch carries the failure to the one place a link's
+/// loss is reported ([`LinkDriver::poll_event`]), so the session learns it is
+/// down the way it learns of a failed read, and re-opens or re-joins on the same
+/// footing.
+///
+/// Any write error counts, not a chosen few: the error the kernel gives for a
+/// lost carrier differs by the stack's state (`ENODEV`, `ENETDOWN`,
+/// `ENETUNREACH`, `EHOSTUNREACH`, `EPERM` from a filter), and upstream does not
+/// pick among them either. One latch belongs to one link; the faces of an
+/// accepting listener each carry their own, so a peer whose route went away
+/// does not end its siblings.
+#[derive(Clone, Debug)]
+pub struct DatagramWriteFault {
+    tripped: Arc<watch::Sender<bool>>,
+}
+
+/// The reading half of a [`DatagramWriteFault`], held by the link's read driver.
+///
+/// A receiver kept for the link's life rather than made at each poll: the poll
+/// is the receive path, which `runtime-zero-copy` holds free of allocation, and
+/// a receiver is made once.
+#[derive(Debug)]
+pub struct DatagramWriteWatch {
+    tripped: watch::Receiver<bool>,
+}
+
+impl DatagramWriteFault {
+    /// A latch that has not tripped, and the watch on it.
+    pub fn channel() -> (Self, DatagramWriteWatch) {
+        let (tripped, watched) = watch::channel(false);
+        (
+            Self {
+                tripped: Arc::new(tripped),
+            },
+            DatagramWriteWatch { tripped: watched },
+        )
+    }
+
+    /// Record that a write failed. Idempotent; the first call says why.
+    pub fn trip(&self, error: &io::Error) {
+        let first = self
+            .tripped
+            .send_if_modified(|tripped| !std::mem::replace(tripped, true));
+        if first {
+            log::warn!("wz-runtime-tokio: datagram link write failed: {error}; the link is lost");
+        }
+    }
+}
+
+impl DatagramWriteWatch {
+    /// Resolves once a write on this link has failed, at once if one already
+    /// has. Cancel-safe.
+    pub async fn tripped(&mut self) {
+        // The latch is held by the writer side and by every clone of it; if all
+        // are gone no write can fail any more, so the wait then never ends,
+        // which is what a link that is still up should do.
+        if self.tripped.wait_for(|tripped| *tripped).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Both halves of one link's write latch, for a driver that reads the link AND
+/// hands its send half to a task of its own ([`crate::UdpDriver`]): the driver
+/// keeps the watch for its [`LinkDriver::poll_event`] and gives each send half
+/// a clone of the latch. The unicast links hold the two halves apart, in the
+/// read driver and in the writer task, which are separate objects there.
+#[derive(Debug)]
+pub struct DatagramWriteLatch {
+    fault: DatagramWriteFault,
+    watch: DatagramWriteWatch,
+}
+
+impl Default for DatagramWriteLatch {
+    fn default() -> Self {
+        let (fault, watch) = DatagramWriteFault::channel();
+        Self { fault, watch }
+    }
+}
+
+impl DatagramWriteLatch {
+    /// The latch a send half trips when its write fails.
+    pub fn fault(&self) -> DatagramWriteFault {
+        self.fault.clone()
+    }
+
+    /// Resolves once a write on this link has failed. See
+    /// [`DatagramWriteWatch::tripped`].
+    pub async fn tripped(&mut self) {
+        self.watch.tripped().await
+    }
+}
 
 /// Bind AND `connect` an outbound UDP socket targeting `peer` — the raw-dial
 /// primitive for the datagram transport. Returns the socket unwrapped so the
@@ -632,9 +744,13 @@ pub fn wire_udp_socket(
     // SRC is this face's own socket. Both ends known means no `None` arm here
     // beyond a failed `local_addr` syscall.
     let endpoints = ip_link_endpoints(LinkKind::Udp, socket.local_addr().ok(), Some(peer));
-    let inbound = UdpReadDriver::from_socket(socket.clone());
+    // Item 902 — a write that fails is a lost link: the writer trips the latch,
+    // the read driver reports it.
+    let (fault, watch) = DatagramWriteFault::channel();
+    let inbound = UdpReadDriver::from_socket(socket.clone(), watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
-    let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(socket, peer, queue));
+    let writer_handle =
+        WriterHandle::spawn(rx, |queue| udp_writer_task(socket, peer, queue, fault));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
@@ -664,9 +780,13 @@ pub fn wire_udp_demuxed(
     // socket's address (every demux face reports the same one, which is the truth:
     // they are one socket), and the DST is this face's own demultiplexed peer.
     let endpoints = ip_link_endpoints(LinkKind::Udp, send_socket.local_addr().ok(), Some(peer));
-    let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump);
+    // Item 902 — one latch per FACE, not per listener: the faces share a socket
+    // and a pump, and a write that failed to this peer is this peer's loss.
+    let (fault, watch) = DatagramWriteFault::channel();
+    let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump, watch);
     let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
-    let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(send_socket, peer, queue));
+    let writer_handle =
+        WriterHandle::spawn(rx, |queue| udp_writer_task(send_socket, peer, queue, fault));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
 }
@@ -702,57 +822,45 @@ enum UdpRxSource {
 /// [`UdpWriteDriver`]).
 pub struct UdpReadDriver {
     source: UdpRxSource,
+    /// Item 902 — the watch on this link's write latch: a write the link's
+    /// writer could not make is reported here as the link's loss.
+    write_fault: DatagramWriteWatch,
 }
 
 impl UdpReadDriver {
     /// The dial/scout read driver: `recv_from` this link's own socket.
-    fn from_socket(socket: Arc<UdpSocket>) -> Self {
+    fn from_socket(socket: Arc<UdpSocket>, write_fault: DatagramWriteWatch) -> Self {
         Self {
             source: UdpRxSource::Socket(socket),
+            write_fault,
         }
     }
 
     /// The accept-demux read driver: read this src's datagrams from the pump's
     /// bounded channel, tagging each with the fixed `peer`. Holds a pump
     /// keep-alive clone so the demux pump lives as long as this face.
-    fn from_demux(rx: UdpFaceReceiver, peer: SocketAddr, pump: Arc<UdpDemuxPump>) -> Self {
+    fn from_demux(
+        rx: UdpFaceReceiver,
+        peer: SocketAddr,
+        pump: Arc<UdpDemuxPump>,
+        write_fault: DatagramWriteWatch,
+    ) -> Self {
         Self {
             source: UdpRxSource::Demux {
                 rx,
                 peer,
                 _pump: pump,
             },
+            write_fault,
         }
     }
-}
 
-impl LinkDriver for UdpReadDriver {
-    async fn open(&mut self) -> io::Result<()> {
-        // The socket is already bound (from a live UdpSocket); open is
-        // unconditionally Ok, mirroring UdpDriver::from_socket.
-        Ok(())
-    }
-
-    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
-        // The read side never sends — outbound goes via UdpWriteDriver.
-        // Surface NotConnected so an accidental call fails loud rather
-        // than silently dropping the datagram.
-        Err(io::Error::new(
-            io::ErrorKind::NotConnected,
-            "UdpReadDriver does not send; outbound goes via UdpWriteDriver",
-        ))
-    }
-
-    async fn close(&mut self) -> io::Result<()> {
-        // UDP has no kernel-level close handshake; dropping the Arc clones
-        // releases the FD. No explicit shutdown needed.
-        Ok(())
-    }
-
-    async fn poll_event(&mut self) -> LinkEvent {
+    /// Receive one datagram from this link's source. Never returns while the
+    /// link is idle; the write latch is [`LinkDriver::poll_event`]'s to race.
+    async fn receive(source: &mut UdpRxSource) -> LinkEvent {
         // One datagram = one wire message (UDP preserves boundaries, so no
         // length-prefix reassembly).
-        match &mut self.source {
+        match source {
             // Dial/scout: read directly off the socket (single datagram cap =
             // MAX_UDP_PAYLOAD). The src is the datagram sender.
             #[cfg(not(feature = "runtime-zero-copy"))]
@@ -789,6 +897,44 @@ impl LinkDriver for UdpReadDriver {
                     cause: LostCause::OsError,
                 },
             },
+        }
+    }
+}
+
+impl LinkDriver for UdpReadDriver {
+    async fn open(&mut self) -> io::Result<()> {
+        // The socket is already bound (from a live UdpSocket); open is
+        // unconditionally Ok, mirroring UdpDriver::from_socket.
+        Ok(())
+    }
+
+    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
+        // The read side never sends — outbound goes via UdpWriteDriver.
+        // Surface NotConnected so an accidental call fails loud rather
+        // than silently dropping the datagram.
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "UdpReadDriver does not send; outbound goes via UdpWriteDriver",
+        ))
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        // UDP has no kernel-level close handshake; dropping the Arc clones
+        // releases the FD. No explicit shutdown needed.
+        Ok(())
+    }
+
+    async fn poll_event(&mut self) -> LinkEvent {
+        // Item 902 — a failed write is reported here, as a failed read is. The
+        // latch is read FIRST (`biased`): a link that could not write is lost
+        // whatever else is waiting on it, as upstream deletes the transport at
+        // the TX task's error without draining the RX side.
+        tokio::select! {
+            biased;
+            () = self.write_fault.tripped() => LinkEvent::Lost {
+                cause: LostCause::OsError,
+            },
+            event = Self::receive(&mut self.source) => event,
         }
     }
 }
@@ -983,7 +1129,16 @@ impl BoxedLinkDriver for UdpWriteDriver {
 /// (logged + bail) — see [`crate::writer_queue`] for why the seal, and not
 /// sender liveness alone, is the teardown signal. UDP has no write-half
 /// shutdown, so the task just returns.
-pub async fn udp_writer_task(socket: Arc<UdpSocket>, peer: SocketAddr, mut queue: OutboundQueue) {
+///
+/// Item 902 — a failed `send` trips `fault` before the task returns: the link's
+/// read driver reports it as the link's loss ([`DatagramWriteFault`]), where the
+/// task's own exit used to be heard by nobody.
+pub async fn udp_writer_task(
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
+    mut queue: OutboundQueue,
+    fault: DatagramWriteFault,
+) {
     // R311y474 — a DIAL socket is `connect`ed to its one peer, so it emits with
     // `send`; the shared LISTENER socket serves N peers and must address each
     // datagram, so it emits with `send_to`. Reading the socket's own connectedness
@@ -1010,6 +1165,7 @@ pub async fn udp_writer_task(socket: Arc<UdpSocket>, peer: SocketAddr, mut queue
             Some(Ok(_)) => queue.recycle_wire(payload),
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: udp_writer_task send failed: {e}; closing");
+                fault.trip(&e);
                 return;
             }
             None => {
@@ -1293,5 +1449,175 @@ mod tests {
             .expect("the reader task");
         assert_eq!(first, Some(item(9)));
         assert_eq!(end, None);
+    }
+
+    /// How long a link that has failed to write is given to say so. The report
+    /// is immediate where it works; this is the bound on a test that waits for
+    /// a report which never comes.
+    const LOST_WITHIN: Duration = Duration::from_secs(5);
+
+    /// A datagram the kernel refuses to write (one past what UDP carries, which
+    /// `sendto(2)` answers with `EMSGSIZE`), put on the writer's queue the way
+    /// the link's own `send_prioritized` would if its size guard were absent.
+    fn an_unwritable_datagram(write: &UdpWriteDriver) {
+        write
+            .tx
+            .send(
+                wz_session_core::qos::Priority::DEFAULT,
+                vec![0u8; MAX_UDP_PAYLOAD + 1],
+            )
+            .expect("the writer's queue is open");
+    }
+
+    /// Open-debt item 902 — a datagram link whose WRITE fails is a lost link.
+    ///
+    /// Upstream ends the transport on the first failed write exactly as it does
+    /// on the first failed read (`io/zenoh-transport/src/unicast/universal/link.rs`
+    /// @ `tracing::debug!("TX task failed: {}", e);` is followed by `del_link`,
+    /// as the RX task's failure is). A stream link gets that for free, because a
+    /// connection that cannot be written is one that cannot be read. A datagram
+    /// socket has no connection: the kernel reports a send error and a receive
+    /// timeout independently, so a link whose interface went away or whose route
+    /// was withdrawn fails every send and receives nothing, with no receive
+    /// error to turn into `Lost`. The writer task used to log that and return;
+    /// the session then ran on until its lease expired.
+    ///
+    /// The refused write here is `EMSGSIZE`, which needs no privilege; the
+    /// interface-removal case is the netns witness of the same mechanism.
+    #[tokio::test]
+    async fn a_dial_link_whose_write_fails_is_lost_not_left_to_the_lease() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        let socket = dial_udp(peer_addr, &LinkSocket::NONE).await.expect("dial");
+        let (mut read, write, _writer) = wire_udp_socket(socket, peer_addr);
+
+        an_unwritable_datagram(&write);
+
+        let event = tokio::time::timeout(LOST_WITHIN, read.poll_event()).await;
+        assert!(
+            matches!(
+                event,
+                Ok(LinkEvent::Lost {
+                    cause: LostCause::OsError
+                })
+            ),
+            "a failed write must end the link; got {event:?}"
+        );
+    }
+
+    /// Open-debt item 902 — the one report a connected datagram socket does get,
+    /// an ICMP refusal, is delivered ONCE and to whichever syscall runs first.
+    ///
+    /// The first datagram goes to a port nobody holds and the kernel answers it
+    /// with an ICMP port-unreachable, which waits on the socket as a pending
+    /// error while nothing is receiving. The writer's next `send` takes it
+    /// (`ECONNREFUSED`), and a reader that starts after that has nothing left to
+    /// be told: its `recv` simply waits. That reader was the whole of the link's
+    /// loss reporting, so the session stayed up until its lease ran out.
+    #[tokio::test]
+    async fn a_refusal_taken_by_the_writer_still_ends_the_dial_link() {
+        // A port nobody holds: bind to learn one, then let it go.
+        let closed = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let closed_addr = closed.local_addr().expect("addr");
+        drop(closed);
+        let socket = dial_udp(closed_addr, &LinkSocket::NONE)
+            .await
+            .expect("dial");
+        let (mut read, write, _writer) = wire_udp_socket(socket, closed_addr);
+
+        assert_eq!(
+            write.send_blocking(b"first", Reliability::BestEffort),
+            LinkSendOutcome::Sent
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            write.send_blocking(b"second", Reliability::BestEffort),
+            LinkSendOutcome::Sent
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let event = tokio::time::timeout(LOST_WITHIN, read.poll_event()).await;
+        assert!(
+            matches!(
+                event,
+                Ok(LinkEvent::Lost {
+                    cause: LostCause::OsError
+                })
+            ),
+            "a refusal the writer took must still end the link; got {event:?}"
+        );
+    }
+
+    /// Open-debt item 902 — the same, for the face an ACCEPTING listener serves.
+    /// Its writer sends from the shared listener socket, so this is the path a
+    /// route withdrawn under one peer takes; the face's receive channel carries
+    /// no error of its own to say so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accepted_face_whose_write_fails_is_lost_not_left_to_the_lease() {
+        let listen: SocketAddr = "127.0.0.1:0".parse().expect("listen addr");
+        let mut demux = bind_udp_demux(listen, &LinkSocket::NONE)
+            .await
+            .expect("bind demux");
+        let addr = demux.local_addr();
+        let src = UdpSocket::bind("127.0.0.1:0").await.expect("bind src");
+        src.send_to(b"hello", addr).await.expect("first datagram");
+        let face = demux.recv_new_face().await.expect("face");
+        let (mut read, write, _writer) =
+            wire_udp_demuxed(demux.wire_inputs(face.inbound_rx), face.peer);
+        // The datagram that opened the face is queued for it; take it so the
+        // next event is the link's own.
+        assert!(matches!(read.poll_event().await, LinkEvent::Rx(_)));
+
+        an_unwritable_datagram(&write);
+
+        let event = tokio::time::timeout(LOST_WITHIN, read.poll_event()).await;
+        assert!(
+            matches!(
+                event,
+                Ok(LinkEvent::Lost {
+                    cause: LostCause::OsError
+                })
+            ),
+            "a failed write must end the face; got {event:?}"
+        );
+    }
+
+    /// Open-debt item 902 — a write that fails on one face of a listener ends
+    /// THAT face. The faces share one socket and one pump; the failure belongs
+    /// to the peer whose datagram it was, and a sibling that is being served
+    /// keeps its link.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_failure_on_one_accepted_face_leaves_its_sibling_served() {
+        let listen: SocketAddr = "127.0.0.1:0".parse().expect("listen addr");
+        let mut demux = bind_udp_demux(listen, &LinkSocket::NONE)
+            .await
+            .expect("bind demux");
+        let addr = demux.local_addr();
+        let s1 = UdpSocket::bind("127.0.0.1:0").await.expect("bind s1");
+        let s2 = UdpSocket::bind("127.0.0.1:0").await.expect("bind s2");
+        s1.send_to(b"one", addr).await.expect("s1 opens its face");
+        let face1 = demux.recv_new_face().await.expect("face1");
+        s2.send_to(b"two", addr).await.expect("s2 opens its face");
+        let face2 = demux.recv_new_face().await.expect("face2");
+        let (mut read1, write1, _w1) =
+            wire_udp_demuxed(demux.wire_inputs(face1.inbound_rx), face1.peer);
+        let (mut read2, _write2, _w2) =
+            wire_udp_demuxed(demux.wire_inputs(face2.inbound_rx), face2.peer);
+        assert!(matches!(read1.poll_event().await, LinkEvent::Rx(_)));
+        assert!(matches!(read2.poll_event().await, LinkEvent::Rx(_)));
+
+        an_unwritable_datagram(&write1);
+        let first = tokio::time::timeout(LOST_WITHIN, read1.poll_event()).await;
+        assert!(
+            matches!(first, Ok(LinkEvent::Lost { .. })),
+            "the face that failed to write is lost; got {first:?}"
+        );
+
+        s2.send_to(b"still-served", addr).await.expect("s2 again");
+        let second = tokio::time::timeout(LOST_WITHIN, read2.poll_event()).await;
+        match second {
+            Ok(LinkEvent::Rx(frame)) => assert_eq!(frame.bytes, b"still-served"),
+            other => panic!("the sibling face must keep its link; got {other:?}"),
+        }
     }
 }

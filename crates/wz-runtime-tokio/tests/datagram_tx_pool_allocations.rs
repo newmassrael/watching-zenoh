@@ -230,7 +230,9 @@ mod udp {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use wz_runtime_tokio::udp_pipeline::{dial_udp, udp_writer_task, UdpWriteDriver};
+    use wz_runtime_tokio::udp_pipeline::{
+        dial_udp, udp_writer_task, DatagramWriteFault, UdpWriteDriver,
+    };
     use wz_runtime_tokio::writer_queue::{datagram_outbound_channel, WriterHandle};
     use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, LinkSubject};
     use wz_session_core::reliability::Reliability;
@@ -262,8 +264,11 @@ mod udp {
             .expect("dial");
         let socket = Arc::new(socket);
         let (tx, rx) = datagram_outbound_channel();
+        // Nothing here reads the link's read half, so the watch on the write
+        // latch is dropped: a failed write would still trip it.
+        let (fault, _watch) = DatagramWriteFault::channel();
         let writer = WriterHandle::spawn_on(rt.handle().clone(), rx, move |queue| {
-            udp_writer_task(socket, addr, queue)
+            udp_writer_task(socket, addr, queue, fault)
         });
         let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         driver.shape_tx_queue(udp_shape());

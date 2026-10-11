@@ -2896,6 +2896,10 @@ pub struct UdpDriver {
     /// the one socket does both.
     send_socket: Option<std::sync::Arc<UdpSocket>>,
     peer: Option<SocketAddr>,
+    /// Open-debt item 902 — what the send halves taken from this driver
+    /// ([`Self::group_sender`]) trip when a write fails, and what
+    /// [`LinkDriver::poll_event`] reports as the link's loss.
+    write_latch: udp_pipeline::DatagramWriteLatch,
 }
 
 /// R2929 — the send half of a [`UdpDriver`]: the socket its datagrams leave
@@ -2907,13 +2911,21 @@ pub struct UdpDriver {
 pub struct UdpGroupSender {
     socket: std::sync::Arc<UdpSocket>,
     peer: SocketAddr,
+    /// Item 902 — shared with the driver this was taken from.
+    fault: udp_pipeline::DatagramWriteFault,
 }
 
 #[cfg(feature = "transport-link-udp")]
 impl UdpGroupSender {
-    /// Write one datagram.
+    /// Write one datagram. A write the kernel refuses is also the link's loss:
+    /// the driver this was taken from reports it from its next
+    /// [`LinkDriver::poll_event`], where upstream's multicast TX task ends the
+    /// transport at the same error.
     pub async fn send(&self, datagram: &[u8]) -> io::Result<()> {
-        self.socket.send_to(datagram, self.peer).await?;
+        if let Err(e) = self.socket.send_to(datagram, self.peer).await {
+            self.fault.trip(&e);
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -2929,6 +2941,7 @@ impl UdpDriver {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: Some(peer),
+            write_latch: Default::default(),
         }
     }
 
@@ -2952,6 +2965,7 @@ impl UdpDriver {
         Ok(UdpGroupSender {
             socket: self.sending_socket()?.clone(),
             peer,
+            fault: self.write_latch.fault(),
         })
     }
 
@@ -2986,6 +3000,7 @@ impl UdpDriver {
             socket: read.socket,
             send_socket: write.socket,
             peer: read.peer,
+            write_latch: Default::default(),
         })
     }
 
@@ -3185,6 +3200,7 @@ impl UdpDriver {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: Some(plan.peer(port)),
+            write_latch: Default::default(),
         })
     }
 
@@ -3247,6 +3263,7 @@ impl UdpDriver {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: Some(plan.peer(port)),
+            write_latch: Default::default(),
         })
     }
 
@@ -3283,6 +3300,29 @@ impl UdpDriver {
             socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: None,
+            write_latch: Default::default(),
+        })
+    }
+
+    /// Receive one datagram off `socket`, with its source.
+    ///
+    /// R3255 — under `runtime-zero-copy` the datagram is received INTO a slot
+    /// of the node's receive pool (the RFC 5.E lifecycle this read used to
+    /// defer to "production tuning") and the session is handed that slot, with
+    /// the datagram's source.
+    #[cfg(feature = "runtime-zero-copy")]
+    async fn receive_datagram(socket: &UdpSocket) -> io::Result<RxFrame> {
+        crate::link_rx_datagram::recv_frame(socket).await
+    }
+
+    /// Receive one datagram off `socket`, with its source. Single datagram size
+    /// cap = 65507 bytes (max UDP payload). R51 baseline allocates per-recv.
+    #[cfg(not(feature = "runtime-zero-copy"))]
+    async fn receive_datagram(socket: &UdpSocket) -> io::Result<RxFrame> {
+        let mut buf = vec![0u8; 65507];
+        socket.recv_from(&mut buf).await.map(|(n, src)| {
+            buf.truncate(n);
+            RxFrame::with_src(buf, src)
         })
     }
 
@@ -3424,21 +3464,15 @@ impl LinkDriver for UdpDriver {
                 }
             }
         };
-        // R3255 — under `runtime-zero-copy` the datagram is received INTO a slot
-        // of the node's receive pool (the RFC 5.E lifecycle this read used to
-        // defer to "production tuning") and the session is handed that slot,
-        // with the datagram's source, as below.
-        #[cfg(feature = "runtime-zero-copy")]
-        let received = crate::link_rx_datagram::recv_frame(socket).await;
-        // Single datagram size cap = 65507 bytes (max UDP payload).
-        // R51 baseline allocates per-recv.
-        #[cfg(not(feature = "runtime-zero-copy"))]
-        let received = {
-            let mut buf = vec![0u8; 65507];
-            socket.recv_from(&mut buf).await.map(|(n, src)| {
-                buf.truncate(n);
-                RxFrame::with_src(buf, src)
-            })
+        // Item 902 — a write the link's send half could not make is the link's
+        // loss too. The latch is read FIRST (`biased`) and its error is the
+        // same `Err` a failed receive is, so both reach the one arm below.
+        let received = tokio::select! {
+            biased;
+            () = self.write_latch.tripped() => {
+                Err(io::Error::other("a write on this link failed"))
+            }
+            received = Self::receive_datagram(socket) => received,
         };
         match received {
             // Carry the datagram source so a multicast consumer can
