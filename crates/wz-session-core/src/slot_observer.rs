@@ -13,12 +13,12 @@
 //! - HERE, once per process: the subscriber table, the queryable table, the
 //!   local tokens, the switchboard, and the observer lists of the declaration
 //!   registries (what the application listens to);
-//! - in each session's SLOT ([`PeerTables`], reached through
+//! - in each session's SLOT ([`crate::peer_tables::PeerTables`], reached through
 //!   `SlotRef::peers`): the peer's keyexpr aliases, its declarations, its
 //!   interests, the replies and `Final`s its queries owe, the answers to its
 //!   liveliness interests. A wire id is scoped by its session, so these cannot
 //!   be shared, and a flood of one session's must stay that session's;
-//! - beside each session, caller-supplied ([`Requesters`]): the requester-side
+//! - beside each session, caller-supplied ([`crate::slot_observer::Requesters`]): the requester-side
 //!   pending queries, which the application writes and whose request ids are
 //!   minted per session. They are generic over the application's reply sink, so
 //!   the owner of the session (the image) types them; a heap-closure sink makes

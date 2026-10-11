@@ -301,8 +301,8 @@ pub struct SubscriberTable<C: SampleSink> {
 /// [`caps::MAX_INBOUND_SUB_INTERESTS`], [`caps::MAX_PENDING_DECLARES`]); a peer
 /// that fills one is refused and counted, and no other session's side changes.
 ///
-/// Two halves that are borrowed apart: [`PeerNaming`], what the peer's ids name
-/// (read by every plane that resolves a keyexpr), and [`InterestSide`], what it
+/// Two halves that are borrowed apart: `PeerNaming`, what the peer's ids name
+/// (read by every plane that resolves a keyexpr), and `InterestSide`, what it
 /// asked to be told and what is staged back (written by the interest plane while
 /// it holds a keyexpr resolved out of the first).
 pub struct SubscriberPeer {

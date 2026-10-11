@@ -14,17 +14,18 @@
 //!
 //! - a reply the stage has no room for, or whose payload is longer than
 //!   [`caps::MAX_REPLY_PAYLOAD_BYTES`], is an `Err` to the queryable's handler
-//!   ([`ReplyError::StagingFull`], [`ReplyError::PayloadTooLarge`]) and is counted
-//!   in [`ReplyRefusals`]. It is never truncated and never built on the heap in
+//!   ([`crate::query_sink::ReplyError::StagingFull`],
+//!   [`crate::query_sink::ReplyError::PayloadTooLarge`]) and is counted
+//!   in [`crate::reply_stage::ReplyRefusals`]. It is never truncated and never built on the heap in
 //!   place of the table;
 //! - a `Request` whose `Final` the finals table could not hold is refused BEFORE
-//!   its queryables run ([`FinalStage::refuse_request`]) and counted: a reply that
+//!   its queryables run ([`crate::reply_stage::FinalStaging::refuse_request`]) and counted: a reply that
 //!   cannot be followed by its `Final` leaves the peer's `get` open until its own
 //!   timeout, and running the handler for it would spend the application's work on
 //!   an answer nobody can be told is complete.
 //!
 //! What this does NOT yet take off the heap is the reply record itself: a staged
-//! [`QueryReply`] still owns its keyexpr and payload as a `String` and a `Vec`
+//! [`crate::query::QueryReply`] still owns its keyexpr and payload as a `String` and a `Vec`
 //! (bounded in size now, by the same limits), and draining one into a wire
 //! `Response` builds an owned message. Both belong to the codec's owned mirrors,
 //! not to the table that holds the record.

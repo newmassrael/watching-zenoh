@@ -9,16 +9,19 @@
 //! serves every session, and the process holds it once. This holds the rest:
 //!
 //! - what the peer's wire ids NAME: its keyexpr aliases
-//!   ([`SubscriberPeer`], bound by [`crate::caps::MAX_PEER_KEYEXPR_ALIASES`]) and
+//!   ([`crate::pubsub::SubscriberPeer`], bound by [`crate::caps::MAX_PEER_KEYEXPR_ALIASES`]) and
 //!   the subscribers, queryables and tokens it declared to us
-//!   ([`RemoteSubscriberPeer`], [`RemoteQueryablePeer`], [`PeerTokens`], each
+//!   ([`crate::declare::subscriber::RemoteSubscriberPeer`],
+//!   [`crate::declare::queryable::RemoteQueryablePeer`],
+//!   [`crate::declare::liveliness_subscriber::PeerTokens`], each
 //!   bound by [`crate::caps::MAX_REMOTE_DECLS`]);
 //! - what it ASKED to be told, and what is staged back to it: its subscriber
 //!   interests ([`crate::caps::MAX_INBOUND_SUB_INTERESTS`]) and the staged
 //!   answers ([`crate::caps::MAX_PENDING_DECLARES`]), the interest answers of the
 //!   liveliness plane (`PeerTables::pending_declares`);
 //! - what its queries make us OWE it: the replies staged and the `Final`s that
-//!   follow ([`ReplyStage`], [`crate::caps::MAX_PENDING_REPLIES`]; [`FinalStage`],
+//!   follow ([`crate::reply_stage::ReplyStage`],
+//!   [`crate::caps::MAX_PENDING_REPLIES`]; [`crate::reply_stage::FinalStage`],
 //!   [`crate::caps::MAX_PENDING_FINALS`]).
 //!
 //! # Why per session
