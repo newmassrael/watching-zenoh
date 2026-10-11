@@ -1082,7 +1082,9 @@ where
 mod tests {
     use super::*;
     use wz_link_lwip::lwip_test_link;
-    use wz_link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
+    use wz_link_lwip::rx_sockets::SESSION_MULTICAST_GROUP_DEFAULT;
+    // Round 3277 -- the binder of `test_bind`: one body on both profiles.
+    use wz_link_lwip::test_bind::session_multicast_rx as bind_session_multicast_rx;
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::multicast_params::MulticastParams;
     use wz_session_core::WhatAmI;

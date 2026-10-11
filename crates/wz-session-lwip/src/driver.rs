@@ -263,7 +263,9 @@ mod tests {
     use alloc::vec::Vec;
 
     use wz_link_lwip::ipv4_addr_loopback;
-    use wz_link_lwip::rx_sockets::bind_session_rx;
+    // Round 3277 -- the binder of `test_bind`: the constructor itself by default, a
+    // leaked pool of one on `static-link-storage`, so these tests run on both.
+    use wz_link_lwip::test_bind::session_rx as bind_session_rx;
     use wz_session_core::tx_buf::TxBuf;
     use wz_session_core::tx_lease::TxLease;
 
@@ -487,13 +489,14 @@ mod tests {
     #[cfg(feature = "rx-in-place")]
     #[test]
     fn the_in_place_receive_reads_a_lent_frame_in_the_macs_buffer() {
-        use wz_link_lwip::ethernet::{EthernetIf, Ipv4Config};
+        use wz_link_lwip::ethernet::Ipv4Config;
+        use wz_link_lwip::test_bind::add_netif;
 
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let inbox = Rc::new(RefCell::new(alloc::collections::VecDeque::new()));
         let lent = Rc::new(RefCell::new(Vec::new()));
         let returned = Rc::new(RefCell::new(Vec::new()));
-        let mut node = EthernetIf::add(
+        let mut node = add_netif(
             &link,
             Lending {
                 inbox: inbox.clone(),

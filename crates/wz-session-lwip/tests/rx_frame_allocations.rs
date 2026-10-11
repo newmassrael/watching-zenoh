@@ -74,6 +74,21 @@ use wz_session_core::sink::BoxedSink;
 use wz_session_core::WhatAmI;
 use wz_session_lwip::{app_layer, LwipLinks, LwipSessionLink};
 
+/// The links the test opens its sockets with: `LwipLinks::new` by default, and with
+/// `static-link-storage` (Round 3277) over a leaked pool, since a test is host code
+/// and may allocate where a firmware declares a `static` pool. The count below
+/// reads the receive path, which the pool does not touch.
+fn new_links(link: Rc<LwipLink>) -> LwipLinks {
+    #[cfg(not(feature = "static-link-storage"))]
+    {
+        LwipLinks::new(link)
+    }
+    #[cfg(feature = "static-link-storage")]
+    {
+        LwipLinks::new(link, wz_link_lwip::test_bind::session_sockets())
+    }
+}
+
 /// Counts the allocations made BY THE CURRENT THREAD, so the parallel test
 /// threads of this binary cannot move each other's numbers.
 struct CountingAllocator;
@@ -320,7 +335,7 @@ struct Pair {
 impl Pair {
     fn establish(link: &Rc<LwipLink>, port: u16) -> Self {
         let runtime = CoopRuntime::new(Frozen);
-        let links = LwipLinks::new(link.clone());
+        let links = new_links(link.clone());
         let config = |role| SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
             role,

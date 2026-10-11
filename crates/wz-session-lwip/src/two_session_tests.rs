@@ -35,8 +35,12 @@ use std::sync::Arc;
 
 use wz_codecs::push::PushOwnedVariant;
 use wz_link_lwip::rx_sockets::{
-    bind_session_multicast_rx, bind_session_rx, SessionRxSocket, SESSION_MULTICAST_GROUP_DEFAULT,
-    SESSION_MULTICAST_RX_SLOTS,
+    SessionRxSocket, SESSION_MULTICAST_GROUP_DEFAULT, SESSION_MULTICAST_RX_SLOTS,
+};
+// Round 3277 -- the binders of `test_bind`: the constructors themselves by default,
+// leaked pools of one on `static-link-storage`, so these tests run on both.
+use wz_link_lwip::test_bind::{
+    session_multicast_rx as bind_session_multicast_rx, session_rx as bind_session_rx,
 };
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{
@@ -57,7 +61,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::WhatAmI;
 
-use crate::links::LwipLinks;
+use crate::links::test_links;
 use crate::multicast_drive::{spawn_multicast_session, LwipMulticastDriver, MulticastSession};
 
 /// A clock the test moves. Every session reads the one runtime clock, so a
@@ -245,7 +249,7 @@ impl TwoSessions {
         let clock = StepClock::default();
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
-        let links = LwipLinks::new(link.clone());
+        let links = test_links(link.clone());
 
         let OpenedLink { sink, pump } = links.open_acceptor(router_port).expect("bind router");
         let router = new_session_actions(

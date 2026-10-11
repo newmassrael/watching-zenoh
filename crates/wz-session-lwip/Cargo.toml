@@ -113,6 +113,17 @@ loopif-multicast = ["wz-link-lwip/loopif-multicast"]
 # names it.
 codec-close = ["wz-session-core/codec-close"]
 
+# Round 3277 -- fixed-memory step S7: the link keeps nothing on a heap. Forwards
+# wz-link-lwip's `static-link-storage` SELECTOR: the session sockets this crate
+# opens are cells of a `static` pool the image declares and hands to
+# `LwipLinks::new(link, sockets)`, and a link opened with every cell taken is
+# `LinkOpenError::Exhausted`, never a heap fallback. As `tx-lend-only` is, it is
+# turned on by an MCU final binary only, never by a library crate's dependency
+# line (workspace feature unification would take the heap constructors away from
+# the AP host tests). The per-session `Rc`s this shell still allocates are the
+# per-session slot's step (S5), not this selector's.
+static-link-storage = ["wz-link-lwip/static-link-storage"]
+
 # R311kx — keepalive TX emitter on the MCU session loop. Forwards to the
 # wz-session-core transport-keepalive capability (the shared
 # check_keepalive_deadline / keepalive_wake_deadline pair + the
@@ -326,6 +337,15 @@ required-features = [
     "transport-keepalive",
     "codec-close",
 ]
+
+# Round 3277 (fixed-memory step S7) -- where a session's link state lives, counted
+# by size: a real lwIP session pair from open to teardown, and the socket's
+# receive queue off the heap on `static-link-storage`. It needs both handshake
+# halves to reach Established; the Put arm is only the feature set the lanes
+# above already name for a pair.
+[[test]]
+name = "link_state_allocations"
+required-features = ["session-unicast-open", "session-unicast-accept", "pubsub-put"]
 
 [lints]
 workspace = true

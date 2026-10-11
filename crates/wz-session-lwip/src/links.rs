@@ -16,7 +16,10 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
+#[cfg(not(feature = "static-link-storage"))]
 use wz_link_lwip::rx_sockets::bind_session_rx;
+#[cfg(feature = "static-link-storage")]
+use wz_link_lwip::rx_sockets::SessionSocketSource;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 use wz_runtime_coop::session_drive::{LinkOpenError, OpenedLink, SessionLinks, UdpPeer};
 
@@ -26,12 +29,29 @@ use crate::session_drive::LwipSessionLink;
 /// The links of a node whose network stack is lwIP.
 pub struct LwipLinks {
     link: Rc<LwipLink>,
+    /// Round 3277 (`static-link-storage`) -- where the session sockets this opens
+    /// are bound out of: a `static` pool the image declared, which is what keeps
+    /// each socket's state off the heap.
+    #[cfg(feature = "static-link-storage")]
+    sockets: &'static dyn SessionSocketSource,
 }
 
 impl LwipLinks {
     /// Links over `link`, the witness that lwIP is initialised.
+    #[cfg(not(feature = "static-link-storage"))]
     pub fn new(link: Rc<LwipLink>) -> Self {
         Self { link }
+    }
+
+    /// Round 3277 (`static-link-storage`) -- links over `link` that bind each
+    /// session socket they open out of `sockets`, a `static`
+    /// `wz_link_lwip::rx_sockets::SessionRxPool` the image declares. Its capacity
+    /// is the number of sessions' sockets open at once; one open that finds it full
+    /// is `LinkOpenError::Exhausted`, counted by the pool, with nothing allocated
+    /// instead.
+    #[cfg(feature = "static-link-storage")]
+    pub fn new(link: Rc<LwipLink>, sockets: &'static dyn SessionSocketSource) -> Self {
+        Self { link, sockets }
     }
 
     /// The stack handle, for a firmware that also pumps lwIP's timers.
@@ -45,7 +65,11 @@ impl LwipLinks {
         peer: UdpPeer,
     ) -> Result<OpenedLink<<Self as SessionLinks>::Pump>, LinkOpenError> {
         // Port 0 asks lwIP for a free one, one per initiator session.
-        let socket = bind_session_rx(&self.link, port).map_err(|_| LinkOpenError::Exhausted)?;
+        #[cfg(not(feature = "static-link-storage"))]
+        let socket = bind_session_rx(&self.link, port);
+        #[cfg(feature = "static-link-storage")]
+        let socket = self.sockets.bind_session_rx(&self.link, port);
+        let socket = socket.map_err(|_| LinkOpenError::Exhausted)?;
         let socket: SharedSessionSocket = Rc::new(RefCell::new(socket));
         let driver = Rc::new(LwipUdpDriver::new(
             socket,
@@ -58,6 +82,21 @@ impl LwipLinks {
             sink: driver.clone(),
             pump: LwipSessionLink::new(self.link.clone(), driver),
         })
+    }
+}
+
+/// Links for a host test: `LwipLinks::new` on the default profile, and with
+/// `static-link-storage` over a leaked pool of sockets (a test is host code and may
+/// allocate; a firmware declares a `static` pool instead).
+#[cfg(test)]
+pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
+    #[cfg(not(feature = "static-link-storage"))]
+    {
+        LwipLinks::new(link)
+    }
+    #[cfg(feature = "static-link-storage")]
+    {
+        LwipLinks::new(link, wz_link_lwip::test_bind::session_sockets())
     }
 }
 
@@ -90,7 +129,7 @@ mod tests {
     #[test]
     fn a_port_already_bound_is_refused_as_exhaustion_and_free_again_once_released() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
-        let links = LwipLinks::new(Rc::new(link));
+        let links = test_links(Rc::new(link));
         let held = links.open_acceptor(7551).expect("the first bind");
         std::assert!(
             matches!(links.open_acceptor(7551), Err(LinkOpenError::Exhausted)),
@@ -170,7 +209,7 @@ mod tests {
         #[test]
         fn lwip_links_carry_a_handshake_between_an_acceptor_and_an_initiator() {
             let (_serial, link) = wz_link_lwip::lwip_test_link();
-            let links = LwipLinks::new(Rc::new(link));
+            let links = test_links(Rc::new(link));
             let runtime = CoopRuntime::new(FrozenClock);
             let local = CoopLocalSet::new(&runtime);
 

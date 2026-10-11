@@ -37,7 +37,7 @@ use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
-use crate::links::LwipLinks;
+use crate::links::test_links;
 
 /// A clock the test moves; both sessions read the one runtime clock.
 #[derive(Clone, Default)]
@@ -121,7 +121,7 @@ fn handshake_emits(t: &ActionTrace) -> u32 {
 #[test]
 fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
-    let links = LwipLinks::new(Rc::new(link));
+    let links = test_links(Rc::new(link));
     let clock = StepClock::default();
     let runtime = CoopRuntime::new(clock.clone());
     let local = CoopLocalSet::new(&runtime);

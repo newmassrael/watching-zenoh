@@ -171,7 +171,8 @@ mod tests {
     use core::cell::RefCell;
 
     use wz_link_lwip::ipv4_addr_loopback;
-    use wz_link_lwip::rx_sockets::bind_session_rx;
+    // Round 3277 -- see `driver`'s tests: one body on both profiles.
+    use wz_link_lwip::test_bind::session_rx as bind_session_rx;
     use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
     use wz_session_core::reliability::Reliability;
     use wz_session_core::session_actions::SessionLinkActions;
