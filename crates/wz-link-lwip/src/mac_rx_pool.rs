@@ -42,7 +42,6 @@
 //! [`RxPoolStorage`]: crate::mac_rx_pool::RxPoolStorage
 //! [`install`]: crate::mac_rx_pool::install
 
-use alloc::boxed::Box;
 use core::mem::MaybeUninit;
 
 pub use crate::eth_rx_pool_mcu::SlotState;
@@ -52,7 +51,28 @@ use crate::rx_ring::PoolRxRing;
 /// The memory a firmware sets aside for the pool, in a `static` it places where
 /// the MAC's DMA reaches and the CPU does not cache. It needs no initial value:
 /// [`install`] writes all of it.
-pub type RxPoolStorage = MaybeUninit<EthRxPoolMcu>;
+///
+/// Round 3277 (fixed-memory step S7): the pool's binding ([`EthRxRing`], a few
+/// hundred bytes of slot handles) lives beside the pool in the same storage, where
+/// [`install`] used to leak it onto a heap. Pool and ring are one to one, so the
+/// storage has exactly the room each pool needs and no allocator is involved; the
+/// ring sits in the same non-cacheable section as the pool, which costs the CPU an
+/// uncached access to a handle table and nothing else.
+#[repr(C)]
+pub struct RxPoolStorage {
+    pool: MaybeUninit<EthRxPoolMcu>,
+    ring: MaybeUninit<EthRxRing>,
+}
+
+impl RxPoolStorage {
+    /// Storage holding nothing, for a `static`: [`install`] writes all of it.
+    pub const fn uninit() -> Self {
+        Self {
+            pool: MaybeUninit::uninit(),
+            ring: MaybeUninit::uninit(),
+        }
+    }
+}
 
 /// The installed pool, bound as a MAC's receive buffers.
 pub type EthRxRing = PoolRxRing<EthRxPoolMcu, SLOT_COUNT>;
@@ -72,8 +92,9 @@ pub fn install(storage: &'static mut RxPoolStorage) -> &'static mut EthRxRing {
         "a pool of zeroes is a pool of free slots only while free is the state 0"
     );
     const _: () = assert!(core::mem::size_of::<EthRxPoolMcu>() % 4 == 0);
+    let RxPoolStorage { pool, ring } = storage;
     let words = core::mem::size_of::<EthRxPoolMcu>() / 4;
-    let base = storage.as_mut_ptr() as *mut u32;
+    let base = pool.as_mut_ptr() as *mut u32;
     for i in 0..words {
         // SAFETY: `i` words into storage this `&'static mut` owns, which is aligned
         // to its slots' alignment (at least 4) and a whole number of words long.
@@ -81,14 +102,15 @@ pub fn install(storage: &'static mut RxPoolStorage) -> &'static mut EthRxRing {
     }
     // SAFETY: every byte is zero, and an all-zero pool is a valid one: the slot
     // bytes are plain bytes and every slot state reads `Free` (asserted above).
-    let pool = unsafe { storage.assume_init_mut() };
-    Box::leak(Box::new(PoolRxRing::new(pool)))
+    let pool = unsafe { pool.assume_init_mut() };
+    ring.write(PoolRxRing::new(pool))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::eth_rx_pool_mcu::SLOT_SIZE;
+    use alloc::boxed::Box;
     use wz_runtime_core::MacRxPool;
 
     fn storage() -> &'static mut RxPoolStorage {
@@ -104,8 +126,10 @@ mod tests {
         let storage = storage();
         // SAFETY: writes bytes into storage this test owns.
         unsafe {
+            // The pool is the storage's first field (`repr(C)`), so its bytes
+            // start where the storage does.
             core::ptr::write_bytes(
-                storage.as_mut_ptr() as *mut u8,
+                storage as *mut RxPoolStorage as *mut u8,
                 0xFF,
                 core::mem::size_of::<EthRxPoolMcu>(),
             )

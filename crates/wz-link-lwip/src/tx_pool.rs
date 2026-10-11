@@ -69,7 +69,7 @@
 //! [`TxPoolStorage`]: crate::tx_pool::TxPoolStorage
 //! [`install`]: crate::tx_pool::install
 
-use alloc::boxed::Box;
+use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -121,6 +121,21 @@ struct Installed {
     capacity: u16,
     stats: TxPoolStats,
 }
+
+/// Where the installed pool's bookkeeping lives: one cell of this module, in
+/// `.bss`, which a second [`install`] overwrites. Round 3277 (fixed-memory step
+/// S7) moved it here from a leaked heap box: there is exactly one installed pool
+/// at a time (the `INSTALLED` pointer below is the one), so exactly one cell is
+/// the right amount of storage, and the pool's own `storage` stays the only
+/// memory a firmware places.
+struct InstalledCell(UnsafeCell<MaybeUninit<Installed>>);
+
+// SAFETY: written by `install` and read by the lend, the gather callback and the
+// free callback, all on lwIP's one thread and none inside another (see
+// "Threading" above), so no two references to the cell are live at once.
+unsafe impl Sync for InstalledCell {}
+
+static INSTALLED_CELL: InstalledCell = InstalledCell(UnsafeCell::new(MaybeUninit::uninit()));
 
 /// The pool lwIP sends from, if one is installed. Written by [`install`], read
 /// by the lend, the gather callback and the free callback, all on lwIP's thread.
@@ -181,12 +196,17 @@ pub fn install(storage: &'static mut TxPoolStorage) -> TxPoolSpan {
     };
     // SAFETY: reads a constant of the shim.
     let capacity = unsafe { wz_lwip_tx_slot_capacity(SLOT_SIZE as u16) };
-    let installed = Box::leak(Box::new(Installed {
-        pool: NonNull::from(pool),
-        span,
-        capacity,
-        stats: TxPoolStats::default(),
-    }));
+    // SAFETY: the threading contract above: no borrow of the cell is live while
+    // `install` runs, and `Installed` has no destructor, so overwriting an earlier
+    // install's record drops nothing.
+    let installed = unsafe {
+        (*INSTALLED_CELL.0.get()).write(Installed {
+            pool: NonNull::from(pool),
+            span,
+            capacity,
+            stats: TxPoolStats::default(),
+        })
+    };
     INSTALLED.store(installed, Ordering::Release);
     span
 }
@@ -354,7 +374,8 @@ pub(crate) struct TestPool;
 #[cfg(test)]
 impl TestPool {
     pub(crate) fn install() -> Self {
-        let storage: &'static mut TxPoolStorage = Box::leak(Box::new(TxPoolStorage::uninit()));
+        let storage: &'static mut TxPoolStorage =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(TxPoolStorage::uninit()));
         install(storage);
         Self
     }
@@ -370,6 +391,7 @@ impl Drop for TestPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
     use std::vec::Vec;
 
     /// The storage a firmware gives is not trusted to hold anything: a section that
