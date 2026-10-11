@@ -42,8 +42,6 @@ use super::{DispatchOutcome, QueryEnvelope, QueryProjection, QueryableRegistry};
 use crate::ext_view::ExtEntryView;
 use crate::query_sink::QuerySink;
 use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
-#[cfg(test)]
-use crate::sample::QosLevel;
 use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound, MappingSpaces};
 
 /// Why a Request read in place is dispatched through its owned projection
@@ -226,7 +224,7 @@ mod tests {
     use crate::query_mode::QueryTarget;
     use crate::reply_stage::ReplyStaging as _;
     use crate::request_build::RequestQueryBuilder;
-    use crate::sample::{EncodingHint, SourceInfo};
+    use crate::sample::{EncodingHint, QosLevel, SourceInfo};
     use alloc::string::String;
     use alloc::vec::Vec;
     use hashbrown::HashMap;
