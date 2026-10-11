@@ -1568,7 +1568,7 @@ pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
 
 // ── the oracle: the census and the field document ──────────────────────────
 
-fn flow_object<'a>(entry: &'a Json5Value) -> &'a Json5Value {
+fn flow_object(entry: &Json5Value) -> &Json5Value {
     entry.get("flow").expect("a flow entry carries its flow")
 }
 
