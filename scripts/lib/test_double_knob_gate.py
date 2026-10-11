@@ -36,14 +36,23 @@ derive from the set of inputs the ORACLE can construct. So:
   branches on is, by construction, a switch on what inputs the oracle can
   produce. An ordinary bool that only test bodies touch is not a knob and is
   not in the population.
-* A RECORD is a counter or log field on a struct in that same module: `usize`,
-  `u32`, `u64`, `AtomicUsize`, or a `Vec<..>`. These are what the double writes
-  down about what it was asked.
+* A RECORD is a field of a struct declared in that same module which the
+  double's non-test code WRITES -- assigns, or mutates through (`+=`,
+  `.push(`, `.fetch_add(`, `.set(`, `.borrow_mut()`, `.lock()`, ...). That is
+  what "the double writes down what it was asked" means, and it is read off the
+  double rather than off the field's TYPE. Open-debt item 903 replaced a list
+  of type names (`usize`, `u32`, `u64`, `AtomicUsize`, `Vec<`), which was wrong
+  both ways: it missed every record held behind interior mutability
+  (`RefCell<usize>`, `Cell<..>`, `Arc<AtomicUsize>`, a `Mutex`-held struct),
+  and it counted a plain `usize` the double only reads (a size, a headroom).
+  A test could then pass by assigning that configuration, or by reading a
+  counter nothing ever incremented.
 
 ONE rule, in the direction that makes a vacuous test loud:
 
 * Every `#[test]` that sets a knob READS at least one record in its own body.
-  A test that configures its double to misbehave and then never asks whether
+  Reading is a mention that is not an assignment target: resetting a counter
+  is not looking at it. A test that configures its double to misbehave and then never asks whether
   the double was called cannot tell "the code under test refused" from "the
   fixture refused" -- which is exactly what the survivor could not tell.
 
@@ -80,6 +89,16 @@ misbehaviour knobs -- a double's own one-shot state flag lands in it too. The
 rule only bites on the ones a `#[test]` configures, so the superset costs
 nothing and keeps the derivation off a judgement about intent.
 
+What a record is NOT proven to be, after item 903: it is a field the double
+writes, found by NAME across the module's non-test code and by the std
+vocabulary for mutation. A field the double writes for another reason (a pool's
+free-list, handed out and taken back) is a record to this derivation, so a test
+that reads only that has not necessarily asked the double the question that
+matters. And a mutation spelled through a method this vocabulary does not know
+(`log.record(x)`) leaves the field out of the population, which can only turn a
+witnessed test red and never an unwitnessed one green. The first is the
+residual; the second is why it is the safe direction.
+
 The general form of item 625 is mutation testing over the suite, and this is
 not that. This gate sees only doubles that switch on A BOOL FIELD; a double
 that refuses unconditionally, or switches on an enum, or is a closure captured
@@ -105,11 +124,70 @@ TEST_FN_RE = re.compile(r"#\[(?:\w+::)?test\b[^\]]*\]\s*(?:(?:async|pub|unsafe)\
 # tracked file here looks like. The trailing comma is optional so a struct's
 # LAST field is still seen -- rustfmt writes one, but a fixture need not.
 BOOL_FIELD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*bool\s*(?:,|$)", re.M)
-RECORD_FIELD_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*"
-    r"(?:usize|u32|u64|AtomicUsize|Vec\s*<)",
-    re.M,
+
+# A struct declaration with a braced body: `struct Name<T> where .. {`. The
+# fields of a RECORD candidate are read from these bodies and from nowhere else,
+# so a parameter on a wrapped `fn` signature or a `name: value` line of a
+# struct literal is never mistaken for a field.
+STRUCT_RE = re.compile(r"\bstruct\s+\w+\s*(?:<[^{;]*>)?\s*(?:where[^{;]*)?\{")
+# One declared field of such a body: `name: Type,` on a line of its own.
+ANY_FIELD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*[^\s=]", re.M)
+
+# What WRITING a field looks like in the double's own code, by receiver-agnostic
+# shape: the record is reached through `self`, through a guard (`st.alloc_calls`)
+# or through a clone, so the receiver is not part of the pattern.
+#
+# ASSIGNMENT covers `=` and every compound form; `=>`, `==` are not writes. The
+# lookahead is written to swallow the operator ITSELF for the reason the knob
+# read pattern below carries.
+_WRITE_VERBS = (
+    r"borrow_mut|lock|write|get_mut|set|replace|take|swap|store|send|try_send|"
+    r"fetch_\w+|compare_exchange\w*|push\w*|pop\w*|insert|extend\w*|append|"
+    r"clear|remove|truncate|drain|retain|entry"
 )
+
+
+def writes_field(field, code):
+    """Does `code` WRITE the field `field`: assign it or mutate through it.
+
+    The mutation verbs are the std vocabulary for mutating a collection, a cell,
+    a mutex-held value or an atomic, which is what `written` means whatever the
+    field's declared type. A custom method this does not know (`log.record(x)`)
+    makes the field NOT a record, and that errs towards a finding: a field
+    missed here can only turn a witnessed test red, never an unwitnessed one
+    green.
+    """
+    name = re.escape(field)
+    assign = re.search(r"\.\s*" + name + r"\s*(?:[+\-*/%|&^]|<<|>>)?=(?![=>])", code)
+    mutate = re.search(r"\.\s*" + name + r"\s*\.\s*(?:" + _WRITE_VERBS + r")\s*\(", code)
+    return bool(assign or mutate)
+
+
+def reads_field(field, body):
+    """Does a test body READ `field`: mention it other than as an assignment target.
+
+    A test that resets a counter (`h.calls = 0`) has written what it is
+    supposed to be reading. The lookahead swallows the whitespace and the
+    (compound) operator for the reason `read_re` below does.
+    """
+    return bool(
+        re.search(
+            r"\.\s*" + re.escape(field) + r"\b(?!\s*(?:[+\-*/%|&^]|<<|>>)?=[^=])",
+            body,
+        )
+    )
+
+
+def struct_fields(scope):
+    """`{field: is_bool}` over the fields of every struct body in `scope`."""
+    fields = {}
+    for m in STRUCT_RE.finditer(scope):
+        start, end = span_from_brace(scope, m.end() - 1)
+        body = scope[start:end]
+        bools = set(BOOL_FIELD_RE.findall(body))
+        for name in ANY_FIELD_RE.findall(body):
+            fields[name] = name in bools
+    return fields
 
 
 def strip_comments(text):
@@ -200,19 +278,20 @@ def line_of(text, idx):
 
 
 def scan_file(path, text):
-    """`(findings, knobs)` for one file.
+    """`(findings, knobs, records)` for one file.
 
-    `knobs` is the roster itself rather than a count, so `--list` can print
-    WHICH knobs the derivation reached. A number alone is the shape this tree
-    keeps getting caught by: 8 is indistinguishable from 8 of the wrong thing.
+    `knobs` and `records` are the rosters themselves rather than counts, so
+    `--list` can print WHICH fields the derivation reached. A number alone is
+    the shape this tree keeps getting caught by: 8 is indistinguishable from 8
+    of the wrong thing.
     """
     stripped = strip_comments(text)
     findings = []
     knobs_seen = []
+    records_seen = []
     for start, end in test_scopes(stripped):
         scope = stripped[start:end]
         bools = set(BOOL_FIELD_RE.findall(scope))
-        records = set(RECORD_FIELD_RE.findall(scope))
         if not bools:
             continue
         fns = test_fns(stripped, start, end)
@@ -225,18 +304,37 @@ def scan_file(path, text):
                     outside[i] = " "
         outside = "".join(outside)
 
-        for field in sorted(bools):
-            # READ by the double, in a non-assignment position. `self.x = true`
-            # inside the double is the double RECORDING something, not
-            # branching on it, and counting that as a knob is what made the
-            # first draft report five false positives.
-            # The lookahead must swallow the whitespace ITSELF: written as
-            # `\b\s*(?!=..)` the `\s*` backtracks to zero and the lookahead
-            # then sees a space instead of the `=`, so every assignment matched
-            # anyway. Measured on the `recorded-bool` selftest fixture.
-            read_re = re.compile(r"\.\s*" + re.escape(field) + r"\b(?!\s*=[^=])")
-            if not read_re.search(outside):
-                continue  # not read by the double: an ordinary test-local bool
+        # READ by the double, in a non-assignment position. `self.x = true`
+        # inside the double is the double RECORDING something, not
+        # branching on it, and counting that as a knob is what made the
+        # first draft report five false positives.
+        # The lookahead must swallow the whitespace ITSELF: written as
+        # `\b\s*(?!=..)` the `\s*` backtracks to zero and the lookahead
+        # then sees a space instead of the `=`, so every assignment matched
+        # anyway. Measured on the `recorded-bool` selftest fixture.
+        knob_fields = {
+            field
+            for field in bools
+            if re.search(r"\.\s*" + re.escape(field) + r"\b(?!\s*=[^=])", outside)
+        }
+        # A RECORD is a field the double WRITES, whatever its declared type
+        # (open-debt item 903). The first draft listed type names -- `usize`,
+        # `u32`, `u64`, `AtomicUsize`, `Vec<` -- and that list was wrong in
+        # both directions: it did not see `RefCell<usize>`, `Cell<..>` or
+        # `Arc<AtomicUsize>`, which is what a double handed only `&self` must
+        # use, and it counted every plain `usize` field, including one the
+        # double merely READS (`headroom`), so a test could pass by assigning
+        # the configuration it had just set. What makes a field a record is
+        # that the double writes it down when it is called; the type is
+        # incidental. A knob is a branch input and is never its own witness.
+        records = {
+            field
+            for field in struct_fields(scope)
+            if field not in knob_fields and writes_field(field, outside)
+        }
+        records_seen.extend((field, line_of(stripped, start)) for field in sorted(records))
+
+        for field in sorted(knob_fields):
             set_re = re.compile(r"\w+\s*\.\s*" + re.escape(field) + r"\s*=\s*(?:true|false)\s*;")
             setters = []
             for name, b_start, b_end in fns:
@@ -249,10 +347,7 @@ def scan_file(path, text):
             # summary that printed only "8 knobs" would read as 8 judgements.
             knobs_seen.append((field, line_of(stripped, start), len(setters)))
             for name, body in setters:
-                if not any(
-                    re.search(r"\.\s*" + re.escape(rec) + r"\b", body)
-                    for rec in records
-                ):
+                if not any(reads_field(rec, body) for rec in records):
                     findings.append(
                         (
                             field,
@@ -263,7 +358,7 @@ def scan_file(path, text):
                             "tell the code's refusal from the fixture's",
                         )
                     )
-    return findings, knobs_seen
+    return findings, knobs_seen, records_seen
 
 
 def tracked_rust_files():
@@ -360,6 +455,108 @@ mod tests {
 """
 
 
+# A record held behind interior mutability. `RefCell<usize>` is what a double
+# that is only ever handed `&self` has to use, and the type-name list this gate
+# first carried did not name it, so a test that DID ask the double was told it
+# had not (measured on `tx_lease.rs`, whose `aborts` is a `RefCell<usize>`).
+SELFTEST_INTERIOR_RECORD = """
+#[cfg(test)]
+mod tests {
+    use core::cell::RefCell;
+    struct Harness {
+        asked: RefCell<usize>,
+        always_fail: bool,
+    }
+    fn alloc(h: &Harness) -> Option<u8> {
+        *h.asked.borrow_mut() += 1;
+        if h.always_fail {
+            return None;
+        }
+        Some(1)
+    }
+    #[test]
+    fn a_refusal_is_the_backends() {
+        let mut h = Harness {
+            asked: RefCell::new(0),
+            always_fail: false,
+        };
+        h.always_fail = true;
+        assert!(alloc(&h).is_none());
+        assert_eq!(*h.asked.borrow(), 1);
+    }
+}
+"""
+
+# A `usize` the double only READS is configuration, not a record: counting it
+# let a test pass by assigning it (`h.headroom = ..`) or by reading a counter the
+# double never writes. Both are in the test body; neither says the double was
+# asked, which is what the rule requires.
+SELFTEST_CONFIG_NOT_RECORD = """
+#[cfg(test)]
+mod tests {
+    struct Harness {
+        calls: usize,
+        headroom: usize,
+        always_fail: bool,
+    }
+    fn alloc(h: &mut Harness) -> Option<u8> {
+        if h.always_fail || h.headroom > 3 {
+            return None;
+        }
+        Some(1)
+    }
+    #[test]
+    fn a_refusal_is_the_backends() {
+        let mut h = Harness {
+            calls: 0,
+            headroom: 0,
+            always_fail: false,
+        };
+        h.always_fail = true;
+        h.headroom = 9;
+        assert!(alloc(&mut h).is_none());
+        assert_eq!(h.calls, 0);
+    }
+}
+"""
+
+# Resetting a record is not reading it: the test writes the counter and never
+# looks at what the double wrote into it.
+SELFTEST_RECORD_ASSIGNED = SELFTEST_WITNESSED.replace(
+    "        assert_eq!(h.state.alloc_calls, 1);",
+    "        h.state.alloc_calls = 0;",
+)
+
+# A bool the DOUBLE writes down is a record, so a test that sets a knob and then
+# reads it HAS asked the double.
+SELFTEST_BOOL_RECORD = """
+#[cfg(test)]
+mod tests {
+    struct Harness {
+        was_asked: bool,
+        always_fail: bool,
+    }
+    fn alloc(h: &mut Harness) -> Option<u8> {
+        h.was_asked = true;
+        if h.always_fail {
+            return None;
+        }
+        Some(1)
+    }
+    #[test]
+    fn a_refusal_is_the_backends() {
+        let mut h = Harness {
+            was_asked: false,
+            always_fail: false,
+        };
+        h.always_fail = true;
+        assert!(alloc(&mut h).is_none());
+        assert!(h.was_asked);
+    }
+}
+"""
+
+
 def selftest():
     """Drive the gate against fixtures the OLD shape would have swallowed.
 
@@ -377,10 +574,14 @@ def selftest():
         ("unset", SELFTEST_UNSET, set(), 1),
         ("not-a-knob", SELFTEST_NOT_A_KNOB, set(), 0),
         ("recorded-bool", SELFTEST_RECORDED_BOOL, set(), 0),
+        ("interior-record", SELFTEST_INTERIOR_RECORD, set(), 1),
+        ("config-not-record", SELFTEST_CONFIG_NOT_RECORD, {"UNWITNESSED"}, 1),
+        ("record-assigned", SELFTEST_RECORD_ASSIGNED, {"UNWITNESSED"}, 1),
+        ("bool-record", SELFTEST_BOOL_RECORD, set(), 1),
     ]
     ok = True
     for name, src, want_kinds, want_knobs in cases:
-        findings, roster = scan_file("<selftest>", src)
+        findings, roster, _records = scan_file("<selftest>", src)
         knobs = len(roster)
         _ = sum(setters for _, _, setters in roster)
         kinds = {kind for _, _, kind, _ in findings}
@@ -405,25 +606,36 @@ def main():
 
     findings = []
     roster = []
+    record_roster = []
     for path in tracked_rust_files():
         try:
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
         except (OSError, UnicodeDecodeError):
             continue
-        rows, seen = scan_file(path, text)
+        rows, seen, recs = scan_file(path, text)
         roster.extend((path, line, field, setters) for field, line, setters in seen)
+        record_roster.extend((path, line, field) for field, line in recs)
         for field, line, kind, detail in rows:
             findings.append((path, line, field, kind, detail))
     knobs = len(roster)
     graded = sum(setters for _, _, _, setters in roster)
+    records = len(record_roster)
 
     if listing:
         for path, line, field, setters in sorted(roster):
             print(f"{path}:{line} {field} (configured by {setters} test(s))")
+        for path, line, field in sorted(record_roster):
+            print(f"{path}:{line} {field} (record: written by the double)")
 
-    if knobs == 0 or graded == 0:
-        what = "knob" if knobs == 0 else "test that configures one"
+    if knobs == 0 or graded == 0 or records == 0:
+        what = (
+            "knob"
+            if knobs == 0
+            else "test that configures one"
+            if graded == 0
+            else "record the double writes"
+        )
         print(
             f"test-double-knob-gate: FAIL — the derivation found NO {what} at "
             "all. A population of zero is the exact failure this gate is "
@@ -447,7 +659,8 @@ def main():
 
     print(
         f"test-double-knob-gate: {knobs} knob(s) derived, {graded} configured "
-        "by a test and each one witnessed"
+        f"by a test and each one witnessed, over {records} record field(s) "
+        "the doubles write"
     )
     return 0
 
