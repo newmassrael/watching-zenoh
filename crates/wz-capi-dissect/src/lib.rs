@@ -3318,8 +3318,9 @@ pub unsafe extern "C" fn wz_dissect_live_census(
 ///
 /// On a handle opened with [`WZ_DISSECT_LIMITS_LIVE_TAP`] the oldest messages of
 /// a flow are discarded to stay inside the ceiling, and the Init is the oldest
-/// message there is. A row is therefore not built from what is held: the zids,
-/// the instants and the totals are taken as the packets arrive. What a ceiling
+/// message there is. A row is therefore taken from the arrivals and never from
+/// what is held: the zids, the instants and the totals are read as the packets
+/// arrive. What a ceiling
 /// does take is a FLOW, and `dropped_by_limits` says how many.
 ///
 /// # It is a READ, and the handle is `const` to say so
