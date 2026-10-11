@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-#![cfg(feature = "reassembly")]
+#![cfg(all(feature = "reassembly", not(feature = "fixed-memory")))]
 
 //! Stage 5 (reassembly axis) — host integration of the MCU acceptor session
 //! e2e driving a FRAGMENT CHAIN.

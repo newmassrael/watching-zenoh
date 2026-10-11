@@ -68,6 +68,13 @@ path = "src/lib.rs"
 # reassembly tests were hidden from this only because `reassembly` is off by
 # default and does not imply `lwip`. Layer C1cf, which builds every crate with
 # its defaults off, is what found it.
+# Fixed-memory step S9c -- the same scenario on the fixed-memory profile, over
+# statics, with the heap counted by the crate that asks for each allocation. It
+# needs the selector set, which is the `fixed-memory` feature.
+[[test]]
+name = "host_acceptor_fixed_e2e"
+required-features = ["fixed-memory"]
+
 [[test]]
 name = "host_acceptor_e2e"
 required-features = ["lwip"]
@@ -129,10 +136,40 @@ lwip-sys = { path = "../lwip-sys", optional = true }
 # opens with (craft_initsyn/opensyn) + the application Frame (craft_frame).
 # Shared with the wz-runtime-tokio session-FSM drive tests so both profiles
 # inspect the same independent-oracle bytes.
-wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
+#
+# S9c -- `default-features = false`: the e2e writes its frames through the crate's
+# `fixed` forms (a buffer on the stack), so the fixtures' `alloc` feature (the `Vec`
+# forms) is the host tests' to turn on, and the crate does not link `alloc` on the
+# fixed-memory profile.
+wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures", default-features = false }
+# S9c -- named only to turn the selectors on through the `fixed-memory` feature below:
+# the facade deliberately forwards neither `session-slot` nor `static-link-storage`
+# (a forward would let workspace feature unification take the heap constructors away
+# from the AP host tests), and both are the final binary's to choose. They are the
+# SAME instances the facade pulls, so no second copy of either crate is built.
+wz-session-lwip = { path = "../wz-session-lwip", optional = true, default-features = false }
+wz-link-lwip = { path = "../wz-link-lwip", optional = true, default-features = false }
 
 [features]
 default = ["lwip"]
+# S9c -- the fixed-memory profile of the e2e: the SESSION TIER with its shell on the
+# per-session slot, static link storage and the static pump and runtime (the selector
+# set `session-slot` implies, plus `static-link-storage`), through
+# `run_acceptor_e2e_fixed` over statics the image declares. The crate links no `alloc`
+# under it, so a use that crept back into the e2e is a compile error; what the
+# session tier still allocates is `wz-session-core`'s and the codec owned mirrors',
+# the next step's. It replaces the heap form (`run_acceptor_e2e`,
+# `AcceptorTopology`, `LwipTopology`): a build has one of them.
+fixed-memory = [
+    "lwip",
+    "dep:wz-session-lwip",
+    "dep:wz-link-lwip",
+    "wz-session-lwip/session-slot",
+    "wz-session-lwip/static-link-storage",
+    "wz-session-lwip/session-unicast-accept",
+    "wz-runtime-coop/session-slot",
+    "wz-session-core/session-slot",
+]
 # R2917 — the lwIP topology (`lwip::LwipTopology`, `run_acceptor_e2e`): the
 # MCU session shell over lwIP loopback. On by default, so every existing
 # caller builds unchanged; a profile on another network stack (Zephyr's

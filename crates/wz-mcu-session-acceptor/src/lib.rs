@@ -50,19 +50,26 @@
 //! kept because the dependence it removes is a property of the stack, not of
 //! the session.
 
+// Fixed-memory step S9c -- under `fixed-memory` the crate does not link `alloc` at all
+// (its frames are written into buffers on the stack, its session state is in statics
+// the image declares), so a use that crept back would be a compile error and not a
+// silent allocation. The heap form (the topology trait, the lwIP topology, the `Rc`
+// sink) is this profile's absence.
+#[cfg(not(feature = "fixed-memory"))]
 extern crate alloc;
 
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::rc::Rc;
-use alloc::vec;
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::vec::Vec;
 
+#[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::session_drive::{
     SessionDatagramLink, SessionDriveConfig, SessionPump, SessionRole,
 };
+#[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::{CoopRuntime, CoopTime};
-#[cfg(feature = "reassembly")]
-use wz_session_wire_fixtures::craft_fragment_wire;
-use wz_session_wire_fixtures::{craft_frame_wire, craft_initsyn_wire, craft_opensyn_wire};
+use wz_session_wire_fixtures::fixed as wires;
 
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the QEMU bin depend only on THIS crate (single-dep facade
@@ -75,16 +82,24 @@ pub use wz_session_core::driver_loop::ReassemblyDropReason;
 
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::session_init_params::SessionInitParams;
+use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::WhatAmI;
 
-#[cfg(all(feature = "lwip", lwip_real_build))]
+#[cfg(all(feature = "lwip", lwip_real_build, not(feature = "fixed-memory")))]
 pub mod lwip;
-#[cfg(all(feature = "lwip", lwip_real_build))]
+#[cfg(all(feature = "lwip", lwip_real_build, not(feature = "fixed-memory")))]
 pub use lwip::{run_acceptor_e2e, run_acceptor_e2e_with_progress, LwipTopology};
+// Fixed-memory step S9c -- the e2e over statics the image declares, which replaces the
+// heap form above on the profile.
+#[cfg(all(feature = "fixed-memory", lwip_real_build))]
+pub mod fixed;
+#[cfg(all(feature = "fixed-memory", lwip_real_build))]
+pub use fixed::{run_acceptor_e2e_fixed, AcceptorStatics};
 
 /// UDP port the acceptor session socket binds to.
 pub const SESSION_PORT: u16 = 7460;
@@ -166,6 +181,11 @@ impl wz_session_core::entropy::EntropySource for FixtureEntropy {
 /// input pump) or as one (a Zephyr socket link): the session's outbound sink,
 /// and the drive loop's inbound [`SessionDatagramLink`]. The crafted peer is
 /// a plain socket on the same stack.
+///
+/// Absent under `fixed-memory`: its acceptor sink is an `Rc<dyn BoxedLinkDriver>` and
+/// its peer's receive a `Vec`. The profile's e2e is `run_acceptor_e2e_fixed`, over
+/// statics.
+#[cfg(not(feature = "fixed-memory"))]
 pub trait AcceptorTopology {
     /// The acceptor's link as the drive loop reads it.
     type Link: SessionDatagramLink;
@@ -352,6 +372,229 @@ enum PeerPhase {
     Done,
 }
 
+/// The reactive peer and the counters of one run: everything the e2e decides that does
+/// not depend on how the acceptor's session is held. The heap form keeps one on its
+/// stack and the fixed-memory form in a `static` (S9c); both feed it the drive loop's
+/// events and the datagrams the peer receives, and both read the verdict off it, so the
+/// two forms cannot disagree about what a handshake that reached `Established` is.
+pub(crate) struct Run {
+    data_mode: DataMode,
+    /// The SN the data dispatch surfaces at: the whole-frame SN, or — for a
+    /// reassembled chain — the final fragment's SN (the SN
+    /// `report_outcome_reassembling` stamps on the completion `FramePayload`).
+    /// The stalled and ooo chains never complete, so their value is inert.
+    expected_data_sn: u64,
+    peer_phase: PeerPhase,
+    frame_dispatched: bool,
+    advanced_fsm: u32,
+    side_effect: u32,
+    frame_payload: u32,
+    data_dispatch_msg_count: usize,
+    parse_error: u32,
+    reassembly_timed_out: u32,
+    reassembly_dropped: u32,
+    last_drop_reason: Option<ReassemblyDropReason>,
+    peer_initack_seen: bool,
+    peer_cookie_len: usize,
+    peer_opensyn_sent: bool,
+    peer_openack_seen: bool,
+    peer_frame_sent: bool,
+    peer_rx_count: u32,
+}
+
+impl Run {
+    /// A run that has seen nothing, for `data_mode`.
+    pub(crate) const fn new(data_mode: DataMode) -> Self {
+        Self {
+            data_mode,
+            expected_data_sn: match data_mode {
+                DataMode::WholeFrame => DATA_FRAME_SN,
+                #[cfg(feature = "reassembly")]
+                DataMode::FragmentChain
+                | DataMode::FragmentChainStalled
+                | DataMode::FragmentChainOoo => FRAG_SN_1,
+            },
+            peer_phase: PeerPhase::AwaitInitAck,
+            frame_dispatched: false,
+            advanced_fsm: 0,
+            side_effect: 0,
+            frame_payload: 0,
+            data_dispatch_msg_count: 0,
+            parse_error: 0,
+            reassembly_timed_out: 0,
+            reassembly_dropped: 0,
+            last_drop_reason: None,
+            peer_initack_seen: false,
+            peer_cookie_len: 0,
+            peer_opensyn_sent: false,
+            peer_openack_seen: false,
+            peer_frame_sent: false,
+            peer_rx_count: 0,
+        }
+    }
+
+    /// One event of the acceptor's drive loop. `on_fragment` is called for a
+    /// dispatched fragment (it only fires under `reassembly`).
+    pub(crate) fn event(&mut self, event: IterationEvent<'_>, on_fragment: &mut dyn FnMut()) {
+        // The hook only fires under `reassembly` (the Fragment outcome is gated);
+        // reference it so the non-reassembly build does not flag an unused param.
+        #[cfg(not(feature = "reassembly"))]
+        let _ = &on_fragment;
+        match event {
+            IterationEvent::Poll(outcome) => match outcome {
+                DriverLoopOutcome::AdvancedFsm => self.advanced_fsm += 1,
+                DriverLoopOutcome::SideEffectOnly => self.side_effect += 1,
+                DriverLoopOutcome::ParseError(_) => self.parse_error += 1,
+                DriverLoopOutcome::FramePayload { sn, messages, .. } => {
+                    self.frame_payload += 1;
+                    if *sn == self.expected_data_sn {
+                        self.frame_dispatched = true;
+                        self.data_dispatch_msg_count = messages.len();
+                    }
+                }
+                // A fragment was dispatched (before the ingest arms the
+                // chain). Notify the caller's hook — the stalled host test
+                // uses it to advance its clock past the chain deadline so
+                // the next sweep evicts; every other caller passes a no-op.
+                #[cfg(feature = "reassembly")]
+                DriverLoopOutcome::Fragment { .. } => on_fragment(),
+                _ => {}
+            },
+            // The same fragment, read where the link held it (a pump that
+            // reads its units in place reports it so, not as `Poll(Fragment)`).
+            #[cfg(feature = "reassembly")]
+            IterationEvent::InPlaceFragment(_) => on_fragment(),
+            // The deadline sweep evicted an abandoned chain — count it (the
+            // FragmentChainStalled verdict).
+            IterationEvent::ReassemblyTimeout(n) => self.reassembly_timed_out += n as u32,
+            // A fragment ingest aborted/refused a chain — count it + record
+            // the reason (the FragmentChainOoo verdict asserts OutOfOrder).
+            IterationEvent::ReassemblyDropped(reason) => {
+                self.reassembly_dropped += 1;
+                self.last_drop_reason = Some(reason);
+            }
+            _ => {}
+        }
+    }
+
+    /// The peer received `reply`: advance its handshake state machine, sending
+    /// through `send` and announcing the stage it moves to through `on_stage`.
+    pub(crate) fn react(
+        &mut self,
+        reply: &[u8],
+        send: &mut dyn FnMut(&[u8]),
+        on_stage: &mut dyn FnMut(AcceptorStage),
+    ) {
+        self.peer_rx_count += 1;
+        match (self.peer_phase, parse_inbound(reply)) {
+            // InitAck arrived — echo its minted cookie in OpenSyn.
+            (
+                PeerPhase::AwaitInitAck,
+                Ok(InboundFrame::Init {
+                    is_ack: true, body, ..
+                }),
+            ) => {
+                self.peer_initack_seen = true;
+                if let Some(cookie) = body.cookie {
+                    self.peer_cookie_len = cookie.len();
+                    send(wires::opensyn(&cookie).as_slice());
+                    self.peer_opensyn_sent = true;
+                    self.peer_phase = PeerPhase::AwaitOpenAck;
+                    on_stage(AcceptorStage::AwaitOpenAck);
+                }
+            }
+            // OpenAck arrived — the acceptor is Established; send the
+            // application data (whole Frame, or a fragment chain the
+            // acceptor reassembles).
+            (PeerPhase::AwaitOpenAck, Ok(InboundFrame::Open { is_ack: true, .. })) => {
+                self.peer_openack_seen = true;
+                match self.data_mode {
+                    DataMode::WholeFrame => {
+                        send(wires::frame(DATA_FRAME_SN, true).as_slice());
+                    }
+                    #[cfg(feature = "reassembly")]
+                    DataMode::FragmentChain => {
+                        // A reliable two-fragment chain. The bodies
+                        // [0x01]+[0x02] reassemble to [0x01,0x02], whose
+                        // lead byte is an N_MID < 0x19 the acceptor's
+                        // parse_frame_payload surfaces as a single
+                        // NetworkMessage::Unknown — i.e. one FramePayload
+                        // at the final fragment's SN.
+                        send(wires::fragment(true, true, FRAG_SN_0, &[0x01]).as_slice());
+                        send(wires::fragment(true, false, FRAG_SN_1, &[0x02]).as_slice());
+                    }
+                    #[cfg(feature = "reassembly")]
+                    DataMode::FragmentChainStalled => {
+                        // Only the FIRST fragment (more=1). The
+                        // continuation is never sent, so the acceptor's
+                        // armed chain is left dangling and the deadline
+                        // sweep evicts it once the caller's clock crosses
+                        // the reassembly window.
+                        send(wires::fragment(true, true, FRAG_SN_0, &[0x01]).as_slice());
+                    }
+                    #[cfg(feature = "reassembly")]
+                    DataMode::FragmentChainOoo => {
+                        // First fragment (sn=10, more=1) arms the chain;
+                        // the second carries a NON-CONSECUTIVE sn=12
+                        // (skipping the expected 11), so strict in-order
+                        // aborts the chain (fragment.ooo) on ingest.
+                        send(wires::fragment(true, true, FRAG_SN_0, &[0x01]).as_slice());
+                        send(wires::fragment(true, true, FRAG_SN_OOO, &[0x02]).as_slice());
+                    }
+                }
+                self.peer_frame_sent = true;
+                self.peer_phase = PeerPhase::Done;
+                on_stage(AcceptorStage::AwaitDispatch);
+            }
+            _ => {}
+        }
+    }
+
+    /// The verdict, given whether the acceptor reached `Established` and how often
+    /// its `InitAck` and `OpenAck` actions fired (its trace counters).
+    pub(crate) fn report(
+        &self,
+        established: bool,
+        init_ack_action_fired: u32,
+        open_ack_action_fired: u32,
+    ) -> AcceptorE2eReport {
+        let outcome = if !established {
+            AcceptorE2eOutcome::NotEstablished
+        } else if self.frame_dispatched {
+            AcceptorE2eOutcome::EstablishedAndDispatched
+        } else if self.reassembly_timed_out > 0 {
+            // Established, no dispatch, but a chain was evicted on its deadline —
+            // the abandoned-chain timeout path, not a fault.
+            AcceptorE2eOutcome::ReassemblyTimedOut
+        } else if self.reassembly_dropped > 0 {
+            // Established, no dispatch, but a chain was aborted/refused at ingest
+            // (e.g. out-of-order) — the malformed-stream drop path, not a fault.
+            AcceptorE2eOutcome::ReassemblyDropped
+        } else {
+            AcceptorE2eOutcome::FrameNotDispatched
+        };
+        AcceptorE2eReport {
+            outcome,
+            advanced_fsm: self.advanced_fsm,
+            side_effect: self.side_effect,
+            frame_payload: self.frame_payload,
+            data_dispatch_msg_count: self.data_dispatch_msg_count,
+            parse_error: self.parse_error,
+            reassembly_timed_out: self.reassembly_timed_out,
+            reassembly_dropped: self.reassembly_dropped,
+            last_drop_reason: self.last_drop_reason,
+            peer_initack_seen: self.peer_initack_seen,
+            peer_cookie_len: self.peer_cookie_len,
+            peer_opensyn_sent: self.peer_opensyn_sent,
+            peer_openack_seen: self.peer_openack_seen,
+            peer_frame_sent: self.peer_frame_sent,
+            peer_rx_count: self.peer_rx_count,
+            init_ack_action_fired,
+            open_ack_action_fired,
+        }
+    }
+}
+
 /// Drive the acceptor session e2e over `topology` to a verdict.
 ///
 /// `clock_source` is the monotonic time the [`CoopRuntime`] and the lease
@@ -379,6 +622,7 @@ enum PeerPhase {
 /// MCU construction seam: the per-handshake cookie nonce and the cookie
 /// signing key are drawn from it. A board passes its own; a caller with no
 /// source passes [`FixtureEntropy`] by name.
+#[cfg(not(feature = "fixed-memory"))]
 pub fn run_acceptor_e2e_on<T, C, E, H>(
     topology: T,
     clock_source: C,
@@ -414,6 +658,7 @@ where
 /// [`AcceptorStage::AwaitInitAck`] right after the opening `InitSyn`,
 /// [`AcceptorStage::AwaitOpenAck`] when the cookie is read off the `InitAck`,
 /// [`AcceptorStage::AwaitDispatch`] when the data is sent after `OpenAck`.
+#[cfg(not(feature = "fixed-memory"))]
 pub fn run_acceptor_e2e_on_with_progress<T, C, E, H, S>(
     mut topology: T,
     clock_source: C,
@@ -453,37 +698,12 @@ where
 
     // Open the handshake: the initiator's first move. The reactive peer
     // drives OpenSyn + the application data off the acceptor's real replies.
-    topology.peer_send(&craft_initsyn_wire());
+    topology.peer_send(wires::initsyn().as_slice());
     on_stage(AcceptorStage::AwaitInitAck);
 
-    let mut peer_phase = PeerPhase::AwaitInitAck;
-    let mut frame_dispatched = false;
-    let mut advanced_fsm = 0u32;
-    let mut side_effect = 0u32;
-    let mut frame_payload = 0u32;
-    let mut data_dispatch_msg_count = 0usize;
-    let mut parse_error = 0u32;
-    let mut reassembly_timed_out = 0u32;
-    let mut reassembly_dropped = 0u32;
-    let mut last_drop_reason: Option<ReassemblyDropReason> = None;
-    let mut peer_initack_seen = false;
-    let mut peer_cookie_len = 0usize;
-    let mut peer_opensyn_sent = false;
-    let mut peer_openack_seen = false;
-    let mut peer_frame_sent = false;
-    let mut peer_rx_count = 0u32;
-
-    // The SN the data dispatch surfaces at: the whole-frame SN, or — for a
-    // reassembled chain — the final fragment's SN (the SN
-    // `report_outcome_reassembling` stamps on the completion `FramePayload`).
-    // The stalled and ooo chains never complete, so their value is inert.
-    let expected_data_sn = match data_mode {
-        DataMode::WholeFrame => DATA_FRAME_SN,
-        #[cfg(feature = "reassembly")]
-        DataMode::FragmentChain | DataMode::FragmentChainStalled | DataMode::FragmentChainOoo => {
-            FRAG_SN_1
-        }
-    };
+    // The reactive peer and the counters of the run: the part of the e2e that does not
+    // depend on how the session is held, so the fixed-memory form runs the same one.
+    let mut run = Run::new(data_mode);
 
     // The same sequence `run_session` runs — one executor pass, then one
     // `step` — with the peer given its turn after every iteration.
@@ -500,133 +720,18 @@ where
     );
     loop {
         pump.runtime().run_until_idle();
-        let finished = pump.step(&mut |event: IterationEvent<'_>| match event {
-            IterationEvent::Poll(outcome) => match outcome {
-                DriverLoopOutcome::AdvancedFsm => advanced_fsm += 1,
-                DriverLoopOutcome::SideEffectOnly => side_effect += 1,
-                DriverLoopOutcome::ParseError(_) => parse_error += 1,
-                DriverLoopOutcome::FramePayload { sn, messages, .. } => {
-                    frame_payload += 1;
-                    if *sn == expected_data_sn {
-                        frame_dispatched = true;
-                        data_dispatch_msg_count = messages.len();
-                    }
-                }
-                // A fragment was dispatched (before the ingest arms the
-                // chain). Notify the caller's hook — the stalled host test
-                // uses it to advance its clock past the chain deadline so
-                // the next sweep evicts; every other caller passes a no-op.
-                #[cfg(feature = "reassembly")]
-                DriverLoopOutcome::Fragment { .. } => on_fragment(),
-                _ => {}
-            },
-            // The same fragment, read where the link held it (a pump that
-            // reads its units in place reports it so, not as `Poll(Fragment)`).
-            #[cfg(feature = "reassembly")]
-            IterationEvent::InPlaceFragment(_) => on_fragment(),
-            // The deadline sweep evicted an abandoned chain — count it (the
-            // FragmentChainStalled verdict).
-            IterationEvent::ReassemblyTimeout(n) => reassembly_timed_out += n as u32,
-            // A fragment ingest aborted/refused a chain — count it + record
-            // the reason (the FragmentChainOoo verdict asserts OutOfOrder).
-            IterationEvent::ReassemblyDropped(reason) => {
-                reassembly_dropped += 1;
-                last_drop_reason = Some(reason);
-            }
-            _ => {}
+        let finished = pump.step(&mut |event: IterationEvent<'_>| {
+            run.event(event, &mut on_fragment);
         });
 
         // The reactive peer: take whatever the acceptor has sent it and
         // advance the peer SM.
         while let Some(reply) = topology.peer_try_recv() {
-            peer_rx_count += 1;
-            match (peer_phase, parse_inbound(&reply)) {
-                // InitAck arrived — echo its minted cookie in OpenSyn.
-                (
-                    PeerPhase::AwaitInitAck,
-                    Ok(InboundFrame::Init {
-                        is_ack: true, body, ..
-                    }),
-                ) => {
-                    peer_initack_seen = true;
-                    if let Some(cookie) = body.cookie {
-                        peer_cookie_len = cookie.len();
-                        topology.peer_send(&craft_opensyn_wire(&cookie));
-                        peer_opensyn_sent = true;
-                        peer_phase = PeerPhase::AwaitOpenAck;
-                        on_stage(AcceptorStage::AwaitOpenAck);
-                    }
-                }
-                // OpenAck arrived — the acceptor is Established; send the
-                // application data (whole Frame, or a fragment chain the
-                // acceptor reassembles).
-                (PeerPhase::AwaitOpenAck, Ok(InboundFrame::Open { is_ack: true, .. })) => {
-                    peer_openack_seen = true;
-                    match data_mode {
-                        DataMode::WholeFrame => {
-                            topology.peer_send(&craft_frame_wire(DATA_FRAME_SN, true));
-                        }
-                        #[cfg(feature = "reassembly")]
-                        DataMode::FragmentChain => {
-                            // A reliable two-fragment chain. The bodies
-                            // [0x01]+[0x02] reassemble to [0x01,0x02], whose
-                            // lead byte is an N_MID < 0x19 the acceptor's
-                            // parse_frame_payload surfaces as a single
-                            // NetworkMessage::Unknown — i.e. one FramePayload
-                            // at the final fragment's SN.
-                            topology.peer_send(&craft_fragment_wire(
-                                true,
-                                true,
-                                FRAG_SN_0,
-                                &[0x01],
-                            ));
-                            topology.peer_send(&craft_fragment_wire(
-                                true,
-                                false,
-                                FRAG_SN_1,
-                                &[0x02],
-                            ));
-                        }
-                        #[cfg(feature = "reassembly")]
-                        DataMode::FragmentChainStalled => {
-                            // Only the FIRST fragment (more=1). The
-                            // continuation is never sent, so the acceptor's
-                            // armed chain is left dangling and the deadline
-                            // sweep evicts it once the caller's clock crosses
-                            // the reassembly window.
-                            topology.peer_send(&craft_fragment_wire(
-                                true,
-                                true,
-                                FRAG_SN_0,
-                                &[0x01],
-                            ));
-                        }
-                        #[cfg(feature = "reassembly")]
-                        DataMode::FragmentChainOoo => {
-                            // First fragment (sn=10, more=1) arms the chain;
-                            // the second carries a NON-CONSECUTIVE sn=12
-                            // (skipping the expected 11), so strict in-order
-                            // aborts the chain (fragment.ooo) on ingest.
-                            topology.peer_send(&craft_fragment_wire(
-                                true,
-                                true,
-                                FRAG_SN_0,
-                                &[0x01],
-                            ));
-                            topology.peer_send(&craft_fragment_wire(
-                                true,
-                                true,
-                                FRAG_SN_OOO,
-                                &[0x02],
-                            ));
-                        }
-                    }
-                    peer_frame_sent = true;
-                    peer_phase = PeerPhase::Done;
-                    on_stage(AcceptorStage::AwaitDispatch);
-                }
-                _ => {}
-            }
+            run.react(
+                &reply,
+                &mut |bytes| topology.peer_send(bytes),
+                &mut on_stage,
+            );
         }
 
         if finished.is_some() {
@@ -634,43 +739,12 @@ where
         }
     }
 
-    let outcome = if !actions.is_established() {
-        AcceptorE2eOutcome::NotEstablished
-    } else if frame_dispatched {
-        AcceptorE2eOutcome::EstablishedAndDispatched
-    } else if reassembly_timed_out > 0 {
-        // Established, no dispatch, but a chain was evicted on its deadline —
-        // the abandoned-chain timeout path, not a fault.
-        AcceptorE2eOutcome::ReassemblyTimedOut
-    } else if reassembly_dropped > 0 {
-        // Established, no dispatch, but a chain was aborted/refused at ingest
-        // (e.g. out-of-order) — the malformed-stream drop path, not a fault.
-        AcceptorE2eOutcome::ReassemblyDropped
-    } else {
-        AcceptorE2eOutcome::FrameNotDispatched
-    };
-
     let trace = actions.trace_snapshot();
-
-    AcceptorE2eReport {
-        outcome,
-        advanced_fsm,
-        side_effect,
-        frame_payload,
-        data_dispatch_msg_count,
-        parse_error,
-        reassembly_timed_out,
-        reassembly_dropped,
-        last_drop_reason,
-        peer_initack_seen,
-        peer_cookie_len,
-        peer_opensyn_sent,
-        peer_openack_seen,
-        peer_frame_sent,
-        peer_rx_count,
-        init_ack_action_fired: trace.send_init_ack_with_cookie,
-        open_ack_action_fired: trace.send_open_ack,
-    }
+    run.report(
+        actions.is_established(),
+        trace.send_init_ack_with_cookie,
+        trace.send_open_ack,
+    )
 }
 
 /// Acceptor session params. The signing key (>= 32 bytes) backs the
@@ -682,19 +756,22 @@ where
 /// cookie nonce comes from, so a board that supplies a source gets both
 /// secrets from it. A source that cannot produce the key stops the e2e loudly:
 /// a session with no signing key would admit nothing.
-fn acceptor_params(
+pub(crate) fn acceptor_params(
     entropy: &mut impl wz_session_core::entropy::EntropySource,
 ) -> SessionInitParams {
     SessionInitParams {
         version: 0x05,
         whatami: WhatAmI::Peer,
-        zid: vec![0x0A, 0x0B, 0x0C, 0x0D],
+        // `zid_bytes` / `cookie_bytes` are the profile's own spelling of these two
+        // (a `Vec` on the growable backing, a fixed buffer under `bounded-heapless`),
+        // so the same fixture serves both profiles.
+        zid: zid_bytes(&[0x0A, 0x0B, 0x0C, 0x0D]),
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
         initial_sn: 0,
-        cookie: vec![0u8; 16],
+        cookie: cookie_bytes(&[0u8; 16]),
         // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
         // fixture demonstrates the production shape rather than the literal a
         // board would otherwise copy.

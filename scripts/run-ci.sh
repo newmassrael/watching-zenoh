@@ -11523,6 +11523,16 @@ layer_c1n_mcu_session_acceptor() {
     _runci_guarded_test "C1n reassembly whole-frame" 1 \
         cargo test -p wz-mcu-session-acceptor --features reassembly \
         --test host_acceptor_e2e --quiet || return 1
+    # S9c -- the acceptor e2e on the fixed-memory profile: the heap counted over the
+    # WHOLE run (zero), and the refusal of a second run on statics that already ran.
+    # One test, one file: lwIP is process-global and the listener's socket stays bound.
+    _runci_guarded_test "C1n fixed-memory e2e" 1 \
+        cargo test -p wz-mcu-session-acceptor --features fixed-memory \
+        --test host_acceptor_fixed_e2e --quiet || return 1
+    # The fixtures' `fixed` forms, which the fixed-memory e2e writes its frames with, are
+    # the `Vec` forms byte for byte; the crate's lib suite is the one test of that.
+    _runci_guarded_test "C1n wire fixtures fixed forms" 1 \
+        cargo test -p wz-session-wire-fixtures --lib the_fixed_forms --quiet || return 1
     # R311y819 — the LIBRARY under the e2e above: the MCU session-bundle
     # construction seam that draws the anti-amplification cookie nonce, and the
     # §2.5 entropy port it draws through. Both legs live HERE because this is
@@ -11566,6 +11576,11 @@ layer_c1n_mcu_session_acceptor() {
         && cargo clippy -p wz-mcu-session-acceptor --features reassembly \
             --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim \
+            --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-mcu-session-acceptor --features fixed-memory \
+            --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-session-wire-fixtures --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-session-wire-fixtures --no-default-features \
             --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-link-lwip --features buffer-pool-session-rx-slim \
             --all-targets --quiet -- -D warnings)

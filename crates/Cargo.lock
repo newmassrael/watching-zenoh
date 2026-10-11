@@ -3049,8 +3049,10 @@ dependencies = [
  "critical-section",
  "lwip-sys",
  "wz",
+ "wz-link-lwip",
  "wz-runtime-coop",
  "wz-session-core",
+ "wz-session-lwip",
  "wz-session-wire-fixtures",
 ]
 

@@ -471,6 +471,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # for the `Rc` one (`app_layer::dispatch_to` takes either).
         frozenset({"adminspace-core", "adminspace-write", "session-slot", "test-support"}),
     ),
+    # Fixed-memory step S9c -- the acceptor e2e crate's one feature that gates a public
+    # item: `fixed-memory` takes the heap form out and puts `pub mod fixed`
+    # (`run_acceptor_e2e_fixed`, `AcceptorStatics`) in its place. Its consumers are
+    # the QEMU image of `deploy/mcu-session-acceptor` (a crate outside this
+    # workspace, built with a fixed feature set) and its own host test, which is a
+    # test target of the crate itself. Held to `AXIS_REACHABLE` below.
+    "wz-mcu-session-acceptor": (
+        "the MCU acceptor e2e library; its consumers are the QEMU image and its own "
+        "host test, built with a fixed feature set",
+        frozenset({"fixed-memory"}),
+    ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
         "on is a `dev-dependency`; no feature definition anywhere in this "
@@ -747,6 +758,45 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
     ),
 }
 
+# Fixed-memory step S9c -- the one kind of second consumer `FACADE_ONLY` can excuse.
+#
+# The excuse says "the facade is the only package whose paths reach this crate". A
+# second package that names the crate breaks it only if it REACHES a path through the
+# crate. `wz-mcu-session-acceptor` names `wz-session-lwip` (and `wz-link-lwip`) to turn
+# the selectors `session-slot` and `static-link-storage` on, so that they land on the
+# SAME instance the facade pulls: the facade deliberately forwards neither (a forward
+# would let workspace feature unification take the heap constructors away from the AP
+# host tests), and the final binary chooses them. Every type it uses it names through
+# the facade, `wz::session_lwip::..`.
+#
+# That is a claim about the consumer's SOURCE, so it is read from the source: an edge
+# listed here holds only while no non-comment line of the consumer's `src`, `tests`
+# and `build.rs` names the crate's Rust path. The day one does, the consumer reaches a
+# path directly, the facade's row stops speaking for it, and this arm says so.
+#: package -> the consumers whose edge into it only turns features on
+SELECTOR_ONLY_EDGE: dict[str, frozenset[str]] = {
+    "wz-session-lwip": frozenset({"wz-mcu-session-acceptor"}),
+}
+
+
+def code_naming_crate(consumer: str, pkg: str, root: pathlib.Path | None = None) -> list[str]:
+    """The files of `consumer` whose non-comment lines name `pkg`'s Rust path."""
+    base = (root if root is not None else ROOT) / "crates"
+    crate = axis_reachable_crate(pkg) or pkg.replace("-", "_")
+    name = re.compile(rf"\b{re.escape(crate)}\b")
+    hits: list[str] = []
+    files = [base / consumer / "build.rs"]
+    for sub in ("src", "tests", "benches", "examples"):
+        files.extend(sorted((base / consumer / sub).rglob("*.rs")))
+    for f in files:
+        if not f.is_file():
+            continue
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if not line.lstrip().startswith("//") and name.search(line):
+                hits.append(str(f.relative_to(base.parent)))
+                break
+    return hits
+
 # R2297 (open-debt item 606) — the AXIS-REACH form, and the fifth kind of claim.
 #
 # `wz-runtime-coop`'s reason said "reached through the facade's `runtime-coop`,
@@ -824,6 +874,10 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
         {"adminspace-core", "adminspace-write", "session-slot", "test-support"}
     ),
     "wz-runtime-core": frozenset({"alloc"}),
+    # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
+    # `fixed-memory`, gates `pub mod fixed` and its re-export behind
+    # `all(feature = .., lwip_real_build)`, a compound the derivation reads.
+    "wz-mcu-session-acceptor": frozenset({"fixed-memory"}),
     "wz": frozenset(
         {
             "api-compat-c",
@@ -1558,6 +1612,7 @@ def axis_reachable_findings(
 def facade_only_findings(
     graph: tuple[dict[str, list[Dep]], set[str], set[str]] | None = None,
     defs: dict[str, dict[str, list[str]]] | None = None,
+    naming: typing.Callable[[str, str], list[str]] = code_naming_crate,
 ) -> list[str]:
     """R2296 — hold every `FACADE_ONLY` row to the dependency graph.
 
@@ -1596,6 +1651,22 @@ def facade_only_findings(
             continue
         examined += len(edges)
         others = sorted({d.consumer for d in edges if d.consumer != FACADE})
+        selector_only = SELECTOR_ONLY_EDGE.get(pkg, frozenset())
+        for consumer in sorted(selector_only - set(others)):
+            findings.append(
+                f"`{consumer}` is listed in `SELECTOR_ONLY_EDGE` for `{pkg}` but has "
+                f"no edge into it, so the entry excuses nothing and is unread"
+            )
+        for consumer in [c for c in others if c in selector_only]:
+            direct = naming(consumer, pkg)
+            if direct:
+                findings.append(
+                    f"`{consumer}` is held to turning features of `{pkg}` on and "
+                    f"nothing else, but names the crate in code ({direct}): it "
+                    f"reaches a path directly, which the facade's row does not "
+                    f"speak for"
+                )
+        others = [c for c in others if c not in selector_only]
         if others:
             findings.append(
                 f"`{pkg}` is excused because `{FACADE}` is its only consumer, "
@@ -2397,8 +2468,10 @@ def facade_only_selftest() -> int:
     # against a graph that does not contain it and report an empty population
     # for a package the workspace really does consume.
     real_fo = dict(FACADE_ONLY)
+    real_so = dict(SELECTOR_ONLY_EDGE)
     FACADE_ONLY.clear()
-    only = {pkg: [Dep(FACADE, "normal", frozenset())]}
+    SELECTOR_ONLY_EDGE.clear()
+    only ={pkg: [Dep(FACADE, "normal", frozenset())]}
     two = {pkg: [Dep(FACADE, "normal", frozenset()), Dep(other, "normal", frozenset())]}
     try:
         OFF_AXIS[pkg] = row
@@ -2419,9 +2492,27 @@ def facade_only_selftest() -> int:
         OFF_AXIS[pkg] = row
         del OFF_AXIS[FACADE]
         no_facade = facade_only_findings((only, libs, unpub), good_defs)
+        # S9c -- a second consumer that only turns features on is excused while its
+        # source never names the crate, and refused the moment it does (or when the
+        # entry has no edge behind it).
+        OFF_AXIS[FACADE] = ("fixture facade", frozenset({"take-demo"}))
+        SELECTOR_ONLY_EDGE.clear()
+        SELECTOR_ONLY_EDGE[pkg] = frozenset({other})
+        selector_control = facade_only_findings(
+            (two, libs, unpub), good_defs, naming=lambda _c, _p: []
+        )
+        selector_names = facade_only_findings(
+            (two, libs, unpub), good_defs, naming=lambda _c, _p: ["demo-other/src/lib.rs"]
+        )
+        SELECTOR_ONLY_EDGE[pkg] = frozenset({"ghost"})
+        selector_stale = facade_only_findings(
+            (only, libs, unpub), good_defs, naming=lambda _c, _p: []
+        )
     finally:
         OFF_AXIS.pop(pkg, None)
         OFF_AXIS.pop(FACADE, None)
+        SELECTOR_ONLY_EDGE.clear()
+        SELECTOR_ONLY_EDGE.update(real_so)
         FACADE_ONLY.clear()
         FACADE_ONLY.update(real_fo)
         if real_off_pkg is not None:
@@ -2445,6 +2536,13 @@ def facade_only_selftest() -> int:
          "a `FACADE_ONLY` entry whose package has no row excuses nothing"),
         (any("points at nothing" in f for f in no_facade),
          "an excuse forwarded to a facade with no row must be reported"),
+        (not selector_control,
+         "a second consumer listed as selector-only whose source never names the "
+         "crate must PASS, or the entry excuses nothing it was written for"),
+        (any("names the crate in code" in f for f in selector_names),
+         "a selector-only consumer that names the crate in code must be reported"),
+        (any("excuses nothing and is unread" in f for f in selector_stale),
+         "a selector-only entry with no edge behind it must be reported"),
     )
     for ok, why in checks:
         if not ok:
