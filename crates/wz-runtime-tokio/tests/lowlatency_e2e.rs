@@ -347,7 +347,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
     let actions = pair.resp_actions;
     assert!(actions.is_lowlatency() && actions.is_established());
     let mut engine = wz_runtime_tokio::session_glue::new_session_engine(&actions);
-    let mut record: Vec<NetworkMessage> = Vec::with_capacity(1);
+    let mut record = wz_session_core::network_message::new_record_buf();
 
     let push = |payload: &[u8]| {
         wz_session_core::push_build::build_push_literal(KEYEXPR, payload)

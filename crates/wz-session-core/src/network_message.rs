@@ -648,16 +648,70 @@ fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, 
 /// so its length is unknowable: take the rest of the payload, header byte
 /// included, as one [`NetworkMessage::Unknown`]. The caller stops walking.
 #[cfg(feature = "codec-frame")]
-fn absorb_unknown(
-    cursor: &mut SceCursor<'_>,
-    out: &mut Vec<NetworkMessage>,
-) -> Result<(), CodecError> {
+fn absorb_unknown(cursor: &mut SceCursor<'_>, out: &mut impl RecordOut) -> Result<(), CodecError> {
     let mid = cursor.peek_slice(1)?[0] & 0x1F;
     let rem = cursor.remaining();
     let body = cursor.peek_slice(rem)?.to_vec();
     cursor.advance(rem)?;
-    out.push(NetworkMessage::Unknown { mid, body });
-    Ok(())
+    out.put(NetworkMessage::Unknown { mid, body })
+}
+
+/// The one-record buffer of the record-at-a-time walk
+/// ([`try_for_each_record`], the receive path `drive::dispatch_datagram`): each
+/// record is decoded into it, handed over, and cleared before the next.
+///
+/// A `Vec` on every build but `bounded-heapless`, where it is a `heapless::Vec`
+/// of one that lives inside the value that holds it, so a session pump placed in
+/// a `static` carries its record buffer with it and the walk takes nothing from
+/// a heap to begin. Make one with [`new_record_buf`], the only spelling that does
+/// not name the backing.
+#[cfg(all(feature = "codec-frame", not(feature = "bounded-heapless")))]
+pub type RecordBuf = Vec<NetworkMessage>;
+/// See the growable form of this alias.
+#[cfg(all(feature = "codec-frame", feature = "bounded-heapless"))]
+pub type RecordBuf = heapless::Vec<NetworkMessage, 1>;
+
+/// An empty [`RecordBuf`]. The growable form reserves its one slot here, once,
+/// so a walk that decodes an owned record never grows it.
+#[cfg(feature = "codec-frame")]
+pub fn new_record_buf() -> RecordBuf {
+    #[cfg(not(feature = "bounded-heapless"))]
+    {
+        Vec::with_capacity(1)
+    }
+    #[cfg(feature = "bounded-heapless")]
+    {
+        heapless::Vec::new()
+    }
+}
+
+/// Where a decode puts the message it has projected: the batch decode's `Vec`
+/// and the walk's [`RecordBuf`] are both this, so the per-MID decoder is written
+/// once. A full output is a refusal the decoder returns, never a drop: the walk
+/// empties its one-record buffer before every decode, so the refusal is only
+/// reachable by a caller that did not.
+#[cfg(feature = "codec-frame")]
+trait RecordOut {
+    fn put(&mut self, message: NetworkMessage) -> Result<(), CodecError>;
+}
+
+#[cfg(feature = "codec-frame")]
+impl RecordOut for Vec<NetworkMessage> {
+    // Inline: this is `Vec::push` as it was written at each call site, and the
+    // decoder's code size is a measured quantity (see `decode_one_record`).
+    #[inline(always)]
+    fn put(&mut self, message: NetworkMessage) -> Result<(), CodecError> {
+        self.push(message);
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "codec-frame", feature = "bounded-heapless"))]
+impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
+    #[inline(always)]
+    fn put(&mut self, message: NetworkMessage) -> Result<(), CodecError> {
+        self.push(message).map_err(|_| CodecError::TooManyElements)
+    }
 }
 
 /// Walk a `Frame.payload` one record at a time: decode the next record into
@@ -713,7 +767,7 @@ pub(crate) enum RecordForm {
 #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
 pub(crate) enum WalkedRecord<'r> {
     /// The record's owned message, the one entry of the buffer.
-    Owned(&'r mut Vec<NetworkMessage>),
+    Owned(&'r mut RecordBuf),
     /// A Push decoded where the payload lies, valid for the call.
     #[cfg(feature = "codec-push")]
     Push(&'r wz_codecs::push::Push<'r>),
@@ -736,7 +790,7 @@ pub(crate) enum WalkedRecord<'r> {
 #[cfg(all(feature = "codec-frame", test))]
 pub(crate) fn for_each_record(
     payload: &[u8],
-    record: &mut Vec<NetworkMessage>,
+    record: &mut RecordBuf,
     form: RecordForm,
     mut each: impl FnMut(WalkedRecord<'_>),
 ) -> Result<(), crate::parse_error::InboundParseError> {
@@ -753,7 +807,7 @@ pub(crate) fn for_each_record(
 #[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
 pub(crate) fn try_for_each_record(
     payload: &[u8],
-    record: &mut Vec<NetworkMessage>,
+    record: &mut RecordBuf,
     form: RecordForm,
     mut each: impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
@@ -1136,7 +1190,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
 #[cfg(feature = "codec-frame")]
 fn decode_one_record(
     cursor: &mut SceCursor<'_>,
-    out: &mut Vec<NetworkMessage>,
+    out: &mut impl RecordOut,
     origin: Origin<'_>,
 ) -> Result<bool, CodecError> {
     let header = cursor.peek_slice(1)?[0];
@@ -1153,35 +1207,35 @@ fn decode_one_record(
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => {
             let req = wz_codecs::request::Request::decode(cursor)?;
-            out.push(NetworkMessage::Request(Box::new(own_wire!(req, origin))));
+            out.put(NetworkMessage::Request(Box::new(own_wire!(req, origin))))?;
         }
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
             let push = wz_codecs::push::Push::decode(cursor)?;
-            out.push(NetworkMessage::Push(Box::new(own_wire!(push, origin))));
+            out.put(NetworkMessage::Push(Box::new(own_wire!(push, origin))))?;
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
             let rf = wz_codecs::response_final::ResponseFinal::decode(cursor)?;
-            out.push(NetworkMessage::ResponseFinal(rf.try_into_owned()?));
+            out.put(NetworkMessage::ResponseFinal(rf.try_into_owned()?))?;
         }
         wire_const::N_MID_OAM => {
             let oam = wz_codecs::oam::Oam::decode(cursor)?;
-            out.push(NetworkMessage::Oam(oam.try_into_owned()?));
+            out.put(NetworkMessage::Oam(oam.try_into_owned()?))?;
         }
         wire_const::N_MID_INTEREST => {
             let interest = wz_codecs::interest::Interest::decode(cursor)?;
-            out.push(NetworkMessage::Interest(interest.try_into_owned()?));
+            out.put(NetworkMessage::Interest(interest.try_into_owned()?))?;
         }
         #[cfg(feature = "codec-response")]
         wire_const::N_MID_RESPONSE => {
             let resp = wz_codecs::response::Response::decode(cursor)?;
-            out.push(NetworkMessage::Response(Box::new(own_wire!(resp, origin))));
+            out.put(NetworkMessage::Response(Box::new(own_wire!(resp, origin))))?;
         }
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => {
             let decl = wz_codecs::declare::Declare::decode(cursor)?;
-            out.push(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)));
+            out.put(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)))?;
         }
         _ => return Ok(false),
     }
@@ -1729,7 +1783,7 @@ mod record_walk_tests {
         Vec<(char, u64)>,
         Result<(), crate::parse_error::InboundParseError>,
     ) {
-        let mut record = Vec::new();
+        let mut record = new_record_buf();
         let mut seen = Vec::new();
         let result = for_each_record(payload, &mut record, RecordForm::Owned, |one| {
             // Without a lendable codec the owned form is the only one there is.
@@ -1811,7 +1865,7 @@ mod record_walk_tests {
     #[test]
     fn the_lent_walk_lends_each_push_and_owns_the_rest_in_order() {
         let payload = [push_record("a/1"), oam_record(2), push_record("a/3")].concat();
-        let mut record = Vec::new();
+        let mut record = new_record_buf();
         let mut seen: Vec<(char, alloc::string::String)> = Vec::new();
         let result = for_each_record(&payload, &mut record, RecordForm::Lent, |one| match one {
             WalkedRecord::Push(push) => {
@@ -1859,7 +1913,7 @@ mod record_walk_tests {
         refused.header |= 0x80;
         let payload = [plain, refused.encode_to_vec(), push_record("a/3")].concat();
         let walk = |form| {
-            let mut record = Vec::new();
+            let mut record = new_record_buf();
             let mut handed = 0;
             let result = for_each_record(&payload, &mut record, form, |_| handed += 1);
             (handed, alloc::format!("{result:?}"))
@@ -1886,7 +1940,7 @@ mod record_walk_tests {
         let rq = request.try_as_borrowed().expect("a view").encode_to_vec();
         let rs = response.try_as_borrowed().expect("a view").encode_to_vec();
         let payload = [rq.clone(), oam_record(2), rs.clone()].concat();
-        let mut record = Vec::new();
+        let mut record = new_record_buf();
         let mut seen: Vec<char> = Vec::new();
         let result = for_each_record(&payload, &mut record, RecordForm::Lent, |one| match one {
             WalkedRecord::Request(request) => {
@@ -1932,7 +1986,7 @@ mod record_walk_tests {
         for bad in [bad_request.encode_to_vec(), bad_response.encode_to_vec()] {
             let payload = [rq.clone(), bad, rs.clone()].concat();
             let walk = |form| {
-                let mut record = Vec::new();
+                let mut record = new_record_buf();
                 let mut handed = 0;
                 let result = for_each_record(&payload, &mut record, form, |_| handed += 1);
                 (handed, alloc::format!("{result:?}"))

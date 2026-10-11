@@ -1170,7 +1170,7 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
-    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
 ) -> DatagramPath {
     match in_place_unit(unit, actions, false) {
@@ -1227,7 +1227,7 @@ pub fn dispatch_datagram_reassembling<R, T, const SLOTS: usize, const CAP: usize
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
-    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    record: &mut crate::network_message::RecordBuf,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
     on_event: &mut dyn FnMut(IterationEvent<'_>),
@@ -1369,7 +1369,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
-    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
 ) -> DatagramPath {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
@@ -1415,7 +1415,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     payload_at: usize,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
-    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
 ) -> DatagramPath {
     use crate::driver_loop::IterationEvent;
@@ -1484,6 +1484,51 @@ enum RecordSource {
     Reassembled,
 }
 
+/// Put the one owned record of a walk into the outcome that reports it. A
+/// growable record buffer and the outcome's list trade places, so the buffer's one
+/// slot is reused for every record and nothing is allocated here; a fixed buffer
+/// has no slot to hand over, so the message is moved into the list (which keeps
+/// its room for the rest of the walk's records).
+#[cfg(all(feature = "codec-frame", not(feature = "bounded-heapless")))]
+fn hand_record_to(
+    messages: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    one: &mut crate::network_message::RecordBuf,
+) {
+    core::mem::swap(messages, one);
+}
+
+/// See the growable form. The record buffer holds one message, so the move is one
+/// `pop`.
+#[cfg(all(feature = "codec-frame", feature = "bounded-heapless"))]
+fn hand_record_to(
+    messages: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    one: &mut crate::network_message::RecordBuf,
+) {
+    while let Some(message) = one.pop() {
+        messages.push(message);
+    }
+}
+
+/// Undo [`hand_record_to`] once the outcome has been reported, so the walk's next
+/// decode finds its record buffer as it left it: empty, and with its slot.
+#[cfg(all(feature = "codec-frame", not(feature = "bounded-heapless")))]
+fn take_record_back(
+    messages: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    one: &mut crate::network_message::RecordBuf,
+) {
+    core::mem::swap(messages, one);
+}
+
+/// See the growable form: the fixed buffer was emptied by the hand-over, so what
+/// is left to do is to drop the reported message and keep the list's room.
+#[cfg(all(feature = "codec-frame", feature = "bounded-heapless"))]
+fn take_record_back(
+    messages: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    _one: &mut crate::network_message::RecordBuf,
+) {
+    messages.clear();
+}
+
 /// Decode `payload`'s records one at a time where they lie and hand each to
 /// `on_event` before the next is decoded: a Push lent (`form` permitting) as
 /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace), any
@@ -1506,7 +1551,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     form: crate::network_message::RecordForm,
     source: RecordSource,
     actions: &SessionLinkActions<R, T>,
-    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    record: &mut crate::network_message::RecordBuf,
     on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
 ) -> Result<(), crate::parse_error::InboundParseError> {
     use crate::driver_loop::IterationEvent;
@@ -1535,7 +1580,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                     None => outcome.insert(empty(extensions()?)),
                 };
                 if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
-                    core::mem::swap(messages, one);
+                    hand_record_to(messages, one);
                     if source == RecordSource::Frame {
                         *messages = count_rx_network_messages(actions, core::mem::take(messages));
                     }
@@ -1548,7 +1593,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                 }
                 on_event(IterationEvent::Poll(outcome));
                 if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
-                    core::mem::swap(messages, one);
+                    take_record_back(messages, one);
                 }
             }
             #[cfg(feature = "codec-push")]
@@ -1587,7 +1632,7 @@ fn fragment_in_place<R, T, const SLOTS: usize, const CAP: usize, S>(
     payload_at: usize,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
-    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    record: &mut crate::network_message::RecordBuf,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
     on_event: &mut dyn FnMut(IterationEvent<'_>),
