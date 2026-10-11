@@ -77,6 +77,15 @@ pub mod links;
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_drive;
 pub mod session_drive;
+// Fixed-memory step S6 (exhaustion cases R1 and R2) -- the node of the `session-slot`
+// profile: a listener that holds up to N accepted sessions on one socket and claims
+// what each needs before it is answered, and the host that opens a session, dialled
+// or accepted, out of the tables the image declared. Both read an InitSyn off the
+// wire, which the accept half of the handshake compiles in.
+#[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+pub mod listener;
+#[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+pub mod session_open;
 // Open-debt item 900 — one program, two sessions: the fault-isolation baseline
 // (a client session to a router and a group session on one local set). It needs
 // both handshake halves, the multicast loop and a payload to carry.

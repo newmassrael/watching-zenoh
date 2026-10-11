@@ -338,6 +338,15 @@ pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
     /// how many went down the copying path and why.
     #[cfg(feature = "rx-in-place")]
     rx_paths: RxPathCounts,
+    /// `session-slot` -- the role this pump is to activate the engine with at its
+    /// FIRST step, and has not yet. The profile's pump does not speak when it is
+    /// built: a dialling pump's activation sends the `InitSyn`, and a pump that
+    /// is built (in a cell of its table) before the task that will run it has a
+    /// cell would put an `InitSyn` on the wire for a session that then cannot run.
+    /// Deferred to the first step, which only a running task makes, the
+    /// session's first byte leaves after every table it needs has said yes.
+    #[cfg(feature = "session-slot")]
+    pending_role: Option<SessionRole>,
     iter: usize,
     max_iters: Option<usize>,
 }
@@ -513,6 +522,9 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         // `outbound.start` does not transition into `AwaitingInitSyn` /
         // `LinkOpening` and the whole handshake stalls.
         engine.initialize();
+        // Under `session-slot` the activation waits for the first step (see
+        // `pending_role`); every other profile activates here, as it always did.
+        #[cfg(not(feature = "session-slot"))]
         for event in role.activation() {
             engine.process_event(*event);
         }
@@ -530,6 +542,8 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             record: new_record_buf(),
             #[cfg(feature = "rx-in-place")]
             rx_paths: RxPathCounts::default(),
+            #[cfg(feature = "session-slot")]
+            pending_role: Some(role),
             iter: 0,
             max_iters,
         }
@@ -563,6 +577,13 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     where
         F: FnMut(IterationEvent<'_>),
     {
+        // The role's activation, deferred from the pump's making (`session-slot`).
+        #[cfg(feature = "session-slot")]
+        if let Some(role) = self.pending_role.take() {
+            for event in role.activation() {
+                self.engine.process_event(*event);
+            }
+        }
         if self.engine.is_in_final_state() {
             return Some(DriverOutcome::Terminated);
         }

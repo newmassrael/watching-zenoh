@@ -24,8 +24,8 @@ use wz_session_core::reliability::Reliability;
 /// driver, and a lend beyond them is simply not granted: the session encodes on
 /// the heap, or under `tx-lend-only` (fixed-memory step S4) refuses the send as a
 /// counted `LinkDropCause::NoTxSlot`, which `tests/tx_allocations.rs` fills both
-/// slots to witness.
-const LENT_MAX: usize = 2;
+/// slots to witness. Public so that witness can pin the capacity it fills.
+pub const LENT_MAX: usize = 2;
 
 /// The session socket shared by the drive loop (inbound `try_recv` /
 /// `recv_with`) and the FSM action layer (outbound `send_blocking` and the
@@ -41,12 +41,47 @@ const LENT_MAX: usize = 2;
 /// Under `session-slot` (fixed-memory step S5) it is not shared by pointer at all:
 /// the driver holds its socket by value, and the one driver is what the drive
 /// loop and the send seam both reach (through the slot that holds it), so there
-/// is no `Rc` to allocate.
+/// is no `Rc` to allocate. A driver is either the sole owner of its socket (a
+/// session that dials) or one of several sessions that read and send through
+/// the one socket a listener holds (`SessionSocket`).
 #[cfg(not(feature = "session-slot"))]
 pub type SharedSessionSocket = Rc<RefCell<SessionRxSocket>>;
 /// See the shared form of this alias.
 #[cfg(feature = "session-slot")]
-pub type SharedSessionSocket = RefCell<SessionRxSocket>;
+pub type SharedSessionSocket = SessionSocket;
+
+/// Where a driver on the `session-slot` profile reaches its socket: the socket
+/// it owns, or the listener's, which every session accepted on one port shares
+/// (`crate::listener::SessionListener`). The driver is written against the
+/// `RefCell` either way, so how many sessions use a socket changes nothing in how
+/// one of them sends or reads.
+#[cfg(feature = "session-slot")]
+pub enum SessionSocket {
+    /// The session's own socket, held by value in the slot that holds the driver.
+    Owned(RefCell<SessionRxSocket>),
+    /// The socket of the listener this session was accepted by.
+    Listened(&'static RefCell<SessionRxSocket>),
+}
+
+#[cfg(feature = "session-slot")]
+impl SessionSocket {
+    /// The listener's socket, shared by every session accepted on it.
+    pub fn listened(socket: &'static RefCell<SessionRxSocket>) -> Self {
+        Self::Listened(socket)
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl core::ops::Deref for SessionSocket {
+    type Target = RefCell<SessionRxSocket>;
+
+    fn deref(&self) -> &RefCell<SessionRxSocket> {
+        match self {
+            Self::Owned(socket) => socket,
+            Self::Listened(socket) => socket,
+        }
+    }
+}
 
 /// A bound session socket in the form [`LwipUdpDriver::new`] takes it: shared by
 /// `Rc` on every profile but `session-slot`, by value under it.
@@ -57,7 +92,7 @@ pub fn share_socket(socket: SessionRxSocket) -> SharedSessionSocket {
     }
     #[cfg(feature = "session-slot")]
     {
-        RefCell::new(socket)
+        SessionSocket::Owned(RefCell::new(socket))
     }
 }
 
@@ -159,6 +194,18 @@ impl LwipUdpDriver {
     /// The currently-configured send target `(addr, port)`.
     pub fn peer(&self) -> (u32, u16) {
         self.peer.get()
+    }
+
+    /// Where the datagram at the head of the socket's queue came from, `None` for
+    /// an empty queue. Not a receive: nothing is taken or retargeted. What a session
+    /// that shares a listener's socket asks before it reads, since the head may be
+    /// another session's.
+    #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+    pub(crate) fn head_source(&self) -> Option<(u32, u16)> {
+        self.socket
+            .borrow()
+            .peek_recv()
+            .map(|datagram| (datagram.src_addr, datagram.src_port))
     }
 
     /// Non-blocking inbound dequeue from the shared socket. The `RefCell`

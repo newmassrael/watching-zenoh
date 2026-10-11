@@ -47,13 +47,50 @@ use crate::driver::DriverHandle;
 pub struct LwipSessionLink<L: Deref<Target = LwipLink>> {
     link: L,
     driver: DriverHandle,
+    /// `session-slot`: the lane of the listener this session was accepted by. A
+    /// session accepted on a listener reads from the one socket every such
+    /// session shares, and takes only the datagrams its own peer sent; the lane
+    /// names that peer, and is given back when this link drops, which is when the
+    /// session's pump does.
+    #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+    lane: Option<crate::listener::LaneGuard>,
 }
 
 impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
     /// Pair the lwIP link whose input path is pumped with the driver whose
     /// socket carries the session.
     pub fn new(link: L, driver: DriverHandle) -> Self {
-        Self { link, driver }
+        Self {
+            link,
+            driver,
+            #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+            lane: None,
+        }
+    }
+
+    /// [`Self::new`] for a session a listener accepted: `driver` reads and sends
+    /// through the listener's socket, and `lane` is the lane the listener
+    /// reserved for the session's peer, through which the link reads only that
+    /// peer's datagrams.
+    #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+    pub fn with_lane(link: L, driver: DriverHandle, lane: crate::listener::LaneGuard) -> Self {
+        Self {
+            link,
+            driver,
+            lane: Some(lane),
+        }
+    }
+
+    /// Whether the datagram at the head of the socket's queue is for this session
+    /// to read: always, for a session that owns its socket, and for one that
+    /// shares a listener's, when it came from the session's peer. `false` too for
+    /// an empty queue, so the caller's own "nothing queued" answer is the same.
+    fn head_is_mine(&self) -> bool {
+        #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+        if let Some(lane) = &self.lane {
+            return self.driver.head_source() == Some(lane.peer());
+        }
+        true
     }
 }
 
@@ -67,6 +104,9 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
     }
 
     fn try_recv(&self) -> Option<RxFrame> {
+        if !self.head_is_mine() {
+            return None;
+        }
         let dg = self.driver.try_recv()?;
         // Reply to whoever just spoke (the acceptor reply path).
         self.driver.set_peer(dg.src_addr, dg.src_port);
@@ -76,6 +116,9 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
     // The datagram is lent where the session socket's receive queue holds it:
     // no heap copy, and no slot-sized value on the stack under the dispatch.
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        if !self.head_is_mine() {
+            return false;
+        }
         self.driver.recv_with(f)
     }
 }

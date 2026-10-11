@@ -683,6 +683,22 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
     parse_unit(bytes, None)
 }
 
+/// Whether `datagram` opens a unicast handshake: its first byte is an INIT transport
+/// header with the A flag clear, that is an `InitSyn`.
+///
+/// A header read and nothing more: it decodes no body and allocates nothing, so a
+/// listener can ask it of a datagram from a peer it has no session for, before it
+/// spends a slot on that peer. The datagram is not otherwise judged (it may still
+/// fail to decode, which the session built for it will say); an `InitAck`, which a
+/// listener never starts a session for, and every other message and an empty
+/// datagram are `false`.
+#[cfg(feature = "codec-init-body")]
+pub fn is_init_syn(datagram: &[u8]) -> bool {
+    datagram.first().is_some_and(|&header| {
+        header & 0x1F == wire_const::T_MID_INIT && header & wire_const::FLAG_T_INIT_A == 0
+    })
+}
+
 /// [`parse_inbound_consuming`] over a unit that can be SHARED: a
 /// [`InboundFrame::Frame`]'s payload is a range of `unit` rather than a copy of
 /// it, so on a lent unit (see [`RxBytes::lend`]) the payload and the messages
@@ -2032,6 +2048,66 @@ mod init_mandatory_identity_tests {
                     Some(E::FramingError)
                 ));
             }
+        }
+    }
+}
+
+// The listener's question of a datagram from a peer it has no session for: does it
+// ask for one? A header read, so it must agree with what the full decode calls an
+// InitSyn.
+#[cfg(all(test, feature = "codec-init-body"))]
+mod init_syn_header_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_init_without_the_ack_flag_is_an_init_syn() {
+        let syn = [wire_const::T_MID_INIT, 0x09, 0x01, 0xAA];
+        let syn_with_ext = [
+            wire_const::T_MID_INIT | wire_const::FLAG_T_Z,
+            0x09,
+            0x01,
+            0xAA,
+        ];
+        let ack = [
+            wire_const::T_MID_INIT | wire_const::FLAG_T_INIT_A,
+            0x09,
+            0x01,
+            0xAA,
+        ];
+        assert!(is_init_syn(&syn));
+        assert!(is_init_syn(&syn_with_ext), "the Z flag is not the A flag");
+        assert!(!is_init_syn(&ack), "an InitAck opens nothing");
+        assert!(!is_init_syn(&[]), "an empty datagram opens nothing");
+        for mid in [
+            wire_const::T_MID_OPEN,
+            wire_const::T_MID_CLOSE,
+            wire_const::T_MID_KEEP_ALIVE,
+            wire_const::T_MID_FRAME,
+            wire_const::T_MID_FRAGMENT,
+            wire_const::T_MID_OAM,
+        ] {
+            assert!(!is_init_syn(&[mid, 0, 0]), "MID {mid:#04x} is not an INIT");
+        }
+    }
+
+    #[cfg(feature = "session-unicast")]
+    #[test]
+    fn it_agrees_with_the_full_decode() {
+        for wire in [
+            alloc::vec![wire_const::T_MID_INIT, 0x09, 0x01, 0xAA],
+            alloc::vec![
+                wire_const::T_MID_INIT | wire_const::FLAG_T_INIT_A,
+                0x09,
+                0x01,
+                0xAA,
+                0x00
+            ],
+        ] {
+            let decoded_as_syn = matches!(
+                parse_inbound(&wire),
+                Ok(InboundFrame::Init { is_ack: false, .. })
+            );
+            assert_eq!(is_init_syn(&wire), decoded_as_syn, "{wire:?}");
         }
     }
 }
