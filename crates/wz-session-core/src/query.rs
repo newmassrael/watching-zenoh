@@ -110,6 +110,10 @@ use crate::registry_error::RegisterError;
 // which is the cfg-gated-import shape Layer C1cf exists to catch.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::reply_acceptance::ReplyKeyExpr;
+// S9a — the replies a queryable stages and the Finals owed after them: a `Vec`
+// on the growable backing and tables that refuse and count on the fixed one.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage, ReplyStaging};
 // `CodecError` is referenced only by `into_response`, which lives in the
 // `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
 // so the import must carry the same gate — otherwise a
@@ -842,7 +846,7 @@ pub struct QueryResponder<'a> {
     /// owned when a caller hands one in ([`Self::new`]). A staged reply owns its
     /// copy either way.
     keyexpr_literal: alloc::borrow::Cow<'a, str>,
-    replies: &'a mut Vec<QueryReply>,
+    replies: &'a mut ReplyStage,
     /// R121j-3c — optional responder identity attached to every
     /// subsequent send_reply / send_reply_del / send_err. `None`
     /// emits no envelope-level responder ext; `Some` stamps the
@@ -899,7 +903,7 @@ impl<'a> QueryResponder<'a> {
         keyexpr_literal: String,
         accept: ReplyKeyExpr,
         qos: QosLevel,
-        replies: &'a mut Vec<QueryReply>,
+        replies: &'a mut ReplyStage,
     ) -> Self {
         Self {
             rid,
@@ -918,7 +922,7 @@ impl<'a> QueryResponder<'a> {
         keyexpr: &'a str,
         accept: ReplyKeyExpr,
         qos: QosLevel,
-        replies: &'a mut Vec<QueryReply>,
+        replies: &'a mut ReplyStage,
     ) -> Self {
         Self {
             rid,
@@ -958,8 +962,14 @@ impl<'a> QueryResponder<'a> {
     /// caller-owned `Vec<QueryReply>` back so each push is one
     /// outbound Response frame on the wire (per zenoh-pico's "many
     /// replies + one final" semantics).
-    pub fn send_reply(&mut self, payload: &[u8]) {
-        self.replies.push(QueryReply::Reply {
+    ///
+    /// S9a — fallible: on the fixed backing a payload longer than
+    /// [`caps::MAX_REPLY_PAYLOAD_BYTES`] or a stage with no room is refused
+    /// ([`ReplyError::PayloadTooLarge`], [`ReplyError::StagingFull`]) and
+    /// counted, and nothing is staged. The growable backing refuses nothing.
+    pub fn send_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
+        self.replies.admit_payload(payload.len())?;
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: String::from(&*self.keyexpr_literal),
             body: ReplyBody::Put(payload.to_vec()),
@@ -969,7 +979,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: None,
-        });
+        })
     }
 
     /// Emit a Put-form reply stamped with an explicit, concrete
@@ -986,7 +996,8 @@ impl<'a> QueryResponder<'a> {
     /// `_anyke`, and nothing is staged — as for every keyed method here.
     pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        self.replies.admit_payload(payload.len())?;
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
@@ -996,8 +1007,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: None,
-        });
-        Ok(())
+        })
     }
 
     /// Emit a Put-form reply carrying the full stored-value metadata: an
@@ -1018,7 +1028,8 @@ impl<'a> QueryResponder<'a> {
         timestamp: &TimestampHint,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        self.replies.admit_payload(payload.len())?;
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
@@ -1028,8 +1039,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: None,
-        });
-        Ok(())
+        })
     }
 
     /// R311y75 — emit a Put-form recovery reply carrying the full recovery
@@ -1053,7 +1063,8 @@ impl<'a> QueryResponder<'a> {
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        self.replies.admit_payload(payload.len())?;
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
@@ -1063,8 +1074,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: source_info.cloned(),
-        });
-        Ok(())
+        })
     }
 
     /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
@@ -1090,7 +1100,9 @@ impl<'a> QueryResponder<'a> {
         attachment: &[u8],
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        self.replies.admit_payload(payload.len())?;
+        self.replies.admit_payload(attachment.len())?;
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
@@ -1100,8 +1112,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: Some(attachment.to_vec()),
             source_info: None,
-        });
-        Ok(())
+        })
     }
 
     /// Emit a Put-form reply under an explicit `keyexpr` carrying a value
@@ -1120,7 +1131,8 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        self.replies.admit_payload(payload.len())?;
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
@@ -1130,16 +1142,15 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: None,
-        });
-        Ok(())
+        })
     }
 
     /// Emit a Del-form reply — the queryable signals that the value
     /// at this keyexpr is being deleted / cleared. No payload bytes
     /// (the inner `MsgDel` body carries only a header + optional
-    /// timestamp).
-    pub fn send_reply_del(&mut self) {
-        self.replies.push(QueryReply::Reply {
+    /// timestamp). Fallible for the reason [`Self::send_reply`] is.
+    pub fn send_reply_del(&mut self) -> Result<(), ReplyError> {
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: String::from(&*self.keyexpr_literal),
             body: ReplyBody::Del,
@@ -1149,7 +1160,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: None,
-        });
+        })
     }
 
     /// R311y294 — the Del-arm mirror of [`Self::send_reply_keyed`]: emit a
@@ -1176,7 +1187,7 @@ impl<'a> QueryResponder<'a> {
     /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
     pub fn send_reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.into(),
             body: ReplyBody::Del,
@@ -1186,8 +1197,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: None,
-        });
-        Ok(())
+        })
     }
 
     /// R311y247 — the Del-arm mirror of [`Self::send_reply_keyed_sourced`]:
@@ -1203,8 +1213,11 @@ impl<'a> QueryResponder<'a> {
     /// [`Self::send_reply_del`] (which stamps no source_info), so the Del
     /// carrier is reachable without dropping to the low-level
     /// `ResponseReplyBuilder`.
-    pub fn send_reply_del_sourced(&mut self, source_info: Option<&SourceInfo>) {
-        self.replies.push(QueryReply::Reply {
+    pub fn send_reply_del_sourced(
+        &mut self,
+        source_info: Option<&SourceInfo>,
+    ) -> Result<(), ReplyError> {
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: String::from(&*self.keyexpr_literal),
             body: ReplyBody::Del,
@@ -1214,7 +1227,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: source_info.cloned(),
-        });
+        })
     }
 
     /// The Del-arm mirror of [`Self::send_reply_keyed_sourced`]: a Del-form
@@ -1241,7 +1254,7 @@ impl<'a> QueryResponder<'a> {
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Del,
@@ -1251,8 +1264,7 @@ impl<'a> QueryResponder<'a> {
             qos: self.qos,
             attachment: None,
             source_info: source_info.cloned(),
-        });
-        Ok(())
+        })
     }
 
     /// R311y562 — stage a Put-form reply under an explicit `keyexpr` carrying
@@ -1275,6 +1287,10 @@ impl<'a> QueryResponder<'a> {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
+        self.replies.admit_payload(payload.len())?;
+        if let Some(attachment) = meta.attachment {
+            self.replies.admit_payload(attachment.len())?;
+        }
         // R3062 -- a payload that is a buffer of shared memory is staged AS the buffer, not as
         // a copy of its bytes: the copy is what the descriptor exists to avoid, and the
         // bytes stay one call away on the handle for a peer that cannot map the segment.
@@ -1285,7 +1301,7 @@ impl<'a> QueryResponder<'a> {
         };
         #[cfg(not(feature = "transport-shm"))]
         let body = ReplyBody::Put(payload.to_vec());
-        self.replies.push(QueryReply::Reply {
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body,
@@ -1297,8 +1313,7 @@ impl<'a> QueryResponder<'a> {
             qos: meta.qos.unwrap_or(self.qos),
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
-        });
-        Ok(())
+        })
     }
 
     /// R311y562 — the Del-arm mirror of [`Self::send_reply_keyed_meta`].
@@ -1331,7 +1346,10 @@ impl<'a> QueryResponder<'a> {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
-        self.replies.push(QueryReply::Reply {
+        if let Some(attachment) = meta.attachment {
+            self.replies.admit_payload(attachment.len())?;
+        }
+        self.replies.stage(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Del,
@@ -1343,8 +1361,7 @@ impl<'a> QueryResponder<'a> {
             qos: meta.qos.unwrap_or(self.qos),
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
-        });
-        Ok(())
+        })
     }
 
     /// Emit an Err reply. `encoding_id` (with optional `schema`)
@@ -1359,16 +1376,22 @@ impl<'a> QueryResponder<'a> {
     /// public bypass of the very gate the trait-level
     /// [`ReplyOut::reply_err`] forwarding was enforcing.
     #[cfg(feature = "query-reply-err")]
-    pub fn send_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
+    pub fn send_err(
+        &mut self,
+        encoding_id: Option<u32>,
+        schema: Option<&str>,
+        payload: &[u8],
+    ) -> Result<(), ReplyError> {
+        self.replies.admit_payload(payload.len())?;
         let encoding = encoding_id.map(|id| (id, schema.map(str::to_string)));
-        self.replies.push(QueryReply::Err {
+        self.replies.stage(QueryReply::Err {
             rid: self.rid,
             keyexpr_literal: String::from(&*self.keyexpr_literal),
             encoding,
             payload: payload.to_vec(),
             responder: self.responder.clone(),
             qos: self.qos,
-        });
+        })
     }
 
     /// R121j-3c — attach a responder identity that every subsequent
@@ -1483,7 +1506,15 @@ impl<'a> QueryResponder<'a> {
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 impl ReplyOut for QueryResponder<'_> {
     fn reply(&mut self, payload: &[u8]) {
-        self.send_reply(payload);
+        // The refusal is counted by the stage; a handler that must KNOW calls
+        // `try_reply`, which hands it back.
+        let _ = self.send_reply(payload);
+    }
+    fn try_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
+        self.send_reply(payload)
+    }
+    fn try_reply_del(&mut self) -> Result<(), ReplyError> {
+        self.send_reply_del()
     }
     fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
         self.send_reply_keyed(keyexpr, payload)
@@ -1528,10 +1559,10 @@ impl ReplyOut for QueryResponder<'_> {
         self.send_reply_keyed_sourced(keyexpr, payload, encoding, timestamp, source_info)
     }
     fn reply_del(&mut self) {
-        self.send_reply_del();
+        let _ = self.send_reply_del();
     }
     fn reply_del_sourced(&mut self, source_info: Option<&SourceInfo>) {
-        self.send_reply_del_sourced(source_info);
+        let _ = self.send_reply_del_sourced(source_info);
     }
     fn reply_keyed_del_sourced(
         &mut self,
@@ -1558,7 +1589,7 @@ impl ReplyOut for QueryResponder<'_> {
     }
     fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
         #[cfg(feature = "query-reply-err")]
-        self.send_err(encoding_id, schema, payload);
+        let _ = self.send_err(encoding_id, schema, payload);
         #[cfg(not(feature = "query-reply-err"))]
         {
             let _ = (encoding_id, schema, payload);
@@ -2041,7 +2072,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         request: &RequestOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        replies: &mut Vec<QueryReply>,
+        replies: &mut ReplyStage,
     ) -> DispatchOutcome {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // Only the Query body arm triggers application-visible
@@ -2233,7 +2264,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         query: &QueryOwned,
         target: Option<QueryTarget>,
         qos: QosLevel,
-        replies: &mut Vec<QueryReply>,
+        replies: &mut ReplyStage,
     ) -> usize {
         // A loopback query is built in this process, so its value is never a list
         // of slices after a marker: there is nothing to un-swap.
@@ -2262,7 +2293,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         keyexpr: &str,
         query: &QueryOwned,
         value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
-        replies: &mut Vec<QueryReply>,
+        replies: &mut ReplyStage,
     ) -> usize {
         self.fire_matching_queryables(
             envelope, keyexpr, query, value, replies, /* is_remote = */ false,
@@ -2292,7 +2323,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         keyexpr: &str,
         query: &QueryOwned,
         unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
-        replies: &mut Vec<QueryReply>,
+        replies: &mut ReplyStage,
         is_remote: bool,
     ) -> usize {
         let QueryEnvelope { rid, target, qos } = envelope;
@@ -2372,7 +2403,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         envelope: QueryEnvelope,
         keyexpr: &str,
         projection: QueryProjection<'_>,
-        replies: &mut Vec<QueryReply>,
+        replies: &mut ReplyStage,
         is_remote: bool,
     ) -> usize {
         let QueryEnvelope { rid, target, qos } = envelope;
@@ -2503,8 +2534,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending_replies: &mut Vec<QueryReply>,
-        pending_final_rids: &mut Vec<(u64, QosLevel)>,
+        pending_replies: &mut ReplyStage,
+        pending_final_rids: &mut FinalStage,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311dx — the whole registry impl is `codec-request`-gated, so
@@ -2544,13 +2575,24 @@ impl<C: QuerySink> QueryableRegistry<C> {
                 // The two arms that DO legitimately owe nothing are exactly the
                 // two `DispatchOutcome::NOT_DISPATCHED` returns, which mirror
                 // zenoh's two pre-`handle_query` exits (session.rs:2769-2792).
+                //
+                // S9a — a Query that would owe a Final the table cannot hold is
+                // refused BEFORE any queryable runs, and counted: a reply that no
+                // Final can follow leaves the requester's `get` open until its own
+                // timeout, and the handler's work would answer nobody. Only a
+                // Query body can owe one, so only it is refused.
+                if matches!(req.body, RequestOwnedVariant::CodecZenohQuery(_))
+                    && !pending_final_rids.has_room()
+                {
+                    pending_final_rids.refuse_request();
+                    continue;
+                }
                 let outcome = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
                 if outcome.dispatched {
                     // R2595 — the terminator carries the QUERY's QoS, as every
                     // reply before it does: upstream stamps it on the final from
                     // the same `QueryInner::qos` the replies came from.
-                    pending_final_rids
-                        .push((req.rid, crate::declare_ext_qos::read_request_qos(req)));
+                    pending_final_rids.owe(req.rid, crate::declare_ext_qos::read_request_qos(req));
                 }
             }
         }
@@ -2569,8 +2611,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending_replies: &mut Vec<QueryReply>,
-        pending_final_rids: &mut Vec<(u64, QosLevel)>,
+        pending_replies: &mut ReplyStage,
+        pending_final_rids: &mut FinalStage,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
@@ -2923,7 +2965,7 @@ mod tests {
         own.insert(7u64, "ours/temp".to_string());
 
         let req = request_query_nonlocal(7, 7, None);
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, MappingSpaces::with_own(&peer, &own), &mut replies);
 
         assert_eq!(
@@ -2961,7 +3003,7 @@ mod tests {
         peer.insert(7u64, "theirs/temp".to_string());
 
         let req = request_query_nonlocal(7, 7, None);
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &peer, &mut replies);
 
         assert_eq!(ours.load(Ordering::SeqCst), 0);
@@ -2978,7 +3020,7 @@ mod tests {
     fn empty_registry_dispatch_is_noop_and_no_replies_emitted() {
         let mut reg = QueryableRegistry::new();
         let req = request_query(42, 0, Some("home/temp"));
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
@@ -3025,7 +3067,7 @@ mod tests {
         });
 
         let req = request_query(7, 0, Some("home/temp"));
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
@@ -3056,7 +3098,7 @@ mod tests {
         });
 
         // Three different keyexpr literals should all match `home/**`.
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         for suffix in ["home", "home/temp", "home/zone/1/temp"] {
             reg.dispatch_request(
                 &request_query(1, 0, Some(suffix)),
@@ -3086,7 +3128,7 @@ mod tests {
             responder.reply(b"ok");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         // A wildcard selector that INTERSECTS the concrete queryable → fires.
         reg.dispatch_request(
             &request_query(1, 0, Some("@zid/*/3912/aligner")),
@@ -3128,7 +3170,7 @@ mod tests {
 
         // mapping_id=11, no suffix → table lookup yields "sensors/temp"
         let req = request_query(1, 11, None);
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &peer_table, &mut replies);
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
 
@@ -3161,7 +3203,7 @@ mod tests {
         });
 
         let req = request_query_with_attachment(11, Some("home/temp"), b"hello-att");
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         let got = captured.lock().unwrap().clone();
@@ -3186,7 +3228,7 @@ mod tests {
         });
 
         let req = request_query(7, 0, Some("home/temp"));
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -3241,7 +3283,7 @@ mod tests {
         });
 
         let req = request_query_with_parameters(13, "home/temp", b"key=value");
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -3306,7 +3348,7 @@ mod tests {
         });
 
         let req = request_query_with_source_info(21, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         let si = captured
@@ -3328,7 +3370,7 @@ mod tests {
             counter.fetch_add(1, Ordering::SeqCst);
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let put_req = request_put(1, "home/temp");
         reg.dispatch_request(&put_req, &HashMap::new(), &mut replies);
 
@@ -3353,7 +3395,7 @@ mod tests {
         });
 
         let req = request_query(1, 0, Some("home/temp"));
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -3380,7 +3422,7 @@ mod tests {
         });
 
         let req = request_query(1, 0, Some("home/temp"));
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -3401,7 +3443,7 @@ mod tests {
             responder.reply_keyed("demo/b", b"v2").unwrap();
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
@@ -3446,7 +3488,7 @@ mod tests {
                 .unwrap();
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
@@ -3509,7 +3551,7 @@ mod tests {
                 .unwrap();
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("@zid/aligner")),
             &HashMap::new(),
@@ -3571,7 +3613,7 @@ mod tests {
             responder.reply_del();
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(99, 0, Some("clear/me")),
             &HashMap::new(),
@@ -3601,7 +3643,7 @@ mod tests {
             responder.reply_err(Some(4), Some("schema_v1"), b"oops");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(5, 0, Some("error/path")),
             &HashMap::new(),
@@ -3635,7 +3677,7 @@ mod tests {
             responder.reply(b"sample-3");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(123, 0, Some("series/data")),
             &HashMap::new(),
@@ -3676,7 +3718,7 @@ mod tests {
             responder.reply(b"after-clear");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("home/temp")),
             &HashMap::new(),
@@ -3748,7 +3790,7 @@ mod tests {
             responder.reply_err(Some(4), Some("schema_v1"), b"oops");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(9, 0, Some("error/path")),
             &HashMap::new(),
@@ -3784,7 +3826,7 @@ mod tests {
             responder.reply(b"hello");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(42, 0, Some("home/temp")),
             &HashMap::new(),
@@ -3892,7 +3934,7 @@ mod tests {
                 .reply_keyed_sourced("demo/data", b"v", None, &ts_cb, Some(&si_cb))
                 .unwrap();
         });
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/data")),
             &HashMap::new(),
@@ -3932,7 +3974,7 @@ mod tests {
         reg.register("demo/data", move |_q, responder| {
             responder.reply_del_sourced(Some(&si_cb));
         });
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/data")),
             &HashMap::new(),
@@ -3996,7 +4038,7 @@ mod tests {
                 )
                 .unwrap();
         });
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
@@ -4068,7 +4110,7 @@ mod tests {
                 .reply_keyed_del_sourced("demo/data", &ts_cb, Some(&si_cb))
                 .unwrap();
         });
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
@@ -4157,7 +4199,7 @@ mod tests {
             .query_value(b"the-query-value", encoding)
             .build()
             .unwrap();
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let matched = reg.dispatch_request(&request, &HashMap::new(), &mut replies);
         assert_eq!(
             matched.matched, 1,
@@ -4221,7 +4263,7 @@ mod tests {
                 },
             });
         });
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let outcome = reg.dispatch_request(request, &HashMap::new(), &mut replies);
         assert_eq!(outcome.matched, 1, "the demo/data queryable matched");
         let seen = seen.lock().unwrap().take().expect("the handler ran");
@@ -4419,7 +4461,7 @@ mod tests {
             NetworkMessage::Request(Box::new(request_query(11, 0, Some("home/temp")))),
             NetworkMessage::Request(Box::new(request_query(12, 0, Some("garden/temp")))),
         ];
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
 
@@ -4460,7 +4502,7 @@ mod tests {
             0,
             Some("garden/humid"),
         )))];
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty(), "nothing matched, so nothing replied");
@@ -4493,7 +4535,7 @@ mod tests {
             build_request_query_with_target(9, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
                 .expect("build AllComplete request"),
         ))];
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(
@@ -4519,7 +4561,7 @@ mod tests {
         let messages = vec![NetworkMessage::Request(Box::new(request_query(
             99, 99, None,
         )))];
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty());
@@ -4558,7 +4600,7 @@ mod tests {
             5,
             "home/temp",
         )))];
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty(), "a MsgPut body fires no queryable");
@@ -4585,7 +4627,7 @@ mod tests {
             1,
             "home/temp",
         )))];
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert_eq!(invocations.load(Ordering::SeqCst), 0);
@@ -4618,7 +4660,7 @@ mod tests {
         });
         assert_ne!(id_a, id_b);
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(1, 0, Some("metrics/cpu")),
             &HashMap::new(),
@@ -4664,7 +4706,7 @@ mod tests {
             seen.push(responder.reply_keyed("other/outside", b"out"));
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
@@ -4720,7 +4762,7 @@ mod tests {
     /// trait object a handler holds, outside the query and inside it.
     #[test]
     fn every_keyed_reply_arm_returns_its_refusal_to_the_caller() {
-        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut responder = QueryResponder::new(
             7,
             "demo/**".to_string(),
@@ -4762,7 +4804,7 @@ mod tests {
                 .expect("`_anyke` waives the gate, so nothing is refused");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let query = Query {
             parameters_len: Some(b"_anyke".len() as u64),
             parameters: Some(b"_anyke"),
@@ -4801,7 +4843,7 @@ mod tests {
             responder.reply(b"22.5");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
@@ -4850,7 +4892,7 @@ mod tests {
             responder.reply(b"22.5");
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
@@ -4887,7 +4929,7 @@ mod tests {
             counter.fetch_add(1, Ordering::SeqCst);
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
@@ -4921,7 +4963,7 @@ mod tests {
             counter.fetch_add(1, Ordering::SeqCst);
         });
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
@@ -4975,7 +5017,7 @@ mod tests {
             .unwrap();
 
         // AllComplete: only the complete queryable fires.
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.local_query(
             1,
             "home/temp",
@@ -4997,7 +5039,7 @@ mod tests {
         assert_eq!(replies.len(), 1, "one reply, from the complete queryable");
 
         // All: both fire (proves the AllComplete skip was target-conditional).
-        let mut replies_all = Vec::new();
+        let mut replies_all = ReplyStage::new();
         reg.local_query(
             2,
             "home/temp",
@@ -5016,7 +5058,7 @@ mod tests {
 
         // BestMatching (absent target = None): both fire on the local path,
         // matching zenoh (only AllComplete filters by completeness locally).
-        let mut replies_bm = Vec::new();
+        let mut replies_bm = ReplyStage::new();
         reg.local_query(
             3,
             "home/temp",
@@ -5065,7 +5107,7 @@ mod tests {
         });
 
         // AllComplete ext on the wire -> only the complete queryable matches.
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let matched = reg.dispatch_request(
             &build_request_query_with_target(1, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
                 .unwrap(),
@@ -5085,7 +5127,7 @@ mod tests {
         assert_eq!(replies.len(), 1);
 
         // Plain Request (no target ext = BestMatching) -> both match.
-        let mut replies_plain = Vec::new();
+        let mut replies_plain = ReplyStage::new();
         let matched_plain = reg.dispatch_request(
             &request_query(2, 0, Some("metrics/cpu")),
             &HashMap::new(),
@@ -5136,7 +5178,7 @@ mod tests {
                 .request_qos(qos.raw)
                 .build()
                 .unwrap();
-            let mut replies = Vec::new();
+            let mut replies = ReplyStage::new();
             reg.dispatch_request(&request, &HashMap::new(), &mut replies);
             assert_eq!(replies.len(), arms, "every reply arm staged one reply");
             for reply in replies {
@@ -5154,7 +5196,7 @@ mod tests {
             "the handler's view reports the query's QoS"
         );
 
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(
             &request_query(3, 0, Some("metrics/cpu")),
             &HashMap::new(),
@@ -5171,7 +5213,7 @@ mod tests {
         }
 
         // The loopback leg inherits the requester's QoS the same way.
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
@@ -5207,7 +5249,7 @@ mod tests {
         );
 
         let req = request_query(1, 0, Some("home/temp"));
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -5231,7 +5273,7 @@ mod tests {
         reg.register("a/**", |_q, r: &mut dyn ReplyOut| r.reply(b"from-wild"));
         reg.register("a/b", |_q, r: &mut dyn ReplyOut| r.reply(b"from-exact"));
 
-        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut replies = ReplyStage::new();
         let mut responder = QueryResponder {
             rid: 7,
             keyexpr_literal: "a/b".into(),
@@ -5372,7 +5414,7 @@ mod tests {
             schema: Some("json".to_string()),
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -5479,7 +5521,7 @@ mod tests {
             schema: Some("json".to_string()),
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -5617,7 +5659,7 @@ mod request_decode_isolation_tests {
         });
 
         let req = request_query_with_attachment(11, "home/temp", b"hello-att");
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -5645,7 +5687,7 @@ mod request_decode_isolation_tests {
         });
 
         let req = request_query_with_parameters(12, "home/temp", b"key=value");
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -5709,7 +5751,7 @@ mod request_decode_isolation_tests {
         });
 
         let req = request_query_with_source_info(14, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.dispatch_request(&req, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -5995,7 +6037,7 @@ mod shm_value_tests {
         let resolved = Arc::new(AtomicUsize::new(0));
         let mut rig = rig(true, counting(&resolved));
         let request = parse_request(&upstream_shm_get());
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let outcome = rig
             .registry
             .dispatch_request(&request, &HashMap::new(), &mut replies);
@@ -6066,7 +6108,7 @@ mod shm_value_tests {
         let resolved = Arc::new(AtomicUsize::new(0));
         let mut rig = rig(true, counting(&resolved));
         let request = parse_request(&message(&chain));
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let outcome = rig
             .registry
             .dispatch_request(&request, &HashMap::new(), &mut replies);
@@ -6108,7 +6150,7 @@ mod shm_value_tests {
         registry.set_shm_negotiated(true);
 
         let request = parse_request(&upstream_shm_get());
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let outcome = registry.dispatch_request(&request, &HashMap::new(), &mut replies);
         assert_eq!(outcome.matched, 1);
 
@@ -6144,7 +6186,7 @@ mod shm_value_tests {
         registry.set_shm_negotiated(true);
 
         let request = parse_request(&upstream_shm_get());
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         registry.dispatch_request(&request, &HashMap::new(), &mut replies);
 
         assert_eq!(
@@ -6163,7 +6205,7 @@ mod shm_value_tests {
         let resolved = Arc::new(AtomicUsize::new(0));
         let mut rig = rig(false, counting(&resolved));
         let request = parse_request(&upstream_shm_get());
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let outcome = rig
             .registry
             .dispatch_request(&request, &HashMap::new(), &mut replies);
@@ -6185,7 +6227,7 @@ mod shm_value_tests {
     fn a_shm_query_whose_slice_does_not_resolve_is_dropped_whole_and_still_acknowledged() {
         let mut rig = rig(true, Arc::new(Refuses));
         let request = parse_request(&upstream_shm_get());
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         let outcome = rig
             .registry
             .dispatch_request(&request, &HashMap::new(), &mut replies);
@@ -6269,7 +6311,7 @@ mod shm_reply_tests {
         let query = Query::default()
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
-        let mut replies = Vec::new();
+        let mut replies = ReplyStage::new();
         reg.local_query(7, "demo/x", &query, None, QosLevel::DEFAULT, &mut replies);
         assert_eq!(replies.len(), 1, "the queryable answered once");
         replies.pop().unwrap()

@@ -1306,6 +1306,13 @@ pub mod request_routing_context;
 /// `codec-response-final`. Runtime-agnostic (`FnMut + Send`, no async).
 pub mod query;
 
+/// Fixed-memory step S9a — what a peer's queries make the session OWE it: the
+/// replies a queryable has staged and the `ResponseFinal`s that follow them, as a
+/// `Vec` on the growable backing and as tables of declared capacity on the fixed
+/// one, where a reply or a request that does not fit is refused and counted.
+#[cfg(feature = "alloc")]
+pub mod reply_stage;
+
 /// R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
 /// [`storage_backend::StorageBackend`] seam + an in-memory backend
 /// ([`storage_backend::MemoryStorage`]). A faithful mirror of zenoh's

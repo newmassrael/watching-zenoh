@@ -33,15 +33,16 @@
 //! is still dispatched, as the copying path dispatches it.
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 use wz_codecs::query::Query;
 use wz_codecs::query_ext_entry::{QueryExtEntry, QueryExtEntryVariant};
 use wz_codecs::request::{Request, RequestVariant};
 
-use super::{DispatchOutcome, QueryEnvelope, QueryProjection, QueryReply, QueryableRegistry};
+use super::{DispatchOutcome, QueryEnvelope, QueryProjection, QueryableRegistry};
 use crate::ext_view::ExtEntryView;
 use crate::query_sink::QuerySink;
+use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
+#[cfg(test)]
 use crate::sample::QosLevel;
 use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound, MappingSpaces};
 
@@ -114,18 +115,26 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         request: &Request<'_>,
         spaces: MappingSpaces<'_>,
-        pending_replies: &mut Vec<QueryReply>,
-        pending_final_rids: &mut Vec<(u64, QosLevel)>,
+        pending_replies: &mut ReplyStage,
+        pending_final_rids: &mut FinalStage,
     ) {
+        // As the owned path: a Query that would owe a Final the table cannot
+        // hold is refused before any queryable runs, and counted.
+        if matches!(request.body, RequestVariant::CodecZenohQuery(_))
+            && !pending_final_rids.has_room()
+        {
+            pending_final_rids.refuse_request();
+            return;
+        }
         match self.dispatch_lent(request, spaces, pending_replies) {
             Ok(outcome) => {
                 if outcome.dispatched {
                     // The terminator carries the query's QoS, read by the rule
                     // the owned path reads it by.
-                    pending_final_rids.push((
+                    pending_final_rids.owe(
                         request.rid,
                         crate::declare_ext_qos::read_qos_in(request.extensions.as_deref()),
-                    ));
+                    );
                 }
             }
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
@@ -140,7 +149,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         request: &Request<'_>,
         spaces: MappingSpaces<'_>,
-        replies: &mut Vec<QueryReply>,
+        replies: &mut ReplyStage,
     ) -> Result<DispatchOutcome, Fallback> {
         // Only the Query body arm reaches the table.
         let RequestVariant::CodecZenohQuery(query) = &request.body else {
@@ -179,8 +188,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         request: &Request<'_>,
         spaces: MappingSpaces<'_>,
-        pending_replies: &mut Vec<QueryReply>,
-        pending_final_rids: &mut Vec<(u64, QosLevel)>,
+        pending_replies: &mut ReplyStage,
+        pending_final_rids: &mut FinalStage,
     ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Request. It
@@ -213,10 +222,13 @@ mod tests {
     use super::*;
     use crate::driver_loop::{InPlaceRecord, IterationEvent};
     use crate::network_message::{parse_frame_payload, NetworkMessage};
+    use crate::query::QueryReply;
     use crate::query_mode::QueryTarget;
+    use crate::reply_stage::ReplyStaging as _;
     use crate::request_build::RequestQueryBuilder;
     use crate::sample::{EncodingHint, SourceInfo};
     use alloc::string::String;
+    use alloc::vec::Vec;
     use hashbrown::HashMap;
     use sce_forge_runtime::codec::SceCursor;
     use std::sync::{Arc, Mutex};
@@ -285,11 +297,11 @@ mod tests {
         let (mut owned, owned_log) = recording();
         let messages = parse_frame_payload(&wire).expect("the record decodes");
         assert!(matches!(messages.as_slice(), [NetworkMessage::Request(_)]));
-        let (mut owned_replies, mut owned_finals) = (Vec::new(), Vec::new());
+        let (mut owned_replies, mut owned_finals) = (ReplyStage::new(), FinalStage::new());
         owned.dispatch_messages(&messages, &peer, &mut owned_replies, &mut owned_finals);
         let (mut lent, lent_log) = recording();
         let decoded = Request::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
-        let (mut lent_replies, mut lent_finals) = (Vec::new(), Vec::new());
+        let (mut lent_replies, mut lent_finals) = (ReplyStage::new(), FinalStage::new());
         lent.dispatch_iteration_event(
             IterationEvent::InPlace(InPlaceRecord::request_of_frame(
                 &decoded,
@@ -304,8 +316,16 @@ mod tests {
         let owned_seen = owned_log.lock().expect("not poisoned").clone();
         let lent_seen = lent_log.lock().expect("not poisoned").clone();
         (
-            (owned_seen, owned_replies, owned_finals),
-            (lent_seen, lent_replies, lent_finals),
+            (
+                owned_seen,
+                owned_replies.drain_staged().collect(),
+                owned_finals.drain_owed().collect(),
+            ),
+            (
+                lent_seen,
+                lent_replies.drain_staged().collect(),
+                lent_finals.drain_owed().collect(),
+            ),
         )
     }
 

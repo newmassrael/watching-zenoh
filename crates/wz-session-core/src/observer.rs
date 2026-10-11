@@ -168,9 +168,9 @@ use crate::switchboard::{EventInjector, SwitchboardRegistry};
 // re-exported `QueryableRegistry` under codec-request; the migration
 // makes the consumer-feature gate explicit so a codec-declare-on /
 // query-queryable-off subset compiles.)
-use crate::query::QueryReply;
 #[cfg(feature = "query-queryable")]
 use crate::query::QueryableRegistry;
+use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage, ReplyStaging};
 // R311dy — `ReplyRegistry` stays always-compiled (alloc): its loopback
 // delivery + timeout sweep are codec-agnostic, mirroring
 // `SubscriberRegistry`. The dispatch fan-out + wire-emit drain stay
@@ -185,7 +185,6 @@ use crate::reply::ReplyRegistry;
 // (`observer.dispatch(event, &actions)`) resolve `S = SessionLinkActions
 // <R, T>` by inference, unchanged.
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
-use alloc::vec::Vec;
 
 /// Six-registry application-layer dispatch bundle. See module-level
 /// docs for the rationale and dispatch flow.
@@ -310,11 +309,18 @@ pub struct ApplicationLayerObserver {
     /// drain side in [`Self::flush_pending`] stays cfg-gated on
     /// `query-queryable` so wire-emit only runs when the queryable
     /// dispatch path is in.
-    pending_replies: Vec<QueryReply>,
+    ///
+    /// S9a — a [`ReplyStage`]: the `Vec` it always was on the growable backing,
+    /// and on the fixed one a table of [`crate::caps::MAX_PENDING_REPLIES`] rows that
+    /// refuses and counts.
+    pending_replies: ReplyStage,
     /// R2595 — `(rid, qos)`: the terminator owed, and the QUERY's QoS it must
     /// carry. The rid alone could not say what the final should read as, so
     /// every final wz emitted read as DEFAULT.
-    pending_final_rids: Vec<(u64, crate::sample::QosLevel)>,
+    ///
+    /// S9a — a [`FinalStage`], bounded by [`crate::caps::MAX_PENDING_FINALS`] on the
+    /// fixed backing, where a request that would need one more is refused.
+    pending_final_rids: FinalStage,
     /// R283 — staging buffer for the declarer-side interest-response
     /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
     /// `local_tokens` during the fan phase (the `alloc` inbound-parse
@@ -394,8 +400,8 @@ impl ApplicationLayerObserver {
             replies: ReplyRegistry::new(),
             // R311r — staging buffers always allocated; drain path in
             // flush_pending stays cfg-gated on query-queryable.
-            pending_replies: Vec::new(),
-            pending_final_rids: Vec::new(),
+            pending_replies: ReplyStage::new(),
+            pending_final_rids: FinalStage::new(),
             // R283 — declarer interest-response staging buffer, gated on
             // `liveliness-token` like its producer registry. R311hn — a
             // no-heap `BoundedVec`.
@@ -785,7 +791,7 @@ impl ApplicationLayerObserver {
     /// drain, so the two halves are separate primitives.
     fn drain_query_replies<S: ResponseSink>(&mut self, sink: &S) {
         #[cfg(feature = "query-queryable")]
-        for reply in self.pending_replies.drain(..) {
+        for reply in self.pending_replies.drain_staged() {
             // W3: a reply whose bounded field overflows cannot be wire-encoded
             // (the codec would reject it too); skip it and continue the drain.
             if let Ok(response) = reply.into_response() {
@@ -806,11 +812,11 @@ impl ApplicationLayerObserver {
     /// ResponseFinal for R.
     fn drain_query_finals<S: ResponseSink>(&mut self, sink: &S) {
         #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
-        for (rid, qos) in self.pending_final_rids.drain(..) {
+        for (rid, qos) in self.pending_final_rids.drain_owed() {
             sink.send_response_final(rid, qos);
         }
         #[cfg(all(feature = "query-queryable", not(feature = "codec-response-final")))]
-        self.pending_final_rids.clear();
+        self.pending_final_rids.drain_owed().for_each(drop);
         // `sink` is consumed only by the `send_response_final` loop above; in
         // every other combo (no `query-queryable`, or `query-queryable` without
         // `codec-response-final`) it is unused but the signature stays stable.
@@ -924,8 +930,23 @@ impl ApplicationLayerObserver {
     /// empty `Vec` — the same OFF projection its sibling drains
     /// ([`Self::drain_query_replies`] / [`Self::drain_query_finals`]) already
     /// document, and the shape a `pub` accessor owes its callers.
-    pub fn take_pending_final_rids(&mut self) -> Vec<(u64, crate::sample::QosLevel)> {
+    pub fn take_pending_final_rids(&mut self) -> FinalStage {
         core::mem::take(&mut self.pending_final_rids)
+    }
+
+    /// What the staged-reply table has refused since this observer was built, by
+    /// why. All zero on the growable backing, which refuses nothing.
+    #[cfg(feature = "bounded-heapless")]
+    pub fn reply_refusals(&self) -> crate::reply_stage::ReplyRefusals {
+        self.pending_replies.refusals()
+    }
+
+    /// How many requests were refused because no `Final` could be owed for them
+    /// ([`crate::caps::MAX_PENDING_FINALS`] held). All zero on the growable
+    /// backing, which refuses nothing.
+    #[cfg(feature = "bounded-heapless")]
+    pub fn request_refusals(&self) -> u32 {
+        self.pending_final_rids.refusals()
     }
 
     /// Combined fan + drain — the production single-call form used

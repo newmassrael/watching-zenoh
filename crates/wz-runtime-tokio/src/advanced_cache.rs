@@ -1293,7 +1293,9 @@ mod tests {
             );
             answer_from_ring(&ring, &view, &mut responder, 0, configured);
             // The anti-vacuity leg, staged through the SAME responder.
-            responder.send_reply(b"not-from-the-cache");
+            responder
+                .send_reply(b"not-from-the-cache")
+                .expect("the growable stage refuses nothing");
         }
 
         let staged: Vec<QosLevel> = replies

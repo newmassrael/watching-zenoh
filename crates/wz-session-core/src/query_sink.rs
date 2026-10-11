@@ -305,6 +305,15 @@ pub enum ReplyError {
     /// The reply keyexpr does not intersect the query's, and the query did
     /// not opt out with the `_anyke` selector parameter.
     KeyExprNotMatch,
+    /// The reply's payload (or its attachment) is longer than the session's
+    /// bounded reply buffer ([`crate::caps::MAX_REPLY_PAYLOAD_BYTES`]). Never
+    /// truncated and never staged. Answered only on the fixed backing
+    /// (`bounded-heapless`); the growable one holds any length.
+    PayloadTooLarge,
+    /// The session's table of staged replies is full
+    /// ([`crate::caps::MAX_PENDING_REPLIES`]) until the next drain. Counted, and
+    /// answered only on the fixed backing.
+    StagingFull,
 }
 
 impl core::fmt::Display for ReplyError {
@@ -314,6 +323,12 @@ impl core::fmt::Display for ReplyError {
                 "reply keyexpr does not intersect the query's, \
                  and the query only accepts replies on matching key expressions",
             ),
+            Self::PayloadTooLarge => {
+                f.write_str("reply payload is longer than the session's bounded reply buffer")
+            }
+            Self::StagingFull => {
+                f.write_str("the session's table of staged replies is full until the next drain")
+            }
         }
     }
 }
@@ -334,7 +349,25 @@ impl core::fmt::Display for ReplyError {
 /// the concrete impl to a no-op rather than dropping the method.
 pub trait ReplyOut {
     /// Emit a Put-form data reply with the given payload bytes.
+    ///
+    /// Infallible in signature, and on the growable backing in fact. On the fixed
+    /// backing a reply the session cannot hold is refused and COUNTED (see
+    /// [`ReplyError::PayloadTooLarge`] and [`ReplyError::StagingFull`]); a handler
+    /// that has to know calls [`Self::try_reply`], which hands the refusal back.
     fn reply(&mut self, payload: &[u8]);
+    /// [`Self::reply`] that says whether the reply was staged. The default stages
+    /// through [`Self::reply`] and answers `Ok`, which is the truth for a sink that
+    /// refuses nothing.
+    fn try_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
+        self.reply(payload);
+        Ok(())
+    }
+    /// [`Self::reply_del`] that says whether the reply was staged; see
+    /// [`Self::try_reply`].
+    fn try_reply_del(&mut self) -> Result<(), ReplyError> {
+        self.reply_del();
+        Ok(())
+    }
     /// Emit a Put-form data reply stamped with an explicit, concrete reply
     /// keyexpr instead of the query keyexpr the responder is bound to. The
     /// faithful shape for a queryable that answers a WILDCARD query with
