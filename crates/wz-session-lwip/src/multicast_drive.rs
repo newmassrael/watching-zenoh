@@ -123,7 +123,17 @@
 //! bothered to say so, and every shipped MCU host in this tree would have
 //! passed `|| false` — an arm with a witness and no user.
 
-#[cfg(not(feature = "session-slot"))]
+// `Rc` backs the heap reply queue and the host tests' shared link; the session task is
+// generic over how the link is held, so a build with neither names it nowhere.
+#[cfg(all(
+    not(feature = "session-slot"),
+    any(
+        test,
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
 use alloc::rc::Rc;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::ops::Deref;

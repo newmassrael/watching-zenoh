@@ -287,6 +287,41 @@ IMAGES: dict[str, Image] = {
         "the multicast drive loop (boxed TX items, the reply queue) and the"
         " session shell: S6",
     ),
+    # S9c -- the fixed-memory profile of the multicast image: the group's session in a
+    # cell of a static table, the group socket in a static pool, the runtime in a static
+    # cell, no allocator and no `extern crate alloc` in the bin or in the e2e library.
+    # It stays `pending` for the reason the acceptor's profile does: the crates of the
+    # session tier carry `alloc` and the link is refused for want of an allocator; the
+    # row below this one names the allocation sites that remain.
+    "mcu-multicast-e2e-fixed": Image(
+        "deploy/mcu-multicast-e2e/Cargo.toml",
+        "bin",
+        "mcu-multicast-e2e",
+        "pending",
+        (
+            Build(
+                V7M,
+                "cross-test",
+                ("fixed-memory",),
+                label="mps2-fixed",
+                no_default_features=True,
+            ),
+        ),
+        "the session tier's own crates still carry `alloc` (wz-session-core, the JOIN"
+        " encoder and the owned TX mirror, wz-runtime-core, the codec owned mirrors):"
+        " the next step",
+    ),
+    # The same profile with an allocator, for the census alone (see the acceptor's).
+    "mcu-multicast-e2e-fixed-census": Image(
+        "deploy/mcu-multicast-e2e/Cargo.toml",
+        "bin",
+        "mcu-multicast-e2e",
+        "pending",
+        (Build(V7M, "cross-test", ("fixed-memory", "heap"), label="mps2-fixed-heap"),),
+        "the linked allocation sites of the multicast tier on the fixed-memory profile,"
+        " read with an allocator present (census only): the worklist of the next step",
+        ci=False,
+    ),
     "mcu-freertos-demo": Image(
         "deploy/mcu-freertos-demo/Cargo.toml",
         "bin",

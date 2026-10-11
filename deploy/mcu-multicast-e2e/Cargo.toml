@@ -52,6 +52,18 @@ name = "mcu-multicast-e2e"
 path = "src/main.rs"
 
 [features]
+default = ["heap"]
+# The image with an allocator: the multicast stack on `embedded-alloc`'s heap, the
+# shape this image has always had. Optional since S9c.
+heap = ["dep:embedded-alloc"]
+# S9c -- the FIXED-MEMORY PROFILE of this image: the multicast session on the per-session
+# slot (a pump in a cell of a static table), the group socket in a static pool and
+# the runtime in a static cell, with no allocator and no `extern crate alloc` in this
+# bin or in the e2e library under it (`run_multicast_e2e_fixed` over statics declared
+# here). Built with `--no-default-features --features fixed-memory`. The image does not
+# link yet, for the reason `deploy/mcu-session-acceptor`'s does not: the session tier's
+# own crates still carry `extern crate alloc`, and the S8 gate lists them.
+fixed-memory = ["wz-mcu-multicast-e2e/fixed-memory"]
 # R311y190 — the RUNTIME multicast toggle. Default (off) = the cross-compile +
 # footprint artifact (plain link, join_ok=false on QEMU loopback). WITH it +
 # WZ_LWIP_PORT=crates/lwip-sys/port/cross-test-mcast (LWIP_LOOPIF_MULTICAST +
@@ -79,7 +91,7 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 # multicast rx socket + the reassembly slot pool + the codec byte buffers)
 # needs a #[global_allocator]; embedded-alloc is the conventional Cortex-M
 # choice. Sized generously for the mps2 4 MB SRAM.
-embedded-alloc = "0.6"
+embedded-alloc = { version = "0.6", optional = true }
 
 # Atomic backend parity with the wz session stack (M3/M4/M7 get native
 # LDREX/STREX; the feature set mirrors the wz-runtime-coop / session-core
@@ -96,7 +108,10 @@ wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
 # so the bin never names the wz facade or wz-session-core directly — the lib is
 # the composition boundary (it enables session-lwip + the multicast profile on
 # the facade).
-wz-mcu-multicast-e2e = { path = "../../crates/wz-mcu-multicast-e2e" }
+#
+# `default-features = false` is a no-op today (the crate has none) and states that the
+# `fixed-memory` profile adds to a base that names no allocator.
+wz-mcu-multicast-e2e = { path = "../../crates/wz-mcu-multicast-e2e", default-features = false }
 
 [profile.release]
 codegen-units = 1

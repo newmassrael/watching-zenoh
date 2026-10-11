@@ -977,7 +977,9 @@ version = "0.1.0"
 dependencies = [
  "lwip-sys",
  "wz",
+ "wz-link-lwip",
  "wz-session-core",
+ "wz-session-lwip",
 ]
 
 [[package]]

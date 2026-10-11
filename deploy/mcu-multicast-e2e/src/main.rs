@@ -41,19 +41,26 @@
 #![no_std]
 #![no_main]
 
+// S9c -- the `fixed-memory` profile has no allocator and does not link `alloc`: a use
+// of the heap that crept into this bin would not compile.
+#[cfg(feature = "heap")]
 extern crate alloc;
 
+#[cfg(feature = "heap")]
 use core::mem::MaybeUninit;
 
 use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::{debug, hprintln};
+#[cfg(feature = "heap")]
 use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 use wz_mcu_clock::SystickClock;
 
-#[cfg(not(feature = "loopback-multicast"))]
+#[cfg(feature = "fixed-memory")]
+use wz_mcu_multicast_e2e::{run_multicast_e2e_fixed, MulticastE2eStatics};
+#[cfg(all(not(feature = "fixed-memory"), not(feature = "loopback-multicast")))]
 use wz_mcu_multicast_e2e::run_multicast_e2e;
-#[cfg(feature = "loopback-multicast")]
+#[cfg(all(not(feature = "fixed-memory"), feature = "loopback-multicast"))]
 use wz_mcu_multicast_e2e::run_multicast_e2e_with_progress;
 use wz_mcu_multicast_e2e::{ClockSource, LwipLink, MulticastOutcome};
 
@@ -61,10 +68,17 @@ use wz_mcu_multicast_e2e::{ClockSource, LwipLink, MulticastOutcome};
 // the alloc-backed multicast stack (the dispatcher + the 32 x 1536 multicast
 // rx socket ~49 KB + the reassembly slot pool + the codec byte buffers) with
 // room to spare.
+#[cfg(feature = "heap")]
 const HEAP_SIZE: usize = 1024 * 256;
 
+#[cfg(feature = "heap")]
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
+
+/// The e2e's statics on the fixed-memory profile: the runtime, the group's session and
+/// the group socket's storage, in `.bss`, sized by the types.
+#[cfg(feature = "fixed-memory")]
+static E2E: MulticastE2eStatics<SystickClockRef> = MulticastE2eStatics::new();
 
 /// CPU clock (MHz) — QEMU clocks the mps2 family at 25 MHz. SysTick counts
 /// processor cycles when `CSR.CLKSOURCE = 1`; dividing by this yields
@@ -107,11 +121,17 @@ pub extern "C" fn sys_now() -> u32 {
 
 #[entry]
 fn main() -> ! {
+    #[cfg(feature = "heap")]
     init_heap();
     GLOBAL_CLOCK.init();
     hprintln!("R311mi: MCU multicast transport e2e starting");
 
+    #[cfg(not(feature = "fixed-memory"))]
     let link = LwipLink::init();
+    // S9c -- the stack's state is a static of the link crate, so the handle is `'static`
+    // and the pump of the fixed-memory profile can hold it.
+    #[cfg(feature = "fixed-memory")]
+    let link = LwipLink::init_static();
     // R311y190 — with `loopback-multicast`, route multicast TX egress over the
     // loop netif BEFORE the drive loop so `run_multicast_e2e` completes a REAL
     // on-target IGMP-join + multicast-loopback roundtrip (the no_std promotion of
@@ -127,12 +147,19 @@ fn main() -> ! {
     // of only the `starting` line above. The plain build is the footprint
     // artifact (Layer Q.5): it never boots in CI, and its text size is a
     // gated measurement, so it keeps the announcement-free entry.
-    #[cfg(feature = "loopback-multicast")]
+    #[cfg(all(not(feature = "fixed-memory"), feature = "loopback-multicast"))]
     let report = run_multicast_e2e_with_progress(&link, SystickClockRef, |stage| {
         hprintln!("R311mi: stage {}", stage.name());
     });
-    #[cfg(not(feature = "loopback-multicast"))]
+    #[cfg(all(not(feature = "fixed-memory"), not(feature = "loopback-multicast")))]
     let report = run_multicast_e2e(&link, SystickClockRef);
+    // S9c -- the same scenario over the statics above: the group's session lives in a
+    // cell of the static table and the one pump drives both the round trip and the
+    // departure.
+    #[cfg(feature = "fixed-memory")]
+    let report = run_multicast_e2e_fixed(&E2E, link, SystickClockRef, |stage| {
+        hprintln!("R311mi: stage {}", stage.name());
+    });
 
     let full_success = report.join_ok
         && report.outcome == Some(MulticastOutcome::IterationLimit)
@@ -194,6 +221,7 @@ fn main() -> ! {
 }
 
 /// Initialise the heap allocator backing `alloc::*` from a static BSS region.
+#[cfg(feature = "heap")]
 fn init_heap() {
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
     // SAFETY: `HEAP_MEM` is a `static mut` accessed only here, before any other
