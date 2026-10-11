@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  MCU session-slot table config (Round 3278): the SSOT for how many
+  sessions one fixed-memory machine holds at once and for the byte ceiling
+  of ONE session's slot. SCE emits `SLOT_COUNT` (MAX_SESSIONS) and
+  `SLOT_SIZE` (the ceiling), so the RAM every session of the machine may
+  take is `SLOT_COUNT * SLOT_SIZE`: one generated number, and the one a deploy
+  file's `session_pool: { ref: session_slot_pool_mcu }` is budgeted against
+  (`scripts/lib/deploy_sessions.py` documents the keys and checks them).
+
+  ## What a slot is
+
+  The session slot is the storage of one session end to end: the bundle that
+  drives it, its link and the socket under it, the engine's staging and the
+  fixed tables a peer can fill (aliases, remote declarations, pending replies).
+  The table of N of them is the `static` the acceptor claims a slot from BEFORE
+  it sends an InitAck, and answers nothing from, counted, when none is free
+  (`wz-session-core::session_slot`).
+
+  ## What the two numbers mean
+
+  `slot-count` is MAX_SESSIONS: every session the machine runs, whether it
+  dials, accepts or joins a group. The sessions a deploy file declares must fit
+  it, and a listening session claims one slot per session it accepts.
+
+  `slot-size` is a CEILING, not a figure derived from a field list. The
+  consuming crate asserts, at compile time, that the typed slot is no larger
+  than it, so a change that grows the slot past the budget is a build failure
+  that names the number to raise. The deploy validator checks the part of the
+  ceiling it can see: the pools one session takes (its receive pool and its
+  reassembly pool) are part of the slot and so may not add up to more than
+  `slot-size`.
+
+  The value is PROVISIONAL, set as the largest pools a declared session takes
+  plus room for the typed part: the multicast session of
+  `deploy/mcu_client_and_group.yaml` takes 32 x 1536 (the receive pool) +
+  4 x 4096 (the reassembly pool) = 65536 bytes, and 32768 more is allowed for
+  everything typed. The measured size of the typed slot replaces the headroom
+  when the slot owns its socket and its staging (the commit that adds that
+  assert moves this number in the same change, with the measurement above it).
+
+  ## What this document does NOT make
+
+  The emitted pool struct (a byte arena of `slot-count` slots and a lifecycle
+  FSM) is not instantiated by anything: a second copy of the bytes the typed
+  slots take would double the RAM this number budgets. The constants are the
+  interface, exactly as the reassembly pool's are for its dispatcher.
+
+  ## section / alignment / cache-policy
+
+  `sram1` / 32 / `none`, as `session_rx_pool_mcu.scxml`. The section is
+  advisory (the emit places nothing in it); `none` because no DMA reads a
+  session slot, so the C5 cache-maintenance externs stay out of the emit.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="session_slot_pool_mcu" version="1.0">
+  <sce:slot-count>3</sce:slot-count>
+  <sce:slot-size>98304</sce:slot-size>
+  <sce:section>sram1</sce:section>
+  <sce:alignment>32</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+</scxml>

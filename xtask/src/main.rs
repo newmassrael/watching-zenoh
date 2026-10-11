@@ -221,6 +221,7 @@ fn regen_codecs(root: &Path) {
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
+///   wz-session-core  : also session_slot_pool_mcu (buffer-pool)
 ///   wz-runtime-coop  : reassembly_pool_mcu (buffer-pool)
 ///   wz-link-lwip     : scout_rx_pool_mcu, session_rx_pool_mcu,
 ///                      session_rx_pool_mcu_minimal,
@@ -263,6 +264,10 @@ fn regen_statecharts_and_pools(root: &Path) {
         ("session_rx_pool_mcu_multicast", "wz-link-lwip"),
         ("session_tx_pool_mcu", "wz-link-lwip"),
         ("eth_rx_pool_mcu", "wz-link-lwip"),
+        // Round 3278 — the session-slot table: MAX_SESSIONS and one slot's
+        // byte ceiling. It is session-tier, so it lands beside the session
+        // statecharts rather than with the link pools.
+        ("session_slot_pool_mcu", "wz-session-core"),
     ];
     for (stem, krate) in pools {
         let out = root.join("out").join(krate);
