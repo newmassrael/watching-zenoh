@@ -726,7 +726,7 @@ type InnerBox<const N: usize, const Q: usize> = static_slots::Slot<Inner<N, Q>>;
 /// Round 3277 (`static-link-storage`) -- the static storage for `S` sockets of
 /// one shape (`N`, `Q`), declared by the image that owns the capacity decision:
 ///
-/// ```ignore
+/// ```text
 /// static SESSION_SOCKETS: UdpSocketPool<SESSION_RX_SLOT_SIZE, SESSION_RX_SLOTS, 2> =
 ///     UdpSocketPool::new();
 /// let socket = LwipUdpSocket::bind_in(&link, 7447, &SESSION_SOCKETS)?;

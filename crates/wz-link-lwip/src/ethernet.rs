@@ -140,7 +140,7 @@ struct EthState<M> {
 /// Round 3277 (`static-link-storage`) -- the static storage for up to `S`
 /// interfaces driven by one MAC type, declared by the firmware:
 ///
-/// ```ignore
+/// ```text
 /// static ETH0: EthernetPool<BoardMac, 1> = EthernetPool::new();
 /// let eth = EthernetIf::add_in(&link, mac, config, &ETH0)?;
 /// ```

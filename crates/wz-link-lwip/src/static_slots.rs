@@ -8,7 +8,7 @@
 //! the socket's state as its receive callback's argument, and the netif holds
 //! the MAC it transmits through. Both therefore need storage that does not move
 //! for as long as lwIP can call back, which until now was a `Pin<Box<..>>` or a
-//! `Box::leak`. A [`SlotPool`] is the same guarantee without the allocator: a
+//! `Box::leak`. A [`SlotPool`](crate::static_slots::SlotPool) is the same guarantee without the allocator: a
 //! fixed array of cells in a `static`, a claim flag per cell, and a counted
 //! refusal when every cell is taken. A cell never moves because a `static`
 //! never does.

@@ -217,8 +217,8 @@ impl LwipMulticastDriver {
     /// Wrap a bound multicast socket with its group destination. `group` /
     /// `port` are the locator the JOIN beacon + data frames multicast to —
     /// the same `(group, port)` passed to
-    /// [`wz_link_lwip::rx_sockets::bind_session_multicast_rx`] so TX and the
-    /// joined RX membership match.
+    /// `wz_link_lwip::rx_sockets::bind_session_multicast_rx` (or its `_in` form
+    /// under `static-link-storage`) so TX and the joined RX membership match.
     pub fn new(socket: SessionMulticastRxSocket, group: u32, port: u16) -> Self {
         Self {
             socket,
@@ -467,7 +467,7 @@ where
 /// owns its socket, and lwIP refuses a second bind to a live port:
 /// `vendor/lwip/src/core/udp.c` @ `/* port matches that of PCB in list and REUSEADDR not set -> reject */`
 /// returns `ERR_USE` unless every PCB on that port sets `SOF_REUSEADDR`, which
-/// [`wz_link_lwip::LwipUdpSocket::bind`] never does. So the tempting shape —
+/// `wz_link_lwip::LwipUdpSocket::bind` (and `bind_in`) never does. So the tempting shape —
 /// hand this function a `&mut` and assign `*driver = rebind()?` — is not merely
 /// untidy, it CANNOT WORK: Rust evaluates the new bind while the old PCB is
 /// still installed. Taking the driver by value lets the `drop` happen before
