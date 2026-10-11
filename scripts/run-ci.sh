@@ -2027,6 +2027,12 @@ layer_c0_test_discipline() {
     # tree, which is why the walk resolves the chain instead of the leaf.
     python3 scripts/lib/tcp_tuning_seam_gate.py --selftest || return 1
     python3 scripts/lib/tcp_tuning_seam_gate.py || return 1
+    # No-allocator link proof, the part that needs no toolchain: every deploy/
+    # image has a row (gated or pending) in the gate's table, and a gated image
+    # declares no allocator and writes no `extern crate alloc`. The linked-ELF
+    # and crate-graph halves run in Layer Q (Q.0n), where the images are built.
+    python3 scripts/lib/no_allocator_link_gate.py --selftest || return 1
+    python3 scripts/lib/no_allocator_link_gate.py --population || return 1
     # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
     # exit an obligation a TYPE enforces and closed that one invariant; the
     # register carried "the other multi-exit sites have not been looked at" as
@@ -16083,6 +16089,54 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
 
     local lwip_port
     lwip_port="$(realpath crates/lwip-sys/port/cross-test)"
+
+    # ── Q.0n — the no-allocator link proof (scripts/lib/no_allocator_link_gate.py).
+    #
+    # Builds every image of the gate's table and judges its LINKED ELF (no
+    # allocator entry point, no GlobalAlloc impl, no alloc-crate code in the
+    # symbol table) and the crates the build compiled (none carries
+    # `extern crate alloc`). A `gated` image must be clean; a `pending` one must
+    # still allocate and the report is what stands in its way (the worklist of
+    # the fixed-memory steps). The one gated image with a link tier in it,
+    # mcu-link-noalloc-probe, is also booted under QEMU, so the proof is of an
+    # image that RUNS. After the gcc check above: every image here links lwIP,
+    # except the registry probe, which needs no C and is harmless to build late.
+    local noalloc_name noalloc_target noalloc_cpu noalloc_machine noalloc_bin
+    if command -v arm-none-eabi-nm >/dev/null 2>&1; then
+        while read -r noalloc_name noalloc_target; do
+            if ! grep -q "^${noalloc_target}$" <<< "$installed"; then
+                _q_unavailable "Q.0n.${noalloc_name}.${noalloc_target}" \
+                    "rustup target ${noalloc_target} absent" || fail=1
+                continue
+            fi
+            if ! python3 scripts/lib/no_allocator_link_gate.py \
+                --image "$noalloc_name" --target "$noalloc_target"; then
+                echo "  Q.0n.${noalloc_name}.${noalloc_target} FAIL" >&2
+                fail=1
+                continue
+            fi
+            echo "  Q.0n.${noalloc_name}.${noalloc_target} OK"
+            [[ "$noalloc_name" == mcu-link-noalloc-probe ]] || continue
+            case "$noalloc_target" in
+                thumbv7m-none-eabi) noalloc_cpu=cortex-m3; noalloc_machine=mps2-an385 ;;
+                thumbv6m-none-eabi) noalloc_cpu=cortex-m0; noalloc_machine=microbit ;;
+                *) continue ;;
+            esac
+            if [[ "$has_qemu" -ne 1 ]]; then
+                _q_unavailable "Q.0n.${noalloc_machine} run" \
+                    "qemu-system-arm not on PATH" || fail=1
+                continue
+            fi
+            noalloc_bin="deploy/mcu-link-noalloc-probe/target/${noalloc_target}/release/mcu-link-noalloc-probe"
+            if ! run_qemu_case \
+                "Q.0n.${noalloc_machine} run mcu-link-noalloc-probe via qemu-system-arm ${noalloc_machine}" \
+                "$noalloc_cpu" "$noalloc_machine" "$noalloc_bin"; then
+                fail=1
+            fi
+        done < <(python3 scripts/lib/no_allocator_link_gate.py --list)
+    else
+        _q_unavailable "Q.0n" "arm-none-eabi-nm not on PATH" || fail=1
+    fi
 
     # Sub-lane matrix: machine|cpu|target|run_policy. Parallel
     # arrays kept as a single colon-delimited table so a new

@@ -953,6 +953,7 @@ round_fed_gates=(
     "prose_dep_graph_gate.py --check"
     "capi_c_coverage.py"
     "tcp_tuning_seam_gate.py"
+    "no_allocator_link_gate.py --population"
     "prose_build_closure_gate.py --check"
     "root_relative_exclusion_lint.py"
     "negotiated_axis_witness_gate.py --check"
