@@ -271916,6 +271916,68 @@
         "5. The runtime-zero-copy reason is re-pinned for uring_reactor.rs in the integration round after a re-read; its text is not rewritten."
       ]
     },
+    "Round 3289": {
+      "decision_summary": "S9a moves every table a peer writes, or that is owed to one peer, out of the process-wide observer into the per-session slot (decision Q7, per session; application registries stay process-wide). Chosen over a shared table with a session key: a wire alias id is session-scoped, so a shared table lets two peers collide on one id, and a flood by one peer would exhaust the others; a per-slot table makes both impossible by construction, and a release forgets the table in place. Each registry is now an application table plus one peer side (Deref and wrapper methods keep the AP API unchanged). Under bounded-heapless every peer table is a fixed table that refuses the entry past its bound, counts the refusal and allocates nothing; replies and finals are fallible (ReplyError StagingFull, PayloadTooLarge) and a request whose Final cannot be owed is refused before a queryable runs. Default and AP builds keep growable tables and behave as before.",
+      "changes_bullets": [
+        "wz-session-core: new id_map (IdMap trait, FixedIdMap with counted refusal; HashMap on the growable backing), PeerAliases, DeclaredKeys, DeclaredQueryables and a KeyText alias (String, or BoundedString of the keyexpr bound).",
+        "wz-session-core: subscriber, queryable, liveliness-subscriber and token registries are split into an application table and one peer side; Deref and wrapper methods keep the AP API unchanged.",
+        "wz-session-core: reply_stage adds ReplyStage and FinalStage (Vec on the growable backing, bounded refusing tables under bounded-heapless), ReplyRefusals, ReplyError StagingFull and PayloadTooLarge, ReplyOut try_reply and try_reply_del; a request whose Final cannot be owed is refused before a queryable runs.",
+        "wz-session-core: peer_tables (PeerTables, forgotten in place at release), the slot cell owns one and SlotRef peers() returns it; slot_observer (SlotObserver, Requesters) lets one application observer serve every slot.",
+        "wz-session-core caps: MAX_PEER_KEYEXPR_ALIASES 16, MAX_REMOTE_DECLS 16, MAX_PENDING_REPLIES 8, MAX_PENDING_FINALS 8, MAX_REPLY_PAYLOAD_BYTES 1024; the deploy validator report is held equal to them by a host test.",
+        "Tests: R3 peer-table exhaustion (10 tests added to bounded_heapless_backing, 16 total), R4 reply_budget_refusal (4), slot_observer_sessions (2), session_slot_pool_deploy (4 added, 9 total), wz-session-lwip session_peer_tables (3).",
+        "CI: C1g and C1m count guards for those commands, a census row for declare-subscriber on the wz-session-lwip session-slot leg."
+      ],
+      "verification_bullets": [
+        "Measured through bx on pc2, pc3 and hkl002, per crate. On the worker's branch and again on the integrated tree:",
+        "R3 (bounded_heapless_backing) 16 of 16 and R4 (reply_budget_refusal) 4 of 4; slot_observer_sessions 2 of 2; wz-session-lwip session_peer_tables 3 of 3; session_slot_pool_deploy 9 of 9 with WZ_DEPLOY_REPORT_REQUIRE=1 on the integrated tree (the deploy validator report equals the caps).",
+        "Red first, measured on the branch: the same tests run against four source mutants failed by name and the mutants were reverted. Refusal count dropped in FixedIdMap: 8 of 16 R3 tests red. Payload bound never reached and Final room always true: both R4 tests aimed at them red. Slot release no longer forgetting its tables: 2 of 3 lwip tests red.",
+        "Default build: wz-session-core lib 533 passed on the integrated tree; the bounded-heapless lib set 953 passed. The AP feature set (declare, query, pubsub, liveliness) 952 passed on the branch.",
+        "clippy -D warnings clean: wz-session-core on all-features, default, bounded-heapless, declare and session-slot sets; wz-session-lwip and wz-link-lwip on all-features and on the slot profile; wz-runtime-coop on session-slot; wz-runtime-tokio default. thumbv7m (branch) and thumbv6m (integrated) checks of wz-session-lwip on the slot profile.",
+        "Census exits 0 and Layer A4 passes (branch); Layer C1bz passes on the integrated tree with the wz-session-core budget at 505 (the base measured 510, five removals, no addition).",
+        "Not verified: the stack peak of a session in place on QEMU or a board, anything on hardware, hosted CI, the size of the peer tables on a 32-bit target (25104 B of a 27488 B slot measured on the 64-bit host)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A staged QueryReply still owns its keyexpr as a String and its payload as a Vec (now bounded in size, not in allocation), and draining one builds an owned response; moving both to the codec's borrowed mirrors is open.",
+        "The requester registries' sinks are heap closures until the image types them; the per-session pending queries are typed by the image through Requesters.",
+        "The peer tables measure 25104 B of a 27488 B slot on the host (64-bit); the figure on a Cortex-M target and the stack peak of an in-place build are not measured. The per-session cost is dominated by the keyexpr text rows, so a small board lowers the deploy limits (aliases, remote declarations) rather than the keyexpr bound.",
+        "S9b: the admin space is not touched and still allocates; it can rely on the slot owning its peer tables, on PeerTables being const-constructible and forgotten in place, and on refusal being counted rather than silent.",
+        "Three test files of wz-session-lwip called heap constructors that static-link-storage removes; they are repaired in the integration round, which also holds the population of that class."
+      ],
+      "publishable_decision_summary": "S9a moves every table a peer writes, or that is owed to one peer, out of the process-wide observer into the per-session slot (decision Q7, per session; application registries stay process-wide). Chosen over a shared table with a session key: a wire alias id is session-scoped, so a shared table lets two peers collide on one id, and a flood by one peer would exhaust the others; a per-slot table makes both impossible by construction, and a release forgets the table in place. Each registry is now an application table plus one peer side (Deref and wrapper methods keep the AP API unchanged). Under bounded-heapless every peer table is a fixed table that refuses the entry past its bound, counts the refusal and allocates nothing; replies and finals are fallible (ReplyError StagingFull, PayloadTooLarge) and a request whose Final cannot be owed is refused before a queryable runs. Default and AP builds keep growable tables and behave as before.",
+      "publishable_changes_bullets": [
+        "wz-session-core: new id_map (IdMap trait, FixedIdMap with counted refusal; HashMap on the growable backing), PeerAliases, DeclaredKeys, DeclaredQueryables and a KeyText alias (String, or BoundedString of the keyexpr bound).",
+        "wz-session-core: subscriber, queryable, liveliness-subscriber and token registries are split into an application table and one peer side; Deref and wrapper methods keep the AP API unchanged.",
+        "wz-session-core: reply_stage adds ReplyStage and FinalStage (Vec on the growable backing, bounded refusing tables under bounded-heapless), ReplyRefusals, ReplyError StagingFull and PayloadTooLarge, ReplyOut try_reply and try_reply_del; a request whose Final cannot be owed is refused before a queryable runs.",
+        "wz-session-core: peer_tables (PeerTables, forgotten in place at release), the slot cell owns one and SlotRef peers() returns it; slot_observer (SlotObserver, Requesters) lets one application observer serve every slot.",
+        "wz-session-core caps: MAX_PEER_KEYEXPR_ALIASES 16, MAX_REMOTE_DECLS 16, MAX_PENDING_REPLIES 8, MAX_PENDING_FINALS 8, MAX_REPLY_PAYLOAD_BYTES 1024; the deploy validator report is held equal to them by a host test.",
+        "Tests: R3 peer-table exhaustion (10 tests added to bounded_heapless_backing, 16 total), R4 reply_budget_refusal (4), slot_observer_sessions (2), session_slot_pool_deploy (4 added, 9 total), wz-session-lwip session_peer_tables (3).",
+        "CI: C1g and C1m count guards for those commands, a census row for declare-subscriber on the wz-session-lwip session-slot leg."
+      ],
+      "publishable_verification_bullets": [
+        "Measured through bx on pc2, pc3 and hkl002, per crate. On the worker's branch and again on the integrated tree:",
+        "R3 (bounded_heapless_backing) 16 of 16 and R4 (reply_budget_refusal) 4 of 4; slot_observer_sessions 2 of 2; wz-session-lwip session_peer_tables 3 of 3; session_slot_pool_deploy 9 of 9 with WZ_DEPLOY_REPORT_REQUIRE=1 on the integrated tree (the deploy validator report equals the caps).",
+        "Red first, measured on the branch: the same tests run against four source mutants failed by name and the mutants were reverted. Refusal count dropped in FixedIdMap: 8 of 16 R3 tests red. Payload bound never reached and Final room always true: both R4 tests aimed at them red. Slot release no longer forgetting its tables: 2 of 3 lwip tests red.",
+        "Default build: wz-session-core lib 533 passed on the integrated tree; the bounded-heapless lib set 953 passed. The AP feature set (declare, query, pubsub, liveliness) 952 passed on the branch.",
+        "clippy -D warnings clean: wz-session-core on all-features, default, bounded-heapless, declare and session-slot sets; wz-session-lwip and wz-link-lwip on all-features and on the slot profile; wz-runtime-coop on session-slot; wz-runtime-tokio default. thumbv7m (branch) and thumbv6m (integrated) checks of wz-session-lwip on the slot profile.",
+        "Census exits 0 and Layer A4 passes (branch); Layer C1bz passes on the integrated tree with the wz-session-core budget at 505 (the base measured 510, five removals, no addition).",
+        "Not verified: the stack peak of a session in place on QEMU or a board, anything on hardware, hosted CI, the size of the peer tables on a 32-bit target (25104 B of a 27488 B slot measured on the 64-bit host)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A staged QueryReply still owns its keyexpr as a String and its payload as a Vec (now bounded in size, not in allocation), and draining one builds an owned response; moving both to the codec's borrowed mirrors is open.",
+        "The requester registries' sinks are heap closures until the image types them; the per-session pending queries are typed by the image through Requesters.",
+        "The peer tables measure 25104 B of a 27488 B slot on the host (64-bit); the figure on a Cortex-M target and the stack peak of an in-place build are not measured. The per-session cost is dominated by the keyexpr text rows, so a small board lowers the deploy limits (aliases, remote declarations) rather than the keyexpr bound.",
+        "S9b: the admin space is not touched and still allocates; it can rely on the slot owning its peer tables, on PeerTables being const-constructible and forgotten in place, and on refusal being counted rather than silent.",
+        "Three test files of wz-session-lwip called heap constructors that static-link-storage removes; they are repaired in the integration round, which also holds the population of that class."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
