@@ -696,6 +696,48 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
+/// A frame that carries a transport extension chain of its own costs the heap
+/// nothing whatever kind of record is in it. The chain is owned only for a record
+/// that is handed over OWNED, and on the slot profile no record is: before the
+/// control kinds were lent, the first Declare, Interest or Oam of a chained frame
+/// made the chain a `Vec` of owned entries.
+#[test]
+fn a_frame_chain_is_owned_by_no_record_of_the_slot_profile() {
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+        wz_runtime_coop::RuntimeCell::new();
+    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    let (mut acceptor, initiator) = establish(&link, &runtime, 7733);
+    let measure = Measurement::new();
+    // Ids 5 and 6, unit encoded, M clear; the first carries the chain flag.
+    const CHAIN: [u8; 2] = [0x80 | 0x05, 0x06];
+    let first = next_sn(&initiator);
+    let mut costs: Vec<(&str, usize)> = Vec::new();
+    let told = acceptor.told.clone();
+    let before = told.declared.load(Ordering::SeqCst);
+    for (at, (what, record)) in (first..).zip([
+        ("a DeclSubscriber", record::subscriber(51, "chain/a")),
+        ("an Oam", record::oam(9)),
+        ("a ResponseFinal", record::response_final(3)),
+        ("an Interest", record::interest_final(8)),
+    ]) {
+        let wire = frame_wire(at, &CHAIN, &record);
+        costs.push((what, read(&measure, &mut acceptor, &initiator, what, &wire)));
+    }
+    assert_eq!(
+        told.declared.load(Ordering::SeqCst) - before,
+        1,
+        "the declaration in a chained frame reached the application"
+    );
+    let wrong: Vec<String> = costs
+        .iter()
+        .filter(|(_, n)| *n != 0)
+        .map(|(what, n)| format!("{what} in a chained frame: {n} allocation(s)"))
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// The SEND side of the same records, measured and not claimed. A session sends a
 /// control record by building an owned message (`declare_build`, `interest_build`,
 /// `response_final_build`) and encoding it into the slot its link lends; the encode

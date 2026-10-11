@@ -11327,9 +11327,10 @@ layer_c1m_session_lwip() {
     # cancelling Interest, a ResponseFinal, an Oam, a MID with no decoder, and four of
     # them in one frame) each read by one acceptor iteration on the slot profile at
     # ZERO allocations (the one interest that asks for the current subscribers owns
-    # one allocation, the answer's owned build, which the file names), and the
-    # owned builders of the sends bounded: 2 = what that command PRINTED.
-    _runci_guarded_test "C1m slot control records" 2 \
+    # one allocation, the answer's owned build, which the file names), a frame that
+    # carries a chain of its own costing the same, and the owned builders of the sends
+    # bounded: 3 = what that command PRINTED.
+    _runci_guarded_test "C1m slot control records" 3 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,declare-subscriber,codec-response-final,session-slot \
         --test slot_control_records --quiet || return 1
