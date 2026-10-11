@@ -64,15 +64,28 @@
 //! [`LwipLink`] so this one function serves the host lane, the footprint
 //! artifact, AND the on-target QEMU proof.
 
-extern crate alloc;
+// Fixed-memory step S9c -- this crate links no `alloc`, on either form. The one place
+// the old body named `Vec` was the payload, which is a fixed array now, and the
+// parameters' zid, which `multicast_params::zid_vec` hands over without the caller
+// naming the type. The `fixed-memory` form adds statics, a pump in a cell of a table
+// and the step loop in place of `run_multicast_session`; what the session tier below
+// still allocates (the encoders and the owned wire mirrors) is `wz-session-core`'s.
 
-use alloc::vec::Vec;
-
+#[cfg(not(feature = "fixed-memory"))]
 use wz::link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
+#[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::CoopRuntime;
+#[cfg(not(feature = "fixed-memory"))]
 use wz::session_lwip::multicast_drive::{
     run_multicast_session, run_multicast_session_with_shutdown, LwipMulticastDriver,
 };
+
+#[cfg(feature = "fixed-memory")]
+mod fixed;
+#[cfg(feature = "fixed-memory")]
+pub use fixed::run_multicast_e2e_fixed;
+#[cfg(feature = "fixed-memory")]
+pub use fixed::MulticastE2eStatics;
 
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the bin depend only on THIS crate (single-dep facade
@@ -89,10 +102,15 @@ pub use wz::link_lwip::LwipLink;
 pub use wz_session_core::multicast_params::MulticastOutcome;
 
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_join::encode_join;
-use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastParams};
-use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
+#[cfg(not(feature = "fixed-memory"))]
+use wz_session_core::multicast_params::MulticastDriveConfig;
+use wz_session_core::multicast_params::{zid_vec, MulticastParams};
+#[cfg(not(feature = "fixed-memory"))]
+use wz_session_core::multicast_tx::MulticastTxItem;
+use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::WhatAmI;
@@ -188,6 +206,7 @@ pub struct MulticastE2eReport {
 /// elapses, so the run is fully deterministic — the fragment chain is
 /// delivered FIFO over loopback and reassembles in order); the deploy bin
 /// passes its SysTick clock.
+#[cfg(not(feature = "fixed-memory"))]
 pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> MulticastE2eReport {
     run_multicast_e2e_with_progress(link, clock_source, |_stage| {})
 }
@@ -231,6 +250,7 @@ impl MulticastStage {
 /// `on_stage` runs between the e2e's phases, so a bare-metal image prints one
 /// console line and a host test pushes into a vector. A caller that wants no
 /// announcements uses [`run_multicast_e2e`], whose no-op compiles away.
+#[cfg(not(feature = "fixed-memory"))]
 pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>(
     link: &LwipLink,
     clock_source: C,
@@ -246,66 +266,29 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     //    succeeds.
     let socket = match bind_session_multicast_rx(link, group, PORT) {
         Ok(sock) => sock,
-        Err(_) => {
-            return MulticastE2eReport {
-                outcome: None,
-                join_ok: false,
-                tx_fragmented: false,
-                peer_admitted: false,
-                active_peers: 0,
-                saw_push: false,
-                saw_drop: false,
-                departed: false,
-            };
-        }
+        Err(_) => return MulticastE2eReport::no_join(),
     };
 
-    // ── Pre-admit a peer at OUR loopback source: a JOIN with a zid distinct
-    //    from ours (so it is admitted, not own-zid-filtered) advertising
-    //    next_sn 0 on a fresh ring, and the SAME batch_size as ours (a
-    //    mismatch would fail validate_join -> the echoed fragments would hit
-    //    an UnknownPeer drop). Injected BEFORE wrapping the socket in the
-    //    driver so the loop's first poll delivers it ahead of our own beacon
-    //    echo, creating the (src_addr, src_port) entry the fragments match.
-    let mut peer = params(PEER_ZID);
-    peer.batch_size = BATCH_SIZE;
-    let peer_join = encode_join(
-        &peer,
-        &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
-    );
-    let _ = socket.send_to(group, PORT, &peer_join);
+    // ── Pre-admit a peer at OUR loopback source (see `peer_join`), BEFORE
+    //    wrapping the socket in the driver so the loop's first poll delivers it
+    //    ahead of our own beacon echo, creating the (src_addr, src_port) entry
+    //    the fragments match.
+    let _ = socket.send_to(group, PORT, &peer_join());
 
     let mut driver = LwipMulticastDriver::new(socket, group, PORT);
     let mut dispatcher = MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000));
     let runtime = CoopRuntime::new(clock_source);
-    let mut self_params = params(SELF_ZID);
-    self_params.batch_size = BATCH_SIZE;
+    let self_params = own_params();
 
     // The oversize payload: deterministic bytes, length 200 > batch_size 64.
-    let payload: Vec<u8> = (0..PAYLOAD_LEN as u32)
-        .map(|i| (i.wrapping_mul(13)) as u8)
-        .collect();
-
-    // Probe the TX side fragments at this budget BEFORE the loop, so a passing
-    // saw_push below is known to have exercised the Fragment RX arm (a single
-    // frame would ride the whole-Frame admit path instead).
-    let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(self_params.seq_num_res));
-    let tx_fragmented = match multicast_put_literal(KEYEXPR, &payload) {
-        Ok(item) => {
-            multicast_tx_emit(item, &mut probe_sn, &self_params)
-                .datagrams
-                .len()
-                > 1
-        }
-        Err(_) => false,
-    };
+    let payload = payload();
+    let tx_fragmented = tx_fragments(&payload, &self_params);
 
     // One queued Put on the reliable channel; the pull-seam yields it once,
     // then None (the loop keeps serving RX + the JOIN beacon).
     let mut pending: Option<MulticastTxItem> = multicast_put_literal(KEYEXPR, &payload).ok();
 
-    let mut saw_push = false;
-    let mut saw_drop = false;
+    let mut seen = Observed::default();
     on_stage(MulticastStage::RoundTrip);
     let outcome = run_multicast_session(
         &mut dispatcher,
@@ -317,18 +300,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
         &runtime,
         link,
         &mut driver,
-        |event| match event {
-            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                if messages
-                    .iter()
-                    .any(|m| matches!(m, NetworkMessage::Push(_)))
-                {
-                    saw_push = true;
-                }
-            }
-            IterationEvent::ReassemblyDropped(_) => saw_drop = true,
-            _ => {}
-        },
+        |event| seen.observe(event),
         || pending.take(),
     );
 
@@ -370,16 +342,109 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     // ride the membership it is announcing on.
     let _ = link.leave_multicast_group(group);
 
-    MulticastE2eReport {
-        outcome: Some(outcome),
-        join_ok: true,
-        tx_fragmented,
-        peer_admitted: active_peers == 1,
-        active_peers,
-        saw_push,
-        saw_drop,
-        departed,
+    MulticastE2eReport::joined(outcome, tx_fragmented, active_peers, &seen, departed)
+}
+
+impl MulticastE2eReport {
+    /// The report of a run whose group socket could not be bound or joined: the loop
+    /// never ran and the rest of the report is inert.
+    fn no_join() -> Self {
+        Self {
+            outcome: None,
+            join_ok: false,
+            tx_fragmented: false,
+            peer_admitted: false,
+            active_peers: 0,
+            saw_push: false,
+            saw_drop: false,
+            departed: false,
+        }
     }
+
+    /// The report of a run that joined, from what its two drives observed. Both forms
+    /// of the e2e build theirs here, so they cannot disagree about what a signal means.
+    fn joined(
+        outcome: MulticastOutcome,
+        tx_fragmented: bool,
+        active_peers: usize,
+        seen: &Observed,
+        departed: bool,
+    ) -> Self {
+        Self {
+            outcome: Some(outcome),
+            join_ok: true,
+            tx_fragmented,
+            peer_admitted: active_peers == 1,
+            active_peers,
+            saw_push: seen.saw_push,
+            saw_drop: seen.saw_drop,
+            departed,
+        }
+    }
+}
+
+/// What the bounded drive's events showed: the reassembled `Push` and a dropped chain.
+#[derive(Default)]
+struct Observed {
+    saw_push: bool,
+    saw_drop: bool,
+}
+
+impl Observed {
+    fn observe(&mut self, event: IterationEvent<'_>) {
+        match event {
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                if messages
+                    .iter()
+                    .any(|m| matches!(m, NetworkMessage::Push(_)))
+                {
+                    self.saw_push = true;
+                }
+            }
+            IterationEvent::ReassemblyDropped(_) => self.saw_drop = true,
+            _ => {}
+        }
+    }
+}
+
+/// The oversize payload: deterministic bytes, `PAYLOAD_LEN` of them, in an array.
+fn payload() -> [u8; PAYLOAD_LEN] {
+    let mut bytes = [0u8; PAYLOAD_LEN];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = (i as u32).wrapping_mul(13) as u8;
+    }
+    bytes
+}
+
+/// Probe that the TX side fragments `payload` at this budget BEFORE the loop, so a
+/// passing `saw_push` is known to have exercised the Fragment RX arm (a single frame
+/// would ride the whole-Frame admit path instead).
+fn tx_fragments(payload: &[u8], own: &MulticastParams) -> bool {
+    let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(own.seq_num_res));
+    match multicast_put_literal(KEYEXPR, payload) {
+        Ok(item) => multicast_tx_emit(item, &mut probe_sn, own).datagrams.len() > 1,
+        Err(_) => false,
+    }
+}
+
+/// The JOIN of the pre-admitted peer: a zid distinct from ours (so it is admitted, not
+/// own-zid-filtered) advertising `next_sn 0` on a fresh ring, and the SAME `batch_size`
+/// as ours (a mismatch would fail `validate_join` and the echoed fragments would hit an
+/// `UnknownPeer` drop).
+fn peer_join() -> impl core::ops::Deref<Target = [u8]> {
+    let mut peer = params(PEER_ZID);
+    peer.batch_size = BATCH_SIZE;
+    encode_join(
+        &peer,
+        &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+    )
+}
+
+/// This node's parameters: the fixture at the tiny batch budget.
+fn own_params() -> MulticastParams {
+    let mut own = params(SELF_ZID);
+    own.batch_size = BATCH_SIZE;
+    own
 }
 
 /// A multicast params fixture (the C1m `run_multicast_session` test shape): a
@@ -390,7 +455,7 @@ fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
         version: 0x09,
         whatami: WhatAmI::Peer,
-        zid: zid.to_vec(),
+        zid: zid_vec(zid),
         lease_ms: 5_000,
         join_interval_ms: 1,
         seq_num_res: 0x02,

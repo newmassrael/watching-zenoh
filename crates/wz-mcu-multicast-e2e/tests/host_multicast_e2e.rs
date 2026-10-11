@@ -20,6 +20,10 @@
 //! `#[test]` exercises the whole round trip in one process via the
 //! `lwip_test_link` init-once harness (one `lwip_init` + the multicast-netif
 //! routing per binary).
+//!
+//! The heap form only: on the `fixed-memory` profile the e2e is
+//! `host_multicast_fixed_e2e`, which draws neither socket nor runtime from the heap.
+#![cfg(not(feature = "fixed-memory"))]
 
 use wz_mcu_multicast_e2e::{
     run_multicast_e2e_with_progress, ClockSource, MulticastOutcome, MulticastStage,

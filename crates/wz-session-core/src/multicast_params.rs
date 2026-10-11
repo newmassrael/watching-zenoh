@@ -55,6 +55,18 @@ pub fn unpack_res_cbyte(cbyte: u8) -> (u8, u8) {
     (cbyte & 0x03, (cbyte >> 2) & 0x03)
 }
 
+/// A zid in the form [`MulticastParams::zid`] holds it, copied from `src`.
+///
+/// The seam a shell that links no `alloc` writes its parameters through: it names
+/// the value, never the `Vec` type behind it, so it compiles with no `alloc` of its
+/// own. The unicast parameters have the same seam (`session_init_params::zid_bytes`)
+/// and it is already profile-sensitive there; the multicast `zid` is still the
+/// growable form on every profile, which is the one allocation here, and the day
+/// it takes a bounded inline value this function takes it too and no caller changes.
+pub fn zid_vec(src: &[u8]) -> Vec<u8> {
+    src.to_vec()
+}
+
 /// Inputs for each outbound multicast JOIN frame plus the periodic-emit
 /// cadence.
 #[derive(Debug, Clone, PartialEq, Eq)]

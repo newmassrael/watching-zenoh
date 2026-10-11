@@ -482,6 +482,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "host test, built with a fixed feature set",
         frozenset({"fixed-memory"}),
     ),
+    # The multicast e2e crate has the same shape and the same one feature: `fixed-memory`
+    # gates `mod fixed` (`run_multicast_e2e_fixed`, `MulticastE2eStatics`). Its
+    # consumers are the multicast QEMU image and its own host test.
+    "wz-mcu-multicast-e2e": (
+        "the MCU multicast e2e library; its consumers are the QEMU image and its own "
+        "host test, built with a fixed feature set",
+        frozenset({"fixed-memory"}),
+    ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
         "on is a `dev-dependency`; no feature definition anywhere in this "
@@ -775,7 +783,7 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
 # path directly, the facade's row stops speaking for it, and this arm says so.
 #: package -> the consumers whose edge into it only turns features on
 SELECTOR_ONLY_EDGE: dict[str, frozenset[str]] = {
-    "wz-session-lwip": frozenset({"wz-mcu-session-acceptor"}),
+    "wz-session-lwip": frozenset({"wz-mcu-session-acceptor", "wz-mcu-multicast-e2e"}),
 }
 
 
@@ -878,6 +886,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.
     "wz-mcu-session-acceptor": frozenset({"fixed-memory"}),
+    "wz-mcu-multicast-e2e": frozenset({"fixed-memory"}),
     "wz": frozenset(
         {
             "api-compat-c",

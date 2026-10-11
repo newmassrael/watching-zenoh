@@ -277,6 +277,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     #     build reaches; legs run 84 and SKIPS excuses 0, leaving 4 claimed by
     #     NOTHING (all four in `compressed_capture_fixture`).
     "wz-capture|hook|compression,dissect,fixtures|"
+    "wz-mcu-multicast-e2e|hook|fixed-memory,loopif-multicast|"
     "wz-mcu-session-acceptor|hook|buffer-pool-session-rx-slim,fixed-memory,reassembly|"
     "wz-packet-socket|hook|tap|"
     # R2680 — widened from `rest-sse-subscribe` alone when `wz-rest` gained

@@ -3040,6 +3040,7 @@ dependencies = [
  "wz",
  "wz-link-lwip",
  "wz-session-core",
+ "wz-session-lwip",
 ]
 
 [[package]]

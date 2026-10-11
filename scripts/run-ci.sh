@@ -11619,9 +11619,18 @@ layer_c1r_mcu_multicast_e2e() {
     # assertion structural; the whole-crate run below still executes everything.
     _runci_guarded_test C1r 1 cargo test -p wz-mcu-multicast-e2e --test host_multicast_e2e --quiet \
         || return 1
+    # S9c -- the same scenario on the fixed-memory profile (the pump in a cell, the group
+    # socket in a static pool, the runtime in a static cell), with the heap counted by
+    # the crate that asks for each allocation: only the session tier's may. One test, its
+    # own file: lwIP is process-global and the group membership is the process's.
+    _runci_guarded_test "C1r fixed-memory e2e" 1 \
+        cargo test -p wz-mcu-multicast-e2e --features fixed-memory,loopif-multicast \
+        --test host_multicast_fixed_e2e --quiet || return 1
     (cd crates \
         && cargo test -p wz-mcu-multicast-e2e --quiet \
-        && cargo clippy -p wz-mcu-multicast-e2e --all-targets --quiet -- -D warnings)
+        && cargo clippy -p wz-mcu-multicast-e2e --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-mcu-multicast-e2e --features fixed-memory,loopif-multicast \
+            --all-targets --quiet -- -D warnings)
 }
 
 # ─── Layer C1ns — every no_std-forcing member, tested isolated ─────
