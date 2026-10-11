@@ -320,6 +320,13 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-keepalive,\
         transport-qos\
         |"
+    # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
+    # its own because the selector swaps the task pool, the join handles, the local
+    # set and the timer queue for their static forms (and drops the tests that build
+    # a runtime with `CoopRuntime::new`). What only it reaches is `static_tests`: a
+    # full task table refuses and counts, a finished task's cell is reused, what a
+    # task held is dropped once, a full timer table makes the sleep wake itself.
+    "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast|"
     "wz-runtime-core|hook|alloc|"
     "wz-session-core|hook|\
         access-extauth-usrpwd,\

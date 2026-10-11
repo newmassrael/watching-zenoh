@@ -345,6 +345,11 @@ mod placing {
         link
     }
 
+    /// The link itself, as a socket is bound against it.
+    pub fn raw(link: &LinkHandle) -> &LwipLink {
+        link
+    }
+
     pub fn runtime() -> Rt {
         RUNTIME.start(Clk).expect("the runtime is started once")
     }
@@ -440,6 +445,11 @@ mod placing {
     /// Another handle on the node's link: a reference count taken.
     pub fn share(link: &LinkHandle) -> LinkHandle {
         link.clone()
+    }
+
+    /// The link itself, as a socket is bound against it.
+    pub fn raw(link: &LinkHandle) -> &LwipLink {
+        link
     }
 
     /// A runtime as every image makes one: an `Arc` of its pools.
@@ -586,8 +596,8 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
     NOW_US.store(0, Ordering::SeqCst);
 
     // The sockets are bound before any window: the socket's storage is step S7's.
-    let acceptor_socket = bind_session_rx(&link, port).expect("bind the acceptor");
-    let initiator_socket = bind_session_rx(&link, 0).expect("bind the initiator");
+    let acceptor_socket = bind_session_rx(placing::raw(&link), port).expect("bind the acceptor");
+    let initiator_socket = bind_session_rx(placing::raw(&link), 0).expect("bind the initiator");
 
     let m = Measurement::new();
     let mut costs = Costs::default();
@@ -625,7 +635,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
     let spare = placing::session(
         placing::share(&link),
         &runtime,
-        bind_session_rx(&link, 0).expect("bind the spare"),
+        bind_session_rx(placing::raw(&link), 0).expect("bind the spare"),
         ([127, 0, 0, 1], port),
         0xc1,
     );
@@ -802,4 +812,28 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
     assert_eq!(placing::pumps_in_use(), 0, "every pump cell is free");
     assert_eq!(placing::sessions_in_use(), 0, "every session slot is free");
     costs.finish();
+}
+
+/// What the runtime's cell and the pump table take of an image's `.bss`, printed
+/// with their parts so a number in a record can be re-derived, and bounded below by
+/// those parts so a table that held less than it claims to would be caught.
+/// Host-sized (the test runs on the host); the target's numbers are the same
+/// expressions compiled for the target.
+#[cfg(feature = "session-slot")]
+#[test]
+fn the_static_tables_report_their_size() {
+    use wz_runtime_coop::session_drive::{PumpSlots, SessionPump};
+    use wz_runtime_coop::RuntimeCell;
+
+    type Cells = RuntimeCell<Clk, 6, 256, 4>;
+    type Pumps = PumpSlots<Clk, LwipSessionLink<placing::LinkHandle>, 2>;
+    type OnePump = SessionPump<Clk, LwipSessionLink<placing::LinkHandle>>;
+    let (runtime, pumps, pump) = (
+        Cells::size_bytes(),
+        Pumps::size_bytes(),
+        core::mem::size_of::<OnePump>(),
+    );
+    println!("runtime cell {runtime} B (6 tasks x 256 B, 4 timers); pump table {pumps} B (2 x pump {pump} B)");
+    assert!(runtime >= 6 * 256, "the task bytes are in the cell");
+    assert!(pumps >= 2 * pump, "a pump is in each cell of the table");
 }

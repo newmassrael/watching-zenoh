@@ -11236,15 +11236,51 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
         --test session_slot_allocations --quiet || return 1
+    # Fixed-memory step S6 -- the PUMP and the RUNTIME under it, counted
+    # (`tests/session_pump_allocations.rs`): the same real pair, each end run as a
+    # task of one local set, from the runtime's making to the last task's end. Under
+    # `session-slot` the pump lives in a cell of a table, the task in a cell of the
+    # runtime's task table and a deadline in its timer table, and every window must
+    # cost the heap nothing: 2 = the pair's test and the one that prints the tables'
+    # sizes, as that command PRINTED, and again with `reassembly`, where the pump's
+    # staging table lies in its cell. Beside them the same file on the selectors the
+    # slot is made of without it, the instrument's control (the windows that make or
+    # host something must cost the heap something): 1 = what that PRINTED. And the
+    # static pool's own tests (a full table refuses and counts, a finished task's
+    # cell is reused, what a task held is dropped once): 13 = what that PRINTED.
+    _runci_guarded_test "C1m session pump alloc" 2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
+        --test session_pump_allocations --quiet || return 1
+    _runci_guarded_test "C1m session pump alloc reassembly" 2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
+        --test session_pump_allocations --quiet || return 1
+    _runci_guarded_test "C1m session pump alloc heap control" 1 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
+        --test session_pump_allocations --quiet || return 1
+    _runci_guarded_test "C1m coop static runtime" 13 \
+        cargo test -p wz-runtime-coop --features session-slot \
+        --lib static_tests:: --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features transport-multicast,codec-push,session-slot \
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-mcu --all-targets \
             --features adminspace-core,adminspace-write,session-slot \
             --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-coop --all-targets \
             --features session-slot,reassembly \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-coop --all-targets \
+            --features session-slot \
             --quiet -- -D warnings) || return 1
     (cd crates \
         && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
