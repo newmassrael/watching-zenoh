@@ -301,8 +301,9 @@ fn the_peer_table_limits_are_the_deploy_files_numbers() {
 
 /// The numbers the admin node's buffer and tables are compiled with (S9b) are the
 /// deploy file's: the reply buffer, the locators a node reports and the links one
-/// `sessions[]` row lists; and the reply buffer is not larger than the reply
-/// payload bound its replies are staged under.
+/// `sessions[]` row lists. (That the reply buffer is not larger than the reply
+/// payload bound its replies are staged under is `caps.rs`'s own compile-time
+/// assert, and the validator refuses the same order in a deploy file.)
 #[test]
 fn the_admin_limits_are_the_deploy_files_numbers() {
     use wz_session_core::caps;
@@ -322,10 +323,6 @@ fn the_admin_limits_are_the_deploy_files_numbers() {
         }
     }
     assert!(drift.is_empty(), "{}", drift.join("\n"));
-    assert!(
-        caps::MAX_ADMIN_REPLY_BYTES <= caps::MAX_REPLY_PAYLOAD_BYTES,
-        "an admin reply is staged as a reply"
-    );
 }
 
 /// Every session the machine declares takes pools that fit the generated slot,
