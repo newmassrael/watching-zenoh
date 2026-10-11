@@ -50,10 +50,10 @@ use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 use wz_mcu_clock::SystickClock;
 
-#[cfg(feature = "fixed-memory")]
-use wz_mcu_session_acceptor::{run_acceptor_e2e_fixed, AcceptorStatics};
 #[cfg(not(feature = "fixed-memory"))]
 use wz_mcu_session_acceptor::run_acceptor_e2e_with_progress;
+#[cfg(feature = "fixed-memory")]
+use wz_mcu_session_acceptor::{run_acceptor_e2e_fixed, AcceptorStatics};
 use wz_mcu_session_acceptor::{AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy};
 
 // Heap sizing fork per target SRAM budget. The mps2 family (M3/M4/M7) has

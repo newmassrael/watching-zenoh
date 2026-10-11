@@ -407,6 +407,31 @@ IMAGES: dict[str, Image] = {
         " the admin node: S6, S9",
         ci=False,
     ),
+    # S9c -- the node of the Zephyr image on the fixed-memory profile: sessions, sockets,
+    # interfaces, endpoints, status rows and console lines in storage the staticlib
+    # declares. It stays `pending`, and the residual is NOT the node's: `zephyr_image!`
+    # declares the global allocator over the kernel heap, `wz-runtime-zephyr` links `alloc`,
+    # the MAC drivers' bring-up lines are built with `format!`, and the session tier's
+    # crates allocate. Built here with the stand-in for the board's build values, which is
+    # a compile and a link-input check: no `west` image was built and nothing was booted.
+    "zephyr-admin-node-fixed": Image(
+        "deploy/zephyr-admin-node/rust/Cargo.toml",
+        "staticlib",
+        "wz-zephyr-admin-node",
+        "pending",
+        (
+            Build(
+                V7EMHF,
+                "@deploy/zephyr-admin-node/lwip-port",
+                ("net-lwip-mac", "mac-cyt4bf", "fixed-memory"),
+                env=ZEPHYR_BUILD_VALUES,
+                label="cyt4bf-lwip-fixed",
+            ),
+        ),
+        "the Zephyr allocator bridge (`zephyr_image!`), wz-runtime-zephyr, the MAC drivers'"
+        " `format!` bring-up lines and the session tier's crates: the node shell itself is fixed",
+        ci=False,
+    ),
     "zephyr-app": Image(
         "deploy/zephyr-app/rust/Cargo.toml",
         "staticlib",

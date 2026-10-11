@@ -56,12 +56,12 @@ use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 use wz_mcu_clock::SystickClock;
 
-#[cfg(feature = "fixed-memory")]
-use wz_mcu_multicast_e2e::{run_multicast_e2e_fixed, MulticastE2eStatics};
 #[cfg(all(not(feature = "fixed-memory"), not(feature = "loopback-multicast")))]
 use wz_mcu_multicast_e2e::run_multicast_e2e;
 #[cfg(all(not(feature = "fixed-memory"), feature = "loopback-multicast"))]
 use wz_mcu_multicast_e2e::run_multicast_e2e_with_progress;
+#[cfg(feature = "fixed-memory")]
+use wz_mcu_multicast_e2e::{run_multicast_e2e_fixed, MulticastE2eStatics};
 use wz_mcu_multicast_e2e::{ClockSource, LwipLink, MulticastOutcome};
 
 // The mps2 family (M3/M4/M7) has 4 MB SRAM, so a generous 256 KB heap holds

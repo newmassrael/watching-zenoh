@@ -24,28 +24,55 @@
 
 extern crate alloc;
 
+// The growable node's imports (S9c: the `fixed-memory` profile runs `fixed_node`'s
+// instead, over statics, and the heap node does not exist in it).
+#[cfg(any(not(feature = "fixed-memory"), feature = "spi-probe"))]
 use alloc::format;
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::rc::Rc;
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::string::String;
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::vec::Vec;
 
+#[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::session_drive::SessionLinks;
+#[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::session_runtime::new_session_actions;
-use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
+#[cfg(any(not(feature = "fixed-memory"), feature = "mac-cyt4bf"))]
+use wz::runtime_coop::ClockSource;
+#[cfg(not(feature = "fixed-memory"))]
+use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
-use wz::runtime_zephyr::glue::{core_clock_hz, log, log_line, stack_usage, yield_ms};
+use wz::runtime_zephyr::glue::{core_clock_hz, log, log_args, log_line};
+#[cfg(not(feature = "fixed-memory"))]
+use wz::runtime_zephyr::glue::{stack_usage, yield_ms};
+#[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_zephyr::stack::StackWatch;
-use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
+#[cfg(any(not(feature = "fixed-memory"), feature = "mac-cyt4bf"))]
+use wz::runtime_zephyr::ZephyrClock;
+use wz::runtime_zephyr::ZephyrEntropy;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::entropy::EntropySource;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::session_init_params::SessionInitParams;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::session_timeouts::SessionTimeouts;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::signing_key::SigningKey;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::WhatAmI;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_mcu::admin_host::ConnectControl;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_mcu::admin_node::AdminNode;
+#[cfg(not(feature = "fixed-memory"))]
 use wz_session_mcu::admin_status::{NodeIdentity, NodeStatus};
 
+#[cfg(feature = "fixed-memory")]
+mod fixed_node;
 #[cfg(feature = "mac-cyt4bf")]
 mod mac_cyt4bf;
 #[cfg(feature = "t1s-lan865x")]
@@ -108,10 +135,13 @@ const BATCH_SIZE: u16 = (ETHERNET_MTU - IPV4_HEADER - UDP_HEADER) as u16;
 
 /// Writes are PERMITTED on this node: upstream's default is to refuse, and the
 /// node opts in, because being reconfigured is what it is for.
+#[cfg(not(feature = "fixed-memory"))]
 static CONTROL: ConnectControl = ConnectControl::new(true);
+#[cfg(not(feature = "fixed-memory"))]
 static STATUS: NodeStatus = NodeStatus::new(true);
 
 /// What a board's network stack gives the node, beyond the links themselves.
+#[cfg(not(feature = "fixed-memory"))]
 pub trait NodeNet {
     /// The links the node opens: one that accepts, one per endpoint it dials.
     type Links: SessionLinks + 'static;
@@ -135,6 +165,7 @@ pub trait NodeNet {
 }
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
+#[cfg(not(feature = "fixed-memory"))]
 fn params(zid: &[u8], signing_key: &[u8]) -> SessionInitParams {
     SessionInitParams {
         version: 0x09,
@@ -151,6 +182,7 @@ fn params(zid: &[u8], signing_key: &[u8]) -> SessionInitParams {
     }
 }
 
+#[cfg(not(feature = "fixed-memory"))]
 fn locator(address: [u8; 4]) -> String {
     let [a, b, c, d] = address;
     format!("udp/{a}.{b}.{c}.{d}:{LISTEN_PORT}")
@@ -158,6 +190,7 @@ fn locator(address: [u8; 4]) -> String {
 
 /// Assemble the node over `net` and run it. Returns only when it cannot start;
 /// the value is the reason, as a nonzero code the C `main()` prints.
+#[cfg(not(feature = "fixed-memory"))]
 fn run<N: NodeNet>(mut net: N) -> i32 {
     // The cookie-signing key is a secret, so it comes from the board's entropy
     // source and a board that cannot supply it stops the node: a predictable key
@@ -267,6 +300,12 @@ compile_error!(
 compile_error!(
     "two network backends: a node runs over one stack, and CMakeLists.txt turns on exactly \
      one `net-*` feature"
+);
+
+#[cfg(all(feature = "fixed-memory", not(feature = "net-lwip-mac")))]
+compile_error!(
+    "the fixed-memory node is the lwIP one: its sessions are opened by the slot profile's \
+     session host, which owns the tables of one stack, and Zephyr's sockets have none yet"
 );
 
 #[cfg(all(feature = "net-lwip-mac", not(feature = "mac-cyt4bf")))]
@@ -447,7 +486,7 @@ fn add_t1s(
         // until it is hidden.
         return Err(c"wz: FAIL - the 10BASE-T1S station address is the onboard port's");
     }
-    log_line(format!(
+    log_args(format_args!(
         "wz: 10BASE-T1S station address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ({})",
         station[0],
         station[1],
@@ -495,7 +534,7 @@ fn start() -> i32 {
             }
         },
     };
-    log_line(format!(
+    log_args(format_args!(
         "wz: station address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ({})",
         station[0],
         station[1],
@@ -533,7 +572,11 @@ fn start() -> i32 {
         log(why);
         return 1;
     }
-    run(net)
+    #[cfg(not(feature = "fixed-memory"))]
+    return run(net);
+    // S9c -- the same node over the statics of `fixed_node`.
+    #[cfg(feature = "fixed-memory")]
+    fixed_node::run(net)
 }
 
 /// What `wz_app_main` returns when the core does not run at the clock the image

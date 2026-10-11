@@ -48,9 +48,7 @@ use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
 
-use crate::{
-    fail, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT, ZID,
-};
+use crate::{fail, ClockSeededXorshift, SystickClockRef, ADDRESS, GLOBAL_CLOCK, LISTEN_PORT, ZID};
 
 /// Sessions the node holds at most, dialled and accepted together: the process's
 /// `max_sessions`.
@@ -70,7 +68,8 @@ const TIMERS: usize = 4;
 /// The node's locator, as the identity reports it.
 const LOCATOR: &str = "udp/10.0.2.15:7447";
 
-type Host = SessionHost<SystickClockRef, &'static LwipLink, ClockSeededXorshift, SESSIONS, SESSIONS>;
+type Host =
+    SessionHost<SystickClockRef, &'static LwipLink, ClockSeededXorshift, SESSIONS, SESSIONS>;
 type Node<'a> =
     SlotAdminNode<'a, SystickClockRef, &'static LwipLink, Factory, SESSIONS, SESSIONS, LANES>;
 
@@ -204,8 +203,7 @@ pub fn run() -> ! {
     // dispatches to: the config-write subscriber and the admin queryable. A node whose
     // registrations were refused is not started, rather than started deaf.
     let mut observer = SlotObserver::new();
-    if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control)
-        .is_err()
+    if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control).is_err()
     {
         fail("the config subscriber was refused");
     }

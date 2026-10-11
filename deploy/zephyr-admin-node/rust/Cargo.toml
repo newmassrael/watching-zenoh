@@ -75,6 +75,34 @@ spi-probe = ["dep:wz-oa-tc6", "dep:wz-spi-scb"]
 # (`CONFIG_WZ_T1S`): the chip's bring-up over the same SCB master. Not together with
 # the probe, which opens the same block.
 t1s-lan865x = ["dep:wz-eth-lan865x", "dep:wz-spi-scb"]
+# S9c -- the FIXED-MEMORY node: the lwIP backend's node over the slot profile's pieces
+# (`fixed_node.rs`), its stack in the static storage of `net_lwip`'s fixed form and its
+# console lines formatted into a fixed buffer, in place of `Rc`, `Vec`, `Box<dyn Port>`
+# and `String`. It replaces the growable node (`wz-session-mcu`'s `AdminNode`, which the
+# `session-slot` profile does not have): a build has one of them. The lwIP backend's
+# only (the slot profile's session host owns the tables of one stack, and Zephyr's
+# sockets have none), so it needs `net-lwip-mac` and its MAC.
+#
+# NOT allocator-free: `zephyr_image!` still declares the allocator over the kernel heap,
+# `wz-runtime-zephyr` links `alloc`, the MAC drivers' bring-up lines are built with
+# `format!` and the session tier allocates; see `fixed_node.rs` for what this build is
+# and what it is not. The two crates named here are named only to turn their selectors
+# on (the facade forwards neither), and are the same instances it pulls.
+fixed-memory = [
+    "net-lwip-mac",
+    "dep:wz-link-lwip",
+    "dep:wz-session-lwip",
+    "dep:wz-runtime-coop",
+    "dep:wz-runtime-zephyr",
+    "wz-runtime-zephyr/session-slot",
+    "wz-link-lwip/static-link-storage",
+    "wz-session-lwip/session-slot",
+    "wz-session-lwip/static-link-storage",
+    "wz-session-lwip/session-unicast-accept",
+    "wz-runtime-coop/session-slot",
+    "wz-session-mcu/session-slot",
+    "wz-session-core/session-slot",
+]
 
 [dependencies]
 # critical-section IMPL provider: the staticlib root defines it over Zephyr's
@@ -116,6 +144,8 @@ wz-link-lwip = { path = "../../../crates/wz-link-lwip", optional = true }
 # The in-place receive (`rx-pool`): the same crate the facade's `session-lwip`
 # links, with `rx-in-place` turned on, and no default features, as the facade has.
 wz-session-lwip = { path = "../../../crates/wz-session-lwip", optional = true, default-features = false }
+wz-runtime-coop = { path = "../../../crates/wz-runtime-coop", optional = true, default-features = false }
+wz-runtime-zephyr = { path = "../../../crates/wz-runtime-zephyr", optional = true, default-features = false }
 # The SPI probe's two halves: the TC6 protocol, and the rules of the SCB master it
 # runs over. Only `CONFIG_WZ_T2G_SPI_PROBE` pulls the first in; either it or
 # `CONFIG_WZ_T1S` pulls in the second.

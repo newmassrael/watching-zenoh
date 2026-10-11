@@ -883,6 +883,8 @@ dependencies = [
  "wz-eth-mac-cyt4bf",
  "wz-link-lwip",
  "wz-oa-tc6",
+ "wz-runtime-coop",
+ "wz-runtime-zephyr",
  "wz-session-core",
  "wz-session-lwip",
  "wz-session-mcu",
