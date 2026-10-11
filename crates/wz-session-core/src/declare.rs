@@ -143,3 +143,22 @@ pub mod matching;
 // module's own `codec-declare` gate.
 #[cfg(all(test, feature = "codec-declare"))]
 mod cross_tests;
+
+// Fixed-memory step S9d -- the per-session slot profile lends its control records
+// (a Declare, an Interest, a ResponseFinal), and each registry that consumes one
+// reads the lent form and the owned form through one body. This is the equivalence
+// of the two, registry by registry. It names every registry the slot profile can
+// carry, so it compiles only where they all do.
+#[cfg(all(
+    test,
+    feature = "session-slot",
+    feature = "codec-declare",
+    feature = "codec-response-final",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "liveliness-token",
+    feature = "liveliness-subscriber",
+    feature = "liveliness-get",
+    feature = "keyexpr-includes"
+))]
+mod lent_tests;

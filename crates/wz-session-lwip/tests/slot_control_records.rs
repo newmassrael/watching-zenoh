@@ -696,3 +696,63 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
     let wrong = wrong.into_inner();
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// The SEND side of the same records, measured and not claimed. A session sends a
+/// control record by building an owned message (`declare_build`, `interest_build`,
+/// `response_final_build`) and encoding it into the slot its link lends; the encode
+/// is free, the owned message is what allocates (its extension chain is a heap
+/// list). These are the counts of that build for the three records the slot profile
+/// node sends, and each is an UPPER BOUND that the step which gives those senders a
+/// borrowed builder lowers: the carry names the interface. A send that costs MORE
+/// than its bound is a regression of the owned build and fails here.
+#[test]
+fn what_the_owned_builders_of_the_control_sends_cost_is_bounded() {
+    /// `send_declare_subscriber`: the owned keyexpr suffix text, the owned
+    /// envelope chain, and the keyexpr the session reconstructs for its
+    /// reconnect cache.
+    const DECLARE_SUBSCRIBER: usize = 3;
+    /// `send_response_final`: the `ResponseFinalOwned`'s extension chain.
+    const RESPONSE_FINAL: usize = 1;
+
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
+        wz_runtime_coop::RuntimeCell::new();
+    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    let (mut acceptor, mut initiator) = establish(&link, &runtime, 7732);
+
+    let measure = Measurement::new();
+    let mut costs: Vec<(&str, usize, usize)> = Vec::new();
+
+    let (sent, n) = measure.count("send_declare_subscriber", || {
+        initiator
+            .actions
+            .send_declare_subscriber(41, 0, Some("tx/k"))
+    });
+    sent.expect("the declaration leaves");
+    costs.push(("send_declare_subscriber", n, DECLARE_SUBSCRIBER));
+    acceptor.step();
+    initiator.step();
+    assert_eq!(
+        acceptor.told.declared_id.load(Ordering::SeqCst),
+        41,
+        "the declaration reached the acceptor's application"
+    );
+
+    let ((), n) = measure.count("send_response_final", || {
+        initiator
+            .actions
+            .send_response_final(7, wz_session_core::sample::QosLevel::default())
+    });
+    costs.push(("send_response_final", n, RESPONSE_FINAL));
+    acceptor.step();
+
+    let mut wrong = Vec::new();
+    for (what, n, bound) in costs {
+        println!("{what}: {n} allocation(s) (bound {bound})");
+        if n > bound {
+            wrong.push(format!("{what}: {n} allocation(s), bound {bound}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
