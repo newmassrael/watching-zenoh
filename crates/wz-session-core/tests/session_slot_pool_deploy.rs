@@ -271,6 +271,34 @@ fn a_changed_number_is_named_by_the_comparison() {
     assert_eq!(drift(&none).len(), 1);
 }
 
+/// The limits a peer's tables are bounded by (S9a) are the numbers the deploy file
+/// states: each key the validator reports for the machine equals the constant the
+/// table is compiled with, so an editor that raises `remote_decls` to 32 while the
+/// code holds 16 is a red test and not a table that is silently smaller than the
+/// file says.
+#[test]
+fn the_peer_table_limits_are_the_deploy_files_numbers() {
+    use wz_session_core::caps;
+    let report = report();
+    let limits = &report["limits"];
+    let mut drift = Vec::new();
+    for (key, constant) in [
+        ("peer_keyexpr_aliases", caps::MAX_PEER_KEYEXPR_ALIASES),
+        ("remote_decls", caps::MAX_REMOTE_DECLS),
+        ("pending_replies", caps::MAX_PENDING_REPLIES),
+        ("pending_finals", caps::MAX_PENDING_FINALS),
+        ("reply_payload_bytes", caps::MAX_REPLY_PAYLOAD_BYTES),
+    ] {
+        if limits[key].as_u64() != Some(constant as u64) {
+            drift.push(format!(
+                "limits.{key}: the deploy file states {}, the code is compiled with {constant}",
+                limits[key]
+            ));
+        }
+    }
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Every session the machine declares takes pools that fit the generated slot,
 /// by the report's own sums and by this crate's constant, and the slot is a whole
 /// number of the alignment SCE carries into the slot type.

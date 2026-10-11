@@ -9885,13 +9885,14 @@ layer_c1g_cargo_test_observer() {
     # (the macOS and Windows portability legs have neither), and libtest prints a
     # skip as `ok`. So THIS lane, which owns the capability, arms
     # WZ_DEPLOY_REPORT_REQUIRE=1, which turns the skip into a failure, and the
-    # count below can only be read from comparisons that ran. 8 = what that
+    # count below can only be read from comparisons that ran. 9 = what that
     # command PRINTED: the equality, the comparison's own control, the fit of
-    # every declared session in the generated slot, and the five witnesses of the
-    # skip decision itself (they need no Python). `cargo` stays on the line of
-    # the `env` prefix: that is the shape `armed_oracle_census.py` reads as an
-    # arming.
-    _runci_guarded_test C1g 8 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
+    # every declared session in the generated slot, (S9a) the five limits of the
+    # tables a peer writes held equal to the constants they are compiled with,
+    # and the five witnesses of the skip decision itself (they need no Python).
+    # `cargo` stays on the line of the `env` prefix: that is the shape
+    # `armed_oracle_census.py` reads as an arming.
+    _runci_guarded_test C1g 9 env WZ_DEPLOY_REPORT_REQUIRE=1 cargo test -p wz-session-core \
         --test session_slot_pool_deploy --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
