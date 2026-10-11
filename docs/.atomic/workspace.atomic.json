@@ -270452,6 +270452,54 @@
         "The process-level netns leg of item 902's register text (delete and re-add the device under a running --sessions group session, expect link lost, rejoined, a new peer arrived) was not built; this change covers the link seam (Lost at the failed write) that loop was waiting on. The multicast pool work is now merged in the same tree, so that leg can be built on it."
       ]
     },
+    "Round 3267": {
+      "decision_summary": "Open-debt item 901 reproduced; repaid at its cause. The shared-memory legs of Layer C1cc (zenoh_c_shm_and_advanced_on_wz_capi_c, 15 legs in the lane, 13 of them call zenoh_shm_example_binary) return early with a note when target/zenohd-shm lacks z_pub_shm, z_sub_shm, z_queryable_shm or z_get_shm, and a return inside a test prints ok. No workflow built that oracle and --quiet hid the note, so hosted C1cc was green over legs that ran for 0.00 s. Fix, following the WZ_*_REQUIRE pattern: the capi-c-arms job now builds the oracle (cache, build on miss, ensure_zenohd_at_pin, presence assert, save) and arms WZ_ZENOHD_SHM_REQUIRE on the C1cc step; the one door every leg uses, zenohd_shm_binary and zenoh_shm_example_binary, panics when the flag is set and the binary is absent. Unset, it still skips. The register said ten legs; the lane lists fifteen. Layer Z's SHM legs are unchanged: that job still provisions no SHM oracle (item 484).",
+      "changes_bullets": [
+        ".github/workflows/ci.yml, job capi-c-arms: new steps install toolchain 1.97.1, restore a cache of target/zenohd-shm (key zenohd-shm-1.10.1-ubuntu-22.04 plus a hash of build-zenohd.sh and ensure_zenohd_at_pin.py), build it on a miss with ZENOHD_SHM=1 ZENOHD_ALLOW_CLONE=1, ensure it answers at the pin and that z_pub_shm, z_sub_shm, z_queryable_shm, z_get_shm are executable, save on main after the ensure step. The C1cc step env gains WZ_ZENOHD_SHM_REQUIRE: \"1\".",
+        "crates/wz-integration-tests/src/lib.rs: new private shm_oracle_or_refusal, called by zenohd_shm_binary and zenoh_shm_example_binary; it panics with the build command when WZ_ZENOHD_SHM_REQUIRE is set and the file is absent, else returns None as before. Doc comments updated."
+      ],
+      "verification_bullets": [
+        "Run on the pc2 build host unless stated; nothing here ran on hosted CI.",
+        "Red (gate): armed_skip_guard.py --check FAILED after the Rust change alone, naming WZ_ZENOHD_SHM_REQUIRE as read in lib.rs and armed nowhere; after the ci.yml arming it reports OK (26 flags armed and read).",
+        "Provisioned on pc2: install-zenoh-c.sh, then ZENOHD_SHM=1 ZENOHD_ALLOW_CLONE=1 build-zenohd.sh (rc 0, about 10 min cold); ensure_zenohd_at_pin.py --plan target/zenohd-shm: OK v1.10.1; the four examples installed.",
+        "Premise before the fix, same binary: example directory pointed at a missing path, flag unset: leg upstream_z_pub_shm_on_wz_capi_c_reaches_a_real_z_sub_shm_as_shared_memory prints ok, 1 passed, 0.00s.",
+        "Red after: same with WZ_ZENOHD_SHM_REQUIRE=1: FAILED, panicked in lib.rs naming the missing z_sub_shm, rc 101.",
+        "Green: oracle present, WZ_C1CC_REQUIRE=1 WZ_ZENOHD_SHM_REQUIRE=1, each of the 15 SHM legs the C1cc lane lists, run alone with --ignored --exact: 15 of 15 ok, 3.0 to 16.3 s wall each. wz-capi-c built with zenoh-c-shared-memory, wz-ap-demo and the pico CLIs built on pc2 first.",
+        "Gates: armed_oracle_census, ensure_zenohd_at_pin --check, decline_arming_gate, unwired_lane_lint, job_budget_binding, upstream_release_distance (the new toolchain line agrees with the pin) all OK; actionlint on ci.yml clean; clippy -D warnings --all-targets wz-integration-tests clean; C1bz for wz-integration-tests pass.",
+        "NOT measured: the hosted run itself (cold build time of the SHM oracle in the capi-c-arms job, which carries no timeout-minutes line; cache save and restore); macOS and Windows (a Linux job)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Next step: read the hosted capi-c-arms job step by step after the push: the new SHM oracle build step (cold wall time; the cache makes later runs cheap), then the C1cc step, whose 15 SHM legs should each take seconds. A red there is a leg that never ran on hosted before, not necessarily a regression of this change.",
+        "Layer Z's shared-memory interop legs (wz_shm_*_zenohd_interop, zenoh_shm_body_foreign_witness) still skip on hosted: the interop job provisions no SHM zenohd (item 484, and the comment at the Ewirez lane). The flag and helper now exist; arming them there needs the same build in that job and is a separate decision.",
+        "Layer C1ce's two z_advanced_* legs need no SHM oracle and are unaffected."
+      ],
+      "publishable_decision_summary": "Open-debt item 901 reproduced; repaid at its cause. The shared-memory legs of Layer C1cc (zenoh_c_shm_and_advanced_on_wz_capi_c, 15 legs in the lane, 13 of them call zenoh_shm_example_binary) return early with a note when target/zenohd-shm lacks z_pub_shm, z_sub_shm, z_queryable_shm or z_get_shm, and a return inside a test prints ok. No workflow built that oracle and --quiet hid the note, so hosted C1cc was green over legs that ran for 0.00 s. Fix, following the WZ_*_REQUIRE pattern: the capi-c-arms job now builds the oracle (cache, build on miss, ensure_zenohd_at_pin, presence assert, save) and arms WZ_ZENOHD_SHM_REQUIRE on the C1cc step; the one door every leg uses, zenohd_shm_binary and zenoh_shm_example_binary, panics when the flag is set and the binary is absent. Unset, it still skips. The register said ten legs; the lane lists fifteen. Layer Z's SHM legs are unchanged: that job still provisions no SHM oracle (item 484).",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml, job capi-c-arms: new steps install toolchain 1.97.1, restore a cache of target/zenohd-shm (key zenohd-shm-1.10.1-ubuntu-22.04 plus a hash of build-zenohd.sh and ensure_zenohd_at_pin.py), build it on a miss with ZENOHD_SHM=1 ZENOHD_ALLOW_CLONE=1, ensure it answers at the pin and that z_pub_shm, z_sub_shm, z_queryable_shm, z_get_shm are executable, save on main after the ensure step. The C1cc step env gains WZ_ZENOHD_SHM_REQUIRE: \"1\".",
+        "crates/wz-integration-tests/src/lib.rs: new private shm_oracle_or_refusal, called by zenohd_shm_binary and zenoh_shm_example_binary; it panics with the build command when WZ_ZENOHD_SHM_REQUIRE is set and the file is absent, else returns None as before. Doc comments updated."
+      ],
+      "publishable_verification_bullets": [
+        "Run on the pc2 build host unless stated; nothing here ran on hosted CI.",
+        "Red (gate): armed_skip_guard.py --check FAILED after the Rust change alone, naming WZ_ZENOHD_SHM_REQUIRE as read in lib.rs and armed nowhere; after the ci.yml arming it reports OK (26 flags armed and read).",
+        "Provisioned on pc2: install-zenoh-c.sh, then ZENOHD_SHM=1 ZENOHD_ALLOW_CLONE=1 build-zenohd.sh (rc 0, about 10 min cold); ensure_zenohd_at_pin.py --plan target/zenohd-shm: OK v1.10.1; the four examples installed.",
+        "Premise before the fix, same binary: example directory pointed at a missing path, flag unset: leg upstream_z_pub_shm_on_wz_capi_c_reaches_a_real_z_sub_shm_as_shared_memory prints ok, 1 passed, 0.00s.",
+        "Red after: same with WZ_ZENOHD_SHM_REQUIRE=1: FAILED, panicked in lib.rs naming the missing z_sub_shm, rc 101.",
+        "Green: oracle present, WZ_C1CC_REQUIRE=1 WZ_ZENOHD_SHM_REQUIRE=1, each of the 15 SHM legs the C1cc lane lists, run alone with --ignored --exact: 15 of 15 ok, 3.0 to 16.3 s wall each. wz-capi-c built with zenoh-c-shared-memory, wz-ap-demo and the pico CLIs built on pc2 first.",
+        "Gates: armed_oracle_census, ensure_zenohd_at_pin --check, decline_arming_gate, unwired_lane_lint, job_budget_binding, upstream_release_distance (the new toolchain line agrees with the pin) all OK; actionlint on ci.yml clean; clippy -D warnings --all-targets wz-integration-tests clean; C1bz for wz-integration-tests pass.",
+        "NOT measured: the hosted run itself (cold build time of the SHM oracle in the capi-c-arms job, which carries no timeout-minutes line; cache save and restore); macOS and Windows (a Linux job)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next step: read the hosted capi-c-arms job step by step after the push: the new SHM oracle build step (cold wall time; the cache makes later runs cheap), then the C1cc step, whose 15 SHM legs should each take seconds. A red there is a leg that never ran on hosted before, not necessarily a regression of this change.",
+        "Layer Z's shared-memory interop legs (wz_shm_*_zenohd_interop, zenoh_shm_body_foreign_witness) still skip on hosted: the interop job provisions no SHM zenohd (item 484, and the comment at the Ewirez lane). The flag and helper now exist; arming them there needs the same build in that job and is a separate decision.",
+        "Layer C1ce's two z_advanced_* legs need no SHM oracle and are unaffected."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
