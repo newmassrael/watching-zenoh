@@ -1829,7 +1829,12 @@ mod tests {
     fn past_the_shims_bound_a_held_socket_falls_back_to_the_copy() {
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = pool_node(&link);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        // A socket whose receive queue holds more than the shim's bound, whatever
+        // the session socket's build-time depth is: the slim profile's queue holds
+        // four, so on it this test stopped at three held frames and never reached
+        // the bound it is about (`held_rx` read 3 against 8). The default profile's
+        // sixteen hid that.
+        let mut socket = crate::LwipUdpSocket::<256, 16>::bind(&link, 7602).expect("bind");
         socket.hold_lent_rx(true);
         let taken = rx_frames_taken();
         for i in 0..RX_HELD_MAX as u8 {
