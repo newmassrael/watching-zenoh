@@ -1505,6 +1505,26 @@ mod tests {
         );
     }
 
+    /// A loopback UDP address that answers a datagram with an ICMP
+    /// port-unreachable for as long as the returned socket is held.
+    ///
+    /// The number is HELD, not released: a released number belongs to nobody
+    /// and the next `bind(:0)` in this binary may be handed it, which would
+    /// swallow the datagram this test needs refused (the class
+    /// `released_port_gate.py` exists for). `refusing_port` cannot serve a UDP
+    /// dial: it holds a TCP number, and UDP numbers are a separate table, so a
+    /// UDP bind could still take it. A bound UDP socket does not refuse by
+    /// itself either, it queues. One that is CONNECTED to a peer which is not
+    /// the sender is skipped by the kernel's lookup for any other source, so
+    /// the number stays taken in the UDP table and a datagram from anyone else
+    /// finds no socket and is refused.
+    fn a_held_udp_number_that_refuses() -> std::net::UdpSocket {
+        let held = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        held.connect("127.0.0.1:1")
+            .expect("connect to a peer that is not the sender");
+        held
+    }
+
     /// Open-debt item 902 — the one report a connected datagram socket does get,
     /// an ICMP refusal, is delivered ONCE and to whichever syscall runs first.
     ///
@@ -1516,10 +1536,8 @@ mod tests {
     /// loss reporting, so the session stayed up until its lease ran out.
     #[tokio::test]
     async fn a_refusal_taken_by_the_writer_still_ends_the_dial_link() {
-        // A port nobody holds: bind to learn one, then let it go.
-        let closed = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let closed_addr = closed.local_addr().expect("addr");
-        drop(closed);
+        let refusing = a_held_udp_number_that_refuses();
+        let closed_addr = refusing.local_addr().expect("addr");
         let socket = dial_udp(closed_addr, &LinkSocket::NONE)
             .await
             .expect("dial");
