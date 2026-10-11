@@ -544,6 +544,27 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-keepalive,\
         tx-lend-only\
         |"
+    # Round 3277 (fixed-memory step S7) -- the FIXED link storage, a SEPARATE row
+    # on purpose, as `bounded-heapless` is for wz-session-core above:
+    # `static-link-storage` is a selector, not an addition. It takes the
+    # constructors that allocate out of wz-link-lwip and puts the pool-taking ones
+    # in, so adding it to the row above would change what every test of that row
+    # means. The filter names the one integration target that reads where a
+    # session's link state lives (`--test=` selects the TARGET, so a test added to
+    # the file is claimed without touching this row); the lib suite of the shell is
+    # run on both profiles by the lane that owns it.
+    "wz-session-lwip|hook|\
+        pubsub-put,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage\
+        |--test=link_state_allocations"
+    # The link tier's own witness (`link_storage_allocations`, which needs the
+    # lwIP init-once harness `test-support`), once on each profile: the default
+    # profile is the instrument's control (the heap shape allocates and the count
+    # sees it), and `static-link-storage` is the subject (it must not).
+    "wz-link-lwip|hook|test-support|--test=link_storage_allocations"
+    "wz-link-lwip|hook|static-link-storage,test-support|--test=link_storage_allocations"
     # R3080 — the MCU session shell, split out of the row above with its tests.
     # Seventeen of its twenty tests are feature-gated (the admin node and its host
     # and status documents need both adminspace features, the application layer

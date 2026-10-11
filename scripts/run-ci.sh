@@ -11083,6 +11083,51 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
         --lib --quiet || return 1
+    # Round 3277 (fixed-memory step S7) -- where the link's state lives, counted
+    # (`wz-link-lwip`'s `link_storage_allocations` and this crate's
+    # `link_state_allocations`). Once on the heap profile every shipped image and
+    # the AP run today, where the sockets and the interface are heap boxes and the
+    # count must SEE them (the instrument's control), once under
+    # `static-link-storage`, where they are cells of a static pool and the count
+    # must be zero, with the refusals of a full pool witnessed (three extra tests
+    # in the link file, one in the session file). 5, 8, 1 and 2 = what each
+    # command PRINTED.
+    # The two lib legs run the whole host suites over the fixed storage, pinned by
+    # their own arms and not by a number every unrelated test would move.
+    _runci_guarded_test "C1m link alloc heap" 5 \
+        cargo test -p wz-link-lwip --features test-support \
+        --test link_storage_allocations --quiet || return 1
+    _runci_guarded_test "C1m link alloc fixed" 8 \
+        cargo test -p wz-link-lwip --features test-support,static-link-storage \
+        --test link_storage_allocations --quiet || return 1
+    _runci_guarded_test "C1m link lib fixed" + \
+        cargo test -p wz-link-lwip --features static-link-storage --lib --quiet || return 1
+    _runci_guarded_test "C1m link state heap" 1 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put \
+        --test link_state_allocations --quiet || return 1
+    _runci_guarded_test "C1m link state fixed" 2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,static-link-storage \
+        --test link_state_allocations --quiet || return 1
+    _runci_guarded_test "C1m session lib fixed" + \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,static-link-storage \
+        --lib --quiet || return 1
+    (cd crates \
+        && cargo clippy -p wz-link-lwip --all-targets --features test-support \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-link-lwip --all-targets \
+            --features test-support,static-link-storage --quiet -- -D warnings \
+        && cargo clippy -p wz-link-lwip --all-targets \
+            --features test-support,static-link-storage,buffer-pool-session-rx-slim \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-link-lwip --all-targets \
+            --features test-support,static-link-storage,tx-pool,mac-rx-pool,rx-hold \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,static-link-storage \
+            --quiet -- -D warnings) || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-coop --all-targets --features rx-in-place,reassembly \
             --quiet -- -D warnings \

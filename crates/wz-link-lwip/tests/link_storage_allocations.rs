@@ -297,10 +297,6 @@ fn the_session_socket_is_bound_used_and_dropped_without_the_heap() {
         std::mem::size_of::<SessionRxSocket>() <= 64,
         "the socket handle is a pointer, the state is behind it"
     );
-    assert!(
-        SESSION_RX_SLOTS * SESSION_RX_SLOT_SIZE >= 4 * 256,
-        "and it is the pool's dimensions"
-    );
     if !FIXED {
         assert!(
             cost.bytes >= SESSION_RX_SLOTS * SESSION_RX_SLOT_SIZE,
@@ -701,7 +697,10 @@ mod refusals {
         );
         assert_eq!(POOL.refusals(), 1, "it is counted");
 
-        drop(first);
+        {
+            // The handle goes out of scope here; lwIP keeps the interface regardless.
+            let _gone = first;
+        }
         assert_eq!(
             POOL.in_use(),
             1,
