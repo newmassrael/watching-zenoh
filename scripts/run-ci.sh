@@ -9815,10 +9815,13 @@ layer_c1g_cargo_test_observer() {
     # crate suite must hold with `TableFull` reachable and the interest stagers
     # refusing a chain whole (`+`, for the reason above). The proof file is
     # pinned EXACTLY, being the one file this leg exists to run: six N+1 refusals
-    # measured under a counting allocator (the sixth needs `liveliness-token`).
+    # measured under a counting allocator (the sixth needs `liveliness-token`),
+    # plus the tables a PEER writes (S9a), each with its own N+1 refusal and the
+    # isolation test beside it: alias, remote subscriber, remote queryable, peer
+    # token and inbound interest. 16 = what that command PRINTED.
     _runci_guarded_test C1g + \
         cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
-    _runci_guarded_test C1g 6 \
+    _runci_guarded_test C1g 16 \
         cargo test -p wz-session-core --test bounded_heapless_backing --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # Fixed-memory step S4 — the LEND-ONLY send profile (`tx-lend-only`, the MCU
     # selector: every frame is encoded into a slot the link lends, and a send
