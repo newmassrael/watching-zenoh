@@ -39,5 +39,14 @@ wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-u
 # `SessionDatagramLink`; both are no_std.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "no_std"] }
 
+[features]
+# Fixed-memory step S9c -- the per-session slot profile of the cooperative runtime, which
+# a firmware turns on (the facade forwards no selector). `ZephyrLinks` is the heap
+# `SessionLinks` seam over Zephyr's sockets, and the slot profile has no such seam (its
+# sessions are opened by a session host that owns the tables of one stack), so the
+# module is not built under it; a firmware on the slot profile brings its own stack. Names
+# `wz-runtime-coop`'s selector, which is the instance the facade pulls too.
+session-slot = ["wz-runtime-coop/session-slot"]
+
 [lints]
 workspace = true

@@ -63,13 +63,25 @@ impl StackWatch {
     /// measured nothing (`None`), which is the caller's to notice by there being no
     /// line at all.
     pub fn observe(&mut self, usage: Option<StackUsage>) -> Option<String> {
+        let usage = self.observe_peak(usage)?;
+        Some(format!(
+            "stack: peak {} of {} bytes",
+            usage.peak(),
+            usage.size
+        ))
+    }
+
+    /// [`observe`](Self::observe) without the line: the usage itself when it is a
+    /// higher peak than any this watch has reported, for a firmware that has no heap
+    /// to build the line in and prints it as `stack: peak {peak} of {size} bytes`.
+    pub fn observe_peak(&mut self, usage: Option<StackUsage>) -> Option<StackUsage> {
         let usage = usage?;
         let peak = usage.peak();
         if self.reported.is_some_and(|seen| peak <= seen) {
             return None;
         }
         self.reported = Some(peak);
-        Some(format!("stack: peak {peak} of {} bytes", usage.size))
+        Some(usage)
     }
 }
 
@@ -152,6 +164,23 @@ mod tests {
             watch.observe(usage(1000, 100)).as_deref(),
             Some("stack: peak 900 of 1000 bytes")
         );
+    }
+
+    /// The line-less form reports the same readings the lined one does: a new peak is
+    /// the usage itself, the same peak is nothing.
+    #[test]
+    fn the_peak_form_reports_the_readings_the_line_form_does() {
+        let mut lined = StackWatch::new();
+        let mut bare = StackWatch::new();
+        for reading in [usage(1000, 900), usage(1000, 900), usage(1000, 600), None] {
+            assert_eq!(
+                bare.observe_peak(reading).map(|u| (u.peak(), u.size)),
+                lined
+                    .observe(reading)
+                    .map(|_| (reading.expect("a line implies a reading").peak(), 1000)),
+                "reading {reading:?}"
+            );
+        }
     }
 
     /// A kernel that did not measure gives no line and does not disturb what

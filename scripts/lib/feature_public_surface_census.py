@@ -490,6 +490,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "host test, built with a fixed feature set",
         frozenset({"fixed-memory"}),
     ),
+    # Fixed-memory step S9c -- the Zephyr runtime profile's one feature that gates a
+    # public item: `session-slot` takes `pub mod links` (`ZephyrLinks`, the heap
+    # `SessionLinks` seam over Zephyr's sockets) out, because the slot profile has no
+    # such seam. Its consumers are the facade (`platform-zephyr`, which forwards no
+    # selector) and the Zephyr firmware images, which are crates outside this workspace
+    # built with a fixed feature set. Held to `AXIS_REACHABLE` below.
+    "wz-runtime-zephyr": (
+        "the Zephyr cooperative runtime profile; its consumers are the facade and "
+        "Zephyr firmware images built with a fixed feature set",
+        frozenset({"session-slot"}),
+    ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
         "on is a `dev-dependency`; no feature definition anywhere in this "
@@ -882,6 +893,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
         {"adminspace-core", "adminspace-write", "session-slot", "test-support"}
     ),
     "wz-runtime-core": frozenset({"alloc"}),
+    "wz-runtime-zephyr": frozenset({"session-slot"}),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.

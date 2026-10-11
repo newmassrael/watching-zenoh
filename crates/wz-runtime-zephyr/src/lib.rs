@@ -56,10 +56,12 @@ extern crate std;
 
 pub mod core_clock;
 pub mod glue;
+#[cfg(not(feature = "session-slot"))]
 pub mod links;
 pub mod net;
 pub mod stack;
 
+#[cfg(not(feature = "session-slot"))]
 pub use links::ZephyrLinks;
 
 /// A Zephyr firmware's image glue, written once in its crate root: the global

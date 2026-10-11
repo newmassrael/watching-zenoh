@@ -57,6 +57,52 @@ pub fn log_line(line: String) {
     unsafe { wz_log(bytes.as_ptr() as *const c_char) };
 }
 
+/// The longest console line [`log_args`] prints, nul included. A longer one is cut,
+/// which a console line can afford and a node with no allocator cannot do without.
+pub const LOG_LINE_BYTES: usize = 192;
+
+/// A line of formatted text in a fixed buffer, cut at the end of it.
+struct LineBuf {
+    bytes: [u8; LOG_LINE_BYTES],
+    len: usize,
+}
+
+impl core::fmt::Write for LineBuf {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        // One byte stays for the terminating nul. Text that does not fit is cut at a
+        // character boundary and the rest is dropped; the formatting goes on.
+        let room = LOG_LINE_BYTES - 1 - self.len;
+        let mut take = text.len().min(room);
+        while !text.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.bytes[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
+/// Format `args` into a nul-terminated line of at most [`LOG_LINE_BYTES`] bytes.
+fn render_line(args: core::fmt::Arguments<'_>) -> LineBuf {
+    let mut line = LineBuf {
+        bytes: [0; LOG_LINE_BYTES],
+        len: 0,
+    };
+    // `LineBuf::write_str` never fails, so neither does the formatting.
+    let _ = core::fmt::write(&mut line, args);
+    line
+}
+
+/// Print a formatted line on the board's console without allocating: `log_line` for a
+/// firmware that has no heap to build the `String` in, as
+/// `log_args(format_args!("a {}", 1))`. A line longer than [`LOG_LINE_BYTES`] is cut.
+pub fn log_args(args: core::fmt::Arguments<'_>) {
+    let line = render_line(args);
+    // SAFETY: the buffer is zero-filled past `len` and `len` leaves one byte, so it is
+    // nul-terminated; it outlives the call and `wz_log` only reads it (printk %s).
+    unsafe { wz_log(line.bytes.as_ptr() as *const c_char) };
+}
+
 /// Sleep this thread for `ms` milliseconds, which is how the net stack's own
 /// threads get the CPU between the cooperative loop's iterations.
 #[inline]
@@ -127,5 +173,43 @@ pub fn halt_after_panic() -> ! {
     log(c"wz: PANIC");
     loop {
         yield_ms(100);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(line: &LineBuf) -> &str {
+        core::str::from_utf8(&line.bytes[..line.len]).expect("the line is text")
+    }
+
+    #[test]
+    fn a_formatted_line_is_what_format_gives_and_is_nul_terminated() {
+        let line = render_line(format_args!(
+            "zephyr-admin-node: {} session(s) {:#06x}",
+            2, 255
+        ));
+        assert_eq!(text(&line), "zephyr-admin-node: 2 session(s) 0x00ff");
+        assert_eq!(
+            line.bytes[line.len], 0,
+            "the byte after the text is the nul"
+        );
+    }
+
+    #[test]
+    fn a_line_longer_than_the_buffer_is_cut_at_a_character_and_keeps_its_nul() {
+        // 191 bytes of room: ninety-six two-byte characters are 192, so the last cannot
+        // fit and the line ends one character earlier, on a boundary.
+        let long = "\u{e9}".repeat(96);
+        let line = render_line(format_args!("{long}"));
+        assert_eq!(line.len, 190, "ninety-five whole characters");
+        assert!(text(&line).chars().all(|c| c == '\u{e9}'));
+        assert_eq!(line.bytes[line.len], 0, "and the nul is still there");
+        assert_eq!(
+            line.bytes[LOG_LINE_BYTES - 1],
+            0,
+            "the last byte is never text"
+        );
     }
 }

@@ -11658,13 +11658,19 @@ layer_c1r_mcu_multicast_e2e() {
 # the guard was not moved with them (hosted C1ns: `expected exactly 24 passed`).
 # Derived by `--list` under this command (the crate has no features): 26, twelve in
 # `core_clock::tests`, four in `stack::tests` and ten in the crate root.
+#
+# 26 -> 29: the console line a firmware with no heap prints (`glue::log_args`, which
+# formats into a fixed buffer) has two tests of its own in `glue::tests`: what it
+# prints is what `format!` gives, and a line past the buffer is cut at a character.
+# The stack watch's line-less form (`StackWatch::observe_peak`) has one in
+# `stack::tests`: it reports the readings the lined form does.
 layer_c1ns_nostd_members_isolated() {
     local nostd
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 26 \
+    _runci_guarded_test "C1ns zephyr lib" 29 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
