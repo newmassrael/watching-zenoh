@@ -189,7 +189,7 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// `run_until_idle` pass.
     ///
     /// Absent under `session-slot`, whose runtime is made by
-    /// [`RuntimeCell::start`] over tables the image declares: this constructor
+    /// `RuntimeCell::start` over tables the image declares: this constructor
     /// allocates the runtime's state.
     #[cfg(not(feature = "session-slot"))]
     pub fn new(clock: C) -> Self {
@@ -352,6 +352,7 @@ impl<C: ClockSource> CoopRuntime<C> {
 ///
 /// The cell is `Sync` by the profile's own rule (one executor on one core; an
 /// interrupt may only raise a task's wake flag), which no compiler can check.
+#[cfg(feature = "session-slot")]
 pub struct RuntimeCell<
     C: ClockSource,
     const TASKS: usize,
@@ -368,11 +369,13 @@ pub struct RuntimeCell<
 // call of `start` that wins the `started` flag inside a critical section, and read
 // only after that call returns; everything it holds is itself `Sync` by its own
 // rule (the tables) or because the clock is `Send + Sync`.
+#[cfg(feature = "session-slot")]
 unsafe impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: usize> Sync
     for RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>
 {
 }
 
+#[cfg(feature = "session-slot")]
 impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: usize>
     RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>
 {
@@ -416,6 +419,7 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
     }
 }
 
+#[cfg(feature = "session-slot")]
 impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: usize> Default
     for RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>
 {

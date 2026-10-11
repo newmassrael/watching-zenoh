@@ -18,10 +18,15 @@ use core::ops::Deref;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{self as coop_drive, SessionDatagramLink};
 pub use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
+// What the drive functions below name. `run_session` is absent under
+// `session-slot` with `reassembly`, and with it every one of these.
+#[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 use wz_runtime_coop::session_runtime::SessionHandle;
+#[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_coop::{CoopLocalJoinHandle, CoopLocalSet};
+#[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::RxFrame;
 
