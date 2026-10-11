@@ -49,6 +49,12 @@ path = "src/lib.rs"
 # lane; `libc` was already in `crates/Cargo.lock` via wz-runtime-tokio.
 [dependencies]
 libc = "0.2"
+# `common::PortReservation` draws the number it reserves for a child from outside
+# the kernel's autoselect range (`bind_unautoselected`), the one picker the
+# in-process legs share, so the lib needs the crate that holds it. Default
+# features only: the dev-dependency below adds the TLS fixtures for the tests,
+# and cargo unifies the two. Test-only crates on both sides, no footprint lane.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 # tests/link_emitter_b6.rs spawns the vendored sce-codegen binary directly, so
 # it needs the same provenance verdict every other consumer of that binary
 # uses. Depending on the helper crate rather than re-deriving the token here is

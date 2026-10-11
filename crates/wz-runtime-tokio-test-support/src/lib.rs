@@ -611,6 +611,62 @@ pub fn free_port() -> u16 {
     );
 }
 
+/// The files that hold this process's claims, kept open for the process's life.
+#[cfg(unix)]
+static CLAIMS: Mutex<Vec<std::fs::File>> = Mutex::new(Vec::new());
+
+/// Claim `port` against every OTHER process that picks through this crate,
+/// for as long as this process lives. `false` means a live process holds it.
+///
+/// Two processes that each draw from the same few thousand numbers meet more
+/// often than a reader expects: 24 copies of one test binary, each holding about
+/// a dozen numbers, met 8 times in 960 runs on the first version of this picker
+/// (a late listener that could not bind, a peer whose dial was answered by the
+/// other copy's listener). A probe bind cannot see it, because the number is
+/// handed out BEFORE its owner binds. So each handed-out number is also an
+/// exclusive `flock` on a file named by the number, and a picker skips a number
+/// whose file is locked.
+///
+/// `flock` and not a marker file: the kernel drops the lock when the descriptor
+/// closes, including on `SIGKILL`, so a killed test cannot strand a number for
+/// every later run. The files themselves are left behind and are harmless: an
+/// unlocked file claims nothing. A host where the directory cannot be made or
+/// the file cannot be opened has no registry, and the pick proceeds without one
+/// -- the same as before this existed. Non-unix hosts have none either, and no
+/// leg in this tree can run a Windows implementation to test one.
+#[cfg(unix)]
+fn claim_across_processes(port: u16) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    // SAFETY: `getuid` has no arguments and no memory effects.
+    let uid = unsafe { libc::getuid() };
+    let dir = std::env::temp_dir().join(format!("wz-free-port-claims-{uid}"));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return true;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(port.to_string()))
+    else {
+        return true;
+    };
+    // SAFETY: `file` owns a valid open descriptor for the whole call, and
+    // `LOCK_EX | LOCK_NB` has no memory effects.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        CLAIMS.lock().expect("claim registry").push(file);
+        return true;
+    }
+    std::io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock
+}
+
+/// No registry on a host that is not unix: see the unix form.
+#[cfg(not(unix))]
+fn claim_across_processes(_port: u16) -> bool {
+    true
+}
+
 /// The smallest span of ports the picker will draw from. A narrower range makes
 /// two pickers meet often, which is the thing the range exists to avoid.
 const MIN_PICK_SPAN: u32 = 1024;
@@ -702,7 +758,9 @@ pub fn bind_unautoselected() -> (std::net::TcpListener, u16) {
     for _ in 0..FREE_PORT_ATTEMPTS {
         let port = first + (random_draw() % span) as u16;
         if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) {
-            return (listener, port);
+            if claim_across_processes(port) {
+                return (listener, port);
+            }
         }
     }
     panic!(
@@ -1070,6 +1128,8 @@ pub async fn establish_capability_pair(
 
 #[cfg(test)]
 mod port_tests {
+    #[cfg(unix)]
+    use super::claim_across_processes;
     use super::{autoselect_range, free_port, refusing_port};
     use std::collections::BTreeSet;
 
@@ -1149,6 +1209,60 @@ mod port_tests {
         }
     }
 
+    /// A number another LIVE process was handed is not handed out here, and is
+    /// again once that process is gone.
+    ///
+    /// The test runs itself twice. With `WZ_PORT_CLAIM_HOLDER` set it is the
+    /// holder: it takes a number from `free_port`, prints it and holds it until
+    /// its stdin closes. Without it, it starts that holder, reads the number, and
+    /// asks for a claim on the same number: that must be refused while the holder
+    /// lives and granted after the holder is killed (the kernel drops an `flock`
+    /// with its process, so a killed test strands nothing).
+    #[cfg(unix)]
+    #[test]
+    fn a_number_held_by_another_process_is_not_handed_out() {
+        use std::io::{BufRead, Read, Write};
+        use std::process::{Command, Stdio};
+
+        if std::env::var_os("WZ_PORT_CLAIM_HOLDER").is_some() {
+            let port = free_port();
+            std::println!("CLAIMED {port}");
+            let _ = std::io::stdout().flush();
+            let mut sink = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut sink);
+            return;
+        }
+        let mut holder = Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "port_tests::a_number_held_by_another_process_is_not_handed_out",
+                "--nocapture",
+            ])
+            .env("WZ_PORT_CLAIM_HOLDER", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start the holder");
+        // Kept alive to the end of the test: dropping the read end early would make
+        // the holder's own harness lines fail with a broken pipe.
+        let mut lines = std::io::BufReader::new(holder.stdout.take().expect("holder stdout"))
+            .lines()
+            .map_while(Result::ok);
+        let held: u16 = lines
+            .find_map(|line| line.strip_prefix("CLAIMED ")?.parse().ok())
+            .expect("the holder prints the number it holds");
+        assert!(
+            !claim_across_processes(held),
+            "{held} is held by a live process and must not be claimable here"
+        );
+        holder.kill().expect("kill the holder");
+        holder.wait().expect("reap the holder");
+        assert!(
+            claim_across_processes(held),
+            "{held} must be claimable again once its holder is gone"
+        );
+    }
+
     /// The structural half of the claim below, with no draw in it: no number
     /// `free_port` hands out lies in the range the kernel autoselects from, and
     /// the range that is read is a real one.
@@ -1185,8 +1299,45 @@ mod port_tests {
     /// the handed-out set. It is a draw, so the claim it carries is bounded: with
     /// the old shape the draw hits within a fraction of a second on every host
     /// measured, and a number outside the autoselect range cannot be hit at all.
+    ///
+    /// It runs in a CHILD process of this test binary (`WZ_AUTOSELECT_PROBE`),
+    /// because eight threads that bind and release listeners without pause are
+    /// interference for every sibling test of the binary that dials a number
+    /// it expects to refuse: one `a_refusing_port_*` leg failed once beside it.
     #[test]
     fn a_handed_out_port_is_never_an_autoselect_result() {
+        use std::process::Command;
+
+        if std::env::var_os("WZ_AUTOSELECT_PROBE").is_some() {
+            let (binds, hits, handed) = hammer_autoselect();
+            std::println!("PROBE binds={binds} hits={hits} handed={handed}");
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "port_tests::a_handed_out_port_is_never_an_autoselect_result",
+                "--nocapture",
+            ])
+            .env("WZ_AUTOSELECT_PROBE", "1")
+            .output()
+            .expect("run the probe process");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("PROBE "))
+            .unwrap_or_else(|| panic!("the probe process printed no result: {text}"));
+        std::println!("{line}");
+        assert!(
+            line.contains(" hits=0 "),
+            "a bind(:0) was given a port free_port had handed out and nobody had bound yet: {line}"
+        );
+    }
+
+    /// Bind `:0` on both address families from eight threads, for up to four
+    /// seconds or until the first hit, against 64 numbers `free_port` handed out
+    /// and nobody has bound. Returns `(binds, hits, handed)`.
+    fn hammer_autoselect() -> (u64, u64, usize) {
         use std::collections::HashSet;
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::Arc;
@@ -1224,17 +1375,11 @@ mod port_tests {
         for t in threads {
             t.join().expect("autoselect thread");
         }
-        std::println!(
-            "{} autoselect bind(s) against {} handed-out port(s): {} hit(s)",
+        (
             binds.load(Ordering::SeqCst),
-            handed.len(),
-            hits.load(Ordering::SeqCst)
-        );
-        assert_eq!(
             hits.load(Ordering::SeqCst),
-            0,
-            "a bind(:0) was given a port free_port had handed out and nobody had bound yet"
-        );
+            handed.len(),
+        )
     }
 
     /// The old three-line helper: bind, read, drop. Reproduced here so the
