@@ -45,6 +45,10 @@ machines:
 
     session_pool:
       ref: session_slot_pool_mcu
+      # The lwIP this machine's QEMU lane is built with (the `cross-test` port of
+      # Layer Q.4): the validator holds its UDP socket count to the table (one per
+      # slot and one for the listener). A board image ships its own header.
+      lwip_opts: crates/lwip-sys/port/cross-test/lwipopts.h
       process:
         max_tasks: 8
         max_timers: 16

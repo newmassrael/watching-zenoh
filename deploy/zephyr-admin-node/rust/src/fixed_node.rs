@@ -79,6 +79,30 @@ const TASKS: usize = SESSIONS + 1;
 const TASK_BYTES: usize = 12288;
 /// Timers the runtime holds: the handshake and lease deadlines of the sessions.
 const TIMERS: usize = 4;
+
+// The tables above are held under the numbers the deploy file states for the machine
+// (`session_pool`): the sessions fit the generated table, the runtime's tables fit the
+// task and timer ceilings, and ONE typed session slot, as the compiler lays it out for
+// the target, fits the generated slot ceiling. A deploy file that lowers a number, or an
+// image that outgrows one, is a build failure that names the line.
+const _: () = {
+    use wz_session_core::caps::{MAX_TASKS, MAX_TIMERS};
+    use wz_session_core::session_slot_pool_mcu::{SLOT_COUNT, SLOT_SIZE};
+    assert!(SESSIONS <= SLOT_COUNT, "SESSIONS exceeds the generated session table");
+    assert!(TASKS <= MAX_TASKS, "TASKS exceeds the deploy file's max_tasks");
+    assert!(TIMERS <= MAX_TIMERS, "TIMERS exceeds the deploy file's max_timers");
+    assert!(
+        SessionSlots::<
+            CoopRuntime<ZephyrClock<TICK_HZ>>,
+            CoopTime<ZephyrClock<TICK_HZ>>,
+            LwipUdpDriver,
+            ZephyrEntropy,
+            SESSIONS,
+        >::slot_bytes()
+            <= SLOT_SIZE,
+        "one typed session slot exceeds the generated slot ceiling"
+    );
+};
 /// The widest locator text: `udp/255.255.255.255:65535`.
 const LOCATOR_BYTES: usize = 32;
 /// The version the node reports.

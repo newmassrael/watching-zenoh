@@ -337,6 +337,9 @@ fn the_shell_limits_are_the_deploy_files_numbers() {
     for (key, constant) in [
         ("connect_endpoints", caps::MAX_STATIC_CONNECT),
         ("multicast_replies", caps::MAX_MULTICAST_REPLIES),
+        // The ceilings an image's own task and timer tables are asserted under.
+        ("max_tasks", caps::MAX_TASKS),
+        ("max_timers", caps::MAX_TIMERS),
     ] {
         if process[key].as_u64() != Some(constant as u64) {
             drift.push(format!(

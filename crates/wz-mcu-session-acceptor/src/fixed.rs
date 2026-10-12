@@ -58,6 +58,22 @@ const TASKS: usize = 2;
 const TASK_BYTES: usize = 512;
 /// Timers the runtime holds: the handshake and the lease deadlines of one session.
 const TIMERS: usize = 4;
+
+// The runtime's tables are held under the task and timer ceilings the deploy file
+// states for the machine (`session_pool.process`): an e2e that outgrows one is a build
+// failure that names the line. (The slot table here is one slot, and the session type
+// is generic over the clock and the entropy source, so the typed-slot ceiling is
+// asserted by the images that name both.)
+const _: () = {
+    assert!(
+        TASKS <= wz_session_core::caps::MAX_TASKS,
+        "TASKS exceeds the deploy file's max_tasks"
+    );
+    assert!(
+        TIMERS <= wz_session_core::caps::MAX_TIMERS,
+        "TIMERS exceeds the deploy file's max_timers"
+    );
+};
 /// How many turns the run takes at most before it gives up: a bound for a regression,
 /// as the heap form's iteration cap is, since a run that never admitted its session
 /// has no pump whose own budget would end it.

@@ -265,6 +265,20 @@ pub const MAX_ADMIN_SESSION_LINKS: usize = 2;
 /// whose reply was dropped asks again.
 pub const MAX_MULTICAST_REPLIES: usize = 8;
 
+/// The most tasks a fixed-memory machine's runtime may hold (the deploy
+/// `session_pool.process.max_tasks` key): a CEILING on the task table an image
+/// declares for itself (`RuntimeCell`'s `TASKS`), not the size of that table. An
+/// image's table is the pump per session it holds and room beside them, so it is
+/// smaller than this; the images assert `TASKS <= MAX_TASKS` at compile time, and
+/// a host test holds this number equal to the deploy file's, so a deploy file that
+/// raises the ceiling and an image that outgrows it are each a red build.
+pub const MAX_TASKS: usize = 8;
+
+/// The most timers a fixed-memory machine's runtime may hold (the deploy
+/// `session_pool.process.max_timers` key): the ceiling on an image's `RuntimeCell`
+/// `TIMERS`, held the same way as [`MAX_TASKS`].
+pub const MAX_TIMERS: usize = 16;
+
 /// Maximum byte length of the keyexpr one admin reply is stamped with:
 /// `@/<zid>/<whatami>/<leg>` and, for a per-entity leg, the entity's own
 /// keyexpr of up to [`MAX_KEYEXPR_BYTES`], so two of them cover the prefix and

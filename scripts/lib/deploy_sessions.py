@@ -120,6 +120,18 @@ What the table adds to the checks above:
                 part also fits is `core::mem::size_of` of the slot, which only
                 the compiler can say and the consuming crate asserts against
                 the same `SLOT_SIZE`.
+    placement   the table is `max_sessions * slot_bytes` bytes and its pool names
+                a `section` (the document's `<sce:section>`, or an inline pool's
+                `section`). When the machine STATES its `memory.sram_regions`, that
+                section must be one of them and its `size` must hold the whole
+                table. A machine that states no regions is not checked: a focused
+                profile inherits its memory block from the profile it is built on
+                and this reader sees only the machine's own keys.
+    lwip_opts   optional; the path of the `lwipopts.h` the machine's image is built
+                with, relative to the repository. It must define
+                `MEMP_NUM_UDP_PCB` and the number must be at least `max_sessions +
+                1`: each slot is one UDP socket and the listener is one more. The
+                number is read from the header and stated nowhere else.
     limits      the machine's `limits` may name only the keys in
                 `LIMIT_KEYS`, and a session's own `limits` may only LOWER the
                 machine's value: the slot is sized by the machine's number, so
@@ -191,7 +203,9 @@ GROUP_KEYS = frozenset({"endpoint", "join_interval_ms", "lease_ms"})
 # the constant is in the tree today and the key only gives it a number a
 # deploy can state; NEW means the limit has no constant yet (it is a growable
 # table or an unbounded buffer on the MCU profile today).
-POOL_KEYS = frozenset({"ref", "max_sessions", "slot_bytes", "process"})
+POOL_KEYS = frozenset(
+    {"ref", "max_sessions", "slot_bytes", "process", "section", "lwip_opts"}
+)
 PROCESS_KEYS = frozenset(
     {
         "max_tasks",
@@ -607,12 +621,80 @@ def pool_document_dims(repo_root: Path, ref: str) -> tuple[int, int] | str:
     return dims[0], dims[1]
 
 
+def pool_document_section(repo_root: Path, ref: str) -> str | None:
+    """The `<sce:section>` the buffer-pool document `ref` names, or None.
+
+    Read after `pool_document_dims` accepted the document, so a missing file or a
+    parse error is that function's refusal and not this one's.
+    """
+    paths = sorted((repo_root / "sources").rglob(f"{ref}.scxml"))
+    if not paths:
+        return None
+    try:
+        root = ET.parse(paths[0]).getroot()
+    except ET.ParseError:
+        return None
+    node = root.find(f"{SCE_NS}section")
+    text = node.text.strip() if node is not None and node.text else ""
+    return text or None
+
+
+SIZE_RE = re.compile(r"^\s*(\d+)\s*([KkMm]?)\s*$")
+
+
+def region_bytes(value: object) -> int | None:
+    """The bytes of a `memory.sram_regions.<name>.size` (`128K`, `1M`, a bare
+    number), or None when it is none of those."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    match = SIZE_RE.match(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    scale = {"": 1, "k": 1024, "m": 1024 * 1024}[match.group(2).lower()]
+    return int(match.group(1)) * scale or None
+
+
+UDP_PCB_RE = re.compile(
+    r"^\s*#\s*define\s+MEMP_NUM_UDP_PCB\s+\(?\s*(\d+)\s*\)?\s*(?:/[/*].*)?$"
+)
+
+
+def lwip_udp_pcbs(repo_root: Path, rel: object) -> int | str:
+    """`MEMP_NUM_UDP_PCB` of the `lwipopts.h` at `rel`, or why it cannot be read.
+
+    The LAST `#define` wins, as the preprocessor reads a file top to bottom. A
+    header that includes another for it states no number of its own, and is
+    refused as such: the machine names the header that DEFINES it.
+    """
+    if not isinstance(rel, str) or not rel:
+        return "must be the path of an lwipopts.h, relative to the repository"
+    path = (repo_root / rel).resolve()
+    try:
+        path.relative_to(repo_root.resolve())
+    except ValueError:
+        return f"`{rel}` is outside the repository"
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return f"`{rel}` cannot be read"
+    found = None
+    for line in text.splitlines():
+        match = UDP_PCB_RE.match(line)
+        if match:
+            found = int(match.group(1))
+    if found is None:
+        return f"`{rel}` states no `#define MEMP_NUM_UDP_PCB <number>`"
+    return found
+
+
 def _pool_numbers(
     repo_root: Path, pool: dict
 ) -> tuple[dict | None, list[tuple[str, str]]]:
     """The table's resolved numbers, and `(key, why)` for every refusal."""
     problems: list[tuple[str, str]] = []
-    inline = sorted({"max_sessions", "slot_bytes"} & set(pool))
+    inline = sorted({"max_sessions", "slot_bytes", "section"} & set(pool))
     if "ref" in pool:
         if inline:
             problems.append(
@@ -637,10 +719,11 @@ def _pool_numbers(
                 "generated": True,
                 "max_sessions": dims[0],
                 "slot_bytes": dims[1],
+                "section": pool_document_section(repo_root, ref),
             },
             problems,
         )
-    if not inline:
+    if not ({"max_sessions", "slot_bytes"} & set(pool)):
         problems.append(
             (
                 "ref",
@@ -653,6 +736,9 @@ def _pool_numbers(
             problems.append((key, "required beside the other inline number"))
         elif not _positive_int(pool[key]):
             problems.append((key, "a positive integer"))
+    section = pool.get("section")
+    if "section" in pool and not (isinstance(section, str) and NAME_RE.match(section)):
+        problems.append(("section", "must name a memory region"))
     if problems:
         return None, problems
     return (
@@ -661,6 +747,7 @@ def _pool_numbers(
             "generated": False,
             "max_sessions": pool["max_sessions"],
             "slot_bytes": pool["slot_bytes"],
+            "section": section,
         },
         problems,
     )
@@ -876,7 +963,79 @@ def session_pool_problems(
             f"{path}.max_sessions: the machine's sessions claim {claimed} slots "
             f"and the table holds {numbers['max_sessions']}"
         )
+    if numbers is not None:
+        errors.extend(_placement_problems(path, machine, numbers))
+        if "lwip_opts" in pool:
+            errors.extend(_lwip_problems(path, repo_root, pool, numbers))
     return errors
+
+
+def _declared_regions(machine: dict) -> dict | None:
+    """`memory.sram_regions` as the machine WRITES it, or None when it writes none.
+
+    A focused profile inherits its memory block from the profile it is built on
+    (`mcu_client_and_group.yaml` says so in a comment) and this reader sees only
+    the machine's own keys, so a machine that states no regions is not checked:
+    the check is the machine's to arm by stating them.
+    """
+    memory = machine.get("memory")
+    regions = memory.get("sram_regions") if isinstance(memory, dict) else None
+    return regions if isinstance(regions, dict) and regions else None
+
+
+def _placement_problems(path: str, machine: dict, numbers: dict) -> list[str]:
+    """Does the whole table fit the memory region its pool document places it in?
+
+    The table is `max_sessions * slot_bytes` bytes (one generated number) and its
+    pool names a `section`. When the machine states its SRAM regions, that section
+    must be one of them and the region must hold the table; one that does not is a
+    layout the linker would fail on, or worse a table that spills into a neighbour.
+    """
+    regions = _declared_regions(machine)
+    section = numbers.get("section")
+    if regions is None or section is None:
+        return []
+    total = numbers["max_sessions"] * numbers["slot_bytes"]
+    region = regions.get(section)
+    if region is None:
+        return [
+            f"{path}.section: the pool is placed in `{section}`, which is not one of "
+            f"the machine's memory.sram_regions ({', '.join(sorted(regions))})"
+        ]
+    size = region_bytes(region.get("size") if isinstance(region, dict) else None)
+    if size is None:
+        return [
+            f"{path}.section: memory.sram_regions.{section}.size is not a size "
+            "(a number of bytes, or a number with a K or M suffix)"
+        ]
+    if total > size:
+        return [
+            f"{path}: the table is {numbers['max_sessions']} x {numbers['slot_bytes']} "
+            f"= {total} bytes and is placed in `{section}`, which holds {size} bytes"
+        ]
+    return []
+
+
+def _lwip_problems(path: str, repo_root: Path, pool: dict, numbers: dict) -> list[str]:
+    """Does the lwIP the machine is built with hold a socket for every slot?
+
+    Each session slot is one UDP socket, and the listener is one more
+    (`SessionRxPool<SESSIONS + 1>` in the images), so lwIP's `MEMP_NUM_UDP_PCB`
+    must be at least `max_sessions + 1`: a smaller pool refuses the bind of the
+    last session at run time, where this refuses the file. The number is read from
+    the header the machine names and restated nowhere.
+    """
+    pcbs = lwip_udp_pcbs(repo_root, pool["lwip_opts"])
+    if isinstance(pcbs, str):
+        return [f"{path}.lwip_opts: {pcbs}"]
+    needed = numbers["max_sessions"] + 1
+    if pcbs < needed:
+        return [
+            f"{path}.lwip_opts: `{pool['lwip_opts']}` holds {pcbs} UDP sockets "
+            f"(MEMP_NUM_UDP_PCB) and a table of {numbers['max_sessions']} sessions "
+            f"with its listener needs {needed}"
+        ]
+    return []
 
 
 def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> dict:
@@ -894,6 +1053,7 @@ def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> di
             "limits": sorted(LIMIT_KEYS),
         },
         "pool": None,
+        "lwip": None,
         "process": {},
         "limits": {},
         "sessions": [],
@@ -912,6 +1072,13 @@ def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> di
     report["pool"] = dict(
         numbers, total_bytes=numbers["max_sessions"] * numbers["slot_bytes"]
     )
+    if "lwip_opts" in pool:
+        pcbs = lwip_udp_pcbs(repo_root, pool["lwip_opts"])
+        report["lwip"] = {
+            "header": pool["lwip_opts"],
+            "udp_pcbs": pcbs if isinstance(pcbs, int) else None,
+            "needed": numbers["max_sessions"] + 1,
+        }
     single_accept = _single_accept(machine)
     for s in machine.get("sessions") or []:
         if not isinstance(s, dict):
@@ -1407,6 +1574,99 @@ def _pool_selftest(repo_root: Path) -> int:
         "the same acceptor on a machine with no table still holds one",
         mutate(no_table_acceptor),
         "sessions[1].accept.max_sessions: 2 is refused",
+    )
+    # Placement: the table (3 x 9000 = 27000 bytes) in the region its pool names.
+    def placed(size, section="sram1", regions=None):
+        def apply(m):
+            m["session_pool"]["section"] = section
+            m["memory"] = {
+                "sram_regions": regions
+                if regions is not None
+                else {"sram1": {"base": 0x30000000, "size": size}}
+            }
+
+        return apply
+
+    check(
+        "a table that fits the region it is placed in is accepted",
+        mutate(placed("32K")),
+        None,
+    )
+    check(
+        "a table exactly the size of its region is accepted",
+        mutate(placed(27000)),
+        None,
+    )
+    check(
+        "a table larger than its region is refused naming both",
+        mutate(placed("16K")),
+        "the table is 3 x 9000 = 27000 bytes and is placed in `sram1`, which holds "
+        "16384 bytes",
+    )
+    check(
+        "a section the machine's regions do not list is refused",
+        mutate(placed("32K", section="sram9")),
+        "the pool is placed in `sram9`, which is not one of the machine's "
+        "memory.sram_regions (sram1)",
+    )
+    check(
+        "a region size that is no size is refused",
+        mutate(placed("big")),
+        "memory.sram_regions.sram1.size is not a size",
+    )
+    check(
+        "a machine that states no regions is not placed",
+        mutate(lambda m: m["session_pool"].update(section="sram1")),
+        None,
+    )
+    check(
+        "a section that is no name is refused",
+        mutate(lambda m: m["session_pool"].update(section="SRAM 1")),
+        "session_pool.section: must name a memory region",
+    )
+    # lwIP: one socket per slot and one for the listener.
+    check(
+        "an lwIP that holds a socket for every slot and the listener is accepted",
+        mutate(
+            lambda m: m["session_pool"].update(
+                lwip_opts="crates/lwip-sys/port/cross-test/lwipopts.h"
+            )
+        ),
+        None,
+    )
+    check(
+        "an lwIP with too few sockets is refused naming the number it has",
+        mutate(
+            lambda m: m["session_pool"].update(
+                lwip_opts="crates/lwip-sys/port/microbit-minimal/lwipopts.h"
+            )
+        ),
+        "holds 3 UDP sockets (MEMP_NUM_UDP_PCB) and a table of 3 sessions with its "
+        "listener needs 4",
+    )
+    check(
+        "a header that states no socket count is refused",
+        mutate(
+            lambda m: m["session_pool"].update(
+                lwip_opts="crates/lwip-sys/port/cross-test-mcast/lwipopts.h"
+            )
+        ),
+        "states no `#define MEMP_NUM_UDP_PCB <number>`",
+    )
+    check(
+        "a header that is not there is refused",
+        mutate(lambda m: m["session_pool"].update(lwip_opts="no/such/lwipopts.h")),
+        "`no/such/lwipopts.h` cannot be read",
+    )
+    check(
+        "a header outside the repository is refused",
+        mutate(lambda m: m["session_pool"].update(lwip_opts="../outside.h")),
+        "`../outside.h` is outside the repository",
+    )
+    check(
+        "a header path that is no string is refused",
+        mutate(lambda m: m["session_pool"].update(lwip_opts=4)),
+        "must be the path of an lwipopts.h",
     )
     check(
         "an admin reply buffer of exactly the reply payload bound is accepted",
