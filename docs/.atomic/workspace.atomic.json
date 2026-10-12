@@ -272510,6 +272510,70 @@
         "Ledger text only; the store was not appended. Integration: cherry-pick the eight commits above 387f34a5; scripts/run-ci.sh and nondefault-tests-gate.sh edits are local insertions beside S9b and S9c's."
       ]
     },
+    "Round 3298": {
+      "decision_summary": "S9e, stage 1: the acceptor image runs on the fixed-memory profile with NO allocator in the build, and the S8 gate says so. The heap is separated from the slot profile by a cargo FEATURE, not a trapping allocator: wz-session-core gets an internal feature storage-profile (implied by alloc and by session-slot), session-slot no longer implies alloc, and the owned forms (NetworkMessage, the owned frame variants, owned samples, queries and replies, boxed sinks, owned builders) stay alloc. The split runs through wz-runtime-core, wz-runtime-coop, wz-codecs, wz-session-mcu, wz-session-lwip, wz-link-lwip, the acceptor and the facade. A trap allocator keeps alloc in the graph and makes the claim a run-time one; with the split a creeping Vec, String or Box is a compile error, and an image that still names alloc is refused at link time. mcu-session-acceptor-fixed is promoted from pending to gated. Layer Q boots the fixed image (Q.4 fixed lane). No SCE-side change was needed.",
+      "changes_bullets": [
+        "Stage 1 (eleven commits; history order is not bisect order, because the storage-profile feature that the earlier ones gate on is introduced by the fifth, so only the tip compiles in every configuration):",
+        "session-core: leaf helpers that build owned values need alloc; sample metadata is readable as borrowed parts (SampleView::timestamp_parts, encoding_parts); the owned frame forms, the owned dispatch and the registry surface are heap-profile only; the storage-profile feature separates heap from slot (hashbrown optional behind alloc, zeroize takes alloc only from session-core alloc); the acceptor profile compiles with no allocator (reply_stage borrows TimestampParts, the owned drain is alloc-only, slot_observer has static sinks); a refusal's quote and a staged zid stay small (DiagnosticText, bounded zid).",
+        "runtime-coop: the runtime is present without the heap (feature runtime, alloc adds the heap forms).",
+        "session-lwip, link-lwip and the facade: a chain with no heap (facade features runtime-coop-fixed and session-lwip-fixed; runtime-coop and session-lwip are those plus the heap).",
+        "CI: the acceptor fixed-memory image links with no allocator (gate promotion, memory-v6m-fixed.x map, deploy manifest heap feature); Layer Q boots the fixed image (Q.4 fixed lane).",
+        "The mcu-noheap-probe lock is refreshed (hashbrown and foldhash leave that probe's graph).",
+        "Per-crate alloc census of the acceptor-fixed build graph: before, wz-session-core, wz-runtime-core, wz-codecs, sce-forge-runtime and sce-portable-bytes plus third-party hashbrown, portable-atomic-util and zeroize, with 13 source lines allocating in the census-only build and the image refused on v7m and v6m; after, none, and the gate reports mcu-session-acceptor-fixed clean as gated on thumbv7m and thumbv6m with the ELF half clean."
+      ],
+      "verification_bullets": [
+        "Layer Q on pc2 (rustc 1.97.0, llvm-nm demangling): the S8 gate selftest and --population pass (16 images classified); Q.0n mcu-session-acceptor-fixed on thumbv7m and thumbv6m is clean as gated; the two probes clean; the heap acceptor, admin, multicast, freertos and qemu-demo rows are OK as pending; footprint[multicast-e2e] text 65068 (+12) and 64800 (-180), tolerance +-256.",
+        "QEMU boot of the fixed image (mps2-an385, cortex-m3, built with feature fixed-memory and the cross-test lwIP port): Stage5 PASS, Established and a Frame dispatched, stack peak 35504 of 4118984 bytes, qemu rc 0; the Q.4 fixed lane passes inside Layer Q.",
+        "Mutant red then green: `extern crate alloc` plus a static fn returning Box::new in the acceptor's fixed module makes the gate FAIL on both targets, naming the crate and fixed.rs:26; reverted, the gate is OK again.",
+        "What gated proves: with no global allocator and no crate of the build graph naming extern crate alloc, the toolchain links the image, so any use of the heap in the graph would be an unresolved allocator symbol or a refused link; the ELF half reads the symbols for alloc entry points, the graph half the crates.",
+        "What it does not prove: the image's behaviour beyond the one boot scenario; stack and footprint bounds beyond the measured peak of that scenario; the ARMv6-M boot (the v6m image links a map sized to the tables and the 16 KB microbit cannot hold it, so v6m is link-proof only); third-party crates that only ride along unused (reported, judged by the ELF).",
+        "At integration (focused, owner policy): see the integration round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Still pending, and why (the images stay `pending` in the S8 gate):",
+        "mcu-admin-node-fixed (and its census row): wz-session-core still names alloc on the admin profile, because adminspace-core implies alloc. Stage 2 splits it into adminspace-fixed (storage-profile, wildcards, pubsub-encoding) and adminspace-core (alloc plus adminspace-fixed) across core, mcu, lwip and the facade. The admin path also needs the lent Declare writers wired into send_declare_subscriber, send_declare_queryable and send_response_final (the S9d lent_control writers exist and are unused by session_actions), a borrowed Response writer built from reply_stage::ReplyParts with the stage drain through it, the registration box replaced, and the owned hint, query and reply types gated alloc.",
+        "mcu-multicast-e2e-fixed (and its census row): additionally needs transport-fragmentation without alloc and the multicast tier items of the S9d carry (a record-at-a-time RX walk, PeerNaming, MulticastParams.zid as ZidBytes, the beacon through encode_join_into).",
+        "the Zephyr fixed admin row: the Zephyr crates link alloc on purpose (the kernel heap), so the row stays pending until the admin profile exists.",
+        "data-plane TX variants still build owned mirrors (S9d carry item 3): send_push_aliased, send_push_with_meta, send_request_query.",
+        "the wz-runtime-core panic-payload box and the registration box.",
+        "SCE-side requests so far: none."
+      ],
+      "publishable_decision_summary": "S9e, stage 1: the acceptor image runs on the fixed-memory profile with NO allocator in the build, and the S8 gate says so. The heap is separated from the slot profile by a cargo FEATURE, not a trapping allocator: wz-session-core gets an internal feature storage-profile (implied by alloc and by session-slot), session-slot no longer implies alloc, and the owned forms (NetworkMessage, the owned frame variants, owned samples, queries and replies, boxed sinks, owned builders) stay alloc. The split runs through wz-runtime-core, wz-runtime-coop, wz-codecs, wz-session-mcu, wz-session-lwip, wz-link-lwip, the acceptor and the facade. A trap allocator keeps alloc in the graph and makes the claim a run-time one; with the split a creeping Vec, String or Box is a compile error, and an image that still names alloc is refused at link time. mcu-session-acceptor-fixed is promoted from pending to gated. Layer Q boots the fixed image (Q.4 fixed lane). No SCE-side change was needed.",
+      "publishable_changes_bullets": [
+        "Stage 1 (eleven commits; history order is not bisect order, because the storage-profile feature that the earlier ones gate on is introduced by the fifth, so only the tip compiles in every configuration):",
+        "session-core: leaf helpers that build owned values need alloc; sample metadata is readable as borrowed parts (SampleView::timestamp_parts, encoding_parts); the owned frame forms, the owned dispatch and the registry surface are heap-profile only; the storage-profile feature separates heap from slot (hashbrown optional behind alloc, zeroize takes alloc only from session-core alloc); the acceptor profile compiles with no allocator (reply_stage borrows TimestampParts, the owned drain is alloc-only, slot_observer has static sinks); a refusal's quote and a staged zid stay small (DiagnosticText, bounded zid).",
+        "runtime-coop: the runtime is present without the heap (feature runtime, alloc adds the heap forms).",
+        "session-lwip, link-lwip and the facade: a chain with no heap (facade features runtime-coop-fixed and session-lwip-fixed; runtime-coop and session-lwip are those plus the heap).",
+        "CI: the acceptor fixed-memory image links with no allocator (gate promotion, memory-v6m-fixed.x map, deploy manifest heap feature); Layer Q boots the fixed image (Q.4 fixed lane).",
+        "The mcu-noheap-probe lock is refreshed (hashbrown and foldhash leave that probe's graph).",
+        "Per-crate alloc census of the acceptor-fixed build graph: before, wz-session-core, wz-runtime-core, wz-codecs, sce-forge-runtime and sce-portable-bytes plus third-party hashbrown, portable-atomic-util and zeroize, with 13 source lines allocating in the census-only build and the image refused on v7m and v6m; after, none, and the gate reports mcu-session-acceptor-fixed clean as gated on thumbv7m and thumbv6m with the ELF half clean."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Q on pc2 (rustc 1.97.0, llvm-nm demangling): the S8 gate selftest and --population pass (16 images classified); Q.0n mcu-session-acceptor-fixed on thumbv7m and thumbv6m is clean as gated; the two probes clean; the heap acceptor, admin, multicast, freertos and qemu-demo rows are OK as pending; footprint[multicast-e2e] text 65068 (+12) and 64800 (-180), tolerance +-256.",
+        "QEMU boot of the fixed image (mps2-an385, cortex-m3, built with feature fixed-memory and the cross-test lwIP port): Stage5 PASS, Established and a Frame dispatched, stack peak 35504 of 4118984 bytes, qemu rc 0; the Q.4 fixed lane passes inside Layer Q.",
+        "Mutant red then green: `extern crate alloc` plus a static fn returning Box::new in the acceptor's fixed module makes the gate FAIL on both targets, naming the crate and fixed.rs:26; reverted, the gate is OK again.",
+        "What gated proves: with no global allocator and no crate of the build graph naming extern crate alloc, the toolchain links the image, so any use of the heap in the graph would be an unresolved allocator symbol or a refused link; the ELF half reads the symbols for alloc entry points, the graph half the crates.",
+        "What it does not prove: the image's behaviour beyond the one boot scenario; stack and footprint bounds beyond the measured peak of that scenario; the ARMv6-M boot (the v6m image links a map sized to the tables and the 16 KB microbit cannot hold it, so v6m is link-proof only); third-party crates that only ride along unused (reported, judged by the ELF).",
+        "At integration (focused, owner policy): see the integration round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still pending, and why (the images stay `pending` in the S8 gate):",
+        "mcu-admin-node-fixed (and its census row): wz-session-core still names alloc on the admin profile, because adminspace-core implies alloc. Stage 2 splits it into adminspace-fixed (storage-profile, wildcards, pubsub-encoding) and adminspace-core (alloc plus adminspace-fixed) across core, mcu, lwip and the facade. The admin path also needs the lent Declare writers wired into send_declare_subscriber, send_declare_queryable and send_response_final (the S9d lent_control writers exist and are unused by session_actions), a borrowed Response writer built from reply_stage::ReplyParts with the stage drain through it, the registration box replaced, and the owned hint, query and reply types gated alloc.",
+        "mcu-multicast-e2e-fixed (and its census row): additionally needs transport-fragmentation without alloc and the multicast tier items of the S9d carry (a record-at-a-time RX walk, PeerNaming, MulticastParams.zid as ZidBytes, the beacon through encode_join_into).",
+        "the Zephyr fixed admin row: the Zephyr crates link alloc on purpose (the kernel heap), so the row stays pending until the admin profile exists.",
+        "data-plane TX variants still build owned mirrors (S9d carry item 3): send_push_aliased, send_push_with_meta, send_request_query.",
+        "the wz-runtime-core panic-payload box and the registration box.",
+        "SCE-side requests so far: none."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
