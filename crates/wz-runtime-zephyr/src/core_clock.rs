@@ -81,7 +81,7 @@ pub enum CoreClockLine {
         /// The clock the image assumes.
         assumed_hz: u32,
     },
-    /// The core runs at a clock the image was not built for.
+    /// The core runs at a clock other than the one the image assumes.
     Mismatch {
         /// What the board read.
         actual_hz: u32,
