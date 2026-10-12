@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""R3312 -- the size of ONE typed session slot, measured and held.
+"""R3312 (no register item) -- the size of ONE typed session slot, measured and held.
 
 ## What was missing
 
