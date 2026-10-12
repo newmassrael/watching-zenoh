@@ -116,10 +116,13 @@ What the table adds to the checks above:
                 else the profile's default) may not add up to more than
                 `slot_bytes`: they are PART of the slot, so a slot smaller
                 than they are cannot hold the session. The table's RAM is
-                `max_sessions * slot_bytes`, one number; whether the typed
-                part also fits is `core::mem::size_of` of the slot, which only
-                the compiler can say and the consuming crate asserts against
-                the same `SLOT_SIZE`.
+                `max_sessions * slot_bytes`, one number. The typed part is
+                `core::mem::size_of` of the slot, which only the compiler can
+                say and the consuming crate asserts against the same
+                `SLOT_SIZE`; when the pool names a `typed_slot_image` its
+                MEASURED bytes are added to the pools, so the budget is
+                pools + typed slot <= `slot_bytes`, and a session whose pools
+                alone fit is still refused when the slot over them does not.
     placement   the table is `max_sessions * slot_bytes` bytes and its pool names
                 a `section` (the document's `<sce:section>`, or an inline pool's
                 `section`). When the machine STATES its `memory.sram_regions`, that
@@ -964,14 +967,27 @@ def session_pool_problems(
         if numbers is not None:
             parts = _session_pool_parts(repo_root, machine, s)
             total = sum(p["bytes"] for p in parts)
-            if total > numbers["slot_bytes"]:
+            typed = _typed_bytes(repo_root, pool)
+            if typed is not None and typed > numbers["slot_bytes"]:
+                # A typed slot over the ceiling by itself is refused ONCE, by
+                # `_typed_slot_problems`; repeating it for every session would bury it.
+                typed = None
+            need = total + (typed or 0)
+            if need > numbers["slot_bytes"]:
                 detail = ", ".join(
                     f"{p['pool']} {p['slots']} x {p['slot_size']} = {p['bytes']}"
                     for p in parts
                 )
+                if typed is None:
+                    what = f"add up to {total} bytes"
+                else:
+                    what = (
+                        f"add up to {total} bytes and the measured typed slot takes "
+                        f"{typed}, {need} together"
+                    )
                 errors.append(
                     f"{base}.sessions[{i}].buffer_pools: the pools this session "
-                    f"takes ({detail}) add up to {total} bytes, more than the "
+                    f"takes ({detail}) {what}, more than the "
                     f"{numbers['slot_bytes']} a session slot holds "
                     "(session_pool slot size)"
                 )
@@ -1013,6 +1029,16 @@ def typed_slot(repo_root: Path, image: object) -> dict | str:
     if not isinstance(found, dict) or not _positive_int(found.get("slot_bytes")):
         return f"`{image}` is not measured in `{SLOT_RECORD}` (it measures: {', '.join(sorted(images))})"
     return found
+
+
+def _typed_bytes(repo_root: Path, pool: dict) -> int | None:
+    """The MEASURED bytes of one typed slot when the pool names a measured image, else
+    None: the budget then adds it to a session's pools, which is what a slot is (the
+    pools it is built over and the typed part the compiler lays out)."""
+    if "typed_slot_image" not in pool:
+        return None
+    found = typed_slot(repo_root, pool["typed_slot_image"])
+    return found["slot_bytes"] if isinstance(found, dict) else None
 
 
 def _typed_slot_problems(path: str, repo_root: Path, pool: dict, numbers: dict) -> list[str]:
@@ -1162,6 +1188,7 @@ def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> di
             continue
         parts = _session_pool_parts(repo_root, machine, s)
         total = sum(p["bytes"] for p in parts)
+        typed = _typed_bytes(repo_root, pool)
         lim = s.get("limits")
         effective = dict(machine_limits)
         if isinstance(lim, dict):
@@ -1172,7 +1199,13 @@ def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> di
                 "slots": _slots_claimed(s, single_accept),
                 "pools": parts,
                 "pool_bytes": total,
-                "headroom_bytes": numbers["slot_bytes"] - total,
+                # The measured typed slot, or null when the machine names no measured
+                # image; `session_bytes` is the pools plus it, and the headroom is the
+                # ceiling less that, so the number the editor shows is what the
+                # validator refuses on.
+                "typed_slot_bytes": typed,
+                "session_bytes": total + (typed or 0),
+                "headroom_bytes": numbers["slot_bytes"] - total - (typed or 0),
                 "limits": effective,
             }
         )
@@ -1772,6 +1805,46 @@ def _pool_selftest(repo_root: Path) -> int:
         "an image that is no string is refused",
         mutate(typed(4)),
         "must name an image of the record",
+    )
+    big = {
+        "session_rx_pool": {"slot_count": 42, "slot_size": 1500},
+        "reassembly_pool": {"slot_count": 2, "slot_size": 500},
+    }
+
+    def big_pools(image):
+        def apply(m):
+            m["session_pool"]["slot_bytes"] = 98304
+            if image:
+                m["session_pool"]["typed_slot_image"] = image
+            m["sessions"][1]["buffer_pools"] = big
+
+        return apply
+
+    check(
+        "pools that fit alone are refused when the measured slot over them does not",
+        mutate(big_pools("mcu-admin-node")),
+        "add up to 64000 bytes and the measured typed slot takes ",
+    )
+    check(
+        "the same pools with no measured image are judged on the pools alone",
+        mutate(big_pools(None)),
+        None,
+    )
+    report = session_pool_report("m", mutate(big_pools(None)), repo_root)
+    expect_equal(
+        "without a measured image the session's bytes are its pools and the headroom is unchanged",
+        [(s["pool_bytes"], s["session_bytes"], s["typed_slot_bytes"]) for s in report["sessions"]][1],
+        (64000, 64000, None),
+    )
+    report = session_pool_report("m", mutate(typed("mcu-admin-node")), repo_root)
+    expect_equal(
+        "with a measured image the session's bytes are its pools plus the typed slot",
+        all(
+            s["session_bytes"] == s["pool_bytes"] + s["typed_slot_bytes"]
+            and s["headroom_bytes"] == 98304 - s["session_bytes"]
+            for s in report["sessions"]
+        ),
+        True,
     )
     report = session_pool_report("m", mutate(typed("mcu-admin-node")), repo_root)
     measured = (report["pool"] or {}).get("typed_slot") or {}

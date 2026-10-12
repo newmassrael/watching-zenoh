@@ -366,10 +366,12 @@ fn every_declared_session_fits_the_generated_slot() {
         generated::SLOT_COUNT
     );
     for s in sessions {
-        let bytes = s["pool_bytes"].as_u64().expect("pool_bytes");
+        // The pools plus the MEASURED typed slot when the machine names a measured
+        // image (`session_bytes`), which is what the validator refuses on.
+        let bytes = s["session_bytes"].as_u64().expect("session_bytes");
         assert!(
             bytes <= generated::SLOT_SIZE as u64,
-            "session {}: its pools take {bytes} bytes, the generated slot holds {}",
+            "session {}: its pools and typed slot take {bytes} bytes, the generated slot holds {}",
             s["name"],
             generated::SLOT_SIZE
         );
