@@ -151,12 +151,13 @@ def tracked_rust(repo: pathlib.Path = REPO) -> list[pathlib.Path]:
 def test_lines(path: pathlib.Path, lines: list[str]) -> set[int]:
     """The 1-based lines inside a test module.
 
-    A file named `tests.rs` is test code throughout. Otherwise each
-    `mod tests {` opens a region running to the next column-0 closing brace; a
-    file may hold SEVERAL, which is why this returns a set rather than one
-    boundary line.
+    A file named `tests.rs`, or one under a `tests/` directory (a cargo
+    integration test, which is a separate crate that production never links), is
+    test code throughout. Otherwise each `mod tests {` opens a region running to
+    the next column-0 closing brace; a file may hold SEVERAL, which is why this
+    returns a set rather than one boundary line.
     """
-    if path.name == "tests.rs":
+    if path.name == "tests.rs" or "tests" in path.parts[:-1]:
         return set(range(1, len(lines) + 1))
     inside: set[int] = set()
     open_at: int | None = None
