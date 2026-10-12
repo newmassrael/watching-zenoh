@@ -9838,6 +9838,13 @@ layer_c1g_cargo_test_observer() {
     # pushes and no one else's. 2 = what that command PRINTED.
     _runci_guarded_test C1g 2 \
         cargo test -p wz-session-core --test slot_observer_sessions --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+    # R3315 -- the observer's place. The observer is 16 KB and the Zephyr node's stack is
+    # 32 KB: a value of it passed through an install cost the node's main function 69 KB of
+    # frame on the kit. The cell is built in place, once, lent one holder at a time and
+    # dropped with the cell; the stack a build needs is read off the image's own binary, not
+    # off a host test. 9 = what that command PRINTED.
+    _runci_guarded_test C1g 9 \
+        cargo test -p wz-session-core --test slot_observer_cell --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     # S9b, row R7 -- the admin space with no allocator. The crate's lib suite on the
     # fixed backing WITH the admin surface and the Err reply (`+`, for the reason the
     # legs above give: the writers, the bounded answerer, the staged-reply arena and
