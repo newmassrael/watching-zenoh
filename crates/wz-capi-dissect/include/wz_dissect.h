@@ -70,7 +70,7 @@
  * open-debt item 554 is about one paragraph long. ASK the document; the number
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
- * "fields", "summary", "readable_surfaces", "selector_diagnose",
+ * "fields", "summary", "readable_surfaces", "selector_diagnose", "selector_bind",
  * "declarations_diagnose", "keyexpr_diagnose", "keyexpr_relate", "declarations_match", "declarations_from_proto", "proto_message", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "session_table", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
@@ -1557,7 +1557,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 34
+#define WZ_DISSECT_ABI_REVISION 35
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1832,6 +1832,38 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   first_reply  an integer, ms                              == != < <= > >=
  *   completion   an integer, ms                              == != < <= > >=
  *   closed       yes or no (y or n)                          == !=
+ *   value        the payload's bytes: "text" or 0x and bytes contains == !=
+ *   node         the sender's name, bound before the doors   == !=
+ *
+ * `value` compares the application payload of a Put, a Reply or an Err as the
+ * publisher put it: after the transport has decompressed and reassembled the
+ * message, and before any encoding is applied. `value == "42"` is the two bytes
+ * 0x34 0x32 whatever the record's encoding calls them. `contains` is a byte
+ * substring test; `==` and `!=` compare the whole payload.
+ *
+ *     - A text literal is quoted, with either quote. Inside it, \" \' and \\
+ *       stand for the character and \xNN (two hex digits) for one byte, so a
+ *       payload that is not text can be written. Any other backslash is refused
+ *       AT the backslash. The escapes are the lexer's, so every field reads
+ *       them; a quoted value that is not UTF-8 is a value a text field does not
+ *       admit.
+ *     - Bytes are 0x and an even, non-zero number of hex digits, either case.
+ *       An unquoted word that is neither is refused at the value rather than
+ *       read as text.
+ *     - UNDECIDED, and never false, where the capture cannot say what the
+ *       payload was: a Del carries none, a Query carries a value only in an
+ *       extension this reader may not be able to open, and a payload that rides
+ *       shared memory is a descriptor on this wire and not the data. `!=` and
+ *       `not` over such a record are undecided too. A payload this term sees is
+ *       always a whole one: a message cut before its payload ended is not a
+ *       record the planes produce.
+ *
+ * `node` names a node the way the application's own list does
+ * (node == "front camera"). A record carries no node name, only the zid its
+ * sender announced, so the name is resolved to a `zid` term by
+ * wz_dissect_selector_bind BEFORE any door is asked, and a selector that still
+ * holds a `node` term is refused by every other door as a selector that does not
+ * compile (the diagnosis puts `at` on the term and says the name is unbound).
  *
  * `zid` is read against THE CAPTURE the selector is judged in. A value of
  * eight or more hexadecimal digits that does not spell, in full, a zid that
@@ -2130,6 +2162,12 @@ int wz_dissect_pcap_session_table(const unsigned char *bytes, size_t len,
  * that was complete. When the refusal is an unknown field, its `message` lists
  * the fields of THE SELECTOR LANGUAGE above, `zid` included.
  *
+ * From verdict revision 4 that list also holds `value` and `node`, the escapes
+ * of a quoted value are read, and a `node` term reads {"ok":false} with `at`
+ * on the term's first byte: only a selector a name table has resolved
+ * (wz_dissect_selector_bind) is one the doors take. The `tokens` classes did
+ * not move: `contains` is a `word`, an operator only where one stands.
+ *
  * The useful moment to ask "is this valid, and if not where" is while the
  * expression is being typed -- before there is a capture to run it against,
  * and long before a caller would want to pay four walks of a file to find
@@ -2163,6 +2201,69 @@ int wz_dissect_pcap_session_table(const unsigned char *bytes, size_t len,
  * @values selector_diagnose kind
  * @carries selector_diagnose kind passenger */
 int wz_dissect_selector_diagnose(const char *selector, char **out);
+
+/* (ABI 35) -- RESOLVE A SELECTOR'S `node` TERMS to the zids your own list of
+ * named nodes gives them, and get back the selector to pass on.
+ *
+ * `node == "front camera"` names a node the way YOUR list does, and a record
+ * carries only the zid its sender announced. The table is yours (only you know
+ * what you call a node), so it crosses as text: `names_json` is ONE JSON object,
+ * each key a node name and each value that node's zid as a string, in zenoh's
+ * spelling (the one the documents print; either case):
+ *
+ *     {"front camera":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2c3d4"}
+ *
+ * A null `names_json` is a table with no names. A name given twice with the
+ * SAME zid is that node; given twice with DIFFERENT zids it stands for two
+ * nodes, and the term that uses it is refused (below) while the table's other
+ * names stay usable. Comments and trailing commas are read (JSON5).
+ *
+ * Returns WZ_DISSECT_OK for any readable text, and writes a JSON verdict, a
+ * successful DIAGNOSIS exactly as wz_dissect_selector_diagnose is, so the memory
+ * rule is untouched: OK means a string you own, an error means none. It opens
+ * with its own revision:
+ *
+ *     {"document":{"name":"selector_bind","revision":1},"ok":true,
+ *      "selector":"kind == put and zid == ff0e..."}
+ *
+ * `selector` is the text to hand every other door. Each `node` term is replaced
+ * by the `zid` term its name stands for (`==` and `!=` are kept) and every other
+ * byte of your text is exactly as you wrote it. Every other door refuses a
+ * selector that still holds a `node` term as one that does not compile
+ * (WZ_DISSECT_ERR_SELECTOR; wz_dissect_selector_diagnose puts `at` on the term),
+ * so a name that was never resolved is never read as a miss.
+ *
+ * A refusal carries `"ok":false`, `"refusal"`, a human `"message"`, and the keys
+ * the word decides. None is ever written as null; a key a word does not carry
+ * is absent:
+ *
+ *     `table`           names_json is not a table: not JSON, not an object, a
+ *                       value that is not a string, or a zid that is not one.
+ *                       `message` names the entry. No position: the fault is
+ *                       not in the selector.
+ *     `selector`        the selector does not compile. `start` and `end` are
+ *                       the one caret wz_dissect_selector_diagnose would give
+ *                       (its `at`), so a span of no width.
+ *     `unknown_node`    a `node` term names something the table does not hold.
+ *                       `name`, and `start` and `end`: the BYTE span of the
+ *                       whole term, field to value, end exclusive.
+ *     `ambiguous_node`  the name stands for two or more zids. `name`, the span,
+ *                       and `candidates`: the zids, in the spelling the
+ *                       documents print, in the order the table gave them.
+ *
+ * The first refusing term is the one reported. The table is judged before the
+ * selector, so a bad table is reported whatever the selector says.
+ *
+ * ⚠ A bound term is an ordinary `zid` term, and a `zid` of eight or more digits
+ * that does not spell a node of the capture in full is read as a PREFIX (see THE
+ * SELECTOR LANGUAGE). A zid zenoh generated is 32 digits and cannot be one; a
+ * shorter id you configured yourself is read as a prefix when its node is absent
+ * from the capture and another node's id begins with the same digits.
+ *
+ * @values selector_bind refusal
+ * @carries selector_bind refusal discriminant */
+int wz_dissect_selector_bind(const char *selector, const char *names_json,
+                             char **out);
 
 /* R311y855 (ABI 5) — THE FIELD LAYER: every message in the capture,
  * dissected into the byte ranges it was decoded from.

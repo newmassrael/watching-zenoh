@@ -2230,59 +2230,8 @@ fn a_selector_narrows_the_census_planes_and_says_what_it_left_out() {
 /// for the program that branches on it.
 #[test]
 fn an_ambiguous_zid_prefix_is_named_by_the_command_line_and_judges_nothing() {
-    const TWIN_A: &str = "cbf383be1111111122222222aaaaaaaa";
-    const TWIN_B: &str = "cbf383be3333333344444444bbbbbbbb";
-    const LONE_A: &str = "1234abcd9999999900000000eeeeeeee";
-    const LONE_B: &str = "fedcba98aaaaaaaa11111111ffffffff";
-
-    let init = |spelled: &str| -> Vec<u8> {
-        let zid =
-            wz_session_core::zid_hex::zenoh_hex_to_zid(spelled).expect("a spelling zenoh takes");
-        let mut wire = vec![
-            wz_session_core::wire_const::T_MID_INIT,
-            0x09,
-            (((zid.len() as u8) - 1) << 4) | 0x02,
-        ];
-        wire.extend_from_slice(&zid);
-        wire
-    };
-    let record = |payload: &'static [u8]| -> Vec<u8> {
-        let mut frame = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
-        frame.extend_from_slice(
-            &wz_codecs::push::Push {
-                header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
-                keyexpr: keyexpr("demo/p"),
-                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                    payload_len: Some(payload.len() as u64),
-                    payload: Some(payload),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-            .encode_to_vec(),
-        );
-        frame
-    };
-    let packets = [
-        udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 43210, 7447, &init(TWIN_A)),
-        udp_packet([10, 0, 0, 2], [10, 0, 0, 1], 7447, 43210, &init(LONE_A)),
-        udp_packet([10, 0, 0, 3], [10, 0, 0, 4], 43211, 7447, &init(TWIN_B)),
-        udp_packet([10, 0, 0, 4], [10, 0, 0, 3], 7447, 43211, &init(LONE_B)),
-        udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 43210, 7447, &record(b"a")),
-        udp_packet([10, 0, 0, 2], [10, 0, 0, 1], 7447, 43210, &record(b"bb")),
-        udp_packet([10, 0, 0, 3], [10, 0, 0, 4], 43211, 7447, &record(b"ccc")),
-        udp_packet([10, 0, 0, 4], [10, 0, 0, 3], 7447, 43211, &record(b"dddd")),
-    ];
-    let rows: Vec<(u32, u32, &[u8])> = packets
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (1, i as u32 * 10_000, p.as_slice()))
-        .collect();
     let scratch = Scratch::new("select-zid-prefix");
-    let capture = scratch.write(
-        "zid-prefix.pcap",
-        &wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &rows),
-    );
+    let capture = scratch.write("zid-prefix.pcap", &four_named_nodes());
     let run = |args: &[&str]| {
         String::from_utf8_lossy(
             &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
@@ -2338,6 +2287,174 @@ fn an_ambiguous_zid_prefix_is_named_by_the_command_line_and_judges_nothing() {
     assert!(
         parsed.get("ambiguous_zid_prefixes").is_none(),
         "the key is absent for a selector that was judged: {control}"
+    );
+}
+
+/// The zids of [`four_named_nodes`]: two share their first eight digits, so that
+/// prefix is ambiguous in it, and the other two are unique by theirs.
+const TWIN_A: &str = "cbf383be1111111122222222aaaaaaaa";
+const TWIN_B: &str = "cbf383be3333333344444444bbbbbbbb";
+const LONE_A: &str = "1234abcd9999999900000000eeeeeeee";
+const LONE_B: &str = "fedcba98aaaaaaaa11111111ffffffff";
+
+/// A capture of four nodes in two conversations, each side naming itself and
+/// then publishing one record under `demo/p`. The payloads are `a`, `bb`, `ccc`
+/// and `dddd`, from `TWIN_A`, `LONE_A`, `TWIN_B` and `LONE_B` in that order.
+fn four_named_nodes() -> Vec<u8> {
+    let init = |spelled: &str| -> Vec<u8> {
+        let zid =
+            wz_session_core::zid_hex::zenoh_hex_to_zid(spelled).expect("a spelling zenoh takes");
+        let mut wire = vec![
+            wz_session_core::wire_const::T_MID_INIT,
+            0x09,
+            (((zid.len() as u8) - 1) << 4) | 0x02,
+        ];
+        wire.extend_from_slice(&zid);
+        wire
+    };
+    let record = |payload: &'static [u8]| -> Vec<u8> {
+        let mut frame = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        frame.extend_from_slice(
+            &wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+                keyexpr: keyexpr("demo/p"),
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                    payload_len: Some(payload.len() as u64),
+                    payload: Some(payload),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        frame
+    };
+    let packets = [
+        udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 43210, 7447, &init(TWIN_A)),
+        udp_packet([10, 0, 0, 2], [10, 0, 0, 1], 7447, 43210, &init(LONE_A)),
+        udp_packet([10, 0, 0, 3], [10, 0, 0, 4], 43211, 7447, &init(TWIN_B)),
+        udp_packet([10, 0, 0, 4], [10, 0, 0, 3], 7447, 43211, &init(LONE_B)),
+        udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 43210, 7447, &record(b"a")),
+        udp_packet([10, 0, 0, 2], [10, 0, 0, 1], 7447, 43210, &record(b"bb")),
+        udp_packet([10, 0, 0, 3], [10, 0, 0, 4], 43211, 7447, &record(b"ccc")),
+        udp_packet([10, 0, 0, 4], [10, 0, 0, 3], 7447, 43211, &record(b"dddd")),
+    ];
+    let rows: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (1, i as u32 * 10_000, p.as_slice()))
+        .collect();
+    wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &rows)
+}
+
+/// A `node` term of `--select` is a NAME, resolved by `--node-names` to the zid
+/// it stands for before the selector is compiled; a name the file does not
+/// resolve is refused at its term and never read as a node that sent nothing.
+///
+/// The control is the same capture under the zid the name stands for: the two
+/// selectors must select the same record, or the name is being resolved to
+/// something other than a node.
+#[test]
+fn a_node_name_is_resolved_by_the_names_file_and_an_unresolved_one_is_refused() {
+    let scratch = Scratch::new("select-node-names");
+    let capture = scratch.write("nodes.pcap", &four_named_nodes());
+    let names = scratch
+        .write(
+            "names.json",
+            format!(r#"{{"front camera":"{LONE_A}","twins":"{TWIN_A}","twins":"{TWIN_B}"}}"#)
+                .as_bytes(),
+        )
+        .to_str()
+        .expect("a utf-8 path")
+        .to_string();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+            .arg(&capture)
+            .args(args)
+            .output()
+            .expect("runs")
+    };
+    let by_zid = String::from_utf8_lossy(
+        &run(&["--census", "--select", &format!("zid == {LONE_A}")]).stdout,
+    )
+    .into_owned();
+    // The names file may come after the selector it names.
+    for args in [
+        vec![
+            "--census",
+            "--select",
+            r#"node == "front camera""#,
+            "--node-names",
+            names.as_str(),
+        ],
+        vec![
+            "--node-names",
+            names.as_str(),
+            "--census",
+            "--select",
+            r#"node == "front camera""#,
+        ],
+    ] {
+        let out = run(&args);
+        let by_name = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            by_name.contains("selection: 1 matched, 3 rejected, 0 UNDECIDED"),
+            "the name selects its node's record: {by_name}"
+        );
+        assert_eq!(by_name, by_zid, "and the report is the one the zid gives");
+    }
+
+    // Refused, each by name and at its term, and with nothing reported about a
+    // capture that was never analysed.
+    let refused = |args: &[&str], sentence: &str| {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(sentence), "{args:?}: {err}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    };
+    refused(
+        &[
+            "--census",
+            "--select",
+            r#"kind == put and node == "radar""#,
+            "--node-names",
+            names.as_str(),
+        ],
+        r#"--select: bytes 16..31: no node is named "radar""#,
+    );
+    refused(
+        &[
+            "--census",
+            "--select",
+            "node == twins",
+            "--node-names",
+            names.as_str(),
+        ],
+        r#"--select: bytes 0..13: "twins" names 2 nodes"#,
+    );
+    refused(
+        &["--census", "--select", r#"node == "front camera""#],
+        r#"--select: bytes 0..22: no node is named "front camera""#,
+    );
+    refused(
+        &["--census", "--node-names", names.as_str()],
+        "--node-names names the nodes of a --select expression and none was given",
+    );
+    let broken = scratch
+        .write("broken.json", br#"{"cam":"0a0b"}"#)
+        .to_str()
+        .expect("a utf-8 path")
+        .to_string();
+    refused(
+        &[
+            "--census",
+            "--select",
+            "node == cam",
+            "--node-names",
+            broken.as_str(),
+        ],
+        "--node-names:",
     );
 }
 

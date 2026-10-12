@@ -360,6 +360,12 @@ pub struct OpenExchange {
     /// `None` when the request carries a payload this build cannot size — a
     /// `Query` whose value rides its ext chain (R311y637, §1.1w).
     payload_bytes: Option<u64>,
+    /// The request's payload bytes, for a `value` term at close, and OWNED for
+    /// the reason `zid` above is: the exchange outlives the message that
+    /// carried them. `None` is `Content::Unavailable` -- the payload cannot be
+    /// told, or was not kept because no term of the selector reads it
+    /// ([`Filter::reads_value`]), in which case nothing asks.
+    value: Option<alloc::vec::Vec<u8>>,
     /// The capture instant of the request, in nanoseconds: the packet that
     /// carried its first byte. Every instant this plane holds is in nanoseconds
     /// and is divided down only where a millisecond is wanted, so the two
@@ -629,6 +635,12 @@ impl ExchangeTable {
                     zid: ctx.zid(direction).map(<[u8]>::to_vec),
                     kind,
                     payload_bytes,
+                    value: match crate::agg::payload_content(message) {
+                        crate::filter::Content::Whole(bytes) if filter.reads_value() => {
+                            Some(bytes.to_vec())
+                        }
+                        _ => None,
+                    },
                     requested_at_ns: at,
                     requested_unit_offset: crate::agg::record_unit_offset(frame, span),
                     requested_delay_ms: crate::agg::source_delay_ms(
@@ -758,6 +770,10 @@ impl ExchangeTable {
             keyexpr: entry.keyexpr.as_deref(),
             kind: entry.kind,
             payload_bytes: entry.payload_bytes,
+            value: entry.value.as_deref().map_or(
+                crate::filter::Content::Unavailable,
+                crate::filter::Content::Whole,
+            ),
             // The REQUEST's instant, so `time` keeps meaning what it meant when
             // R311y618 asked at the request. A `time` term that silently became
             // "when it closed" would move every reader's window by the latency
@@ -1948,6 +1964,49 @@ pub(crate) mod tests {
         let (light, _) = correlate_where(&records, "bytes < 50");
         assert_eq!(light.requests(), 1);
         assert_eq!(light.selection().rejected, 1);
+    }
+
+    /// A `value` term, judged on the REQUEST's payload as kept since the
+    /// request went past and read at the close. Two puts and a valued query say
+    /// `alpha` and `bravo`; a bare query has no payload at all and is
+    /// undecided, so the three answers come from three different requests.
+    #[test]
+    fn the_exchange_view_answers_a_value_term_off_the_requests_payload() {
+        let topic = || sender_space(0, Some("v/topic"));
+        let records = alloc::vec![
+            (true, Some(1_000), request_put(1, topic(), b"alpha")),
+            (false, Some(1_010), response_final(1)),
+            (true, Some(2_000), request_put(2, topic(), b"bravo")),
+            (false, Some(2_010), response_final(2)),
+            (
+                true,
+                Some(3_000),
+                crate::agg::tests::request_query_valued(3, topic(), Some(b"alpha"))
+            ),
+            (false, Some(3_010), response_final(3)),
+            (true, Some(4_000), request_query(4, topic())),
+            (false, Some(4_010), response_final(4)),
+        ];
+
+        let (alpha, plain) = correlate_where(&records, r#"value contains "alp""#);
+        assert_eq!(plain.requests(), 4, "the control: unfiltered all are seen");
+        assert_eq!(
+            alpha.selection(),
+            crate::filter::Selection {
+                matched: 2,
+                rejected: 1,
+                undecided: 1
+            }
+        );
+        assert_eq!(alpha.requests(), 2);
+        assert_eq!(alpha.unclosed(), 0, "and the admitted ones still closed");
+
+        let (bravo, _) = correlate_where(&records, r#"value == "bravo""#);
+        assert_eq!(bravo.requests(), 1);
+        // Nothing else asks for the payload, so nothing keeps it: a selector
+        // without a `value` term judges the same exchanges it always did.
+        let (kinds, _) = correlate_where(&records, "kind == put");
+        assert_eq!(kinds.requests(), 2);
     }
 
     /// A `time` term, judged on the REQUEST — which is this plane's rule from

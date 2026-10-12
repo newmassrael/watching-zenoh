@@ -116,6 +116,12 @@ BOTH = {
     # flag was deleted. A member's number lives at the member.
     "all planes at once": ("--census", "wz_dissect_pcap_census", ()),
     "selector over the planes": ("--select", "wz_dissect_pcap_census_where", (11,)),
+    # (ABI 35) -- a `node` term of that selector names a node by the caller's own
+    # word, and a record carries only a zid. Both surfaces take the caller's
+    # table and resolve the name to the zid it stands for BEFORE the selector is
+    # compiled: the command line reads the table from a file, the ABI from text.
+    # Neither surface judges an unresolved name; both refuse it at its term.
+    "node names in a selector": ("--node-names", "wz_dissect_selector_bind", ()),
     "flow listing": ("--flows", "wz_dissect_pcap_summary", ()),
     "a machine-readable document": ("--json", "wz_dissect_pcap_census", ()),
     # R311y855 — moved here from ONLY_CLI. The ABI now walks the messages

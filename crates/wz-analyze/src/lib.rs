@@ -287,6 +287,14 @@ pub enum UsageError {
     /// and "`--select` does not take `key = demo/**`" is a worse message than
     /// the one the parser already wrote.
     BadSelector(String),
+    /// `--node-names` named a file that could not be read, or whose table is not
+    /// one object of node name to zid. Carries the reason, which names the
+    /// entry that is wrong.
+    BadNodeNames(String),
+    /// `--node-names` was given and `--select` was not: a table of names that no
+    /// selector reads changes nothing about the output, and this parser refuses
+    /// the flag that silently does nothing (see [`Self::SelectWithoutPlane`]).
+    NodeNamesWithoutSelect,
     /// R311y674 — a selector was given and no plane was asked for.
     ///
     /// REFUSED rather than accepted as a no-op. The three census planes are the
@@ -344,6 +352,12 @@ impl core::fmt::Display for UsageError {
             Self::UnknownFlag(flag) => write!(f, "unknown option `{flag}`"),
             Self::BadValue(flag, got) => write!(f, "{flag} does not take `{got}`"),
             Self::BadSelector(why) => write!(f, "--select: {why}"),
+            Self::BadNodeNames(why) => write!(f, "--node-names: {why}"),
+            Self::NodeNamesWithoutSelect => write!(
+                f,
+                "--node-names names the nodes of a --select expression and none was given; \
+                 add --select"
+            ),
             Self::SelectWithoutPlane => write!(
                 f,
                 "--select narrows the census planes and none was asked for; \
@@ -535,15 +549,27 @@ OPTIONS:
                         key == demo/**        dir == a       kind == query
                         bytes > 100           time < 5000    delay >= 10
                         zid == cbf383be
-                      joined with and / or / not and parentheses. A zid is
-                      written as the nodes plane prints it, whole or as a
-                      prefix of eight digits or more; a prefix that begins two
-                      nodes of the capture is named in the report and judges
-                      nothing. The report says how many records matched, how
+                        value contains \"temp=\"    value == 0x00ff
+                        node == \"front camera\"
+                      joined with and / or / not and parentheses. `value` is
+                      the payload as the publisher put it (a quoted text, with
+                      \\\" \\\\ and \\xNN escapes, or 0x and whole bytes); a record
+                      whose payload cannot be told is UNDECIDED, never a
+                      non-match. A `node` is a name, resolved to the zid it
+                      stands for by --node-names. A zid is written as the
+                      nodes plane prints it, whole or as a prefix of eight
+                      digits or more; a prefix that begins two nodes of the
+                      capture is named in the report and judges nothing. The
+                      report says how many records matched, how
                       many were rejected, and how many are UNDECIDED -- a
                       keyexpr whose declaration went past before the tap
                       started cannot be judged, and counting it as a non-match
                       would make a short total look whole
+    --node-names <file>
+                      the names a `node` term of --select may use: one JSON
+                      object of node name to its zid, in the spelling the nodes
+                      plane prints. A name the file does not hold, or holds for
+                      two zids, is refused at its term
     --bounded         read the capture under the live-tap ceilings instead of
                       unbounded -- the same preset the C ABI's
                       wz_dissect_pcap_summary_bounded uses. Without it the
@@ -640,7 +666,10 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     let mut serial_linktypes: Vec<u32> = Vec::new();
     let mut max_messages: Option<usize> = None;
     let mut census = Census::default();
-    let mut select: Option<wz_capture::filter::Filter> = None;
+    // Kept as TEXT until the arguments are all read: a `node` term is resolved
+    // by `--node-names`, which may come after the `--select` it names.
+    let mut select_text: Option<String> = None;
+    let mut node_names: Option<wz_capture::filter::NodeNames> = None;
     let mut per_field = false;
     let mut bounded = false;
     let mut health = false;
@@ -665,9 +694,18 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
             "--select" => {
                 at += 1;
                 let raw = args.get(at).ok_or(UsageError::MissingValue("--select"))?;
-                select = Some(
-                    wz_capture::filter::Filter::parse(raw)
-                        .map_err(|err| UsageError::BadSelector(err.to_string()))?,
+                select_text = Some(raw.clone());
+            }
+            "--node-names" => {
+                at += 1;
+                let path = args
+                    .get(at)
+                    .ok_or(UsageError::MissingValue("--node-names"))?;
+                let text = std::fs::read_to_string(path)
+                    .map_err(|err| UsageError::BadNodeNames(format!("{path}: {err}")))?;
+                node_names = Some(
+                    wz_capture::filter::NodeNames::from_json(&text)
+                        .map_err(|err| UsageError::BadNodeNames(format!("{path}: {err}")))?,
                 );
             }
             "--messages" => {
@@ -911,6 +949,22 @@ pub fn parse(args: &[String]) -> Result<Options, UsageError> {
     if csv.is_some() && format == Format::Json {
         return Err(UsageError::CsvAndJson);
     }
+    // The selector is compiled last, so `--node-names` may follow it. A `node`
+    // term is resolved to the `zid` term its name stands for before the parser
+    // sees it, which is the step `wz_dissect_selector_bind` is for the C
+    // surface; a name the table does not hold is refused at its term.
+    let select = match select_text {
+        None if node_names.is_some() => return Err(UsageError::NodeNamesWithoutSelect),
+        None => None,
+        Some(text) => {
+            let bound = wz_capture::filter::bind_nodes(&text, &node_names.unwrap_or_default())
+                .map_err(|err| UsageError::BadSelector(err.to_string()))?;
+            Some(
+                wz_capture::filter::Filter::parse(&bound)
+                    .map_err(|err| UsageError::BadSelector(err.to_string()))?,
+            )
+        }
+    };
     Ok(Options {
         capture: match (capture, &interface) {
             (Some(path), _) => path,
@@ -1414,7 +1468,7 @@ pub fn analyze_dissection(
     // The register carried this as "--select does not reach the QUIC pass", and
     // measuring narrowed it: `Filter`'s terms are ALL record-level -- key, dir,
     // kind, bytes, time, elapsed, offset, delay, replies, errs, first_reply,
-    // completion -- and not one of them can be evaluated against a flow whose
+    // completion, value -- and not one of them can be evaluated against a flow whose
     // records this reader has never decoded. So the selector is not UNWIRED
     // here, it is INAPPLICABLE, and wiring it would mean inventing a predicate
     // over bytes nobody has read.

@@ -2805,6 +2805,48 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_DIAGNOSE_R2_CARRIES,
     },
+    // TWO FIELDS, ONE OPERATOR AND ONE ESCAPE JOIN THE LANGUAGE, and the
+    // verdict's VALUES move under stationary keys again, so this row is the
+    // whole notice.
+    //
+    // * `message` of an unknown-field refusal now lists `value` and `node`.
+    // * A selector that holds a `node` term reads `ok:false`, with `at` on the
+    //   term's first byte and a `message` saying the name is not bound: a node
+    //   name is not something a record carries, so the doors take only the
+    //   text a name table has resolved (`wz_dissect_selector_bind`).
+    // * `value contains …`, a `value` term over text or `0x` bytes, and the
+    //   backslash escapes of a quoted value now read `ok:true`; a backslash
+    //   that does not begin an escape is refused AT the backslash, where it was
+    //   once taken for a literal.
+    // * The `tokens` classes did not move: `contains` is a `word`.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 4,
+        keys: SELECTOR_DIAGNOSE_R4_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R2_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R2_CARRIES,
+    },
+    // THE NODE NAME BINDER'S VERDICT, first revision.
+    //
+    // A `node` term names a node by the application's own word, and a record
+    // carries only the zid its sender announced, so the name is resolved before
+    // any door is asked. The verdict is the selector to pass on, or the typed
+    // refusal -- never a selector with a hole in it. The refusal's `refusal`
+    // word DECIDES which keys arrive beside it (`carries` below), because a
+    // refusal that is about the table has no place in the selector to point at
+    // and one about a term has the term's byte span; neither is ever written as
+    // a `null`, on the rule every document here keeps.
+    DocumentShape {
+        document: SELECTOR_BIND,
+        revision: 1,
+        keys: SELECTOR_BIND_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_BIND_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_BIND_R1_CARRIES,
+    },
     // A `zid` PREFIX IS READ AGAINST THE CAPTURE, and an ambiguous one is
     // reported on the verdict document.
     //
@@ -2913,6 +2955,10 @@ pub const SUMMARY: &str = "summary";
 pub const READABLE_SURFACES: &str = "readable_surfaces";
 /// A selector's verdict (`wz_dissect_selector_diagnose`).
 pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
+/// A selector's `node` terms resolved to the zids a caller's table gives them
+/// (`wz_dissect_selector_bind`): the selector to hand the doors, or the typed
+/// refusal that says which term could not be resolved and why.
+pub const SELECTOR_BIND: &str = "selector_bind";
 /// A declaration block's verdict (`wz_dissect_declarations_diagnose`).
 pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
 /// One key expression's verdict (`wz_dissect_keyexpr_diagnose`).
@@ -9281,6 +9327,78 @@ pub const SELECTOR_DIAGNOSE_R2_KEYS: &[&str] = &[
 /// notice, written on the [`DocumentShape`] row.
 pub const SELECTOR_DIAGNOSE_R3_KEYS: &[&str] = SELECTOR_DIAGNOSE_R2_KEYS;
 
+/// The selector verdict's key set at revision 4: revision 3's, by name, for
+/// the reason revision 3 aliased revision 2's -- values moved under stationary
+/// keys and the row on [`DocumentShape`] is the notice.
+pub const SELECTOR_DIAGNOSE_R4_KEYS: &[&str] = SELECTOR_DIAGNOSE_R3_KEYS;
+
+/// The binder verdict's key set at revision 1, over EVERY shape it takes: the
+/// success (`selector`) and the four refusals (`refusal`, `message`, and the
+/// `name`, `start`, `end` and `candidates` a refusal about a term adds).
+pub const SELECTOR_BIND_R1_KEYS: &[&str] = &[
+    "candidates",
+    "document",
+    "end",
+    "message",
+    "name",
+    "ok",
+    "refusal",
+    "revision",
+    "selector",
+    "start",
+];
+
+/// What a binder `refusal` says at revision 1: the table could not be read, the
+/// selector does not compile, a `node` term names nothing the table holds, a
+/// `node` term names more than one thing it holds.
+pub const SELECTOR_BIND_REFUSAL_R1: &[&str] =
+    &["ambiguous_node", "selector", "table", "unknown_node"];
+
+/// The binder verdict's value families at revision 1: the refusal.
+pub const SELECTOR_BIND_R1_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "refusal",
+    values: SELECTOR_BIND_REFUSAL_R1,
+}];
+
+/// A `refusal` is a DISCRIMINANT: the word decides what the object says about
+/// where. The envelope keys (`document`, `ok`) are included, as the type's note
+/// says, because a consumer parses the object it is handed.
+///
+/// * `table` -- the caller's own table; there is no place in the selector;
+/// * `selector` -- the text does not compile; `start` and `end` are the one
+///   caret `wz_dissect_selector_diagnose` would put (`at`), a zero-width span;
+/// * `unknown_node` and `ambiguous_node` -- the whole `node` term, and for the
+///   second the zids the name stands for, in the spelling the documents print.
+pub const SELECTOR_BIND_R1_CARRIES: &[KeyCarries] = &[KeyCarries {
+    key: "refusal",
+    shape: CarriesShape::Discriminant(&[
+        WordCarries {
+            word: "ambiguous_node",
+            shapes: &[&[
+                "candidates",
+                "document",
+                "end",
+                "message",
+                "name",
+                "ok",
+                "start",
+            ]],
+        },
+        WordCarries {
+            word: "selector",
+            shapes: &[&["document", "end", "message", "ok", "start"]],
+        },
+        WordCarries {
+            word: "table",
+            shapes: &[&["document", "message", "ok"]],
+        },
+        WordCarries {
+            word: "unknown_node",
+            shapes: &[&["document", "end", "message", "name", "ok", "start"]],
+        },
+    ]),
+}];
+
 /// What a token's `kind` says at selector-verdict revision 2 — the words of
 /// [`crate::filter::TokenClass`].
 pub const TOKEN_CLASS_R2: &[&str] = &[
@@ -14905,7 +15023,12 @@ mod tests {
             // To 3 when the position of an unfinished selector moved to its
             // byte length and an unknown field's candidates gained `zid`: two
             // values under stationary keys, so this entry is the notice.
-            (SELECTOR_DIAGNOSE, 3),
+            // To 4 when `value` and `node` joined the field list and a
+            // quoted value gained escapes: again values under stationary keys.
+            (SELECTOR_DIAGNOSE, 4),
+            // The node names of a selector resolved to the zids a caller's
+            // table gives them.
+            (SELECTOR_BIND, 1),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             (DECLARATIONS_DIAGNOSE, 2),

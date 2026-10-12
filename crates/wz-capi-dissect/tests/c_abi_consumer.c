@@ -2636,11 +2636,13 @@ int main(void) {
     /* Revision 2 closes with the lexer's tokens, byte spans into
      * the selector above, so a consumer colours the selector off this walk.
      * Revision 3 moves the position of an unfinished selector to its byte
-     * length and lists `zid` among an unknown field's candidates.
+     * length and lists `zid` among an unknown field's candidates. Revision 4
+     * adds `value` and `node` to those candidates and reads the escapes of a
+     * quoted value; none of it is on this success branch.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":3},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":4},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\"},"
@@ -2862,7 +2864,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[16];
+    } revisioned[17];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -3308,6 +3310,14 @@ int main(void) {
         rc = wz_dissect_proto_describe("M", &one, 1, 0, &revisioned[15].doc);
     }
     CHECK(rc == WZ_DISSECT_OK, "proto_message document rc=%d", rc);
+    /* (ABI 35) -- the binder's verdict, at 1. A selector with no node term and
+     * no table is the cheapest input it answers; the same envelope opens a
+     * refusal. */
+    revisioned[16].name = "selector_bind";
+    revisioned[16].revision = 1;
+    revisioned[16].doc = NULL;
+    rc = wz_dissect_selector_bind("kind == put", NULL, &revisioned[16].doc);
+    CHECK(rc == WZ_DISSECT_OK, "selector_bind document rc=%d", rc);
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -3340,6 +3350,45 @@ int main(void) {
               "reads it before parsing the body: %s",
               revisioned[i].name, revisioned[i].doc);
         wz_dissect_string_free(revisioned[i].doc);
+    }
+
+    /* (ABI 35) -- A NODE NAME BOUND TO THE ZID IT STANDS FOR, driven from C the
+     * way a consumer holding a list of named nodes does it: the table crosses as
+     * text, the selector that comes back is the language's own, and a door never
+     * sees a name. The refusal of a name the table lacks is a successful verdict
+     * with a typed word and the byte span of the term, and a door handed the
+     * unbound selector refuses it as a selector that does not compile. */
+    {
+        char *bound = NULL;
+        char *unnamed = NULL;
+        char *doc = NULL;
+        rc = wz_dissect_selector_bind(
+            "kind == put and node == \"front camera\"",
+            "{\"front camera\":\"ff0eedd0c0b0a0908070605040302011\"}", &bound);
+        CHECK(rc == WZ_DISSECT_OK, "selector_bind rc=%d", rc);
+        CHECK(bound != NULL && strstr(bound, "\"ok\":true") != NULL &&
+                  strstr(bound,
+                         "\"selector\":\"kind == put and zid == "
+                         "ff0eedd0c0b0a0908070605040302011\"") != NULL,
+              "the name must come back as the zid it stands for: %s",
+              bound ? bound : "(null)");
+        wz_dissect_string_free(bound);
+
+        rc = wz_dissect_selector_bind("node == radar", "{}", &unnamed);
+        CHECK(rc == WZ_DISSECT_OK, "selector_bind (unknown name) rc=%d", rc);
+        CHECK(unnamed != NULL && strstr(unnamed, "\"ok\":false") != NULL &&
+                  strstr(unnamed, "\"refusal\":\"unknown_node\"") != NULL &&
+                  strstr(unnamed, "\"name\":\"radar\"") != NULL &&
+                  strstr(unnamed, "\"start\":0,\"end\":13") != NULL,
+              "an unknown name is a typed refusal with its span: %s",
+              unnamed ? unnamed : "(null)");
+        wz_dissect_string_free(unnamed);
+
+        rc = wz_dissect_pcap_census_where(pcap, sizeof pcap, "node == radar",
+                                          &doc);
+        CHECK(rc == WZ_DISSECT_ERR_SELECTOR && doc == NULL,
+              "a door must refuse a selector that still holds a node name, "
+              "not read it as a miss (rc=%d)", rc);
     }
 
     /* R2114 (open-debt item 237) -- A FORMAT THIS LIBRARY DOES NOT SHIP,

@@ -368,6 +368,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 34, for `wz_dissect_keyexpr_relate`, `wz_dissect_declarations_match` and
     // `wz_dissect_proto_describe`: two key expressions related, the declaration
     // rule that covers a key, and a root message of a `.proto` schema described.
+    // 35, for `wz_dissect_selector_bind`: the node names of a selector resolved
+    // to the zids a caller's table gives them.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -385,7 +387,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 34;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 35;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2848,6 +2850,55 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
     write_string(wz_capture::filter::diagnose_json(expr), out)
 }
 
+/// ABI 35 -- resolve a selector's `node` terms to the zids a caller's table
+/// gives them, and hand back the selector to pass on.
+///
+/// A `node == "front camera"` term names a node the way the application's own
+/// list does, and a record carries only the zid its sender announced. The
+/// table is the application's (only it knows what it calls a node), so it
+/// crosses as text: one JSON object of node name to that node's zid, in zenoh's
+/// spelling. The document is `selector_bind`: `{"ok":true,"selector":"…"}` with
+/// every `node` term replaced by the `zid` term its name stands for, or a typed
+/// refusal (`refusal`: `table`, `selector`, `unknown_node`, `ambiguous_node`)
+/// with the byte span of the term it is about. Every other door refuses a
+/// selector that still holds a `node` term, as one that does not compile, so a
+/// name that was never resolved is never read as a miss.
+///
+/// A refusal is a successful DIAGNOSIS and not an error, exactly as for
+/// [`wz_dissect_selector_diagnose`], which is why the memory rule is untouched:
+/// OK means a string you own, an error means none. A null `names_json` is a
+/// table with no names.
+///
+/// # Safety
+/// `selector` must be a NUL-terminated C string, `names_json` null or one, and
+/// `out` a writable pointer to a `*mut c_char`. `selector` and `out` may not be
+/// null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_bind(
+    selector: *const c_char,
+    names_json: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let names = if names_json.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { std::ffi::CStr::from_ptr(names_json) }.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+        }
+    };
+    write_string(wz_capture::filter::bind_json(expr, names), out)
+}
+
 // ── R2102 (ABI 11, open-debt item 524) — THE LIVE DOOR ──────────────────────
 //
 // Four symbols and a getter. Everything above this line takes a whole capture
@@ -4674,6 +4725,8 @@ mod tests {
             "dir" => "a",
             "kind" => "put",
             "closed" => "yes",
+            "value" => "\"x\"",
+            "node" => "\"front camera\"",
             _ => "1",
         };
         for (field, description) in &rows {
@@ -7184,10 +7237,11 @@ mod tests {
         // Revision 2 closes with the lexer's tokens, byte spans
         // into `key == demo/**`. Revision 3 moved the position of an
         // unfinished selector and the candidates of an unknown field, and
-        // neither is on this success branch.
+        // neither is on this success branch. Nor is revision 4's, which
+        // added two fields and the escapes of a quoted value.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":3},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":4},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\"}]}"
@@ -7207,7 +7261,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":3},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":4},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
@@ -7231,6 +7285,92 @@ mod tests {
             "`kind ==` parses, so the fault is not at byte 0 -- an `at` that is \
              always 0 would point every UI at the first character: {verdict}"
         );
+    }
+
+    /// A NODE NAME IS RESOLVED BEFORE ANY DOOR READS IT, and a name that was
+    /// not resolved is refused rather than read as a miss.
+    ///
+    /// The consumer holds a list of named nodes; a record carries only the zid
+    /// its sender announced. `wz_dissect_selector_bind` is the one place the two
+    /// meet, and what it hands back is the language's own text, so the doors
+    /// need no table. Asserted from both sides: the bound text is accepted and
+    /// narrows by the zid, and the unbound text is a selector that does not
+    /// compile (`ERR_SELECTOR`, and the diagnosis puts the caret on the term),
+    /// because an empty census under a name nobody resolved would read as "that
+    /// node sent nothing".
+    #[test]
+    fn a_node_name_is_bound_before_a_door_reads_it() {
+        const CAM: &str = "ff0eedd0c0b0a0908070605040302011";
+        let table = format!(r#"{{"front camera":"{CAM}"}}"#);
+        let file = census_capture();
+
+        let bound = call_selector_bind(r#"node == "front camera""#, Some(&table));
+        assert!(
+            bound.contains(&format!("\"ok\":true,\"selector\":\"zid == {CAM}\"")),
+            "{bound}"
+        );
+        // The text a consumer passes on is what is inside `selector`, and the
+        // doors take it.
+        let text = format!("zid == {CAM}");
+        assert!(call_census_where(&file, &text).is_ok());
+
+        // The unbound text is refused by the door and located by the diagnosis.
+        assert_eq!(
+            call_census_where(&file, r#"node == "front camera""#),
+            Err(WZ_DISSECT_ERR_SELECTOR)
+        );
+        let diagnosis = call_selector_diagnose(r#"kind == put and node == "front camera""#);
+        assert!(diagnosis.contains("\"ok\":false,\"at\":16"), "{diagnosis}");
+        assert!(diagnosis.contains("not bound to a zid"), "{diagnosis}");
+
+        // Each refusal is typed and located, and a table without the name is
+        // not an empty answer.
+        let unknown = call_selector_bind(r#"kind == put and node == "radar""#, Some(&table));
+        assert!(
+            unknown.contains(
+                "\"ok\":false,\"refusal\":\"unknown_node\",\"message\":\"bytes 16..31: \
+                 no node is named \\\"radar\\\"\",\"name\":\"radar\",\"start\":16,\"end\":31"
+            ),
+            "{unknown}"
+        );
+        let twice = call_selector_bind("node == twin", Some(r#"{"twin":"a1b2","twin":"c3d4"}"#));
+        assert!(twice.contains("\"refusal\":\"ambiguous_node\""), "{twice}");
+        assert!(
+            twice.contains("\"candidates\":[\"a1b2\",\"c3d4\"]"),
+            "{twice}"
+        );
+        let broken = call_selector_bind("kind ==", Some(&table));
+        assert!(
+            broken.contains("\"refusal\":\"selector\"") && broken.contains("\"start\":7,\"end\":7"),
+            "the caret of a selector that ends unfinished is its byte length: {broken}"
+        );
+        let bad_table = call_selector_bind("kind == put", Some(r#"{"cam":"0a0b"}"#));
+        assert!(bad_table.contains("\"refusal\":\"table\""), "{bad_table}");
+        assert!(
+            !bad_table.contains("\"start\""),
+            "a fault in the table has no place in the selector: {bad_table}"
+        );
+
+        // No table is a table with no names: a selector without a node term
+        // binds to itself.
+        assert!(call_selector_bind("kind == put", None)
+            .contains("\"ok\":true,\"selector\":\"kind == put\""));
+
+        // The memory rule is the diagnosis door's: nulls are refused and
+        // nothing is handed back.
+        let sel = std::ffi::CString::new("kind == put").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { wz_dissect_selector_bind(core::ptr::null(), core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe {
+                wz_dissect_selector_bind(sel.as_ptr(), core::ptr::null(), core::ptr::null_mut())
+            },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert!(out.is_null());
     }
 
     /// The census door keeps the ABI's memory contract: a bad capture is a
@@ -7627,7 +7767,10 @@ mod tests {
         // `wz_dissect_string_free`; the two texts cross as C strings and the schema
         // files as the struct `wz_dissect_declarations_from_proto` takes, so no
         // struct is new.
-        assert_eq!(wz_dissect_abi_version(), 34);
+        // 35, for `wz_dissect_selector_bind`: one symbol, a `char*` released by
+        // `wz_dissect_string_free`; the selector and the name table cross as C
+        // strings the caller already holds, and no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 35);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -8368,6 +8511,9 @@ mod tests {
             ),
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
             (rev::SELECTOR_DIAGNOSE, vec![selector_ok, selector_bad]),
+            // The binder's verdict over every shape it writes: a success and a
+            // refusal of each of its four words, whose keys differ by word.
+            (rev::SELECTOR_BIND, bind_documents()),
             (rev::DECLARATIONS_DIAGNOSE, decl),
             (rev::KEYEXPR_DIAGNOSE, keyexpr),
             // Every shape the `.proto` door writes: the success, a place in a
@@ -8533,6 +8679,11 @@ mod tests {
             ),
             (rev::READABLE_SURFACES, call_readable_surfaces()),
             (rev::SELECTOR_DIAGNOSE, call_selector_diagnose("")),
+            // Declares no plane either.
+            (
+                rev::SELECTOR_BIND,
+                bind_documents().into_iter().next().expect("a document"),
+            ),
             (rev::DECLARATIONS_DIAGNOSE, call_declarations_diagnose("")),
             (rev::KEYEXPR_DIAGNOSE, call_keyexpr_diagnose("demo/**")),
             // Declares no plane either.
@@ -8736,6 +8887,9 @@ mod tests {
                 rev::SELECTOR_DIAGNOSE,
                 vec![call_selector_diagnose(""), call_selector_diagnose("key ==")],
             ),
+            // Every shape the binder writes: no refusal writes a `null`, the
+            // position keys are simply absent where the word has none.
+            (rev::SELECTOR_BIND, bind_documents()),
             (
                 rev::DECLARATIONS_DIAGNOSE,
                 vec![
@@ -8916,6 +9070,43 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         s
+    }
+
+    /// Drive the binder the way C does. `names` is the table's text, or `None`
+    /// for the null pointer C passes for "no names".
+    fn call_selector_bind(selector: &str, names: Option<&str>) -> String {
+        let text = CString::new(selector).expect("no interior NUL");
+        let table = names.map(|n| CString::new(n).expect("no interior NUL"));
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_selector_bind(
+                text.as_ptr(),
+                table.as_ref().map_or(core::ptr::null(), |t| t.as_ptr()),
+                &mut out,
+            )
+        };
+        assert_eq!(
+            rc, WZ_DISSECT_OK,
+            "a refused binding is a successful DIAGNOSIS, not an error"
+        );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
+    /// Every shape the binder's verdict takes, success first.
+    fn bind_documents() -> Vec<String> {
+        const NAMES: &str = r#"{"cam":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2"}"#;
+        vec![
+            call_selector_bind("kind == put and node == cam or node != lidar", Some(NAMES)),
+            call_selector_bind("node == radar", Some(NAMES)),
+            call_selector_bind("node == twin", Some(r#"{"twin":"a1b2","twin":"c3d4"}"#)),
+            call_selector_bind("node ==", Some(NAMES)),
+            call_selector_bind("node == cam", Some("[]")),
+        ]
     }
 
     /// Drive the selector diagnostic the way C does.

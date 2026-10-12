@@ -56,11 +56,32 @@
 //! | `first_reply` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
 //! | `completion` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or it never closed |
 //! | `closed` | `yes` / `no`, or `y` / `n` | `==` `!=` | the plane does not correlate exchanges |
+//! | `value` | the payload bytes: a quoted text, or `0x` and whole bytes in hex | `contains` `==` `!=` | the record's payload cannot be separated from its message, or is not carried in it |
+//! | `node` | the name of the node that sent the record | `==` `!=` | never judged: the name is bound to a `zid` term before any record is asked (see below) |
 //!
 //! The table is the language's field list as it is WRITTEN. The list the
 //! parser reads and the one an unknown-field refusal prints are one
 //! declaration (`selector_fields!`), and a test holds this table to it by
 //! offering the parser every name here.
+//!
+//! ## `value` is the payload AS THE PUBLISHER PUT IT
+//!
+//! The bytes compared are the application payload of a `Put`, a `Reply` or an
+//! `Err`, after the transport has decompressed and reassembled the message
+//! and before any encoding is applied to them: `value == "42"` is the two
+//! bytes `0x34 0x32`, whatever the record's encoding calls them. `contains`
+//! is a byte substring test, `==` and `!=` compare the whole payload.
+//!
+//! A text literal is quoted. Inside the quotes `\"`, `\'` and `\\` stand for
+//! the character, and `\xNN` (two hex digits) for one byte, so a payload that
+//! is not text is still expressible; any other backslash is refused at its own
+//! byte. Bytes are written `0x` and an even number of hex digits.
+//!
+//! It is undecidable, never false, where the capture cannot say what the
+//! payload was: a `Del` has none, a `Query`'s value that this reader cannot
+//! open, and a payload that rides shared memory instead of the wire. A
+//! record whose message was cut before its payload ended is not a record the
+//! plane produced at all, so a payload this term sees is always a whole one.
 //!
 //! ## R311y636 (§1.1v) — the last five are about the OUTCOME, not the request
 //!
@@ -297,6 +318,9 @@ pub struct RecordView<'a> {
     /// real and unmeasured. Reporting the second as `0` made `bytes > 0`
     /// answer `no` about traffic that was there.
     pub payload_bytes: Option<u64>,
+    /// The payload's BYTES, where [`Self::payload_bytes`] is only their count.
+    /// Asked by the `value` term; see [`Content`] for what each answer means.
+    pub value: Content<'a>,
     /// The capture clock as of the frame that carried it, or `None` when the
     /// capture format carried no timestamp
     /// ([`PassiveFrame::observed_at_ms`](wz_session_core::passive::PassiveFrame::observed_at_ms)).
@@ -371,6 +395,29 @@ pub struct RecordView<'a> {
     /// one would put an identity on the wire that nobody sent, which is the
     /// line the consumer's own half-row rule draws from the other side.
     pub zid: Option<&'a [u8]>,
+}
+
+/// What a record's payload is, as the `value` term reads it.
+///
+/// A sibling of [`RecordView::payload_bytes`] and answering the same
+/// question one step further: not how many bytes the payload has but which.
+/// It borrows from the decoded message, so a plane that folds records pays
+/// nothing for it unless a selector asks.
+///
+/// There is deliberately no "a prefix of the payload" state. Every plane here
+/// walks a message that decoded whole, and a payload whose length the wire
+/// does not back is [`Self::Unavailable`] already (the same line
+/// `payload_bytes` draws with `None`), so a `contains` answer is never
+/// "no" about bytes that were cut off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Content<'a> {
+    /// The payload cannot be told from this record: a `Del` carries none, a
+    /// `Query`'s value that this build cannot open is one opaque ext, and a
+    /// payload that rides shared memory is a descriptor on this wire, not the
+    /// data. A `value` term over it is undecidable and never false.
+    Unavailable,
+    /// The payload, every byte of it. An empty slice is a real empty payload.
+    Whole(&'a [u8]),
 }
 
 /// A three-valued answer.
@@ -492,6 +539,8 @@ selector_fields! {
     FirstReply => "first_reply",
     Completion => "completion",
     Closed => "closed",
+    Value => "value",
+    Node => "node",
 }
 
 impl Field {
@@ -598,6 +647,36 @@ enum Term {
         want: bool,
         negated: bool,
     },
+    /// The content axis: the payload's bytes against `needle`.
+    ///
+    /// The needle is bytes and not text because a payload is bytes: the
+    /// literal the reader typed (`"abc"`, `0x00ff`) is decoded once, at parse,
+    /// so the per-record path is a slice comparison.
+    Value {
+        op: ValueOp,
+        needle: Vec<u8>,
+    },
+    /// A node NAME. It never reaches a record: [`Filter::parse`] refuses a
+    /// selector that holds one, and [`bind_nodes`] is what turns it into the
+    /// `zid` term the name stands for. The variant exists so the binder can
+    /// read the terms it must replace out of the one tree the parser builds,
+    /// instead of keeping a second reader of the grammar that would disagree
+    /// about where a term begins.
+    Node {
+        name: String,
+        /// The byte range of the WHOLE term, field to value, which is what the
+        /// binder replaces and what a refusal points at.
+        span: (usize, usize),
+        negated: bool,
+    },
+}
+
+/// How a `value` term compares: the three the language admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueOp {
+    Contains,
+    Eq,
+    Ne,
 }
 
 impl Term {
@@ -712,8 +791,30 @@ impl Term {
                 None => Truth::Unknown,
                 Some(o) => Truth::of((o.closed == *want) != *negated),
             },
+            // The content axis. `Unavailable` is the sixth undecidable case: a
+            // record whose payload this capture cannot tell is not a record
+            // whose payload is different, so `value != "x"` over it is
+            // undecidable too, for the reason the `Zid` arm gives.
+            Self::Value { op, needle } => match record.value {
+                Content::Unavailable => Truth::Unknown,
+                Content::Whole(bytes) => Truth::of(match op {
+                    ValueOp::Contains => contains_bytes(bytes, needle),
+                    ValueOp::Eq => bytes == needle.as_slice(),
+                    ValueOp::Ne => bytes != needle.as_slice(),
+                }),
+            },
+            // Unreachable through a `Filter` a caller holds, which refuses a
+            // node name at parse. If a future path builds one anyway, the
+            // honest answer is that it was not judged, and never a miss.
+            Self::Node { .. } => Truth::Unknown,
         }
     }
+}
+
+/// Whether `haystack` holds `needle` as a run of bytes. The empty needle is in
+/// every payload, the empty one included, as it is for a string.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 // R2757 (open debt 790) — `dir_index` used to be spelled here TOO, identically.
@@ -875,7 +976,28 @@ impl Filter {
     /// reading of "no filter given", and it keeps a caller wiring a command-line
     /// flag from having to special-case the empty string into a different code
     /// path.
+    ///
+    /// A selector that holds a `node` term is refused ([`FilterErrorKind::UnboundNode`])
+    /// at the term: a node NAME is not something a record carries, so no
+    /// record could be judged by it, and answering `no` (or `unknown`) for
+    /// every record would be a silent empty table. [`bind_nodes`] is what
+    /// resolves the name, and the text it returns parses.
     pub fn parse(source: &str) -> Result<Self, FilterError> {
+        let filter = Self::parse_tree(source)?;
+        let mut nodes = Vec::new();
+        filter.root.node_terms(&mut nodes);
+        match nodes.into_iter().next() {
+            None => Ok(filter),
+            Some(node) => Err(FilterError {
+                at: node.span.0,
+                kind: FilterErrorKind::UnboundNode { name: node.name },
+            }),
+        }
+    }
+
+    /// The parse itself, `node` terms included. [`Self::parse`] is this plus
+    /// the refusal; the binder reads the terms it must replace out of it.
+    fn parse_tree(source: &str) -> Result<Self, FilterError> {
         let tokens = lex(source)?;
         if tokens.is_empty() {
             return Ok(Self::any());
@@ -898,6 +1020,16 @@ impl Filter {
     /// Decide one record.
     pub fn matches(&self, record: &RecordView<'_>) -> Truth {
         self.root.eval(record)
+    }
+
+    /// `true` when some term of this selector compares the payload's bytes.
+    ///
+    /// For a plane that must KEEP a record's payload until it can be judged
+    /// (the exchange plane judges at the close) to copy it only when a
+    /// selector will read it, instead of holding every open query's bytes for
+    /// the sake of a term nobody wrote.
+    pub fn reads_value(&self) -> bool {
+        self.root.reads_value()
     }
 
     /// Read this selector against the zids ONE capture names, and say what its
@@ -1127,6 +1259,256 @@ impl Node {
             Self::Term(_) => self.clone(),
         }
     }
+
+    /// Whether any term asks for the payload's bytes.
+    fn reads_value(&self) -> bool {
+        match self {
+            Self::Any | Self::Ambiguous => false,
+            Self::Or(nodes) | Self::And(nodes) => nodes.iter().any(Node::reads_value),
+            Self::Not(inner) => inner.reads_value(),
+            Self::Term(term) => matches!(term, Term::Value { .. }),
+        }
+    }
+
+    /// Every `node` term, left to right as the selector writes them.
+    fn node_terms(&self, out: &mut Vec<NodeTerm>) {
+        match self {
+            Self::Any | Self::Ambiguous => {}
+            Self::Or(nodes) | Self::And(nodes) => nodes.iter().for_each(|n| n.node_terms(out)),
+            Self::Not(inner) => inner.node_terms(out),
+            Self::Term(Term::Node {
+                name,
+                span,
+                negated,
+            }) => out.push(NodeTerm {
+                name: name.clone(),
+                span: *span,
+                negated: *negated,
+            }),
+            Self::Term(_) => {}
+        }
+    }
+}
+
+/// A `node` term as the binder reads it out of a parsed selector.
+struct NodeTerm {
+    name: String,
+    /// The whole term, field to value.
+    span: (usize, usize),
+    negated: bool,
+}
+
+/// THE NAMES OF THE NODES, handed in by the application.
+///
+/// A `node` term names a node the way the application's own list does
+/// (`node == "front camera"`), and a capture knows nodes only by the zid each
+/// announced. The table is what connects them, and it is the application's
+/// because only the application knows what it calls a node: this crate has no
+/// name to offer and does not invent one.
+///
+/// A table keeps EVERY pair it is given. A name given two different zids is
+/// not an error of the table but of the term that uses it: `node == "x"` over
+/// a name that stands for two nodes would have to pick one, and picking is a
+/// guess that silently drops the other node's traffic, so [`bind_nodes`]
+/// refuses that term and leaves the table's other names usable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeNames {
+    /// `(name, zid)` in the order given; the zid is canonical (trailing zero
+    /// bytes trimmed), so one zid is one entry however it was spelled.
+    entries: Vec<(String, Vec<u8>)>,
+}
+
+/// Why a name table could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeNamesError {
+    /// The document is not readable JSON; the offset is a byte of it.
+    NotJson { offset: usize },
+    /// The document is readable but is not an object of name to zid.
+    NotAnObject,
+    /// A name whose value is not a string.
+    ZidNotText { name: String },
+    /// A name whose zid is not a zid in zenoh's spelling: bare hex, either
+    /// case, no leading zero, at most 32 digits.
+    BadZid { name: String, zid: String },
+}
+
+impl fmt::Display for NodeNamesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotJson { offset } => write!(f, "the name table is not JSON (byte {offset})"),
+            Self::NotAnObject => write!(f, "the name table must be an object of name to zid"),
+            Self::ZidNotText { name } => write!(f, "the zid of {name:?} must be a string"),
+            Self::BadZid { name, zid } => {
+                write!(
+                    f,
+                    "the zid {zid:?} of {name:?} is not a zid in zenoh's spelling"
+                )
+            }
+        }
+    }
+}
+
+impl NodeNames {
+    /// An empty table: every `node` term is then an unknown name.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one name for the node with this zid (zenoh's spelling, either case).
+    /// A name may be added again with another zid; see the type's note.
+    pub fn add(&mut self, name: &str, zid: &str) -> Result<(), NodeNamesError> {
+        let bad = || NodeNamesError::BadZid {
+            name: name.to_string(),
+            zid: zid.to_string(),
+        };
+        let parsed = parse_zid(zid, 0).map_err(|_| bad())?;
+        let entry = (name.to_string(), parsed);
+        if !self.entries.contains(&entry) {
+            self.entries.push(entry);
+        }
+        Ok(())
+    }
+
+    /// A table from the application's JSON: one object, each key a node name
+    /// and each value that node's zid as a string.
+    ///
+    /// `{"front camera":"a1b2c3d4e5f60718293a4b5c6d7e8f90"}`. A key written
+    /// twice is the same name given twice, which is the name-with-two-zids case
+    /// above and not a parse error; JSON5 comments and trailing commas are
+    /// read, as they are everywhere this workspace reads JSON.
+    pub fn from_json(text: &str) -> Result<Self, NodeNamesError> {
+        let document = wz_session_core::json5::parse(text)
+            .map_err(|e| NodeNamesError::NotJson { offset: e.offset })?;
+        let wz_session_core::json5::Json5Value::Object(members) = document else {
+            return Err(NodeNamesError::NotAnObject);
+        };
+        let mut table = Self::new();
+        for (name, value) in members {
+            let wz_session_core::json5::Json5Value::String(zid) = value else {
+                return Err(NodeNamesError::ZidNotText { name });
+            };
+            table.add(&name, &zid)?;
+        }
+        Ok(table)
+    }
+
+    /// The distinct zids a name stands for, in the order they were given.
+    fn zids_of(&self, name: &str) -> Vec<&[u8]> {
+        let mut found: Vec<&[u8]> = Vec::new();
+        for (n, zid) in &self.entries {
+            if n == name && !found.contains(&zid.as_slice()) {
+                found.push(zid);
+            }
+        }
+        found
+    }
+}
+
+/// Why [`bind_nodes`] did not produce a selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeBindError {
+    /// The selector does not compile; its position is the verdict's.
+    Selector(FilterError),
+    /// A `node` term names something the table does not hold. The span is the
+    /// whole term, so a caret lands on it.
+    UnknownNode {
+        name: String,
+        start: usize,
+        end: usize,
+    },
+    /// A `node` term names something the table gives two or more zids. They
+    /// are listed in the order given, in zenoh's spelling.
+    AmbiguousNode {
+        name: String,
+        zids: Vec<String>,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl fmt::Display for NodeBindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Selector(e) => e.fmt(f),
+            Self::UnknownNode { name, start, end } => {
+                write!(f, "bytes {start}..{end}: no node is named {name:?}")
+            }
+            Self::AmbiguousNode {
+                name,
+                zids,
+                start,
+                end,
+            } => write!(
+                f,
+                "bytes {start}..{end}: {name:?} names {} nodes ({})",
+                zids.len(),
+                zids.join(", ")
+            ),
+        }
+    }
+}
+
+/// Replace every `node` term of a selector with the `zid` term its name stands
+/// for, and return the selector text.
+///
+/// `node == "front camera"` becomes `zid == <the zid>`, `!=` stays `!=`, and
+/// the rest of the text is untouched byte for byte, so every position a
+/// diagnosis reports on the result is a position in a selector the reader
+/// could have typed. The result is the language's own plain text: no door
+/// needs to know a name table exists.
+///
+/// A name the table does not hold, or holds for two nodes, is REFUSED at its
+/// term and never read as no match. The first such term in the selector is
+/// the one reported.
+///
+/// ⚠ The bound term is an ordinary `zid` term, so a zid of eight or more
+/// digits keeps the prefix reading `zid` has ("A zid may be written as a
+/// PREFIX"): a node whose whole zid is that short, absent from the capture,
+/// while another node's zid begins with the same digits, is read as that other
+/// node. A zid generated by zenoh is 32 digits and cannot be one.
+pub fn bind_nodes(source: &str, names: &NodeNames) -> Result<String, NodeBindError> {
+    let filter = Filter::parse_tree(source).map_err(NodeBindError::Selector)?;
+    let mut terms = Vec::new();
+    filter.root.node_terms(&mut terms);
+    let mut edits = Vec::with_capacity(terms.len());
+    for term in terms {
+        let (start, end) = term.span;
+        let zids = names.zids_of(&term.name);
+        let zid = match zids.as_slice() {
+            [] => {
+                return Err(NodeBindError::UnknownNode {
+                    name: term.name,
+                    start,
+                    end,
+                })
+            }
+            [one] => *one,
+            many => {
+                return Err(NodeBindError::AmbiguousNode {
+                    name: term.name,
+                    zids: many
+                        .iter()
+                        .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z))
+                        .collect(),
+                    start,
+                    end,
+                })
+            }
+        };
+        let op = if term.negated { "!=" } else { "==" };
+        let replacement = alloc::format!(
+            "zid {op} {}",
+            wz_session_core::zid_hex::zid_to_zenoh_hex(zid)
+        );
+        edits.push((start, end, replacement));
+    }
+    // Terms were collected left to right and do not overlap, so splicing from
+    // the back keeps every earlier offset true.
+    let mut bound = source.to_string();
+    for (start, end, replacement) in edits.into_iter().rev() {
+        bound.replace_range(start..end, &replacement);
+    }
+    Ok(bound)
 }
 
 /// What a filter did to the records it was shown.
@@ -1220,6 +1602,13 @@ pub enum FilterErrorKind {
     /// A refusal and NOT a degraded match, for the reason this module's header
     /// gives: the alternative is a selector that silently means something else.
     WildcardUnsupported,
+    /// A backslash in a quoted value that is not followed by one of the
+    /// escapes (`\"` `\'` `\\` `\xNN`). Its position is the backslash.
+    BadEscape,
+    /// A `node` term in a selector no name table was applied to. A node name
+    /// is not a thing a record carries, so the term cannot be judged; the
+    /// refusal is at the term, and [`bind_nodes`] is what resolves it.
+    UnboundNode { name: String },
 }
 
 impl fmt::Display for FilterError {
@@ -1255,6 +1644,16 @@ impl fmt::Display for FilterError {
                 f,
                 "this build's keyexpr matcher has no wildcards, so a pattern \
                  containing '*' cannot be answered (feature `filter-wildcards`)"
+            ),
+            FilterErrorKind::BadEscape => write!(
+                f,
+                "a backslash in a quoted value must begin \\\" or \\' or \\\\ or \\xNN \
+                 (two hex digits)"
+            ),
+            FilterErrorKind::UnboundNode { name } => write!(
+                f,
+                "the node name {name:?} is not bound to a zid; resolve node terms with a \
+                 name table first"
             ),
         }
     }
@@ -1409,6 +1808,131 @@ pub fn diagnose_json(expr: &str) -> String {
     out
 }
 
+/// The binder's verdict, `wz_dissect_selector_bind`'s document, rendered HERE for
+/// the reason [`diagnose_json`] is.
+///
+/// `{envelope,"ok":true,"selector":"…"}` carries the selector to hand the doors:
+/// `selector` with every `node` term replaced by the `zid` term its name stands
+/// for (see [`bind_nodes`]). Otherwise `{envelope,"ok":false,"refusal":"…",
+/// "message":"…"}` and the keys the `refusal` word decides, none of them ever a
+/// `null`:
+///
+/// * `table` -- `names_json` is not a table (see [`NodeNames::from_json`]); no
+///   position, since the fault is not in the selector;
+/// * `selector` -- the selector does not compile; `start` and `end` are the
+///   caret `selector_diagnose` would give (`at`), a span of no width;
+/// * `unknown_node` / `ambiguous_node` -- `name` and the BYTE span `start..end`
+///   of the whole `node` term, and for the second `candidates`, the zids the
+///   name stands for.
+///
+/// `names_json` of `None` is a table with no names, so a selector without a
+/// `node` term binds to itself and one with a term is an unknown node.
+pub fn bind_json(selector: &str, names_json: Option<&str>) -> String {
+    let mut out = String::from("{");
+    crate::doc_revision::envelope_into(crate::doc_revision::SELECTOR_BIND, &mut out);
+    let names = match names_json {
+        None => Ok(NodeNames::new()),
+        Some(text) => NodeNames::from_json(text),
+    };
+    let refusal = |out: &mut String,
+                   which: BindRefusal,
+                   message: &dyn fmt::Display,
+                   name: Option<&str>,
+                   span: Option<(usize, usize)>,
+                   candidates: Option<&[String]>| {
+        let word = which.word();
+        let _ = fmt::Write::write_fmt(out, format_args!(",\"ok\":false,\"refusal\":\"{word}\""));
+        out.push_str(",\"message\":");
+        wz_session_core::json::escape_into(&message.to_string(), out);
+        if let Some(name) = name {
+            out.push_str(",\"name\":");
+            wz_session_core::json::escape_into(name, out);
+        }
+        if let Some((start, end)) = span {
+            let _ = fmt::Write::write_fmt(out, format_args!(",\"start\":{start},\"end\":{end}"));
+        }
+        if let Some(candidates) = candidates {
+            out.push_str(",\"candidates\":");
+            wz_session_core::json::push_str_array(candidates, out);
+        }
+    };
+    match names.map(|names| bind_nodes(selector, &names)) {
+        Err(e) => refusal(&mut out, BindRefusal::Table, &e, None, None, None),
+        Ok(Ok(bound)) => {
+            out.push_str(",\"ok\":true,\"selector\":");
+            wz_session_core::json::escape_into(&bound, &mut out);
+        }
+        Ok(Err(e)) => match &e {
+            NodeBindError::Selector(f) => refusal(
+                &mut out,
+                BindRefusal::Selector,
+                &e,
+                None,
+                Some((f.at, f.at)),
+                None,
+            ),
+            NodeBindError::UnknownNode { name, start, end } => refusal(
+                &mut out,
+                BindRefusal::UnknownNode,
+                &e,
+                Some(name),
+                Some((*start, *end)),
+                None,
+            ),
+            NodeBindError::AmbiguousNode {
+                name,
+                zids,
+                start,
+                end,
+            } => refusal(
+                &mut out,
+                BindRefusal::AmbiguousNode,
+                &e,
+                Some(name),
+                Some((*start, *end)),
+                Some(zids),
+            ),
+        },
+    }
+    out.push('}');
+    out
+}
+
+/// The `refusal` words of the binder's verdict. A closed set, written once: the
+/// document's declared family is held to [`bind_refusal_words`], which walks
+/// this, so a refusal cannot be added here and go undeclared.
+#[derive(Clone, Copy)]
+enum BindRefusal {
+    AmbiguousNode,
+    Selector,
+    Table,
+    UnknownNode,
+}
+
+impl BindRefusal {
+    const ALL: [Self; 4] = [
+        Self::AmbiguousNode,
+        Self::Selector,
+        Self::Table,
+        Self::UnknownNode,
+    ];
+
+    const fn word(self) -> &'static str {
+        match self {
+            Self::AmbiguousNode => "ambiguous_node",
+            Self::Selector => "selector",
+            Self::Table => "table",
+            Self::UnknownNode => "unknown_node",
+        }
+    }
+}
+
+/// Every word [`bind_json`] can write as `refusal`, for the declared family to
+/// be held to.
+pub fn bind_refusal_words() -> Vec<&'static str> {
+    BindRefusal::ALL.iter().map(|r| r.word()).collect()
+}
+
 /// THE LEXER'S TOKENS, for a consumer that colours a selector.
 ///
 /// The same walk [`Filter::parse`] runs, so a colouring and a verdict cannot
@@ -1435,7 +1959,10 @@ pub fn tokens(source: &str) -> Vec<LexedToken> {
 enum TokenKind {
     Word(String),
     /// A quoted value — never re-read as a keyword, so `key == "or"` works.
-    Quoted(String),
+    /// Its escapes are decoded, so these are the bytes the reader meant, which
+    /// are not always UTF-8 (`"\xff"`); a field that wants text asks
+    /// [`Literal::text`].
+    Quoted(Vec<u8>),
     Op(Op),
     Not,
     And,
@@ -1539,12 +2066,47 @@ fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), FilterError> {
                 // why the one above it was fatal and this one was not.
                 let mut j = start;
                 let mut closed = false;
-                for ch in source[start..].chars() {
+                // The decoded bytes, because `\xNN` can spell a byte that is
+                // not UTF-8 and a `value` term compares bytes. `j` stays the
+                // SOURCE offset of the next character to read, so the token's
+                // span and every `at` after it keep counting source bytes.
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut chars = source[start..].chars();
+                while let Some(ch) = chars.next() {
                     if ch == quote {
                         closed = true;
                         break;
                     }
-                    j += ch.len_utf8();
+                    if ch != '\\' {
+                        bytes.extend_from_slice(ch.encode_utf8(&mut [0u8; 4]).as_bytes());
+                        j += ch.len_utf8();
+                        continue;
+                    }
+                    let bad_escape = FilterError {
+                        at: j,
+                        kind: FilterErrorKind::BadEscape,
+                    };
+                    // A backslash with nothing after it is an unfinished
+                    // quote, which the end of the loop reports.
+                    let Some(escaped) = chars.next() else { break };
+                    match escaped {
+                        '"' | '\'' | '\\' => {
+                            bytes.push(escaped as u8);
+                            j += 2;
+                        }
+                        'x' => {
+                            let high = chars.next();
+                            let Some(high) = high else { break };
+                            let low = chars.next();
+                            let Some(low) = low else { break };
+                            match (high.to_digit(16), low.to_digit(16)) {
+                                (Some(h), Some(l)) => bytes.push((h * 16 + l) as u8),
+                                _ => return Err(bad_escape),
+                            }
+                            j += 4;
+                        }
+                        _ => return Err(bad_escape),
+                    }
                 }
                 if !closed {
                     return Err(FilterError {
@@ -1555,7 +2117,7 @@ fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), FilterError> {
                 tokens.push(Token {
                     at,
                     end: j + quote.len_utf8(),
-                    kind: TokenKind::Quoted(source[start..j].to_string()),
+                    kind: TokenKind::Quoted(bytes),
                 });
                 i = j + quote.len_utf8();
             }
@@ -1733,12 +2295,21 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let (op_at, op) = match self.next() {
+        let (op_at, cmp) = match self.next() {
             Some(Token {
                 at,
                 kind: TokenKind::Op(op),
                 ..
-            }) => (*at, *op),
+            }) => (*at, Cmp::Plain(*op)),
+            // `contains` is a WORD, not a lexical operator: it is only an
+            // operator in the place one stands, so `key == contains` still
+            // names the chunk. The lexer's token classes (and the diagnosis
+            // that publishes them) are unchanged by it.
+            Some(Token {
+                at,
+                kind: TokenKind::Word(w),
+                ..
+            }) if w == "contains" => (*at, Cmp::Contains),
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
@@ -1753,12 +2324,17 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let (value_at, value_end, value) = match self.next() {
+        let (value_at, value_end, literal) = match self.next() {
             Some(Token {
                 at,
                 end,
-                kind: TokenKind::Word(w) | TokenKind::Quoted(w),
-            }) => (*at, *end, w.clone()),
+                kind: TokenKind::Word(w),
+            }) => (*at, *end, Literal::Word(w.clone())),
+            Some(Token {
+                at,
+                end,
+                kind: TokenKind::Quoted(bytes),
+            }) => (*at, *end, Literal::Quoted(bytes.clone())),
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
@@ -1786,7 +2362,59 @@ impl<'a> Parser<'a> {
                 kind: FilterErrorKind::UnknownField(field),
             });
         };
+        let op = match cmp {
+            Cmp::Plain(op) => op,
+            // `contains` is the `value` field's own operator. Every other
+            // field is refused it here, so the `Op` the `Value` arm is handed
+            // is never read: that arm reads `cmp`.
+            Cmp::Contains if known == Field::Value => Op::Eq,
+            Cmp::Contains => {
+                return Err(FilterError {
+                    at: op_at,
+                    kind: FilterErrorKind::OperatorNotAdmitted {
+                        field: known.name(),
+                        op: "contains",
+                    },
+                })
+            }
+        };
+        // The `value` field is the one whose literal is BYTES, and reads it as
+        // it was lexed. Every other field reads TEXT, and a quoted value that
+        // is not UTF-8 is a value that field does not admit.
+        let value = match known {
+            Field::Value => String::new(),
+            _ => literal.text(known.name(), value_at)?,
+        };
         let term = match known {
+            Field::Value => {
+                let op = match cmp {
+                    Cmp::Contains => ValueOp::Contains,
+                    Cmp::Plain(Op::Eq) => ValueOp::Eq,
+                    Cmp::Plain(Op::Ne) => ValueOp::Ne,
+                    Cmp::Plain(other) => {
+                        return Err(FilterError {
+                            at: op_at,
+                            kind: FilterErrorKind::OperatorNotAdmitted {
+                                field: known.name(),
+                                op: other.as_str(),
+                            },
+                        })
+                    }
+                };
+                Term::Value {
+                    op,
+                    needle: literal.value_bytes(value_at)?,
+                }
+            }
+            // The node axis: a NAME, bound to a zid before any record is asked.
+            Field::Node => {
+                let negated = equality_negation(op, known.name(), op_at)?;
+                Term::Node {
+                    name: value,
+                    span: (field_at, value_end),
+                    negated,
+                }
+            }
             Field::Key => {
                 let negated = equality_negation(op, known.name(), op_at)?;
                 Term::Key {
@@ -1926,6 +2554,77 @@ fn equality_negation(op: Op, field: &'static str, at: usize) -> Result<bool, Fil
     }
 }
 
+/// The operator a term was written with: one of the six comparisons, or the
+/// word `contains`, which only the `value` field admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cmp {
+    Plain(Op),
+    Contains,
+}
+
+/// The value of a term as the lexer produced it, before a field decides how to
+/// read it. An unquoted run is text; a quoted one is the bytes its escapes
+/// decode to, which are not always text.
+enum Literal {
+    Word(String),
+    Quoted(Vec<u8>),
+}
+
+impl Literal {
+    /// The literal as TEXT, for every field but `value`. A quoted run that is
+    /// not UTF-8 is a value `field` does not admit, refused at the value.
+    fn text(&self, field: &'static str, at: usize) -> Result<String, FilterError> {
+        match self {
+            Self::Word(w) => Ok(w.clone()),
+            Self::Quoted(bytes) => String::from_utf8(bytes.clone()).map_err(|_| FilterError {
+                at,
+                kind: FilterErrorKind::UnknownValue {
+                    field,
+                    value: String::from_utf8_lossy(bytes).into_owned(),
+                },
+            }),
+        }
+    }
+
+    /// The literal as the BYTES a `value` term compares: a quoted run as it was
+    /// decoded, or an unquoted `0x` followed by whole bytes of hex. Any other
+    /// unquoted run is refused rather than read as text, because text is
+    /// quoted and a payload term that guessed at `abc` would guess differently
+    /// from the reader.
+    fn value_bytes(&self, at: usize) -> Result<Vec<u8>, FilterError> {
+        match self {
+            Self::Quoted(bytes) => Ok(bytes.clone()),
+            Self::Word(word) => hex_bytes(word).ok_or_else(|| FilterError {
+                at,
+                kind: FilterErrorKind::UnknownValue {
+                    field: "value",
+                    value: word.clone(),
+                },
+            }),
+        }
+    }
+}
+
+/// `0x` and an even, non-zero number of hex digits, as the bytes they spell.
+fn hex_bytes(word: &str) -> Option<Vec<u8>> {
+    let digits = word
+        .strip_prefix("0x")
+        .or_else(|| word.strip_prefix("0X"))?;
+    if digits.is_empty() || digits.len() % 2 != 0 || !digits.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    digits
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some((high * 16 + low) as u8)
+        })
+        .collect()
+}
+
 fn integer(value: &str, at: usize) -> Result<u64, FilterError> {
     value.parse::<u64>().map_err(|_| FilterError {
         at,
@@ -1953,7 +2652,8 @@ fn compile_pattern(pattern: &str, at: usize) -> Result<Vec<String>, FilterError>
 
 fn describe_token(kind: &TokenKind) -> String {
     match kind {
-        TokenKind::Word(w) | TokenKind::Quoted(w) => w.clone(),
+        TokenKind::Word(w) => w.clone(),
+        TokenKind::Quoted(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         TokenKind::Op(op) => op.as_str().to_string(),
         TokenKind::Not => "not".to_string(),
         TokenKind::And => "and".to_string(),
@@ -1979,6 +2679,10 @@ mod tests {
             keyexpr,
             kind,
             payload_bytes: Some(payload_bytes),
+            // The default carries no readable payload, on the rule the `zid`
+            // line below states: a test that means to drive the content axis
+            // writes `RecordView { value: Content::Whole(..), ..put(..) }`.
+            value: Content::Unavailable,
             observed_at_ms,
             // R2757 (open debt 790) — `None`, on the same rule the line below
             // states for the capture origin: a helper's default should put a
@@ -3172,5 +3876,361 @@ mod tests {
             "the parser accepts {accepted:?} and this module's table documents \
              {documented_sorted:?}"
         );
+    }
+
+    fn with_value(bytes: &[u8]) -> RecordView<'_> {
+        RecordView {
+            value: Content::Whole(bytes),
+            ..put(Some("demo/a"))
+        }
+    }
+
+    fn judge(selector: &str, record: &RecordView<'_>) -> Truth {
+        Filter::parse(selector)
+            .unwrap_or_else(|e| panic!("{selector:?} should parse: {e}"))
+            .matches(record)
+    }
+
+    /// The three comparisons read the payload's bytes: a substring, the whole,
+    /// and the whole's negation. The needle is bytes, so text and hex are one
+    /// term shape, and the empty needle is in every payload.
+    #[test]
+    fn the_value_term_compares_the_payload_bytes() {
+        let record = with_value(b"temp=21.5C");
+        assert_eq!(judge(r#"value contains "21.5""#, &record), Truth::Yes);
+        assert_eq!(judge(r#"value contains "22""#, &record), Truth::No);
+        assert_eq!(judge(r#"value == "temp=21.5C""#, &record), Truth::Yes);
+        assert_eq!(judge(r#"value == "temp=21.5""#, &record), Truth::No);
+        assert_eq!(judge(r#"value != "temp=21.5""#, &record), Truth::Yes);
+        assert_eq!(judge(r#"value != "temp=21.5C""#, &record), Truth::No);
+        // Hex is the same bytes: `=` is 0x3d.
+        assert_eq!(judge("value contains 0x3d3231", &record), Truth::Yes);
+        assert_eq!(judge("value contains 0X3D3232", &record), Truth::No);
+        // A needle longer than the payload is not in it, and the empty needle
+        // is in every payload, the empty payload included.
+        assert_eq!(judge(r#"value contains "temp=21.5C!""#, &record), Truth::No);
+        assert_eq!(judge(r#"value contains """#, &record), Truth::Yes);
+        assert_eq!(judge(r#"value == """#, &with_value(b"")), Truth::Yes);
+        assert_eq!(judge(r#"value contains "a""#, &with_value(b"")), Truth::No);
+        // `not` is Kleene negation over the same answer.
+        assert_eq!(judge(r#"not value contains "21.5""#, &record), Truth::No);
+    }
+
+    /// A payload this capture cannot tell is not a payload that differs. All
+    /// three comparisons are undecidable, `!=` and `not` included, and the
+    /// connectives keep the rule they keep for every other axis.
+    #[test]
+    fn a_payload_that_cannot_be_read_is_undecided_and_never_a_miss() {
+        let record = put(Some("demo/a"));
+        assert_eq!(record.value, Content::Unavailable);
+        for selector in [
+            r#"value contains "x""#,
+            r#"value == "x""#,
+            r#"value != "x""#,
+            r#"not value == "x""#,
+        ] {
+            assert_eq!(judge(selector, &record), Truth::Unknown, "{selector}");
+        }
+        // `unknown AND no` is `no`; `unknown OR yes` is `yes`.
+        assert_eq!(
+            judge(r#"value contains "x" and key == other"#, &record),
+            Truth::No
+        );
+        assert_eq!(
+            judge(r#"value contains "x" or key == demo/a"#, &record),
+            Truth::Yes
+        );
+        assert_eq!(
+            judge(r#"value contains "x" and key == demo/a"#, &record),
+            Truth::Unknown
+        );
+    }
+
+    /// Escapes make a payload that is not text expressible, and a bad one is
+    /// refused at its own backslash rather than read as a literal.
+    #[test]
+    fn a_quoted_value_decodes_its_escapes_and_refuses_the_rest() {
+        let record = with_value(b"say \"hi\" \\ \x00\xff");
+        assert_eq!(judge(r#"value contains "say \"hi\"""#, &record), Truth::Yes);
+        assert_eq!(judge(r#"value contains 'say "hi"'"#, &record), Truth::Yes);
+        assert_eq!(
+            judge(r#"value contains 'it\'s'"#, &with_value(b"it's")),
+            Truth::Yes
+        );
+        assert_eq!(
+            judge(r#"value contains "\\ \x00\xff""#, &record),
+            Truth::Yes
+        );
+        assert_eq!(judge(r#"value contains "\xFF""#, &record), Truth::Yes);
+
+        let at = |selector: &str| {
+            let e = Filter::parse(selector).expect_err(selector);
+            assert_eq!(e.kind, FilterErrorKind::BadEscape, "{selector}");
+            e.at
+        };
+        // The position is the backslash, counted in source bytes.
+        assert_eq!(at(r#"value == "ab\q""#), 12);
+        assert_eq!(at(r#"value == "\xZ1""#), 10);
+        assert_eq!(at(r#"value == "a\x4g""#), 11);
+        // A selector that ends inside an escape is an unfinished quote.
+        for unfinished in [r#"value == "a\"#, r#"value == "a\x"#, r#"value == "a\x4"#] {
+            assert_eq!(
+                Filter::parse(unfinished).expect_err(unfinished).kind,
+                FilterErrorKind::UnterminatedQuote,
+                "{unfinished}"
+            );
+        }
+        // Escapes are the lexer's, so any field reads them: a quoted keyexpr
+        // that is not UTF-8 is a value `key` does not admit.
+        let e = Filter::parse(r#"key == "a\xffb""#).expect_err("not text");
+        assert!(matches!(
+            e.kind,
+            FilterErrorKind::UnknownValue { field: "key", .. }
+        ));
+        assert_eq!(e.at, 7);
+        assert!(Filter::parse(r#"key == "demo\x2fa""#).is_ok());
+    }
+
+    /// Text is quoted and bytes are `0x` and whole bytes; an unquoted word that
+    /// is neither is refused at the value, because reading `abc` as text would
+    /// guess differently from the reader.
+    #[test]
+    fn a_value_literal_is_quoted_text_or_whole_hex_bytes() {
+        for refused in ["abc", "0x", "0xabc", "0xzz", "0x1g", "ff"] {
+            let selector = alloc::format!("value == {refused}");
+            let e = Filter::parse(&selector).expect_err(&selector);
+            assert!(
+                matches!(&e.kind, FilterErrorKind::UnknownValue { field: "value", value } if value == refused),
+                "{selector}: {e:?}"
+            );
+            assert_eq!(e.at, 9, "{selector}");
+        }
+        assert!(Filter::parse("value == 0x00ff").is_ok());
+    }
+
+    /// `contains` is the `value` field's operator and nobody else's, and it is
+    /// an operator only where one stands.
+    #[test]
+    fn contains_is_an_operator_only_of_the_value_field() {
+        let e = Filter::parse("key contains demo").expect_err("key has no contains");
+        assert_eq!(
+            e.kind,
+            FilterErrorKind::OperatorNotAdmitted {
+                field: "key",
+                op: "contains"
+            }
+        );
+        assert_eq!(e.at, 4);
+        let e = Filter::parse(r#"value < "a""#).expect_err("no ordering of payloads");
+        assert_eq!(
+            e.kind,
+            FilterErrorKind::OperatorNotAdmitted {
+                field: "value",
+                op: "<"
+            }
+        );
+        // A word `contains` in the value position, or as a keyexpr chunk, is
+        // the word it always was.
+        assert!(Filter::parse("key == contains").is_ok());
+        assert!(Filter::parse("key == contains/x").is_ok());
+        // An unknown field is refused as an unknown field, not as a missing
+        // operator, now that the operator position can hold a word.
+        let e = Filter::parse(r#"payload contains "x""#).expect_err("no such field");
+        assert!(matches!(e.kind, FilterErrorKind::UnknownField(_)));
+        assert_eq!(e.at, 0);
+        // The diagnosis' token classes are unchanged by the new word.
+        let classes: Vec<_> = tokens(r#"value contains "x""#)
+            .into_iter()
+            .map(|t| t.class)
+            .collect();
+        assert_eq!(
+            classes,
+            [TokenClass::Word, TokenClass::Word, TokenClass::Quoted]
+        );
+    }
+
+    const CAMERA: [u8; 16] = [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf0,
+        0x0f,
+    ];
+    const LIDAR: [u8; 16] = [
+        0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18, 0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f,
+        0x90,
+    ];
+
+    fn names() -> NodeNames {
+        let mut names = NodeNames::new();
+        names
+            .add(
+                "front camera",
+                &wz_session_core::zid_hex::zid_to_zenoh_hex(&CAMERA),
+            )
+            .expect("a zid");
+        names
+            .add(
+                "lidar",
+                &wz_session_core::zid_hex::zid_to_zenoh_hex(&LIDAR).to_uppercase(),
+            )
+            .expect("a zid, in capitals");
+        names
+    }
+
+    /// A `node` name is not a thing a record carries: a selector that holds one
+    /// is refused at the term, and is never judged as a miss.
+    #[test]
+    fn an_unbound_node_term_is_refused_at_the_term() {
+        let e = Filter::parse(r#"kind == put and node == "lidar""#).expect_err("unbound");
+        assert_eq!(
+            e.kind,
+            FilterErrorKind::UnboundNode {
+                name: "lidar".to_string()
+            }
+        );
+        // The term starts at its field, past `kind == put and `.
+        assert_eq!(e.at, 16);
+        // Both operators, a bare word, and a negation all hold a node term.
+        for selector in ["node != x", "not node == x", "(node == x)"] {
+            assert!(
+                matches!(
+                    Filter::parse(selector).expect_err(selector).kind,
+                    FilterErrorKind::UnboundNode { .. }
+                ),
+                "{selector}"
+            );
+        }
+        assert!(Filter::parse("node < x").is_err());
+        assert!(Filter::parse("node contains x").is_err());
+    }
+
+    /// Binding replaces each node term by the zid term its name stands for and
+    /// leaves every other byte of the selector alone; the result is a selector
+    /// that parses and that selects the named node's records.
+    #[test]
+    fn binding_turns_a_node_name_into_the_zid_it_stands_for() {
+        let selector =
+            r#"kind == put  and ( node == "front camera" or not node != lidar ) and bytes > 3"#;
+        let bound = bind_nodes(selector, &names()).expect("both names are in the table");
+        let camera = wz_session_core::zid_hex::zid_to_zenoh_hex(&CAMERA);
+        let lidar = wz_session_core::zid_hex::zid_to_zenoh_hex(&LIDAR);
+        assert_eq!(
+            bound,
+            alloc::format!(
+                "kind == put  and ( zid == {camera} or not zid != {lidar} ) and bytes > 3"
+            )
+        );
+        let filter = Filter::parse(&bound).expect("the bound selector is plain language");
+        let from = |zid: &'static [u8]| RecordView {
+            zid: Some(zid),
+            ..put(Some("demo/a"))
+        };
+        assert_eq!(filter.matches(&from(&CAMERA)), Truth::Yes);
+        assert_eq!(filter.matches(&from(&LIDAR)), Truth::Yes);
+        assert_eq!(filter.matches(&from(&[0x42; 16])), Truth::No);
+        // A sender nobody named is undecided, as it is for a `zid` term.
+        assert_eq!(filter.matches(&put(Some("demo/a"))), Truth::Unknown);
+        // A selector without a node term comes back as it went in.
+        assert_eq!(
+            bind_nodes("kind == put", &names()).as_deref(),
+            Ok("kind == put")
+        );
+        assert_eq!(bind_nodes("", &NodeNames::new()).as_deref(), Ok(""));
+    }
+
+    /// A name the table does not hold, or holds for two nodes, is refused at its
+    /// term: neither is a match that found nothing.
+    #[test]
+    fn binding_refuses_a_name_it_cannot_resolve_to_one_node() {
+        let selector = r#"node == "lidar" or node == "radar""#;
+        assert_eq!(
+            bind_nodes(selector, &names()),
+            Err(NodeBindError::UnknownNode {
+                name: "radar".to_string(),
+                start: 19,
+                end: 34
+            })
+        );
+        let mut twice = names();
+        // The same name for the same node, in another case, is one node.
+        twice
+            .add("lidar", &wz_session_core::zid_hex::zid_to_zenoh_hex(&LIDAR))
+            .expect("a zid");
+        assert!(bind_nodes(r#"node == lidar"#, &twice).is_ok());
+        twice
+            .add(
+                "lidar",
+                &wz_session_core::zid_hex::zid_to_zenoh_hex(&CAMERA),
+            )
+            .expect("a zid");
+        let refused = bind_nodes(r#"kind == put and node == lidar"#, &twice).expect_err("two");
+        assert_eq!(
+            refused,
+            NodeBindError::AmbiguousNode {
+                name: "lidar".to_string(),
+                zids: alloc::vec![
+                    wz_session_core::zid_hex::zid_to_zenoh_hex(&LIDAR),
+                    wz_session_core::zid_hex::zid_to_zenoh_hex(&CAMERA),
+                ],
+                start: 16,
+                end: 29
+            }
+        );
+        // The ambiguity belongs to the name: another name still binds.
+        assert!(bind_nodes(r#"node == "front camera""#, &twice).is_ok());
+        // A selector that does not compile is the selector's refusal.
+        assert!(matches!(
+            bind_nodes("node ==", &names()),
+            Err(NodeBindError::Selector(FilterError {
+                kind: FilterErrorKind::UnexpectedEnd,
+                ..
+            }))
+        ));
+    }
+
+    /// The application's table is one JSON object of name to zid. A zid that is
+    /// not a zid, and a document that is not that shape, are refused by name.
+    #[test]
+    fn the_name_table_reads_one_object_of_name_to_zid() {
+        let camera = wz_session_core::zid_hex::zid_to_zenoh_hex(&CAMERA);
+        let table = NodeNames::from_json(&alloc::format!(
+            r#"{{"front camera":"{camera}", "lidar":"{}"}}"#,
+            wz_session_core::zid_hex::zid_to_zenoh_hex(&LIDAR)
+        ))
+        .expect("a table");
+        // A table holds zids and not their spelling, so the capitals `names()`
+        // wrote one of them in are the same table.
+        assert_eq!(table, names());
+        // The same key written twice is a name with two zids, kept so the term
+        // that uses it can be refused.
+        let doubled = NodeNames::from_json(&alloc::format!(
+            r#"{{"x":"{camera}", "x":"{}"}}"#,
+            wz_session_core::zid_hex::zid_to_zenoh_hex(&LIDAR)
+        ))
+        .expect("a table");
+        assert!(matches!(
+            bind_nodes("node == x", &doubled),
+            Err(NodeBindError::AmbiguousNode { .. })
+        ));
+        assert_eq!(
+            NodeNames::from_json(r#"{"a":"0a0b"}"#),
+            Err(NodeNamesError::BadZid {
+                name: "a".to_string(),
+                zid: "0a0b".to_string()
+            })
+        );
+        assert_eq!(
+            NodeNames::from_json(r#"{"a":7}"#),
+            Err(NodeNamesError::ZidNotText {
+                name: "a".to_string()
+            })
+        );
+        assert_eq!(
+            NodeNames::from_json(r#"["a"]"#),
+            Err(NodeNamesError::NotAnObject)
+        );
+        assert!(matches!(
+            NodeNames::from_json("{"),
+            Err(NodeNamesError::NotJson { .. })
+        ));
+        assert_eq!(NodeNames::from_json("{}"), Ok(NodeNames::new()));
     }
 }

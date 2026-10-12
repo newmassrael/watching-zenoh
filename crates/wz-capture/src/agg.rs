@@ -62,7 +62,7 @@ use wz_codecs::wireexpr::WireexprOwnedVariant;
 use wz_codecs::CodecStorage;
 use wz_session_core::wire::parts::WireexprOwnedVariant as WireKeyexpr;
 
-use crate::filter::{Filter, RecordKind, RecordView, Selection, Truth};
+use crate::filter::{Content, Filter, RecordKind, RecordView, Selection, Truth};
 
 /// What one keyexpr carried, on one side of one flow.
 ///
@@ -1655,6 +1655,7 @@ impl ThroughputTable {
             keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
             kind,
             payload_bytes: sized_payload(&counts),
+            value: payload_content(message),
             unit_offset: record_unit_offset(frame, span),
             source_delay_ms: delay,
             // R2757 (open debt 790) — the node plane's answer for THIS
@@ -2206,15 +2207,27 @@ fn measured_payload(
 /// decode gets further rather than being one loose number for all three.
 #[cfg(feature = "network-codecs")]
 fn query_value_bytes(body: &[u8]) -> PayloadSize {
+    match query_value_payload(body) {
+        Ok(payload) => PayloadSize::Measured(payload.len() as u64),
+        Err(unresolved) => unresolved,
+    }
+}
+
+/// The application bytes of a `Query`'s VALUE ext, or the bound that says why
+/// they could not be told. [`query_value_bytes`] is its size and the `value`
+/// term reads its content, so the layout is decoded in ONE place and the two
+/// cannot disagree about which queries carry a readable payload.
+#[cfg(feature = "network-codecs")]
+fn query_value_payload(body: &[u8]) -> Result<&[u8], PayloadSize> {
     let mut cursor = wz_codecs::SceCursor::new(body);
     // The encoding prefix is CONSUMED rather than inspected: its only job here
     // is to move the cursor to the length prefix. Reading it through the codec
     // instead of skipping a guessed width is what makes a schema-carrying
     // encoding (`packed_id & 1`, a name of its own length) come out right.
     if wz_codecs::encoding::Encoding::decode(&mut cursor).is_err() {
-        return PayloadSize::Unresolved {
+        return Err(PayloadSize::Unresolved {
             at_most: body.len() as u64,
-        };
+        });
     }
     // Snapshotted BEFORE the read: a VLE that runs out of bytes may leave the
     // cursor part-way through its own prefix, and a bound read off a cursor a
@@ -2222,15 +2235,90 @@ fn query_value_bytes(body: &[u8]) -> PayloadSize {
     // about the wire.
     let after_encoding = cursor.remaining() as u64;
     let Ok(declared) = cursor.read_vle_u64() else {
-        return PayloadSize::Unresolved {
+        return Err(PayloadSize::Unresolved {
             at_most: after_encoding,
-        };
+        });
     };
     let present = cursor.remaining() as u64;
     if declared == present {
-        PayloadSize::Measured(declared)
+        // The payload is what remains: the length prefix was the last thing
+        // read, so these are the final `present` bytes of the ext body.
+        Ok(&body[body.len() - cursor.remaining()..])
     } else {
-        PayloadSize::Unresolved { at_most: present }
+        Err(PayloadSize::Unresolved { at_most: present })
+    }
+}
+
+/// A record's payload as the `value` term reads it: the bytes, when this
+/// reader can tell them, and [`Content::Unavailable`] when it cannot.
+///
+/// Asked of the same four carriers [`classify`] sizes, by the same rules: a
+/// slot is `Whole` exactly when [`classify`] counts it `Measured`, and every
+/// state it counts as unsized (a payload on shared memory, a query value this
+/// build cannot open) is `Unavailable`, so `bytes` and `value` cannot disagree
+/// about whether a record's payload is known. A `Del` carries none, a `Query`
+/// without a value carries none, and a record that is not traffic under a
+/// keyexpr has none to speak of.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn payload_content(message: &NetworkMessage) -> Content<'_> {
+    use wz_codecs::push::PushOwnedVariant;
+    use wz_codecs::reply::ReplyOwnedVariant;
+    use wz_codecs::request::RequestOwnedVariant;
+    use wz_codecs::response::ResponseOwnedVariant;
+
+    match message {
+        NetworkMessage::Push(p) => match &p.body {
+            PushOwnedVariant::CodecZenohMsgPut(put)
+            | PushOwnedVariant::Default { body: put, .. } => put_content(put),
+            PushOwnedVariant::CodecZenohMsgDel(_) => Content::Unavailable,
+        },
+        NetworkMessage::Request(r) => match &r.body {
+            RequestOwnedVariant::CodecZenohMsgPut(put) => put_content(put),
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                match query_body_bytes(q.extensions.as_deref()).map(query_value_payload) {
+                    Some(Ok(payload)) => Content::Whole(payload),
+                    _ => Content::Unavailable,
+                }
+            }
+            RequestOwnedVariant::CodecZenohMsgDel(_) | RequestOwnedVariant::Default { .. } => {
+                Content::Unavailable
+            }
+        },
+        NetworkMessage::Response(r) => match &r.body {
+            ResponseOwnedVariant::CodecZenohReply(reply)
+            | ResponseOwnedVariant::Default { body: reply, .. } => match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(put)
+                | ReplyOwnedVariant::Default { body: put, .. } => put_content(put),
+                ReplyOwnedVariant::CodecZenohMsgDel(_) => Content::Unavailable,
+            },
+            ResponseOwnedVariant::CodecZenohErr(err) => {
+                if carries_shm_marker(err.extensions.as_deref()) {
+                    Content::Unavailable
+                } else {
+                    Content::Whole(err.payload.as_slice())
+                }
+            }
+        },
+        _ => Content::Unavailable,
+    }
+}
+
+/// Without the network codecs there is no body this build can read a payload
+/// out of, so the axis declines for every record: a smaller reach and not a
+/// wrong answer, as for [`source_delay_ms`].
+#[cfg(not(feature = "network-codecs"))]
+pub(crate) fn payload_content(_message: &NetworkMessage) -> Content<'_> {
+    Content::Unavailable
+}
+
+/// A `Put`'s payload slot as content: the inline bytes, or `Unavailable` when
+/// they are elsewhere (shared memory), the same split [`measured_put`] makes.
+#[cfg(feature = "network-codecs")]
+fn put_content(put: &wz_session_core::wire::parts::MsgPutOwned) -> Content<'_> {
+    if put_payload_is_elsewhere(put) {
+        Content::Unavailable
+    } else {
+        Content::Whole(put_bytes(put))
     }
 }
 
@@ -4673,6 +4761,68 @@ pub(crate) mod tests {
         }
         let filter = crate::filter::Filter::parse(selector).expect("the selector must compile");
         aggregate_where(&d, &filter)
+    }
+
+    /// The content axis on the throughput plane, over the payloads the wire
+    /// produced: a `Put`'s bytes, a `Query`'s value (found one ext and one
+    /// sub-decode in), and the three records whose payload this reader cannot
+    /// tell -- a `Del`, a query that carries no value, and one whose value
+    /// claims more bytes than follow it. Each of the three states is produced by
+    /// a different record, so a plane that hardwired one of them fails here.
+    #[test]
+    fn a_value_term_reads_the_payload_the_wire_carried() {
+        let records = alloc::vec![
+            (
+                true,
+                push(sender_space(0, Some("home/temp")), b"temp=21.5C")
+            ),
+            (
+                true,
+                push(sender_space(0, Some("home/temp")), b"temp=30.0C")
+            ),
+            (true, push_del(sender_space(0, Some("home/temp")))),
+            (
+                true,
+                request_query_valued(1, sender_space(0, Some("home/q")), Some(b"temp=21.5C")),
+            ),
+            (
+                true,
+                request_query_valued(2, sender_space(0, Some("home/q")), None),
+            ),
+            (
+                true,
+                request_query_truncated(3, sender_space(0, Some("home/q"))),
+            ),
+        ];
+        let said = |selector: &str| aggregate_datagrams_where(&records, selector).selection();
+        let expected = Selection {
+            matched: 2,
+            rejected: 1,
+            undecided: 3,
+        };
+        assert_eq!(said(r#"value contains "21.5""#), expected);
+        assert_eq!(said(r#"value == "temp=21.5C""#), expected);
+        assert_eq!(said("value == 0x74656d703d32312e3543"), expected);
+        // `!=` is the complement among the records that can be judged, and the
+        // three that cannot are still the three that cannot.
+        assert_eq!(
+            said(r#"value != "temp=21.5C""#),
+            Selection {
+                matched: 1,
+                rejected: 2,
+                undecided: 3
+            }
+        );
+        // Kleene: a record that fails the other half is out whatever its
+        // payload was, so the Del and the queries are decided `no`.
+        assert_eq!(
+            said(r#"kind == put and value contains "30.0""#),
+            Selection {
+                matched: 1,
+                rejected: 5,
+                undecided: 0
+            }
+        );
     }
 
     /// The same pipeline over RAW framing units — the bytes of a datagram

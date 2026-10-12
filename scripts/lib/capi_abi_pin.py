@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 34
+EXPECTED_VERSION = 35
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -339,6 +339,15 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_keyexpr_relate",
     "wz_dissect_declarations_match",
     "wz_dissect_proto_describe",
+    # (ABI 35) -- the NODE NAMES of a selector resolved to the zids a caller's
+    # table gives them. A `node` term names a node the way the application's own
+    # list does, and a record carries only the zid its sender announced; this is
+    # the one place the two meet, and what it returns is the language's own text,
+    # so no other door takes a table. One symbol and one document. The memory
+    # rule does not move: the verdict is a `char*` released by
+    # `wz_dissect_string_free`, the selector and the table cross as C strings the
+    # CALLER holds, nothing is retained between calls, and no callback runs.
+    "wz_dissect_selector_bind",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

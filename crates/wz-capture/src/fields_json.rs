@@ -6748,7 +6748,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 58] = [
+        let live: [(&str, &str, Vec<&'static str>); 59] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6876,6 +6876,13 @@ mod tests {
                 rev::SELECTOR_DIAGNOSE,
                 "kind",
                 crate::filter::TokenClass::names(),
+            ),
+            // The binder verdict's refusal words, walked from the enum the
+            // emitter writes them through.
+            (
+                rev::SELECTOR_BIND,
+                "refusal",
+                crate::filter::bind_refusal_words(),
             ),
             // The declaration verdict's two families and the key-expression
             // verdict's one. The kinds are `DeclarationKind::word` over its
@@ -7638,6 +7645,18 @@ mod tests {
         .into_iter()
         .map(crate::filter::diagnose_json)
         .collect();
+        // The binder verdict, over one selector per word of its `refusal` and a
+        // success that rewrites two terms: the four refusals carry different
+        // keys, so this is the population that shows a word and its shape agree.
+        let names = r#"{"cam":"ff0eedd0c0b0a0908070605040302011","lidar":"a1b2"}"#;
+        let bind_verdicts: Vec<String> = alloc::vec![
+            crate::filter::bind_json("kind == put", None),
+            crate::filter::bind_json(r#"node == cam or not node != lidar"#, Some(names)),
+            crate::filter::bind_json(r#"node == radar"#, Some(names)),
+            crate::filter::bind_json(r#"node == twin"#, Some(r#"{"twin":"a1b2","twin":"c3d4"}"#),),
+            crate::filter::bind_json("node ==", Some(names)),
+            crate::filter::bind_json("node == cam", Some("[]")),
+        ];
         // The two verdicts on a typed text, over one text per FAULT so every
         // `reason` word is rendered, and (for the declaration verdict) a success
         // with a line of each kind so every `kind` word is.
@@ -7728,13 +7747,14 @@ mod tests {
         // The description document, over a schema with every type word, label
         // and syntax, and one of each shape of refusal.
         let describe_docs = crate::proto_describe_tests::documents_for_the_carries_gate();
-        let docs: [(&str, Vec<&String>); 13] = [
+        let docs: [(&str, Vec<&String>); 14] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
                 alloc::vec![&census, &censusl, &censusdg, &v6_census, &interests, &multilink],
             ),
             (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
+            (rev::SELECTOR_BIND, bind_verdicts.iter().collect()),
             (rev::SELECTION, verdict_docs.iter().collect()),
             (
                 rev::DECLARATIONS_DIAGNOSE,

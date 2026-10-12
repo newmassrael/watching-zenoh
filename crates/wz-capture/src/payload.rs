@@ -1353,6 +1353,9 @@ impl PayloadCensus {
             keyexpr: keyexpr.as_deref(),
             kind,
             payload_bytes,
+            // The bytes the `bytes` term counted, from the same classifier
+            // module, so the two terms cannot disagree about a record.
+            value: crate::agg::payload_content(message),
             // R2757 (open debt 790) — the node plane's answer, asked with the
             // same `direction` this record already carries.
             zid: ctx.zid(direction),
@@ -4749,6 +4752,32 @@ mod census_tests {
             crate::filter::Selection {
                 matched: 1,
                 rejected: 2,
+                undecided: 0
+            }
+        );
+    }
+
+    /// The payload plane reads the same bytes the throughput plane does: a
+    /// `value` term over the push the census is about, and over a reply
+    /// carried by a `Response`, which this plane judges as a record of its own.
+    #[test]
+    fn a_value_term_reads_the_payload_this_plane_inspects() {
+        let capture = alloc::vec![
+            (true, push_declaring("t/one", ID_TEXT, b"pushed words")),
+            (true, push_declaring("t/two", ID_TEXT, b"other text")),
+            (
+                false,
+                fx::response_reply(1, fx::sender_space(0, Some("t/reply")), b"replied words"),
+            ),
+        ];
+        let (t, plain) = census_where(&capture, r#"value contains "words""#);
+        assert_eq!(plain.payloads(), 3, "the control: all three are inspected");
+        assert_eq!(t.payloads(), 2);
+        assert_eq!(
+            t.selection(),
+            crate::filter::Selection {
+                matched: 2,
+                rejected: 1,
                 undecided: 0
             }
         );
