@@ -13,9 +13,12 @@
 //!
 //! 1. [`ZephyrClock`] — a [`ClockSource`] over the kernel tick counter
 //!    (`sys_clock_tick_get`), const-generic over `CONFIG_SYS_CLOCK_TICKS_PER_SEC`.
-//! 2. [`ZephyrAllocator`] — a [`GlobalAlloc`] over the Zephyr kernel heap
-//!    (`k_malloc`/`k_free`). The deploy binary declares it as its
-//!    `#[global_allocator]` and sets `CONFIG_HEAP_MEM_POOL_SIZE`.
+//! 2. `ZephyrAllocator` (the `alloc` feature) — a [`GlobalAlloc`] over the Zephyr
+//!    kernel heap (`k_malloc`/`k_free`). The deploy binary declares it as its
+//!    `#[global_allocator]` and sets `CONFIG_HEAP_MEM_POOL_SIZE`. A firmware on
+//!    the fixed-memory profile (`session-slot`, with the defaults off) has no such
+//!    seam: it declares no allocator at all, and the toolchain's own refusal to link
+//!    one that allocates is the proof it does not.
 //!
 //! [`ZephyrRuntime`] is then just `CoopRuntime<ZephyrClock<TICK_HZ>>`.
 //!
@@ -47,6 +50,9 @@
 //! fixed-width types instead.
 #![no_std]
 
+// The heap profile's: the kernel-heap allocator, the owned forms of the session core and
+// the Zephyr socket stack's buffers. The fixed-memory profile links no `alloc` crate.
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 // The host witnesses at the foot of this file panic-test a const parser, which
@@ -56,17 +62,18 @@ extern crate std;
 
 pub mod core_clock;
 pub mod glue;
-#[cfg(not(feature = "session-slot"))]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub mod links;
+#[cfg(feature = "alloc")]
 pub mod net;
 pub mod stack;
 
-#[cfg(not(feature = "session-slot"))]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub use links::ZephyrLinks;
 
-/// A Zephyr firmware's image glue, written once in its crate root: the global
-/// allocator over the kernel heap, a `critical_section` implementation over the
-/// kernel's IRQ lock, and the panic handler ([`glue::halt_after_panic`]).
+/// A Zephyr firmware's image glue on the heap profile, written once in its crate root:
+/// the global allocator over the kernel heap, a `critical_section` implementation over
+/// the kernel's IRQ lock, and the panic handler ([`glue::halt_after_panic`]).
 ///
 /// The `critical_section` implementation is expanded INTO the firmware's crate
 /// because it has to be there: a staticlib bundles its root crate's
@@ -76,9 +83,13 @@ pub use links::ZephyrLinks;
 /// `critical-section` with `restore-state-u32` (the kernel's IRQ key is a
 /// `u32`), as this macro's expansion names it.
 ///
+/// A firmware with no allocator writes [`zephyr_image_no_heap!`] instead: the same
+/// glue without the allocator.
+///
 /// ```ignore
 /// wz_runtime_zephyr::zephyr_image!();
 /// ```
+#[cfg(feature = "alloc")]
 #[macro_export]
 macro_rules! zephyr_image {
     () => {
@@ -88,6 +99,19 @@ macro_rules! zephyr_image {
         #[global_allocator]
         static WZ_ZEPHYR_ALLOCATOR: $crate::ZephyrAllocator = $crate::ZephyrAllocator;
 
+        $crate::zephyr_image_no_heap!();
+    };
+}
+
+/// A Zephyr firmware's image glue with NO allocator: the `critical_section`
+/// implementation over the kernel's IRQ lock and the panic handler. It declares no
+/// `#[global_allocator]`, so a build that allocates anywhere in its graph does not link
+/// (the toolchain's "no global memory allocator found"), which is the proof the
+/// no-allocator link gate reads. [`zephyr_image!`] is this plus the kernel-heap
+/// allocator, and expands to it.
+#[macro_export]
+macro_rules! zephyr_image_no_heap {
+    () => {
         struct WzZephyrCriticalSection;
         critical_section::set_impl!(WzZephyrCriticalSection);
 
@@ -112,12 +136,16 @@ macro_rules! zephyr_image {
     };
 }
 
+#[cfg(feature = "alloc")]
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
+#[cfg(feature = "alloc")]
 use core::mem::size_of;
 
 use wz_runtime_coop::{ClockSource, CoopRuntime};
-use zephyr_sys::{k_free, k_malloc, sys_clock_tick_get};
+use zephyr_sys::sys_clock_tick_get;
+#[cfg(feature = "alloc")]
+use zephyr_sys::{k_free, k_malloc};
 
 /// Monotonic [`ClockSource`] reading the Zephyr kernel tick counter.
 ///
@@ -465,6 +493,7 @@ impl wz_session_core::epoch::EpochSource for ZephyrEpoch {
 /// own timer-queue entries) takes the over-aligned branch below, which aligns
 /// up regardless of the `k_malloc` base alignment. Setting this to 8 would hand
 /// align-8 allocations a 4-aligned pointer on the default heap = UB.
+#[cfg(feature = "alloc")]
 const HEAP_ALIGN: usize = 4;
 
 /// A [`GlobalAlloc`] bridging Rust's allocator to the Zephyr kernel heap
@@ -476,8 +505,10 @@ const HEAP_ALIGN: usize = 4;
 /// heap — the Zephyr heap IS the kernel's, so every Zephyr deploy routes Rust
 /// allocations through it. One audited bridge, shared. Identical over-alignment
 /// scheme to `wz_runtime_freertos::FreertosAllocator`.
+#[cfg(feature = "alloc")]
 pub struct ZephyrAllocator;
 
+#[cfg(feature = "alloc")]
 unsafe impl GlobalAlloc for ZephyrAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.align() <= HEAP_ALIGN {

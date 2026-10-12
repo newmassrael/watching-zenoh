@@ -5,15 +5,17 @@
 //!
 //! A Zephyr image is the kernel plus one Rust staticlib, and the staticlib has
 //! to bring four things the kernel cannot supply for it: a global allocator over
-//! the kernel heap, a `critical_section` implementation over the kernel's IRQ
-//! lock, a panic handler, and a way to print. They are identical in every
-//! firmware (the acceptor e2e, the admin node), so they live here once and a
-//! firmware writes [`zephyr_image!`](crate::zephyr_image) in its crate root.
+//! the kernel heap (a firmware with no heap brings none), a `critical_section`
+//! implementation over the kernel's IRQ lock, a panic handler, and a way to
+//! print. They are identical in every firmware (the acceptor e2e, the admin
+//! node), so they live here once and a firmware writes `zephyr_image!` (or
+//! `zephyr_image_no_heap!`) in its crate root.
 //!
 //! The functions are the Rust side of the C seams in
 //! `deploy/zephyr-common/wz_board_hooks.c`; `printk` is variadic and `k_msleep` /
 //! `irq_lock` are `static inline`, so neither can be called from Rust directly.
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
 use core::ffi::{c_char, CStr};
 
@@ -48,7 +50,9 @@ pub fn log(msg: &CStr) {
     unsafe { wz_log(msg.as_ptr()) };
 }
 
-/// Print a formatted line on the board's console.
+/// Print a formatted line on the board's console, built on the heap: the heap
+/// profile's form, of which [`log_args`] is the one that needs no allocator.
+#[cfg(feature = "alloc")]
 pub fn log_line(line: String) {
     let mut bytes = line.into_bytes();
     bytes.push(0);
@@ -59,7 +63,12 @@ pub fn log_line(line: String) {
 
 /// The longest console line [`log_args`] prints, nul included. A longer one is cut,
 /// which a console line can afford and a node with no allocator cannot do without.
-pub const LOG_LINE_BYTES: usize = 192;
+///
+/// Sized for the longest line a firmware prints: the MAC pool reports (about 150
+/// characters of words and up to twelve `u32` counters of ten digits each, or four
+/// 32-bit addresses in `{:#010x}`, which is ten characters each) come to under 300.
+/// The buffer lives on the caller's stack for the one call.
+pub const LOG_LINE_BYTES: usize = 384;
 
 /// A line of formatted text in a fixed buffer, cut at the end of it.
 struct LineBuf {
@@ -199,11 +208,17 @@ mod tests {
 
     #[test]
     fn a_line_longer_than_the_buffer_is_cut_at_a_character_and_keeps_its_nul() {
-        // 191 bytes of room: ninety-six two-byte characters are 192, so the last cannot
-        // fit and the line ends one character earlier, on a boundary.
-        let long = "\u{e9}".repeat(96);
+        // One byte of the buffer is the nul, so there is room for `LOG_LINE_BYTES - 1`: a
+        // whole number of two-byte characters past that cannot fit, and the line ends one
+        // character earlier, on a boundary.
+        let characters = LOG_LINE_BYTES / 2;
+        let long = "\u{e9}".repeat(characters);
         let line = render_line(format_args!("{long}"));
-        assert_eq!(line.len, 190, "ninety-five whole characters");
+        assert_eq!(
+            line.len,
+            LOG_LINE_BYTES - 2,
+            "every whole character that fits"
+        );
         assert!(text(&line).chars().all(|c| c == '\u{e9}'));
         assert_eq!(line.bytes[line.len], 0, "and the nul is still there");
         assert_eq!(

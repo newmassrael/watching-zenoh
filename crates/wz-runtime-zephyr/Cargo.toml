@@ -31,15 +31,24 @@ path = "src/lib.rs"
 [dependencies]
 # Hand-FFI to the Zephyr kernel (sys_clock_tick_get + k_malloc/k_free).
 zephyr-sys = { path = "../zephyr-sys" }
-# The cooperative executor SSOT (CoopRuntime + ClockSource), with its task pool
-# (alloc feature) — the Zephyr profile reuses it, parameterised by the clock.
-wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
+# The cooperative executor SSOT (CoopRuntime + ClockSource) — the Zephyr profile reuses
+# it, parameterised by the clock. Its task pool is the heap form under `alloc` and the
+# static one under `session-slot` (below); with neither the executor is absent.
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
 # R2916 — the network seam's link types (`BoxedLinkDriver`, `RxFrame`,
 # `LinkEndpoints`). `session-unicast` above is what hands the drive loop's
-# `SessionDatagramLink`; both are no_std.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "no_std"] }
+# `SessionDatagramLink`; both are no_std. The session core's owned forms are `alloc`'s.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
 
 [features]
+# The heap profile: the cooperative runtime's heap task pool, the session core's owned
+# forms, the kernel-heap allocator (`ZephyrAllocator`, which a firmware declares as its
+# `#[global_allocator]`) and the Zephyr socket stack (`net`, `links`), which builds its
+# receive buffers and locator text on the heap. Default, so a crate that names this one
+# as it always did gets what it always got; a firmware with no allocator turns the
+# defaults off and names `session-slot`.
+default = ["alloc"]
+alloc = ["wz-runtime-coop/alloc", "wz-session-core/alloc"]
 # Fixed-memory step S9c -- the per-session slot profile of the cooperative runtime, which
 # a firmware turns on (the facade forwards no selector). `ZephyrLinks` is the heap
 # `SessionLinks` seam over Zephyr's sockets, and the slot profile has no such seam (its

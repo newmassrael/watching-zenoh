@@ -168,7 +168,7 @@ pub use wz_runtime_freertos as runtime_freertos;
 // multi-task is a deliberate re-openable FUTURE profile, not what this ships.
 // The kernel-symbol link + QEMU mps2/an385 boot is deploy/zephyr-app (Z2,
 // run-ci Layer Qz + the GitHub zephyr-mcu job).
-#[cfg(feature = "platform-zephyr")]
+#[cfg(feature = "platform-zephyr-fixed")]
 pub use wz_runtime_zephyr as runtime_zephyr;
 
 // R311y33 — the two RTOS cooperative profiles are themselves mutually exclusive:
@@ -182,6 +182,30 @@ compile_error!(
     "wz: `platform-freertos` and `platform-zephyr` are mutually exclusive — a \
      deploy links exactly one RTOS kernel + one #[global_allocator]. Enable the \
      one MCU platform profile this deploy targets."
+);
+
+// The same two guards for the Zephyr profile's no-heap form (`platform-zephyr` implies
+// it, and is already refused above, so the form alone is what is left to refuse here).
+#[cfg(all(
+    feature = "runtime-tokio",
+    feature = "platform-zephyr-fixed",
+    not(feature = "platform-zephyr")
+))]
+compile_error!(
+    "wz: `platform-zephyr-fixed` (the MCU Zephyr cooperative profile with no heap) is \
+     incompatible with `runtime-tokio` (the AP profile) — enable exactly one \
+     runtime profile per deploy."
+);
+
+#[cfg(all(
+    feature = "platform-freertos",
+    feature = "platform-zephyr-fixed",
+    not(feature = "platform-zephyr")
+))]
+compile_error!(
+    "wz: `platform-freertos` and `platform-zephyr-fixed` are mutually exclusive — a \
+     deploy links exactly one RTOS kernel. Enable the one MCU platform profile this \
+     deploy targets."
 );
 
 // R311az-3a / R311az-3b-ii — §5.C link tier re-export under the MCU

@@ -23,7 +23,9 @@
 //! The arithmetic is here, with no kernel call, so it is tested on a host. The
 //! one call that reads the kernel is [`crate::glue::stack_usage`].
 
+#[cfg(feature = "alloc")]
 use alloc::format;
+#[cfg(feature = "alloc")]
 use alloc::string::String;
 
 /// What the kernel says of a stack: how big it is, and how many of its bytes were
@@ -61,7 +63,9 @@ impl StackWatch {
     /// this watch has reported, and nothing otherwise: not when the peak is the
     /// same (a line a second would drown the console), and not when the kernel
     /// measured nothing (`None`), which is the caller's to notice by there being no
-    /// line at all.
+    /// line at all. The heap profile's form: a firmware with no allocator reads
+    /// [`observe_peak`](Self::observe_peak) and prints the line itself.
+    #[cfg(feature = "alloc")]
     pub fn observe(&mut self, usage: Option<StackUsage>) -> Option<String> {
         let usage = self.observe_peak(usage)?;
         Some(format!(
@@ -71,7 +75,7 @@ impl StackWatch {
         ))
     }
 
-    /// [`observe`](Self::observe) without the line: the usage itself when it is a
+    /// `observe` without the line: the usage itself when it is a
     /// higher peak than any this watch has reported, for a firmware that has no heap
     /// to build the line in and prints it as `stack: peak {peak} of {size} bytes`.
     pub fn observe_peak(&mut self, usage: Option<StackUsage>) -> Option<StackUsage> {
@@ -130,6 +134,7 @@ mod tests {
 
     /// The line is the words the MCU lanes grep for, with the numbers in the
     /// order they print them.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_line_says_peak_then_size_in_the_lanes_own_words() {
         let mut watch = StackWatch::new();
@@ -141,6 +146,7 @@ mod tests {
 
     /// One line for each new peak, so a console is not drowned by a number that
     /// has not moved, and the LAST line is always the deepest the stack has been.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_line_is_printed_only_when_the_peak_has_grown() {
         let mut watch = StackWatch::new();
@@ -168,6 +174,7 @@ mod tests {
 
     /// The line-less form reports the same readings the lined one does: a new peak is
     /// the usage itself, the same peak is nothing.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_peak_form_reports_the_readings_the_line_form_does() {
         let mut lined = StackWatch::new();
@@ -188,11 +195,15 @@ mod tests {
     #[test]
     fn a_reading_the_kernel_did_not_make_prints_nothing_and_forgets_nothing() {
         let mut watch = StackWatch::new();
-        assert_eq!(watch.observe(None), None, "nothing measured, nothing said");
-        assert!(watch.observe(usage(500, 400)).is_some());
-        assert_eq!(watch.observe(None), None);
         assert_eq!(
-            watch.observe(usage(500, 400)),
+            watch.observe_peak(None),
+            None,
+            "nothing measured, nothing said"
+        );
+        assert!(watch.observe_peak(usage(500, 400)).is_some());
+        assert_eq!(watch.observe_peak(None), None);
+        assert_eq!(
+            watch.observe_peak(usage(500, 400)),
             None,
             "the earlier peak was kept"
         );

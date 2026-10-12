@@ -36,12 +36,11 @@
 //! chip's new assertion and not the old one. If it were not, the open would start
 //! early and fail on the bus with a line that says so.
 
-use alloc::format;
 use core::ffi::CStr;
 
 use wz::runtime_coop::ClockSource;
 use wz::runtime_core::EthernetMac;
-use wz::runtime_zephyr::glue::{delay_us, log_line};
+use wz::runtime_zephyr::glue::{delay_us, log_args};
 use wz::runtime_zephyr::{u32_from_build, ZephyrClock};
 use wz_eth_lan865x::{Config, OpenError, PacedMac, Plca, ServiceEvent};
 use wz_spi_scb::{ScbSpi, SpiMode};
@@ -175,26 +174,43 @@ fn reset_by_line(lines: u32) -> Result<(), &'static CStr> {
     Ok(())
 }
 
+/// The PLCA mode in the words the bring-up line says it: `off`, `coordinator, N node(s)`
+/// or `follower I, count N`. Written into the console line, so a build with no allocator
+/// builds no `String` for it.
+struct PlcaWords<'a>(&'a Plca);
+
+impl core::fmt::Display for PlcaWords<'_> {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Plca::Off => out.write_str("off"),
+            Plca::Node { id: 0, count } => write!(out, "coordinator, {count} node(s)"),
+            Plca::Node { id, count } => write!(out, "follower {id}, count {count}"),
+        }
+    }
+}
+
 /// The reason, on the console, that the chip could not be opened; and the line that
 /// stops the node.
 fn refuse(error: OpenError<wz_spi_scb::Error<i32>>) -> &'static CStr {
     match error {
         OpenError::Config(why) => {
-            log_line(format!("wz: t1s: the configuration was refused: {why:?}"));
+            log_args(format_args!(
+                "wz: t1s: the configuration was refused: {why:?}"
+            ));
             c"wz: FAIL - the 10BASE-T1S configuration was refused"
         }
         OpenError::Identity(why) => {
-            log_line(format!("wz: t1s: DEVID names no LAN8650/1: {why:?}"));
+            log_args(format_args!("wz: t1s: DEVID names no LAN8650/1: {why:?}"));
             c"wz: FAIL - what answers on the MikroBUS socket is not a LAN8650/1"
         }
         OpenError::RevisionNotAccepted(found) => {
-            log_line(format!(
+            log_args(format_args!(
                 "wz: t1s: the part is a revision no document grades: {found:?}"
             ));
             c"wz: FAIL - the LAN865x is a silicon revision this build does not accept"
         }
         OpenError::Bus(why) => {
-            log_line(format!(
+            log_args(format_args!(
                 "wz: t1s: the bus failed during the bring-up: {why:?}"
             ));
             c"wz: FAIL - the LAN865x bring-up failed on the SPI bus"
@@ -232,15 +248,15 @@ impl BoardMac for T1sMac {
     fn service(&mut self, _now_ms: u64) {
         match self.inner.service() {
             ServiceEvent::Quiet => {}
-            ServiceEvent::Report(report) => log_line(format!(
+            ServiceEvent::Report(report) => log_args(format_args!(
                 "zephyr-admin-node: t1s: reconfigured {}, status0 {:#04x}, phy status {:#06x}",
                 report.reconfigured, report.status0, report.phy_status
             )),
-            ServiceEvent::Failed(why) => log_line(format!(
+            ServiceEvent::Failed(why) => log_args(format_args!(
                 "zephyr-admin-node: t1s: housekeeping failed, not reported again until it \
                  recovers: {why:?}"
             )),
-            ServiceEvent::Recovered(report) => log_line(format!(
+            ServiceEvent::Recovered(report) => log_args(format_args!(
                 "zephyr-admin-node: t1s: housekeeping recovered after {} failure(s), \
                  reconfigured {}, status0 {:#04x}, phy status {:#06x}",
                 self.inner.failures(),
@@ -258,7 +274,7 @@ pub fn open(mac_address: [u8; 6]) -> Result<T1sMac, &'static CStr> {
     if BUILD_VALUES_ONLY {
         // Said once and first, before anything a lab would be reading for: an image
         // like this has configured a segment with numbers nobody chose.
-        log_line(format!(
+        log_args(format_args!(
             "wz: FAIL - this image was built with made-up values for a build, not a lab's: \
              PLCA {PLCA:?} and address {} describe no segment (overlays/t2g_t1s_build_values.conf)",
             env!("WZ_T1S_IPV4")
@@ -266,7 +282,7 @@ pub fn open(mac_address: [u8; 6]) -> Result<T1sMac, &'static CStr> {
     }
     // SAFETY: the board's routing of the pins; no arguments.
     let lines = unsafe { wz_board_t1s_lines_init() };
-    log_line(format!(
+    log_args(format_args!(
         "wz: t1s: reset line {}, interrupt line {}",
         if lines & LINE_RESET != 0 {
             "wired"
@@ -280,7 +296,7 @@ pub fn open(mac_address: [u8; 6]) -> Result<T1sMac, &'static CStr> {
         }
     ));
     let (spi, rate) = spi_cyt4bf::open(SpiMode::Mode0, SPI_HZ)?;
-    log_line(format!(
+    log_args(format_args!(
         "wz: t1s: SCB3, mode 0, {} Hz (divider {}, oversample {})",
         rate.achieved_hz, rate.divider, rate.oversample
     ));
@@ -296,15 +312,11 @@ pub fn open(mac_address: [u8; 6]) -> Result<T1sMac, &'static CStr> {
     )
     .map_err(refuse)?;
     let identity = inner.identity();
-    log_line(format!(
+    log_args(format_args!(
         "wz: t1s: {:?} revision {:?}, PLCA {}",
         identity.product,
         identity.revision,
-        match PLCA {
-            Plca::Off => alloc::string::String::from("off"),
-            Plca::Node { id: 0, count } => format!("coordinator, {count} node(s)"),
-            Plca::Node { id, count } => format!("follower {id}, count {count}"),
-        }
+        PlcaWords(&PLCA)
     ));
     if lines & LINE_IRQ != 0 {
         inner.set_interrupt_probe(irq_asserted);

@@ -45,6 +45,7 @@ use wz::link_lwip::LwipLink;
 use wz::runtime_coop::ClockSource;
 use wz::runtime_core::EthernetMac;
 use wz::runtime_zephyr::ZephyrClock;
+#[cfg(not(feature = "fixed-memory"))]
 use wz::session_lwip::LwipLinks;
 #[cfg(feature = "fixed-memory")]
 use wz_session_core::bounded::BoundedVec;
@@ -193,7 +194,7 @@ pub const MAX_PORTS: usize = 2;
 /// of a `Box<dyn Port>`: the node's loop does the same two things to each, and an enum
 /// holds the interface where it is, with no allocation to type-erase it.
 #[cfg(feature = "fixed-memory")]
-enum PortCell {
+pub(crate) enum PortCell {
     Onboard(EthernetIf<crate::mac_cyt4bf::T2gMac>),
     #[cfg(feature = "t1s-lan865x")]
     T1s(EthernetIf<crate::mac_lan865x::T1sMac>),

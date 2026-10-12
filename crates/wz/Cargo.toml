@@ -385,7 +385,14 @@ platform-linux = []
 platform-macos = []
 platform-qnx = []
 platform-windows = []
-platform-zephyr = ["dep:wz-runtime-zephyr"]
+platform-zephyr = ["platform-zephyr-fixed", "wz-runtime-zephyr/alloc"]
+# S9e -- the Zephyr profile's seams WITHOUT the heap: the clock, the entropy and epoch
+# sources, the image glue and the console line, and none of the kernel-heap allocator or
+# the Zephyr socket stack (whose buffers and locator text are built on the heap).
+# `platform-zephyr` is this plus the heap, so a heap deploy is unchanged and a build that
+# enables both has the heap, as feature unification says. Alone it has no task pool: it
+# composes with `wz-runtime-zephyr/session-slot`, which a fixed-memory image names itself.
+platform-zephyr-fixed = ["dep:wz-runtime-zephyr"]
 
 # ----- domain: pubsub (12 atomic, 8 active / 4 FOUNDATIONAL-reserved) -----
 # R311y314 — was "11 atomic, 10 active / 1 reserved", the pre-R311y307 count.

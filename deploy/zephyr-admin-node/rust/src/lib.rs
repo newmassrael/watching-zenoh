@@ -22,11 +22,15 @@
 //! when the node could not start: a running node never does.
 #![no_std]
 
+// S9e -- the heap profile's: the growable node, the Zephyr sockets' stack and the console
+// lines built on the heap. A build of the fixed-memory profile with the defaults off links
+// no `alloc` crate, and declares no allocator (`zephyr_image_no_heap!` below).
+#[cfg(feature = "heap")]
 extern crate alloc;
 
 // The growable node's imports (S9c: the `fixed-memory` profile runs `fixed_node`'s
 // instead, over statics, and the heap node does not exist in it).
-#[cfg(any(not(feature = "fixed-memory"), feature = "spi-probe"))]
+#[cfg(not(feature = "fixed-memory"))]
 use alloc::format;
 #[cfg(not(feature = "fixed-memory"))]
 use alloc::rc::Rc;
@@ -44,9 +48,9 @@ use wz::runtime_coop::ClockSource;
 #[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
-use wz::runtime_zephyr::glue::{core_clock_hz, log, log_args, log_line};
+use wz::runtime_zephyr::glue::{core_clock_hz, log, log_args};
 #[cfg(not(feature = "fixed-memory"))]
-use wz::runtime_zephyr::glue::{stack_usage, yield_ms};
+use wz::runtime_zephyr::glue::{log_line, stack_usage, yield_ms};
 #[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_zephyr::stack::StackWatch;
 #[cfg(any(not(feature = "fixed-memory"), feature = "mac-cyt4bf"))]
@@ -85,7 +89,12 @@ mod net_zephyr;
 mod spi_cyt4bf;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
+#[cfg(feature = "heap")]
 wz::runtime_zephyr::zephyr_image!();
+// The same without the allocator: a build that allocates anywhere in its graph does not
+// link, which is what the no-allocator link gate takes as its proof.
+#[cfg(not(feature = "heap"))]
+wz::runtime_zephyr::zephyr_image_no_heap!();
 
 /// How often the node reads its stack's high-water mark. The read walks the whole
 /// stack, so it is made a few times a second and not on every pass of the loop;
@@ -302,6 +311,12 @@ compile_error!(
      one `net-*` feature"
 );
 
+#[cfg(not(any(feature = "heap", feature = "fixed-memory")))]
+compile_error!(
+    "no memory profile: `heap` (the growable node over the kernel heap, the default) or \
+     `fixed-memory` (the slot profile's node over statics, with the defaults off)"
+);
+
 #[cfg(all(feature = "fixed-memory", not(feature = "net-lwip-mac")))]
 compile_error!(
     "the fixed-memory node is the lwIP one: its sessions are opened by the slot profile's \
@@ -370,26 +385,26 @@ fn probe_tc6() {
             return;
         }
     };
-    log_line(format!(
+    log_args(format_args!(
         "wz: spi probe: SCB3, mode 0, {} Hz (divider {}, oversample {})",
         rate.achieved_hz, rate.divider, rate.oversample
     ));
     let mut tc6 = Tc6::new(spi, ChunkSize::B64);
     for (name, reg) in [("OA_ID", std_reg::ID), ("OA_PHYID", std_reg::PHYID)] {
         match tc6.reg_read(reg) {
-            Ok(value) => log_line(format!("wz: spi probe: {name} = {value:#010x}")),
-            Err(why) => log_line(format!("wz: spi probe: {name} not read: {why:?}")),
+            Ok(value) => log_args(format_args!("wz: spi probe: {name} = {value:#010x}")),
+            Err(why) => log_args(format_args!("wz: spi probe: {name} not read: {why:?}")),
         }
     }
     match tc6.reg_read(LAN865X_DEVID) {
-        Ok(value) => log_line(format!(
+        Ok(value) => log_args(format_args!(
             "wz: spi probe: DEVID = {value:#010x} (MODEL {:#06x}, REV {})",
             (value >> 4) & 0xFFFF,
             value & 0xF
         )),
-        Err(why) => log_line(format!("wz: spi probe: DEVID not read: {why:?}")),
+        Err(why) => log_args(format_args!("wz: spi probe: DEVID not read: {why:?}")),
     }
-    log_line(format!(
+    log_args(format_args!(
         "wz: spi probe: done (kernel uptime {} ms)",
         uptime_ms()
     ));
@@ -598,11 +613,11 @@ fn check_core_clock() -> Option<i32> {
     match assess_core_clock(core_clock_hz(), IMAGE_CORE_CLOCK_HZ, board_reads_clock) {
         CoreClockOutcome::Silent => None,
         CoreClockOutcome::Report(line) => {
-            log_line(line);
+            log_args(format_args!("{line}"));
             None
         }
         CoreClockOutcome::Stop(line) => {
-            log_line(line);
+            log_args(format_args!("{line}"));
             Some(CORE_CLOCK_MISMATCH)
         }
     }

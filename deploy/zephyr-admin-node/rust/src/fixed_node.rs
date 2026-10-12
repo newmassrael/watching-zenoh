@@ -17,17 +17,19 @@
 //!
 //! # What this build is, and is not
 //!
-//! The node's own storage is above. The image is NOT allocator-free yet, and the reasons
-//! are not this file's: `zephyr_image!` declares the global allocator over the kernel
-//! heap and `wz-runtime-zephyr` links `alloc` (its console line, its stack line, its
-//! clock-check line), the MAC drivers' bring-up lines are built with `format!`, and
-//! the session tier (`wz-session-core`, the codec owned mirrors) allocates. What it does
-//! show is that the node SHELL asks the heap for nothing it does not have to: its sessions,
-//! sockets, interfaces, endpoint list, status rows and console lines are fixed.
+//! The node's own storage is above, and with it the image has NO allocator (S9e): it
+//! declares none (`zephyr_image_no_heap!`), `wz-runtime-zephyr` is built without its
+//! `alloc` (its clock-check line is a value, its stack line is printed by this file), the
+//! MAC drivers' bring-up lines are printed into the fixed console buffer
+//! (`glue::log_args`), and the session tier is the slot profile's, so no crate of the
+//! graph names `alloc`. The no-allocator link gate (S8) takes that as its proof: a
+//! program that allocates anywhere does not link without a global allocator.
 //!
-//! Not built with `west` (no Zephyr SDK here): the staticlib compiles through the S8
-//! gate's stand-in for the board's build values, which is a compile and a link-input
-//! check, and nothing was booted on the T2G kit.
+//! What the proof does NOT cover: the image has not been built by `west` (no Zephyr SDK
+//! here) and its CMake build does not select this profile yet, so the staticlib compiles
+//! only through the S8 gate's stand-in for the board's build values, which is a compile
+//! and a link-input check, and nothing was booted on the T2G kit. The longest console
+//! line the buffer holds is `glue::LOG_LINE_BYTES`; a longer one is cut.
 
 use core::cell::RefCell;
 

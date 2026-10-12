@@ -267,6 +267,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "api-compat-pico",
                 "platform-freertos",
                 "platform-zephyr",
+                "platform-zephyr-fixed",
                 "rest-http-bridge",
                 "runtime-coop-fixed",
                 "runtime-tokio",
@@ -504,6 +505,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # such seam. Its consumers are the facade (`platform-zephyr`, which forwards no
     # selector) and the Zephyr firmware images, which are crates outside this workspace
     # built with a fixed feature set. Held to `AXIS_REACHABLE` below.
+    # S9e -- the heap profile (`alloc`: `ZephyrAllocator`, and `pub mod net` and `links`,
+    # the Zephyr socket stack) is this crate's DEFAULT feature, so it is in the census's
+    # denominator no more than any default is; the facade's `platform-zephyr` names it and
+    # the no-heap form (`platform-zephyr-fixed`) leaves it off.
     "wz-runtime-zephyr": (
         "the Zephyr cooperative runtime profile; its consumers are the facade and "
         "Zephyr firmware images built with a fixed feature set",
@@ -914,6 +919,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "api-compat-pico",
             "platform-freertos",
             "platform-zephyr",
+            "platform-zephyr-fixed",
             "rest-http-bridge",
             "runtime-coop-fixed",
             "runtime-tokio",

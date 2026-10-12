@@ -19,8 +19,7 @@
 //! is the comparison and the words, with no kernel call, so they are tested on a
 //! host.
 
-use alloc::format;
-use alloc::string::String;
+use core::fmt;
 
 /// How far the core clock may be from the one the image assumes, in parts per
 /// thousand of the assumed clock, in either direction.
@@ -64,17 +63,70 @@ pub const fn judge_core_clock(actual_hz: u32, assumed_hz: u32) -> CoreClock {
     }
 }
 
+/// The words the startup says about a reading: the facts, and the line they make when
+/// displayed. A value and not a `String`, so a firmware with no allocator says them
+/// through its fixed console line (`glue::log_args`) and a heap firmware through
+/// whichever it likes; the words are the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreClockLine {
+    /// The board has a hook for its clock and it gave 0 Hz.
+    Unknown {
+        /// The clock the image assumes.
+        assumed_hz: u32,
+    },
+    /// The core runs at the assumed clock, within [`TOLERANCE_PERMILLE`].
+    Reading {
+        /// What the board read.
+        actual_hz: u32,
+        /// The clock the image assumes.
+        assumed_hz: u32,
+    },
+    /// The core runs at a clock the image was not built for.
+    Mismatch {
+        /// What the board read.
+        actual_hz: u32,
+        /// The clock the image assumes.
+        assumed_hz: u32,
+    },
+}
+
+impl fmt::Display for CoreClockLine {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            CoreClockLine::Unknown { assumed_hz } => write!(
+                out,
+                "wz: core clock unknown (the board's reading gave 0 Hz; the image assumes {assumed_hz} Hz)"
+            ),
+            CoreClockLine::Reading {
+                actual_hz,
+                assumed_hz,
+            } => write!(
+                out,
+                "wz: core clock {actual_hz} Hz (the image assumes {assumed_hz} Hz)"
+            ),
+            CoreClockLine::Mismatch {
+                actual_hz,
+                assumed_hz,
+            } => write!(
+                out,
+                "wz: FAIL - the core runs at {actual_hz} Hz, the image assumes {assumed_hz} Hz; \
+                 start a CM0+ image that configures the clock tree"
+            ),
+        }
+    }
+}
+
 /// What the startup does about the reading.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreClockOutcome {
     /// Say nothing: the board cannot read its clock and never claimed to. This is
     /// every emulated board, whose console must not change.
     Silent,
     /// Say this line and carry on.
-    Report(String),
+    Report(CoreClockLine),
     /// Say this line and stop: the node would run with a time base that is not the
     /// one its waits and timeouts were written against.
-    Stop(String),
+    Stop(CoreClockLine),
 }
 
 /// The startup's decision for a reading of `actual_hz` against `assumed_hz`.
@@ -90,23 +142,25 @@ pub fn assess_core_clock(
     board_reads_clock: bool,
 ) -> CoreClockOutcome {
     match judge_core_clock(actual_hz, assumed_hz) {
-        CoreClock::Unreadable if board_reads_clock => CoreClockOutcome::Report(format!(
-            "wz: core clock unknown (the board's reading gave 0 Hz; the image assumes {assumed_hz} Hz)"
-        )),
+        CoreClock::Unreadable if board_reads_clock => {
+            CoreClockOutcome::Report(CoreClockLine::Unknown { assumed_hz })
+        }
         CoreClock::Unreadable => CoreClockOutcome::Silent,
-        CoreClock::AsAssumed => CoreClockOutcome::Report(format!(
-            "wz: core clock {actual_hz} Hz (the image assumes {assumed_hz} Hz)"
-        )),
-        CoreClock::Differs => CoreClockOutcome::Stop(format!(
-            "wz: FAIL - the core runs at {actual_hz} Hz, the image assumes {assumed_hz} Hz; \
-             start a CM0+ image that configures the clock tree"
-        )),
+        CoreClock::AsAssumed => CoreClockOutcome::Report(CoreClockLine::Reading {
+            actual_hz,
+            assumed_hz,
+        }),
+        CoreClock::Differs => CoreClockOutcome::Stop(CoreClockLine::Mismatch {
+            actual_hz,
+            assumed_hz,
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::string::ToString;
 
     /// `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC` of the CYT4BF M7 board (devicetree
     /// `clock-frequency` of its CPU node).
@@ -205,12 +259,20 @@ mod tests {
 
     #[test]
     fn a_mismatch_stops_the_startup_with_the_one_line_a_lab_reads() {
+        let CoreClockOutcome::Stop(line) = assess_core_clock(8_000_000, ASSUMED, true) else {
+            panic!("a core at 8 MHz where 350 MHz is assumed stops the startup");
+        };
         assert_eq!(
-            assess_core_clock(8_000_000, ASSUMED, true),
-            CoreClockOutcome::Stop(String::from(
-                "wz: FAIL - the core runs at 8000000 Hz, the image assumes 350000000 Hz; \
-                 start a CM0+ image that configures the clock tree"
-            ))
+            line,
+            CoreClockLine::Mismatch {
+                actual_hz: 8_000_000,
+                assumed_hz: ASSUMED
+            }
+        );
+        assert_eq!(
+            line.to_string(),
+            "wz: FAIL - the core runs at 8000000 Hz, the image assumes 350000000 Hz; \
+             start a CM0+ image that configures the clock tree"
         );
         // Too fast stops just the same, and a board without a hook that
         // nonetheless got a reading is held to it as well.
@@ -222,11 +284,12 @@ mod tests {
 
     #[test]
     fn a_match_reports_what_the_clock_was_and_carries_on() {
+        let CoreClockOutcome::Report(line) = assess_core_clock(349_500_000, ASSUMED, true) else {
+            panic!("a core at the assumed clock reports it");
+        };
         assert_eq!(
-            assess_core_clock(349_500_000, ASSUMED, true),
-            CoreClockOutcome::Report(String::from(
-                "wz: core clock 349500000 Hz (the image assumes 350000000 Hz)"
-            ))
+            line.to_string(),
+            "wz: core clock 349500000 Hz (the image assumes 350000000 Hz)"
         );
     }
 
@@ -245,12 +308,13 @@ mod tests {
     /// either, since an unevaluable tree is not a measured mismatch.
     #[test]
     fn a_board_with_a_hook_that_got_nothing_says_so_and_carries_on() {
+        let CoreClockOutcome::Report(line) = assess_core_clock(0, ASSUMED, true) else {
+            panic!("a hook that read nothing is reported, not stopped on");
+        };
         assert_eq!(
-            assess_core_clock(0, ASSUMED, true),
-            CoreClockOutcome::Report(String::from(
-                "wz: core clock unknown (the board's reading gave 0 Hz; \
-                 the image assumes 350000000 Hz)"
-            ))
+            line.to_string(),
+            "wz: core clock unknown (the board's reading gave 0 Hz; \
+             the image assumes 350000000 Hz)"
         );
     }
 }

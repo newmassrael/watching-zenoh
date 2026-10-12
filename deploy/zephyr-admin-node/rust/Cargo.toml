@@ -34,17 +34,36 @@ path = "src/lib.rs"
 crate-type = ["staticlib"]
 
 [features]
+default = ["heap"]
+# S9e -- the HEAP PROFILE of this image, which is what the CMake build has always made: the
+# growable node (`wz-session-mcu`'s `AdminNode` over `Rc` handles and `Vec`s), the heap
+# runtime and session forms, the Zephyr sockets' stack, and the kernel-heap allocator the
+# image declares (`zephyr_image!`). Every feature that links the `alloc` crate of a
+# dependency is named here and nowhere else, so a build of the fixed-memory profile, which
+# turns the defaults off, names none of them.
+heap = [
+    "wz/runtime-coop",
+    "wz/platform-zephyr",
+    "wz/adminspace-core",
+    "wz-session-core/alloc",
+    "wz-session-mcu/alloc",
+    "wz-session-mcu/adminspace-core",
+    # The lwIP session crate's heap forms, when the lwIP backend is on (`net-lwip-mac`
+    # names the crate; a weak forward leaves it out of a build of the sockets backend).
+    "wz-session-lwip?/alloc",
+]
 # The network stack the board's Kconfig chose (`CONFIG_WZ_NET_BACKEND_*`);
 # deploy/zephyr-admin-node/CMakeLists.txt turns exactly one on.
 net-zephyr-sockets = []
 # lwIP polled from the node's loop, over a wz Ethernet MAC crate. The facade's
-# `session-lwip` brings lwIP's links and the real lwIP build, which needs
-# WZ_LWIP_PORT in the build's environment (the CMake sets it).
+# `session-lwip-fixed` brings lwIP's links and the real lwIP build, which needs
+# WZ_LWIP_PORT in the build's environment (the CMake sets it); the heap profile adds
+# the session crate's heap forms (`heap`, through the weak forward above).
 #
 # It also lends: the lwIP UDP driver hands the session the datagram payload and
 # the MAC sends the pbuf chain in place (ARCHITECTURE section 9.1), so the
 # session is built to try a lend (`wz/transport-tx-lend`).
-net-lwip-mac = ["wz/session-lwip", "wz/transport-tx-lend"]
+net-lwip-mac = ["wz/session-lwip-fixed", "wz/transport-tx-lend", "dep:wz-session-lwip"]
 # The MAC (`CONFIG_WZ_MAC_*`): the Infineon CYT4BF family's ETH0.
 mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
 # The node's datagrams are encoded into slots of a transmit pool placed in the
@@ -83,17 +102,22 @@ t1s-lan865x = ["dep:wz-eth-lan865x", "dep:wz-spi-scb"]
 # only (the slot profile's session host owns the tables of one stack, and Zephyr's
 # sockets have none), so it needs `net-lwip-mac` and its MAC.
 #
-# NOT allocator-free: `zephyr_image!` still declares the allocator over the kernel heap,
-# `wz-runtime-zephyr` links `alloc`, the MAC drivers' bring-up lines are built with
-# `format!` and the session tier allocates; see `fixed_node.rs` for what this build is
-# and what it is not. The two crates named here are named only to turn their selectors
-# on (the facade forwards neither), and are the same instances it pulls.
+# S9e -- built with `--no-default-features --features net-lwip-mac,mac-cyt4bf,fixed-memory`
+# it has NO allocator: the image declares none (`zephyr_image_no_heap!`), `wz-runtime-zephyr`
+# is built without its `alloc`, the MAC drivers' bring-up lines are printed into the fixed
+# console buffer (`glue::log_args`), and the session tier is the slot profile's, so no crate
+# of the graph names `alloc` (the no-allocator link gate, S8). With `heap` as well it is the
+# census-only build, which has an allocator and so links. The crates named here are named
+# only to turn their selectors on (the facade forwards none of them), and are the same
+# instances it pulls.
 fixed-memory = [
     "net-lwip-mac",
     "dep:wz-link-lwip",
     "dep:wz-session-lwip",
     "dep:wz-runtime-coop",
     "dep:wz-runtime-zephyr",
+    "wz/platform-zephyr-fixed",
+    "wz/adminspace-fixed",
     "wz-runtime-zephyr/session-slot",
     "wz-link-lwip/static-link-storage",
     "wz-session-lwip/session-slot",
@@ -101,6 +125,7 @@ fixed-memory = [
     "wz-session-lwip/session-unicast-accept",
     "wz-runtime-coop/session-slot",
     "wz-session-mcu/session-slot",
+    "wz-session-mcu/adminspace-fixed",
     "wz-session-core/session-slot",
 ]
 
@@ -114,14 +139,12 @@ critical-section = { version = "1", features = ["restore-state-u32"] }
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
 # The composable-framework route every deploy takes: the facade's features unify
-# onto the one wz-session-core the session shell is built against. `runtime-coop`
-# is the executor; `platform-zephyr` the Zephyr profile seams (clock, allocator,
-# sockets, links, glue). keepalive and close keep the zenoh host's lease and
-# teardown honest.
+# onto the one wz-session-core the session shell is built against. The runtime
+# (`runtime-coop`, the executor) and the platform (`platform-zephyr`, the Zephyr profile
+# seams: clock, allocator, sockets, links, glue) are the profile's to name: `heap` names
+# them with the heap, `fixed-memory` without it. keepalive and close keep the zenoh
+# host's lease and teardown honest.
 wz = { path = "../../../crates/wz", default-features = false, features = [
-    "runtime-coop",
-    "platform-zephyr",
-    "adminspace-core",
     "adminspace-write",
     "codec-frame",
     "codec-keep-alive",
@@ -130,8 +153,7 @@ wz = { path = "../../../crates/wz", default-features = false, features = [
 ] }
 # The session shell: application layer, admin node, connection manager, dialer,
 # generic over the stack's `SessionLinks`. Names no link crate.
-wz-session-mcu = { path = "../../../crates/wz-session-mcu", features = [
-    "adminspace-core",
+wz-session-mcu = { path = "../../../crates/wz-session-mcu", default-features = false, features = [
     "adminspace-write",
     "transport-keepalive",
 ] }
@@ -157,7 +179,6 @@ wz-eth-lan865x = { path = "../../../crates/wz-eth-lan865x", optional = true }
 # The types the facade does not re-export (SessionInitParams, SigningKey,
 # SessionTimeouts, the entropy trait); features arrive through the facade.
 wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = [
-    "alloc",
     "session-unicast",
     "no_std",
 ] }

@@ -19,13 +19,12 @@
 //! each with the kernel's own uptime, stay: a bench reads them beside a wall clock,
 //! and the two agree only if the kernel's time base is what the build assumed.
 
-use alloc::format;
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz::runtime_coop::ClockSource;
 use wz::runtime_core::EthernetMac;
-use wz::runtime_zephyr::glue::{delay_us, log, log_line};
+use wz::runtime_zephyr::glue::{delay_us, log, log_args};
 use wz::runtime_zephyr::ZephyrClock;
 use wz_eth_mac_cyt4bf::{
     Config, Cyt4bfBoard, Cyt4bfMac, DmaArea, LinkError, LinkEvent, LinkMode, RefClock,
@@ -229,9 +228,10 @@ impl BoardMac for T2gMac {
     fn service(&mut self, now_ms: u64) {
         match self.inner.service_link(now_ms) {
             LinkEvent::Steady => {}
-            LinkEvent::Up(mode) => {
-                log_line(format!("zephyr-admin-node: link up, {}", describe(mode)))
-            }
+            LinkEvent::Up(mode) => log_args(format_args!(
+                "zephyr-admin-node: link up, {}",
+                describe(mode)
+            )),
             LinkEvent::Down => log(c"zephyr-admin-node: link down"),
         }
         #[cfg(feature = "tx-pool")]
@@ -271,7 +271,7 @@ impl T2gMac {
         }
         self.rx_reported = Some(now);
         let (mac, (free, size), in_ring, (taken_lent, taken_copied), (read, copied)) = now;
-        log_line(format!(
+        log_args(format_args!(
             "wz: rx-pool: lent {}, returned {}, refused {}, dropped {}, copied {}; \
              pool free {}, in the ring {}, of {}; lwIP took {} lent, {} copied; \
              the session read {} in place, {} copied",
@@ -302,7 +302,7 @@ fn install_rx_pool() -> &'static mut wz_link_lwip::mac_rx_pool::EthRxRing {
     let pool = wz_link_lwip::mac_rx_pool::install(storage);
     let (start, len) = pool.span();
     let (section_start, section_end) = nocache_section();
-    log_line(format!(
+    log_args(format_args!(
         "wz: eth0: receive pool of {} slots at {:#010x} to {:#010x}, in the non-cacheable \
          section {:#010x} to {:#010x}, written in place by the MAC",
         pool.slot_count(),
@@ -312,6 +312,21 @@ fn install_rx_pool() -> &'static mut wz_link_lwip::mac_rx_pool::EthRxRing {
         section_end,
     ));
     pool
+}
+
+/// The bus address of the last in-place frame's first descriptor as the pool line prints
+/// it, `0x` and eight hex digits, or `none` before there was one.
+#[cfg(feature = "tx-pool")]
+struct LastDescriptor(Option<u32>);
+
+#[cfg(feature = "tx-pool")]
+impl core::fmt::Display for LastDescriptor {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(bus) => write!(out, "{bus:#010x}"),
+            None => out.write_str("none"),
+        }
+    }
 }
 
 #[cfg(feature = "tx-pool")]
@@ -335,16 +350,12 @@ impl T2gMac {
         }
         self.tx_reported = Some(now);
         let (mac, pool) = now;
-        let last = match mac.last_in_place_bus {
-            Some(bus) => format!("{bus:#010x}"),
-            None => alloc::string::String::from("none"),
-        };
-        log_line(format!(
+        log_args(format_args!(
             "wz: tx-pool: in place {}, copied {}, last descriptor {}; pool lent {}, \
              started {}, completed {}, unarmed {}, abandoned {}, free {} of {}",
             mac.in_place,
             mac.copied,
-            last,
+            LastDescriptor(mac.last_in_place_bus),
             pool.lent,
             pool.started,
             pool.completed,
@@ -369,7 +380,7 @@ fn install_tx_pool() -> wz_link_lwip::tx_pool::TxPoolSpan {
         core::ptr::addr_of!(_nocache_ram_start) as usize,
         core::ptr::addr_of!(_nocache_ram_end) as usize,
     );
-    log_line(format!(
+    log_args(format_args!(
         "wz: eth0: transmit pool of {} slots at {:#010x} to {:#010x}, in the non-cacheable \
          section {:#010x} to {:#010x}, read in place by the MAC",
         wz_link_lwip::session_tx_pool_mcu::SLOT_COUNT,
@@ -394,8 +405,8 @@ fn describe(mode: LinkMode) -> &'static str {
 /// with the kernel's uptime. The uptime is the point: it is the kernel's own count
 /// of how long boot has taken, so a bench that timestamps the console sees at once
 /// whether the kernel's second is the wall clock's second.
-fn stage(what: &str) {
-    log_line(format!(
+fn stage(what: core::fmt::Arguments<'_>) {
+    log_args(format_args!(
         "wz: eth0: {what} (kernel uptime {} ms)",
         crate::uptime_ms()
     ));
@@ -411,7 +422,7 @@ pub fn open(
     ref_clock: RefClock,
     link_wait_ms: u32,
 ) -> Result<T2gMac, &'static CStr> {
-    stage("routing ETH0's pins");
+    stage(format_args!("routing ETH0's pins"));
     // SAFETY: the board's pin routing function, with no arguments.
     if unsafe { wz_board_eth_pins_init() } != 0 {
         return Err(c"wz: FAIL - the board could not route ETH0's pins");
@@ -465,7 +476,7 @@ pub fn open(
         wz_eth_mac_cyt4bf::InitError::UnknownDmaBusWidth(field) => {
             // The static message cannot carry the value, and the value is what a
             // bench needs to see.
-            log_line(format!(
+            log_args(format_args!(
                 "wz: eth0: DESIGNCFG_DEBUG1 DMA_BUS_WIDTH reads {field}; the driver knows 1, 2 and 4"
             ));
             c"wz: FAIL - the MAC's DMA bus width is not one this driver knows"
@@ -483,13 +494,16 @@ pub fn open(
             c"wz: FAIL - the receive pool is not where the MAC may write it in place"
         }
     })?;
-    stage(&format!(
+    stage(format_args!(
         "MAC initialised; finding the PHY, then waiting up to {link_wait_ms} ms for a link"
     ));
     let outcome = inner.bring_up_link(link_wait_ms.saturating_mul(1000));
-    stage("link bring-up returned");
+    stage(format_args!("link bring-up returned"));
     match outcome {
-        Ok(mode) => log_line(format!("zephyr-admin-node: link up, {}", describe(mode))),
+        Ok(mode) => log_args(format_args!(
+            "zephyr-admin-node: link up, {}",
+            describe(mode)
+        )),
         Err(LinkError::NoLink) => {
             log(c"zephyr-admin-node: no link yet; the node starts and waits for one")
         }
