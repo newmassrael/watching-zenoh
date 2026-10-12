@@ -86,7 +86,15 @@ adminspace-write = [
     "wz-session-core/declare-subscriber",
 ]
 adminspace-core = [
+    "adminspace-fixed",
     "wz-session-core/adminspace-core",
+]
+# S9e — the admin node's pieces that need no allocator (the fixed status and identity
+# rows, the arena the replies are built in, the host the writes go through): what the
+# per-session slot profile answers an admin GET with. `adminspace-core` is this plus
+# the growable node and the owned rows, so it implies this and the heap.
+adminspace-fixed = [
+    "wz-session-core/adminspace-fixed",
     "query-queryable",
     "codec-response",
     "codec-response-final",

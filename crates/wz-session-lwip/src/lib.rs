@@ -62,7 +62,7 @@ extern crate std;
 // The growable dialer and admin node are not on the `session-slot` profile: its
 // admin node is `slot_node` below, over the fixed rows of `admin_fixed`, and its dialer
 // is the one of that module (see `wz-session-mcu`'s `session-slot`).
-#[cfg(all(feature = "adminspace-core", feature = "session-slot"))]
+#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 pub use wz_session_mcu::admin_fixed;
 #[cfg(all(
     feature = "adminspace-core",
@@ -70,7 +70,7 @@ pub use wz_session_mcu::admin_fixed;
     not(feature = "session-slot")
 ))]
 pub use wz_session_mcu::admin_node;
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 pub use wz_session_mcu::admin_status;
 pub use wz_session_mcu::app_layer;
 #[cfg(all(feature = "adminspace-write", not(feature = "session-slot")))]
@@ -102,7 +102,7 @@ pub mod session_host;
 #[cfg(all(
     feature = "session-slot",
     feature = "session-unicast-accept",
-    feature = "adminspace-core",
+    feature = "adminspace-fixed",
     feature = "adminspace-write"
 ))]
 pub mod slot_node;

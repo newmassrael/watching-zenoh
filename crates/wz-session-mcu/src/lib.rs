@@ -74,11 +74,11 @@ pub mod connect_manager;
 pub mod dial;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
 // through the shared answerer, on the same application layer.
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 pub mod admin_status;
 // S9b — the same admin GET with no allocator: the node's state in fixed rows, the
 // reply built in a bounded arena and staged in the session's own stage.
-#[cfg(all(feature = "adminspace-core", feature = "session-slot"))]
+#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 pub mod admin_fixed;
 // R2837 — the node a host reaches and reconfigures at runtime: listen, the
 // write subscriber, the status queryable and the dial manager, ticked as one.

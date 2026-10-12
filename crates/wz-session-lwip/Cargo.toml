@@ -273,8 +273,15 @@ adminspace-write = [
 # through `wz_session_core::adminspace::answer_admin_query`, the AP's own
 # answerer. It needs a queryable and the full reply chain.
 adminspace-core = [
+    "adminspace-fixed",
     "wz-session-core/adminspace-core",
     "wz-session-mcu/adminspace-core",
+]
+# S9e — the admin GET with no allocator (the slot node's status, identity and reply
+# arena): `adminspace-core` is this plus the heap forms.
+adminspace-fixed = [
+    "wz-session-core/adminspace-fixed",
+    "wz-session-mcu/adminspace-fixed",
     "query-queryable",
     "codec-response",
     "codec-response-final",

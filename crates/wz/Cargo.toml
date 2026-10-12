@@ -1012,6 +1012,12 @@ adminspace-core = [
     "wz-runtime-tokio?/adminspace-core",
     "wz-session-lwip?/adminspace-core",
 ]
+# S9e — the same admin GET on a node with no allocator: the weak forward to the lwIP
+# shell's `adminspace-fixed` alone (the growable node and the owned rows are
+# `adminspace-core`'s, which also names the heap).
+adminspace-fixed = [
+    "wz-session-lwip?/adminspace-fixed",
+]
 # R311y203 — adminspace-introspection-handlers active flip: the per-entity
 # subscriber/queryable admin introspection (`@/<zid>/<whatami>/subscriber|queryable/**`).
 adminspace-introspection-handlers = ["wz-runtime-tokio?/adminspace-introspection-handlers"]

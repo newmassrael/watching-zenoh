@@ -48,10 +48,8 @@ wz-eth-mac-lan9118 = { path = "../../crates/wz-eth-mac-lan9118" }
 # unify onto the one wz-session-core the session shell is built against.
 # keepalive and close keep the zenoh host's lease and teardown honest.
 wz = { path = "../../crates/wz", default-features = false, features = [
-    "session-lwip",
     # Its link is the lwIP UDP driver, which lends the datagram payload.
     "transport-tx-lend",
-    "adminspace-core",
     "adminspace-write",
     "codec-frame",
     "codec-keep-alive",
@@ -61,7 +59,6 @@ wz = { path = "../../crates/wz", default-features = false, features = [
 # The types the facade does not re-export (SessionInitParams, SigningKey,
 # SessionTimeouts, the entropy trait); features arrive through the facade.
 wz-session-core = { path = "../../crates/wz-session-core", default-features = false, features = [
-    "alloc",
     "session-unicast",
     "no_std",
 ] }
@@ -78,16 +75,17 @@ wz-runtime-coop = { path = "../../crates/wz-runtime-coop", optional = true, defa
 default = ["heap"]
 # The image with an allocator: the growable node on `embedded-alloc`'s heap, the shape
 # this image has always had.
-heap = ["dep:embedded-alloc"]
+heap = ["dep:embedded-alloc", "wz/session-lwip", "wz/adminspace-core", "wz-session-core/alloc"]
 # S9c -- the FIXED-MEMORY PROFILE of this image: the node of `src/fixed.rs`, over the
 # slot profile's pieces (session slots, a pump table, a static runtime, a socket pool,
 # a listener, the fixed status and admin rows, the Ethernet pool), with no allocator
 # and no `extern crate alloc` in the bin. Built with `--no-default-features --features
-# fixed-memory`. The image does not link yet, for the reason the acceptor's profile does
-# not: the session tier's own crates still carry `extern crate alloc`, and the S8 gate
-# lists them. (With `heap` as well it is the census-only build, which has an allocator
-# and so links.)
+# fixed-memory`. The heap forms (`wz/session-lwip`, `wz-session-core/alloc`) are the
+# `heap` feature's, so a build of the profile names no heap feature of any crate; with
+# `heap` as well it is the census-only build, which has an allocator and so links.
 fixed-memory = [
+    "wz/session-lwip-fixed",
+    "wz/adminspace-fixed",
     "dep:wz-session-lwip",
     "dep:wz-link-lwip",
     "dep:wz-runtime-coop",

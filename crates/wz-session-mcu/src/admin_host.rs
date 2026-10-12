@@ -47,7 +47,7 @@ use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BoxedSink, SampleView};
 #[cfg(feature = "session-slot")]
 use wz_session_core::text_out::FixedText;
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 use wz_session_core::text_out::TextOut;
 
 struct State {
@@ -162,7 +162,7 @@ impl ConnectControl {
 /// reports, so a host that wrote `connect/endpoints` can read it back at
 /// `@/<zid>/<whatami>/config`. Keys are spelled as upstream's config document
 /// spells them; only the part this node holds is present.
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 impl crate::admin_status::ConfigView for ConnectControl {
     fn write_config_json(&self, out: &mut dyn TextOut) {
         let (permit_write, list) = critical_section::with(|cs| {
@@ -182,7 +182,7 @@ impl crate::admin_status::ConfigView for ConnectControl {
 /// reported in the node's own words instead of only leaving the list as it
 /// was. Each verdict is its variant's name; a malformed value adds where the
 /// parse stopped and what it expected there.
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 impl crate::admin_status::ConnectStatusSource for ConnectControl {
     fn write_permit(&self) -> bool {
         critical_section::with(|cs| self.state.borrow(cs).borrow().permit_write)
@@ -234,7 +234,7 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
 /// entry as a string, a group as `{"strategy":…,"locators":[…]}` (the derive on
 /// its `Locators`, strategy in camelCase), so what was written reads back in
 /// the form it was written, an empty group included.
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 fn push_connect_endpoints(
     list: &[wz_session_core::admin_connect::ConnectEntry],
     out: &mut dyn TextOut,
