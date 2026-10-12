@@ -53,6 +53,7 @@ const RESPONSE_HEADER: u8 = wire_const::N_MID_RESPONSE | wire_const::FLAG_N_N;
 const REPLY_HEADER: u8 = 0x04;
 
 /// The Err body's header: `_Z_MID_Z_ERR`.
+#[cfg(feature = "query-reply-err")]
 const ERR_HEADER: u8 = 0x05;
 
 /// A Put's header, and a Del's.
@@ -266,6 +267,8 @@ impl<'a> ResponseWriter<'a> {
             #[cfg(feature = "transport-shm")]
             PartsBody::Shared(handle) => Some(handle.bytes()),
         };
+        // Only the encoding (a Put's) and the attachment's extension id read it.
+        #[cfg(any(feature = "pubsub-encoding", feature = "pubsub-attachment"))]
         let is_put = payload.is_some();
         #[cfg(not(feature = "pubsub-timestamp"))]
         let _ = timestamp;
@@ -388,5 +391,172 @@ impl<'a> ResponseWriter<'a> {
             payload_len: payload.len() as u64,
             payload,
         }
+    }
+}
+
+/// The writer against the owned path it replaces: the same bytes for every reply the
+/// stage can describe, and the refusals. Each side is built from the same `ReplyParts`,
+/// the owned one through `QueryReply::from_parts` and `into_response` (the route the
+/// heap profile takes), and the number of rows compared is asserted, so a writer that
+/// always wrote the same message would be caught by the first row that differs and not
+/// pass an empty loop.
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::*;
+    use crate::declare_ext_qos::QOS_DECLARE;
+    use crate::query::QueryReply;
+    use crate::reply_stage::{EncodingParts, TimestampParts};
+    use crate::sample::SourceInfo;
+    use alloc::vec::Vec;
+
+    /// The bytes the owned path writes for `parts`.
+    fn owned_bytes(parts: &ReplyParts<'_>) -> Vec<u8> {
+        let response = QueryReply::from_parts(parts)
+            .into_response()
+            .expect("the owned response is built");
+        let view = response.try_as_borrowed().expect("a view");
+        view.encode_to_vec()
+    }
+
+    /// The bytes the writer writes for `parts`.
+    fn lent_bytes(parts: ReplyParts<'_>) -> Vec<u8> {
+        let writer = ResponseWriter::new(parts).expect("the reply is writable");
+        let mut buffer = [0u8; 1024];
+        let mut sink = SliceSink::new(&mut buffer);
+        writer.encode(&mut sink).expect("the buffer holds it");
+        let len = sink.position();
+        buffer[..len].to_vec()
+    }
+
+    #[test]
+    fn a_reply_is_written_as_the_owned_path_writes_it() {
+        let source = SourceInfo::new(&[7u8; 4], 3, 9);
+        let attachments: [Option<&[u8]>; 2] = [None, Some(b"att")];
+        let encodings: [Option<EncodingParts<'_>>; 3] = [
+            None,
+            Some(EncodingParts {
+                packed_id: 10 << 1,
+                schema: None,
+            }),
+            Some(EncodingParts {
+                packed_id: (5 << 1) | 1,
+                schema: Some("v=1"),
+            }),
+        ];
+        let stamps: [Option<TimestampParts<'_>>; 2] = [
+            None,
+            Some(TimestampParts {
+                time: 123_456_789,
+                zid: &[0xAB; 8],
+            }),
+        ];
+        let responders: [Option<(&[u8], u32)>; 3] =
+            [None, Some((&[1, 2, 3, 4], 5)), Some((&[9u8; 16], 300))];
+        let sources: [Option<&SourceInfo>; 2] = [None, Some(&source)];
+        let bodies: [PartsBody<'_>; 3] = [
+            PartsBody::Put(b"hello"),
+            PartsBody::Put(b""),
+            PartsBody::Del,
+        ];
+        let mut compared = 0usize;
+        for body in bodies {
+            for qos in [QosLevel::DEFAULT, QOS_DECLARE] {
+                for responder in responders {
+                    for encoding in encodings {
+                        for timestamp in stamps {
+                            for attachment in attachments {
+                                for source_info in sources {
+                                    let parts = ReplyParts {
+                                        rid: 7,
+                                        keyexpr: "demo/a",
+                                        responder,
+                                        qos,
+                                        kind: PartsKind::Reply {
+                                            body,
+                                            encoding,
+                                            timestamp,
+                                            attachment,
+                                            source_info,
+                                        },
+                                    };
+                                    assert_eq!(
+                                        lent_bytes(parts),
+                                        owned_bytes(&parts),
+                                        "qos {qos:?}, responder {responder:?}, encoding \
+                                         {encoding:?}, timestamp {timestamp:?}, attachment \
+                                         {attachment:?}, source {:?}",
+                                        source_info.is_some(),
+                                    );
+                                    compared += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 2 * 3 * 3 * 2 * 2 * 2, "the matrix ran whole");
+    }
+
+    #[cfg(feature = "query-reply-err")]
+    #[test]
+    fn an_err_is_written_as_the_owned_path_writes_it() {
+        let encodings: [Option<(u32, Option<&str>)>; 3] =
+            [None, Some((5, None)), Some((5, Some("s")))];
+        let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
+        let mut compared = 0usize;
+        for encoding in encodings {
+            for qos in [QosLevel::DEFAULT, QOS_DECLARE] {
+                for responder in responders {
+                    for payload in [&b"boom"[..], &b""[..]] {
+                        let parts = ReplyParts {
+                            rid: 300,
+                            keyexpr: "demo/err",
+                            responder,
+                            qos,
+                            kind: PartsKind::Err { encoding, payload },
+                        };
+                        assert_eq!(
+                            lent_bytes(parts),
+                            owned_bytes(&parts),
+                            "encoding {encoding:?}, qos {qos:?}, responder {responder:?}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 2 * 2 * 2);
+    }
+
+    #[test]
+    fn a_reply_the_wire_cannot_carry_is_refused_not_cut() {
+        let kind = PartsKind::Reply {
+            body: PartsBody::Put(b"x"),
+            encoding: None,
+            timestamp: None,
+            attachment: None,
+            source_info: None,
+        };
+        let parts = |keyexpr, responder| ReplyParts {
+            rid: 1,
+            keyexpr,
+            responder,
+            qos: QosLevel::DEFAULT,
+            kind,
+        };
+        assert!(matches!(
+            ResponseWriter::new(parts("", None)),
+            Err(ResponseRefusal::EmptyKeyexpr)
+        ));
+        assert!(matches!(
+            ResponseWriter::new(parts("demo/a", Some((&[], 1)))),
+            Err(ResponseRefusal::ResponderIdentity)
+        ));
+        assert!(matches!(
+            ResponseWriter::new(parts("demo/a", Some((&[0u8; 17], 1)))),
+            Err(ResponseRefusal::ResponderIdentity)
+        ));
+        assert!(ResponseWriter::new(parts("demo/a", Some((&[0u8; 16], 1)))).is_ok());
     }
 }
