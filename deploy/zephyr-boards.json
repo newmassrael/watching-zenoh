@@ -107,6 +107,18 @@
       "conf_overlay": ["overlays/t2g_rx_pool.conf"],
       "verdict_steps": "HW.31 to HW.35",
       "note": "The onboard RMII image with the receive pool (ARCHITECTURE section 9.2, CONFIG_WZ_CYT4BF_RX_POOL): 16 slots of 1536 bytes from sources/network/eth_rx_pool_mcu.scxml, placed in Zephyr's non-cacheable section beside the MAC's rings, which then hold no receive buffer of their own. Each receive descriptor is armed with a slot; a received frame is lent to lwIP in the slot the controller wrote it into and the descriptor is armed again with another slot; the session socket keeps a lent datagram as the pbuf it arrived in, and the session loop's in-place receive dispatches it from the slot, so a datagram that fits one frame crosses from the wire to the session dispatch with no copy. A datagram lwIP reassembles from fragments, and a frame past the eight lwIP may hold lent, is copied, and counted. The generated pool's receive edges (armed, started, complete, returned) follow each frame, a descriptor left unarmed because every slot is out is counted as a refusal, and the console prints the pool's place beside the section's bounds and, every 10 seconds when they moved, the MAC's, the pool's, lwIP's and the session socket's counts. HARDWARE is the record's run of this image with the CM0+ launcher on a bench kit, the five steps HW.31 to HW.35 of HARDWARE_VERDICT.md (the row's verdict_steps), each ending OK: the pool sat at 0x28009860 to 0x2800f860 inside the non-cacheable section, the controller wrote 49 frames into slots that lwIP took lent (none copied), the session read 36 datagrams in place and none copied, and every slot came home (free 8, in the ring 8 of 16, refused 0). The session's stack peaked at 20352 of 32768 bytes with the in-place receive. What the record does not settle: a start after the board's power is removed completely, the pool running dry under load, and a datagram reassembled from fragments. HW.31 carries the onboard verdict for this image without naming its steps, so that the row's steps are one range."
+    },
+    {
+      "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
+      "link": "rmii-dp83825i-fixed",
+      "app": "zephyr-admin-node",
+      "network": "lwip-mac",
+      "rust_target": "thumbv7em-none-eabi",
+      "grade": "BUILT",
+      "witness": {"lane": "Qzb"},
+      "requires": ["zephyr-cm0p-launcher"],
+      "conf_overlay": ["overlays/t2g_fixed.conf", "overlays/t2g_tx_pool.conf", "overlays/t2g_rx_pool.conf"],
+      "note": "The onboard RMII image on the fixed-memory profile (CONFIG_WZ_FIXED_MEMORY) with both pools: the node of fixed_node.rs, whose sessions, sockets, listener lanes, observer and interfaces are statics the image declares, built with the Rust crate's default features off, so the Rust image links no allocator. Its listener reads only the datagrams of the peer each session was accepted from and drops and counts the rest, where the growable node's one accepting session takes the source of every datagram it reads as its peer. It is the same overlays' image as the two pool rows, on the slot profile. Layer Qzb builds it and reads the Rust target back. Not yet a HARDWARE row: no ledger record names its steps."
     }
   ],
   "companions": [

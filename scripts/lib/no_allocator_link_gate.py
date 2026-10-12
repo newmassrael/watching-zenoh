@@ -440,8 +440,10 @@ IMAGES: dict[str, Image] = {
     # Built with the stand-in for the board's build values, which is a compile and a
     # link-input check: a staticlib has no link step of its own, so the proof is the
     # symbols of the archive and the crates of its graph, and the toolchain's refusal
-    # holds where the kernel's image link would take it. No `west` image was built and
-    # nothing was booted on the kit; the CMake build does not select this profile yet.
+    # holds where the kernel's image link would take it. The CMake build selects this
+    # profile (`CONFIG_WZ_FIXED_MEMORY`, `overlays/t2g_fixed.conf`), `west` links it
+    # (Layer Qzb builds the table's `rmii-dp83825i-fixed` row) and it has been booted on
+    # the T2G kit; the census stays the stand-in build, which needs no Zephyr SDK.
     "zephyr-admin-node-fixed": Image(
         "deploy/zephyr-admin-node/rust/Cargo.toml",
         "staticlib",

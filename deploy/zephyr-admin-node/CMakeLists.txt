@@ -22,6 +22,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../zephyr-common/wz_zephyr_board.cmake)
 target_sources(app PRIVATE src/main.c)
 
 set(backend_env "")
+set(no_default_features "")
 
 if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   set(backend_feature net-zephyr-sockets)
@@ -119,6 +120,14 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
     endif()
   else()
     message(FATAL_ERROR "wz: the lwIP backend needs a MAC (CONFIG_WZ_MAC_*).")
+  endif()
+
+  # The fixed-memory profile: the node of fixed_node.rs, with the crate's default
+  # features (the heap profile) off, so the Rust image links no allocator. It is a
+  # profile of the lwIP backend alone (the Kconfig symbol depends on it).
+  if(CONFIG_WZ_FIXED_MEMORY)
+    list(APPEND backend_feature fixed-memory)
+    set(no_default_features NO_DEFAULT_FEATURES)
   endif()
 
   # lwIP's C is built by the CARGO build (lwip-sys), against this image's port: its
@@ -245,6 +254,7 @@ wz_zephyr_rust_app(
   RUST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust
   LIB      wz_zephyr_admin_node
   FEATURES ${backend_feature}
+  ${no_default_features}
   CARGO_ENV ${backend_env}
   UNDEFINED ${backend_undefined}
 )

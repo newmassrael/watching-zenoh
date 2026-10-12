@@ -80,6 +80,9 @@ endfunction()
 #   RUST_DIR <dir>            the staticlib crate (holds Cargo.toml)
 #   LIB      <stem>           the staticlib's name: lib<stem>.a
 #   [FEATURES <f>...]         cargo features to turn on
+#   [NO_DEFAULT_FEATURES]     build without the crate's default features: a profile
+#                             that names its own (the fixed-memory node, which has
+#                             no allocator) must not inherit the heap profile's
 #   [CARGO_ENV <VAR=val>...]  extra environment for the cargo build
 #   [UNDEFINED <sym>...]      kernel / POSIX symbols only this application's Rust
 #                             side references, to keep through the image link
@@ -88,7 +91,7 @@ endfunction()
 # Sets WZ_RUST_TARGET in the caller's scope, builds the crate as an always-run
 # custom target, and links it into `app` with the symbol contract below.
 function(wz_zephyr_rust_app)
-  cmake_parse_arguments(WZ "" "RUST_DIR;LIB" "FEATURES;CARGO_ENV;UNDEFINED" ${ARGN})
+  cmake_parse_arguments(WZ "NO_DEFAULT_FEATURES" "RUST_DIR;LIB" "FEATURES;CARGO_ENV;UNDEFINED" ${ARGN})
   if(NOT WZ_RUST_DIR OR NOT WZ_LIB)
     message(FATAL_ERROR "wz_zephyr_rust_app needs RUST_DIR and LIB")
   endif()
@@ -106,9 +109,12 @@ function(wz_zephyr_rust_app)
 
   set(rust_lib ${WZ_RUST_DIR}/target/${rust_target}/release/lib${WZ_LIB}.a)
   set(cargo_features "")
+  if(WZ_NO_DEFAULT_FEATURES)
+    list(APPEND cargo_features --no-default-features)
+  endif()
   if(WZ_FEATURES)
     list(JOIN WZ_FEATURES "," joined)
-    set(cargo_features --features ${joined})
+    list(APPEND cargo_features --features ${joined})
   endif()
 
   # Always-run (ALL + no OUTPUT) so Rust source edits are picked up; cargo's own

@@ -202,6 +202,22 @@ config WZ_CYT4BF_RX_POOL
 	  (HARDWARE_VERDICT.md, steps HW.31 to HW.35). Off by default: nothing
 	  has run on silicon with it.
 
+config WZ_FIXED_MEMORY
+	bool "Build the node on the fixed-memory profile (no allocator in the Rust image)"
+	depends on WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF
+	help
+	  The node of fixed_node.rs: every table it holds (sessions, sockets, the
+	  listener's lanes, the observer, the interfaces) is a static the image
+	  declares, the session tier is the slot profile's, and the Rust staticlib is
+	  built with its default features off, so it links no allocator. The
+	  listener reads only the datagrams of the peer each session was accepted
+	  from and drops and counts the rest, where the growable node's one accepting
+	  session takes the source of every datagram it reads as its peer.
+
+	  The lwIP backend only: the slot profile's session host owns the tables of
+	  one stack, and Zephyr's sockets have none. Off by default: the image has
+	  not been booted on silicon with it.
+
 choice WZ_CYT4BF_PINS
 	prompt "ETH0 pin routing"
 
