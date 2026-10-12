@@ -63,7 +63,7 @@ pub enum DriverLoopOutcome {
     ///
     /// The heap profile's outcome: it owns the decoded batch. The per-session slot
     /// profile delivers each record where its frame lies (`InPlaceRecord`), and a
-    /// frame with none to deliver is [`Self::EmptyFrame`] where no allocator exists.
+    /// frame with none to deliver is `Self::EmptyFrame` where no allocator exists.
     #[cfg(feature = "alloc")]
     FramePayload {
         reliable: bool,

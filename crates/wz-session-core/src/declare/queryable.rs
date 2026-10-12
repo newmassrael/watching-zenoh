@@ -107,7 +107,7 @@ use crate::wireexpr_resolve::{KeyexprBuf, MappingSpaces};
 pub struct QuerierCriterion {
     /// The querier's keyexpr (a pattern; both sides may be wildcards). Read it
     /// through `as_str`: it is a `String` on the heap profile and a bounded buffer
-    /// with no allocator ([`crate::declare::CriterionKey`]).
+    /// with no allocator (`crate::declare::CriterionKey`).
     pub keyexpr: super::CriterionKey,
     /// The querier's `allowed_destination`: which halves of the verdict
     /// it admits at all. pico's `ctx->allow_local` / `ctx->allow_remote`

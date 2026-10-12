@@ -6,11 +6,13 @@
 //!
 //! A reply the queryable staged waits in a [`ReplyStage`](crate::reply_stage::ReplyStage)
 //! as a row and a byte arena, and [`ReplyStage::parts`](crate::reply_stage::ReplyStage::parts)
-//! describes it with every field borrowed ([`ReplyParts`]). Sending it the way the heap
+//! describes it with every field borrowed
+//! ([`ReplyParts`](crate::reply_stage::ReplyParts)). Sending it the way the heap
 //! profile does means building a [`QueryReply`](crate::query::QueryReply) (a `String`,
 //! and a `Vec` per field), then the owned `ResponseOwned` out of that (a second copy of
 //! all of it), then encoding that: two heap objects whose only job is to be encoded and
-//! dropped. [`ResponseWriter`] takes the description and writes the `Response` the
+//! dropped. [`ResponseWriter`](crate::lent_response::ResponseWriter) takes the
+//! description and writes the `Response` the
 //! owned path writes, byte for byte, with the text and the payload read where they lie
 //! and the few bytes it has to make (the body of the responder and the source-info
 //! extensions) in arrays of its own.
@@ -26,7 +28,8 @@
 //! combination the stage can describe.
 //!
 //! A reply the owned path panics on (an empty keyexpr, a responder identity of no
-//! bytes) is REFUSED here with a [`ResponseRefusal`], which is what a node with no
+//! bytes) is REFUSED here with a
+//! [`ResponseRefusal`](crate::lent_response::ResponseRefusal), which is what a node with no
 //! allocator and no unwinding can do about a malformed reply: the drain skips it, as it
 //! skips a reply whose bounded field overflows on the heap profile.
 

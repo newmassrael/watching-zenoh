@@ -94,7 +94,7 @@ impl ReplySink for NoReplies {
 }
 
 /// What the application registered on the slot profile, in a place the sessions'
-/// `on_event`s all reach: the process-wide [`SlotObserver`], installed once at
+/// `on_event`s all reach: the process-wide `SlotObserver`, installed once at
 /// startup into a `static`.
 ///
 /// `SlotObserver::new` is not `const` (its registries are built, not zeroed), so the

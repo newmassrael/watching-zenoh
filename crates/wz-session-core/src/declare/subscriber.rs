@@ -93,7 +93,7 @@ use crate::wireexpr_resolve::{KeyexprBuf, MappingSpaces};
 pub struct PublisherCriterion {
     /// The publisher's keyexpr (a pattern; both sides may be wildcards). Read it
     /// through `as_str`: it is a `String` on the heap profile and a bounded buffer
-    /// with no allocator ([`crate::declare::CriterionKey`]).
+    /// with no allocator (`crate::declare::CriterionKey`).
     pub keyexpr: super::CriterionKey,
     /// The publisher's `allowed_destination`: which halves of the verdict
     /// it admits at all.

@@ -678,7 +678,7 @@ use alloc::string::{String, ToString};
 
 /// The text an outbound-keyexpr refusal quotes ([`OutboundKeyexprError`]): a `String`
 /// on the heap profile, and on a build with no allocator a text of
-/// [`DIAGNOSTIC_TEXT_BYTES`]. It is DIAGNOSTIC: what a person reads in the refusal's
+/// `DIAGNOSTIC_TEXT_BYTES`. It is DIAGNOSTIC: what a person reads in the refusal's
 /// message, never a value anything acts on, so a quote longer than the bound is cut at
 /// a character boundary rather than refused. The bound is small because the refusal
 /// is returned by value, and a keyexpr's whole 256 bytes twice would make every
