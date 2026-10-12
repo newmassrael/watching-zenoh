@@ -273130,6 +273130,44 @@
         "The accessor-reach census and the rest of Layer C1bw read the doc build of wz-capture, which failed before them in that run: read their verdicts on the run that carries this push."
       ]
     },
+    "Round 3310": {
+      "decision_summary": "The hosted run of f1a42b27 read Layer C0s red: the silent-skip gate found that the_generators_own_sizes_are_the_numbers, the test that holds the nanopb size arithmetic to nanopb's own generator, prints a skip and returns where the generator's headers are absent, names no REQUIRE door, and that no lane runs the script that provisions them, so the claim of agreement with the generator was a sentence no lane checked. The script was run on a build host now: nanopb 0.4.9.1 generated 27 size macros over the three reference schemas and the module's nine tests pass, the comparison with the generator among them, so the arithmetic does agree. Repaired at the cause: the test reads WZ_NANOPB_REFERENCE_REQUIRE and fails where it is set and the headers are absent, the script sets it, and Layer C1bn, whose job already carries protoc, runs the script with it set and counts the nine tests. What a hosted runner lacks of python3 venv or PyPI access is not known until that lane runs.",
+      "changes_bullets": [
+        "wz-capture proto_nanopb_tests: `the_generators_own_sizes_are_the_numbers` reads WZ_NANOPB_REFERENCE_REQUIRE and asserts where it is set and WZ_NANOPB_REFERENCE_DIR is not; its doc says so.",
+        "scripts/nanopb-reference-sizes.sh sets WZ_NANOPB_REFERENCE_REQUIRE for its cargo test.",
+        "scripts/run-ci.sh Layer C1bn: a leg runs the script with the door set and requires `9 passed`, the number the command printed on a build host."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host, never the coordinating host: scripts/nanopb-reference-sizes.sh run once as it was (generator nanopb 0.4.9.1, 27 size macros over sizes, shapes and file_defaults; the nine proto_nanopb_tests pass, the generator comparison among them), and once as Layer C1bn will run it, with WZ_NANOPB_REFERENCE_REQUIRE=1 (nine passed); clippy -D warnings --all-targets of wz-capture (exit 0).",
+        "Locally: the silent-skip gate (check and selftest, OK: every default-run skip can now be made a failure by an armed lane) and bash -n of both scripts.",
+        "Not verified here: Layer C1bn itself, so whether the hosted job has python3 venv and reaches PyPI; its job time with the leg added; the hosted run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted Layer C1bn leg of this push first: if the runner lacks python3-venv, add it to the passive-dissection job's apt line with an apt_package_census entry in the same commit; if PyPI is unreachable, vendor the pinned generator rather than skipping the leg.",
+        "The nanopb arithmetic is now agreed with the generator on the three reference schemas only; a schema shape outside them (a oneof of messages, extensions) is not covered by that agreement."
+      ],
+      "publishable_decision_summary": "The hosted run of f1a42b27 read Layer C0s red: the silent-skip gate found that the_generators_own_sizes_are_the_numbers, the test that holds the nanopb size arithmetic to nanopb's own generator, prints a skip and returns where the generator's headers are absent, names no REQUIRE door, and that no lane runs the script that provisions them, so the claim of agreement with the generator was a sentence no lane checked. The script was run on a build host now: nanopb 0.4.9.1 generated 27 size macros over the three reference schemas and the module's nine tests pass, the comparison with the generator among them, so the arithmetic does agree. Repaired at the cause: the test reads WZ_NANOPB_REFERENCE_REQUIRE and fails where it is set and the headers are absent, the script sets it, and Layer C1bn, whose job already carries protoc, runs the script with it set and counts the nine tests. What a hosted runner lacks of python3 venv or PyPI access is not known until that lane runs.",
+      "publishable_changes_bullets": [
+        "wz-capture proto_nanopb_tests: `the_generators_own_sizes_are_the_numbers` reads WZ_NANOPB_REFERENCE_REQUIRE and asserts where it is set and WZ_NANOPB_REFERENCE_DIR is not; its doc says so.",
+        "scripts/nanopb-reference-sizes.sh sets WZ_NANOPB_REFERENCE_REQUIRE for its cargo test.",
+        "scripts/run-ci.sh Layer C1bn: a leg runs the script with the door set and requires `9 passed`, the number the command printed on a build host."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host, never the coordinating host: scripts/nanopb-reference-sizes.sh run once as it was (generator nanopb 0.4.9.1, 27 size macros over sizes, shapes and file_defaults; the nine proto_nanopb_tests pass, the generator comparison among them), and once as Layer C1bn will run it, with WZ_NANOPB_REFERENCE_REQUIRE=1 (nine passed); clippy -D warnings --all-targets of wz-capture (exit 0).",
+        "Locally: the silent-skip gate (check and selftest, OK: every default-run skip can now be made a failure by an armed lane) and bash -n of both scripts.",
+        "Not verified here: Layer C1bn itself, so whether the hosted job has python3 venv and reaches PyPI; its job time with the leg added; the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted Layer C1bn leg of this push first: if the runner lacks python3-venv, add it to the passive-dissection job's apt line with an apt_package_census entry in the same commit; if PyPI is unreachable, vendor the pinned generator rather than skipping the leg.",
+        "The nanopb arithmetic is now agreed with the generator on the three reference schemas only; a schema shape outside them (a oneof of messages, extensions) is not covered by that agreement."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
