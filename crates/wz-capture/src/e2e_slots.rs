@@ -54,6 +54,35 @@ use crate::e2e_profile::Profile;
 pub const UNREADABLE_PAYLOAD: &str =
     "the payload is not one run of bytes in the capture (shared memory, or several slices)";
 
+/// Why a rule that matched yielded no frame, as a closed set a machine reads:
+/// the `unopened_reason` of a capture row's `e2e` block, beside the free `why`
+/// a person reads. Two reasons because there are two ways a covered payload is
+/// not a frame, and a consumer that has to tell them apart (a payload too short
+/// to hold the header is damage; one that is not a run of bytes is a carrier
+/// this reader does not follow) must not do it by reading a sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unopened {
+    /// The payload is not one run of bytes in the capture.
+    PayloadNotContiguous,
+    /// The payload is shorter than the profile's header.
+    PayloadShorterThanHeader,
+}
+
+impl Unopened {
+    /// Every reason, so the vocabulary a document declares and a test's walk of
+    /// it are one list.
+    pub const ALL: [Self; 2] = [Self::PayloadNotContiguous, Self::PayloadShorterThanHeader];
+
+    /// The word a machine reads for this reason. Exhaustive, so a reason added
+    /// to the enum cannot reach a consumer without one.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::PayloadNotContiguous => "payload_not_contiguous",
+            Self::PayloadShorterThanHeader => "payload_shorter_than_header",
+        }
+    }
+}
+
 /// Who a slot's frames are from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlotSender {
@@ -127,6 +156,30 @@ pub struct Opened {
     /// Whether the timeout was judged: false when the packet carried no
     /// timestamp, or when no judgment was made at all.
     pub timed: bool,
+    /// The counter this frame was judged against: the last one the slot
+    /// ACCEPTED before it, `None` while it has accepted none. A CRC error and a
+    /// repetition accept nothing, so after either the same counter is what the
+    /// next frame is judged against; a step past the allowed gap IS accepted
+    /// (the counter moved and the verdict says by how much it was wrong), so it
+    /// becomes the next frame's. `None` as well when there is no slot to judge
+    /// against ([`Self::judgment`] is `None`).
+    pub previous: Option<u64>,
+    /// The step from [`Self::previous`] to this frame's counter, in the counter's
+    /// own width, as the judge computes it: `None` when there is nothing to step
+    /// from, and when the CRC did not match (the counter of a damaged frame is
+    /// not read).
+    pub step: Option<u64>,
+}
+
+impl Outcome {
+    /// Why this outcome is not a frame, or `None` when it is one.
+    pub fn unopened(&self) -> Option<Unopened> {
+        match self {
+            Self::Unreadable { .. } => Some(Unopened::PayloadNotContiguous),
+            Self::TooShort { .. } => Some(Unopened::PayloadShorterThanHeader),
+            Self::Opened(_) => None,
+        }
+    }
 }
 
 /// The ledger of a run: a judge per slot seen.
@@ -189,6 +242,8 @@ impl SlotLedger {
                 slot,
                 judgment: None,
                 timed: false,
+                previous: None,
+                step: None,
             }));
         }
         let judge = self
@@ -196,6 +251,14 @@ impl SlotLedger {
             .entry(slot.clone())
             .or_insert_with(|| profile.judge());
         let counter = frame.counter(profile);
+        // Read BEFORE the judge moves anything: what the frame is judged
+        // against, and how far it is from it.
+        let previous = judge.baseline();
+        let step = if frame.crc_ok {
+            judge.step_from_baseline(counter)
+        } else {
+            None
+        };
         let (judged, timed) = match reception.observed_at_ns {
             Some(ns) => (
                 judge.receive(frame.crc_ok, counter, ns / NANOS_PER_MILLI),
@@ -214,6 +277,8 @@ impl SlotLedger {
             slot,
             timed: timed && judgment.is_some(),
             judgment,
+            previous,
+            step,
         }))
     }
 }

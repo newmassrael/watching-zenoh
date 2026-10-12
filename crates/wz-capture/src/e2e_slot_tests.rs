@@ -171,6 +171,115 @@ fn a_counter_that_repeats_skips_wraps_and_jumps_is_judged_within_its_slot() {
     assert_eq!(next(8), (false, CounterReason::None));
 }
 
+/// What a frame was judged AGAINST, frame by frame: the counter the slot had
+/// last accepted, and the step from it. The expected pairs are written out from
+/// the counters sent, never read back from the judge, and each repeat and each
+/// damaged frame is placed where the wrong rule ("the previous FRAME's
+/// counter") reads a different number than the right one ("the last ACCEPTED").
+#[test]
+fn a_frame_reports_the_counter_it_was_judged_against_and_the_step_from_it() {
+    let p = profile(SLOT_A);
+    let mut ledger = SlotLedger::new();
+    let key = "demo/a";
+    let mut next = |frame: Vec<u8>| {
+        let o = receive(&mut ledger, &p, key, Some(X), &frame);
+        (o.previous, o.step)
+    };
+    // Nothing accepted yet: no previous, and nothing to step from.
+    assert_eq!(next(frame_a(&p, 65534, 7)), (None, None));
+    // The step is taken in the counter's own width: 65535 - 65534.
+    assert_eq!(next(frame_a(&p, 65535, 7)), (Some(65534), Some(1)));
+    // The wrap: (0 - 65535) mod 65536.
+    assert_eq!(next(frame_a(&p, 0, 7)), (Some(65535), Some(1)));
+    // A repetition has a step of zero and accepts nothing.
+    assert_eq!(next(frame_a(&p, 0, 7)), (Some(0), Some(0)));
+    // A damaged frame is not read for its counter: no step, and it accepts
+    // nothing. 9 would have been out of range, and the report must not say so.
+    assert_eq!(next(damaged(frame_a(&p, 9, 7))), (Some(0), None));
+    // So the frame after it is judged against 0, not against the damaged 9.
+    assert_eq!(next(frame_a(&p, 3, 7)), (Some(0), Some(3)));
+    // A step past the allowed gap IS accepted: it is the next frame's previous.
+    assert_eq!(next(frame_a(&p, 20, 7)), (Some(3), Some(17)));
+    assert_eq!(next(frame_a(&p, 21, 7)), (Some(20), Some(1)));
+}
+
+/// A frame whose first reception was damaged accepted nothing, so the slot is
+/// still empty and the next valid frame is the slot's first.
+#[test]
+fn a_damaged_first_frame_leaves_the_slot_without_a_previous_counter() {
+    let p = profile(SLOT_A);
+    let mut ledger = SlotLedger::new();
+    let first = receive(
+        &mut ledger,
+        &p,
+        "demo/a",
+        Some(X),
+        &damaged(frame_a(&p, 5, 7)),
+    );
+    assert_eq!((first.previous, first.step), (None, None));
+    let second = receive(&mut ledger, &p, "demo/a", Some(X), &frame_a(&p, 6, 7));
+    assert_eq!(
+        (second.previous, second.step),
+        (None, None),
+        "nothing was accepted before it, so it is the slot's first"
+    );
+    let third = receive(&mut ledger, &p, "demo/a", Some(X), &frame_a(&p, 7, 7));
+    assert_eq!((third.previous, third.step), (Some(6), Some(1)));
+}
+
+/// A frame with no slot to judge against has no previous counter to report:
+/// reporting the baseline of some OTHER sender's slot would be the unknown
+/// sender charged with another's counter.
+#[test]
+fn a_frame_with_no_slot_reports_no_previous_counter() {
+    let p = profile(SLOT_A);
+    let mut ledger = SlotLedger::new();
+    receive(&mut ledger, &p, "demo/a", Some(X), &frame_a(&p, 1, 7));
+    let unknown = receive(&mut ledger, &p, "demo/a", None, &frame_a(&p, 2, 7));
+    assert!(unknown.judgment.is_none());
+    assert_eq!((unknown.previous, unknown.step), (None, None));
+}
+
+/// The two ways a covered payload is not a frame have two words, and a word
+/// belongs to exactly one of them. Written both directions: the walk of the
+/// enum and the outcomes that map onto it.
+#[test]
+fn a_payload_that_is_not_a_frame_says_why_in_a_closed_word() {
+    use crate::e2e_slots::Unopened;
+    let p = profile(SLOT_A);
+    let mut ledger = SlotLedger::new();
+    let short = ledger.receive(&Reception {
+        profile: &p,
+        keyexpr: "demo/a",
+        payload: b"short",
+        sender: Some(X),
+        observed_at_ns: None,
+    });
+    assert_eq!(short.unopened(), Some(Unopened::PayloadShorterThanHeader));
+    let unreadable = Outcome::Unreadable {
+        why: crate::e2e_slots::UNREADABLE_PAYLOAD,
+    };
+    assert_eq!(unreadable.unopened(), Some(Unopened::PayloadNotContiguous));
+    let frame = ledger.receive(&Reception {
+        profile: &p,
+        keyexpr: "demo/a",
+        payload: &frame_a(&p, 1, 7),
+        sender: Some(X),
+        observed_at_ns: None,
+    });
+    assert_eq!(
+        frame.unopened(),
+        None,
+        "a frame has no reason to be unopened"
+    );
+    // The words are distinct and snake_case: a consumer switches on them.
+    let words: Vec<&str> = Unopened::ALL.iter().map(|r| r.word()).collect();
+    assert_eq!(
+        words,
+        ["payload_not_contiguous", "payload_shorter_than_header"]
+    );
+}
+
 #[test]
 fn two_senders_publishing_one_key_keep_separate_counters() {
     let p = profile(SLOT_A);

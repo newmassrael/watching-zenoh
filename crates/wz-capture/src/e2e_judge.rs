@@ -303,21 +303,25 @@ impl Judge {
         })
     }
 
+    /// The step a frame carrying `counter` would be from the baseline:
+    /// `(counter - baseline) mod 2^width`, in the counter's own width; `None`
+    /// before any counter was accepted, when there is nothing to step from.
+    /// It moves nothing, and it is the ONE place the width-wrapping subtraction
+    /// is written, so a caller that reports the step reports the number the
+    /// verdict was reached from.
+    pub fn step_from_baseline(&self, counter: u64) -> Option<u64> {
+        self.baseline
+            .map(|baseline| counter.wrapping_sub(baseline) & self.counter_mask())
+    }
+
     /// What the counter alone says about a frame whose CRC matched: the step
     /// from the baseline, judged. It moves nothing.
     fn counter_step(&self, counter: u64) -> CounterReason {
-        match self.baseline {
+        match self.step_from_baseline(counter) {
             None => CounterReason::None,
-            Some(baseline) => {
-                let step = counter.wrapping_sub(baseline) & self.counter_mask();
-                if step == 0 {
-                    CounterReason::Repeat
-                } else if step <= self.config.max_gap {
-                    CounterReason::None
-                } else {
-                    CounterReason::OutOfRange
-                }
-            }
+            Some(0) => CounterReason::Repeat,
+            Some(step) if step <= self.config.max_gap => CounterReason::None,
+            Some(_) => CounterReason::OutOfRange,
         }
     }
 
@@ -416,6 +420,33 @@ mod tests {
             silence_ms: None,
             ..rx_full(j, crc_ok, counter, now)
         }
+    }
+
+    /// The step a verdict is reached from is the number a caller may report:
+    /// the width-wrapping subtraction has one author, and the verdict follows it.
+    #[test]
+    fn the_step_a_caller_asks_for_is_the_step_the_verdict_is_reached_from() {
+        let mut j = judge(2);
+        assert_eq!(j.step_from_baseline(7), None, "nothing to step from yet");
+        rx(&mut j, true, 0xFFFE, 1);
+        // Forward, past the wrap: (2 - 0xFFFE) mod 2^16 = 4.
+        assert_eq!(j.step_from_baseline(2), Some(4));
+        // The same counter again is a step of zero, which is a repetition.
+        assert_eq!(j.step_from_baseline(0xFFFE), Some(0));
+        assert_eq!(
+            rx(&mut j, true, 0xFFFE, 2).counter_reason,
+            CounterReason::Repeat
+        );
+        // Backwards is a long way forward in a counter that wraps.
+        assert_eq!(j.step_from_baseline(0xFFFD), Some(0xFFFF));
+        // Asking moves nothing: the baseline is still the last accepted counter.
+        assert_eq!(j.baseline(), Some(0xFFFE));
+        // A step above the allowed gap is the step the verdict called out of range.
+        assert_eq!(j.step_from_baseline(9), Some(11));
+        assert_eq!(
+            rx(&mut j, true, 9, 3).counter_reason,
+            CounterReason::OutOfRange
+        );
     }
 
     #[test]
