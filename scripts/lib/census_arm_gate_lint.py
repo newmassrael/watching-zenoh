@@ -84,10 +84,19 @@ def _feature_of(gate: str) -> str | None:
     checker's whole claim is that one variant answers to one feature, and a
     compound predicate is a decision someone made that this rule has not been
     taught to read.
+
+    `alloc` is the one feature set aside before that count. It names the heap
+    profile, not a codec: the module gate always requires it (it is in
+    `supplied`), so a variant gated `all(alloc, codec-join)` answers to
+    `codec-join` exactly as one gated `codec-join` did before the owned forms
+    moved behind `alloc`, and a gate naming `alloc` alone is no gate this rule
+    needs to match.
     """
     if not gate.strip():
         return None
-    feats = FEATURE.findall(gate)
+    feats = [f for f in FEATURE.findall(gate) if f != "alloc"]
+    if not feats:
+        return None
     if len(feats) != 1:
         raise SystemExit(
             f"census-arm-gate: a gate names {len(feats)} feature(s) and this "
