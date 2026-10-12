@@ -273062,6 +273062,40 @@
         "Open: the Zephyr admin node's new assertions are compiled by the hosted Layer Qzb only; read that job on the run that carries this push."
       ]
     },
+    "Round 3308": {
+      "decision_summary": "The hosted run of b24bc165 read the heap multicast image's footprint at 66296 and 66104 bytes of text against baselines of 65056 and 64980, outside the band of 256. It was 65068 on the runs of eb7cf703, so the growth lies inside the fixed-memory multicast stage. A per-symbol diff of the two trees on a build host reads +1126 bytes of symbols: the image's main grew 1182, the standalone encode_join (454) and encode_close (50) left, the slice sink's writers (176) and a memclr routine (174) arrived. The cause read from them is that the stage framed the JOIN of the heap and the no-allocator images with one encoder, which keeps the two from drifting; what the diff does not show is which inlining decision grew main, and no single commit of the arc was built on its own, so none is named. The growth is accepted as intended and the baseline moves to the hosted reading, with that reasoning written beside the table; it is not masked and the band stays at 256.",
+      "changes_bullets": [
+        "scripts/check-footprint.sh: the multicast-e2e text baselines move from 65056 and 64980 to 66296 and 66104 (thumbv7m, thumbv7em-hf), the hosted reading of d277eaa2 and b24bc165; the comment above the table records the per-symbol diff and the reading of its cause. data and bss do not move, and the band stays at 256."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host: the multicast image (deploy/mcu-multicast-e2e, thumbv7m, release, the lane's cross-test lwIP port) built at eb7cf703 and at d277eaa2, and llvm-nm -S read for each; the two symbol lists were diffed with hashes stripped (symbol bytes 62504 and 63630, +1126). The hosted figures come from the logs of the Layer Q jobs of the runs of d277eaa2, eb7cf703, 292cdd6a and 55c3340f and of b24bc165.",
+        "Locally: bash -n of check-footprint.sh.",
+        "Not verified here: the footprint on the final tree by the check itself (the new baselines are the hosted readings of b24bc165, and this tree adds only constants in wz-session-core caps and compile-time assertions in images that are not this one); thumbv7em-hf was not diffed per symbol; the rest of the 102 bytes between the symbol sum and the hosted delta is attributed to padding by arithmetic, not read."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The inlining decision that grew the image's main by 1182 bytes is not read. Next step if wanted: build the stage's commits one by one (65a95b78, 0d40596c, da5ad4e1, f50baa4a) with the same recipe and name the one that moved the number, then see whether an outlined encode would give the bytes back.",
+        "The footprint of the final tree is read by the hosted Layer Q.5 of the run that carries this push."
+      ],
+      "publishable_decision_summary": "The hosted run of b24bc165 read the heap multicast image's footprint at 66296 and 66104 bytes of text against baselines of 65056 and 64980, outside the band of 256. It was 65068 on the runs of eb7cf703, so the growth lies inside the fixed-memory multicast stage. A per-symbol diff of the two trees on a build host reads +1126 bytes of symbols: the image's main grew 1182, the standalone encode_join (454) and encode_close (50) left, the slice sink's writers (176) and a memclr routine (174) arrived. The cause read from them is that the stage framed the JOIN of the heap and the no-allocator images with one encoder, which keeps the two from drifting; what the diff does not show is which inlining decision grew main, and no single commit of the arc was built on its own, so none is named. The growth is accepted as intended and the baseline moves to the hosted reading, with that reasoning written beside the table; it is not masked and the band stays at 256.",
+      "publishable_changes_bullets": [
+        "scripts/check-footprint.sh: the multicast-e2e text baselines move from 65056 and 64980 to 66296 and 66104 (thumbv7m, thumbv7em-hf), the hosted reading of d277eaa2 and b24bc165; the comment above the table records the per-symbol diff and the reading of its cause. data and bss do not move, and the band stays at 256."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host: the multicast image (deploy/mcu-multicast-e2e, thumbv7m, release, the lane's cross-test lwIP port) built at eb7cf703 and at d277eaa2, and llvm-nm -S read for each; the two symbol lists were diffed with hashes stripped (symbol bytes 62504 and 63630, +1126). The hosted figures come from the logs of the Layer Q jobs of the runs of d277eaa2, eb7cf703, 292cdd6a and 55c3340f and of b24bc165.",
+        "Locally: bash -n of check-footprint.sh.",
+        "Not verified here: the footprint on the final tree by the check itself (the new baselines are the hosted readings of b24bc165, and this tree adds only constants in wz-session-core caps and compile-time assertions in images that are not this one); thumbv7em-hf was not diffed per symbol; the rest of the 102 bytes between the symbol sum and the hosted delta is attributed to padding by arithmetic, not read."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The inlining decision that grew the image's main by 1182 bytes is not read. Next step if wanted: build the stage's commits one by one (65a95b78, 0d40596c, da5ad4e1, f50baa4a) with the same recipe and name the one that moved the number, then see whether an outlined encode would give the bytes back.",
+        "The footprint of the final tree is read by the hosted Layer Q.5 of the run that carries this push."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
