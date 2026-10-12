@@ -145,9 +145,12 @@ MACRO_CALL = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*!\s*[({\[]")
 FIELD = re.compile(
     r"^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?(?:mut\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:"
 )
+# S9e -- `&` opens a gated call ARGUMENT, `&mut || Ok(Vec::new())` or `&mut ||
+# chain.owned(..)`: a borrow expression, which no item starts with. The shape the
+# in-place walk's two closure arguments take once their heap form is behind `alloc`.
 BLOCK_OR_STMT = re.compile(
     r"^\s*(?:[{}()\[\]]|let\b|if\b|for\b|while\b|loop\b|match\b|return\b"
-    r"|break\b|continue\b|else\b|\.|\||\"|\d|_\b)"
+    r"|break\b|continue\b|else\b|\.|\||&|\"|\d|_\b)"
 )
 CALL_OR_PATH = re.compile(
     r"^\s*[A-Za-z_][A-Za-z0-9_:<>\.]*\s*(?:[({,]|=>|=[^=]|\.|::<)"
@@ -265,9 +268,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "platform-freertos",
                 "platform-zephyr",
                 "rest-http-bridge",
-                "runtime-coop",
+                "runtime-coop-fixed",
                 "runtime-tokio",
-                "session-lwip",
+                "session-lwip-fixed",
             }
         ),
     ),
@@ -356,10 +359,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # Round 3279 -- `session-slot` joins: the per-session-slot SELECTOR for the
         # MCU final binary, gating `session_runtime::new_session_in_slot` and the
         # slot handle bindings in `pub mod`s (the shape the sites above have).
+        # S9e -- `runtime` joins: the runtime proper (the executor, the task pool
+        # and the session-drive modules) is present without the heap, so it sits
+        # behind its own name and `alloc` adds the heap forms; the sites are `pub
+        # mod`s and re-exports, the shape the sites above have.
         frozenset(
             {
                 "alloc",
                 "reassembly",
+                "runtime",
                 "rx-in-place",
                 "scouting-static",
                 "session-slot",
@@ -858,6 +866,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
         {
             "alloc",
             "reassembly",
+            "runtime",
             "rx-in-place",
             "scouting-static",
             "session-slot",
@@ -906,9 +915,9 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "platform-freertos",
             "platform-zephyr",
             "rest-http-bridge",
-            "runtime-coop",
+            "runtime-coop-fixed",
             "runtime-tokio",
-            "session-lwip",
+            "session-lwip-fixed",
         }
     ),
 }
