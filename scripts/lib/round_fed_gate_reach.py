@@ -251,6 +251,18 @@ DEFERRED: dict[str, str] = {
         "differently-featured target directory makes the build unbounded. "
         "Hosted Layer C1cf owns it."
     ),
+    "session_slot_bytes.py": (
+        "R3312 -- it BUILDS its subject. The gate cross-builds each image that "
+        "names its slot type with the `slot-bytes-probe` feature and reads the "
+        "size of one symbol out of the linked ELF with `nm -S`, so it cannot "
+        "grade a tree it has not compiled. MEASURED at 51.1s for the first "
+        "`--check` after a source change (two cross builds, the thumbv7m and "
+        "thumbv7em-hf images, with the build host's dependency cache warm) and "
+        "0.46s when nothing changed: the first figure is the one a push pays, "
+        "and it would add about seven tenths to a 62-member block costing "
+        "68.4-74.8s. Hosted Layer Q.0s owns it, in the job that already "
+        "holds the cross toolchains."
+    ),
     "bump_sweep.py": (
         "18.47s in --check mode, and it is an AGGREGATE: it sweeps a pin "
         "bump's whole re-measurement surface, most of whose members this hook "
