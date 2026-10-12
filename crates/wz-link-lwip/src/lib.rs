@@ -739,25 +739,32 @@ struct Inner<const N: usize, const Q: usize> {
 }
 
 impl<const N: usize, const Q: usize> Inner<N, Q> {
-    /// A socket's state before its pcb exists: nothing queued, nothing dropped.
+    /// A socket's state before its pcb exists (nothing queued, nothing dropped), in a
+    /// new heap box and pinned, written where it stays.
     ///
-    /// By value, for a socket whose state lives in a heap box. The state is the receive
-    /// queue's size (24.7 KB for a session socket), so a socket in a static cell is
-    /// written by [`Self::init_in_place`] instead.
-    #[cfg_attr(feature = "static-link-storage", allow(dead_code))]
-    fn new() -> Self {
-        let mut inner = core::mem::MaybeUninit::<Self>::uninit();
-        // SAFETY: `init_in_place` writes every field, which `every_field_is_written`
-        // holds to the field list at compile time.
+    /// There is no by-value constructor: the state is the receive queue's size (24.7 KB
+    /// for a session socket), and a value of that size is a local of whoever builds it.
+    /// A heap build that went through one needed a stack that big (the FreeRTOS demo's
+    /// task, 16 KiB, did not boot). A socket in a static cell is written by
+    /// [`Self::init_in_place`] as well.
+    #[cfg(not(feature = "static-link-storage"))]
+    fn boxed() -> Pin<Box<Self>> {
+        let layout = core::alloc::Layout::new::<Self>();
+        // SAFETY: the layout is not zero-sized (the queue is in it); `init_in_place`
+        // writes every field of the allocation, and an allocation it got from the
+        // global allocator with this layout is what `Box::from_raw` takes back.
         unsafe {
-            Self::init_in_place(inner.as_mut_ptr());
-            inner.assume_init()
+            let at = alloc::alloc::alloc(layout).cast::<Self>();
+            if at.is_null() {
+                alloc::alloc::handle_alloc_error(layout);
+            }
+            Self::init_in_place(at);
+            Box::into_pin(Box::from_raw(at))
         }
     }
 
     /// Write a socket's state before its pcb exists at `at`, field by field, so the
-    /// state is never a value of its own on any stack. The single list of fields, which
-    /// [`Self::new`] shares.
+    /// state is never a value of its own on any stack. The single list of fields.
     ///
     /// # Safety
     ///
@@ -766,15 +773,18 @@ impl<const N: usize, const Q: usize> Inner<N, Q> {
     // the node's loop on the dial path.
     #[inline(never)]
     unsafe fn init_in_place(at: *mut Self) {
-        use core::ptr::addr_of_mut;
+        use core::ptr::{self, addr_of_mut};
+        // Each gated statement opens with the path `ptr::write(`, not the macro: the
+        // feature-public-surface census reads a gated line that starts with a macro
+        // call as one that may expand to a public item.
         // SAFETY: the caller's; each field is written once through a pointer to it.
         unsafe {
-            addr_of_mut!((*at).pcb).write(NonNull::dangling());
-            addr_of_mut!((*at).rx_queue).write(Queue::new());
-            addr_of_mut!((*at).rx_drops).write(0);
+            ptr::write(addr_of_mut!((*at).pcb), NonNull::dangling());
+            ptr::write(addr_of_mut!((*at).rx_queue), Queue::new());
+            ptr::write(addr_of_mut!((*at).rx_drops), 0);
             #[cfg(feature = "rx-hold")]
-            addr_of_mut!((*at).hold_lent).write(false);
-            addr_of_mut!((*at)._pin).write(PhantomPinned);
+            ptr::write(addr_of_mut!((*at).hold_lent), false);
+            ptr::write(addr_of_mut!((*at)._pin), PhantomPinned);
         }
     }
 
@@ -1062,7 +1072,7 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     ///   (e.g. already in use within the lwIP stack).
     #[cfg(not(feature = "static-link-storage"))]
     pub fn bind(link: &LwipLink, port: u16) -> Result<Self, LinkError> {
-        Self::attach(link, Box::pin(Inner::new()), port)
+        Self::attach(link, Inner::boxed(), port)
     }
 
     /// Round 3277 (`static-link-storage`) -- `bind` over a cell of
