@@ -66,7 +66,21 @@ default = [
 # cross-compile, C1h subset matrix) never surfaced it; the mcu-noheap-probe
 # binary did. Propagating the feature makes the no-alloc profile genuinely
 # allocator-free and keeps the alloc profile unchanged.
-alloc = ["wz-codecs/alloc"]
+alloc = ["storage-profile", "wz-codecs/alloc", "dep:hashbrown", "zeroize/alloc"]
+
+# `storage-profile` -- a STORAGE PROFILE is selected, so the session tier's modules
+# (the link types, the wire and frame codecs' drivers, the registries and their
+# tables, the session bundle) are compiled. There are two: the heap profile
+# (`alloc`, growable `Vec` / `String` / `Box`, the AP's and the default) and the
+# per-session slot profile (`session-slot`, storage of fixed size, NO allocator).
+# It is implied by each of the two and is not meant to be named on its own.
+#
+# It is what the module gates say where they used to say `alloc`: the machinery is
+# the same under either profile, and what differs is what it is made of. An item that
+# names a `Vec`, a `String`, a `Box`, an `Arc` or a hashed map is gated on `alloc`
+# and is the heap profile's; a build with `session-slot` and without `alloc` compiles
+# the rest and links no allocator.
+storage-profile = []
 
 # `bounded-heapless` selects the FIXED-CAPACITY backing for
 # `bounded::BoundedVec` / `bounded::BoundedString` while `alloc` stays on: every
@@ -306,8 +320,10 @@ session-extqos = ["transport-qos"]
 # R311y9 — per-session transport byte/message counters. Additive instrumentation
 # (4 AtomicUsize + 2 single-site increments at the send_wire/dispatch_link_event
 # seams + a public snapshot accessor); zero extra deps. Off by default; the
-# adminspace-metrics consumer stays P4. AP-only (never on an MCU lane).
-transport-stats = []
+# adminspace-metrics consumer stays P4. AP-only (never on an MCU lane): it counts
+# through the owned `NetworkMessage` and the label registry, which are the heap
+# profile's, so it implies `alloc` and a build with no allocator cannot ask for it.
+transport-stats = ["alloc"]
 
 # session-extcompression — the Z_EXT_COMPRESSION (0x6) establishment handshake
 # (the wz mirror of zenoh's compression ext). Gates the `extcompression` ext
@@ -838,7 +854,12 @@ keyexpr-prefix = []
 # wz-runtime-tokio same-named feature (`= ["codec-declare"]`); the
 # wz-runtime-tokio side forwards here so the gated action arms compile
 # consistently workspace-wide.
-declare-keyexpr = ["codec-declare"]
+#
+# `declare-keyexpr` also implies `alloc`: the aliases a node declares are held in a
+# `HashMap<u64, String>` (`SessionCore::outbound_mappings`, the id space an `M=0`
+# reference names), and the per-session slot profile has no such table yet, so a
+# build that declares keyexprs takes the heap profile's.
+declare-keyexpr = ["codec-declare", "alloc"]
 declare-token = ["codec-declare"]
 declare-final = ["codec-declare"]
 declare-interest = ["codec-declare"]
@@ -1139,7 +1160,9 @@ tx-lend-only = ["transport-tx-lend"]
 # A SELECTOR, as `bounded-heapless` and `tx-lend-only` are, and the one that
 # names the whole per-session profile: it implies those two (a slot whose
 # collections grow, or whose frames are built on the heap, has not removed the
-# heap from the session), and `alloc` keeps its meaning. Under it the init
+# heap from the session) and `storage-profile` (the session tier is compiled), and
+# `alloc` keeps its meaning: it does NOT imply it, and a build with this selector
+# and without `alloc` links no allocator at all (S9e). Under it the init
 # parameters hold their zid, cookie and key in arrays, the peer facts a
 # handshake captures and the four handshake ext chains are arrays too, the
 # cookie entropy source is a reference to a source the slot holds and not a
@@ -1156,7 +1179,7 @@ tx-lend-only = ["transport-tx-lend"]
 # the multilink aggregation API is not compiled (a build that selects every
 # feature at once must still build; an image that turns this selector on does
 # not turn multilink on).
-session-slot = ["bounded-heapless", "tx-lend-only"]
+session-slot = ["bounded-heapless", "tx-lend-only", "storage-profile"]
 
 # Item 895 — `transport_compose`: transport messages WRITTEN from explicit
 # fields, for a caller that says every field itself (the transport build door
@@ -1233,7 +1256,13 @@ sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", def
 # (e.g. `cargo test -p wz-session-core --lib` MCU-style regression)
 # resolves `HashMap<u64, String>::get` without leaning on the
 # wz-runtime-tokio side enabling it transitively.
-hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
+#
+# OPTIONAL, and pulled only by `alloc`: `hashbrown` declares `extern crate alloc`
+# unconditionally, so a graph that names it needs a global allocator whether or not
+# one of its maps is ever built. The per-session slot profile (`session-slot` without
+# `alloc`) holds its tables in `bounded::BoundedVec` / `id_map::IdMap`'s fixed arm and
+# must not name this crate at all.
+hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"], optional = true }
 # Round 311vh — xxh3 hasher for the storage-replication digest primitives
 # (storage_replication.rs). Optional, pulled only by `storage-replication`.
 # default-features = false keeps it no_std (xxh3 is a pure computation, no
@@ -1274,7 +1303,12 @@ keccak = { version = "0.1", default-features = false, optional = true }
 # (no std, no nightly, no unsafe); the `frame` format is std-coupled + unused
 # (we use the block API), so default-features are off.
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"], optional = true }
-zeroize = { version = "1", default-features = false, features = ["alloc"] }
+#
+# The key wrapper (`Zeroizing<[u8; N]>` on the slot profile, `Zeroizing<Vec<u8>>` on the
+# heap profile). Its `alloc` feature declares `extern crate alloc`, so only the `alloc`
+# feature of THIS crate turns it on (`zeroize/alloc`); the slot profile uses the array
+# form, which needs none.
+zeroize = { version = "1", default-features = false }
 # no-alloc backing store for the application-layer registries. When the
 # `alloc` feature is off (MCU no-heap profile, §2.3) `BoundedVec<T, N>`
 # (src/bounded.rs) wraps `heapless::Vec<T, N>`; when on it wraps

@@ -16,6 +16,11 @@
 #![no_std]
 #![cfg_attr(not(feature = "alloc"), allow(unused_extern_crates))]
 
+// The `alloc` crate is linked by the heap profile (`alloc`) and by nothing else. The
+// per-session slot profile (`session-slot` without `alloc`) compiles the session
+// machinery against fixed storage and links NO allocator: a `Vec`, a `String` or a
+// `Box` named by code that profile compiles is refused here, by the compiler, and is
+// not left for the image's link to find.
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -409,7 +414,7 @@ pub mod peer_init_caps;
 /// `wz-runtime-tokio::session_glue`; the OS-entropy constructor stays
 /// AP-only as a free fn in the tokio crate (getrandom has no MCU
 /// backend, and the orphan rule forbids a cross-crate inherent method).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod signing_key;
 
 /// R2760 — the accept cookie that CARRIES the acceptor's state, so the
@@ -417,7 +422,7 @@ pub mod signing_key;
 ///
 /// Gated with [`signing_key`] and for its reason: the cookie is a `Vec<u8>`
 /// authenticated by that module's `SigningKey`, so the two share a footing.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod accept_cookie;
 
 /// R2762 — the per-extension ACCEPT STATE seam the cookie is meant to carry.
@@ -435,14 +440,14 @@ pub mod accept_state;
 /// DP3 leaf lifted from `wz-runtime-tokio::session_glue`; unblocked by
 /// R311ei moving SigningKey here. No codec coupling — drives the session
 /// FSM identically on the tokio (AP) and lwIP (MCU) runtimes.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod session_init_params;
 
 /// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
 /// RxFrame carries Vec<u8> so the module is alloc-gated. The
 /// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
 /// wz-runtime-tokio because they are tokio-specific.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod link;
 
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
@@ -455,7 +460,7 @@ pub mod rx_profile;
 /// R2928 — a pushed message's congestion outcome and deadline, shared by the
 /// unicast session and the multicast transmission pipeline. Alloc-gated with
 /// the two modules it reads ([`link`] and [`session_init_params`]).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod tx_deadline;
 
 /// Inbound-parse error surface + ext-chain depth ceiling. Precursor
@@ -499,7 +504,7 @@ pub mod ext_admit;
 /// decoder and a VLE read, so every `alloc` build now has a consumer and there
 /// is no longer a list to grow. `alloc` is the real dependency and always was:
 /// the decoder returns an owned `Vec` of entries.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 mod ext_chain;
 
 /// Lease-deadline check outcome (R77 helper surface). no_std +
@@ -608,7 +613,7 @@ pub mod metadata;
 
 /// Typed reject for the outbound DECLARE-side gate (R300). Uses
 /// OutboundKeyexprError (alloc-bound) so the module is alloc-gated.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod send_declare_error;
 
 /// W3 — typed reject for the non-DECLARE outbound wire-emit actions
@@ -621,7 +626,7 @@ pub mod send_wire_error;
 /// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`
 /// feature. Re-exported from wz-runtime-tokio for `crate::sample::*`
 /// callsite compatibility.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod sample;
 
 /// §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror
@@ -630,7 +635,7 @@ pub mod sample;
 /// (always-on, no cfg toggle — encoding identity is a data value, not a
 /// composable code path). Gated on `alloc` (it builds the `String`-bearing
 /// [`sample::EncodingHint`]).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod encoding;
 
 /// zid <-> zenoh `ZenohId` Display hex — the SSOT recipe for rendering a
@@ -638,13 +643,13 @@ pub mod encoding;
 /// FOUNDATIONAL (always-on under `alloc`); `storage_replication` re-exports it,
 /// and the admin space (§5.23) reads it without the storage gate. Gated on
 /// `alloc` (it builds a `String`).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod zid_hex;
 
 /// R311y50 — the SSOT JSON string-literal escaper shared by the hand-rolled
 /// (no `serde_json`) admin / config JSON emitters (`adminspace`, `config`).
 /// `alloc`-only; ungated by any admin/routing cfg so every emitter reaches it.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod json;
 
 /// R311y842 — the READ direction of [`json`]: a hand-rolled JSON5 reader, so
@@ -696,7 +701,7 @@ pub mod admin_reply;
 /// `pub` for the `read_zbuf` / `write_zbuf` "one zenoh ZBuf" framing primitive,
 /// consumed across the crate boundary by the AP-only pubkey auth method (the
 /// VLE u64 helpers stay `pub(crate)`); the rest is crate-internal.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod vle;
 
 /// R311y68 — `ext-pubsub-serde-codec` (§5.25): the Zenoh Serialization
@@ -715,14 +720,14 @@ pub mod serde_codec;
 /// `Unknown` variants stay unconditional. Re-exported from
 /// wz-runtime-tokio at `crate::session_glue::NetworkMessage` for
 /// callsite compatibility with the query / declare / tests modules.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod network_message;
 
 /// R3011 (open-debt item 850) — the data-plane owned wire types
 /// (`PushOwned`, `RequestOwned`, `ResponseOwned` and their bodies) spelled at
 /// the storage profile a receive path hands up, under the short names the
 /// generated types have.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod wire;
 
 /// R76 / R83 / R311di-12 — `DriverLoopOutcome` + `IterationEvent`
@@ -731,7 +736,7 @@ pub mod wire;
 /// Runtime-agnostic; the wz-runtime-tokio side keeps the concrete
 /// `poll_and_dispatch_one` + `drive_session_until_terminal` loop
 /// machinery that constructs these values.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod driver_loop;
 
 /// R311y784 / R311y787 — the multicast departure observer surface
@@ -767,7 +772,7 @@ pub mod multicast_peer_arrived;
 /// `network_message` / `driver_loop`; the no-alloc borrowed-decode variant
 /// is a deferred follow-up. `inbound_to_fsm_event` is additionally gated on
 /// `session-unicast` (it names the generated FSM event enum).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod inbound;
 
 /// The outbound frame buffer seam (ARCHITECTURE section 9.1): [`tx_buf::TxBuf`]
@@ -782,7 +787,7 @@ pub mod tx_buf;
 /// 9.1, "the codec writes directly into a pool slot"). It allocates nothing
 /// itself (it is a pointer into memory the link owns) and is gated with
 /// `link`, the module that defines the link driver trait it borrows.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod tx_lease;
 
 /// Outbound `T_MID_FRAME` envelope encoders (`encode_frame_envelope` +
@@ -791,7 +796,7 @@ pub mod tx_lease;
 /// one outbound encode SSOT across the tokio (AP) and lwIP (MCU)
 /// profiles. Owned `Vec` output, so alloc-gated like `inbound` /
 /// `network_message`.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod frame_encode;
 
 /// Outbound transport-handshake / close / keepalive frame encoders
@@ -806,7 +811,7 @@ pub mod frame_encode;
 /// union — its `encode_keep_alive` is a const 1-byte header, no codec
 /// body).
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     any(
         feature = "codec-init-body",
         feature = "codec-open-body",
@@ -840,7 +845,7 @@ pub mod initial_sn;
 /// Push-builder SSOT. Owned `Vec` output (alloc-gated) and `codec-push`
 /// gated — the whole module is dead under a subset that does not compose
 /// the pub/sub data plane.
-#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-push"))]
 pub mod push_build;
 
 /// The payload of a Put body and the one rule that picks between its two wire
@@ -851,7 +856,7 @@ pub mod push_build;
 /// R3044 -- and on the Query's, whose value is the same list of slices after the
 /// same marker and is read by the same walk (`collect_slices`).
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     any(
         feature = "codec-push",
         feature = "codec-response",
@@ -865,7 +870,7 @@ pub mod put_payload;
 /// link without the inbound alias table (c3c-3 B1). Relocated out of
 /// `push_build` so the Request forward path reuses it without the Push codec;
 /// `alloc`-gated only (owned-string output).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod wireexpr_build;
 
 /// Shared `ext_nodeid` routing-context chain codec (P4 routing) — the SSOT
@@ -884,7 +889,7 @@ pub mod wireexpr_build;
 /// the `ext_qos` chain, so an `alloc`-only build reached a chain edit that did
 /// not exist. Widening costs nothing: the items are `pub`, so no configuration
 /// gains a dead-code finding.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod ext_nodeid;
 
 /// QueryableInfo (`complete` / `distance`) extension on a DeclareQueryable
@@ -892,7 +897,7 @@ pub mod ext_nodeid;
 /// `set_queryable_info` over the body's ext chain, a thin projection of the
 /// shared [`ext_nodeid`] z64-chain SSOT. Gated on `alloc` + `codec-declare`
 /// (the carrier codec).
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 pub mod queryable_info;
 
 /// Push routing-context source `node_id` (P4 routing, linkstate port step
@@ -900,7 +905,7 @@ pub mod queryable_info;
 /// extension — the data-plane forward seam naming the spanning-tree root a
 /// linkstate-peer floods a message along. `codec-push` gated (the data plane
 /// the routing context rides) and owned `Vec` output (alloc-gated).
-#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-push"))]
 pub mod push_routing_context;
 
 /// OAM carrier for the linkstate-peer topology exchange (P4 routing,
@@ -917,7 +922,7 @@ pub mod linkstate_oam;
 /// share one DECLARE-builder SSOT. Owned `Vec` output (alloc-gated) and
 /// `codec-declare` gated. Distinct from the `declare` module (the
 /// remote-declaration registries) — this is the outbound encode side.
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 pub mod declare_build;
 
 /// Declare routing-context source `node_id` (P4 routing, linkstate port step
@@ -927,7 +932,7 @@ pub mod declare_build;
 /// declaration along (the Declare twin of [`push_routing_context`]).
 /// `codec-declare` gated (the declaration carrier the routing context rides)
 /// and owned `Vec` output (alloc-gated).
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 pub mod declare_routing_context;
 
 /// Declare `ext_keyexpr` extension (P4 routing, c3c-3 debt A1 — subscription
@@ -936,7 +941,7 @@ pub mod declare_routing_context;
 /// carries — the keyexpr IS the sourced-subscription identity (`id == 0`), so a
 /// transit linkstate peer resolves which interest to withdraw from this ext.
 /// `codec-declare` gated and owned `Vec` output (alloc-gated).
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 pub mod declare_ext_keyexpr;
 
 /// Declare `ext_qos` extension (R311y801): `QOS_DECLARE` /
@@ -949,7 +954,7 @@ pub mod declare_ext_keyexpr;
 /// Interest codec compares against `declare::ext::QoSType`), and
 /// `wz_codecs::interest` carries no codec feature gate; the `DeclareOwned`-typed
 /// items inside are `codec-declare`-gated individually.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod declare_ext_qos;
 
 /// Outbound INTEREST network-message builders
@@ -957,13 +962,13 @@ pub mod declare_ext_qos;
 /// hoisted from `wz-runtime-tokio::session_glue`. `InterestOwned` output, so
 /// alloc-gated; the builders carry no codec feature gate (mirroring the
 /// ungated `frame_encode::encode_frame_with_interest`).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod interest_build;
 
 /// Outbound RESPONSE-FINAL network-message builder
 /// (`build_response_final`). Separate from `response_build` because
 /// `codec-response-final` is an independent feature from `codec-response`.
-#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-response-final"))]
 pub mod response_final_build;
 
 /// Fixed-memory step S9d -- the control messages (a `Declare`, an `Interest`, a
@@ -974,14 +979,14 @@ pub mod response_final_build;
 /// the module's tests hold for every input they take. The Declare family is
 /// `codec-declare`-gated and the `ResponseFinal` writer `codec-response-final`-gated,
 /// as their builders are.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod lent_control;
 
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns
 /// `Option<String>`).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod wireexpr_resolve;
 
 /// R311di-14+ — application-layer remote-declaration registries
@@ -1173,7 +1178,7 @@ pub mod extbound;
 /// subregions by rule: the pin's `compute_region_of` with its filters, whole.
 /// [`extbound::region_and_bound_of`] is the same question for a node on the
 /// `auto` preset. Pure and not yet called on a live session.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod region_partition;
 
 #[cfg(feature = "transport-lowlatency")]
@@ -1284,7 +1289,7 @@ pub mod extauth_usrpwd;
 /// without the Response codec there is no wire frame to build. The
 /// precursor that lets `query.rs` (with its `codec-response`-gated
 /// `QueryReply::into_response`) migrate into wz-session-core.
-#[cfg(all(feature = "alloc", feature = "codec-response"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 pub mod response_build;
 
 /// R311eh — Request-builder cluster (`build_request_query` + the five
@@ -1295,7 +1300,7 @@ pub mod response_build;
 /// the mirror of the `response_build` move. Gated on
 /// `all(alloc, codec-request)` — the builders allocate owned codec
 /// buffers and there is no Request frame to build without the codec.
-#[cfg(all(feature = "alloc", feature = "codec-request"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-request"))]
 pub mod request_build;
 
 /// Request routing-context source `node_id` (P4 routing, query-routing atom
@@ -1305,7 +1310,7 @@ pub mod request_build;
 /// queryables (the Request twin of [`push_routing_context`] /
 /// [`declare_routing_context`]). `codec-request` gated (the Query carrier the
 /// routing context rides) and owned `Vec` output (alloc-gated).
-#[cfg(all(feature = "alloc", feature = "codec-request"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-request"))]
 pub mod request_routing_context;
 
 /// R311dx — application-layer queryable registry (`QueryableRegistry`
@@ -1335,7 +1340,7 @@ pub mod query;
 /// replies a queryable has staged and the `ResponseFinal`s that follow them, as a
 /// `Vec` on the growable backing and as tables of declared capacity on the fixed
 /// one, where a reply or a request that does not fit is refused and counted.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod reply_stage;
 
 /// Fixed-memory step S9a — every table a PEER writes, or that is owed to one
@@ -1343,7 +1348,7 @@ pub mod reply_stage;
 /// interests and what is staged back, the replies and `Final`s its queries owe.
 /// The per-session half of what the observer used to hold process-wide; the
 /// session slot owns one under `session-slot`.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod peer_tables;
 
 /// R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
@@ -1527,7 +1532,7 @@ pub mod reply;
 /// wz-runtime-tokio. Alloc-gated (the `send_response` method takes a
 /// `wz_codecs::response::ResponseOwned`); the method set is empty in a
 /// build with neither response codec so the trait is always-nameable.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub mod response_sink;
 
 /// R311dz — application-layer observer bundle (`ApplicationLayerObserver`):
@@ -1559,7 +1564,7 @@ pub mod observer;
 /// beside the session ([`slot_observer::Requesters`]). Its dispatch and drain take
 /// the session's tables as arguments, in the AP observer's order and by its rules.
 /// Only on the fixed backing (`bounded-heapless`, which `session-slot` implies).
-#[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
+#[cfg(all(feature = "storage-profile", feature = "bounded-heapless"))]
 pub mod slot_observer;
 
 /// SCE-generated reassembly slot state machine. The emit comes from
@@ -1701,18 +1706,14 @@ pub mod session_timeouts;
 /// The concrete `R = TokioRuntime` constructor (`new_session_actions`) and
 /// the `Engine`-bound `new_session_engine` factory stay AP-side in
 /// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
-#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod session_actions;
 
 /// Fixed-memory step S5 — the per-session slot: storage of fixed size that holds
 /// one session (its link driver, its entropy source and the bundle that drives it)
 /// and frees it when the last handle goes. Only under the `session-slot`
 /// selector, which is the MCU profile's and never a library crate's.
-#[cfg(all(
-    feature = "alloc",
-    feature = "session-unicast",
-    feature = "session-slot"
-))]
+#[cfg(all(feature = "session-unicast", feature = "session-slot"))]
 pub mod session_slot;
 
 /// A4 (session-reconnect) — re-dial + re-handshake support types: the
@@ -1734,7 +1735,7 @@ pub mod reconnect;
 /// `report_outcome_reassembling` (reassembly-pool ingest) so the lwIP MCU sync
 /// loop (Stage 4) and the tokio async loop share one dispatch SSOT. Gated like
 /// [`session_actions`] (it names the FSM engine + the action bundle).
-#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod drive;
 
 /// SCE-generated multicast session-LEVEL state machine (Round A). The emit
