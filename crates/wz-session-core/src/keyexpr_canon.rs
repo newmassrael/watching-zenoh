@@ -677,15 +677,21 @@ pub fn validate_keyexpr(text: &str) -> Result<(), KeyexprRefusal> {
 use alloc::string::{String, ToString};
 
 /// The text an outbound-keyexpr refusal quotes ([`OutboundKeyexprError`]): a `String`
-/// on the heap profile, and on a build with no allocator a text of the length a
-/// keyexpr can have there ([`crate::caps::MAX_KEYEXPR_BYTES`]). It is DIAGNOSTIC: what a
-/// person reads in the refusal's message, never a value anything acts on, so a quote
-/// longer than the bound is cut at a character boundary rather than refused.
+/// on the heap profile, and on a build with no allocator a text of
+/// [`DIAGNOSTIC_TEXT_BYTES`]. It is DIAGNOSTIC: what a person reads in the refusal's
+/// message, never a value anything acts on, so a quote longer than the bound is cut at
+/// a character boundary rather than refused. The bound is small because the refusal
+/// is returned by value, and a keyexpr's whole 256 bytes twice would make every
+/// `Result` that can carry it large.
 #[cfg(feature = "alloc")]
 pub type DiagnosticText = String;
 /// See the heap form of this alias.
 #[cfg(all(feature = "storage-profile", not(feature = "alloc")))]
-pub type DiagnosticText = heapless::String<{ crate::caps::MAX_KEYEXPR_BYTES }>;
+pub type DiagnosticText = heapless::String<DIAGNOSTIC_TEXT_BYTES>;
+
+/// How much of a keyexpr a refusal quotes on a build with no allocator.
+#[cfg(all(feature = "storage-profile", not(feature = "alloc")))]
+pub const DIAGNOSTIC_TEXT_BYTES: usize = 48;
 
 /// `text` as a [`DiagnosticText`].
 #[cfg(feature = "alloc")]
@@ -696,7 +702,7 @@ fn diagnostic_text(text: &str) -> DiagnosticText {
 /// `text` as a [`DiagnosticText`], cut at the last character boundary that fits.
 #[cfg(all(feature = "storage-profile", not(feature = "alloc")))]
 fn diagnostic_text(text: &str) -> DiagnosticText {
-    let mut end = text.len().min(crate::caps::MAX_KEYEXPR_BYTES);
+    let mut end = text.len().min(DIAGNOSTIC_TEXT_BYTES);
     while !text.is_char_boundary(end) {
         end -= 1;
     }

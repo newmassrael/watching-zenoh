@@ -636,7 +636,7 @@ impl ReplyStaging for ReplyStage {
                 timestamp: timestamp.map(|ts| {
                     let mut zid = heapless::Vec::new();
                     // The length was checked above.
-                    let _ = zid.extend_from_slice(&ts.zid);
+                    let _ = zid.extend_from_slice(ts.zid);
                     (ts.time, zid)
                 }),
                 attachment: attachment.map(|bytes| self.put(bytes)),
