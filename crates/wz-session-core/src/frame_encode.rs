@@ -18,9 +18,33 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "codec-declare",
+))]
 use sce_forge_runtime::codec::{CodecError, SceSink};
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "codec-declare",
+))]
 use wz_codecs::wire_const;
 
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "codec-declare",
+))]
 use crate::qos::Priority;
 // `TxBuf` is needed for the method calls only when `EncodeBuf` is a concrete
 // type (no lending); on a `dyn TxBuf` the methods resolve without the import.
@@ -61,6 +85,14 @@ use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 /// (0x80, Frame-level transport extensions) is never set — the MVP data
 /// path has no Frame-level ext chain (see `ExtChainRole` for the
 /// handshake chains).
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "codec-declare",
+))]
 pub(crate) fn frame_flags(reliable: bool) -> u8 {
     if reliable {
         wire_const::FLAG_T_FRAME_R
@@ -139,6 +171,14 @@ fn write_qos_ext(
 /// The destination is any [`TxBuf`]: a heap `Vec` never refuses, a fixed buffer
 /// (a pool slot's storage) returns [`CodecError::BufferOverflow`] if even the
 /// prefix, at most 13 bytes, does not fit.
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "codec-declare",
+))]
 pub(crate) fn begin_frame(
     buf: &mut EncodeBuf<'_>,
     sn: u64,
@@ -239,6 +279,14 @@ where
 /// not fit is an `Err(CodecError::BufferOverflow)` and not a panic; the bytes
 /// already written stay in the buffer, so the caller rolls back with
 /// [`TxBuf::truncate`] to the length it saw before the call.
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "codec-declare",
+))]
 pub(crate) fn encode_frame_envelope_into<P>(
     buf: &mut EncodeBuf<'_>,
     sn: u64,

@@ -1545,6 +1545,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
         reliable: true,
         sn: 0,
         priority: crate::qos::Priority::DEFAULT,
+        #[cfg(feature = "alloc")]
         has_ext: false,
     };
     let walked = walk_records_in_place(
@@ -1594,8 +1595,10 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     let crate::inbound::FrameHead {
         reliable,
         sn,
+        #[cfg(feature = "alloc")]
         has_ext,
         chain,
+        ..
     } = head;
     // The frame's own chain is owned only for an owned record (the heap profile's).
     #[cfg(not(feature = "alloc"))]
@@ -1608,6 +1611,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         reliable,
         sn,
         priority,
+        #[cfg(feature = "alloc")]
         has_ext,
     };
     // The frame's own chain is handed over owned only with an owned record:
@@ -1641,6 +1645,8 @@ struct RecordCarrier {
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
+    /// Read only into an owned outcome, which the heap profile alone delivers.
+    #[cfg(feature = "alloc")]
     has_ext: bool,
 }
 
@@ -1759,7 +1765,6 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
         reliable,
         sn,
         priority,
-        has_ext: _,
     } = carrier;
     #[cfg(not(feature = "alloc"))]
     let _ = (source, actions);
@@ -1850,9 +1855,13 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
         #[cfg(feature = "alloc")]
         on_event(IterationEvent::Poll(&empty(extensions()?)));
         // A frame with no record to deliver is a frame the session read and has
-        // nothing to hand on.
+        // nothing to hand on; the heap profile's empty batch, without the batch.
         #[cfg(not(feature = "alloc"))]
-        on_event(IterationEvent::Poll(&DriverLoopOutcome::SideEffectOnly));
+        on_event(IterationEvent::Poll(&DriverLoopOutcome::EmptyFrame {
+            reliable,
+            sn,
+            priority,
+        }));
     }
     Ok(())
 }
@@ -1933,6 +1942,7 @@ where
                 reliable,
                 sn,
                 priority,
+                #[cfg(feature = "alloc")]
                 has_ext: false,
             };
             dropped_by_decode = walk_records_in_place(

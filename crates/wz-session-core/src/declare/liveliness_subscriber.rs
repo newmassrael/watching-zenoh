@@ -1306,6 +1306,13 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
         claimed: &dyn Fn(u64) -> bool,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
+        // The two arms below consume the table, the peer and the claim filter; a
+        // build with neither (no owned frame, no lent Declare) reads none of them.
+        #[cfg(not(any(
+            feature = "alloc",
+            all(feature = "session-slot", feature = "codec-declare")
+        )))]
+        let _ = (&peer, &peer_keyexpr_table, claimed);
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {

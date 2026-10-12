@@ -58,7 +58,10 @@ use crate::entropy::EntropySource;
 // CodecError is the return type of `encode_init_with_role` /
 // `encode_open_with_role` only; gate it on those encoders' codecs so a
 // consumer-plane-only subset (no handshake-body codec) does not see it unused.
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
 use sce_forge_runtime::codec::CodecError;
 use wz_runtime_core::TimeSource;
 
@@ -150,11 +153,11 @@ use crate::wireexpr_resolve::OwnMappingSpace;
 use crate::inbound::{parse_inbound_consuming, InboundFrame};
 use crate::parse_error::InboundParseError;
 
-// metadata carriers for the *_with_meta action methods. UNGATED on purpose:
-// `send_push_with_meta_*` / `send_request_query_with_meta` are
-// signature-stable (R311j) — only their bodies are codec-gated, the
-// signatures reference these types in every subset — so the import must be
-// codec-agnostic (mirrors the ungated session_glue re-export it came from).
+// metadata carriers for the *_with_meta action methods. Codec-agnostic on
+// purpose: `send_push_with_meta_*` / `send_request_query_with_meta` are
+// signature-stable (R311j) across every codec subset — only their bodies are
+// codec-gated. They are heap-profile methods (the carriers own a `Vec` and a
+// `String`), so the import and the methods share the `alloc` gate.
 #[cfg(feature = "alloc")]
 use crate::metadata::{PushMetadata, QueryMetadata};
 
@@ -4817,7 +4820,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// same peer re-derives the same origin with nothing persisted between
     /// attempts — the multilink property zenoh's `compute_sn` comment names
     /// as the reason for hashing rather than drawing entropy.
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     fn open_params(&self) -> Option<SessionInitParams> {
         let initial_sn = self.open_initial_sn()?;
         let mut params = self.params.clone();
@@ -9896,7 +9899,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `send_push_*_with_meta_*` senders call this after their dispatch;
     /// the express bit is only derivable where QoS metadata exists, which
     /// today is the Push metadata path.
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
     fn flush_batch_if_express(&self, meta: &PushMetadata) {
         #[cfg(feature = "transport-batching")]
         if meta
@@ -10351,6 +10354,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `PublishOptions`. Reliability gating, frame-SN minting, and
     /// driver dispatch mirror the metadata-stripped fast path; only
     /// the Push builder differs.
+    #[cfg(feature = "alloc")]
     pub fn send_push_with_meta_literal(
         &self,
         keyexpr_suffix: &str,
@@ -10373,6 +10377,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R233 — metadata-bearing counterpart of [`send_push_aliased`].
+    #[cfg(feature = "alloc")]
     pub fn send_push_with_meta_aliased(
         &self,
         mapping_id: u64,
@@ -10400,6 +10405,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// because `_z_msg_del_t` carries no encoding slot; the loopback
     /// branch enforces the same projection so neither side surfaces
     /// an `encoding` on a Del Sample.
+    #[cfg(feature = "alloc")]
     pub fn send_push_del_with_meta_literal(
         &self,
         keyexpr_suffix: &str,
@@ -10422,6 +10428,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R233 — metadata-bearing counterpart of
     /// [`send_push_del_aliased`].
+    #[cfg(feature = "alloc")]
     pub fn send_push_del_with_meta_aliased(
         &self,
         mapping_id: u64,
@@ -11751,6 +11758,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// for the Query / Reply / Final correlation chain.
     /// R311j signature-stability retrofit — body cfg, signature stable.
     /// Silent no-op when `codec-request` off.
+    #[cfg(feature = "alloc")]
     pub fn send_request_query_with_meta(
         &self,
         rid: u64,

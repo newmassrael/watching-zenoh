@@ -1555,6 +1555,9 @@ impl<C: ReplySink> ReplyRegistry<C> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
+        // Read only by the owned arm and by the lent Response arm.
+        #[cfg(not(any(feature = "alloc", feature = "codec-response")))]
+        let _ = &peer_keyexpr_table;
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {

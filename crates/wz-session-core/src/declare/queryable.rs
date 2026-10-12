@@ -44,7 +44,7 @@ use crate::declare::matching::{BoxedMatchingSink, MatchingWatchList};
 use crate::driver_loop::DriverLoopOutcome;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::driver_loop::IterationEvent;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::locality::Locality;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
@@ -172,25 +172,43 @@ impl QuerierCriterion {
 /// could only ever fire on a flag wz cannot emit.
 #[cfg(feature = "alloc")]
 fn declared_answers(declared: &DeclaredQueryables, criterion: &QuerierCriterion) -> bool {
+    declared_answers_for(
+        declared,
+        &criterion.keyexpr,
+        criterion.locality,
+        criterion.complete_required,
+    )
+}
+
+/// [`declared_answers`] over the three knobs themselves, so a build with no
+/// owned [`QuerierCriterion`] (the slot profile) asks the same question with
+/// a borrowed keyexpr and no allocation.
+#[cfg(feature = "storage-profile")]
+fn declared_answers_for(
+    declared: &DeclaredQueryables,
+    keyexpr: &str,
+    locality: Locality,
+    complete_required: bool,
+) -> bool {
     use crate::bounded::BoundedVec;
     // R311y797 — the querier's own locality gates this half BEFORE the
     // membership is consulted at all: a `Locality::SessionLocal` querier
     // is not answered by any peer, so no peer declaration can make it
     // match. pico refuses the same way, per remote target
     // (`_z_write_filter_peer_allowed`, `net/filtering.c:66`).
-    if !criterion.locality.allows_remote() {
+    if !locality.allows_remote() {
         return false;
     }
     // S9a — split into a bounded chunk view, not a `Vec`; a keyexpr deeper than
     // the bound matches nothing, as the sibling scans answer an over-deep key.
     let mut target_chunks: BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
         BoundedVec::new();
-    for chunk in criterion.keyexpr.split('/') {
+    for chunk in keyexpr.split('/') {
         if target_chunks.push(chunk).is_err() {
             return false;
         }
     }
-    if criterion.complete_required {
+    if complete_required {
         #[cfg(feature = "keyexpr-includes")]
         {
             declared.entries().any(|(_, candidate)| {
@@ -408,10 +426,7 @@ impl RemoteQueryablePeer {
     /// registry now stores.
     #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
-        declared_answers(
-            &self.declared,
-            &QuerierCriterion::intersecting(query_keyexpr),
-        )
+        declared_answers_for(&self.declared, query_keyexpr, Locality::Any, false)
     }
 
     /// R311y797 — the criterion-aware consult behind

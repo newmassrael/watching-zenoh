@@ -31,29 +31,36 @@
 //! a liveliness get's replies claimed before the token planes see them; every
 //! Reply drained before the `Final` that terminates it).
 
-#[cfg(feature = "liveliness-token")]
+// `Requesters` is generic over the application's reply sink and names no heap
+// type. `SlotObserver` below registers heap-boxed sinks, so it and everything
+// only it names sit behind `alloc`.
+#[cfg(all(feature = "alloc", feature = "liveliness-token"))]
 use crate::declare::liveliness::LivelinessRegistry;
 #[cfg(feature = "liveliness-get")]
 use crate::declare::liveliness_get::LivelinessGetRegistry;
-#[cfg(feature = "liveliness-subscriber")]
+#[cfg(all(feature = "alloc", feature = "liveliness-subscriber"))]
 use crate::declare::liveliness_subscriber::LivelinessSubscriberTable;
-#[cfg(feature = "liveliness-token")]
+#[cfg(all(feature = "alloc", feature = "liveliness-token"))]
 use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
-#[cfg(feature = "declare-queryable")]
+#[cfg(all(feature = "alloc", feature = "declare-queryable"))]
 use crate::declare::queryable::RemoteQueryableTable;
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
 use crate::declare::subscriber::RemoteSubscriberTable;
+#[cfg(feature = "alloc")]
 use crate::driver_loop::IterationEvent;
+#[cfg(feature = "alloc")]
 use crate::peer_tables::PeerTables;
+#[cfg(feature = "alloc")]
 use crate::pubsub::SubscriberTable;
-#[cfg(feature = "query-queryable")]
+#[cfg(all(feature = "alloc", feature = "query-queryable"))]
 use crate::query::QueryableRegistry;
 use crate::reply::ReplyRegistry;
 use crate::reply_sink::ReplySink;
-#[cfg(feature = "query-queryable")]
+#[cfg(all(feature = "alloc", feature = "query-queryable"))]
 use crate::reply_stage::{FinalStaging, ReplyStaging};
+#[cfg(feature = "alloc")]
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
-#[cfg(feature = "switchboard")]
+#[cfg(all(feature = "alloc", feature = "switchboard"))]
 use crate::switchboard::{EventInjector, SwitchboardRegistry};
 
 /// The requester-side registries of ONE session: the pending `z_get`s and, with
@@ -93,7 +100,9 @@ impl<R: ReplySink, G: ReplySink> Default for Requesters<R, G> {
 }
 
 /// What the application registered, shared by every session of the process. See
-/// the module documentation.
+/// the module documentation. It registers heap-boxed sinks, so it is the
+/// heap-profile observer; a build with no allocator types its own registrations.
+#[cfg(feature = "alloc")]
 pub struct SlotObserver {
     /// The local subscriptions. One registration serves every session.
     pub subscribers: SubscriberTable<crate::sink::BoxedSink>,
@@ -124,12 +133,14 @@ pub struct SlotObserver {
         LivelinessSubscriberTable<crate::declare::liveliness_sample::BoxedLivelinessSampleSink>,
 }
 
+#[cfg(feature = "alloc")]
 impl Default for SlotObserver {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl SlotObserver {
     /// An observer with nothing registered.
     pub fn new() -> Self {

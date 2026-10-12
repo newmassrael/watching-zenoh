@@ -95,7 +95,12 @@ use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "alloc")]
 use wz_codecs::interest::InterestOwned;
 
-use crate::ext_nodeid::{self, EXT_ENC_Z64};
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-request", feature = "storage-profile")
+))]
+use crate::ext_nodeid;
+use crate::ext_nodeid::EXT_ENC_Z64;
 use crate::qos::{CongestionControl, Priority};
 use crate::sample::QosLevel;
 
@@ -176,6 +181,10 @@ fn read_qos_chain<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosL
 /// [`read_qos_chain`] over any chain a reader can ask, the owned one or one
 /// read where its message lies (a Request the in-place receive path lends):
 /// the one rule both read the `ext_qos` by.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-request", feature = "storage-profile")
+))]
 pub(crate) fn read_qos_in<E: crate::ext_view::ExtEntryView>(exts: Option<&[E]>) -> QosLevel {
     ext_nodeid::read_z64_in(exts, QOS_EXT_HEADER)
         .map(|v| QosLevel::from_raw(v as u8))

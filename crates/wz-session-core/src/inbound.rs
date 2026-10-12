@@ -745,6 +745,8 @@ pub fn parse_inbound_consuming_in(
 pub(crate) struct FrameHead<C> {
     pub(crate) reliable: bool,
     pub(crate) sn: u64,
+    /// Read only into an owned outcome, which the heap profile alone delivers.
+    #[cfg(feature = "alloc")]
     pub(crate) has_ext: bool,
     pub(crate) chain: C,
 }
@@ -794,6 +796,7 @@ fn decode_frame_head<C>(
     Ok(FrameHead {
         reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
         sn,
+        #[cfg(feature = "alloc")]
         has_ext,
         chain,
     })

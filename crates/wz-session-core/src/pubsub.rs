@@ -189,7 +189,7 @@ use crate::sample::extract_qos;
 use crate::sample::extract_source_info;
 #[cfg(all(feature = "pubsub-put", feature = "alloc"))]
 use crate::sample::EncodingHint;
-#[cfg(feature = "storage-profile")]
+#[cfg(feature = "alloc")]
 use crate::sample::Reliability;
 #[cfg(feature = "alloc")]
 use crate::sample::Sample;
@@ -2729,7 +2729,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     }
 
     /// [`SubscriberPeer::resolve_inbound_mapping`] for this registry's peer.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     pub fn resolve_inbound_mapping(&self, id: u64) -> Option<String> {
         self.peer.resolve_inbound_mapping(id)
     }

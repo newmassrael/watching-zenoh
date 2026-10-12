@@ -50,9 +50,12 @@ use alloc::vec::Vec;
 use crate::bounded::BoundedVec;
 #[cfg(feature = "bounded-heapless")]
 use crate::caps;
+#[cfg(feature = "alloc")]
 use crate::query::QueryReply;
 use crate::query_sink::ReplyError;
-use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+#[cfg(feature = "alloc")]
+use crate::sample::{EncodingHint, TimestampHint};
+use crate::sample::{QosLevel, SourceInfo};
 
 /// A reply's encoding as borrowed parts: the wire `packed_id` and the optional
 /// schema, a slice of the caller's own string.
@@ -64,12 +67,34 @@ pub struct EncodingParts<'a> {
     pub schema: Option<&'a str>,
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> EncodingParts<'a> {
     /// The parts of an owned hint, borrowing its schema.
     pub fn of(hint: &'a EncodingHint) -> Self {
         Self {
             packed_id: hint.packed_id,
             schema: hint.schema.as_deref(),
+        }
+    }
+}
+
+/// A reply's value timestamp as borrowed parts: the time and the identity bytes
+/// of the clock that stamped it, a slice of the caller's own buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimestampParts<'a> {
+    /// The timestamp's time value.
+    pub time: u64,
+    /// The identity of the clock, as the wire carries it.
+    pub zid: &'a [u8],
+}
+
+#[cfg(feature = "alloc")]
+impl<'a> TimestampParts<'a> {
+    /// The parts of an owned hint, borrowing its identity.
+    pub fn of(hint: &'a TimestampHint) -> Self {
+        Self {
+            time: hint.time,
+            zid: &hint.zid,
         }
     }
 }
@@ -97,7 +122,7 @@ pub enum PartsKind<'a> {
         /// The value's encoding (the inner body's E-flag), if any.
         encoding: Option<EncodingParts<'a>>,
         /// The value's timestamp, if any.
-        timestamp: Option<&'a TimestampHint>,
+        timestamp: Option<TimestampParts<'a>>,
         /// The opaque attachment, if any.
         attachment: Option<&'a [u8]>,
         /// The sample's source info, if any.
@@ -149,10 +174,14 @@ pub trait ReplyStaging {
     /// The `index`-th staged reply, in the order they were staged, as the owned
     /// record. The fixed backing builds it from its row (an allocation, which is
     /// the drain's, see the module documentation); the growable one clones.
+    /// Heap profile only: the owned record is the owned mirror's.
+    #[cfg(feature = "alloc")]
     fn nth(&self, index: usize) -> Option<QueryReply>;
 
     /// Take every staged reply, in the order they were staged. Whatever has not
-    /// been taken when the iterator is dropped is dropped with it.
+    /// been taken when the iterator is dropped is dropped with it. Heap profile
+    /// only, as [`Self::nth`].
+    #[cfg(feature = "alloc")]
     fn drain_staged(&mut self) -> impl Iterator<Item = QueryReply> + '_;
 }
 
@@ -198,10 +227,12 @@ impl ReplyStaging for Vec<QueryReply> {
         self.len()
     }
 
+    #[cfg(feature = "alloc")]
     fn nth(&self, index: usize) -> Option<QueryReply> {
         self.get(index).cloned()
     }
 
+    #[cfg(feature = "alloc")]
     fn drain_staged(&mut self) -> impl Iterator<Item = QueryReply> + '_ {
         self.drain(..)
     }
@@ -349,6 +380,7 @@ impl ReplyStage {
     }
 
     /// Remove and return the reply staged last, as `Vec::pop` does.
+    #[cfg(feature = "alloc")]
     pub fn pop(&mut self) -> Option<QueryReply> {
         let reply = self.nth(self.rows.len().checked_sub(1)?)?;
         // Rows are written front to back, key first, so this row's bytes are the
@@ -362,6 +394,7 @@ impl ReplyStage {
     /// An iterator over owned copies of the staged replies, in order. Each is built
     /// from its row, so it allocates (the drain's allocation, see the module
     /// documentation); the stage itself is not changed.
+    #[cfg(feature = "alloc")]
     pub fn iter(&self) -> impl Iterator<Item = QueryReply> + '_ {
         (0..self.rows.len()).filter_map(|index| self.nth(index))
     }
@@ -393,75 +426,80 @@ impl ReplyStage {
         encoding.map(|(id, schema)| (id, schema.map(|schema| self.put(schema.as_bytes()))))
     }
 
-    fn encoding_hint(&self, encoding: &RowEncoding) -> Option<EncodingHint> {
-        encoding.as_ref().map(|(packed_id, schema)| EncodingHint {
-            packed_id: *packed_id,
-            schema: schema.map(|schema| alloc::string::String::from(self.text(schema))),
-        })
+    /// A row's encoding as the id and the schema text read out of the arena.
+    fn encoding_of(&self, encoding: &RowEncoding) -> Option<(u32, Option<&str>)> {
+        encoding
+            .as_ref()
+            .map(|(packed_id, schema)| (*packed_id, schema.map(|schema| self.text(schema))))
     }
 
-    fn row_to_reply(&self, row: &Row) -> QueryReply {
-        let keyexpr_literal = alloc::string::String::from(self.text(row.keyexpr));
-        let responder = row
-            .responder
-            .as_ref()
-            .map(|(zid, eid)| (zid.to_vec(), *eid));
-        match &row.kind {
+    /// A row as the borrowed description it was staged from. Nothing is copied:
+    /// every slice points into the arena or the row, so this is what a writer that
+    /// puts the reply on the wire reads, and what the owned record is built from.
+    fn row_parts<'a>(&'a self, row: &'a Row) -> ReplyParts<'a> {
+        let kind = match &row.kind {
             RowKind::Reply {
                 payload,
                 encoding,
                 timestamp,
                 attachment,
                 source_info,
-            } => QueryReply::Reply {
-                rid: row.rid,
-                keyexpr_literal,
+            } => PartsKind::Reply {
                 body: match payload {
-                    RowPayload::Put(span) => {
-                        crate::query::ReplyBody::Put(self.bytes(*span).to_vec())
-                    }
-                    RowPayload::Del => crate::query::ReplyBody::Del,
+                    RowPayload::Put(span) => PartsBody::Put(self.bytes(*span)),
+                    RowPayload::Del => PartsBody::Del,
                     #[cfg(feature = "transport-shm")]
-                    RowPayload::Shared(handle) => {
-                        crate::query::ReplyBody::PutShared(handle.clone())
-                    }
+                    RowPayload::Shared(handle) => PartsBody::Shared(handle),
                 },
-                encoding: self.encoding_hint(encoding),
-                timestamp: timestamp.as_ref().map(|(time, zid)| TimestampHint {
-                    time: *time,
-                    zid: zid.to_vec(),
-                }),
-                responder,
-                attachment: attachment.map(|span| self.bytes(span).to_vec()),
-                source_info: source_info.clone(),
-                qos: row.qos,
+                encoding: self
+                    .encoding_of(encoding)
+                    .map(|(packed_id, schema)| EncodingParts { packed_id, schema }),
+                timestamp: timestamp
+                    .as_ref()
+                    .map(|(time, zid)| TimestampParts { time: *time, zid }),
+                attachment: attachment.map(|span| self.bytes(span)),
+                source_info: source_info.as_ref(),
             },
             #[cfg(feature = "query-reply-err")]
-            RowKind::Err { encoding, payload } => QueryReply::Err {
-                rid: row.rid,
-                keyexpr_literal,
-                encoding: encoding.as_ref().map(|(id, schema)| {
-                    (
-                        *id,
-                        schema.map(|schema| alloc::string::String::from(self.text(schema))),
-                    )
-                }),
-                payload: self.bytes(*payload).to_vec(),
-                responder,
-                qos: row.qos,
+            RowKind::Err { encoding, payload } => PartsKind::Err {
+                encoding: self.encoding_of(encoding),
+                payload: self.bytes(*payload),
             },
+        };
+        ReplyParts {
+            rid: row.rid,
+            keyexpr: self.text(row.keyexpr),
+            responder: row
+                .responder
+                .as_ref()
+                .map(|(zid, eid)| (zid.as_slice(), *eid)),
+            qos: row.qos,
+            kind,
         }
+    }
+
+    /// The `index`-th staged reply as borrowed parts, in the order they were
+    /// staged. No allocation: the parts point into the stage.
+    pub fn parts(&self, index: usize) -> Option<ReplyParts<'_>> {
+        self.rows.get(index).map(|row| self.row_parts(row))
+    }
+
+    /// A row as the owned record, built from its parts: the one place a described
+    /// reply becomes a [`QueryReply`].
+    #[cfg(feature = "alloc")]
+    fn row_to_reply(&self, row: &Row) -> QueryReply {
+        QueryReply::from_parts(&self.row_parts(row))
     }
 }
 
 /// The staged replies of a stage taken BY VALUE, in order, as owned records.
-#[cfg(feature = "bounded-heapless")]
+#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
 pub struct StagedIntoIter {
     stage: ReplyStage,
     next: usize,
 }
 
-#[cfg(feature = "bounded-heapless")]
+#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
 impl Iterator for StagedIntoIter {
     type Item = QueryReply;
 
@@ -472,7 +510,7 @@ impl Iterator for StagedIntoIter {
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
+#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
 impl IntoIterator for ReplyStage {
     type Item = QueryReply;
     type IntoIter = StagedIntoIter;
@@ -487,13 +525,13 @@ impl IntoIterator for ReplyStage {
 
 /// The staged replies of a stage taken IN PLACE: what [`ReplyStaging::drain_staged`]
 /// hands back. The stage is emptied when this is dropped, however much was taken.
-#[cfg(feature = "bounded-heapless")]
+#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
 struct StagedDrain<'a> {
     stage: &'a mut ReplyStage,
     next: usize,
 }
 
-#[cfg(feature = "bounded-heapless")]
+#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
 impl Iterator for StagedDrain<'_> {
     type Item = QueryReply;
 
@@ -504,7 +542,7 @@ impl Iterator for StagedDrain<'_> {
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
+#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
 impl Drop for StagedDrain<'_> {
     fn drop(&mut self) {
         self.stage.clear();
@@ -625,10 +663,12 @@ impl ReplyStaging for ReplyStage {
         self.rows.len()
     }
 
+    #[cfg(feature = "alloc")]
     fn nth(&self, index: usize) -> Option<QueryReply> {
         self.rows.get(index).map(|row| self.row_to_reply(row))
     }
 
+    #[cfg(feature = "alloc")]
     fn drain_staged(&mut self) -> impl Iterator<Item = QueryReply> + '_ {
         StagedDrain {
             stage: self,

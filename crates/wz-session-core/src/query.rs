@@ -113,7 +113,7 @@ use crate::reply_acceptance::ReplyKeyExpr;
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::reply_stage::{
     EncodingParts, FinalStage, FinalStaging, PartsBody, PartsKind, ReplyParts, ReplyStage,
-    ReplyStaging,
+    ReplyStaging, TimestampParts,
 };
 // `CodecError` is referenced only by `into_response`, which lives in the
 // `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
@@ -201,7 +201,7 @@ use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 use crate::response_build::ResponseReplyBuilder;
 #[cfg(feature = "alloc")]
 use crate::sample::{EncodingHint, TimestampHint};
-#[cfg(feature = "storage-profile")]
+#[cfg(any(feature = "alloc", feature = "codec-request"))]
 use crate::sample::{QosLevel, SourceInfo};
 
 /// R311v — extract the attachment payload view from an inbound
@@ -690,7 +690,10 @@ impl QueryReply {
                     packed_id: e.packed_id,
                     schema: e.schema.map(String::from),
                 }),
-                timestamp: timestamp.cloned(),
+                timestamp: timestamp.map(|ts| TimestampHint {
+                    time: ts.time,
+                    zid: ts.zid.to_vec(),
+                }),
                 responder,
                 attachment: attachment.map(<[u8]>::to_vec),
                 source_info: source_info.cloned(),
@@ -1094,7 +1097,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
-                timestamp: Some(timestamp),
+                timestamp: Some(TimestampParts::of(timestamp)),
                 attachment: None,
                 source_info: None,
             },
@@ -1130,7 +1133,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
-                timestamp: Some(timestamp),
+                timestamp: Some(TimestampParts::of(timestamp)),
                 attachment: None,
                 source_info,
             },
@@ -1354,7 +1357,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
-                timestamp: Some(timestamp),
+                timestamp: Some(TimestampParts::of(timestamp)),
                 attachment: None,
                 source_info,
             },
@@ -1401,7 +1404,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body,
                 encoding: meta.encoding.map(EncodingParts::of),
-                timestamp: meta.timestamp,
+                timestamp: meta.timestamp.map(TimestampParts::of),
                 attachment: meta.attachment,
                 source_info: meta.source_info,
             },
@@ -1448,7 +1451,7 @@ impl<'a> QueryResponder<'a> {
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
-                timestamp: meta.timestamp,
+                timestamp: meta.timestamp.map(TimestampParts::of),
                 attachment: meta.attachment,
                 source_info: meta.source_info,
             },

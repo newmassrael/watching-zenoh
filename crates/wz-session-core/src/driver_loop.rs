@@ -62,8 +62,8 @@ pub enum DriverLoopOutcome {
     /// `messages` against its per-MID handler set.
     ///
     /// The heap profile's outcome: it owns the decoded batch. The per-session slot
-    /// profile delivers each record where its frame lies (`InPlaceRecord`) and
-    /// reports `SideEffectOnly` when the frame is done.
+    /// profile delivers each record where its frame lies (`InPlaceRecord`), and a
+    /// frame with none to deliver is [`Self::EmptyFrame`] where no allocator exists.
     #[cfg(feature = "alloc")]
     FramePayload {
         reliable: bool,
@@ -91,6 +91,17 @@ pub enum DriverLoopOutcome {
         /// (not `#[cfg]`-gated): the variant is ungated and `qos::Priority` is
         /// always compiled, so a gated field would feature-skew every consumer
         /// match (signature-stability).
+        priority: crate::qos::Priority,
+    },
+    /// A `Frame` the session read that carried no record to deliver: the heap
+    /// profile reports it as a [`Self::FramePayload`] with an empty batch, and a
+    /// build with no allocator, which has no batch to be empty, reports this
+    /// instead. Its `reliable`, `sn` and `priority` are the frame's, as the
+    /// owned outcome's are.
+    #[cfg(not(feature = "alloc"))]
+    EmptyFrame {
+        reliable: bool,
+        sn: u64,
         priority: crate::qos::Priority,
     },
     /// `parse_inbound` rejected the wire bytes, OR the Frame envelope
