@@ -148,13 +148,25 @@
 ))]
 extern crate alloc;
 
+// The runtime is present over the heap forms (`alloc`) or over the static forms
+// (`session-slot`); with neither there is no executor to be present.
+#[cfg(all(
+    feature = "runtime",
+    not(feature = "alloc"),
+    not(feature = "session-slot")
+))]
+compile_error!(
+    "wz-runtime-coop: `runtime` (and `session-unicast`, which implies it) needs a form of the \
+     task pool: `alloc` for the heap form, `session-slot` for the static one"
+);
+
 pub mod sync;
 
 // R311bb — Arc + AtomicBool/U64 polyfill via portable-atomic{,-util}
 // for thumbv6m (Cortex-M0+). Crate-private: call sites import via
 // `crate::atomic::Arc` etc. so the polyfill swap stays a single-cfg
 // rewrite rather than per-file conditional imports.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub(crate) mod atomic;
 
 // Fixed-memory step S6 -- under `session-slot` the task pool, its handles, the
@@ -208,11 +220,11 @@ pub mod local_static;
 pub use local_heap as local;
 #[cfg(feature = "session-slot")]
 pub use local_static as local;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub mod runtime_impl;
 #[cfg(all(test, feature = "session-slot"))]
 mod static_tests;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub mod time;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 #[doc(hidden)]
@@ -226,20 +238,20 @@ pub mod timer_static;
 pub use timer_heap as timer;
 #[cfg(feature = "session-slot")]
 pub use timer_static as timer;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 mod yield_now;
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub use join_handle::CoopJoinHandle;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub use local::{CoopLocalJoinHandle, CoopLocalSet};
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub use runtime_impl::CoopRuntime;
 #[cfg(feature = "session-slot")]
 pub use runtime_impl::RuntimeCell;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub use time::{ClockSource, CoopTime};
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub use yield_now::{yield_now, YieldNow};
 
 // Stage 4a — session-tier `SessionRuntime` binding (the per-profile

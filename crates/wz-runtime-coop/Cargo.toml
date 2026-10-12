@@ -85,11 +85,24 @@ default = []
 # closing the M0+ alloc gap that R311av documented. Native-atomic
 # targets (M3+ / M7 / Mxx / RISC-V IMAC / AP) bypass the polyfill
 # via `target_has_atomic` cfg in `src/atomic.rs`.
-alloc = [
+#
+# S9e — the feature is split in two so that a build with no allocator can have
+# the runtime. `runtime` is the runtime being PRESENT (the executor, its time
+# source, the sync aliases): over the heap forms with `alloc`, over the static
+# forms with `session-slot`. `alloc` is the heap: it adds `runtime` and every
+# dependency feature that links the `alloc` crate (`wz-runtime-core/alloc`,
+# `portable-atomic-util/alloc`, and the session core's own `alloc`). A build with
+# `session-slot` and without `alloc` therefore names no allocator-bearing crate at
+# all, which is what the no-allocator link gate (S8) reads off the dependency graph.
+runtime = [
     "dep:wz-runtime-core",
-    "wz-runtime-core/alloc",
     "dep:portable-atomic",
+]
+alloc = [
+    "runtime",
+    "wz-runtime-core/alloc",
     "dep:portable-atomic-util",
+    "portable-atomic-util/alloc",
 ]
 
 # R311ih — static scouting mode on the MCU profile. The MCU session
@@ -134,11 +147,15 @@ reassembly = [
 # binding so `SessionLinkActions<CoopRuntime<C>, CoopTime<C>>`
 # type-checks; the sync drive-loop consumer (`session_drive`) reading
 # real lwIP UDP follows.
+#
+# S9e — it no longer implies `alloc`: the heap forms of the runtime (and the
+# session core's `alloc`, which `alloc` here forwards) are the heap profile's, so
+# a heap build names `alloc` beside this feature, as every consumer does, and a
+# `session-slot` build does not.
 session-unicast = [
-    "alloc",
+    "runtime",
     "dep:wz-session-core",
     "wz-session-core/session-unicast",
-    "wz-session-core/alloc",
     "wz-session-core/no_std",
 ]
 
@@ -247,7 +264,7 @@ critical-section = "1"
 # (M3+/M7/Mxx/RISC-V IMAC/AP); on those, the polyfill crate compiles
 # but its types are never instantiated.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"], optional = true }
-portable-atomic-util = { version = "0.2", default-features = false, features = ["alloc"], optional = true }
+portable-atomic-util = { version = "0.2", default-features = false, optional = true }
 # R311av — Runtime / TimeSource trait surface. Optional + alloc-gated
 # so the no-alloc sync-only build path stays trait-skeleton-free.
 # `wz-runtime-core/alloc` is required because RuntimeError under

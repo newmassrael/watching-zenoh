@@ -46,21 +46,22 @@ use critical_section::Mutex;
 use wz_runtime_core::TimeSource;
 #[cfg(all(feature = "rx-in-place", not(feature = "reassembly")))]
 use wz_session_core::drive::dispatch_datagram;
-#[cfg(not(feature = "rx-in-place"))]
+#[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
 use wz_session_core::drive::dispatch_link_event;
+#[cfg(feature = "alloc")]
+use wz_session_core::drive::dispatch_pending;
 use wz_session_core::drive::SessionEngine;
 #[cfg(feature = "transport-keepalive")]
 use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
-use wz_session_core::drive::{
-    check_lease_deadline, dispatch_pending, lease_wake_deadline, new_session_engine,
-};
+use wz_session_core::drive::{check_lease_deadline, lease_wake_deadline, new_session_engine};
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::drive::{CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 #[cfg(not(feature = "session-slot"))]
 use wz_session_core::link::BoxedLinkDriver;
-#[cfg(not(feature = "rx-in-place"))]
+#[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
 use wz_session_core::link::LinkEvent;
+#[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::network_message::{new_record_buf, RecordBuf};
@@ -99,7 +100,11 @@ pub trait SessionDatagramLink {
     /// The next inbound datagram as a frame, or `None` when nothing is
     /// queued. Taking a datagram also RETARGETS the link's replies to that
     /// datagram's source — the acceptor learns its peer from the InitSyn,
-    /// and every reply after it goes back to whoever just spoke.
+    /// and every reply after it goes back to whoever just spoke. The copying
+    /// receive is the heap profile's (the frame is an owned [`RxFrame`]), so a
+    /// build with no allocator has no such method and a link answers
+    /// [`Self::recv_with`] alone.
+    #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame>;
 
     /// Lend the next inbound datagram's bytes to `f` WHERE THE LINK HOLDS
@@ -115,7 +120,9 @@ pub trait SessionDatagramLink {
     /// The provided form takes the datagram through [`Self::try_recv`], so it
     /// costs that frame's copy: right for a link with no buffer of its own to
     /// lend, and what every link answered before this existed. A link that
-    /// holds its datagrams overrides it.
+    /// holds its datagrams overrides it. With no allocator there is no copying
+    /// receive to fall back to, so every link states this one.
+    #[cfg(feature = "alloc")]
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         match self.try_recv() {
             Some(frame) => {
@@ -125,6 +132,11 @@ pub trait SessionDatagramLink {
             None => false,
         }
     }
+
+    /// Lend the next inbound datagram's bytes to `f` where the link holds them
+    /// (see the form above); with no allocator a link states it.
+    #[cfg(not(feature = "alloc"))]
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool;
 }
 
 /// A shared link is a link: the same object is usually the session's
@@ -634,6 +646,9 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
         // message until the peer sends again.
+        // A build with no allocator parks nothing: it reads the rest of a datagram
+        // where the link holds it, so there is no remainder to come back to.
+        #[cfg(feature = "alloc")]
         if let Some(outcome) = dispatch_pending(&self.actions, &mut self.engine) {
             #[cfg(feature = "reassembly")]
             report_outcome_reassembling(
@@ -692,7 +707,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         // link has already retargeted its replies to the datagram's source.
         // Unicast MCU session shell — one peer per link, so no source
         // attribution is needed.
-        #[cfg(not(feature = "rx-in-place"))]
+        #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
         if let Some(frame) = self.link.try_recv() {
             let outcome =
                 dispatch_link_event(LinkEvent::Rx(frame), &self.actions, &mut self.engine);
