@@ -53,18 +53,18 @@ use crate::tx_buf::{EncodeBuf, TxBuf, TxSink};
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::Declare;
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwned;
 #[cfg(feature = "alloc")]
 use wz_codecs::interest::{Interest, InterestOwned};
 // R311y578 (G7) — tracks [`oam_body`]'s gate exactly, `session-unicast`
 // included: the import exists for that one signature, so any predicate the
 // function does not have makes the import unused under `-D warnings`.
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
 use crate::wire::PushOwned;
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::wire::RequestOwned;
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::ResponseOwned;
 #[cfg(all(
     feature = "codec-linkstate",
@@ -80,7 +80,7 @@ use wz_codecs::request::Request;
 use wz_codecs::response::Response;
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use wz_codecs::response_final::ResponseFinal;
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use wz_codecs::response_final::ResponseFinalOwned;
 
 /// R311jq — the FRAME parent-flags byte for a channel: `FLAG_T_FRAME_R`
@@ -311,7 +311,7 @@ where
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
 pub(crate) fn push_body(
     push: &PushOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
@@ -381,7 +381,7 @@ pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut TxSink<'_>) -> Result<(),
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 pub(crate) fn declare_body(
     declare: &DeclareOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
@@ -398,7 +398,7 @@ pub(crate) fn declare_body(
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 pub(crate) fn request_body(
     request: &RequestOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
@@ -415,7 +415,7 @@ pub(crate) fn request_body(
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 pub(crate) fn response_body(
     response: &ResponseOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
@@ -432,7 +432,7 @@ pub(crate) fn response_body(
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 pub(crate) fn response_final_body(
     response_final: &ResponseFinalOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {

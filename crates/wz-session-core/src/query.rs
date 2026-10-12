@@ -230,7 +230,7 @@ use crate::sample::{EncodingHint, TimestampHint};
 // extraction. cfg-off: callback always observes attachment=None.
 // Signature stable (returns Option), behavior change is the early
 // short-circuit at the function entry.
-#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
     #[cfg(not(feature = "query-attachment"))]
     {
@@ -285,7 +285,7 @@ pub fn request_query_parameters(request: &RequestOwned) -> Option<&[u8]> {
 // Signature stable (returns Option); `query-source-info` off
 // short-circuits to None so a `codec-request` subset that does not
 // compose querier provenance carries no source-info decode path.
-#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 fn extract_query_source_info(query: &QueryOwned) -> Option<crate::sample::SourceInfo> {
     #[cfg(not(feature = "query-source-info"))]
     {
@@ -655,13 +655,13 @@ pub enum QueryReply {
 /// `transport-shm` there is none to name and the option is the uninhabited one, so the same
 /// signature serves both builds and no site has to spell the difference.
 #[cfg(all(
-    feature = "storage-profile",
+    feature = "alloc",
     feature = "codec-response",
     feature = "transport-shm"
 ))]
 type ShmDescriptorArg = Option<crate::extshm::ShmDescriptor>;
 #[cfg(all(
-    feature = "storage-profile",
+    feature = "alloc",
     feature = "codec-response",
     not(feature = "transport-shm")
 ))]

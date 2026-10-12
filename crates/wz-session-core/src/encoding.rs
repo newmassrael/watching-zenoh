@@ -48,7 +48,7 @@ pub const ID_APPLICATION_PROTOBUF: EncodingId = 13; // encoding-protobuf
 
 /// Pack a raw predefined id into the wire `packed_id` for a schema-less encoding
 /// (`id << 1`, schema-present bit clear).
-const fn packed_no_schema(id: EncodingId) -> u32 {
+pub(crate) const fn packed_no_schema(id: EncodingId) -> u32 {
     (id as u32) << 1
 }
 

@@ -144,6 +144,8 @@ fn link_chain(chain: &mut HeaplessVec<ExtEntry<'_>, 8>) {
 pub struct ResponseWriter<'a> {
     parts: ReplyParts<'a>,
     responder: IdentityBody,
+    // Read only under `reply-source-info`, the feature that puts the extension on the wire.
+    #[cfg_attr(not(feature = "reply-source-info"), allow(dead_code))]
     source_info: IdentityBody,
 }
 

@@ -1090,6 +1090,7 @@ impl AdminLegCardinality {
 /// `the_manifest_describes_exactly_the_legs_this_build_answers`, which derives the
 /// population by RUNNING [`answer_admin_query`] against a wildcard and comparing
 /// what it actually replied with what this table declares.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminLeg {
     /// The concrete key (`Single`) or the key pattern (`PerItem`), with this
@@ -1153,11 +1154,16 @@ impl AdminLegEncoding {
     /// The wire `(packed_id, schema)` of this encoding.
     pub fn parts(self) -> (u32, Option<&'static str>) {
         match self {
+            // The ids the owned `EncodingHint` constants are made of, so a node with
+            // no allocator (which has no `EncodingHint`) says the same thing.
             Self::Json => (
-                crate::sample::EncodingHint::APPLICATION_JSON.packed_id,
+                crate::encoding::packed_no_schema(crate::encoding::ID_APPLICATION_JSON),
                 None,
             ),
-            Self::Text => (crate::sample::EncodingHint::TEXT_PLAIN.packed_id, None),
+            Self::Text => (
+                crate::encoding::packed_no_schema(crate::encoding::ID_TEXT_PLAIN),
+                None,
+            ),
             #[cfg(feature = "adminspace-metrics")]
             Self::Metrics => crate::encoding::encoding_parts_from_mime(METRICS_ENCODING),
         }
@@ -1198,6 +1204,7 @@ impl AdminLegEncoding {
 /// `String`s, collected. The manifest document ([`write_admin_surface_json`]) is the
 /// same visitor over a fixed buffer, so the owned list and the written document
 /// cannot disagree about which legs exist.
+#[cfg(feature = "alloc")]
 pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
     let mut legs = Vec::new();
     let mut key = String::new();
@@ -1415,6 +1422,7 @@ pub fn admin_unspoken_fields() -> &'static [&'static str] {
 ///
 /// Merging the two into one row was the alternative and it loses the encoding
 /// axis, which is question two of the three this document exists to answer.
+#[cfg(feature = "alloc")]
 pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
     let mut out = String::new();
     let mut key = String::new();
@@ -1482,6 +1490,7 @@ pub fn write_admin_surface_json<W: TextOut + ?Sized, K: AdminBuffer>(
 /// (`serde_json::to_string(&sub.1)`, zenoh `adminspace.rs:793,843`). zids are in
 /// zenoh `ZenohId` Display (hex) form. Serialized field order matches zenoh's serde
 /// derive: `routers`, `peers`, `clients`.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminSources {
     /// Router nodes that declared the entity (empty for a plain peer's peer-tier
@@ -1629,6 +1638,7 @@ impl AdminEntityKind {
 /// no wire record — `session/mod.rs:2196`), and zenoh's `publishers_data` /
 /// `queriers_data` loop over an empty table emits NOTHING, so omitting these is
 /// byte-identical to zenoh running with no declared publishers.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminDeclaration {
     /// Whether this is a subscriber or a queryable entry.
@@ -1638,6 +1648,14 @@ pub struct AdminDeclaration {
     /// The nodes that declared this keyexpr (`{routers,peers,clients}`), the reply body.
     pub sources: AdminSources,
 }
+
+/// The introspection entries of a node with no allocator: a type with no values, so the
+/// `&[AdminDeclaration]` the answerer takes is always the empty slice. An entry owns
+/// its keyexpr and its source lists, which is the heap profile's, and the legs that
+/// read them (`adminspace-introspection-handlers`) need the heap.
+#[cfg(not(feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminDeclaration {}
 
 /// The per-entity admin introspection key `@/<zid>/<whatami>/<kind>/<pattern>`
 /// (`kind` = `subscriber` / `queryable`), zenoh `adminspace.rs:786`. `pattern` is
@@ -1673,6 +1691,7 @@ fn write_admin_entity_key<W: TextOut + ?Sized>(
 // R2824 — the two constants, and the membership decision below, moved to the
 // no-alloc `admin_config_space` so the MCU's config-write surface decides with
 // the same code. Their documentation moved with them.
+#[cfg(feature = "alloc")]
 use crate::admin_config_space::{
     subkey_in_config_space, ConfigSpaceRefusal, ADMIN_CONFIG_WRITE_PATTERN_TAIL,
 };
@@ -1744,6 +1763,7 @@ use crate::admin_config_space::{
 /// survive as assertions about THIS type, minus its control arm, which is the
 /// one thing a type is allowed to take away (see
 /// `the_space_is_one_origin_and_round_trips`).
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminConfigWriteSpace {
     /// `@/<zid>/<whatami>/config/**`. PRIVATE, and the only field: every other
@@ -1761,6 +1781,7 @@ pub struct AdminConfigWriteSpace {
     pattern: String,
 }
 
+#[cfg(feature = "alloc")]
 impl AdminConfigWriteSpace {
     /// THE constructor — the `(zid_hex, whatami)` pair, which is what a node
     /// knows about itself, and nothing else.
@@ -1920,6 +1941,7 @@ fn write_admin_plugin_status_root_key<W: TextOut + ?Sized>(
 /// `config_json` are passed separately because each host reads them differently
 /// (a Session from its one peer + its read-at-open snapshot; a routing peer from
 /// its faces + its LIVE shared `WzConfig`).
+#[cfg(feature = "alloc")]
 pub struct AdminAnswerCtx<'a> {
     /// This node's zid in zenoh hex form.
     pub zid_hex: &'a str,
@@ -2041,8 +2063,14 @@ pub struct AdminNodeFacts<'a, S, M, L> {
     pub metadata_json: &'a str,
     /// The admin GET permission: `false` answers nothing ([`AdminAnswerCtx::read`]).
     pub read: bool,
-    /// This node's stats registry, if it has one ([`AdminAnswerCtx::stats`]).
+    /// This node's stats registry, if it has one (`AdminAnswerCtx::stats`). A registry
+    /// is a heap structure, so a node with no allocator holds none: the field is there
+    /// on both profiles, and without one it can only be `None`.
+    #[cfg(feature = "alloc")]
     pub stats: Option<&'a crate::stats_registry::StatsRegistry>,
+    /// See the heap form: a reference to nothing, so `None` is the only value.
+    #[cfg(not(feature = "alloc"))]
+    pub stats: Option<&'a core::convert::Infallible>,
     /// The node's listening locators.
     pub locators: L,
     /// The connected unicast peers.
@@ -2526,6 +2554,7 @@ where
 ///
 /// S9b — this is [`answer_admin_query_in`] over `String` buffers it makes and an
 /// owned context, so the AP and a node with no allocator write one set of legs.
+#[cfg(feature = "alloc")]
 pub fn answer_admin_query(
     view: &dyn crate::query_sink::QueryView,
     out: &mut dyn crate::query_sink::ReplyOut,
@@ -2626,6 +2655,7 @@ fn write_route_successor_entry_suffix<W: TextOut + ?Sized>(
 /// and passes them IN — the SAME host-agnostic seam [`answer_admin_query`] uses
 /// for `config_json`, keeping this data-view net-agnostic + no_std-feasible.
 /// Every zid string is already zenoh `ZenohId` Display (hex) form.
+#[cfg(feature = "alloc")]
 pub struct AdminRouterCtx<'a> {
     /// This node's zid in zenoh hex form.
     pub zid_hex: &'a str,
@@ -2661,6 +2691,7 @@ pub struct AdminRouterCtx<'a> {
 /// `#[cfg]`-gated (the caller passes an empty/`None` ctx with the feature off).
 ///
 /// S9b — this is [`answer_router_admin_query_in`] over `String` buffers it makes.
+#[cfg(feature = "alloc")]
 pub fn answer_router_admin_query(
     view: &dyn crate::query_sink::QueryView,
     out: &mut dyn crate::query_sink::ReplyOut,
@@ -2673,6 +2704,7 @@ pub fn answer_router_admin_query(
 
 /// [`answer_router_admin_query`] written into buffers its caller supplies, with
 /// the refusals reported as [`answer_admin_query_in`] reports them.
+#[cfg(feature = "alloc")]
 pub fn answer_router_admin_query_in<K: AdminBuffer, B: AdminBuffer>(
     key: &mut K,
     body: &mut B,
@@ -2743,6 +2775,7 @@ pub fn answer_router_admin_query_in<K: AdminBuffer, B: AdminBuffer>(
 /// config-hotreload, which is dlopen plugin start/stop — no wz analogue). The
 /// variants are ALWAYS compiled (signature stability); only the PARSE arms that
 /// construct the storage ones are `#[cfg]`-gated.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminConfigWrite {
     /// R2644 — `.../config/<a/config/key/path> <json5>`: write ONE config key at
@@ -2984,6 +3017,7 @@ impl AdminConfigWrite {
 /// R311y51 (§5.23 `adminspace-write`) — the outcome of gating + decoding an admin
 /// config-WRITE PUT, so the caller logs each case as zenoh does (a permission
 /// deny is an `error`, `adminspace.rs:397`; a malformed / unknown write is benign).
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminConfigWriteOutcome {
     /// Permitted + recognized: the caller applies this intent.
@@ -3171,6 +3205,7 @@ pub const ADMIN_CONFIG_WRITE_ACTIONS: &[&str] = &[
 /// applied. R2644 built a three-way distinction — never-heard-of /
 /// known-and-ignored / known-and-not-runtime-mutable — and a predicate narrowed
 /// to "honoured" collapses the middle case into the first.
+#[cfg(feature = "alloc")]
 pub fn parse_admin_config_write(
     space: &AdminConfigWriteSpace,
     keyexpr: &str,

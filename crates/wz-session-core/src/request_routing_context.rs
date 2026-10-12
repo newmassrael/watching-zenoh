@@ -79,7 +79,7 @@ pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
 pub(crate) fn read_target_in<E: crate::ext_view::ExtEntryView>(
     exts: Option<&[E]>,
 ) -> Option<QueryTarget> {
-    ext_nodeid::read_z64_in(exts, TARGET_EXT_HEADER).and_then(QueryTarget::from_wire_byte)
+    crate::ext_nodeid::read_z64_in(exts, TARGET_EXT_HEADER).and_then(QueryTarget::from_wire_byte)
 }
 
 /// The Request `ext_timeout` extension id — zenoh-pico's

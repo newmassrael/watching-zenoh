@@ -9906,7 +9906,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R3122 -- the priority a Request is ROUTED on: the data plane, zenoh's default
     /// `Priority::Data`. One definition for the dispatch below and for the sender's handoff, which
     /// must open its transaction on the link the dispatch will pick.
-    #[cfg(feature = "codec-request")]
+    #[cfg(all(feature = "codec-request", feature = "alloc"))]
     const REQUEST_ROUTE_PRIORITY: Priority = Priority::DEFAULT;
 
     /// See [`Self::dispatch_push`].
