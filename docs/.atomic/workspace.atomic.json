@@ -273638,6 +273638,48 @@
         "A bound over a call chain, not one frame: the sum of the frames along the deepest path of the call graph against the stack, which the lab run's peak reading stands in for today."
       ]
     },
+    "Round 3322": {
+      "decision_summary": "The gossip multihop differential against libzenohc failed on a hosted run (A linked to B only where the reference linked B, C, D, E) and passed on the next with the same code. On a build host with the real reference it failed about one run in fifty, and a looped run with a per-node link log showed one shape each time: the node A dialled logged the link up and then down at once, and A never registered a face for it. The cause is a zid's spelling. A minted session id whose last byte is zero (one in 256) went on the wire as sixteen bytes, where zenoh sends it trimmed; the routing graph holds an id trimmed; the dial compared the node it opened to against the node it meant to dial as raw bytes, took it for another node and closed it. A zid is a value. same_zid compares two spellings by their trimmed form, and the dial, the held-face lookup, the face dedup and the dial-intent dedup use it; a minted id now goes on the wire trimmed. Three new tests failed first on the raw comparison.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/zid_hex.rs: same_zid, the comparison of two spellings of one zid, with its test.",
+        "crates/wz-capi-core/src/drive.rs: is_expected_peer (the dial's check of the node it opened to) and scouted_connector's own-id test use same_zid; a minted id goes on the wire trimmed (minted_zids), and an all-zero draw is refused; the dial-registry stress test reads the peer id by value; two new tests and one adjusted.",
+        "crates/wz-capi-core/src/faces.rs: holds_peer and the face dedup compare by value.",
+        "crates/wz-runtime-tokio/src/accept_loop.rs: holds_zid, the dial-intent dedup, compares by value."
+      ],
+      "verification_bullets": [
+        "On a build host, red first: with the comparison left as raw bytes the three new tests (same_zid, a minted id with a zero tail on the wire, the dialled-node check) fail on their assertions and the test beside them passes; with the repair they pass, with the crates' tests for the dial-intent dedup and clippy with warnings denied clean on wz-session-core, wz-capi-core and wz-runtime-tokio.",
+        "The looped differential against the real libzenohc, un-instrumented, on the repaired tree: 30 runs, no failure. Before the repair the same loop failed 4 times in 188 (about 2 percent), so 30 clean runs are weak evidence by themselves; the deterministic tests are the control.",
+        "NOT verified here: the hosted run, which carries the differential in its api-compat-c job. The dial-registry stress test of wz-capi-core cannot run on this build host: it fails 6 of 6 alone on the tree before this change as well, so its adjusted comparison (the peer id by value) is checked by clippy and by reading only."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The dial-registry stress test of wz-capi-core fails on the build host on every tree tried (a dial reports DriveFailed) and passes hosted; why it fails there is not found.",
+        "A node a gossip list named whose link then ended is dialled again only when it is next named; the connector's own note says a face that ends is not re-dialled. A refused or aborted link therefore stays lost until new topology arrives.",
+        "Three more comparisons of an id read off the wire with an id from the node's own session (the scouting responder's own-Hello test, the scout initiator's self-echo test, the multicast join's own-id test) stay raw. They compare two wire forms that are both trimmed now; a peer that sent an untrimmed id would still differ there."
+      ],
+      "publishable_decision_summary": "The gossip multihop differential against libzenohc failed on a hosted run (A linked to B only where the reference linked B, C, D, E) and passed on the next with the same code. On a build host with the real reference it failed about one run in fifty, and a looped run with a per-node link log showed one shape each time: the node A dialled logged the link up and then down at once, and A never registered a face for it. The cause is a zid's spelling. A minted session id whose last byte is zero (one in 256) went on the wire as sixteen bytes, where zenoh sends it trimmed; the routing graph holds an id trimmed; the dial compared the node it opened to against the node it meant to dial as raw bytes, took it for another node and closed it. A zid is a value. same_zid compares two spellings by their trimmed form, and the dial, the held-face lookup, the face dedup and the dial-intent dedup use it; a minted id now goes on the wire trimmed. Three new tests failed first on the raw comparison.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/zid_hex.rs: same_zid, the comparison of two spellings of one zid, with its test.",
+        "crates/wz-capi-core/src/drive.rs: is_expected_peer (the dial's check of the node it opened to) and scouted_connector's own-id test use same_zid; a minted id goes on the wire trimmed (minted_zids), and an all-zero draw is refused; the dial-registry stress test reads the peer id by value; two new tests and one adjusted.",
+        "crates/wz-capi-core/src/faces.rs: holds_peer and the face dedup compare by value.",
+        "crates/wz-runtime-tokio/src/accept_loop.rs: holds_zid, the dial-intent dedup, compares by value."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, red first: with the comparison left as raw bytes the three new tests (same_zid, a minted id with a zero tail on the wire, the dialled-node check) fail on their assertions and the test beside them passes; with the repair they pass, with the crates' tests for the dial-intent dedup and clippy with warnings denied clean on wz-session-core, wz-capi-core and wz-runtime-tokio.",
+        "The looped differential against the real libzenohc, un-instrumented, on the repaired tree: 30 runs, no failure. Before the repair the same loop failed 4 times in 188 (about 2 percent), so 30 clean runs are weak evidence by themselves; the deterministic tests are the control.",
+        "NOT verified here: the hosted run, which carries the differential in its api-compat-c job. The dial-registry stress test of wz-capi-core cannot run on this build host: it fails 6 of 6 alone on the tree before this change as well, so its adjusted comparison (the peer id by value) is checked by clippy and by reading only."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The dial-registry stress test of wz-capi-core fails on the build host on every tree tried (a dial reports DriveFailed) and passes hosted; why it fails there is not found.",
+        "A node a gossip list named whose link then ended is dialled again only when it is next named; the connector's own note says a face that ends is not re-dialled. A refused or aborted link therefore stays lost until new topology arrives.",
+        "Three more comparisons of an id read off the wire with an id from the node's own session (the scouting responder's own-Hello test, the scout initiator's self-echo test, the multicast join's own-id test) stay raw. They compare two wire forms that are both trimmed now; a peer that sent an untrimmed id would still differ there."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
