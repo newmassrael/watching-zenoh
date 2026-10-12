@@ -1175,6 +1175,20 @@ mod port_tests {
     use super::{claim_across_processes, claim_in};
     use std::collections::BTreeSet;
 
+    /// Held by a test that drops a listener and expects the number to refuse, for
+    /// the whole test, and by every test that starts a child process, around the
+    /// start only.
+    ///
+    /// Why: `fork` gives the child a copy of every descriptor the process has
+    /// open, and `exec` closes them again; between the two, a listener that
+    /// another thread has just dropped is still open in the child, so the
+    /// number still ANSWERS. `Command::spawn` returns after the `exec`, so the
+    /// window is the call. Measured on a 22-core host with the tests of this
+    /// module running together: the refusing-port test failed in 87 of 100 runs
+    /// beside the test that starts a holder process and 58 of 100 beside the
+    /// probe process, and in none beside the tests that start no process.
+    static SPAWN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// R2778 — the discriminator for `refusing_port`, moved here with the
     /// helper from `wz-integration-tests`, where it guarded that crate's local
     /// copy (R311y383): the socket RESERVES the port (a concurrent bind to it
@@ -1221,6 +1235,9 @@ mod port_tests {
     #[test]
     fn a_refusing_port_listens_and_refuses_again_on_the_same_number() {
         use std::net::{TcpListener, TcpStream};
+        // No other test of this module may start a process while a listener
+        // here is dropped: see `SPAWN_GATE`.
+        let _gate = SPAWN_GATE.lock().unwrap_or_else(|held| held.into_inner());
         let port = refusing_port();
         let connect_within =
             |addr| TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(10));
@@ -1286,6 +1303,8 @@ mod port_tests {
             return;
         }
         let dir = std::env::temp_dir().join(format!("wz-claim-test-{}", std::process::id()));
+        // The gate covers the start only: see `SPAWN_GATE`.
+        let gate = SPAWN_GATE.lock().unwrap_or_else(|held| held.into_inner());
         let mut holder = Command::new(std::env::current_exe().expect("this test binary"))
             .args([
                 "--exact",
@@ -1297,6 +1316,7 @@ mod port_tests {
             .stdout(Stdio::piped())
             .spawn()
             .expect("start the holder");
+        drop(gate);
         // Kept alive to the end of the test: dropping the read end early would make
         // the holder's own harness lines fail with a broken pipe.
         let mut lines = std::io::BufReader::new(holder.stdout.take().expect("holder stdout"))
@@ -1375,27 +1395,37 @@ mod port_tests {
     /// measured, and a number outside the autoselect range cannot be hit at all.
     ///
     /// It runs in a CHILD process of this test binary (`WZ_AUTOSELECT_PROBE`),
-    /// because eight threads that bind and release listeners without pause are
-    /// interference for every sibling test of the binary that dials a number
-    /// it expects to refuse: one `a_refusing_port_*` leg failed once beside it.
+    /// so that eight threads binding and releasing listeners without pause do
+    /// not compete with its siblings for the cores. That process is also what
+    /// fails the refusing-port test beside it, and not through its binds: it
+    /// is started with `fork`, and a listener dropped in the window before
+    /// the `exec` is still open in the child. The start is therefore made
+    /// under `SPAWN_GATE`.
     #[test]
     fn a_handed_out_port_is_never_an_autoselect_result() {
-        use std::process::Command;
+        use std::process::{Command, Stdio};
 
         if std::env::var_os("WZ_AUTOSELECT_PROBE").is_some() {
             let (binds, hits, handed) = hammer_autoselect();
             std::println!("PROBE binds={binds} hits={hits} handed={handed}");
             return;
         }
-        let output = Command::new(std::env::current_exe().expect("this test binary"))
+        // The gate covers the start only: see `SPAWN_GATE`.
+        let gate = SPAWN_GATE.lock().unwrap_or_else(|held| held.into_inner());
+        let child = Command::new(std::env::current_exe().expect("this test binary"))
             .args([
                 "--exact",
                 "port_tests::a_handed_out_port_is_never_an_autoselect_result",
                 "--nocapture",
             ])
             .env("WZ_AUTOSELECT_PROBE", "1")
-            .output()
-            .expect("run the probe process");
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the probe process");
+        drop(gate);
+        let output = child.wait_with_output().expect("run the probe process");
         let text = String::from_utf8_lossy(&output.stdout);
         let line = text
             .lines()
