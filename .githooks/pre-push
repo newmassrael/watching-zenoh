@@ -954,6 +954,10 @@ round_fed_gates=(
     "capi_c_coverage.py"
     "tcp_tuning_seam_gate.py"
     "no_allocator_link_gate.py --population"
+    # R3320 -- every FreeRTOS image's declared task stack is read once from its
+    # source; a text read, no build. The frame check itself needs the linked ELF
+    # and runs in Layer Q.
+    "stack_frame_gate.py --population"
     "prose_build_closure_gate.py --check"
     "root_relative_exclusion_lint.py"
     "negotiated_axis_witness_gate.py --check"

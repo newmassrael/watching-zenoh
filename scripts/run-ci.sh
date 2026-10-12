@@ -2033,6 +2033,12 @@ layer_c0_test_discipline() {
     # and crate-graph halves run in Layer Q (Q.0n), where the images are built.
     python3 scripts/lib/no_allocator_link_gate.py --selftest || return 1
     python3 scripts/lib/no_allocator_link_gate.py --population || return 1
+    # R3320 -- the stack-frame budget: the part that needs no toolchain, the
+    # frame reader driven over each prologue shape and the rule over the Round
+    # 3318 frame, and every image's declared stack read once from its source.
+    # The ELF half runs in Layer Q (Q.frt, Q.frt2), where the images are built.
+    python3 scripts/lib/stack_frame_gate.py --selftest || return 1
+    python3 scripts/lib/stack_frame_gate.py --population || return 1
     # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
     # exit an obligation a TYPE enforces and closed that one invariant; the
     # register carried "the other multi-exit sites have not been looked at" as
@@ -16597,6 +16603,12 @@ install qemu-system-arm" || fail=1
             --target thumbv7m-none-eabi --bin mcu-freertos-demo --quiet; then
             echo "  Q.frt build mcu-freertos-demo thumbv7m-none-eabi OK"
             any_built=1
+            # R3320 -- the frame budget BEFORE the boot: a frame over half the
+            # task's stack never reaches a first line, and the boot below would
+            # report only a 30 s timeout (Round 3318 is the case).
+            if ! python3 scripts/lib/stack_frame_gate.py --check frt; then
+                fail=1
+            fi
             if [[ "$has_qemu" -ne 1 ]]; then
                 _q_unavailable "Q.frt run" "qemu-system-arm not on PATH" \
                     || fail=1
@@ -16632,6 +16644,9 @@ install qemu-system-arm" || fail=1
             --bin mcu-freertos-two-session --quiet; then
             echo "  Q.frt2 build mcu-freertos-two-session thumbv7m-none-eabi OK"
             any_built=1
+            if ! python3 scripts/lib/stack_frame_gate.py --check frt2; then
+                fail=1
+            fi
             if [[ "$has_qemu" -ne 1 ]]; then
                 _q_unavailable "Q.frt2 run" "qemu-system-arm not on PATH" \
                     || fail=1
