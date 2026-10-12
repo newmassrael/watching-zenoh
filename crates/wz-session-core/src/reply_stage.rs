@@ -183,6 +183,14 @@ pub trait ReplyStaging {
     /// only, as [`Self::nth`].
     #[cfg(feature = "alloc")]
     fn drain_staged(&mut self) -> impl Iterator<Item = QueryReply> + '_;
+
+    /// Hand every staged reply, in the order they were staged, to `emit` as borrowed
+    /// parts, and leave the stage empty: the drain that builds no owned record, so a
+    /// node with no allocator can send what it staged. `emit` reads the parts where
+    /// they lie, in the arena, and must not keep them. Fixed backing only: the growable
+    /// one holds owned records, which `drain_staged` hands out.
+    #[cfg(feature = "bounded-heapless")]
+    fn drain_parts<F: FnMut(ReplyParts<'_>)>(&mut self, emit: F);
 }
 
 /// How the `ResponseFinal`s owed to a peer are staged, the same for both backings.
@@ -674,6 +682,13 @@ impl ReplyStaging for ReplyStage {
             stage: self,
             next: 0,
         }
+    }
+
+    fn drain_parts<F: FnMut(ReplyParts<'_>)>(&mut self, mut emit: F) {
+        for row in &self.rows {
+            emit(self.row_parts(row));
+        }
+        self.clear();
     }
 }
 

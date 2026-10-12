@@ -22,18 +22,10 @@
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::wire_const;
 
+// The Declare ENVELOPE header every builder in this module emits lives with the chain
+// it promises, in `declare_ext_qos`, where the borrowed writers read it as well.
 use crate::declare_ext_qos::declare_envelope_extensions;
-use crate::ext_nodeid::MESSAGE_FLAG_Z;
-
-/// R311y801 — the Declare ENVELOPE header every builder in this module emits:
-/// `N_MID_DECLARE` with the `Z` chain bit, because every Declare now carries
-/// the `ext_qos` extension zenoh stamps on it (`QoSType::DECLARE` —
-/// `Priority::Control` + `CongestionControl::Block`). The bit and the chain are
-/// two halves of one fact, so they are named together here and the chain
-/// content lives in [`crate::declare_ext_qos`]: a builder that sets one without
-/// the other emits a header promising extensions that are not there, which the
-/// peer reads as a truncated message rather than as a missing field.
-pub(crate) const DECLARE_ENVELOPE_HEADER: u8 = wire_const::N_MID_DECLARE | MESSAGE_FLAG_Z;
+pub(crate) use crate::declare_ext_qos::DECLARE_ENVELOPE_HEADER;
 
 // R2386 — gated with its one consumer, `build_declare_final`. The import was
 // unconditional while the builder was `codec-declare`-gated, so the two moved

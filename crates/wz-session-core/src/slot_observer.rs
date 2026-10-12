@@ -209,7 +209,9 @@ impl SlotObserver {
                 &mut peers.remote_subscribers,
                 event,
                 peer_table,
-                &|c| c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr),
+                &|c| {
+                    c.locality.allows_local() && subscribers.has_local_matching(c.keyexpr.as_str())
+                },
             );
         }
         #[cfg(all(feature = "declare-queryable", feature = "query-queryable"))]
@@ -221,7 +223,7 @@ impl SlotObserver {
                 peer_table,
                 &|c| {
                     c.locality.allows_local()
-                        && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                        && queryables.has_local_matching(c.keyexpr.as_str(), c.complete_required)
                 },
             );
         }
@@ -354,11 +356,12 @@ impl SlotObserver {
         #[cfg(all(feature = "declare-subscriber", feature = "codec-declare"))]
         {
             let subscribers = &self.subscribers;
-            dropped += self
-                .remote_subscribers
-                .flush_declarations_on_link_loss(&mut peers.remote_subscribers, &|c| {
-                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
-                });
+            dropped += self.remote_subscribers.flush_declarations_on_link_loss(
+                &mut peers.remote_subscribers,
+                &|c| {
+                    c.locality.allows_local() && subscribers.has_local_matching(c.keyexpr.as_str())
+                },
+            );
         }
         #[cfg(all(
             feature = "declare-queryable",
@@ -371,7 +374,7 @@ impl SlotObserver {
                 &mut peers.remote_queryables,
                 &|c| {
                     c.locality.allows_local()
-                        && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                        && queryables.has_local_matching(c.keyexpr.as_str(), c.complete_required)
                 },
             );
         }
@@ -389,15 +392,16 @@ impl SlotObserver {
         dropped
     }
 
-    /// The staged replies, through `send_response`. A reply whose bounded field
-    /// overflows cannot be wire-encoded and is skipped, as on the AP.
+    /// The staged replies, through `send_reply_parts`: each is read where it lies in
+    /// the stage and handed to the sink as borrowed parts, so a sink with no allocator
+    /// writes the `Response` from the row and builds no record, and a sink with a heap
+    /// builds the owned one it always did. A reply whose bounded field overflows cannot
+    /// be wire-encoded and is skipped, as on the AP.
     fn drain_query_replies<S: ResponseSink>(&mut self, peers: &mut PeerTables, sink: &S) {
         #[cfg(feature = "query-queryable")]
-        for reply in peers.replies.drain_staged() {
-            if let Ok(response) = reply.into_response() {
-                sink.send_response(response);
-            }
-        }
+        peers
+            .replies
+            .drain_parts(|parts| sink.send_reply_parts(parts));
         #[cfg(not(feature = "query-queryable"))]
         let _ = (peers, sink);
     }

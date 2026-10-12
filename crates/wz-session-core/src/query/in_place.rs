@@ -32,6 +32,7 @@
 //! longer than [`KeyexprBuf`], which only the fixed bounded backing refuses. Each
 //! is still dispatched, as the copying path dispatches it.
 
+#[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
 use wz_codecs::query::Query;
@@ -94,11 +95,15 @@ fn lent_projection<'q>(query: &'q Query<'q>) -> QueryProjection<'q> {
         source_info: crate::sample::extract_source_info(exts),
         #[cfg(not(feature = "query-source-info"))]
         source_info: None,
-        #[cfg(feature = "query-value")]
+        // A build with no heap does not project a query's value (its encoding is an
+        // owned hint), nor a value or attachment held as shareable bytes.
+        #[cfg(all(feature = "alloc", feature = "query-value"))]
         plain_value: crate::query_value_ext::decode_query_value_ext(exts),
-        #[cfg(not(feature = "query-value"))]
+        #[cfg(all(feature = "alloc", not(feature = "query-value")))]
         plain_value: None,
+        #[cfg(feature = "alloc")]
         shared_value: None,
+        #[cfg(feature = "alloc")]
         attachment_shared: None,
     }
 }
@@ -135,8 +140,20 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     );
                 }
             }
+            #[cfg(feature = "alloc")]
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
                 self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
+            }
+            // With no allocator there is no owned projection to fall back on, so a
+            // Request the lent form cannot represent reaches no queryable, and is
+            // owed its Final as a query that matched nobody is: the requester's
+            // query ends with no reply, where a refused one would be left to time out.
+            #[cfg(not(feature = "alloc"))]
+            Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
+                pending_final_rids.owe(
+                    request.rid,
+                    crate::declare_ext_qos::read_qos_in(request.extensions.as_deref()),
+                );
             }
         }
     }
@@ -181,7 +198,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// The fallback: the owned projection of `request`, dispatched by the path
     /// the copying receive takes ([`Self::dispatch_messages`]), so a Request the
     /// lent form cannot represent is dispatched, and owes its Final, exactly as
-    /// it always did.
+    /// it always did. Heap profile only.
+    #[cfg(feature = "alloc")]
     fn dispatch_owned_projection(
         &mut self,
         request: &Request<'_>,

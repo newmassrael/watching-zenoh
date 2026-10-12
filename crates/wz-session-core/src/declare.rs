@@ -135,6 +135,17 @@ pub(crate) fn declared_intersects(declared: &crate::id_map::DeclaredKeys, keyexp
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
 pub mod matching;
 
+/// S9e -- the text of a matching criterion's keyexpr: an owned `String` on the heap
+/// profile, where a watch owns its key, and the bounded buffer of a keyexpr with no
+/// allocator. The criterion is the argument the registries' re-evaluation hands the
+/// session's own table (`local_matching`), so it exists on both profiles; only the heap
+/// profile builds one (a matching watch needs `session-matching`, which needs the
+/// heap), and both read the key through `as_str`.
+#[cfg(feature = "alloc")]
+pub(crate) type CriterionKey = alloc::string::String;
+#[cfg(all(not(feature = "alloc"), feature = "storage-profile"))]
+pub(crate) type CriterionKey = crate::wireexpr_resolve::KeyexprBuf;
+
 // R311ds — cross-registry composability tests (R311dr-wider-tests
 // carry closure). Gated on `codec-declare` as well as `test` because
 // it references all three registries, which compile only under

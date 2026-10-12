@@ -108,10 +108,17 @@ pub trait ReplyView {
     /// reorders a recovered (retransmitted) sample by — a recovery GET reply
     /// carries the original sample's identity so it lands in the right
     /// per-source stream. Default `None` so impls predating the seam stay
-    /// valid. `alloc`-gated (the [`crate::sample::SourceInfo`] type lives in
-    /// the `alloc`-gated `sample` module), mirroring [`crate::query_sink::QueryView::source_info`].
-    #[cfg(feature = "alloc")]
+    /// valid. [`crate::sample::SourceInfo`] is a plain fixed-size record, so this is
+    /// there with no allocator too, mirroring [`crate::query_sink::QueryView::source_info`].
+    #[cfg(feature = "storage-profile")]
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        None
+    }
+    /// [`Self::timestamp`] as borrowed parts: the time and the identity bytes, read where
+    /// the view holds them, so a sink with no allocator orders versions by the stamp too.
+    /// Default `None`, as the owned form's.
+    #[cfg(feature = "storage-profile")]
+    fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
         None
     }
     /// R311y321 — the inline body timestamp (`MsgPut` / `MsgDel` T-flag

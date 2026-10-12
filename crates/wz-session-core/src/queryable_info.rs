@@ -23,11 +23,15 @@
 //! [`set_z64_ext`](crate::ext_nodeid::set_z64_ext) chain SSOT, exactly like
 //! [`ext_nodeid`](crate::ext_nodeid)'s `read_source` / `set_source`.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(feature = "alloc")]
 use wz_codecs::ext_entry::ExtEntryOwned;
 
-use crate::ext_nodeid::{read_z64_ext, set_z64_ext, EXT_ENC_Z64};
+use crate::ext_nodeid::EXT_ENC_Z64;
+#[cfg(feature = "alloc")]
+use crate::ext_nodeid::{read_z64_ext, set_z64_ext};
 
 /// The QueryableInfo extension id — zenoh `zextz64!(0x01, false)`.
 pub const QUERYABLE_INFO_EXT_ID: u8 = 0x01;
@@ -119,7 +123,8 @@ fn unpack(value: u64) -> QueryableInfo {
 /// Read the QueryableInfo from a DeclareQueryable body's ext chain. An absent
 /// ext is zenoh's DEFAULT `{ complete: false, distance: 0 }` (the omit-on-DEFAULT
 /// inverse). A thin projection of the shared [`read_z64_ext`] over the
-/// QueryableInfo id.
+/// QueryableInfo id. Heap profile only: it reads the owned chain, a `Vec`.
+#[cfg(feature = "alloc")]
 pub fn read_queryable_info(exts: Option<&Vec<ExtEntryOwned>>) -> QueryableInfo {
     read_z64_ext(exts, QUERYABLE_INFO_EXT_HEADER).map_or(QueryableInfo::DEFAULT, unpack)
 }
@@ -140,7 +145,9 @@ pub fn read_queryable_info_in<E: crate::ext_view::ExtEntryView>(
 /// omit-on-DEFAULT encoding: the DEFAULT `{ false, 0 }` (z64 value `0`) REMOVES
 /// any existing entry, anything else inserts / replaces it. Returns whether the
 /// chain is now NON-EMPTY, so the caller can sync the body's header `Z` flag. A
-/// thin projection of the shared [`set_z64_ext`].
+/// thin projection of the shared [`set_z64_ext`]. Heap profile only: it edits the
+/// owned chain, a `Vec`.
+#[cfg(feature = "alloc")]
 pub fn set_queryable_info(exts: &mut Option<Vec<ExtEntryOwned>>, info: QueryableInfo) -> bool {
     let value = pack(info);
     set_z64_ext(
@@ -150,7 +157,7 @@ pub fn set_queryable_info(exts: &mut Option<Vec<ExtEntryOwned>>, info: Queryable
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use alloc::vec;

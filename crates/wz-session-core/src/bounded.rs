@@ -436,6 +436,14 @@ impl<const N: usize> Default for BoundedString<N> {
     }
 }
 
+impl<const N: usize> Clone for BoundedString<N> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl<const N: usize> Deref for BoundedString<N> {
     type Target = str;
 

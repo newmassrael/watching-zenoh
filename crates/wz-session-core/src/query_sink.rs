@@ -87,9 +87,10 @@ pub trait QueryView {
     /// identity: zid / eid / sn). `None` when no source-info ext is
     /// present. Default impl returns `None`
     /// so `QueryView` impls that predate this accessor stay valid.
-    /// `alloc`-only (the `SourceInfo` type lives in the `alloc`-gated
-    /// `sample` module); mirrors `SampleView`'s metadata accessors.
-    #[cfg(feature = "alloc")]
+    /// Present with the session machinery (`storage-profile`: the `SourceInfo`
+    /// type lives in the `sample` module that machinery brings, and it is a plain
+    /// record with no heap); mirrors `SampleView`'s metadata accessors.
+    #[cfg(feature = "storage-profile")]
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         None
     }
@@ -165,9 +166,9 @@ pub trait QueryView {
     /// `None` meaning "absent", which is a true answer for an impl that never
     /// sees the ext. A default QoS is not "absent": it is a specific value
     /// that marks a reply droppable, so an impl that inherited it would give
-    /// a wrong answer silently. `alloc`-only because `QosLevel` lives in the
-    /// `alloc`-gated `sample` module.
-    #[cfg(feature = "alloc")]
+    /// a wrong answer silently. Present with the session machinery
+    /// (`storage-profile`), where `QosLevel` lives.
+    #[cfg(feature = "storage-profile")]
     fn qos(&self) -> crate::sample::QosLevel;
 }
 
@@ -450,6 +451,11 @@ pub trait ReplyOut {
     /// [`Self::reply_keyed_encoded`], so every sink that implements that arm takes
     /// this one with its meaning; a sink that can stage the parts without an owned
     /// hint overrides it.
+    ///
+    /// Without `alloc` there is no owned hint to build, so the default falls back to
+    /// [`Self::reply_keyed`] and drops the encoding, as every arm of this family does
+    /// for a sink that does not carry the metadata; the one sink a build without a heap
+    /// has, the query responder over the stage, overrides it.
     #[cfg(feature = "alloc")]
     fn reply_keyed_encoded_parts(
         &mut self,
@@ -463,6 +469,17 @@ pub trait ReplyOut {
             schema: schema.map(alloc::string::String::from),
         };
         self.reply_keyed_encoded(keyexpr, payload, Some(&hint))
+    }
+    #[cfg(not(feature = "alloc"))]
+    fn reply_keyed_encoded_parts(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        packed_id: u32,
+        schema: Option<&str>,
+    ) -> Result<(), ReplyError> {
+        let _ = (packed_id, schema);
+        self.reply_keyed(keyexpr, payload)
     }
     /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
     /// an optional value `encoding`) under an explicit concrete `keyexpr`.
@@ -722,9 +739,9 @@ pub struct BorrowedQuery<'a> {
     /// Source-info record (querier identity), if any. Borrowed — the
     /// dispatcher decodes the ext once into a local that outlives the
     /// per-queryable fan and lends it, matching the other fields' borrow
-    /// shape (no per-match clone). `alloc`-only — the `SourceInfo` type
-    /// lives in the `alloc`-gated `sample` module.
-    #[cfg(feature = "alloc")]
+    /// shape (no per-match clone). Present with the session machinery
+    /// (`storage-profile`), where the `SourceInfo` type lives.
+    #[cfg(feature = "storage-profile")]
     pub source_info: Option<&'a crate::sample::SourceInfo>,
     /// Value payload (Query body VALUE ext id 0x03 — the querier's attached
     /// value), if any. Borrowed — the dispatcher decodes the ext once into a
@@ -745,7 +762,7 @@ pub struct BorrowedQuery<'a> {
     /// R2594 — the query's QoS (see [`QueryView::qos`]). The dispatcher reads
     /// it off the Request envelope once per query and hands every matched
     /// queryable the same value.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub qos: crate::sample::QosLevel,
 }
 
@@ -759,7 +776,7 @@ impl QueryView for BorrowedQuery<'_> {
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment
     }
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         self.source_info
     }
@@ -776,7 +793,7 @@ impl QueryView for BorrowedQuery<'_> {
     fn is_local(&self) -> bool {
         self.is_local
     }
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     fn qos(&self) -> crate::sample::QosLevel {
         self.qos
     }

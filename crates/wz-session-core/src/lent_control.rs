@@ -112,7 +112,7 @@ fn chain_of<'a>(entry: ExtEntry<'a>) -> HeaplessVec<ExtEntry<'a>, 8> {
 /// An `ext_qos` entry carrying `qos`: `zextz64!(0x1, false)`, terminal (no
 /// chain-continuation bit, since it is the only entry). The borrowed twin of
 /// [`crate::declare_ext_qos::qos_ext`].
-fn qos_entry<'a>(qos: QosLevel) -> ExtEntry<'a> {
+pub(crate) fn qos_entry<'a>(qos: QosLevel) -> ExtEntry<'a> {
     ExtEntry {
         header: QOS_EXT_HEADER,
         body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
@@ -124,7 +124,7 @@ fn qos_entry<'a>(qos: QosLevel) -> ExtEntry<'a> {
 /// What the `Z` bit of a message header says about its chain: set when the
 /// message carries one. The same rule as
 /// [`crate::ext_nodeid::sync_header_z`], over a header that starts clear.
-const fn with_z(header: u8) -> u8 {
+pub(crate) const fn with_z(header: u8) -> u8 {
     header | crate::ext_nodeid::MESSAGE_FLAG_Z
 }
 
@@ -201,7 +201,7 @@ impl NamedKeyexpr {
 /// `ext_qos` entry of [`QOS_DECLARE`].
 #[cfg(feature = "codec-declare")]
 fn envelope<'a>(interest_id: Option<u64>, body: DeclareVariant<'a>) -> Declare<'a> {
-    let mut header = crate::declare_build::DECLARE_ENVELOPE_HEADER;
+    let mut header = crate::declare_ext_qos::DECLARE_ENVELOPE_HEADER;
     if interest_id.is_some() {
         header |= wire_const::FLAG_N_DECLARE_I;
     }
@@ -215,7 +215,7 @@ fn envelope<'a>(interest_id: Option<u64>, body: DeclareVariant<'a>) -> Declare<'
 
 /// The `Local`-arm wireexpr every id-based declaration, and every restricted
 /// interest, names its keyexpr with.
-fn local<'a>(mapping_id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
+pub(crate) fn local<'a>(mapping_id: u64, suffix: Option<&'a str>) -> Wireexpr<'a> {
     Wireexpr {
         body: WireexprVariant::WireexprLocal(WireexprLocal {
             id: mapping_id,

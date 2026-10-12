@@ -30,6 +30,7 @@
 //! keyexpr is longer than [`KeyexprBuf`], which only the fixed bounded backing
 //! refuses. Each is still delivered, as the copying path delivers it.
 
+#[cfg(feature = "alloc")]
 use core::cell::OnceCell;
 
 use wz_codecs::response::{Response, ResponseVariant};
@@ -37,7 +38,9 @@ use wz_codecs::timestamp::Timestamp;
 
 use super::ReplyRegistry;
 use crate::reply_sink::{ReplyKind, ReplySink, ReplyView};
-use crate::sample::{SourceInfo, TimestampHint};
+use crate::sample::SourceInfo;
+#[cfg(feature = "alloc")]
+use crate::sample::TimestampHint;
 use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound, MappingSpaces};
 
 /// The reply a Response read in place is delivered as: every field a range of
@@ -52,6 +55,9 @@ struct LentReply<'r> {
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
     timestamp: Option<&'r Timestamp<'r>>,
+    // The owned hint a sink asks for by `timestamp`, built on the first ask: it owns a
+    // heap field, so a build with no allocator reads the stamp as `timestamp_parts`.
+    #[cfg(feature = "alloc")]
     timestamp_hint: OnceCell<TimestampHint>,
 }
 
@@ -80,12 +86,19 @@ impl ReplyView for LentReply<'_> {
     fn source_info(&self) -> Option<&SourceInfo> {
         self.source_info.as_ref()
     }
+    #[cfg(feature = "alloc")]
     fn timestamp(&self) -> Option<&TimestampHint> {
         let ts = self.timestamp?;
         Some(
             self.timestamp_hint
                 .get_or_init(|| TimestampHint::from_view(ts)),
         )
+    }
+    fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
+        self.timestamp.map(|ts| crate::reply_stage::TimestampParts {
+            time: ts.time,
+            zid: ts.zid,
+        })
     }
     // `payload_shared` and `attachment_shared` keep their `None` defaults: the
     // bytes are the link's, lent for the call, and a sink that keeps them copies
@@ -265,9 +278,20 @@ impl<C: ReplySink> ReplyRegistry<C> {
     ) {
         match self.deliver_lent(response, spaces) {
             Ok(()) => {}
-            #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
+            #[cfg(all(
+                feature = "alloc",
+                any(feature = "pubsub-put", feature = "query-reply")
+            ))]
             Err(Fallback::Sliced) => self.dispatch_owned_projection(response, spaces),
+            #[cfg(feature = "alloc")]
             Err(Fallback::KeyexprPastBound) => self.dispatch_owned_projection(response, spaces),
+            // With no allocator there is no owned projection to fall back on: a reply the
+            // lent form cannot represent is dropped, and the pending get it answers
+            // ends by its own timeout, as it does for a reply that never came.
+            #[cfg(not(feature = "alloc"))]
+            Err(_) => {
+                let _ = spaces;
+            }
         }
     }
 
@@ -300,6 +324,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
             attachment: body.attachment,
             source_info: body.source_info,
             timestamp: body.timestamp,
+            #[cfg(feature = "alloc")]
             timestamp_hint: OnceCell::new(),
         };
         self.fire_replies_for(&reply);
@@ -308,7 +333,9 @@ impl<C: ReplySink> ReplyRegistry<C> {
 
     /// The fallback: the owned projection of `response`, delivered by the path
     /// the copying receive takes ([`Self::dispatch_response`]), so a reply the
-    /// lent form cannot represent is delivered exactly as it always was.
+    /// lent form cannot represent is delivered exactly as it always was. Heap
+    /// profile only.
+    #[cfg(feature = "alloc")]
     fn dispatch_owned_projection(&mut self, response: &Response<'_>, spaces: MappingSpaces<'_>) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Response. It

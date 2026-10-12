@@ -46,14 +46,20 @@
 //! two sinks: the fixed node's reply is the AP's reply byte for byte, because it
 //! is the same code.
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use crate::admin_reply::{AdminBuffer, AdminReplyError};
 use crate::text_out::{Overflow, TextOut};
 
 /// One link of a connected transport — the `{src,dst}` pair zenoh's
-/// `link_to_json` emits (`adminspace.rs:608-613`).
+/// `link_to_json` emits (`adminspace.rs:608-613`). The owned rows of this module
+/// (`AdminLink`, `AdminSession`, `AdminMulticastPeer`, and the node data built of
+/// them) are the heap profile's; a node with no allocator answers from the borrowed
+/// rows (`AdminSessionRef`, `AdminMulticastPeerRef`).
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminLink {
     /// Local link endpoint (`Link::src`).
@@ -67,6 +73,7 @@ pub struct AdminLink {
 /// `None` when the peer's role is not known (rendered as zenoh's `"unknown"`
 /// fallback, `:630`). The `weight` zenoh carries (`:632`) is a router-linkstate
 /// value; R2637 made it real here — see [`Self::weight`].
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminSession {
     /// The peer's zid in zenoh `ZenohId` Display form
@@ -123,6 +130,7 @@ pub struct AdminSession {
 /// the unicast row's `region`, `shm` or `weight`. Upstream lists every unicast
 /// transport first and then each member of each multicast transport, and
 /// [`AdminLocalData::to_json`] keeps that order.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminMulticastPeer {
     /// The member's zid in zenoh `ZenohId` Display form.
@@ -153,6 +161,7 @@ pub trait AdminLinkList {
     fn link(&self, index: usize) -> Option<(&str, &str)>;
 }
 
+#[cfg(feature = "alloc")]
 impl AdminLinkList for Vec<AdminLink> {
     fn link_count(&self) -> usize {
         self.len()
@@ -186,6 +195,7 @@ pub struct AdminSessionRef<'a> {
     pub region: Option<&'a str>,
 }
 
+#[cfg(feature = "alloc")]
 impl AdminSession {
     /// This row as the writer reads it, borrowing every field.
     pub fn view(&self) -> AdminSessionRef<'_> {
@@ -213,6 +223,7 @@ pub struct AdminMulticastPeerRef<'a> {
     pub links: &'a dyn AdminLinkList,
 }
 
+#[cfg(feature = "alloc")]
 impl AdminMulticastPeer {
     /// This row as the writer reads it, borrowing every field.
     pub fn view(&self) -> AdminMulticastPeerRef<'_> {
@@ -352,6 +363,7 @@ pub const WZ_STATIC_PLUGIN_PATH: &str = "__static__";
 /// upstream gets from the getter's `key_expr` argument — serving only the leaves
 /// the GET asks for — wz gets from the same per-leaf intersection test every
 /// other admin leg uses.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminPluginStatusLeaf {
     /// The key suffix BELOW the plugin's status root, with no leading `/`
@@ -366,6 +378,7 @@ pub struct AdminPluginStatusLeaf {
     pub json_body: String,
 }
 
+#[cfg(feature = "alloc")]
 impl AdminPluginStatusLeaf {
     /// A leaf at `suffix` carrying `json_body`.
     pub fn new(suffix: impl Into<String>, json_body: impl Into<String>) -> Self {
@@ -387,6 +400,7 @@ impl AdminPluginStatusLeaf {
 /// [`answer_admin_query`]'s slice parameter is signature-stable across the
 /// `adminspace-plugins-handlers` toggle; only the reply BLOCKS that consume it are
 /// `#[cfg]`-gated.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminPlugin {
     /// The plugin id (zenoh `PluginStatus::id`) — the registry key + reply-key leaf.
@@ -411,6 +425,15 @@ pub struct AdminPlugin {
     pub status_leaves: Vec<AdminPluginStatusLeaf>,
 }
 
+/// The plugin registry of a node with no allocator: a type with no values, so the
+/// `&[AdminPlugin]` the answerer takes is always the empty slice and every signature
+/// that names it is the same on both profiles. A plugin owns its id, name, version and
+/// path as strings, which is the heap profile's; the node with no allocator hosts none.
+#[cfg(not(feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminPlugin {}
+
+#[cfg(feature = "alloc")]
 impl AdminPlugin {
     /// Build a static wz-subsystem plugin entry: [`path`](Self::path) =
     /// [`WZ_STATIC_PLUGIN_PATH`]. `version` is the node build version (or `None`).
@@ -545,6 +568,10 @@ fn push_plugins_object<W: TextOut + ?Sized>(plugins: &[AdminPlugin], out: &mut W
 /// `NOT-THIS-KEY: metadata` disclaimer (R2155, open-debt item 541), because the
 /// field landed as a hardcoded `null` and so this type did not honour the
 /// config key of that name. It does now, and the disclaimer went with the null.
+///
+/// The heap profile's owned view; a node with no allocator writes the same object
+/// from borrowed rows through [`write_local_data_json`].
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminLocalData {
     /// This node's zid in zenoh `ZenohId` Display form.
@@ -576,6 +603,7 @@ pub struct AdminLocalData {
     pub metadata_json: String,
 }
 
+#[cfg(feature = "alloc")]
 impl Default for AdminLocalData {
     /// Every field empty, and `metadata` `null` — the one field whose empty
     /// text would not be a JSON value, so the derive cannot be used.
@@ -648,7 +676,10 @@ impl Default for AdminSpacePermissions {
 /// preferred: this is produced by a `Fn()` the handler calls per GET, and a
 /// closure cannot hand out a borrow of state it does not own. A caller whose
 /// values are fixed clones them, which is one `String` per admin GET on a path
-/// that already allocates its reply.
+/// that already allocates its reply. A node with no allocator reads its live inputs
+/// as the borrowed rows [`answer_admin_query_in`] takes, so this is the heap
+/// profile's.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminLiveInputs {
     /// The read/write gate, resolved per GET — see [`AdminSpacePermissions`].
@@ -737,6 +768,7 @@ pub enum AdminAnswerOutcome {
 /// and the log facade there. That split is the same one the enum's own doc
 /// describes: this crate is `no_std` + `alloc` and links no logger.
 #[must_use]
+#[cfg(feature = "alloc")]
 pub fn denied_read_diagnostic(keyexpr: &str) -> alloc::string::String {
     let mut out = String::new();
     write_denied_read_diagnostic(&mut out, keyexpr);
@@ -752,6 +784,7 @@ pub fn write_denied_read_diagnostic<W: TextOut + ?Sized>(out: &mut W, keyexpr: &
     out.push_str("' but adminspace.permissions.read=false in configuration");
 }
 
+#[cfg(feature = "alloc")]
 impl AdminLocalData {
     /// Serialize to the zenoh `local_data` JSON object. zenoh builds it with the
     /// `json!` macro then `serde_json::to_vec`, and pins `serde_json` WITHOUT
@@ -798,7 +831,7 @@ impl AdminLocalData {
     /// speak them.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
-        Self::write_json(
+        write_local_data_json(
             &mut out,
             &self.zid_hex,
             &self.version,
@@ -810,123 +843,125 @@ impl AdminLocalData {
         );
         out
     }
+}
 
-    /// [`Self::to_json`] for a node that does not hold its state as an
-    /// [`AdminLocalData`]: the same object, written into any sink, from the rows as
-    /// borrowed views. `to_json` is this function called over an owned
-    /// `AdminLocalData`, so the two cannot differ.
-    ///
-    /// `sessions` and `multicast_peers` are walked once, in order, and a refusal of
-    /// the sink is the sink's to report ([`crate::text_out::FixedText::finish`]).
-    #[allow(clippy::too_many_arguments)]
-    pub fn write_json<'a, W, S, M, L>(
-        mut out: &mut W,
-        zid_hex: &str,
-        version: &str,
-        metadata_json: &str,
-        locators: L,
-        sessions: S,
-        multicast_peers: M,
-        plugins: &[AdminPlugin],
-    ) where
-        W: TextOut + ?Sized,
-        S: Iterator<Item = AdminSessionRef<'a>>,
-        M: Iterator<Item = AdminMulticastPeerRef<'a>>,
-        L: Iterator<Item = &'a str>,
-    {
-        // Under a build without the plugin legs `plugins` is read by nobody.
-        #[cfg(not(feature = "adminspace-plugins-handlers"))]
-        let _ = plugins;
-        // R311y60 — the locators string array via the json::push_str_array SSOT.
-        out.push_str("{\"locators\":");
-        crate::json::push_str_array(locators, &mut out);
-        // `metadata` is the host's rendered config value (`null` when unset);
-        // `plugins` is the started-plugins object under
-        // `adminspace-plugins-handlers`, else `null` (the original behavior).
-        out.push_str(",\"metadata\":");
-        out.push_str(metadata_json);
-        out.push_str(",\"plugins\":");
-        #[cfg(feature = "adminspace-plugins-handlers")]
-        push_plugins_object(plugins, &mut out);
-        #[cfg(not(feature = "adminspace-plugins-handlers"))]
-        out.push_str("null");
-        out.push_str(",\"sessions\":[");
-        let mut wrote_a_row = false;
-        for session in sessions {
-            if wrote_a_row {
-                out.push(',');
-            }
-            wrote_a_row = true;
-            out.push_str("{\"links\":");
-            push_admin_links(session.links, &mut out);
-            out.push_str(",\"peer\":");
-            push_json_str(session.peer_zid_hex, &mut out);
-            // R2858 — `region` between `peer` and `shm`: the same BTreeMap
-            // order that places every other key here.
-            out.push_str(",\"region\":");
-            push_json_str(session.region.unwrap_or("unknown"), &mut out);
-            // R2415 — `shm` sits between `peer` and `weight` because upstream's
-            // serde_json Map is a BTreeMap and emits keys ALPHABETICALLY; inserting
-            // it anywhere else would be a different byte stream for the same facts.
-            out.push_str(if session.shm {
-                ",\"shm\":true,\"weight\":"
-            } else {
-                ",\"shm\":false,\"weight\":"
-            });
-            // R2637 — the whole object or `null`, as upstream emits it. The INNER
-            // keys are alphabetical for the same reason the outer ones are:
-            // upstream serializes this through the same `serde_json` Map. So
-            // `actual_weight` precedes `dst_weight` precedes `src_weight`, which is
-            // NOT the declaration order of either struct.
-            match &session.weight {
-                Some(w) => {
-                    out.push_str("{\"actual_weight\":");
-                    push_u16(w.actual_weight, &mut out);
-                    out.push_str(",\"dst_weight\":");
-                    push_opt_u16(w.dst_weight, &mut out);
-                    out.push_str(",\"src_weight\":");
-                    push_opt_u16(w.src_weight, &mut out);
-                    out.push('}');
-                }
-                None => out.push_str("null"),
-            }
-            out.push_str(",\"whatami\":");
-            match session.whatami {
-                Some(w) => push_json_str(w, &mut out),
-                None => push_json_str("unknown", &mut out),
-            }
-            out.push('}');
+/// [`AdminLocalData::to_json`] for a node that does not hold its state as an
+/// [`AdminLocalData`]: the same object, written into any sink, from the rows as
+/// borrowed views. `to_json` is this function called over an owned
+/// `AdminLocalData`, so the two cannot differ. A free function, not a method, because
+/// the owned `AdminLocalData` is the heap profile's and this is not.
+///
+/// `sessions` and `multicast_peers` are walked once, in order, and a refusal of
+/// the sink is the sink's to report ([`crate::text_out::FixedText::finish`]).
+#[allow(clippy::too_many_arguments)]
+pub fn write_local_data_json<'a, W, S, M, L>(
+    mut out: &mut W,
+    zid_hex: &str,
+    version: &str,
+    metadata_json: &str,
+    locators: L,
+    sessions: S,
+    multicast_peers: M,
+    plugins: &[AdminPlugin],
+) where
+    W: TextOut + ?Sized,
+    S: Iterator<Item = AdminSessionRef<'a>>,
+    M: Iterator<Item = AdminMulticastPeerRef<'a>>,
+    L: Iterator<Item = &'a str>,
+{
+    // Under a build without the plugin legs `plugins` is read by nobody.
+    #[cfg(not(feature = "adminspace-plugins-handlers"))]
+    let _ = plugins;
+    // R311y60 — the locators string array via the json::push_str_array SSOT.
+    out.push_str("{\"locators\":");
+    crate::json::push_str_array(locators, &mut out);
+    // `metadata` is the host's rendered config value (`null` when unset);
+    // `plugins` is the started-plugins object under
+    // `adminspace-plugins-handlers`, else `null` (the original behavior).
+    out.push_str(",\"metadata\":");
+    out.push_str(metadata_json);
+    out.push_str(",\"plugins\":");
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    push_plugins_object(plugins, &mut out);
+    #[cfg(not(feature = "adminspace-plugins-handlers"))]
+    out.push_str("null");
+    out.push_str(",\"sessions\":[");
+    let mut wrote_a_row = false;
+    for session in sessions {
+        if wrote_a_row {
+            out.push(',');
         }
-        // R2859 — then each member of each multicast group, after every
-        // unicast row: upstream's second loop over
-        // `get_transports_multicast()`. Keys alphabetical as above, and only
-        // the four upstream writes for this kind of row.
-        for member in multicast_peers {
-            if wrote_a_row {
-                out.push(',');
+        wrote_a_row = true;
+        out.push_str("{\"links\":");
+        push_admin_links(session.links, &mut out);
+        out.push_str(",\"peer\":");
+        push_json_str(session.peer_zid_hex, &mut out);
+        // R2858 — `region` between `peer` and `shm`: the same BTreeMap
+        // order that places every other key here.
+        out.push_str(",\"region\":");
+        push_json_str(session.region.unwrap_or("unknown"), &mut out);
+        // R2415 — `shm` sits between `peer` and `weight` because upstream's
+        // serde_json Map is a BTreeMap and emits keys ALPHABETICALLY; inserting
+        // it anywhere else would be a different byte stream for the same facts.
+        out.push_str(if session.shm {
+            ",\"shm\":true,\"weight\":"
+        } else {
+            ",\"shm\":false,\"weight\":"
+        });
+        // R2637 — the whole object or `null`, as upstream emits it. The INNER
+        // keys are alphabetical for the same reason the outer ones are:
+        // upstream serializes this through the same `serde_json` Map. So
+        // `actual_weight` precedes `dst_weight` precedes `src_weight`, which is
+        // NOT the declaration order of either struct.
+        match &session.weight {
+            Some(w) => {
+                out.push_str("{\"actual_weight\":");
+                push_u16(w.actual_weight, &mut out);
+                out.push_str(",\"dst_weight\":");
+                push_opt_u16(w.dst_weight, &mut out);
+                out.push_str(",\"src_weight\":");
+                push_opt_u16(w.src_weight, &mut out);
+                out.push('}');
             }
-            wrote_a_row = true;
-            out.push_str("{\"group\":");
-            push_json_str(member.group.unwrap_or("unknown"), &mut out);
-            out.push_str(",\"links\":");
-            push_admin_links(member.links, &mut out);
-            out.push_str(",\"peer\":");
-            push_json_str(member.peer_zid_hex, &mut out);
-            out.push_str(",\"whatami\":");
-            push_json_str(member.whatami.unwrap_or("unknown"), &mut out);
-            out.push('}');
+            None => out.push_str("null"),
         }
-        out.push_str("],\"version\":");
-        push_json_str(version, &mut out);
-        out.push_str(",\"zid\":");
-        push_json_str(zid_hex, &mut out);
+        out.push_str(",\"whatami\":");
+        match session.whatami {
+            Some(w) => push_json_str(w, &mut out),
+            None => push_json_str("unknown", &mut out),
+        }
         out.push('}');
     }
+    // R2859 — then each member of each multicast group, after every
+    // unicast row: upstream's second loop over
+    // `get_transports_multicast()`. Keys alphabetical as above, and only
+    // the four upstream writes for this kind of row.
+    for member in multicast_peers {
+        if wrote_a_row {
+            out.push(',');
+        }
+        wrote_a_row = true;
+        out.push_str("{\"group\":");
+        push_json_str(member.group.unwrap_or("unknown"), &mut out);
+        out.push_str(",\"links\":");
+        push_admin_links(member.links, &mut out);
+        out.push_str(",\"peer\":");
+        push_json_str(member.peer_zid_hex, &mut out);
+        out.push_str(",\"whatami\":");
+        push_json_str(member.whatami.unwrap_or("unknown"), &mut out);
+        out.push('}');
+    }
+    out.push_str("],\"version\":");
+    push_json_str(version, &mut out);
+    out.push_str(",\"zid\":");
+    push_json_str(zid_hex, &mut out);
+    out.push('}');
 }
 
 /// The admin root keyexpr `@/<zid>/<whatami>` — the key `local_data` replies
 /// under (zenoh `reply_key`, `adminspace.rs:562-567`) and the literal the
 /// built-in queryable answers a GET against.
+#[cfg(feature = "alloc")]
 pub fn admin_root_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = String::with_capacity(2 + zid_hex.len() + 1 + whatami.len());
     write_admin_root_key(&mut s, zid_hex, whatami);
@@ -954,6 +989,7 @@ fn write_admin_leg_key<W: TextOut + ?Sized>(out: &mut W, zid_hex: &str, whatami:
 /// The built-in admin queryable keyexpr `@/<zid>/<whatami>/**` — zenoh declares
 /// its admin queryable on `[root_key, "/**"].concat()` (`adminspace.rs:341`), so
 /// any admin GET under the node prefix routes to it.
+#[cfg(feature = "alloc")]
 pub fn admin_queryable_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = String::new();
     write_admin_queryable_key(&mut s, zid_hex, whatami);
@@ -981,6 +1017,7 @@ pub fn admin_metrics_key(zid_hex: &str, whatami: &str) -> String {
 /// config-READ GET at all; wz ADDS this typed read surface (a superset, not a
 /// mirror of a zenoh read path). Ungated (part of adminspace-core): a config GET
 /// is core admin introspection, not a metrics-gated handler.
+#[cfg(feature = "alloc")]
 pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = String::new();
     write_admin_leg_key(&mut s, zid_hex, whatami, "config");
@@ -1009,6 +1046,7 @@ pub const METRICS_ENCODING: &str = "application/openmetrics-text; version=1.0.0;
 /// exists for exactly that reason — every other admin key this module answers
 /// carries a name upstream also uses, so a wz-native leg needs a namespace of its
 /// own or it becomes a name upstream can later collide with.
+#[cfg(feature = "alloc")]
 pub fn admin_surface_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = String::new();
     write_admin_leg_key(&mut s, zid_hex, whatami, "wz/surface");
@@ -2283,7 +2321,7 @@ where
             // Surface A: the `plugins` field object (started-only) — always passed so
             // `plugins` is a used parameter regardless of the feature; the writer
             // emits `null` when `adminspace-plugins-handlers` is off.
-            AdminLocalData::write_json(
+            write_local_data_json(
                 b,
                 zid_hex,
                 version,

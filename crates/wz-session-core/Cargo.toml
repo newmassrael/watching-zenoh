@@ -137,6 +137,19 @@ bounded-heapless = []
 # every keyexpr consumer equally; one that omits `*` breaks this gate alone.
 adminspace-core = [
     "alloc",
+    "adminspace-fixed",
+]
+
+# adminspace-fixed (S9e) — the admin space a node with NO allocator answers from:
+# the `local_data` view, the key helpers and the reply writers over `TextOut`,
+# and the buffers an answer is built in (`admin_reply`), without anything that
+# owns a growable string. `adminspace-core` is this plus the heap forms (the
+# `String`-returning helpers, the owned leg list, the AP's write surface), so a
+# build that names both has the heap, as feature unification says, and a build
+# on the slot profile that names only this one links no allocator. It carries the
+# same wildcard and encoding composition as `adminspace-core` for the same reason.
+adminspace-fixed = [
+    "storage-profile",
     "keyexpr-wildcard-single",
     "keyexpr-wildcard-double",
     "pubsub-encoding",

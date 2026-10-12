@@ -126,7 +126,7 @@ use crate::reply_acceptance::{ReplyAcceptance, ReplyAcceptanceStored};
 // Put / Del body into `InboundReplyBody`, independent of the pub/sub
 // publisher markers. `query-reply` implies `codec-response`, so the
 // outer `codec-response` requirement holds in every arm of the `any`.
-#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
 // R311y739 — the two-space PAIR is `alloc`-only: the `dispatch_messages` /
 // `dispatch_iteration_event` signatures name it under that gate alone, while
@@ -137,7 +137,7 @@ use crate::wire::{ResponseOwned, ResponseOwnedVariant};
 use crate::wireexpr_resolve::MappingSpaces;
 #[cfg(all(
     feature = "codec-response",
-    feature = "storage-profile",
+    feature = "alloc",
     any(
         feature = "pubsub-put",
         feature = "pubsub-delete",

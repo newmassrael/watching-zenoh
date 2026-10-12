@@ -56,6 +56,8 @@ use crate::driver_loop::IterationEvent;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::wireexpr_resolve::resolve_wireexpr_into;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
@@ -63,7 +65,7 @@ use crate::registry_error::RegisterError;
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
+use crate::wireexpr_resolve::{KeyexprBuf, MappingSpaces};
 
 /// R311y797 — everything a publisher's matching verdict depends on, as
 /// one value: the keyexpr it publishes on and the locality it is willing
@@ -86,11 +88,13 @@ use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 /// `registration_ctx->allow_local` at
 /// `vendor/zenoh-pico/src/net/filtering.c:386`, and
 /// `_z_write_filter_peer_allowed` (`:66`) on the remote side.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublisherCriterion {
-    /// The publisher's keyexpr (a pattern; both sides may be wildcards).
-    pub keyexpr: String,
+    /// The publisher's keyexpr (a pattern; both sides may be wildcards). Read it
+    /// through `as_str`: it is a `String` on the heap profile and a bounded buffer
+    /// with no allocator ([`crate::declare::CriterionKey`]).
+    pub keyexpr: super::CriterionKey,
     /// The publisher's `allowed_destination`: which halves of the verdict
     /// it admits at all.
     pub locality: crate::locality::Locality,

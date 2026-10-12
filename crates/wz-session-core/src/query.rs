@@ -112,15 +112,18 @@ use crate::reply_acceptance::ReplyKeyExpr;
 // on the growable backing and tables that refuse and count on the fixed one.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::reply_stage::{
-    EncodingParts, FinalStage, FinalStaging, PartsBody, PartsKind, ReplyParts, ReplyStage,
-    ReplyStaging, TimestampParts,
+    EncodingParts, FinalStage, PartsBody, PartsKind, ReplyParts, ReplyStage, ReplyStaging,
 };
+// The staging methods that take an owned hint (the timestamp) and the `Final` table's
+// trait are the heap profile's: a build with no allocator stages through `ReplyParts`.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+use crate::reply_stage::{FinalStaging, TimestampParts};
 // `CodecError` is referenced only by `into_response`, which lives in the
 // `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
 // so the import must carry the same gate — otherwise a
 // `codec-response`-without-`alloc` subset compiles the import but not its
 // sole user (Layer C1h regression).
-#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use sce_forge_runtime::codec::CodecError;
 
 // R311gb (Track 2) — HashMap (peer-keyexpr table) + the driver-loop /
@@ -158,8 +161,10 @@ use crate::wire::{RequestOwned, RequestOwnedVariant};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::ResponseOwned;
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+use crate::wireexpr_resolve::MappingSpaces;
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::wireexpr_resolve::{
-    resolve_wireexpr_in, resolve_wireexpr_into, KeyexprBuf, KeyexprPastBound, MappingSpaces,
+    resolve_wireexpr_in, resolve_wireexpr_into, KeyexprBuf, KeyexprPastBound,
 };
 
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
@@ -184,14 +189,14 @@ use crate::query_sink::BoxedQuerySink;
 // `ReplyMeta` carries `alloc`-gated hint types and its only sites here are
 // `QueryResponder`'s staging methods, so it follows `BorrowedQuery`'s gate —
 // the one that block itself carries — rather than the unconditional trio's.
-#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::query_sink::ReplyMeta;
 // `ReplyError` is what `QueryResponder`'s keyed staging methods return, so it
 // carries their gate for the same reason `ReplyMeta` does.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::query_sink::ReplyError;
 use crate::query_sink::{QuerySink, QueryView, ReplyOut};
-#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 // R311y315 — `ResponseErrBuilder` is deliberately NOT imported here.
 // Its only two code sites (the `into_response` Err arm and the Err
 // round-trip test) are both gated on `query-reply-err`, so an import
@@ -199,10 +204,12 @@ use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 // names the type", which is the drift class that has bitten this file
 // before. Both sites fully qualify instead, which cannot drift.
 use crate::response_build::ResponseReplyBuilder;
+#[cfg(any(feature = "alloc", feature = "codec-request"))]
+use crate::sample::QosLevel;
+#[cfg(feature = "alloc")]
+use crate::sample::SourceInfo;
 #[cfg(feature = "alloc")]
 use crate::sample::{EncodingHint, TimestampHint};
-#[cfg(any(feature = "alloc", feature = "codec-request"))]
-use crate::sample::{QosLevel, SourceInfo};
 
 /// R311v — extract the attachment payload view from an inbound
 /// [`Query`]'s extensions chain.
@@ -901,7 +908,7 @@ pub struct QueryResponder<'a> {
     /// so a matched queryable that stages nothing costs the heap nothing for it;
     /// owned when a caller hands one in ([`Self::new`]). A staged reply owns its
     /// copy either way.
-    keyexpr_literal: alloc::borrow::Cow<'a, str>,
+    keyexpr_literal: LiteralKey<'a>,
     replies: &'a mut ReplyStage,
     /// R121j-3c — optional responder identity attached to every
     /// subsequent send_reply / send_reply_del / send_err. `None`
@@ -934,6 +941,18 @@ pub struct QueryResponder<'a> {
     qos: QosLevel,
 }
 
+/// The query's keyexpr as a responder holds it: a `Cow`, so a caller that hands one
+/// in as a `String` is kept as that, where the build has a heap; the borrow alone where
+/// it has none, which is the only form the dispatch builds anyway.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+type LiteralKey<'a> = alloc::borrow::Cow<'a, str>;
+#[cfg(all(
+    feature = "codec-request",
+    feature = "storage-profile",
+    not(feature = "alloc")
+))]
+type LiteralKey<'a> = &'a str;
+
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<'a> QueryResponder<'a> {
     /// R311li — public constructor: the Session-tier deferred queryable
@@ -957,6 +976,7 @@ impl<'a> QueryResponder<'a> {
     /// default is exactly the shape this seam shipped with: every wz reply
     /// read as droppable while both references mark a default query's reply
     /// `Block`.
+    #[cfg(feature = "alloc")]
     pub fn new(
         rid: u64,
         keyexpr_literal: String,
@@ -985,7 +1005,7 @@ impl<'a> QueryResponder<'a> {
     ) -> Self {
         Self {
             rid,
-            keyexpr_literal: alloc::borrow::Cow::Borrowed(keyexpr),
+            keyexpr_literal: keyexpr.into(),
             replies,
             responder: None,
             accept,
@@ -1081,6 +1101,7 @@ impl<'a> QueryResponder<'a> {
     /// [`crate::response_build::ResponseReplyBuilder`] (the encoding emitted
     /// iff `pubsub-encoding` is on, the timestamp iff `pubsub-timestamp` is
     /// on — the wz MsgPut metadata policy gates).
+    #[cfg(feature = "alloc")]
     pub fn send_reply_keyed_stamped(
         &mut self,
         keyexpr: &str,
@@ -1116,6 +1137,7 @@ impl<'a> QueryResponder<'a> {
     /// [`QueryReply::into_response`] into
     /// [`crate::response_build::ResponseReplyBuilder::source_info`] (emitted
     /// iff `reply-source-info` is on, the advanced-recovery gate).
+    #[cfg(feature = "alloc")]
     pub fn send_reply_keyed_sourced(
         &mut self,
         keyexpr: &str,
@@ -1155,6 +1177,7 @@ impl<'a> QueryResponder<'a> {
     /// iff `pubsub-attachment` is on, the wz Put-body attachment policy gate).
     /// No timestamp — the aligner orders by the `EventMetadata` it carries in
     /// the attachment, not a reply T-flag.
+    #[cfg(feature = "alloc")]
     pub fn send_reply_keyed_attached(
         &mut self,
         keyexpr: &str,
@@ -1187,6 +1210,7 @@ impl<'a> QueryResponder<'a> {
     /// [`Self::send_reply_keyed_attached`] (which always carries an attachment
     /// ext): a queryable that types its value without versioning it gets the
     /// E-flag alone.
+    #[cfg(feature = "alloc")]
     pub fn send_reply_keyed_encoded(
         &mut self,
         keyexpr: &str,
@@ -1306,6 +1330,7 @@ impl<'a> QueryResponder<'a> {
     /// [`Self::send_reply_del`] (which stamps no source_info), so the Del
     /// carrier is reachable without dropping to the low-level
     /// `ResponseReplyBuilder`.
+    #[cfg(feature = "alloc")]
     pub fn send_reply_del_sourced(
         &mut self,
         source_info: Option<&SourceInfo>,
@@ -1342,6 +1367,7 @@ impl<'a> QueryResponder<'a> {
     /// As on the Put arm, a keyexpr the querier's query does not cover (the
     /// `reply ⊆ query` contract) is refused with
     /// [`ReplyError::KeyExprNotMatch`] unless the query carried `_anyke`.
+    #[cfg(feature = "alloc")]
     pub fn send_reply_keyed_del_sourced(
         &mut self,
         keyexpr: &str,
@@ -1377,6 +1403,7 @@ impl<'a> QueryResponder<'a> {
     /// gate (`pubsub-encoding` / `pubsub-timestamp` / `pubsub-attachment` /
     /// `reply-source-info`) — this seam adds no wire arm, it only stops
     /// dropping the ones already built.
+    #[cfg(feature = "alloc")]
     pub fn send_reply_keyed_meta(
         &mut self,
         keyexpr: &str,
@@ -1435,6 +1462,7 @@ impl<'a> QueryResponder<'a> {
     /// `QueryReply::into_response` threads it into the builder for both arms —
     /// so a C caller's attachment travelled the whole way and died on this one
     /// hardcoded `None`.
+    #[cfg(feature = "alloc")]
     pub fn send_reply_keyed_del_meta(
         &mut self,
         keyexpr: &str,
@@ -1623,6 +1651,7 @@ impl ReplyOut for QueryResponder<'_> {
     fn reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
         self.send_reply_keyed_del(keyexpr)
     }
+    #[cfg(feature = "alloc")]
     fn reply_keyed_stamped(
         &mut self,
         keyexpr: &str,
@@ -1632,6 +1661,7 @@ impl ReplyOut for QueryResponder<'_> {
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_stamped(keyexpr, payload, encoding, timestamp)
     }
+    #[cfg(feature = "alloc")]
     fn reply_keyed_encoded(
         &mut self,
         keyexpr: &str,
@@ -1649,6 +1679,7 @@ impl ReplyOut for QueryResponder<'_> {
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_encoded_parts(keyexpr, payload, EncodingParts { packed_id, schema })
     }
+    #[cfg(feature = "alloc")]
     fn reply_keyed_attached(
         &mut self,
         keyexpr: &str,
@@ -1658,6 +1689,7 @@ impl ReplyOut for QueryResponder<'_> {
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_attached(keyexpr, payload, encoding, attachment)
     }
+    #[cfg(feature = "alloc")]
     fn reply_keyed_sourced(
         &mut self,
         keyexpr: &str,
@@ -1671,9 +1703,11 @@ impl ReplyOut for QueryResponder<'_> {
     fn reply_del(&mut self) {
         let _ = self.send_reply_del();
     }
+    #[cfg(feature = "alloc")]
     fn reply_del_sourced(&mut self, source_info: Option<&SourceInfo>) {
         let _ = self.send_reply_del_sourced(source_info);
     }
+    #[cfg(feature = "alloc")]
     fn reply_keyed_del_sourced(
         &mut self,
         keyexpr: &str,
@@ -1682,6 +1716,7 @@ impl ReplyOut for QueryResponder<'_> {
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_del_sourced(keyexpr, timestamp, source_info)
     }
+    #[cfg(feature = "alloc")]
     fn reply_keyed_meta(
         &mut self,
         keyexpr: &str,
@@ -1690,6 +1725,7 @@ impl ReplyOut for QueryResponder<'_> {
     ) -> Result<(), ReplyError> {
         self.send_reply_keyed_meta(keyexpr, payload, meta)
     }
+    #[cfg(feature = "alloc")]
     fn reply_keyed_del_meta(
         &mut self,
         keyexpr: &str,
@@ -2097,12 +2133,17 @@ struct QueryProjection<'q> {
     attachment: Option<&'q [u8]>,
     /// The querier's source info.
     source_info: Option<crate::sample::SourceInfo>,
-    /// The value in its plain shape, read off the chain.
+    /// The value in its plain shape, read off the chain. A build with no heap does
+    /// not project a query's value: its encoding is an owned hint, and the queryables
+    /// of such a build (the admin space) read none.
+    #[cfg(feature = "alloc")]
     plain_value: Option<(crate::sample::EncodingHint, &'q [u8])>,
     /// The value held as shareable bytes: un-swapped out of shared memory, or a
     /// range of a frame the link lent. Preferred over `plain_value` when present.
+    #[cfg(feature = "alloc")]
     shared_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
     /// The attachment held as shareable bytes, beside `attachment`.
+    #[cfg(feature = "alloc")]
     attachment_shared: Option<crate::link::RxBytes>,
 }
 
@@ -2178,6 +2219,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// (wire-data-helper exemption to R311g1 signature stability,
     /// mirror of `SubscriberRegistry::dispatch_push`). Gate carried by
     /// the enclosing `#[cfg(all(codec-request, alloc))] impl`.
+    #[cfg(feature = "alloc")]
     pub fn dispatch_request<'a>(
         &mut self,
         request: &RequestOwned,
@@ -2298,6 +2340,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// value that could not be read, counted by the receive state, and the caller
     /// drops the whole query.
     #[cfg(feature = "transport-shm")]
+    #[cfg(feature = "alloc")]
     fn unswap_query_value(
         &mut self,
         query: &QueryOwned,
@@ -2385,6 +2428,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     ///
     /// R311dx — gate carried by the enclosing
     /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
+    #[cfg(feature = "alloc")]
     pub fn local_query(
         &mut self,
         rid: u64,
@@ -2415,6 +2459,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// why the value rides beside it and not in it. `value.0` is the encoding the body's
     /// own value ext would have carried, and `value.1` is the same bytes the body carries
     /// for a build that reads only the plain shape, so the two readings agree.
+    #[cfg(feature = "alloc")]
     pub fn local_query_with_value(
         &mut self,
         envelope: QueryEnvelope,
@@ -2445,6 +2490,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// R311dx — the shared fan-out body for the two public entry
     /// points; gate carried by the enclosing
     /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
+    #[cfg(feature = "alloc")]
     fn fire_matching_queryables(
         &mut self,
         envelope: QueryEnvelope,
@@ -2539,16 +2585,19 @@ impl<C: QuerySink> QueryableRegistry<C> {
             parameters: parameters_view,
             attachment: attachment_view,
             source_info: source_info_view,
+            #[cfg(feature = "alloc")]
             plain_value,
-            shared_value: unswapped_value,
+            #[cfg(feature = "alloc")]
+                shared_value: unswapped_value,
+            #[cfg(feature = "alloc")]
             attachment_shared,
         } = projection;
-        #[cfg(feature = "query-value")]
+        #[cfg(all(feature = "alloc", feature = "query-value"))]
         let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
             Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
             None => plain_value,
         };
-        #[cfg(not(feature = "query-value"))]
+        #[cfg(all(feature = "alloc", not(feature = "query-value")))]
         let value_view: Option<(crate::sample::EncodingHint, &[u8])> = {
             let _ = plain_value;
             None
@@ -2593,7 +2642,11 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     parameters: parameters_view,
                     attachment: attachment_view,
                     source_info: source_info_view.as_ref(),
+                    #[cfg(feature = "alloc")]
                     payload: value_view.as_ref().map(|(_, p)| *p),
+                    #[cfg(not(feature = "alloc"))]
+                    payload: None,
+                    #[cfg(feature = "alloc")]
                     encoding: value_view.as_ref().map(|(e, _)| e),
                     rid,
                     // R311li — loopback origin marker (pico _is_local
@@ -2603,20 +2656,25 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     qos,
                 };
                 // R3061 -- a value held as a shareable buffer is lent as one, and so is
-                // an attachment.
-                let lent_value = unswapped_value.as_ref().map(|(_, shared)| shared);
-                if lent_value.is_some() || attachment_shared.is_some() {
-                    queryable.sink.handle(
-                        &crate::query_sink::SharedQuery {
-                            base: query_view,
-                            value: lent_value,
-                            attachment: attachment_shared.as_ref(),
-                        },
-                        &mut responder,
-                    )
-                } else {
-                    queryable.sink.handle(&query_view, &mut responder)
+                // an attachment. A build with no heap holds neither.
+                #[cfg(feature = "alloc")]
+                {
+                    let lent_value = unswapped_value.as_ref().map(|(_, shared)| shared);
+                    if lent_value.is_some() || attachment_shared.is_some() {
+                        queryable.sink.handle(
+                            &crate::query_sink::SharedQuery {
+                                base: query_view,
+                                value: lent_value,
+                                attachment: attachment_shared.as_ref(),
+                            },
+                            &mut responder,
+                        )
+                    } else {
+                        queryable.sink.handle(&query_view, &mut responder)
+                    }
                 }
+                #[cfg(not(feature = "alloc"))]
+                queryable.sink.handle(&query_view, &mut responder)
             }
         }
         matched
@@ -2658,6 +2716,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// this layer per the scope note on
     /// [`Self::dispatch_request`]; they do not enqueue a Final
     /// either.
+    #[cfg(feature = "alloc")]
     pub fn dispatch_messages<'a>(
         &mut self,
         messages: &[NetworkMessage],
@@ -2744,6 +2803,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(
                     messages,

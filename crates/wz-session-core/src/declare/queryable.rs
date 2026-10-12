@@ -49,6 +49,8 @@ use crate::locality::Locality;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::wireexpr_resolve::resolve_wireexpr_into;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
@@ -56,7 +58,7 @@ use crate::registry_error::RegisterError;
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
+use crate::wireexpr_resolve::{KeyexprBuf, MappingSpaces};
 
 // R311y797 — one peer-declared queryable, as the membership table holds
 // it, is a `DeclaredQueryable` (`crate::id_map`, S9a): the resolved keyexpr
@@ -100,11 +102,13 @@ use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 /// type rather than pico's two bools; it answers the same two questions
 /// through `allows_local` / `allows_remote` and cannot represent the
 /// neither-half state those bools can.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerierCriterion {
-    /// The querier's keyexpr (a pattern; both sides may be wildcards).
-    pub keyexpr: String,
+    /// The querier's keyexpr (a pattern; both sides may be wildcards). Read it
+    /// through `as_str`: it is a `String` on the heap profile and a bounded buffer
+    /// with no allocator ([`crate::declare::CriterionKey`]).
+    pub keyexpr: super::CriterionKey,
     /// The querier's `allowed_destination`: which halves of the verdict
     /// it admits at all. pico's `ctx->allow_local` / `ctx->allow_remote`
     /// (`vendor/zenoh-pico/src/net/filtering.c:261-262`), zenoh's

@@ -32,8 +32,10 @@
 //! the Request-level header `Z` sync — the one field that differs from the Push
 //! / Declare twins.
 
+#[cfg(feature = "alloc")]
 use crate::wire::RequestOwned;
 
+#[cfg(feature = "alloc")]
 use crate::ext_nodeid;
 use crate::query_mode::{QueryTarget, TARGET_EXT_HEADER};
 
@@ -41,6 +43,7 @@ use crate::query_mode::{QueryTarget, TARGET_EXT_HEADER};
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
 /// the shared [`ext_nodeid::read_source`](crate::ext_nodeid::read_source).
+#[cfg(feature = "alloc")]
 pub fn read_request_source(request: &RequestOwned) -> u16 {
     ext_nodeid::read_source(request.extensions.as_ref())
 }
@@ -50,6 +53,7 @@ pub fn read_request_source(request: &RequestOwned) -> u16 {
 /// [`ext_nodeid::set_source`](crate::ext_nodeid::set_source) owns the chain
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
 /// Request-level header `Z` flag to the resulting chain.
+#[cfg(feature = "alloc")]
 pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
     let present = ext_nodeid::set_source(&mut request.extensions, node_id);
     ext_nodeid::sync_header_z(&mut request.header, present);
@@ -65,6 +69,7 @@ pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
 /// projection of the shared [`read_z64_ext`](crate::ext_nodeid::read_z64_ext)
 /// over [`TARGET_EXT_HEADER`], mapped through [`QueryTarget::from_wire_byte`] — no
 /// target-specific decoder.
+#[cfg(feature = "alloc")]
 pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
     read_target_in(request.extensions.as_deref())
 }
@@ -98,11 +103,12 @@ pub const TIMEOUT_EXT_HEADER: u8 =
 /// over the same `Z64` body the target ext uses, so this is a thin projection of
 /// the shared [`read_z64_ext`](crate::ext_nodeid::read_z64_ext) over
 /// [`TIMEOUT_EXT_HEADER`].
+#[cfg(feature = "alloc")]
 pub fn read_request_timeout_ms(request: &RequestOwned) -> Option<u64> {
     ext_nodeid::read_z64_ext(request.extensions.as_ref(), TIMEOUT_EXT_HEADER)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};

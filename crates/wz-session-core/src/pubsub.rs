@@ -122,13 +122,15 @@ use crate::registry_error::RegisterError;
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
-#[cfg(all(feature = "storage-profile", feature = "declare-subscriber"))]
+#[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
 use crate::wireexpr_resolve::resolve_wireexpr_into;
 // R2385 — the DECLARED keyexpr's own scope has a rule of its own (the D_KEXPR
 // header has no mapping bit), and `absorb_declare` is its only caller here, so
 // this import carries that arm's gate rather than the wider `any(..)` above.
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+use crate::wireexpr_resolve::resolve_declared_keyexpr_into;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
-use crate::wireexpr_resolve::{resolve_declared_keyexpr_into, KeyexprBuf};
+use crate::wireexpr_resolve::KeyexprBuf;
 // R311y739 — the two-space PAIR is `alloc`-gated only: the `own_mapping_space`
 // field and the `mapping_spaces()` accessor exist in every `alloc` profile,
 // including one with no wire-dispatch consumer compiled in, whereas the

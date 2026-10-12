@@ -106,6 +106,8 @@ use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::wireexpr_resolve::resolve_wireexpr_into;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
@@ -113,7 +115,7 @@ use crate::registry_error::RegisterError;
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf};
+use crate::wireexpr_resolve::KeyexprBuf;
 // R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
 // `dispatch_iteration_event` name it in their signatures under that gate alone,
 // while only the `Declare` arm inside them resolves and so carries `codec-declare`.

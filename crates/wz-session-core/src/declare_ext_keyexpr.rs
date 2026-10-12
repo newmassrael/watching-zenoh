@@ -36,11 +36,16 @@
 //! which this full-node routing module never instantiates. `build` stays
 //! fallible purely by `owned_bytes`'s profile-generic signature.
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::CodecError;
+#[cfg(feature = "alloc")]
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+#[cfg(feature = "alloc")]
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
 use crate::ext_header::ext_eid;
@@ -71,6 +76,7 @@ pub(crate) const INNER_HAS_SUFFIX: u8 = 0x01;
 /// profile-generic `owned_bytes` signature; on the `alloc` carrier this module
 /// is gated to, the owned ZBuf is unbounded (R311nq `SceBytes`), so a literal
 /// keyexpr is never length-rejected.
+#[cfg(feature = "alloc")]
 pub fn build_ext_keyexpr(literal: &str) -> Result<ExtEntryOwned, CodecError> {
     build_ext_wireexpr(0, literal)
 }
@@ -87,6 +93,7 @@ pub fn build_ext_keyexpr(literal: &str) -> Result<ExtEntryOwned, CodecError> {
 /// token declared on an id retracts on that id, and the body is two bytes —
 /// `[is_local, id]` — when the declaration covers the whole key and the suffix
 /// is empty. `has_suffix` follows the suffix, as upstream's `kelen != 0` does.
+#[cfg(feature = "alloc")]
 pub fn build_ext_wireexpr(mapping_id: u64, suffix: &str) -> Result<ExtEntryOwned, CodecError> {
     let mut body: Vec<u8> = Vec::with_capacity(2 + suffix.len());
     let has_suffix = if suffix.is_empty() {
@@ -143,7 +150,9 @@ fn parse_ext_keyexpr_entry<E: ExtEntryView>(exts: Option<&[E]>) -> Option<(u8, u
 /// aliased (a non-zero inner mapping id) rather than a literal — the
 /// linkstate-peer HAT is literal-only here, the same deferral as the data /
 /// declare literal seams. Borrows the suffix out of the ext body (no
-/// allocation). The alias-capable superset is [`resolve_ext_keyexpr`].
+/// allocation). The alias-capable superset is [`resolve_ext_keyexpr`]. Heap profile
+/// only: it reads the owned chain, a `Vec`.
+#[cfg(feature = "alloc")]
 pub fn read_ext_keyexpr(exts: Option<&Vec<ExtEntryOwned>>) -> Option<&str> {
     let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts.map(Vec::as_slice))?;
     if inner_header & INNER_HAS_SUFFIX == 0 || id != 0 {
@@ -171,6 +180,7 @@ pub fn read_ext_keyexpr(exts: Option<&Vec<ExtEntryOwned>>) -> Option<&str> {
 /// [`read_ext_keyexpr`] answers `None` for, and it is upstream's own
 /// no-op condition too: an already-optimized keyexpr carries its namespace from
 /// the declaration that defined it, so `handle_namespace_egress` leaves it alone.
+#[cfg(feature = "alloc")]
 pub fn set_ext_keyexpr_literal(
     exts: &mut Vec<ExtEntryOwned>,
     literal: &str,
@@ -205,6 +215,7 @@ pub fn set_ext_keyexpr_literal(
 /// `table` is the peer's table in whichever form the build keeps it: a plain
 /// `&HashMap` (a router face) or the [`MappingSpaces`] a session holds, of which
 /// the PEER half is read, since this extension carries no mapping bit.
+#[cfg(feature = "alloc")]
 pub fn resolve_ext_keyexpr<'a>(
     exts: Option<&Vec<ExtEntryOwned>>,
     table: impl Into<MappingSpaces<'a>>,
@@ -229,6 +240,9 @@ pub fn resolve_ext_keyexpr<'a>(
 /// session on the fixed backing resolves an undeclaration a peer sent without
 /// touching the heap. [`KeyexprPastBound`](crate::wireexpr_resolve::KeyexprPastBound)
 /// is the one answer a bounded buffer adds: the composed keyexpr does not fit.
+/// Heap profile only: it reads the owned chain, a `Vec`; the borrowed chain's form is
+/// [`resolve_ext_keyexpr_in`].
+#[cfg(feature = "alloc")]
 pub fn resolve_ext_keyexpr_into<'k>(
     exts: Option<&'k Vec<ExtEntryOwned>>,
     table: impl Into<MappingSpaces<'k>>,
@@ -270,7 +284,7 @@ pub fn resolve_ext_keyexpr_in<'k, E: ExtEntryView>(
     Ok(Some(out.as_str()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use alloc::vec;

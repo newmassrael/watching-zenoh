@@ -672,7 +672,7 @@ pub mod retry_period;
 /// R2824 (§5.23) — which sub-key a config write names in a node's config
 /// space, with no allocator: the membership gates the AP decoder
 /// (`adminspace`) and the MCU decoder (`admin_connect`) both run.
-#[cfg(any(feature = "adminspace-core", feature = "adminspace-write"))]
+#[cfg(any(feature = "adminspace-fixed", feature = "adminspace-write"))]
 pub mod admin_config_space;
 
 /// R2824 (§5.23 `adminspace-write`) — upstream's `connect/endpoints` config
@@ -685,7 +685,7 @@ pub mod admin_connect;
 /// queryable keyexpr helpers + the `local_data` JSON body, the wz mirror of
 /// zenoh `net/runtime/adminspace.rs`. Pure data-view (the queryable wiring lives
 /// in wz-runtime-tokio); `alloc`-only / no_std-feasible.
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 pub mod adminspace;
 
 /// Fixed-memory step S9b — the buffers an admin reply is built in
@@ -693,7 +693,7 @@ pub mod adminspace;
 /// refuses what does not fit), the typed refusal ([`admin_reply::AdminReplyError`])
 /// and its counters, and the per-process arena a node with no allocator answers
 /// from ([`admin_reply::AdminReplyArena`]).
-#[cfg(feature = "adminspace-core")]
+#[cfg(feature = "adminspace-fixed")]
 pub mod admin_reply;
 
 /// Shared slice-based VLE decoder (the `SceCursor::read_vle_u64` borrowed-slice
@@ -845,7 +845,7 @@ pub mod initial_sn;
 /// Push-builder SSOT. Owned `Vec` output (alloc-gated) and `codec-push`
 /// gated — the whole module is dead under a subset that does not compose
 /// the pub/sub data plane.
-#[cfg(all(feature = "storage-profile", feature = "codec-push"))]
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
 /// The payload of a Put body and the one rule that picks between its two wire
@@ -895,8 +895,9 @@ pub mod ext_nodeid;
 /// QueryableInfo (`complete` / `distance`) extension on a DeclareQueryable
 /// (P4 routing, QueryTarget::BestMatching) — `read_queryable_info` /
 /// `set_queryable_info` over the body's ext chain, a thin projection of the
-/// shared [`ext_nodeid`] z64-chain SSOT. Gated on `alloc` + `codec-declare`
-/// (the carrier codec).
+/// shared [`ext_nodeid`] z64-chain SSOT. Gated on `storage-profile` +
+/// `codec-declare` (the carrier codec); the two functions over the owned chain
+/// need `alloc`, the packing and the borrowed read do not.
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 pub mod queryable_info;
 
@@ -905,7 +906,7 @@ pub mod queryable_info;
 /// extension — the data-plane forward seam naming the spanning-tree root a
 /// linkstate-peer floods a message along. `codec-push` gated (the data plane
 /// the routing context rides) and owned `Vec` output (alloc-gated).
-#[cfg(all(feature = "storage-profile", feature = "codec-push"))]
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_routing_context;
 
 /// OAM carrier for the linkstate-peer topology exchange (P4 routing,
@@ -922,7 +923,7 @@ pub mod linkstate_oam;
 /// share one DECLARE-builder SSOT. Owned `Vec` output (alloc-gated) and
 /// `codec-declare` gated. Distinct from the `declare` module (the
 /// remote-declaration registries) — this is the outbound encode side.
-#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub mod declare_build;
 
 /// Declare routing-context source `node_id` (P4 routing, linkstate port step
@@ -932,7 +933,7 @@ pub mod declare_build;
 /// declaration along (the Declare twin of [`push_routing_context`]).
 /// `codec-declare` gated (the declaration carrier the routing context rides)
 /// and owned `Vec` output (alloc-gated).
-#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub mod declare_routing_context;
 
 /// Declare `ext_keyexpr` extension (P4 routing, c3c-3 debt A1 — subscription
@@ -940,7 +941,8 @@ pub mod declare_routing_context;
 /// `_z_decl_ext_keyexpr` keyexpr extension a SOURCED `UndeclareSubscriber`
 /// carries — the keyexpr IS the sourced-subscription identity (`id == 0`), so a
 /// transit linkstate peer resolves which interest to withdraw from this ext.
-/// `codec-declare` gated and owned `Vec` output (alloc-gated).
+/// `codec-declare` gated; the builders and readers over the owned chain are
+/// alloc-gated, the layout constants and the borrowed resolve are not.
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 pub mod declare_ext_keyexpr;
 
@@ -968,7 +970,7 @@ pub mod interest_build;
 /// Outbound RESPONSE-FINAL network-message builder
 /// (`build_response_final`). Separate from `response_build` because
 /// `codec-response-final` is an independent feature from `codec-response`.
-#[cfg(all(feature = "storage-profile", feature = "codec-response-final"))]
+#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
 pub mod response_final_build;
 
 /// Fixed-memory step S9d -- the control messages (a `Declare`, an `Interest`, a
@@ -981,6 +983,15 @@ pub mod response_final_build;
 /// as their builders are.
 #[cfg(feature = "storage-profile")]
 pub mod lent_control;
+
+/// Fixed-memory step S9e -- a reply a queryable staged, written as the codec's
+/// BORROWED `Response` from the stage's own row ([`reply_stage::ReplyParts`]), where
+/// `QueryReply::into_response` makes the owned mirror (a copy of every field, twice)
+/// and encodes that. Byte-equal to it, which the module's tests hold for every
+/// combination the stage can describe; the drain of a node with no allocator
+/// ([`slot_observer`]) sends through it.
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+pub mod lent_response;
 
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
@@ -1289,7 +1300,7 @@ pub mod extauth_usrpwd;
 /// without the Response codec there is no wire frame to build. The
 /// precursor that lets `query.rs` (with its `codec-response`-gated
 /// `QueryReply::into_response`) migrate into wz-session-core.
-#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub mod response_build;
 
 /// R311eh — Request-builder cluster (`build_request_query` + the five
@@ -1300,7 +1311,7 @@ pub mod response_build;
 /// the mirror of the `response_build` move. Gated on
 /// `all(alloc, codec-request)` — the builders allocate owned codec
 /// buffers and there is no Request frame to build without the codec.
-#[cfg(all(feature = "storage-profile", feature = "codec-request"))]
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
 pub mod request_build;
 
 /// Request routing-context source `node_id` (P4 routing, query-routing atom
@@ -1309,7 +1320,8 @@ pub mod request_build;
 /// linkstate-peer relays a ROUTED Query (`Request`) along, toward the matching
 /// queryables (the Request twin of [`push_routing_context`] /
 /// [`declare_routing_context`]). `codec-request` gated (the Query carrier the
-/// routing context rides) and owned `Vec` output (alloc-gated).
+/// routing context rides); the functions over the owned Request are alloc-gated, the
+/// borrowed read of the target is not.
 #[cfg(all(feature = "storage-profile", feature = "codec-request"))]
 pub mod request_routing_context;
 

@@ -70,9 +70,12 @@ use wz_runtime_core::TimeSource;
 // serves exactly one item and must carry exactly that item's gate; carrying a
 // narrower one is what turned a `declare-subscriber`-without-`liveliness-token`
 // build into E0425 the moment the method's own gate was widened.
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::ResponseOwned;
-#[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+#[cfg(all(
+    any(feature = "liveliness-token", feature = "declare-subscriber"),
+    feature = "alloc"
+))]
 use wz_codecs::declare::DeclareOwned;
 use wz_codecs::ext_entry::ExtEntryOwned;
 
@@ -228,11 +231,14 @@ use crate::declare::local_token::build_token_reply;
 // `declare-interest`): there the outbound `Declare` arm now falls to the no-emit
 // catch arm, which is what the arm's own note already says a build with no
 // origination feature does.
-#[cfg(any(
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
+#[cfg(all(
+    any(
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+    ),
+    feature = "alloc"
 ))]
 use crate::declare_build::*;
 #[cfg(feature = "declare-interest")]
@@ -248,11 +254,11 @@ use crate::interest_build::*;
 // because an Interest is an `InterestOwned`.
 #[cfg(feature = "alloc")]
 use crate::interest_build::InterestKinds;
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
 use crate::push_build::*;
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::request_build::*;
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use crate::response_final_build::*;
 
 /// R311jp — TX batching accumulator state (zenoh-pico
@@ -2476,9 +2482,39 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
 }
 
 impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
-    #[cfg(feature = "codec-response")]
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
     fn send_response(&self, response: ResponseOwned) {
         self.send_response(response);
+    }
+    // With no allocator a staged reply is written as the codec's borrowed `Response`
+    // from the stage's own row and encoded into the lent slot: no `QueryReply`, no
+    // `ResponseOwned`. Routed as `dispatch_response` routes a response: on the band
+    // and with the express bit of the reply's own `ext_qos`, reliable, and an express
+    // reply drains the open batch. A reply the wire cannot carry is skipped (the heap
+    // drain skips one whose bounded field overflows), and this surface has no error
+    // channel, so a transport-down reject drops the emit as the dead link would.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "storage-profile",
+        not(feature = "alloc")
+    ))]
+    fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        let Ok(writer) = crate::lent_response::ResponseWriter::new(parts) else {
+            return;
+        };
+        let qos = parts.qos;
+        let _ = self.dispatch_network_message(
+            qos.priority(),
+            /*reliable=*/ true,
+            qos,
+            wz_codecs::response::Response::MAX_ENCODED_BYTES,
+            crate::stats::NetworkStatsClass::unread(),
+            |sink| writer.encode(sink),
+        );
+        #[cfg(feature = "transport-batching")]
+        if qos.is_express() {
+            self.flush_open_batch();
+        }
     }
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
@@ -2502,7 +2538,22 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
 // encodes the same borrowed value through `SliceSink`. No reply-shape
 // duplication across profiles.
 impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R, T> {
-    #[cfg(feature = "liveliness-token")]
+    // With no allocator the borrowed reply (`build_token_reply`, which is what the
+    // heap form converts to its owned mirror) is encoded as it is, into the lent slot:
+    // the same bytes, the same routing (control band, the default QoS a reply with no
+    // `ext_qos` reads as).
+    #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
+    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        let _ = self.dispatch_network_message(
+            Priority::Control,
+            /*reliable=*/ true,
+            crate::sample::QosLevel::DEFAULT,
+            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+            |sink| build_token_reply(token_id, keyexpr, interest_id).encode(sink),
+        );
+    }
+    #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         self.send_declare(
             build_token_reply(token_id, keyexpr, interest_id)
@@ -2510,7 +2561,19 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES"),
         );
     }
-    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    #[cfg(all(
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        not(feature = "alloc")
+    ))]
+    fn send_declare_final_reply(&self, interest_id: u64) {
+        let _ = self.dispatch_declare_lent(|sink| {
+            crate::lent_control::declare_final_reply(interest_id).encode(sink)
+        });
+    }
+    #[cfg(all(
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "alloc"
+    ))]
     fn send_declare_final_reply(&self, interest_id: u64) {
         // R311y530 — built through the UNGATED `declare_build` twin rather than
         // `local_token::build_final_reply`, so this arm compiles in a
@@ -2519,7 +2582,24 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         // the I-flag + interest_id onto a bodyless `DeclFinal`.
         self.send_declare(crate::declare_build::build_declare_final_reply(interest_id));
     }
-    #[cfg(feature = "declare-subscriber")]
+    // With no allocator the reply is written from the caller's own text through the
+    // borrowed writer of `lent_control`; a keyexpr longer than the session holds text for
+    // is skipped, as the heap form skips one the bounded codec field cannot hold.
+    #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
+    fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
+        if keyexpr.len() > crate::caps::MAX_KEYEXPR_BYTES {
+            return;
+        }
+        let _ = self.dispatch_declare_lent(|sink| {
+            crate::lent_control::declare_subscriber_reply_with_id(
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            )
+            .encode(sink)
+        });
+    }
+    #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
         // A reply keyexpr longer than the bounded codec field cannot be encoded;
         // the chain's `DeclFinal` still terminates the peer's CURRENT interest,
@@ -6339,7 +6419,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// The row's texts live on this call's stack in fixed buffers and are gone when
     /// `f` returns, so what a node keeps it copies (`FixedAdminSession::from_view`).
-    #[cfg(feature = "adminspace-core")]
+    #[cfg(feature = "adminspace-fixed")]
     pub fn with_admin_session<X>(
         &self,
         f: impl FnOnce(crate::adminspace::AdminSessionRef<'_>) -> X,
@@ -8126,6 +8206,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // below, because upstream labels the message rather than the frame.
         // R2952 — also the band a scheduled block-first push dispatches at.
         let message_priority = priority;
+        // Read only by the stats counters and by the block-first schedule (which owns a
+        // copy of the message, so needs the heap): neither exists in this build.
+        #[cfg(not(any(feature = "alloc", feature = "transport-stats")))]
+        let _ = (stage, message_priority);
         // R2923 — zenoh's `is_droppable`: a best-effort message, or one whose
         // congestion control is `Drop`
         // (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
@@ -9262,6 +9346,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// owns the frame SN. cfg = the union of the routed `send_*` callers
     /// (a build where no caller exists must not carry the dead symbol).
     #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
     fn dispatch_push(
         &self,
         priority: Priority,
@@ -9297,6 +9382,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// mean resolving a mapping (a mutex round-trip) per send for nothing, so
     /// the feature-off arm returns the control class without touching the table.
     #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
     fn outbound_push_class(
         &self,
         _push: &crate::wire::PushOwned,
@@ -9313,6 +9399,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// [`Self::outbound_push_class`] for a `Request`.
     #[cfg(feature = "codec-request")]
+    #[cfg(feature = "alloc")]
     fn outbound_request_class(
         &self,
         _request: &crate::wire::RequestOwned,
@@ -9331,6 +9418,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// [`Self::outbound_push_class`] for a `Response`.
     #[cfg(feature = "codec-response")]
+    #[cfg(feature = "alloc")]
     fn outbound_response_class(
         &self,
         _response: &crate::wire::ResponseOwned,
@@ -9385,6 +9473,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-response",
         feature = "codec-response-final"
     ))]
+    #[cfg(feature = "alloc")]
     pub fn send_network_message(
         &self,
         msg: crate::network_message::NetworkMessage,
@@ -9420,6 +9509,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-response",
         feature = "codec-response-final"
     ))]
+    #[cfg(feature = "alloc")]
     pub fn send_network_message_qos(
         &self,
         msg: crate::network_message::NetworkMessage,
@@ -9476,6 +9566,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "codec-response"
         )
     ))]
+    #[cfg(feature = "alloc")]
     fn open_shm_tx(
         &self,
         msg: &crate::network_message::NetworkMessage,
@@ -9553,6 +9644,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-response",
         feature = "codec-response-final"
     ))]
+    #[cfg(feature = "alloc")]
     fn send_network_message_qos_dispatch(
         &self,
         msg: crate::network_message::NetworkMessage,
@@ -9733,6 +9825,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "codec-push"
         ),
     ))]
+    #[cfg(feature = "alloc")]
     fn dispatch_declare(
         &self,
         declare: wz_codecs::declare::DeclareOwned,
@@ -9751,6 +9844,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
+    /// [`Self::dispatch_declare`] for a declaration the caller writes itself, from its
+    /// own text, through the borrowed writers of [`crate::lent_control`]: the route a
+    /// session with no allocator sends a `Declare` by, since the owned
+    /// `DeclareOwned` that `dispatch_declare` takes is a heap object. The routing is
+    /// the same (`Priority::Control`, the declare QoS, the `Declare` stats label);
+    /// only the body's source differs. Always reliable, as `dispatch_declare`'s
+    /// callers pass it.
+    #[cfg(all(
+        not(feature = "alloc"),
+        any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )
+    ))]
+    fn dispatch_declare_lent<P>(&self, encode_body: P) -> Result<(), SendWireError>
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        self.dispatch_network_message(
+            Priority::Control,
+            /*reliable=*/ true,
+            crate::declare_ext_qos::QOS_DECLARE,
+            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+            encode_body,
+        )
+    }
+
     /// See [`Self::dispatch_push`]. The OAM-LINKSTATE TX path (c3d
     /// linkstate-peer flood). The reserve hint is the fixed
     /// `Oam::MAX_ENCODED_BYTES`; the variable LinkStateList ZBuf payload
@@ -9764,6 +9886,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `codec-linkstate` alone — an encode-only build — does not pull this
     /// send path (which would orphan it without `dispatch_network_message`).
     #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+    #[cfg(feature = "alloc")]
     fn dispatch_oam(
         &self,
         oam: wz_codecs::oam::OamOwned,
@@ -9788,6 +9911,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-request")]
+    #[cfg(feature = "alloc")]
     fn dispatch_request(
         &self,
         request: crate::wire::RequestOwned,
@@ -9808,6 +9932,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// See [`Self::dispatch_push`]. The linkstate-peer query RETURN path: a
     /// queryable's `Response` (Reply / Err) relayed back toward the querier.
     #[cfg(feature = "codec-response")]
+    #[cfg(feature = "alloc")]
     fn dispatch_response(
         &self,
         response: crate::wire::ResponseOwned,
@@ -9844,6 +9969,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-response-final")]
+    #[cfg(feature = "alloc")]
     fn dispatch_response_final(
         &self,
         response_final: wz_codecs::response_final::ResponseFinalOwned,
@@ -9875,6 +10001,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         all(feature = "codec-linkstate", feature = "codec-push")
     ))]
+    #[cfg(feature = "alloc")]
     fn dispatch_interest(
         &self,
         interest: wz_codecs::interest::InterestOwned,
@@ -10282,13 +10409,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         value: &[u8],
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "codec-push")]
+        // An aliased form names a keyexpr this session declared, and a session with
+        // no allocator declares none (`declare-keyexpr` needs the heap), so there is
+        // no alias for it to name.
+        #[cfg(all(feature = "codec-push", feature = "alloc"))]
         {
             let push = build_push_aliased(mapping_id, suffix, value)?;
             self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             Ok(())
         }
-        #[cfg(not(feature = "codec-push"))]
+        #[cfg(not(all(feature = "codec-push", feature = "alloc")))]
         {
             let _ = (mapping_id, suffix, value, reliable);
             Err(SendWireError::FeatureDisabled)
@@ -10308,7 +10438,43 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_suffix: &str,
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "codec-push")]
+        // With no allocator the Del is encoded from the caller's own `&str` through the
+        // codec's borrowed view, straight into the lent slot, as `send_push_literal_qos`
+        // does for a Put: the `Push` and `MsgDel` headers `build_push_del_literal` writes,
+        // and no owned mirror.
+        #[cfg(all(feature = "codec-push", not(feature = "alloc")))]
+        {
+            use wz_codecs::msg_del::MsgDel;
+            use wz_codecs::push::{Push, PushVariant};
+            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+            use wz_codecs::wireexpr_local::WireexprLocal;
+            self.dispatch_network_message(
+                Priority::DEFAULT,
+                reliable,
+                crate::sample::QosLevel::DEFAULT,
+                wz_codecs::push::Push::MAX_ENCODED_BYTES,
+                crate::stats::NetworkStatsClass::unread(),
+                |sink| {
+                    Push {
+                        header: wz_codecs::wire_const::N_MID_PUSH | 0x20,
+                        keyexpr: Wireexpr {
+                            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                                id: 0,
+                                suffix_len: Some(keyexpr_suffix.len() as u64),
+                                suffix: Some(keyexpr_suffix),
+                            }),
+                        },
+                        extensions: None,
+                        body: PushVariant::CodecZenohMsgDel(MsgDel {
+                            header: 0x02,
+                            ..MsgDel::default()
+                        }),
+                    }
+                    .encode(sink)
+                },
+            )
+        }
+        #[cfg(all(feature = "codec-push", feature = "alloc"))]
         {
             let push = build_push_del_literal(keyexpr_suffix)?;
             self.dispatch_push(Priority::DEFAULT, push, reliable)?;
@@ -10334,13 +10500,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: Option<&str>,
         reliable: bool,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "codec-push")]
+        // See `send_push_aliased`: no alias exists without the heap.
+        #[cfg(all(feature = "codec-push", feature = "alloc"))]
         {
             let push = build_push_del_aliased(mapping_id, suffix)?;
             self.dispatch_push(Priority::DEFAULT, push, reliable)?;
             Ok(())
         }
-        #[cfg(not(feature = "codec-push"))]
+        #[cfg(not(all(feature = "codec-push", feature = "alloc")))]
         {
             let _ = (mapping_id, suffix, reliable);
             Err(SendWireError::FeatureDisabled)
@@ -10480,7 +10647,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
-        #[cfg(feature = "declare-subscriber")]
+        // With no allocator the declaration is written from the caller's own text
+        // through the borrowed writer of `lent_control`, straight into the lent slot:
+        // the owned `DeclareOwned` below is a heap object whose only job is to be
+        // encoded and dropped, and the reconnect cache that would copy the keyexpr
+        // does not exist in this profile.
+        #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
+        {
+            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            self.dispatch_declare_lent(|sink| {
+                crate::lent_control::declare_subscriber(
+                    subscriber_id,
+                    keyexpr_mapping_id,
+                    keyexpr_suffix,
+                )
+                .encode(sink)
+            })
+            .map_err(SendDeclareError::from)
+        }
+        #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
         {
             // R311ou — build half (R300 pico-safety gate + envelope) is the
             // shared `prepare_declare_subscriber` SSOT, also called by the
@@ -10532,7 +10717,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_suffix: Option<&str>,
         complete: bool,
     ) -> Result<(), SendDeclareError> {
-        #[cfg(feature = "declare-queryable")]
+        // See `send_declare_subscriber`: no allocator, so the borrowed writer, with the
+        // local `QueryableInfo` the owned form stamps (omitted when it is the default).
+        #[cfg(all(feature = "declare-queryable", not(feature = "alloc")))]
+        {
+            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            self.dispatch_declare_lent(|sink| {
+                crate::lent_control::declare_queryable(
+                    queryable_id,
+                    keyexpr_mapping_id,
+                    keyexpr_suffix,
+                    crate::queryable_info::QueryableInfo::local(complete),
+                )
+                .encode(sink)
+            })
+            .map_err(SendDeclareError::from)
+        }
+        #[cfg(all(feature = "declare-queryable", feature = "alloc"))]
         {
             // R311ow — build half (R300 pico-safety gate + envelope) is the
             // shared `prepare_declare_queryable` SSOT, also called by the
@@ -10664,7 +10865,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and the `send_declare_subscriber` wrapper both call this, so the
     /// pico-safety gate + envelope assembly stay authored exactly once (build
     /// SSOT). Mirror of the declare-token split landed in R311mw (B5b-2b-3).
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
     pub fn prepare_declare_subscriber(
         &self,
         subscriber_id: u64,
@@ -10746,7 +10947,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `send_declare_queryable` wrapper both call this, so the pico-safety gate
     /// and envelope assembly stay authored exactly once (build SSOT). Mirror of
     /// the declare-subscriber split landed in R311ou.
-    #[cfg(feature = "declare-queryable")]
+    #[cfg(all(feature = "declare-queryable", feature = "alloc"))]
     pub fn prepare_declare_queryable(
         &self,
         queryable_id: u64,
@@ -10831,7 +11032,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// BOTH gate features supply it (`liveliness-token = ["codec-declare"]`,
     /// `declare-subscriber = ["codec-declare"]`), so the widened gate keeps
     /// that dependency satisfied by construction rather than by coincidence.
-    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    ///
+    /// Heap profile only: the argument is the owned record. A session with no
+    /// allocator sends a declaration through the borrowed writers of
+    /// [`crate::lent_control`] (`send_declare_subscriber`, `send_declare_queryable`).
+    #[cfg(all(
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "alloc"
+    ))]
     pub fn send_declare(&self, declare: DeclareOwned) {
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.
@@ -11026,6 +11234,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     prefix
                 })
                 .ok_or(SendDeclareError::UnknownMappingId(id)),
+        }
+    }
+
+    /// What [`Self::reconstruct_outbound_keyexpr`] decides for a declaration's key, with
+    /// no allocator and so no string to build: the outbound pico-safety gate (R300) on
+    /// a literal key, and the refusals for a key that names nothing. A session with no
+    /// allocator declares no keyexpr of its own (`declare-keyexpr` needs the heap), so
+    /// its table of outbound mappings is always empty and every alias is unknown, the
+    /// answer the owned form gives for an empty table.
+    #[cfg(all(
+        not(feature = "alloc"),
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    fn check_outbound_declared_keyexpr(
+        mapping_id: u64,
+        suffix: Option<&str>,
+    ) -> Result<(), SendDeclareError> {
+        match (mapping_id, suffix) {
+            (0, None) => Err(SendDeclareError::MissingKeyexpr),
+            (0, Some(literal)) => Ok(check_outbound_keyexpr_pico_safe(literal)?),
+            (id, _) => Err(SendDeclareError::UnknownMappingId(id)),
         }
     }
 
@@ -11707,13 +11936,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "codec-request")]
+        // The request is the owned `RequestOwned`; a session with no allocator has no
+        // writer for it yet, so it refuses with the typed error a build without the
+        // codec gives, and the refusal is the thing to look for when one is wanted.
+        #[cfg(all(feature = "codec-request", feature = "alloc"))]
         {
             let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_request(request, /*reliable=*/ true)?;
             Ok(())
         }
-        #[cfg(not(feature = "codec-request"))]
+        #[cfg(not(all(feature = "codec-request", feature = "alloc")))]
         {
             let _ = (rid, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendWireError::FeatureDisabled)
@@ -11809,7 +12041,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// without growing a public error enum for an action that
     /// has historically been a fire-and-forget primitive.
     pub fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
-        #[cfg(feature = "codec-response-final")]
+        // With no allocator the terminator is written from its two numbers through the
+        // borrowed writer of `lent_control`, routed as `dispatch_response_final` routes
+        // it: on the band its own `ext_qos` names, as control plane.
+        #[cfg(all(feature = "codec-response-final", not(feature = "alloc")))]
+        {
+            let _ = self.dispatch_network_message(
+                qos.priority(),
+                /*reliable=*/ true,
+                qos,
+                wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+                crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
+                |sink| crate::lent_control::response_final(request_id, qos).encode(sink),
+            );
+        }
+        #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
         {
             let response_final = build_response_final(request_id, qos);
             // F2 — this surface has no error channel; a transport-down
@@ -11851,7 +12097,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// arg type `Response` is itself feature-gated, so signature
     /// cannot stay stable without un-gating the type — deferred to
     /// R267 Session<R,T> reparam-adjacent architectural cascade).
-    #[cfg(feature = "codec-response")]
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
     pub fn send_response(&self, response: ResponseOwned) {
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.
@@ -11864,7 +12110,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// reference taken for its receiver is released only by that receiver, so the caller that
     /// took one needs the verdict to give it back (`QueryReply::into_response_shm`). Same
     /// egress as [`Self::send_response`], which is this with the verdict dropped.
-    #[cfg(feature = "codec-response")]
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
     pub fn try_send_response(&self, response: ResponseOwned) -> Result<(), SendWireError> {
         // §5.21 routing-namespace — the reply EGRESS seam. Query replies flush
         // through this dedicated `dispatch_response` path, which bypasses BOTH

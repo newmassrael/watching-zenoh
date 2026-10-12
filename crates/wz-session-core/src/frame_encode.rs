@@ -51,8 +51,10 @@ use crate::qos::Priority;
 #[allow(unused_imports)]
 use crate::tx_buf::{EncodeBuf, TxBuf, TxSink};
 
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use wz_codecs::declare::Declare;
 #[cfg(feature = "codec-declare")]
-use wz_codecs::declare::{Declare, DeclareOwned};
+use wz_codecs::declare::DeclareOwned;
 #[cfg(feature = "alloc")]
 use wz_codecs::interest::{Interest, InterestOwned};
 // R311y578 (G7) — tracks [`oam_body`]'s gate exactly, `session-unicast`
@@ -70,14 +72,16 @@ use crate::wire::ResponseOwned;
     feature = "session-unicast"
 ))]
 use wz_codecs::oam::OamOwned;
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
 use wz_codecs::push::Push;
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use wz_codecs::request::Request;
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use wz_codecs::response::Response;
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
+use wz_codecs::response_final::ResponseFinal;
 #[cfg(feature = "codec-response-final")]
-use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
+use wz_codecs::response_final::ResponseFinalOwned;
 
 /// R311jq — the FRAME parent-flags byte for a channel: `FLAG_T_FRAME_R`
 /// (0x20) when reliable, 0 otherwise, matching zenoh-pico's
@@ -469,7 +473,7 @@ pub(crate) fn interest_body(
 /// its perspective the reply was sent). The default `reliable=true`
 /// is the production-safe choice; callers passing `false` accept
 /// the consequence.
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 pub fn encode_frame_with_response(sn: u64, response: ResponseOwned, reliable: bool) -> Vec<u8> {
     encode_frame_with_response_qos(sn, response, reliable, None)
 }
@@ -478,7 +482,7 @@ pub fn encode_frame_with_response(sn: u64, response: ResponseOwned, reliable: bo
 /// reason `encode_frame_with_push_qos` exists: the multicast TX emit rides a
 /// reply on the band its Response carries, so the Frame must say which. `None`
 /// is byte-identical to the anchor.
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 pub fn encode_frame_with_response_qos(
     sn: u64,
     response: ResponseOwned,
@@ -505,7 +509,7 @@ pub fn encode_frame_with_response_qos(
 /// `reliable=true` is the production-safe choice; callers passing
 /// `false` accept the consequence (typically only fuzz / negative
 /// tests).
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 pub fn encode_frame_with_response_final(
     sn: u64,
     response_final: ResponseFinalOwned,
@@ -518,7 +522,7 @@ pub fn encode_frame_with_response_final(
 /// terminator's mirror of the Response one: the multicast TX emit rides a
 /// final on its query's clamped band, so the Frame must name it. `None` is
 /// byte-identical to the anchor.
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 pub fn encode_frame_with_response_final_qos(
     sn: u64,
     response_final: ResponseFinalOwned,
@@ -545,7 +549,7 @@ pub fn encode_frame_with_response_final_qos(
 /// unreliable Query could silently drop and leave the local
 /// `z_get` future hung without a Response or ResponseFinal. Callers
 /// that pass `reliable=false` accept that risk explicitly.
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool) -> Vec<u8> {
     encode_frame_envelope(
         sn,
@@ -571,7 +575,7 @@ pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool)
 /// passing `reliable=false` accept that the DECLARE may arrive
 /// after a referencing Push and the peer's resolver will reject
 /// the unknown id — useful only for fuzz / negative tests.
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool) -> Vec<u8> {
     encode_frame_envelope(
         sn,
@@ -637,7 +641,7 @@ pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bo
 /// `crates/wz-integration-tests/tests/layer3_frame.rs`. This
 /// helper composes only the one transport header byte that
 /// `Frame::encode` does not emit.
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
 pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u8> {
     // DEFAULT anchor: no Frame ext_qos, byte-identical to every pre-QoS caller
     // (the ~10 existing call sites + all layer3 byte-equiv tests). The multicast
@@ -657,7 +661,7 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 /// `io/zenoh-transport/src/multicast/rx.rs` bails on a non-DEFAULT frame at a
 /// non-qos peer). The unicast TX writes the same ext through its batch writer
 /// ([`crate::session_actions`]), not this helper.
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
 pub fn encode_frame_with_push_qos(
     sn: u64,
     push: PushOwned,

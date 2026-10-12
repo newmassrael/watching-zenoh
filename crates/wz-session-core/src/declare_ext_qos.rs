@@ -124,6 +124,19 @@ pub const QOS_EXT_HEADER: u8 = QOS_EXT_ID | EXT_ENC_Z64;
 pub const QOS_DECLARE: QosLevel =
     QosLevel::from_parts(Priority::Control, CongestionControl::Block, false);
 
+/// R311y801 — the Declare ENVELOPE header every Declare writer emits:
+/// `N_MID_DECLARE` with the `Z` chain bit, because every Declare carries the
+/// `ext_qos` extension of [`QOS_DECLARE`]. The bit and the chain are two halves of
+/// one fact, so they are named together here and the owned builders
+/// (`declare_build`) and the borrowed writers (`lent_control`) both read this one
+/// constant: a writer that set one without the other would emit a header promising
+/// extensions that are not there, which the peer reads as a truncated message
+/// rather than as a missing field. Here and not in `declare_build` because that
+/// module builds owned records and so needs the heap, while the writers do not.
+#[cfg(feature = "codec-declare")]
+pub(crate) const DECLARE_ENVELOPE_HEADER: u8 =
+    wz_codecs::wire_const::N_MID_DECLARE | crate::ext_nodeid::MESSAGE_FLAG_Z;
+
 /// Build the `ext_qos` extension entry carrying `qos`. Terminal header (the
 /// caller's chain normalisation via [`ext_nodeid::apply_chain_z_bits`] sets the
 /// continuation bit if another entry follows).
