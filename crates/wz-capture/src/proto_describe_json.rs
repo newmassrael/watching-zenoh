@@ -10,13 +10,17 @@
 //! # `proto_message`
 //!
 //! ```text
-//! {"document":{"name":"proto_message","revision":1},"ok":true,
+//! {"document":{"name":"proto_message","revision":2},"ok":true,
 //!  "root":"pkg.Reading",
 //!  "messages":[{"full_name":"pkg.Reading","file":"reading.proto","syntax":"proto3",
-//!    "oneofs":[],
+//!    "oneofs":[],"comment":" One reading.\n","trailing_comment":null,
+//!    "options":[{"name":"(ext).id","kind":"integer","value":7}],
 //!    "fields":[{"name":"sensor_id","json_name":"sensorId","number":1,
 //!      "type":"uint32","label":"singular","oneof":null,"packed":null,
-//!      "enum":null,"message_type":null,"map":null}]}]}
+//!      "enum":null,"message_type":null,"map":null,
+//!      "comment":null,"trailing_comment":" the sensor\n",
+//!      "options":[{"name":"(ext).int_size","kind":"identifier",
+//!                  "value":"IS_16"}]}]}]}
 //! ```
 //!
 //! `messages` is the root message first, then every message it reaches, each
@@ -24,6 +28,30 @@
 //! `message_type`, and that name is the `full_name` of one of the entries. Every
 //! key of a field row is always present and one that does not apply is `null`:
 //!
+//! * `comment` and `trailing_comment`, on a message row as on a field row, are
+//!   the comments `protoc` itself attaches to the declaration, as it stores
+//!   them in its `SourceCodeInfo` (the leading and the trailing comment), and
+//!   `null` when there is none. The text is the text after the comment marker,
+//!   its line breaks included, so a `//` comment keeps the space after the
+//!   slashes and ends with a newline, and a `/** ... */` comment begins with the
+//!   `*` and a newline, a continuation line losing its leading white space and
+//!   one `*`. A message's trailing comment is the one after its `{`. The rule
+//!   for which comment belongs to which declaration is `protoc`'s and is stated
+//!   on [`crate::proto_lex::Gap`]: a comment on the line of the declaration
+//!   before trails that one; a comment on the lines before a declaration, with
+//!   no blank line between, leads it; a blank line detaches a comment from both;
+//! * `options` is an array, empty for none, of the options written on the field
+//!   (its `[...]` list) or the message (its `option` statements), each in the
+//!   order written and none dropped: `{"name":N,"kind":K,"value":V}`. `name` is
+//!   the name as the file spelled it: a plain word (`packed`), a dotted path, or
+//!   an extension in parentheses and the path after it (`(ext).field`). `kind`
+//!   is how the value was written, one of `identifier` (a bare word: `true`, an
+//!   enum value's name; `value` is the word), `integer` (`value` a number by the
+//!   integer rule below), `float` (`value` the literal as written, sign
+//!   included, as a string), `string` (`value` the decoded text) and
+//!   `aggregate` (`value` the text between the braces of a `{ ... }` value, as
+//!   written). An option is not judged: a value no consumer of that option could
+//!   read is still listed;
 //! * `oneof` is the oneof's name, or `null` for a field that is in none;
 //! * `packed` is a boolean for a repeated field of a packable type (whether it
 //!   is written as one run) and `null` for every other field;
@@ -62,7 +90,8 @@ use wz_session_core::json::escape_into;
 use crate::doc_revision::{envelope, PROTO_MESSAGE};
 use crate::proto_decode_json::push_integer;
 use crate::proto_describe::{
-    describe_proto, FieldDescription, MapDescription, MessageDescription, Target,
+    describe_proto, FieldDescription, MapDescription, MessageDescription, OptionDescription,
+    OptionValueDescription, Target,
 };
 use crate::proto_schema::{ProtoDiagnostic, ProtoFile};
 
@@ -125,7 +154,10 @@ fn push_message(message: &MessageDescription, out: &mut String) {
         }
         escape_into(name, out);
     }
-    out.push_str("],\"fields\":[");
+    out.push(']');
+    push_comments(&message.comment, &message.trailing_comment, out);
+    push_options(&message.options, out);
+    out.push_str(",\"fields\":[");
     for (i, field) in message.fields.iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -159,7 +191,43 @@ fn push_field(field: &FieldDescription, out: &mut String) {
         Some(map) => push_map(map, out),
         None => out.push_str("null"),
     }
+    push_comments(&field.comment, &field.trailing_comment, out);
+    push_options(&field.options, out);
     out.push('}');
+}
+
+/// The `comment` and `trailing_comment` keys of a message or a field row, each
+/// the text as `protoc` stores it or `null`.
+fn push_comments(comment: &Option<String>, trailing: &Option<String>, out: &mut String) {
+    for (key, text) in [("comment", comment), ("trailing_comment", trailing)] {
+        out.push_str(&format!(",\"{key}\":"));
+        match text {
+            Some(text) => escape_into(text, out),
+            None => out.push_str("null"),
+        }
+    }
+}
+
+/// The `options` key of a message or a field row: an array, empty for none.
+fn push_options(options: &[OptionDescription], out: &mut String) {
+    out.push_str(",\"options\":[");
+    for (i, option) in options.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        escape_into(&option.name, out);
+        out.push_str(&format!(",\"kind\":\"{}\",\"value\":", option.value.kind()));
+        match &option.value {
+            OptionValueDescription::Integer(n) => push_integer(*n, out),
+            OptionValueDescription::Identifier(text)
+            | OptionValueDescription::Float(text)
+            | OptionValueDescription::String(text)
+            | OptionValueDescription::Aggregate(text) => escape_into(text, out),
+        }
+        out.push('}');
+    }
+    out.push(']');
 }
 
 /// The `enum` and `message_type` keys of a row, in that order, each `null` where

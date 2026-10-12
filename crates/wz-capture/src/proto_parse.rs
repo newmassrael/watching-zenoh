@@ -30,14 +30,24 @@
 //! `group` inside an `extend` block still declares its message, in the scope the
 //! block is written in.
 //!
-//! Skipped, but with the statement's own grammar so a mistake in one lands on
-//! the token that is wrong and does not swallow the statements after it:
-//! `option` statements, `[...]` options and `service` blocks (balanced braces).
-//! A field's `[...]` entry whose name is a single plain word keeps its value
-//! when that is a word or a string (see [`FieldOption`]); the parser does not
-//! judge it, so a file whose `packed` has a value that is no boolean still
-//! parses and the declaration door still reads it, and only the value door,
-//! which acts on the option, refuses.
+//! Every option is kept, with the statement's own grammar so a mistake in one
+//! lands on the token that is wrong and does not swallow the statements after
+//! it: the `[...]` entries of a field, an enum value or an `extensions` range,
+//! and the `option` statements of a file and of a message (see [`FieldOption`]
+//! for the name and [`OptionValue`] for the value, as written). The parser does
+//! not judge an option, so a file whose `packed` has a value that is no boolean
+//! still parses and the declaration door still reads it, and only the value
+//! door, which acts on the option, refuses. `service` blocks are skipped
+//! (balanced braces).
+//!
+//! ## Comments
+//!
+//! A message and a field keep the comments `protoc` attaches to them ([`Docs`]).
+//! `protoc` does not look at every token for them: it reads the gap after a `;`,
+//! a `{` that opens a block and a `}` that closes one, the three tokens that end
+//! a declaration, so this parser does the same (`Parser::end_decl`), and the
+//! rule for which comment in a gap belongs to which side is the lexer's
+//! ([`crate::proto_lex::Gap`]).
 //!
 //! Refused with a stated reason: `import weak` and editions. Whether a `group`
 //! or an `extend` is refused is not the parser's to say; it depends on which
@@ -275,26 +285,47 @@ pub(crate) enum Label {
     Repeated,
 }
 
-/// What an option's value was written as. Only the shapes the value door reads
-/// are kept apart; every other value is [`OptionValue::Other`].
+/// What an option's value was written as. The parser keeps the value as written
+/// and does not judge it: whoever acts on an option decides what it may be.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum OptionValue {
-    /// A bare word: `true`, `false`, an enum value's name.
+    /// A bare word: `true`, `false`, an enum value's name, `inf`, or a signed
+    /// one (`-inf`).
     Ident(String),
     Str(String),
-    Other,
+    /// An integer literal with its sign, wide enough for every `u64` and its
+    /// negation.
+    Int(i128),
+    /// A floating-point literal as it was written, sign included.
+    Float(String),
+    /// A `{ ... }` aggregate: the text between the braces, as written, trimmed.
+    Aggregate(String),
 }
 
-/// One entry of a field's `[...]` list whose name is a single plain word
-/// (`packed`, `json_name`, `deprecated`). Options named by a parenthesised
-/// extension (`(my.ext)`) or a dotted path are read for their syntax and not
-/// kept.
+/// One option, from a field's or an enum value's `[...]` list or from an
+/// `option` statement.
+///
+/// The name is kept as written: a plain word (`packed`), a dotted path
+/// (`foo.bar`), or an extension in parentheses with the rest of the path after it
+/// (`(my.ext).field`), the parts joined by `.`.
 #[derive(Clone, Debug)]
 pub(crate) struct FieldOption {
     pub name: String,
     pub value: OptionValue,
     /// Where the value starts, which is where a wrong value is blamed.
     pub value_pos: Pos,
+}
+
+/// The comments `protoc` attaches to a declaration (see [`crate::proto_lex::Gap`]
+/// for the rule), as it stores them: the text after the comment marker, line
+/// breaks included.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Docs {
+    /// The comment in front of the declaration with no blank line between.
+    pub leading: Option<String>,
+    /// The comment after the declaration's `;`, or after the `{` that opens a
+    /// message.
+    pub trailing: Option<String>,
 }
 
 /// One field.
@@ -311,12 +342,16 @@ pub(crate) struct FieldDecl {
     /// of.
     pub oneof: Option<usize>,
     pub options: Vec<FieldOption>,
+    pub docs: Docs,
 }
 
 /// One message.
 #[derive(Clone, Debug)]
 pub(crate) struct MessageDecl {
     pub name: Named,
+    pub docs: Docs,
+    /// The message's own `option` statements, in the order written.
+    pub options: Vec<FieldOption>,
     pub oneofs: Vec<Named>,
     pub fields: Vec<FieldDecl>,
     pub nested: Vec<MessageDecl>,
@@ -358,6 +393,8 @@ pub(crate) struct FileAst {
     pub services: Vec<Named>,
     /// The `extend` blocks written at the top level of the file.
     pub extends: Vec<ExtendDecl>,
+    /// The file's own `option` statements, in the order written.
+    pub options: Vec<FieldOption>,
 }
 
 /// A readable name for what a token is, for "expected X, found Y".
@@ -382,9 +419,14 @@ enum Scope {
 }
 
 struct Parser<'a> {
+    src: &'a str,
     lex: Lexer<'a>,
     ahead: VecDeque<Result<Token<'a>, SyntaxError>>,
     syntax: Syntax,
+    /// The comment that leads the declaration about to start: found in the gap
+    /// after the last `;`, `{` or `}` that ended a declaration, which is where
+    /// `protoc` looks for it.
+    upcoming: Option<String>,
 }
 
 /// Parse one file.
@@ -393,9 +435,11 @@ struct Parser<'a> {
 /// first, and later ones are often its consequence.
 pub(crate) fn parse_file(src: &str) -> Result<FileAst, SyntaxError> {
     let mut p = Parser {
+        src,
         lex: Lexer::new(src),
         ahead: VecDeque::new(),
         syntax: Syntax::Proto2,
+        upcoming: None,
     };
     p.file()
 }
@@ -436,6 +480,30 @@ impl<'a> Parser<'a> {
                 "internal: no token",
             )),
         }
+    }
+
+    /// The text of a token as it was written.
+    fn text_of(&self, t: &Token<'a>) -> &'a str {
+        &self.src[t.start..t.end]
+    }
+
+    /// A declaration has just ended: the `;` that ends a statement, the `{` that
+    /// opens a block, or the `}` that closes one. Reads the gap after it and
+    /// returns the comments that now belong to the declaration, as `protoc` does
+    /// at the same three tokens: the comment that led it (found when the
+    /// declaration before ended) and the one that trails it. The comment that
+    /// leads the NEXT declaration is kept for it.
+    ///
+    /// Peeks the token after, which a lexical error there surfaces at, the place
+    /// `protoc` meets it.
+    fn end_decl(&mut self) -> Result<Docs, SyntaxError> {
+        let next = self.peek()?;
+        let (trailing, leading_next) = match &next.gap {
+            Some(gap) => (gap.trailing.clone(), gap.leading.clone()),
+            None => (None, None),
+        };
+        let leading = core::mem::replace(&mut self.upcoming, leading_next);
+        Ok(Docs { leading, trailing })
     }
 
     fn is_sym(&mut self, c: char) -> bool {
@@ -518,7 +586,10 @@ impl<'a> Parser<'a> {
             enums: Vec::new(),
             services: Vec::new(),
             extends: Vec::new(),
+            options: Vec::new(),
         };
+        // The comment in front of the first declaration leads it.
+        self.upcoming = self.peek()?.gap.as_ref().and_then(|g| g.leading.clone());
         if self.is_ident("syntax") {
             ast.syntax = self.syntax_statement()?;
             self.syntax = ast.syntax;
@@ -529,6 +600,7 @@ impl<'a> Parser<'a> {
                 Tok::Eof => return Ok(ast),
                 Tok::Sym(';') => {
                     self.bump()?;
+                    self.end_decl()?;
                 }
                 Tok::Ident("import") => {
                     let import = self.import_statement()?;
@@ -541,9 +613,13 @@ impl<'a> Parser<'a> {
                     }
                     let name = self.dotted_name("a package name")?;
                     self.expect_sym(';', "after the package name")?;
+                    self.end_decl()?;
                     ast.package = Some(name);
                 }
-                Tok::Ident("option") => self.option_statement()?,
+                Tok::Ident("option") => {
+                    let option = self.option_statement()?;
+                    ast.options.push(option);
+                }
                 Tok::Ident("message") => {
                     let m = self.message(0)?;
                     ast.messages.push(m);
@@ -556,6 +632,7 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     let name = self.expect_ident("a service name")?;
                     self.skip_braces("a service")?;
+                    self.end_decl()?;
                     ast.services.push(name);
                 }
                 Tok::Ident("extend") => {
@@ -590,6 +667,7 @@ impl<'a> Parser<'a> {
         self.expect_sym('=', "after `syntax`")?;
         let (value, pos) = self.string_value()?;
         self.expect_sym(';', "after the syntax string")?;
+        self.end_decl()?;
         match value.as_str() {
             "proto2" => Ok(Syntax::Proto2),
             "proto3" => Ok(Syntax::Proto3),
@@ -618,6 +696,7 @@ impl<'a> Parser<'a> {
         }
         let (path, _) = self.string_value()?;
         self.expect_sym(';', "after the imported path")?;
+        self.end_decl()?;
         Ok(Import {
             path,
             kind,
@@ -654,50 +733,53 @@ impl<'a> Parser<'a> {
     }
 
     /// `option name = value;` with the statement's own grammar.
-    fn option_statement(&mut self) -> Result<(), SyntaxError> {
+    fn option_statement(&mut self) -> Result<FieldOption, SyntaxError> {
         self.bump()?;
-        self.option_assignment()?;
+        let option = self.option_assignment()?;
         self.expect_sym(';', "after the option")?;
-        Ok(())
+        self.end_decl()?;
+        Ok(option)
     }
 
     /// `name = value`, shared by option statements and `[...]` lists.
     ///
-    /// The result keeps the option only when its name is a single plain word
-    /// and its value is a word or a string: those are the options the value
-    /// door reads (`packed`, `json_name`). Everything else is consumed for its
-    /// grammar and dropped.
-    fn option_assignment(&mut self) -> Result<Option<FieldOption>, SyntaxError> {
+    /// Every option is kept, whatever its name and its value: the parser reads
+    /// the statement's grammar and does not judge the option. Who acts on one
+    /// (`packed` and `json_name` are acted on by the value door, an extension
+    /// option by whoever knows its extension) decides what it may be.
+    fn option_assignment(&mut self) -> Result<FieldOption, SyntaxError> {
         // The name: parts joined by dots, a part being an identifier or an
         // extension name in parentheses.
-        let mut plain: Option<String> = None;
-        let mut parts = 0usize;
+        let mut name = String::new();
         loop {
+            if !name.is_empty() {
+                name.push('.');
+            }
             let t = self.bump()?;
-            parts += 1;
             match t.tok {
-                Tok::Ident(word) => {
-                    if parts == 1 {
-                        plain = Some(String::from(word));
-                    }
-                }
-                Tok::Sym('(') => loop {
-                    let inner = self.bump()?;
-                    match inner.tok {
-                        Tok::Ident(_) | Tok::Sym('.') => {}
-                        Tok::Sym(')') => break,
-                        other => {
-                            return Err(SyntaxError::new(
-                                inner.pos,
-                                format!(
-                                    "expected `)` to close the extension name in an option, \
-                                     found {}",
-                                    describe(&other)
-                                ),
-                            ))
+                Tok::Ident(word) => name.push_str(word),
+                Tok::Sym('(') => {
+                    name.push('(');
+                    loop {
+                        let inner = self.bump()?;
+                        match inner.tok {
+                            Tok::Ident(word) => name.push_str(word),
+                            Tok::Sym('.') => name.push('.'),
+                            Tok::Sym(')') => break,
+                            other => {
+                                return Err(SyntaxError::new(
+                                    inner.pos,
+                                    format!(
+                                        "expected `)` to close the extension name in an \
+                                         option, found {}",
+                                        describe(&other)
+                                    ),
+                                ))
+                            }
                         }
                     }
-                },
+                    name.push(')');
+                }
                 other => {
                     return Err(SyntaxError::new(
                         t.pos,
@@ -718,27 +800,32 @@ impl<'a> Parser<'a> {
             Tok::Sym('-') => {
                 self.bump()?;
                 let n = self.bump()?;
-                if !matches!(n.tok, Tok::Ident(_) | Tok::Int(_) | Tok::Float) {
-                    return Err(SyntaxError::new(
-                        n.pos,
-                        format!("expected a number after `-`, found {}", describe(&n.tok)),
-                    ));
+                match n.tok {
+                    Tok::Int(magnitude) => OptionValue::Int(-i128::from(magnitude)),
+                    Tok::Ident(word) => OptionValue::Ident(format!("-{word}")),
+                    Tok::Float => OptionValue::Float(format!("-{}", self.text_of(&n))),
+                    other => {
+                        return Err(SyntaxError::new(
+                            n.pos,
+                            format!("expected a number after `-`, found {}", describe(&other)),
+                        ))
+                    }
                 }
-                OptionValue::Other
             }
             Tok::Ident(word) => {
                 self.bump()?;
                 OptionValue::Ident(String::from(word))
             }
-            Tok::Int(_) | Tok::Float => {
+            Tok::Int(n) => {
                 self.bump()?;
-                OptionValue::Other
+                OptionValue::Int(i128::from(n))
+            }
+            Tok::Float => {
+                self.bump()?;
+                OptionValue::Float(String::from(self.text_of(&v)))
             }
             Tok::Str(_) => OptionValue::Str(self.string_value()?.0),
-            Tok::Sym('{') => {
-                self.skip_braces("an option value")?;
-                OptionValue::Other
-            }
+            Tok::Sym('{') => OptionValue::Aggregate(self.aggregate_text("an option value")?),
             other => {
                 return Err(SyntaxError::new(
                     v.pos,
@@ -746,23 +833,56 @@ impl<'a> Parser<'a> {
                 ))
             }
         };
-        Ok(match (plain, parts) {
-            (Some(name), 1) => Some(FieldOption {
-                name,
-                value,
-                value_pos: v.pos,
-            }),
-            _ => None,
+        Ok(FieldOption {
+            name,
+            value,
+            value_pos: v.pos,
         })
     }
 
-    /// `[name = value, ...]` after a field or an enum value, with the entries
-    /// [`Self::option_assignment`] keeps.
+    /// A `{ ... }` aggregate value, whatever is inside it, as the text between
+    /// the outer braces, trimmed. The brace under the cursor opens it. The braces
+    /// of a value do not end a declaration.
+    fn aggregate_text(&mut self, what: &str) -> Result<String, SyntaxError> {
+        let open = self.bump()?;
+        if open.tok != Tok::Sym('{') {
+            return Err(SyntaxError::new(
+                open.pos,
+                format!(
+                    "expected `{{` to open {what}, found {}",
+                    describe(&open.tok)
+                ),
+            ));
+        }
+        let mut depth = 1usize;
+        loop {
+            let t = self.bump()?;
+            match t.tok {
+                Tok::Eof => {
+                    return Err(SyntaxError::new(
+                        t.pos,
+                        format!("end of file inside {what} (missing `}}`)"),
+                    ))
+                }
+                Tok::Sym('{') => depth += 1,
+                Tok::Sym('}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(String::from(self.src[open.end..t.start].trim()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `[name = value, ...]` after a field or an enum value, every entry in the
+    /// order written.
     fn bracketed_options(&mut self) -> Result<Vec<FieldOption>, SyntaxError> {
         self.expect_sym('[', "to open the options")?;
         let mut kept = Vec::new();
         loop {
-            kept.extend(self.option_assignment()?);
+            kept.push(self.option_assignment()?);
             let t = self.bump()?;
             match t.tok {
                 Tok::Sym(',') => {}
@@ -786,12 +906,14 @@ impl<'a> Parser<'a> {
         self.bump()?;
         let name = self.expect_ident("an enum name")?;
         self.expect_sym('{', "to open the enum")?;
+        self.end_decl()?;
         let mut values = Vec::new();
         loop {
             let t = self.peek()?.clone();
             match t.tok {
                 Tok::Sym('}') => {
                     self.bump()?;
+                    self.end_decl()?;
                     return Ok(EnumDecl { name, values });
                 }
                 Tok::Eof => {
@@ -802,8 +924,11 @@ impl<'a> Parser<'a> {
                 }
                 Tok::Sym(';') => {
                     self.bump()?;
+                    self.end_decl()?;
                 }
-                Tok::Ident("option") => self.option_statement()?,
+                Tok::Ident("option") => {
+                    self.option_statement()?;
+                }
                 Tok::Ident("reserved") => {
                     // Ranges and names, in a grammar of numbers, `to`, `max`,
                     // commas and strings; nothing here names a declared value.
@@ -821,6 +946,7 @@ impl<'a> Parser<'a> {
                             _ => {}
                         }
                     }
+                    self.end_decl()?;
                 }
                 Tok::Ident(_) => {
                     let value = self.expect_ident("an enum value name")?;
@@ -843,6 +969,7 @@ impl<'a> Parser<'a> {
                         self.bracketed_options()?;
                     }
                     self.expect_sym(';', "after the enum value")?;
+                    self.end_decl()?;
                     let number = i128::from(magnitude);
                     values.push(EnumValue {
                         name: value,
@@ -879,8 +1006,13 @@ impl<'a> Parser<'a> {
     /// [`Self::message`].
     fn message_body(&mut self, name: Named, depth: usize) -> Result<MessageDecl, SyntaxError> {
         self.expect_sym('{', "to open the message")?;
+        // A message's comments are the ones around its `{`: the comment before
+        // its keyword, and the one after the brace.
+        let docs = self.end_decl()?;
         let mut msg = MessageDecl {
             name,
+            docs,
+            options: Vec::new(),
             oneofs: Vec::new(),
             fields: Vec::new(),
             nested: Vec::new(),
@@ -894,6 +1026,7 @@ impl<'a> Parser<'a> {
             match t.tok {
                 Tok::Sym('}') => {
                     self.bump()?;
+                    self.end_decl()?;
                     return Ok(msg);
                 }
                 Tok::Eof => {
@@ -904,6 +1037,7 @@ impl<'a> Parser<'a> {
                 }
                 Tok::Sym(';') => {
                     self.bump()?;
+                    self.end_decl()?;
                 }
                 Tok::Ident("message") => {
                     let nested = self.message(depth + 1)?;
@@ -917,7 +1051,10 @@ impl<'a> Parser<'a> {
                     let e = self.extend_block(depth + 1, &mut msg.nested)?;
                     msg.extends.push(e);
                 }
-                Tok::Ident("option") => self.option_statement()?,
+                Tok::Ident("option") => {
+                    let option = self.option_statement()?;
+                    msg.options.push(option);
+                }
                 Tok::Ident("extensions") => self.extensions(t.pos)?,
                 Tok::Ident("reserved") => self.reserved(&mut msg)?,
                 Tok::Ident("oneof") => self.oneof(&mut msg, depth)?,
@@ -933,6 +1070,7 @@ impl<'a> Parser<'a> {
         self.bump()?;
         let name = self.expect_ident("a oneof name")?;
         self.expect_sym('{', "to open the oneof")?;
+        self.end_decl()?;
         msg.oneofs.push(name);
         let index = msg.oneofs.len() - 1;
         loop {
@@ -940,6 +1078,7 @@ impl<'a> Parser<'a> {
             match t.tok {
                 Tok::Sym('}') => {
                     self.bump()?;
+                    self.end_decl()?;
                     return Ok(());
                 }
                 Tok::Eof => {
@@ -950,8 +1089,11 @@ impl<'a> Parser<'a> {
                 }
                 Tok::Sym(';') => {
                     self.bump()?;
+                    self.end_decl()?;
                 }
-                Tok::Ident("option") => self.option_statement()?,
+                Tok::Ident("option") => {
+                    self.option_statement()?;
+                }
                 _ => {
                     let mut f = self.field(Scope::Oneof, depth + 1, &mut msg.nested)?;
                     f.oneof = Some(index);
@@ -985,6 +1127,7 @@ impl<'a> Parser<'a> {
             self.bracketed_options()?;
         }
         self.expect_sym(';', "after the extension ranges")?;
+        self.end_decl()?;
         Ok(())
     }
 
@@ -1019,6 +1162,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect_sym(';', "after the reservation")?;
+        self.end_decl()?;
         Ok(())
     }
 
@@ -1155,6 +1299,7 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         self.expect_sym(';', "after the field")?;
+        let docs = self.end_decl()?;
         Ok(FieldDecl {
             name,
             number,
@@ -1164,6 +1309,7 @@ impl<'a> Parser<'a> {
             label: field_label,
             oneof: None,
             options,
+            docs,
         })
     }
 
@@ -1230,7 +1376,11 @@ impl<'a> Parser<'a> {
                 format!("messages are nested more than {MAX_MESSAGE_NESTING} levels deep"),
             ));
         }
-        groups.push(self.message_body(name.clone(), body_depth)?);
+        let body = self.message_body(name.clone(), body_depth)?;
+        // The group is one declaration with two faces, a field and a message, and
+        // the comments around its `{` are on both.
+        let docs = body.docs.clone();
+        groups.push(body);
         Ok(FieldDecl {
             name: Named {
                 name: name.name.to_ascii_lowercase(),
@@ -1244,6 +1394,7 @@ impl<'a> Parser<'a> {
             label: Label::Implicit,
             oneof: None,
             options,
+            docs,
         })
     }
 
@@ -1272,6 +1423,7 @@ impl<'a> Parser<'a> {
             ));
         }
         self.expect_sym('{', "to open the extend block")?;
+        self.end_decl()?;
         let mut first_field = String::new();
         loop {
             let at = self.peek()?.clone();
@@ -1287,6 +1439,7 @@ impl<'a> Parser<'a> {
             }
             if self.is_sym('}') {
                 self.bump()?;
+                self.end_decl()?;
                 return Ok(ExtendDecl {
                     pos: keyword.pos,
                     extendee,

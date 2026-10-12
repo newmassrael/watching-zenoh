@@ -125,8 +125,8 @@ use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _, CHILD
 
 use wz_capi_dissect::{
     wz_dissect_declarations_diagnose, wz_dissect_declarations_from_proto, wz_dissect_e2e_open_body,
-    wz_dissect_e2e_wrap, wz_dissect_proto_encode, wz_dissect_string_free, WzDissectProtoFile,
-    WZ_DISSECT_OK,
+    wz_dissect_e2e_wrap, wz_dissect_proto_describe, wz_dissect_proto_encode,
+    wz_dissect_string_free, WzDissectProtoFile, WZ_DISSECT_OK,
 };
 use wz_session_core::json5::{self, Json5Value};
 
@@ -3858,4 +3858,569 @@ fn the_reading_comparison_writes_the_text_format_it_means() {
     );
     assert_eq!(from_base64("AQL/").expect("base64"), [1, 2, 0xff]);
     assert_eq!(from_base64("Zm8=").expect("base64"), b"fo");
+}
+
+// ---- the description door's comments, judged by protoc -----------------------
+//
+// `wz_dissect_proto_describe` gives a message and a field the `comment` and the
+// `trailing_comment` that `protoc` attaches to them. The rule is `protoc`'s and
+// is long (which comment trails the declaration above, which leads the one below,
+// what a blank line cuts off, what a `/* */` with a token after it on its line
+// belongs to), so it is judged against `protoc` itself and not against the
+// author's reading of `tokenizer.cc`: every schema below is compiled with
+// `--include_source_info`, the `SourceCodeInfo` of the descriptor set is read
+// back in the text form `protoc --decode` prints, and for every message and
+// field the description reaches, the comments of the location at its path are the
+// ones the document must carry, `null` where the location has none.
+
+/// One `location` of a `SourceCodeInfo`: its path and the comments it carries
+/// (the detached ones are nobody's, and are not read).
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Located {
+    path: Vec<u32>,
+    leading: Option<String>,
+    trailing: Option<String>,
+}
+
+/// The text of a string as `protoc --decode` prints it (the part between the
+/// quotes): C escapes, a byte outside printable ASCII as three octal digits.
+fn unescape_text_format(inside: &str) -> Result<String, String> {
+    let bytes = inside.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        match bytes.get(i).copied() {
+            Some(b'n') => out.push(b'\n'),
+            Some(b'r') => out.push(b'\r'),
+            Some(b't') => out.push(b'\t'),
+            Some(c @ (b'"' | b'\'' | b'\\')) => out.push(c),
+            Some(d @ b'0'..=b'7') => {
+                let mut value = u32::from(d - b'0');
+                let mut digits = 1;
+                while digits < 3 && matches!(bytes.get(i + 1), Some(b'0'..=b'7')) {
+                    value = value * 8 + u32::from(bytes[i + 1] - b'0');
+                    i += 1;
+                    digits += 1;
+                }
+                out.push(u8::try_from(value).map_err(|_| format!("octal {value} past a byte"))?);
+            }
+            other => return Err(format!("an escape protoc does not print: {other:?}")),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).map_err(|e| format!("a comment that is not UTF-8: {e}"))
+}
+
+/// A quoted string value on a line of the text format.
+fn quoted(value: &str) -> Result<String, String> {
+    let inside = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .ok_or_else(|| format!("not a quoted string: {value}"))?;
+    unescape_text_format(inside)
+}
+
+/// Every `location` of the descriptor's `source_code_info`.
+fn source_comments(descriptor_text: &str) -> Result<Vec<Located>, String> {
+    let mut out = Vec::new();
+    let mut inside: Option<Located> = None;
+    let mut in_info = false;
+    for line in descriptor_text.lines() {
+        let line = line.trim();
+        if line == "source_code_info {" {
+            in_info = true;
+            continue;
+        }
+        if !in_info {
+            continue;
+        }
+        if line == "location {" {
+            inside = Some(Located::default());
+            continue;
+        }
+        let Some(loc) = inside.as_mut() else { continue };
+        if line == "}" {
+            out.extend(inside.take());
+        } else if let Some(n) = line.strip_prefix("path: ") {
+            loc.path
+                .push(n.parse().map_err(|_| format!("a path element: {n}"))?);
+        } else if let Some(v) = line.strip_prefix("leading_comments: ") {
+            loc.leading = Some(quoted(v)?);
+        } else if let Some(v) = line.strip_prefix("trailing_comments: ") {
+            loc.trailing = Some(quoted(v)?);
+        }
+    }
+    Ok(out)
+}
+
+/// What a `SourceCodeInfo` path names: a message by full name, or one of its
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Declared {
+    Message(String),
+    Field(String, String),
+}
+
+/// The declaration at every path of the (single) file in `set`.
+fn declared_by_path(set: &Node) -> BTreeMap<Vec<u32>, Declared> {
+    fn visit(prefix: &str, path: Vec<u32>, message: &Node, out: &mut BTreeMap<Vec<u32>, Declared>) {
+        let name = message.scalar("name").unwrap_or_default();
+        let full = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        out.insert(path.clone(), Declared::Message(full.clone()));
+        for (k, field) in message.blocks("field").enumerate() {
+            let mut at = path.clone();
+            at.extend([2, k as u32]);
+            out.insert(
+                at,
+                Declared::Field(
+                    full.clone(),
+                    field.scalar("name").unwrap_or_default().into(),
+                ),
+            );
+        }
+        for (j, nested) in message.blocks("nested_type").enumerate() {
+            let mut at = path.clone();
+            at.extend([3, j as u32]);
+            visit(&full, at, nested, out);
+        }
+    }
+    let mut out = BTreeMap::new();
+    let Some(file) = set.blocks("file").next() else {
+        return out;
+    };
+    let package = file.scalar("package").unwrap_or_default();
+    for (i, message) in file.blocks("message_type").enumerate() {
+        visit(package, vec![4, i as u32], message, &mut out);
+    }
+    out
+}
+
+/// `(leading, trailing)` of every declaration that has a comment, by what it is.
+fn expected_comments(
+    set: &Node,
+    located: &[Located],
+) -> BTreeMap<Declared, (Option<String>, Option<String>)> {
+    let names = declared_by_path(set);
+    let mut out = BTreeMap::new();
+    for l in located {
+        if l.leading.is_none() && l.trailing.is_none() {
+            continue;
+        }
+        if let Some(declared) = names.get(&l.path) {
+            out.insert(declared.clone(), (l.leading.clone(), l.trailing.clone()));
+        }
+    }
+    out
+}
+
+fn describe_with_the_door(root: &str, text: &str) -> Json5Value {
+    let root = CString::new(root).expect("no NUL");
+    let name = CString::new("a.proto").expect("no NUL");
+    let entry = WzDissectProtoFile {
+        name: name.as_ptr(),
+        text: text.as_ptr(),
+        text_len: text.len(),
+    };
+    let mut out: *mut c_char = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local; the strings are NUL-terminated
+    // and the buffer is as long as the length says.
+    let rc = unsafe { wz_dissect_proto_describe(root.as_ptr(), &entry, 1, 0, &mut out) };
+    let doc = take_doc(rc, out);
+    json5::parse(&doc).unwrap_or_else(|e| panic!("the door wrote no JSON ({e:?}): {doc}"))
+}
+
+/// A comment key of a row: the text, or `None` for `null`.
+fn comment_of(row: &Json5Value, key: &str) -> Result<Option<String>, String> {
+    match member(row, key) {
+        Some(Json5Value::Null) => Ok(None),
+        Some(Json5Value::String(s)) => Ok(Some(s.clone())),
+        other => Err(format!("`{key}` is {other:?}, not a string or null")),
+    }
+}
+
+/// Where the document's comments differ from `expected`, one line each, how many
+/// declarations it compared, and how many of those `protoc` gives a comment (the
+/// number that says the comparison had something to disagree about).
+fn compare_comments(
+    doc: &Json5Value,
+    expected: &BTreeMap<Declared, (Option<String>, Option<String>)>,
+) -> (Vec<String>, usize, usize) {
+    let mut differences = Vec::new();
+    let (mut compared, mut commented) = (0, 0);
+    let Some(Json5Value::Array(messages)) = member(doc, "messages") else {
+        return (vec![format!("no messages: {}", doc.to_json_text())], 0, 0);
+    };
+    let mut judge = |what: Declared, row: &Json5Value| {
+        let want = expected.get(&what).cloned().unwrap_or((None, None));
+        commented += usize::from(want != (None, None));
+        let got = (|| {
+            Ok::<_, String>((
+                comment_of(row, "comment")?,
+                comment_of(row, "trailing_comment")?,
+            ))
+        })();
+        compared += 1;
+        match got {
+            Ok(got) if got == want => {}
+            Ok(got) => differences.push(format!("{what:?}\n  protoc: {want:?}\n  door:   {got:?}")),
+            Err(why) => differences.push(format!("{what:?}: {why}")),
+        }
+    };
+    for message in messages {
+        let Some(Json5Value::String(full)) = member(message, "full_name") else {
+            continue;
+        };
+        judge(Declared::Message(full.clone()), message);
+        if let Some(Json5Value::Array(fields)) = member(message, "fields") {
+            for field in fields {
+                if let Some(Json5Value::String(name)) = member(field, "name") {
+                    judge(Declared::Field(full.clone(), name.clone()), field);
+                }
+            }
+        }
+    }
+    (differences, compared, commented)
+}
+
+/// One schema of the comment corpus: a name, the root message, the text.
+struct CommentCase {
+    name: &'static str,
+    root: &'static str,
+    text: &'static str,
+}
+
+fn comment_corpus() -> Vec<CommentCase> {
+    const COMMENTED: &str = "// File header, detached by the blank line.\n\
+\n\
+syntax = \"proto3\";\n\
+\n\
+// The point of a plot.\n\
+message Point { // opens Point\n\
+  // The x.\n\
+  double x = 1; // trailing x\n\
+  double y = 2;\n\
+  /* block lead of z */\n\
+  double z = 3;\n\
+  // Run of\n\
+  // two lines.\n\
+  double w = 4;\n\
+\n\
+  // Detached from v by a blank line below.\n\
+\n\
+  double v = 5; /* same-line block */ double u = 6;\n\
+  double t = 7;\n\
+  // Trails t: followed by a blank line.\n\
+\n\
+  double s = 8;\n\
+  /** Doc block\n\
+   *  second line\n\
+   */\n\
+  double r = 9;\n\
+  // Before the close.\n\
+}\n\
+// After the message.\n\
+message Other {}\n";
+    vec![
+        CommentCase {
+            name: "every position the rule tells apart",
+            root: "Point",
+            text: COMMENTED,
+        },
+        CommentCase {
+            name: "the comment after a closing brace leads the next message",
+            root: "Other",
+            text: COMMENTED,
+        },
+        CommentCase {
+            name: "nested messages and a oneof",
+            root: "demo.Outer",
+            text: "syntax = \"proto3\";\n\
+package demo;\n\
+// Outer doc.\n\
+message Outer { // after brace\n\
+  // Inner doc.\n\
+  message Inner {\n\
+    int32 a = 1; // a trails\n\
+  }\n\
+  // The choice.\n\
+  oneof pick {\n\
+    // The name.\n\
+    string name = 1;\n\
+    uint32 code = 2; /* block trailing */\n\
+  }\n\
+  // Lead of the inner field\n\
+  Inner inner = 3;\n\
+}\n",
+        },
+        CommentCase {
+            name: "statements of every kind between declarations",
+            root: "demo.M",
+            text: "// c0\n\
+syntax = \"proto2\";\n\
+// c1\n\
+package demo; // c2\n\
+// lead of E\n\
+enum E { // e open\n\
+  // lead A\n\
+  A = 0; // trail A\n\
+}\n\
+// lead of S\n\
+service S { rpc Go (M) returns (M); } // trail S\n\
+// lead M\n\
+message M {\n\
+  // lead reserved\n\
+  reserved 5, 6; // trail reserved\n\
+  // lead extensions\n\
+  extensions 100 to 199;\n\
+  // lead f\n\
+  optional int32 f = 1 [deprecated = true]; // trail f\n\
+  // lead g\n\
+  optional E g = 2;\n\
+}\n",
+        },
+        CommentCase {
+            name: "carriage returns are part of the comment text",
+            root: "M",
+            text: "syntax = \"proto3\";\r\n// lead\r\nmessage M {\r\n  // f lead\r\n  \
+int32 a = 1; // trail\r\n}\r\n",
+        },
+        CommentCase {
+            name: "block comments of every form",
+            root: "M",
+            text: "syntax = \"proto3\";\n\
+/* one-line block lead */\n\
+message M {\n\
+  /*\n\
+   * multi\n\
+   * line\n\
+   */\n\
+  int32 a = 1;\n\
+  /** doc */\n\
+  int32 b = 2;\n\
+  int32 c = 3; /* trailing block */\n\
+  int32 d = 4; /* mid */ int32 e = 5; // after e\n\
+  /* before close */\n\
+}\n",
+        },
+        CommentCase {
+            name: "blank lines cut a comment off from both sides",
+            root: "M",
+            text: "syntax = \"proto3\";\n\
+\n\
+// detached 1\n\
+\n\
+// lead of M\n\
+message M {\n\
+\n\
+  // detached in message\n\
+\n\
+  // lead a\n\
+  int32 a = 1;\n\
+\n\
+  // detached between a and b\n\
+\n\
+  // lead b\n\
+  int32 b = 2;\n\
+  // trail b: a blank line follows\n\
+\n\
+  int32 c = 3;\n\
+}\n",
+        },
+        CommentCase {
+            name: "comments inside an option list belong to nobody",
+            root: "M",
+            text: "syntax = \"proto2\";\n\
+message M {\n\
+  // lead a\n\
+  optional int32 a = 1 [deprecated = true, // inner\n\
+      json_name = \"a_\" // inner2\n\
+    ]; // trail a\n\
+  optional int32 b = 2;\n\
+}\n",
+        },
+        CommentCase {
+            name: "an extend block between messages",
+            root: "N",
+            text: "syntax = \"proto2\";\n\
+message M { optional int32 a = 1; extensions 100 to 199; }\n\
+// lead of extend\n\
+extend M {\n\
+  // lead ext\n\
+  optional int32 e = 100; // trail ext\n\
+}\n\
+// lead of N\n\
+message N { optional int32 n = 1; }\n",
+        },
+        CommentCase {
+            name: "stray semicolons and a comment at the end of the file",
+            root: "M",
+            text: "syntax = \"proto3\";\n\
+message M { ; // x\n\
+  // lead a\n\
+  int32 a = 1; };\n\
+// trail of nothing\n",
+        },
+    ]
+}
+
+#[test]
+fn the_description_door_attaches_the_comments_protoc_attaches() {
+    let required = std::env::var("WZ_PROTOC_REQUIRE").is_ok();
+    let judge = match protoc().and_then(|(bin, version)| measure_judge(bin, version)) {
+        Ok(j) => j,
+        Err(why) => {
+            if required {
+                panic!(
+                    "WZ_PROTOC_REQUIRE is set and protoc cannot judge: {why}. The comments of \
+                     the description door have no other adjudicator, so a lane that armed this \
+                     flag was asking for the measurement, not for a skip"
+                );
+            }
+            eprintln!(
+                "skip: protoc cannot judge here ({why}); set WZ_PROTOC_REQUIRE=1 to make that a failure"
+            );
+            return;
+        }
+    };
+    let mut flags = judge.flags().to_vec();
+    flags.push("--include_source_info");
+
+    let mut disagreements: Vec<String> = Vec::new();
+    let (mut declarations, mut with_a_comment) = (0usize, 0usize);
+    for case in comment_corpus() {
+        let dir = tempfile::tempdir().expect("tempdir for the schema");
+        std::fs::write(dir.path().join("a.proto"), case.text).expect("write the schema");
+        let compiled = match compile(&judge.bin, &flags, dir.path(), "a.proto") {
+            Ok(c) if c.ok => c,
+            Ok(c) => {
+                disagreements.push(format!(
+                    "[{}] protoc refused the schema, so the corpus is wrong: {}",
+                    case.name, c.stderr
+                ));
+                continue;
+            }
+            Err(why) => panic!("[{}] {why}", case.name),
+        };
+        let text = compiled
+            .descriptor_text
+            .expect("a compiled schema is read back");
+        let set = read_text(&text).expect("the descriptor set reads");
+        let located = source_comments(&text).expect("the source info reads");
+        let expected = expected_comments(&set, &located);
+        let doc = describe_with_the_door(case.root, case.text);
+        let (differences, compared, commented) = compare_comments(&doc, &expected);
+        declarations += compared;
+        with_a_comment += commented;
+        disagreements.extend(
+            differences
+                .into_iter()
+                .map(|d| format!("[{}] {d}", case.name)),
+        );
+    }
+    eprintln!(
+        "description comments vs protoc: {declarations} declaration(s) compared, {with_a_comment} \
+         of them with a comment in protoc's view; judge: {}",
+        judge.version
+    );
+    assert!(
+        declarations >= 30 && with_a_comment >= 20,
+        "the corpus no longer exercises the comments: {declarations} compared, \
+         {with_a_comment} with a comment"
+    );
+    assert!(
+        disagreements.is_empty(),
+        "the description door and protoc disagree on {} point(s):\n\n{}",
+        disagreements.len(),
+        disagreements.join("\n\n")
+    );
+}
+
+/// THE COMMENT COMPARISON IS HELD TO A CONTROL, with no protoc: a recorded
+/// `SourceCodeInfo` reads as the comments it holds, escapes decoded, and a
+/// document with one comment changed is reported as a disagreement.
+#[test]
+fn the_comment_comparison_reports_a_door_that_disagrees() {
+    let recorded = r#"file {
+  name: "a.proto"
+  message_type {
+    name: "M"
+    field { name: "a" number: 1 }
+  }
+  source_code_info {
+    location {
+      path: 4
+      path: 0
+      span: 1
+      leading_comments: " Lead \"M\".\n"
+      trailing_comments: " caf\303\251\\\n"
+    }
+    location {
+      path: 4
+      path: 0
+      path: 2
+      path: 0
+      span: 2
+      leading_detached_comments: " nobody's\n"
+    }
+    location {
+      path: 4
+      path: 0
+      path: 2
+      path: 0
+      span: 3
+      trailing_comments: " a\n"
+    }
+  }
+}
+"#;
+    let located = source_comments(recorded).expect("reads");
+    assert_eq!(located.len(), 3, "{located:?}");
+    assert_eq!(located[0].path, [4, 0]);
+    assert_eq!(located[0].leading.as_deref(), Some(" Lead \"M\".\n"));
+    assert_eq!(located[0].trailing.as_deref(), Some(" caf\u{e9}\\\n"));
+    // A detached comment is nobody's.
+    assert_eq!(
+        (located[1].leading.clone(), located[1].trailing.clone()),
+        (None, None)
+    );
+    let set = read_text(recorded).expect("the descriptor reads");
+    let expected = expected_comments(&set, &located);
+    assert_eq!(expected.len(), 2, "{expected:?}");
+
+    let agreeing = json5::parse(
+        r#"{"messages":[{"full_name":"M","comment":" Lead \"M\".\n",
+            "trailing_comment":" café\\\n",
+            "fields":[{"name":"a","comment":null,"trailing_comment":" a\n"}]}]}"#,
+    )
+    .expect("JSON");
+    let (differences, compared, commented) = compare_comments(&agreeing, &expected);
+    assert!(differences.is_empty(), "{differences:?}");
+    assert_eq!((compared, commented), (2, 2));
+
+    // A trailing comment moved to the leading side, a comment dropped, and a
+    // comment the judge does not have: three disagreements, each reported.
+    for wrong in [
+        r#"{"messages":[{"full_name":"M","comment":null,"trailing_comment":" café\\\n","fields":[{"name":"a","comment":null,"trailing_comment":" a\n"}]}]}"#,
+        r#"{"messages":[{"full_name":"M","comment":" Lead \"M\".\n","trailing_comment":" café\\\n","fields":[{"name":"a","comment":null,"trailing_comment":null}]}]}"#,
+        r#"{"messages":[{"full_name":"M","comment":" Lead \"M\".\n","trailing_comment":" café\\\n","fields":[{"name":"a","comment":" extra\n","trailing_comment":" a\n"}]}]}"#,
+    ] {
+        let doc = json5::parse(wrong).expect("JSON");
+        let (differences, ..) = compare_comments(&doc, &expected);
+        assert_eq!(differences.len(), 1, "{wrong}: {differences:?}");
+    }
+    assert_eq!(
+        unescape_text_format("\\303\\251\\n").expect("octal"),
+        "\u{e9}\n"
+    );
+    assert!(unescape_text_format("\\q").is_err());
 }

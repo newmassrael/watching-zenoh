@@ -31,6 +31,7 @@
 //! `protoc` expands a tab to the next multiple of eight, which is a display
 //! decision this reader does not reproduce.
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -78,11 +79,47 @@ pub(crate) enum Tok<'a> {
     Eof,
 }
 
+/// The comments found in the gap in front of a token, by `protoc`'s own rules.
+///
+/// `protoc` does not keep every comment: it decides, at the gap between two
+/// tokens, which comment trails the token before and which leads the token
+/// after, and drops the rest as detached. The rule (`NextWithComments` in
+/// `google/protobuf/io/tokenizer.cc`):
+///
+/// * a comment that starts on the same line as the token before trails it, a
+///   `//` comment alone (the comments on the lines below do not join it), a
+///   `/* */` comment only when nothing else follows it on its line (otherwise it
+///   belongs to nobody);
+/// * a run of `//` comments on the lines after, with no blank line between them
+///   and the token before, trails that token too when a blank line follows the
+///   run, and leads the next token when none does;
+/// * a blank line detaches whatever precedes it from both;
+/// * a comment before a closing `}`, `]` or `)` or before the end of the file
+///   leads nothing.
+///
+/// The text of a comment is what `protoc` stores in `SourceCodeInfo`: after the
+/// `//` or the `/*`, up to and including the newline of a line comment, with a
+/// block comment's continuation lines stripped of their leading white space and
+/// one `*`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Gap {
+    /// The comment trailing the token BEFORE this gap.
+    pub trailing: Option<String>,
+    /// The comment leading the token that owns this record.
+    pub leading: Option<String>,
+}
+
 /// A token and where it starts.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Token<'a> {
     pub tok: Tok<'a>,
     pub pos: Pos,
+    /// Byte offsets of the token in the source text, `start..end`.
+    pub start: usize,
+    pub end: usize,
+    /// The comments in the gap in front of the token, when there are any. Shared
+    /// so that a token cloned for a look-ahead does not copy a long comment.
+    pub gap: Option<Rc<Gap>>,
 }
 
 /// The tokenizer over one file's text.
@@ -91,6 +128,84 @@ pub(crate) struct Lexer<'a> {
     at: usize,
     line: u32,
     col: u32,
+    /// Whether a token has been handed out: the first gap of a file has no token
+    /// before it for a comment to trail.
+    started: bool,
+}
+
+/// What a `/` at the cursor starts.
+enum CommentStart {
+    Line,
+    /// A block comment, with the place it began.
+    Block(Pos),
+}
+
+/// `protoc`'s `CommentCollector`: the comment being read, and where it goes.
+struct Collector {
+    buffer: String,
+    has_comment: bool,
+    is_line: bool,
+    can_attach_to_prev: bool,
+    trailing: Option<String>,
+}
+
+impl Collector {
+    fn new(can_attach_to_prev: bool) -> Self {
+        Self {
+            buffer: String::new(),
+            has_comment: false,
+            is_line: false,
+            can_attach_to_prev,
+            trailing: None,
+        }
+    }
+
+    /// Line comments on consecutive lines are one comment; a block comment
+    /// before them is another.
+    fn line_buffer(&mut self) -> &mut String {
+        if self.has_comment && !self.is_line {
+            self.flush();
+        }
+        self.has_comment = true;
+        self.is_line = true;
+        &mut self.buffer
+    }
+
+    fn block_buffer(&mut self) -> &mut String {
+        self.flush();
+        self.has_comment = true;
+        self.is_line = false;
+        &mut self.buffer
+    }
+
+    fn clear(&mut self) {
+        self.buffer.clear();
+        self.has_comment = false;
+    }
+
+    /// End the comment being read: it trails the token before when it still may,
+    /// and is detached (dropped) otherwise.
+    fn flush(&mut self) {
+        if self.has_comment {
+            if self.can_attach_to_prev {
+                self.trailing = Some(core::mem::take(&mut self.buffer));
+                self.can_attach_to_prev = false;
+            }
+            self.clear();
+        }
+    }
+
+    fn detach_from_prev(&mut self) {
+        self.can_attach_to_prev = false;
+    }
+
+    /// Whatever is still being read leads the next token.
+    fn finish(self) -> Gap {
+        Gap {
+            trailing: self.trailing,
+            leading: self.has_comment.then_some(self.buffer),
+        }
+    }
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -113,6 +228,7 @@ impl<'a> Lexer<'a> {
             at,
             line: 1,
             col: 1,
+            started: false,
         }
     }
 
@@ -146,78 +262,218 @@ impl<'a> Lexer<'a> {
         loop {
             match self.byte(0) {
                 Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) => self.bump(),
-                Some(b'/') if self.byte(1) == Some(b'/') => {
-                    while !matches!(self.byte(0), None | Some(b'\n')) {
+                _ => match self.comment_start() {
+                    Some(CommentStart::Line) => self.line_comment(&mut String::new()),
+                    Some(CommentStart::Block(started)) => {
+                        self.block_comment(&mut String::new(), started)?;
+                    }
+                    None => return Ok(()),
+                },
+            }
+        }
+    }
+
+    /// Skip the blanks that are not a line break, as `protoc` counts them.
+    fn blanks(&mut self) {
+        while matches!(self.byte(0), Some(b' ' | b'\t' | b'\r' | 0x0b | 0x0c)) {
+            self.bump();
+        }
+    }
+
+    /// Consume `//` or `/*` when the cursor is on one. A `/` that is neither is a
+    /// symbol, and is left for the token that follows.
+    fn comment_start(&mut self) -> Option<CommentStart> {
+        if self.byte(0) != Some(b'/') {
+            return None;
+        }
+        let started = self.pos();
+        match self.byte(1) {
+            Some(b'/') => {
+                self.bump();
+                self.bump();
+                Some(CommentStart::Line)
+            }
+            Some(b'*') => {
+                self.bump();
+                self.bump();
+                Some(CommentStart::Block(started))
+            }
+            _ => None,
+        }
+    }
+
+    /// The rest of a `//` comment: the text after the slashes up to and including
+    /// the line break, which is what `protoc` keeps.
+    fn line_comment(&mut self, out: &mut String) {
+        let from = self.at;
+        while !matches!(self.byte(0), None | Some(b'\n')) {
+            self.bump();
+        }
+        if self.byte(0) == Some(b'\n') {
+            self.bump();
+        }
+        out.push_str(&self.src[from..self.at]);
+    }
+
+    /// The rest of a `/* */` comment, as `protoc` reads it: each line's leading
+    /// white space and one `*` are not part of the text, and neither is the
+    /// closing `*/`. An unterminated comment is the only way this fails.
+    fn block_comment(&mut self, out: &mut String, started: Pos) -> Result<(), SyntaxError> {
+        let mut from = self.at;
+        loop {
+            while !matches!(self.byte(0), None | Some(b'*' | b'/' | b'\n')) {
+                self.bump();
+            }
+            match self.byte(0) {
+                None => {
+                    // Blamed where the file ends, as `protoc` does, with the
+                    // place the comment began in the text because that is the
+                    // line a person must fix.
+                    return Err(SyntaxError::new(
+                        self.pos(),
+                        alloc::format!(
+                            "end of file inside a block comment that began at line {}, column {}",
+                            started.line,
+                            started.col
+                        ),
+                    ));
+                }
+                Some(b'\n') => {
+                    self.bump();
+                    out.push_str(&self.src[from..self.at]);
+                    self.blanks();
+                    if self.byte(0) == Some(b'*') {
+                        self.bump();
+                        if self.byte(0) == Some(b'/') {
+                            self.bump();
+                            return Ok(());
+                        }
+                    }
+                    from = self.at;
+                }
+                Some(b'*') => {
+                    self.bump();
+                    if self.byte(0) == Some(b'/') {
+                        self.bump();
+                        out.push_str(&self.src[from..self.at - 2]);
+                        return Ok(());
+                    }
+                }
+                Some(_) => self.bump(),
+            }
+        }
+    }
+
+    /// The gap in front of the next token: the comment that trails the token
+    /// before it and the one that leads this one, by the rule [`Gap`] states.
+    ///
+    /// Leaves the cursor on the next token, so every caller that wants only the
+    /// token goes on to read it.
+    fn gap(&mut self) -> Result<Gap, SyntaxError> {
+        let mut c = Collector::new(self.started);
+        if self.started {
+            // A comment on the line of the token before is that token's.
+            self.blanks();
+            match self.comment_start() {
+                Some(CommentStart::Line) => {
+                    self.line_comment(c.line_buffer());
+                    // The lines below do not join a trailing comment.
+                    c.flush();
+                }
+                Some(CommentStart::Block(started)) => {
+                    self.block_comment(c.block_buffer(), started)?;
+                    self.blanks();
+                    if self.byte(0) != Some(b'\n') {
+                        // The next token is on this line, so the comment belongs
+                        // to neither side.
+                        self.skip_trivia()?;
+                        return Ok(Gap::default());
+                    }
+                    self.bump();
+                    c.flush();
+                }
+                None => {
+                    if self.byte(0) == Some(b'\n') {
+                        self.bump();
+                    } else {
+                        // The next token is on the same line: no comments.
+                        self.skip_trivia()?;
+                        return Ok(Gap::default());
+                    }
+                }
+            }
+        }
+        // Now on a line after the token before, or at the start of the file.
+        loop {
+            self.blanks();
+            match self.comment_start() {
+                Some(CommentStart::Line) => self.line_comment(c.line_buffer()),
+                Some(CommentStart::Block(started)) => {
+                    self.block_comment(c.block_buffer(), started)?;
+                    // The rest of the line is not a blank line.
+                    self.blanks();
+                    if self.byte(0) == Some(b'\n') {
                         self.bump();
                     }
                 }
-                Some(b'/') if self.byte(1) == Some(b'*') => {
-                    let started = self.pos();
-                    self.bump();
-                    self.bump();
-                    loop {
-                        match self.byte(0) {
-                            None => {
-                                // Blamed where the file ends, as `protoc` does,
-                                // with the place the comment began in the text
-                                // because that is the line a person must fix.
-                                return Err(SyntaxError::new(
-                                    self.pos(),
-                                    alloc::format!(
-                                        "end of file inside a block comment that began at line {}, column {}",
-                                        started.line,
-                                        started.col
-                                    ),
-                                ));
-                            }
-                            Some(b'*') if self.byte(1) == Some(b'/') => {
-                                self.bump();
-                                self.bump();
-                                break;
-                            }
-                            Some(_) => self.bump(),
+                None => {
+                    if self.byte(0) == Some(b'\n') {
+                        // A blank line ends the comment and cuts it off from the
+                        // token before.
+                        self.bump();
+                        c.flush();
+                        c.detach_from_prev();
+                    } else {
+                        // A closing bracket or the end of the file ends a scope:
+                        // a comment in front of it leads nothing.
+                        if matches!(self.byte(0), None | Some(b'}' | b']' | b')')) {
+                            c.flush();
                         }
+                        return Ok(c.finish());
                     }
                 }
-                _ => return Ok(()),
             }
         }
     }
 
     /// The next token. Calling it again after `Tok::Eof` returns `Tok::Eof`.
     pub(crate) fn next_token(&mut self) -> Result<Token<'a>, SyntaxError> {
-        self.skip_trivia()?;
+        let gap = self.gap()?;
+        self.started = true;
+        let gap = (gap != Gap::default()).then(|| Rc::new(gap));
         let pos = self.pos();
+        let start = self.at;
+        let tok = self.token(pos)?;
+        Ok(Token {
+            tok,
+            pos,
+            start,
+            end: self.at,
+            gap,
+        })
+    }
+
+    /// The token under the cursor, which is past any trivia.
+    fn token(&mut self, pos: Pos) -> Result<Tok<'a>, SyntaxError> {
         let Some(b) = self.byte(0) else {
-            return Ok(Token { tok: Tok::Eof, pos });
+            return Ok(Tok::Eof);
         };
         if is_ident_start(b) {
             let start = self.at;
             while self.byte(0).is_some_and(is_ident_continue) {
                 self.bump();
             }
-            return Ok(Token {
-                tok: Tok::Ident(&self.src[start..self.at]),
-                pos,
-            });
+            return Ok(Tok::Ident(&self.src[start..self.at]));
         }
         if b.is_ascii_digit() || (b == b'.' && self.byte(1).is_some_and(|n| n.is_ascii_digit())) {
-            let tok = self.number(pos)?;
-            return Ok(Token { tok, pos });
+            return self.number(pos);
         }
         if b == b'"' || b == b'\'' {
-            let bytes = self.string(b)?;
-            return Ok(Token {
-                tok: Tok::Str(bytes),
-                pos,
-            });
+            return Ok(Tok::Str(self.string(b)?));
         }
         if b.is_ascii_punctuation() {
             self.bump();
-            return Ok(Token {
-                tok: Tok::Sym(b as char),
-                pos,
-            });
+            return Ok(Tok::Sym(b as char));
         }
         // Anything else is a control byte or the first byte of a non-ASCII
         // character outside a string or comment. The character is named by its
@@ -581,6 +837,91 @@ mod tests {
         let e = err("a\n/* never\nclosed\n");
         assert_eq!(e.pos, Pos { line: 4, col: 1 });
         assert!(e.reason.contains("began at line 2"));
+    }
+
+    /// The gap in front of token number `index` of `src` (the end of the file
+    /// counts as a token): `(trailing, leading)`.
+    fn gap_before(src: &str, index: usize) -> (Option<String>, Option<String>) {
+        let mut lex = Lexer::new(src);
+        for _ in 0..index {
+            lex.next_token().expect("lexes");
+        }
+        let t = lex.next_token().expect("lexes");
+        let g = t.gap.map(|g| (*g).clone()).unwrap_or_default();
+        (g.trailing, g.leading)
+    }
+
+    fn s(text: &str) -> Option<String> {
+        Some(String::from(text))
+    }
+
+    #[test]
+    fn a_comment_on_the_line_of_the_token_before_trails_it() {
+        // `//` after a token trails it, and the comment on the next lines is the
+        // next token's, not a continuation of the trailing one.
+        assert_eq!(
+            gap_before("a // t\n// l\nb", 1),
+            (s(" t\n"), s(" l\n")),
+            "line comments"
+        );
+        assert_eq!(gap_before("a /* x */\nb", 1), (s(" x "), None), "block");
+        // A block comment with a token after it on its line belongs to nobody.
+        assert_eq!(gap_before("a /* x */ b", 1), (None, None));
+    }
+
+    #[test]
+    fn a_blank_line_detaches_and_a_run_before_one_trails() {
+        // No blank line before the run, one after it: the run trails.
+        assert_eq!(
+            gap_before("a\n// run\n// two\n\nb", 1),
+            (s(" run\n two\n"), None)
+        );
+        // A blank line before it: detached from both.
+        assert_eq!(gap_before("a\n\n// d\n\nb", 1), (None, None));
+        // No blank line after it either: it leads the next token.
+        assert_eq!(gap_before("a\n\n// l\nb", 1), (None, s(" l\n")));
+    }
+
+    #[test]
+    fn a_comment_before_a_closing_bracket_leads_nothing() {
+        // The end of the file, and a `}`: neither takes a leading comment, and the
+        // comment goes to the token before when it still may.
+        assert_eq!(gap_before("a\n// end\n", 1), (s(" end\n"), None));
+        assert_eq!(gap_before("a\n// end\n}", 1), (s(" end\n"), None));
+        // Detached by a blank line first: nobody has it.
+        assert_eq!(gap_before("a\n\n// end\n}", 1), (None, None));
+    }
+
+    #[test]
+    fn a_block_comment_is_stripped_the_way_protoc_strips_it() {
+        // `/**` starts the text with the second star; each continuation line loses
+        // its indent and one star; the closing `*/` is not text.
+        assert_eq!(
+            gap_before("/**\n * hi\n *  there\n */\nx", 0),
+            (None, s("*\n hi\n  there\n"))
+        );
+        assert_eq!(gap_before("/* one */\nx", 0), (None, s(" one ")));
+    }
+
+    #[test]
+    fn the_first_token_has_no_token_before_it_for_a_comment_to_trail() {
+        let mut lex = Lexer::new("// lead\nx");
+        let t = lex.next_token().expect("x");
+        let gap = t.gap.expect("a gap");
+        assert_eq!(
+            (gap.trailing.clone(), gap.leading.clone()),
+            (None, s(" lead\n"))
+        );
+        assert_eq!((t.start, t.end), (8, 9));
+    }
+
+    #[test]
+    fn a_token_keeps_its_byte_span() {
+        let mut lex = Lexer::new("ab  1.5");
+        let a = lex.next_token().expect("ab");
+        let f = lex.next_token().expect("float");
+        assert_eq!((a.start, a.end), (0, 2));
+        assert_eq!((f.tok, f.start, f.end), (Tok::Float, 4, 7));
     }
 
     #[test]

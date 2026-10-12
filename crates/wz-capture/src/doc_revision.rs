@@ -2371,6 +2371,28 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: PROTO_MESSAGE_R1_CARRIES,
     },
+    // THE COMMENTS AND THE OPTIONS OF A DESCRIBED SCHEMA.
+    //
+    // A consumer that builds a form from a schema reads, beside the field's name
+    // and type, the words the schema's author wrote about it and the options the
+    // author set on it, and until now had to read the `.proto` text a second time
+    // for both. Revision 2 adds, on a message row and on a field row alike,
+    // `comment` and `trailing_comment` (the comments as `protoc` attaches them,
+    // `null` for none) and `options` (every option as written, with the `kind` of
+    // its value). Nothing retires and nothing moves: a consumer that read
+    // revision 1's keys reads revision 2's, and finds more beside them.
+    //
+    // `kind` is a closed set and a PASSENGER: its word says how the value was
+    // written and the `value` is beside it whichever word that is.
+    DocumentShape {
+        document: PROTO_MESSAGE,
+        revision: 2,
+        keys: PROTO_MESSAGE_R2_KEYS,
+        retiring: &[],
+        families: PROTO_MESSAGE_R2_FAMILIES,
+        planes: &[],
+        carries: PROTO_MESSAGE_R2_CARRIES,
+    },
     // What building a protected frame under a caller-supplied profile did, or
     // why it refused.
     //
@@ -9593,6 +9615,98 @@ pub const PROTO_MESSAGE_R1_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The description document's key set at revision 2: revision 1's PLUS `comment`
+/// and `trailing_comment` (on a message row and on a field row), `options` (the
+/// same two rows) and, inside an option, `kind`. Nothing retires; `name` and
+/// `value` were already keys and an option row reuses them.
+pub const PROTO_MESSAGE_R2_KEYS: &[&str] = &[
+    "column",
+    "comment",
+    "document",
+    "enum",
+    "fields",
+    "file",
+    "full_name",
+    "json_name",
+    "key",
+    "kind",
+    "label",
+    "line",
+    "map",
+    "message",
+    "message_type",
+    "messages",
+    "name",
+    "number",
+    "ok",
+    "oneof",
+    "oneofs",
+    "options",
+    "packed",
+    "reason",
+    "revision",
+    "root",
+    "syntax",
+    "trailing_comment",
+    "type",
+    "value",
+    "values",
+];
+
+/// How an option's value was written, the words of `kind`.
+pub const PROTO_OPTION_KIND_R2: &[&str] =
+    &["aggregate", "float", "identifier", "integer", "string"];
+
+/// The description document's value families at revision 2: revision 1's four
+/// and the `kind` of an option.
+pub const PROTO_MESSAGE_R2_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "key",
+        values: PROTO_MAP_KEY_R1,
+    },
+    ValueFamily {
+        key: "kind",
+        values: PROTO_OPTION_KIND_R2,
+    },
+    ValueFamily {
+        key: "label",
+        values: PROTO_LABEL_R1,
+    },
+    ValueFamily {
+        key: "syntax",
+        values: PROTO_SYNTAX_R1,
+    },
+    ValueFamily {
+        key: "type",
+        values: PROTO_TYPE_R1,
+    },
+];
+
+/// All five are PASSENGERS. `kind` says how an option's `value` was written
+/// (a number, or a string), and `value` is beside it whichever word it is.
+pub const PROTO_MESSAGE_R2_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "key",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "label",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "syntax",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "type",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The `e2e_wrap` document's key set at revision 1, over BOTH branches: the
 /// built frame with every step it took, and the refusal with whichever
 /// position keys apply.
@@ -14675,7 +14789,10 @@ mod tests {
             // Which rule of a declaration text covers a key.
             (DECLARATIONS_MATCH, 1),
             // A root message of a `.proto` schema, described.
-            (PROTO_MESSAGE, 1),
+            // To 2 when a message and a field gained the comments `protoc`
+            // attaches to them and every option as written: `comment`,
+            // `trailing_comment`, `options` and, inside an option, `kind`.
+            (PROTO_MESSAGE, 2),
             // A protected frame built and read under a caller's profile.
             // To 2 when the body could be described: `body_message`, `stage`
             // and the writer's position keys.

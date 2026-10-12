@@ -156,8 +156,8 @@ use core::fmt;
 use crate::payload::formats::{escape_field, FormatMap};
 use crate::proto_lex::{Pos, SyntaxError};
 use crate::proto_parse::{
-    parse_file, EnumDecl, ExtendDecl, FieldOption, FieldType, FileAst, ImportKind, Label, MapValue,
-    MessageDecl, ScalarKind, Syntax, TypeName, MAX_FIELD_NUMBER,
+    parse_file, Docs, EnumDecl, ExtendDecl, FieldOption, FieldType, FileAst, ImportKind, Label,
+    MapValue, MessageDecl, ScalarKind, Syntax, TypeName, MAX_FIELD_NUMBER,
 };
 
 /// The most lines a result may hold, the rule line included.
@@ -401,6 +401,10 @@ pub(crate) struct Msg {
     pub(crate) fields: Vec<Fld>,
     /// The names of the message's oneofs, in the order written.
     pub(crate) oneofs: Vec<String>,
+    /// The comments `protoc` attaches to the message.
+    pub(crate) docs: Docs,
+    /// The message's own `option` statements, in the order written.
+    pub(crate) options: Vec<FieldOption>,
     /// What in the text keeps this message from being declared, should the
     /// expansion visit it, in the order the linker met them.
     blockers: Vec<Blocker>,
@@ -481,8 +485,10 @@ pub(crate) struct Fld {
     pub(crate) label: Label,
     /// The index in the owning message's `oneofs`, if the field is a member.
     pub(crate) oneof: Option<usize>,
-    /// The `[...]` entries with a plain name, for `packed` and `json_name`.
+    /// Every `[...]` entry, in the order written.
     pub(crate) options: Vec<FieldOption>,
+    /// The comments `protoc` attaches to the field.
+    pub(crate) docs: Docs,
 }
 
 pub(crate) struct Linker<'f, 'a> {
@@ -707,6 +713,8 @@ impl<'a> Linker<'_, 'a> {
             syntax: self.syntaxes[file],
             fields: Vec::new(),
             oneofs: m.oneofs.iter().map(|o| o.name.clone()).collect(),
+            docs: m.docs.clone(),
+            options: m.options.clone(),
             blockers: Vec::new(),
         });
         self.declare(full.clone(), Kind::Message(idx), file, m.name.pos)?;
@@ -1086,6 +1094,7 @@ impl<'a> Linker<'_, 'a> {
                 label: f.label,
                 oneof: f.oneof,
                 options: f.options.clone(),
+                docs: f.docs.clone(),
             });
         }
         self.msgs[idx].fields = fields;

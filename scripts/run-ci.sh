@@ -13811,10 +13811,12 @@ layer_c1bn_passive_dissection_features() {
     # joined the file, and thirteen until the hosted run on protoc 3.12.4, which
     # omits a proto3 `-0.0`, added the probe, its reader and the door-only test.
     # Sixteen until the reading door (`wz_dissect_e2e_open_body`) joined with its
-    # adjudicator and its text-format control: eighteen.
+    # adjudicator and its text-format control: eighteen. Twenty when the
+    # description door's comments (`wz_dissect_proto_describe`) joined with their
+    # adjudicator, which reads `protoc`'s `SourceCodeInfo`, and its control.
     out="$(cd crates && WZ_PROTOC_REQUIRE=1 cargo test -p wz-integration-tests \
         --test proto_door_protoc_oracle --quiet 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. 18 passed' <<<"$out" || {
+    grep -qE '^test result: ok\. 20 passed' <<<"$out" || {
         echo "  C1bn FAIL: the .proto door oracle did not run"
         echo "$out"; return 1; }
 

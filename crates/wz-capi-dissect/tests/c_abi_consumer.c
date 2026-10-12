@@ -1258,8 +1258,10 @@ static int check_relate_match_describe_doors(void) {
         "syntax = \"proto3\";\n"
         "package m;\n"
         "enum Mode { OFF = 0; ON = 1; }\n"
+        "// One reading.\n"
         "message Root {\n"
-        "  uint32 sensor_id = 1;\n"
+        "  // The sensor.\n"
+        "  uint32 sensor_id = 1 [(ext).int_size = IS_16, (ext).max = 8];\n"
         "  Mode mode = 2;\n"
         "  repeated sint32 samples = 3;\n"
         "  oneof pick { string name = 4; uint32 code = 5; }\n"
@@ -1276,8 +1278,21 @@ static int check_relate_match_describe_doors(void) {
     CHECK(strstr(doc, "{\"name\":\"sensor_id\",\"json_name\":\"sensorId\","
                       "\"number\":1,\"type\":\"uint32\",\"label\":\"singular\","
                       "\"oneof\":null,\"packed\":null,\"enum\":null,"
-                      "\"message_type\":null,\"map\":null}") != NULL,
+                      "\"message_type\":null,\"map\":null,"
+                      "\"comment\":\" The sensor.\\n\",\"trailing_comment\":null,"
+                      "\"options\":[{\"name\":\"(ext).int_size\","
+                      "\"kind\":\"identifier\",\"value\":\"IS_16\"},"
+                      "{\"name\":\"(ext).max\",\"kind\":\"integer\","
+                      "\"value\":8}]}") != NULL,
           "a scalar row must carry every key: %s", doc);
+    CHECK(strstr(doc, "\"comment\":\" One reading.\\n\"") != NULL,
+          "a message row must carry the comment protoc attaches: %s", doc);
+    CHECK(strstr(doc, "\"name\":\"mode\",\"json_name\":\"mode\",\"number\":2,"
+                      "\"type\":\"enum\",\"label\":\"singular\",\"oneof\":null,"
+                      "\"packed\":null") != NULL &&
+              strstr(doc, "\"comment\":null,\"trailing_comment\":null,"
+                          "\"options\":[]}") != NULL,
+          "a row without a comment or an option must say so: %s", doc);
     CHECK(strstr(doc, "\"type\":\"enum\"") != NULL &&
               strstr(doc, "\"enum\":{\"name\":\"m.Mode\",\"values\":[{\"name\":"
                           "\"OFF\",\"number\":0},{\"name\":\"ON\",\"number\":1}]}") !=
@@ -3281,7 +3296,7 @@ int main(void) {
                                        &revisioned[14].doc);
     CHECK(rc == WZ_DISSECT_OK, "declarations_match document rc=%d", rc);
     revisioned[15].name = "proto_message";
-    revisioned[15].revision = 1;
+    revisioned[15].revision = 2;
     revisioned[15].doc = NULL;
     {
         static const char one_text[] =

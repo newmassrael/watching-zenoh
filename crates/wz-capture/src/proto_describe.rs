@@ -27,6 +27,14 @@
 //! belongs to, whether a repeated field is written packed, and what a type that
 //! names another type points at.
 //!
+//! A message and a field also carry the comments `protoc` attaches to them (the
+//! leading and the trailing comment, by `protoc`'s own rule, which the lexer
+//! implements: [`crate::proto_lex::Gap`]) and every option written on them, in the
+//! order written, none dropped and none judged. A consumer that builds a form from
+//! the schema thereby reads the words the author wrote about a field and the
+//! options the author set on it (an extension's option included) from the one
+//! reader, and not from a second pass over the text.
+//!
 //! The words are closed: the `type` of a field is a scalar keyword or one of
 //! `enum`, `message` and `map`, and the `label` one of `singular`, `optional`,
 //! `required` and `repeated`. A `map<K, V>` is written on the wire as a repeated
@@ -52,7 +60,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::proto_parse::{Label, ScalarKind, Syntax};
+use crate::proto_parse::{FieldOption, Label, OptionValue, ScalarKind, Syntax};
 use crate::proto_schema::{FieldKind, Linker, MapValueKind, ProtoDiagnostic, ProtoFile};
 
 /// The words of a field's `type`: every scalar keyword, then the three that name
@@ -81,6 +89,59 @@ pub const LABEL_WORDS: [&str; 4] = ["singular", "optional", "required", "repeate
 
 /// The words of a message's `syntax`.
 pub const SYNTAX_WORDS: [&str; 2] = ["proto2", "proto3"];
+
+/// The words of an option's `kind`: how its value was written.
+pub const OPTION_KIND_WORDS: [&str; 5] = ["identifier", "integer", "float", "string", "aggregate"];
+
+/// The value of an option, as written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptionValueDescription {
+    /// A bare word: `true`, an enum value's name.
+    Identifier(String),
+    Integer(i128),
+    /// The literal as written, sign included.
+    Float(String),
+    String(String),
+    /// The text between the braces of a `{ ... }` value, as written.
+    Aggregate(String),
+}
+
+impl OptionValueDescription {
+    /// The word of [`OPTION_KIND_WORDS`] for this value.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Identifier(_) => OPTION_KIND_WORDS[0],
+            Self::Integer(_) => OPTION_KIND_WORDS[1],
+            Self::Float(_) => OPTION_KIND_WORDS[2],
+            Self::String(_) => OPTION_KIND_WORDS[3],
+            Self::Aggregate(_) => OPTION_KIND_WORDS[4],
+        }
+    }
+}
+
+/// One option of a field or a message, as written: the name the way the file
+/// spelled it (`packed`, `(ext).field`) and the value, not judged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptionDescription {
+    pub name: String,
+    pub value: OptionValueDescription,
+}
+
+fn describe_options(options: &[FieldOption]) -> Vec<OptionDescription> {
+    options
+        .iter()
+        .map(|o| OptionDescription {
+            name: o.name.clone(),
+            value: match &o.value {
+                OptionValue::Ident(w) => OptionValueDescription::Identifier(w.clone()),
+                OptionValue::Int(n) => OptionValueDescription::Integer(*n),
+                OptionValue::Float(text) => OptionValueDescription::Float(text.clone()),
+                OptionValue::Str(s) => OptionValueDescription::String(s.clone()),
+                OptionValue::Aggregate(text) => OptionValueDescription::Aggregate(text.clone()),
+            },
+        })
+        .collect()
+}
 
 /// An enum a field's type names, with the numbers its names stand for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +197,12 @@ pub struct FieldDescription {
     pub target: Target,
     /// The two types of a field of type `map`.
     pub map: Option<MapDescription>,
+    /// The comment `protoc` reads as leading the field.
+    pub comment: Option<String>,
+    /// The comment `protoc` reads as trailing the field.
+    pub trailing_comment: Option<String>,
+    /// Every entry of the field's `[...]` list, in the order written.
+    pub options: Vec<OptionDescription>,
 }
 
 /// One message.
@@ -151,6 +218,12 @@ pub struct MessageDescription {
     pub oneofs: Vec<String>,
     /// The fields, in declaration order.
     pub fields: Vec<FieldDescription>,
+    /// The comment `protoc` reads as leading the message.
+    pub comment: Option<String>,
+    /// The comment `protoc` reads as trailing the message: the one after its `{`.
+    pub trailing_comment: Option<String>,
+    /// The message's own `option` statements, in the order written.
+    pub options: Vec<OptionDescription>,
 }
 
 /// The root message and the messages it reaches.
@@ -276,6 +349,9 @@ pub fn describe_proto(
                 packed,
                 target,
                 map,
+                comment: f.docs.leading.clone(),
+                trailing_comment: f.docs.trailing.clone(),
+                options: describe_options(&f.options),
             });
         }
         messages.push(MessageDescription {
@@ -284,6 +360,9 @@ pub fn describe_proto(
             syntax: syntax_word(msg.syntax),
             oneofs: msg.oneofs.clone(),
             fields,
+            comment: msg.docs.leading.clone(),
+            trailing_comment: msg.docs.trailing.clone(),
+            options: describe_options(&msg.options),
         });
     }
     Ok(ProtoDescription {

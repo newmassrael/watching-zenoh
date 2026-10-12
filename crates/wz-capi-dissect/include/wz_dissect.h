@@ -3030,12 +3030,17 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  *
  * Always returns WZ_DISSECT_OK for well formed arguments and writes a document:
  *
- *     {"document":{"name":"proto_message","revision":1},"ok":true,
+ *     {"document":{"name":"proto_message","revision":2},"ok":true,
  *      "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading",
  *       "file":"a.proto","syntax":"proto3","oneofs":[],
+ *       "comment":" One reading.\n","trailing_comment":null,
+ *       "options":[{"name":"(ext).id","kind":"integer","value":7}],
  *       "fields":[{"name":"sensor_id","json_name":"sensorId","number":1,
  *        "type":"uint32","label":"singular","oneof":null,"packed":null,
- *        "enum":null,"message_type":null,"map":null}]}]}
+ *        "enum":null,"message_type":null,"map":null,
+ *        "comment":null,"trailing_comment":" the sensor\n",
+ *        "options":[{"name":"(ext).int_size","kind":"identifier",
+ *                    "value":"IS_16"}]}]}]}
  *
  * `messages` is the root message first, then every message it reaches, each ONCE;
  * a field of type `message` names its message by full name in `message_type`,
@@ -3064,6 +3069,39 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  * The vocabularies are closed, and `syntax` (`proto2` or `proto3`, on a message)
  * with them.
  *
+ * COMMENTS AND OPTIONS (revision 2). A message row and a field row both carry
+ * `comment`, `trailing_comment` and `options`, so a form can show the words the
+ * schema's author wrote and read the options the author set without reading the
+ * .proto a second time.
+ *
+ *     `comment`, `trailing_comment`  the comments protoc itself attaches to the
+ *              declaration (its leading and its trailing comment), as protoc
+ *              stores them, or null for none. The text is what follows the
+ *              comment marker, line breaks included: a line comment keeps the
+ *              space after its two slashes and ends with a newline, and a doc
+ *              block begins with its second star and a newline, each later line
+ *              losing its indent and one star. The rule that decides which
+ *              comment belongs to which declaration is protoc's own: a comment
+ *              on the line of the declaration before trails that one, a comment
+ *              on the lines in front of a declaration with no blank line between
+ *              leads it, a blank line detaches a comment from both, a block
+ *              comment with a token after it on its line belongs to nobody, and
+ *              a comment in front of a closing brace trails the declaration
+ *              above it. A message's trailing comment is the one after its `{`.
+ *     `options` an array, empty for none, of every option written on the field
+ *              (its [...] list) or the message (its `option` statements), in
+ *              the order written and none dropped:
+ *              {"name":N,"kind":K,"value":V}. `name` is the name as the file
+ *              spelled it: a plain word, a dotted path, or an extension in
+ *              parentheses with the path after it. `kind` is how the value was
+ *              written: `identifier` (a bare word such as true or an enum
+ *              value's name; `value` is the word), `integer` (`value` is a
+ *              number by the rule the enum numbers follow), `float` (`value` is
+ *              the literal as written, sign included, as a string), `string`
+ *              (`value` is the decoded text) or `aggregate` (`value` is the text
+ *              between the braces of a {...} value, as written). An option is
+ *              not judged: a value nobody could read is still listed.
+ *
  * A schema that is refused is a successful DIAGNOSIS, with the keys
  * wz_dissect_declarations_from_proto gives (`file`, `line` and `column` together
  * for a place in a file, `file` alone for a whole file, none for an argument,
@@ -3075,10 +3113,12 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  * not UTF-8.
  *
  * @values proto_message key
+ * @values proto_message kind
  * @values proto_message label
  * @values proto_message syntax
  * @values proto_message type
  * @carries proto_message key passenger
+ * @carries proto_message kind passenger
  * @carries proto_message label passenger
  * @carries proto_message syntax passenger
  * @carries proto_message type passenger */

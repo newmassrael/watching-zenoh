@@ -2091,12 +2091,24 @@ pub unsafe extern "C" fn wz_dissect_declarations_match(
 /// [`WZ_DISSECT_OK`] with a document, for any arguments that are well formed:
 ///
 /// ```text
-/// {"document":{"name":"proto_message","revision":1},"ok":true,
+/// {"document":{"name":"proto_message","revision":2},"ok":true,
 ///  "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading","file":"a.proto",
-///   "syntax":"proto3","oneofs":[],"fields":[{"name":"sensor_id","json_name":"sensorId",
+///   "syntax":"proto3","oneofs":[],"comment":" One reading.\n","trailing_comment":null,
+///   "options":[{"name":"(ext).id","kind":"integer","value":7}],
+///   "fields":[{"name":"sensor_id","json_name":"sensorId",
 ///   "number":1,"type":"uint32","label":"singular","oneof":null,"packed":null,
-///   "enum":null,"message_type":null,"map":null}]}]}
+///   "enum":null,"message_type":null,"map":null,"comment":null,
+///   "trailing_comment":" the sensor\n",
+///   "options":[{"name":"(ext).int_size","kind":"identifier","value":"IS_16"}]}]}]}
 /// ```
+///
+/// A message row and a field row both carry `comment` and `trailing_comment` (the
+/// comments `protoc` itself attaches to the declaration, as it stores them, or
+/// `null`) and `options`: every option written on the field or the message, in the
+/// order written, each `{"name","kind","value"}` with `kind` one of `identifier`,
+/// `integer`, `float`, `string` and `aggregate`. The rule that decides which
+/// comment belongs to which declaration is `protoc`'s, stated on
+/// `wz_capture::proto_describe_json`.
 ///
 /// `messages` is the root message first, then each message it reaches once; a field
 /// of type `message` names its message by full name in `message_type`. Every key of
@@ -10540,17 +10552,21 @@ mod tests {
     }
 
     /// A schema that reaches every key of the description document: an enum, a
-    /// map with a message value, a oneof, a packed field and a recursive field.
+    /// map with a message value, a oneof, a packed field, a recursive field, the
+    /// comments around a message and a field, and an option of every kind.
     const DESCRIBED: &str = "syntax = \"proto3\";\n\
         package demo;\n\
         enum Mode { OFF = 0; ON = 1; }\n\
         message Point { double x = 1; }\n\
-        message Shape {\n\
+        // The shape.\n\
+        message Shape { // opens\n\
+          option (ext).id = 7;\n\
           Mode mode = 1;\n\
           map<string, Point> points = 2;\n\
-          repeated sint32 samples = 3;\n\
+          // The samples.\n\
+          repeated sint32 samples = 3 [(ext).size = 4, (ext).kind = KIND_X, (ext).tag = \"t\"];\n\
           oneof pick { string name = 4; uint32 code = 5; }\n\
-          Shape parent = 6;\n\
+          Shape parent = 6 [(ext) = { a: 1 }, deprecated = true, default = -1.5];\n\
         }\n";
 
     /// A declaration text with an end-to-end profile on ONE line, as a profile

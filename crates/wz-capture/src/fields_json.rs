@@ -6954,6 +6954,12 @@ mod tests {
                 "key",
                 crate::proto_describe::map_key_words(),
             ),
+            // How an option's value was written, held to the reader's own list.
+            (rev::PROTO_MESSAGE, "kind", {
+                let mut words = crate::proto_describe::OPTION_KIND_WORDS.to_vec();
+                words.sort_unstable();
+                words
+            }),
             (
                 rev::PROTO_MESSAGE,
                 "label",

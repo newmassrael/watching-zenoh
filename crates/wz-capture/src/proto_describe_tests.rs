@@ -9,8 +9,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::proto_describe::{
-    describe_proto, type_words, FieldDescription, ProtoDescription, Target, LABEL_WORDS,
-    SYNTAX_WORDS,
+    describe_proto, type_words, FieldDescription, OptionDescription, OptionValueDescription,
+    ProtoDescription, Target, LABEL_WORDS, OPTION_KIND_WORDS, SYNTAX_WORDS,
 };
 use crate::proto_describe_json::proto_message_json;
 use crate::proto_schema::{ProtoDiagnostic, ProtoFile};
@@ -307,7 +307,7 @@ fn the_document_has_one_shape_for_every_row_and_closed_words() {
         0,
     );
     assert!(
-        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":1},\"ok\":true,"),
+        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":2},\"ok\":true,"),
         "{doc}"
     );
     // A field row with nothing to point at writes every key, `null` where it
@@ -316,7 +316,8 @@ fn the_document_has_one_shape_for_every_row_and_closed_words() {
         doc.contains(
             "{\"name\":\"f_int32\",\"json_name\":\"fInt32\",\"number\":3,\"type\":\"int32\",\
              \"label\":\"singular\",\"oneof\":null,\"packed\":null,\"enum\":null,\
-             \"message_type\":null,\"map\":null}"
+             \"message_type\":null,\"map\":null,\"comment\":null,\"trailing_comment\":null,\
+             \"options\":[]}"
         ),
         "{doc}"
     );
@@ -384,6 +385,9 @@ fn the_declared_vocabularies_are_the_walks() {
     labels.sort_unstable();
     assert_eq!(family("label"), labels);
     assert_eq!(family("syntax"), SYNTAX_WORDS.to_vec());
+    let mut kinds = OPTION_KIND_WORDS.to_vec();
+    kinds.sort_unstable();
+    assert_eq!(family("kind"), kinds);
     // A map key is any scalar a map may be keyed by: the fifteen less the three
     // (`double`, `float`, `bytes`) the language guide refuses.
     let keys = family("key");
@@ -396,13 +400,242 @@ fn the_declared_vocabularies_are_the_walks() {
     }
 }
 
-/// The documents a family gate measures `type`, `key`, `label` and `syntax` over:
-/// the rich schema (every type word, every label, both syntaxes), a small one,
-/// and each shape of refusal.
+/// A schema whose comments sit in every position `protoc`'s rule tells apart.
+/// Every expectation below was read off `protoc` 3.21.12 (`--include_source_info`,
+/// `leading_comments` / `trailing_comments` of each location), not off this
+/// reader's idea of the rule: the oracle test in `wz-integration-tests` makes the
+/// same comparison on every machine that has `protoc`.
+const COMMENTED: &str = "// File header, detached by the blank line.\n\
+\n\
+syntax = \"proto3\";\n\
+\n\
+// The point of a plot.\n\
+message Point { // opens Point\n\
+  // The x.\n\
+  double x = 1; // trailing x\n\
+  double y = 2;\n\
+  /* block lead of z */\n\
+  double z = 3;\n\
+  // Run of\n\
+  // two lines.\n\
+  double w = 4;\n\
+\n\
+  // Detached from v by a blank line below.\n\
+\n\
+  double v = 5; /* same-line block */ double u = 6;\n\
+  double t = 7;\n\
+  // Trails t: followed by a blank line.\n\
+\n\
+  double s = 8;\n\
+  /** Doc block\n\
+   *  second line\n\
+   */\n\
+  double r = 9;\n\
+  // Before the close.\n\
+}\n\
+// After the message.\n\
+message Other {}\n";
+
+fn comments_of(
+    d: &ProtoDescription,
+    message: &str,
+    name: &str,
+) -> (Option<String>, Option<String>) {
+    let f = field(d, message, name);
+    (f.comment.clone(), f.trailing_comment.clone())
+}
+
+/// A COMMENT BELONGS TO THE DECLARATION `protoc` GIVES IT TO. Leading is the
+/// comment right before a declaration; trailing is the one on its own line after
+/// it, or the run on the next lines when a blank line follows; a blank line
+/// detaches; a block comment with a token after it on the line belongs to
+/// nobody; a comment before a closing brace trails the declaration above.
+#[test]
+fn a_comment_goes_where_protoc_puts_it() {
+    let d = described("Point", COMMENTED);
+    let some = |s: &str| Some(String::from(s));
+    // A message's trailing comment is the one after its `{`.
+    let point = &d.messages[0];
+    assert_eq!(point.comment, some(" The point of a plot.\n"));
+    assert_eq!(point.trailing_comment, some(" opens Point\n"));
+    assert_eq!(
+        comments_of(&d, "Point", "x"),
+        (some(" The x.\n"), some(" trailing x\n"))
+    );
+    // Nothing around `y`: the comment above `z` is `z`'s.
+    assert_eq!(comments_of(&d, "Point", "y"), (None, None));
+    // A block comment keeps no trailing newline of its own.
+    assert_eq!(
+        comments_of(&d, "Point", "z"),
+        (some(" block lead of z "), None)
+    );
+    // A run of line comments is ONE comment.
+    assert_eq!(
+        comments_of(&d, "Point", "w"),
+        (some(" Run of\n two lines.\n"), None)
+    );
+    // A blank line detaches the comment from `v`; a block comment that has a
+    // token after it on its line belongs to nobody, so `u` has none either.
+    assert_eq!(comments_of(&d, "Point", "v"), (None, None));
+    assert_eq!(comments_of(&d, "Point", "u"), (None, None));
+    // A comment on the line after, with a blank line below it, trails.
+    assert_eq!(
+        comments_of(&d, "Point", "t"),
+        (None, some(" Trails t: followed by a blank line.\n"))
+    );
+    assert_eq!(comments_of(&d, "Point", "s"), (None, None));
+    // A doc block: the leading `*`, then each line without its indent and `*`.
+    // The comment before the closing brace trails the declaration above it.
+    assert_eq!(
+        comments_of(&d, "Point", "r"),
+        (
+            some("* Doc block\n  second line\n"),
+            some(" Before the close.\n")
+        )
+    );
+    // The comment after a message's closing brace leads the next one.
+    let other = described("Other", COMMENTED);
+    assert_eq!(other.messages[0].comment, some(" After the message.\n"));
+}
+
+/// THE FIRST DECLARATION'S COMMENT, and a oneof's members: the comment before
+/// the first statement of a file leads it (here `syntax`, so the message after
+/// it has none), and a field inside a oneof is a declaration like any other.
+#[test]
+fn the_first_comment_of_a_file_and_a_oneof_member() {
+    let text = "// Lead of syntax.\nsyntax = \"proto3\";\nmessage M {\n  oneof pick {\n    \
+                // The name.\n    string name = 1;\n    uint32 code = 2; // The code.\n  }\n}\n";
+    let d = described("M", text);
+    assert_eq!(d.messages[0].comment, None);
+    assert_eq!(
+        comments_of(&d, "M", "name"),
+        (Some(String::from(" The name.\n")), None)
+    );
+    assert_eq!(
+        comments_of(&d, "M", "code"),
+        (None, Some(String::from(" The code.\n")))
+    );
+}
+
+/// A comment is not a token: the reader's refusals do not move for one, and a
+/// comment is never mistaken for a declaration's end.
+#[test]
+fn comments_do_not_change_what_is_refused() {
+    let bad = "syntax = \"proto3\";\n// c\nmessage M { /* c */ Nope n = 1; // c\n}\n";
+    let d = describe("M", &[("a.proto", bad)]).expect_err("an undefined type");
+    assert_eq!(d.line, Some(3));
+    let torn = "syntax = \"proto3\";\nmessage M {\n  // c\n  int32 a = 1 // no semicolon\n}\n";
+    assert!(describe("M", &[("a.proto", torn)]).is_err());
+}
+
+/// A schema with an option of every kind, on a message and on fields: a dotted
+/// extension path, an integer, an enum word, a string, a negative number, a
+/// float, an aggregate and plain options. Nothing is dropped and nothing is
+/// judged.
+const OPTIONED: &str = "syntax = \"proto2\";\n\
+message Opt {\n\
+  option (ext.msg).id = 7;\n\
+  option deprecated = true;\n\
+  optional int32 a = 1 [(ext).size = 16, (ext).kind = KIND_X, deprecated = true, default = -5];\n\
+  optional string b = 2 [(ext) = { max: 3, tag: \"x\" }, json_name = \"bee\"];\n\
+  optional double c = 3 [default = -1.5e3, (ext.f) = 2.5, (.ext).neg = -7];\n\
+  optional double d = 4 [default = -inf];\n\
+  optional int32 e = 5;\n\
+  oneof o { option (x) = 1; int32 f = 6; }\n\
+}\n";
+
+fn options_of(options: &[OptionDescription]) -> Vec<(&str, OptionValueDescription)> {
+    options
+        .iter()
+        .map(|o| (o.name.as_str(), o.value.clone()))
+        .collect()
+}
+
+/// EVERY OPTION OF A FIELD AND OF A MESSAGE IS KEPT, in the order written, with
+/// the name the file spelled and the value as it was written.
+#[test]
+fn every_option_is_kept_as_written() {
+    use OptionValueDescription as V;
+    let d = described("Opt", OPTIONED);
+    let s = |t: &str| String::from(t);
+    assert_eq!(
+        options_of(&d.messages[0].options),
+        [
+            ("(ext.msg).id", V::Integer(7)),
+            ("deprecated", V::Identifier(s("true")))
+        ]
+    );
+    assert_eq!(
+        options_of(&field(&d, "Opt", "a").options),
+        [
+            ("(ext).size", V::Integer(16)),
+            ("(ext).kind", V::Identifier(s("KIND_X"))),
+            ("deprecated", V::Identifier(s("true"))),
+            ("default", V::Integer(-5)),
+        ]
+    );
+    assert_eq!(
+        options_of(&field(&d, "Opt", "b").options),
+        [
+            ("(ext)", V::Aggregate(s("max: 3, tag: \"x\""))),
+            ("json_name", V::String(s("bee"))),
+        ]
+    );
+    assert_eq!(
+        options_of(&field(&d, "Opt", "c").options),
+        [
+            ("default", V::Float(s("-1.5e3"))),
+            ("(ext.f)", V::Float(s("2.5"))),
+            ("(.ext).neg", V::Integer(-7)),
+        ]
+    );
+    assert_eq!(
+        options_of(&field(&d, "Opt", "d").options),
+        [("default", V::Identifier(s("-inf")))]
+    );
+    // A field with none has an empty list, and the options the value door reads
+    // are still read: `json_name` above is `bee`.
+    assert!(field(&d, "Opt", "e").options.is_empty());
+    assert_eq!(field(&d, "Opt", "b").json_name, "bee");
+    // The words are the reader's own list.
+    for v in [
+        V::Identifier(s("")),
+        V::Integer(0),
+        V::Float(s("")),
+        V::String(s("")),
+        V::Aggregate(s("")),
+    ] {
+        assert!(OPTION_KIND_WORDS.contains(&v.kind()), "{}", v.kind());
+    }
+}
+
+/// An option's JSON row: a number for an integer by the integer rule, the text
+/// for the rest, the kind beside it.
+#[test]
+fn the_options_document_row_says_the_kind_beside_the_value() {
+    let doc = proto_message_json("Opt", &files(&[("a.proto", OPTIONED)]), 0);
+    for row in [
+        "{\"name\":\"(ext.msg).id\",\"kind\":\"integer\",\"value\":7}",
+        "{\"name\":\"deprecated\",\"kind\":\"identifier\",\"value\":\"true\"}",
+        "{\"name\":\"default\",\"kind\":\"integer\",\"value\":-5}",
+        "{\"name\":\"(ext)\",\"kind\":\"aggregate\",\"value\":\"max: 3, tag: \\\"x\\\"\"}",
+        "{\"name\":\"json_name\",\"kind\":\"string\",\"value\":\"bee\"}",
+        "{\"name\":\"default\",\"kind\":\"float\",\"value\":\"-1.5e3\"}",
+        "{\"name\":\"default\",\"kind\":\"identifier\",\"value\":\"-inf\"}",
+    ] {
+        assert!(doc.contains(row), "{row}\n{doc}");
+    }
+}
+
+/// The documents a family gate measures `type`, `key`, `label`, `syntax` and
+/// `kind` over: the rich schema (every type word, every label, both syntaxes), the
+/// schema with an option of every kind, a small one, and each shape of refusal.
 pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
     let both = files(&[("a.proto", RICH), ("legacy.proto", LEGACY)]);
     alloc::vec![
         proto_message_json("demo.Rich", &both, 0),
+        proto_message_json("Opt", &files(&[("a.proto", OPTIONED)]), 0),
+        proto_message_json("Point", &files(&[("a.proto", COMMENTED)]), 0),
         proto_message_json(
             "Reading",
             &files(&[(
@@ -447,5 +680,8 @@ fn the_carries_gate_documents_reach_every_word_of_every_family() {
             all.contains(&format!("\"syntax\":\"{word}\"")),
             "syntax {word}"
         );
+    }
+    for word in OPTION_KIND_WORDS {
+        assert!(all.contains(&format!("\"kind\":\"{word}\"")), "kind {word}");
     }
 }
