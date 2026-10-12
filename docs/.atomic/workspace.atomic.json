@@ -273020,6 +273020,48 @@
         "The hosted run of 10b13892 (the first tree with no PARTIAL atom) was not yet complete when this was written; a gate that refuses an empty PARTIAL set would show there first."
       ]
     },
+    "Round 3307": {
+      "decision_summary": "Four of the pool design's open questions are settled after re-measuring the tree. Built: the deploy file's task and timer ceilings (8, 16) are caps constants held equal to it by the existing test; the fixed images assert at compile time that sessions fit the generated table, tasks and timers fit those ceilings, and one typed slot fits the generated slot ceiling (Q6 as assertions); the deploy validator checks the table against its SRAM region when the machine states regions (Q4) and the lwIP socket count of the header the machine names (Q5). Declined: Q8, the module is constants and an unused struct the linker drops, and gating it costs the deploy test a required-features for no byte or behavior; Q3, no consumer of a committed size exists here and the assertions already tie the real slot to the ceiling. Q7 is the owner's. The ceiling 98304 stays: the slot does not own its socket queue or reassembly staging, so the measured slot (about 1.8 KB on thumbv7m) is not what it bounds.",
+      "changes_bullets": [
+        "wz-session-core caps: `MAX_TASKS` (8) and `MAX_TIMERS` (16), the ceilings on an image's task and timer tables; the deploy equality test compares `max_tasks` and `max_timers` with them.",
+        "mcu-admin-node and zephyr-admin-node fixed images: compile-time assertions that SESSIONS is within the generated SLOT_COUNT, TASKS and TIMERS within the ceilings, and one typed session slot (`SessionSlots::slot_bytes`) within SLOT_SIZE; the fixed acceptor asserts the task and timer ceilings.",
+        "deploy_sessions.py: `session_pool.section` and `session_pool.lwip_opts`; a table that does not fit the SRAM region its pool names is refused when the machine states `memory.sram_regions`, and an lwipopts.h whose MEMP_NUM_UDP_PCB is below max_sessions + 1 is refused; the report carries the pool's section and an lwip block; 13 selftest cases.",
+        "deploy/mcu_session_acceptor.yaml names the cross-test lwipopts.h; the doc of `session_slot_pool_mcu` says what reads its constants."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host, never the coordinating host: the no-allocator gate build of mcu-admin-node-fixed and of mcu-session-acceptor-fixed for thumbv7m (both clean as gated, with the assertions compiled in); the wz-session-core session_slot_pool_deploy test, once unarmed and once with WZ_DEPLOY_REPORT_REQUIRE=1 so that a skip would have failed (11 passed).",
+        "Locally: the deploy validator's selftest (0 failing) and validate-deploy.sh, the audit (REMAINING 0), the atom test graph selftest, both census gates, the self-report lint, the python-floor lint, the discard-site lint, the reason pin gate and the depth census.",
+        "Not verified here: the Zephyr admin node's assertions are built only by the hosted Layer Qzb and were not compiled; the dissect and heap feature sets of wz-session-core (caps gained two constants and nothing else); the hosted run of this push and of the two before it."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The SRAM region check reads only the regions a machine states itself, and no shipped machine with a session_pool states any (the focused profiles inherit mcu_target.yaml's memory block by comment), so it refuses nothing today. When one does, 3 x 98304 = 294912 bytes will not fit the 128K `sram1` its pool names: the number or the section moves then. Next step: a resolver that reads a focused profile's inherited memory block, or a `memory` block in each machine that declares a pool.",
+        "Q7 (peer tables per session or one partitioned observer) is the owner's decision and is not made here.",
+        "Open: the Zephyr admin node's new assertions are compiled by the hosted Layer Qzb only; read that job on the run that carries this push."
+      ],
+      "publishable_decision_summary": "Four of the pool design's open questions are settled after re-measuring the tree. Built: the deploy file's task and timer ceilings (8, 16) are caps constants held equal to it by the existing test; the fixed images assert at compile time that sessions fit the generated table, tasks and timers fit those ceilings, and one typed slot fits the generated slot ceiling (Q6 as assertions); the deploy validator checks the table against its SRAM region when the machine states regions (Q4) and the lwIP socket count of the header the machine names (Q5). Declined: Q8, the module is constants and an unused struct the linker drops, and gating it costs the deploy test a required-features for no byte or behavior; Q3, no consumer of a committed size exists here and the assertions already tie the real slot to the ceiling. Q7 is the owner's. The ceiling 98304 stays: the slot does not own its socket queue or reassembly staging, so the measured slot (about 1.8 KB on thumbv7m) is not what it bounds.",
+      "publishable_changes_bullets": [
+        "wz-session-core caps: `MAX_TASKS` (8) and `MAX_TIMERS` (16), the ceilings on an image's task and timer tables; the deploy equality test compares `max_tasks` and `max_timers` with them.",
+        "mcu-admin-node and zephyr-admin-node fixed images: compile-time assertions that SESSIONS is within the generated SLOT_COUNT, TASKS and TIMERS within the ceilings, and one typed session slot (`SessionSlots::slot_bytes`) within SLOT_SIZE; the fixed acceptor asserts the task and timer ceilings.",
+        "deploy_sessions.py: `session_pool.section` and `session_pool.lwip_opts`; a table that does not fit the SRAM region its pool names is refused when the machine states `memory.sram_regions`, and an lwipopts.h whose MEMP_NUM_UDP_PCB is below max_sessions + 1 is refused; the report carries the pool's section and an lwip block; 13 selftest cases.",
+        "deploy/mcu_session_acceptor.yaml names the cross-test lwipopts.h; the doc of `session_slot_pool_mcu` says what reads its constants."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host, never the coordinating host: the no-allocator gate build of mcu-admin-node-fixed and of mcu-session-acceptor-fixed for thumbv7m (both clean as gated, with the assertions compiled in); the wz-session-core session_slot_pool_deploy test, once unarmed and once with WZ_DEPLOY_REPORT_REQUIRE=1 so that a skip would have failed (11 passed).",
+        "Locally: the deploy validator's selftest (0 failing) and validate-deploy.sh, the audit (REMAINING 0), the atom test graph selftest, both census gates, the self-report lint, the python-floor lint, the discard-site lint, the reason pin gate and the depth census.",
+        "Not verified here: the Zephyr admin node's assertions are built only by the hosted Layer Qzb and were not compiled; the dissect and heap feature sets of wz-session-core (caps gained two constants and nothing else); the hosted run of this push and of the two before it."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The SRAM region check reads only the regions a machine states itself, and no shipped machine with a session_pool states any (the focused profiles inherit mcu_target.yaml's memory block by comment), so it refuses nothing today. When one does, 3 x 98304 = 294912 bytes will not fit the 128K `sram1` its pool names: the number or the section moves then. Next step: a resolver that reads a focused profile's inherited memory block, or a `memory` block in each machine that declares a pool.",
+        "Q7 (peer tables per session or one partitioned observer) is the owner's decision and is not made here.",
+        "Open: the Zephyr admin node's new assertions are compiled by the hosted Layer Qzb only; read that job on the run that carries this push."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
