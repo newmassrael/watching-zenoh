@@ -21,34 +21,42 @@
 //! always present in wz-codecs (no `codec-oam` / `codec-interest`
 //! feature exists).
 
-#[cfg(any(
-    feature = "codec-request",
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-declare",
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-request",
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-declare",
+    )
 ))]
 use alloc::boxed::Box;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(all(feature = "codec-frame", feature = "alloc"))]
+use sce_forge_runtime::codec::CodecError;
 #[cfg(feature = "codec-frame")]
-use sce_forge_runtime::codec::{CodecError, SceCursor};
+use sce_forge_runtime::codec::SceCursor;
 
 // Only the lifetime-free `*Owned` mirrors are imported at module level —
 // they are what `NetworkMessage` stores. The borrowed `Foo<'a>` decode
 // views are referenced by fully-qualified path inside the codec-frame
 // gated `parse_frame_payload` (their only use), so no borrowed import
 // needs cfg-gating against the body-codec feature matrix.
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use wz_codecs::declare::DeclareOwned;
+#[cfg(feature = "alloc")]
 use wz_codecs::interest::InterestOwned;
+#[cfg(feature = "alloc")]
 use wz_codecs::oam::OamOwned;
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 use wz_codecs::push::PushOwned;
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
 use wz_codecs::request::RequestOwned;
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
 use wz_codecs::response::ResponseOwned;
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
 use wz_codecs::response_final::ResponseFinalOwned;
 
 /// R3011 (open-debt item 850) — the storage profile of the DATA-PLANE messages
@@ -74,15 +82,31 @@ pub type WireStorage = sce_forge_runtime::codec::DefaultStorage;
 
 /// What a decode projects its messages out of: the frame, when there is one to
 /// share, and nothing on a build that has no sharing to do.
-#[cfg(all(feature = "codec-frame", feature = "rx-shared-bytes"))]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "rx-shared-bytes"
+))]
 type Origin<'a> = Option<&'a crate::link::RxBytes>;
-#[cfg(all(feature = "codec-frame", not(feature = "rx-shared-bytes")))]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    not(feature = "rx-shared-bytes")
+))]
 type Origin<'a> = core::marker::PhantomData<&'a ()>;
 
 /// No origin to share: the walk copies, as every walk did before there was one.
-#[cfg(all(feature = "codec-frame", feature = "rx-shared-bytes"))]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "rx-shared-bytes"
+))]
 const NO_ORIGIN: Origin<'static> = None;
-#[cfg(all(feature = "codec-frame", not(feature = "rx-shared-bytes")))]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    not(feature = "rx-shared-bytes")
+))]
 const NO_ORIGIN: Origin<'static> = core::marker::PhantomData;
 
 /// Project a borrowed view into its owned message at [`WireStorage`], sharing
@@ -98,6 +122,7 @@ const NO_ORIGIN: Origin<'static> = core::marker::PhantomData;
 /// the `Push`, `Request` and `Response` arms, and a build with none of them has
 /// no use for the macro (an unused definition is a `-D warnings` error).
 #[cfg(all(
+    feature = "alloc",
     feature = "codec-frame",
     feature = "rx-shared-bytes",
     any(
@@ -115,6 +140,7 @@ macro_rules! own_wire {
     };
 }
 #[cfg(all(
+    feature = "alloc",
     feature = "codec-frame",
     not(feature = "rx-shared-bytes"),
     any(
@@ -146,6 +172,12 @@ use wz_codecs::wire_const;
 /// `Debug + Clone + PartialEq` derive set per
 /// `sce-build::forge::rust_derive_policy::RustDeriveCategory::CodecStruct`
 /// SSOT (SCE 14ff5e36d).
+///
+/// The heap profile's message: each variant owns its decoded record (boxed, and
+/// the unknown record's bytes in a `Vec`). The per-session slot profile has no
+/// such value: it reads every record where its frame lies (`RecordForm::LentControl`)
+/// and hands the lent view over.
+#[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub enum NetworkMessage {
     /// Network MID `_Z_MID_N_REQUEST` (0x1C). Carries a query / put /
@@ -249,6 +281,7 @@ fn then_judge(
     }
 }
 
+#[cfg(feature = "alloc")]
 impl NetworkMessage {
     /// What a conforming PARTICIPANT must do with this message's extension
     /// chains:
@@ -592,6 +625,7 @@ fn response_view_admission(
 ///
 /// The decode itself reads such a batch, so a capture sees it; this is the one
 /// place a participant stops it.
+#[cfg(feature = "alloc")]
 #[inline(never)]
 pub fn refuse_unknown_mandatory_ext(
     messages: Vec<NetworkMessage>,
@@ -604,6 +638,7 @@ pub fn refuse_unknown_mandatory_ext(
 
 /// The refusal [`refuse_unknown_mandatory_ext`] makes of `messages`, or `None`
 /// when a participant may act on every one of them.
+#[cfg(feature = "alloc")]
 fn first_unknown_mandatory_ext(
     messages: &[NetworkMessage],
 ) -> Option<crate::parse_error::InboundParseError> {
@@ -647,7 +682,7 @@ fn first_unknown_mandatory_ext(
 /// without leaving an orphan public symbol. Individual match arms
 /// inside this function carry their own per-body cfg
 /// (`N_MID_PUSH` under `codec-push`, etc.).
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
     parse_batch(bytes, NO_ORIGIN)
 }
@@ -660,7 +695,7 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
 ///
 /// Off `rx-shared-bytes` there is nothing to share, and this is
 /// [`parse_frame_payload`] over the same bytes.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_frame_payload_in(
     origin: &crate::link::RxBytes,
 ) -> Result<Vec<NetworkMessage>, CodecError> {
@@ -688,7 +723,7 @@ pub fn parse_frame_payload_in(
 /// [`parse_frame_payload_in`] instead. Off `rx-shared-bytes` there is nothing to
 /// share, a lent copy would be a second copy for nothing, and this is
 /// [`parse_frame_payload`] over the same bytes.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_frame_payload_lending(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
     #[cfg(feature = "rx-shared-bytes")]
     {
@@ -700,7 +735,7 @@ pub fn parse_frame_payload_lending(bytes: &[u8]) -> Result<Vec<NetworkMessage>, 
     }
 }
 
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, CodecError> {
     let mut messages = Vec::new();
     let mut cursor = SceCursor::new(bytes);
@@ -721,7 +756,7 @@ fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, 
 /// The record at the cursor has a MID this build has no envelope decoder for,
 /// so its length is unknowable: take the rest of the payload, header byte
 /// included, as one [`NetworkMessage::Unknown`]. The caller stops walking.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn absorb_unknown(cursor: &mut SceCursor<'_>, out: &mut impl RecordOut) -> Result<(), CodecError> {
     let mid = cursor.peek_slice(1)?[0] & 0x1F;
     let rem = cursor.remaining();
@@ -739,23 +774,49 @@ fn absorb_unknown(cursor: &mut SceCursor<'_>, out: &mut impl RecordOut) -> Resul
 /// a `static` carries its record buffer with it and the walk takes nothing from
 /// a heap to begin. Make one with [`new_record_buf`], the only spelling that does
 /// not name the backing.
-#[cfg(all(feature = "codec-frame", not(feature = "bounded-heapless")))]
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "alloc",
+    not(feature = "bounded-heapless")
+))]
 pub type RecordBuf = Vec<NetworkMessage>;
 /// See the growable form of this alias.
-#[cfg(all(feature = "codec-frame", feature = "bounded-heapless"))]
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "alloc",
+    feature = "bounded-heapless"
+))]
 pub type RecordBuf = heapless::Vec<NetworkMessage, 1>;
+
+/// The record buffer of a build with no allocator: nothing. Such a build has no
+/// owned message to decode a record into (`NetworkMessage` is the heap profile's),
+/// so the walk reads every record where it lies and the buffer is a marker the
+/// walk and the pump that holds it still pass around, one value of no size.
+#[cfg(all(feature = "codec-frame", not(feature = "alloc")))]
+#[derive(Debug, Default)]
+pub struct RecordBuf;
+
+#[cfg(all(feature = "codec-frame", not(feature = "alloc")))]
+impl RecordBuf {
+    /// Empty the buffer: it holds nothing, so there is nothing to do.
+    pub fn clear(&mut self) {}
+}
 
 /// An empty [`RecordBuf`]. The growable form reserves its one slot here, once,
 /// so a walk that decodes an owned record never grows it.
 #[cfg(feature = "codec-frame")]
 pub fn new_record_buf() -> RecordBuf {
-    #[cfg(not(feature = "bounded-heapless"))]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     {
         Vec::with_capacity(1)
     }
-    #[cfg(feature = "bounded-heapless")]
+    #[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
     {
         heapless::Vec::new()
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        RecordBuf
     }
 }
 
@@ -764,12 +825,12 @@ pub fn new_record_buf() -> RecordBuf {
 /// once. A full output is a refusal the decoder returns, never a drop: the walk
 /// empties its one-record buffer before every decode, so the refusal is only
 /// reachable by a caller that did not.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 trait RecordOut {
     fn put(&mut self, message: NetworkMessage) -> Result<(), CodecError>;
 }
 
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 impl RecordOut for Vec<NetworkMessage> {
     // Inline: this is `Vec::push` as it was written at each call site, and the
     // decoder's code size is a measured quantity (see `decode_one_record`).
@@ -780,7 +841,11 @@ impl RecordOut for Vec<NetworkMessage> {
     }
 }
 
-#[cfg(all(feature = "codec-frame", feature = "bounded-heapless"))]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "bounded-heapless"
+))]
 impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
     #[inline(always)]
     fn put(&mut self, message: NetworkMessage) -> Result<(), CodecError> {
@@ -821,13 +886,17 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordForm {
     /// Every record is decoded into its owned message.
+    #[cfg(feature = "alloc")]
     Owned,
     /// A Push, a Request and a Response are decoded where the payload lies and
     /// lent.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response"
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        )
     ))]
     Lent,
     /// The slot profile's form: EVERY record is decoded where the payload lies
@@ -851,6 +920,7 @@ pub(crate) enum RecordForm {
 #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
 pub(crate) enum WalkedRecord<'r> {
     /// The record's owned message, the one entry of the buffer.
+    #[cfg(feature = "alloc")]
     Owned(&'r mut RecordBuf),
     /// A Push decoded where the payload lies, valid for the call.
     #[cfg(feature = "codec-push")]
@@ -915,12 +985,16 @@ pub(crate) fn try_for_each_record(
     form: RecordForm,
     mut each: impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    use crate::parse_error::InboundParseError;
     // Without a lendable codec there is nothing to lend, and every form is owned.
     #[cfg(not(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
+        all(
+            feature = "alloc",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response"
+            )
+        ),
         feature = "session-slot"
     )))]
     let _ = form;
@@ -929,39 +1003,53 @@ pub(crate) fn try_for_each_record(
         record.clear();
         // The slot profile's form lends every kind, so there is no owned decode
         // left for the rest of the loop to do on its behalf.
-        #[cfg(feature = "session-slot")]
+        #[cfg(all(feature = "session-slot", feature = "alloc"))]
         if form == RecordForm::LentControl {
             match lend_any_record(&mut cursor, &mut each)? {
                 Walk::Continue => continue,
                 Walk::End => break,
             }
         }
-        #[cfg(any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response"
-        ))]
-        if form == RecordForm::Lent {
-            let mid = cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F;
-            if lend_record(mid, &mut cursor, &mut each)? {
-                continue;
+        // A build with no allocator has the one form and no owned message to decode a
+        // record into: this is the whole walk.
+        #[cfg(not(feature = "alloc"))]
+        {
+            let RecordForm::LentControl = form;
+            match lend_any_record(&mut cursor, &mut each)? {
+                Walk::Continue => continue,
+                Walk::End => break,
             }
         }
-        let known =
-            decode_one_record(&mut cursor, record, NO_ORIGIN).map_err(InboundParseError::Codec)?;
-        if !known {
-            absorb_unknown(&mut cursor, record).map_err(InboundParseError::Codec)?;
-        }
-        if let Some(refusal) = first_unknown_mandatory_ext(record) {
-            record.clear();
-            return Err(refusal);
-        }
-        if let Err(stop) = each(WalkedRecord::Owned(record)) {
-            record.clear();
-            return Err(stop);
-        }
-        if !known {
-            break;
+        #[cfg(feature = "alloc")]
+        {
+            use crate::parse_error::InboundParseError;
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response"
+            ))]
+            if form == RecordForm::Lent {
+                let mid = cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F;
+                if lend_record(mid, &mut cursor, &mut each)? {
+                    continue;
+                }
+            }
+            let known = decode_one_record(&mut cursor, record, NO_ORIGIN)
+                .map_err(InboundParseError::Codec)?;
+            if !known {
+                absorb_unknown(&mut cursor, record).map_err(InboundParseError::Codec)?;
+            }
+            if let Some(refusal) = first_unknown_mandatory_ext(record) {
+                record.clear();
+                return Err(refusal);
+            }
+            if let Err(stop) = each(WalkedRecord::Owned(record)) {
+                record.clear();
+                return Err(stop);
+            }
+            if !known {
+                break;
+            }
         }
     }
     record.clear();
@@ -978,6 +1066,7 @@ pub(crate) fn try_for_each_record(
 /// line it occupies the stack only while that one record is handed over, not
 /// for the whole walk.
 #[cfg(all(
+    feature = "alloc",
     feature = "codec-frame",
     any(test, feature = "session-unicast"),
     any(
@@ -1218,7 +1307,7 @@ fn lend_unknown(
 /// prefix, so the ONLY way to find record N+1 is to have fully decoded
 /// record N. Once that fails there is nothing to resynchronise against:
 /// halting is correct, and the deliverable is saying WHERE and WHY.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchHalt {
     /// A network MID this build has no envelope decoder for. Its body
@@ -1260,7 +1349,7 @@ pub enum BatchHalt {
 /// tail the capture truncated — and in every one of those cases the
 /// records it COULD read are still real, still in order, and still worth
 /// more than the `Err` that discards them.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 #[derive(Debug)]
 pub struct BatchParse {
     /// Every record decoded before the walk stopped, in wire order.
@@ -1292,7 +1381,7 @@ pub struct BatchParse {
     pub unparsed_bytes: usize,
 }
 
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 impl BatchParse {
     /// `true` when the entire payload decoded with no halt — the shape a
     /// participant's strict parse also accepts.
@@ -1333,19 +1422,19 @@ impl BatchParse {
 ///
 /// Never returns `Err`. An empty payload is `messages = []`, `halt = None`
 /// — a valid empty batch, exactly as in the strict parse.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
     parse_payload_best_effort(bytes, usize::MAX)
 }
 
 /// Decode the single network record carried by a lowlatency framing unit.
 /// Trailing bytes are reported, never treated as another batched message.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 pub fn parse_lowlatency_payload_best_effort(bytes: &[u8]) -> BatchParse {
     parse_payload_best_effort(bytes, 1)
 }
 
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
     let total = bytes.len();
     let mut messages = Vec::new();
@@ -1442,7 +1531,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
 /// `opt-level=s` — the whole of Layer Q's +868 regression, per-symbol ELF
 /// diff of `e8af0d92` against `8fd6c25c`. The SSOT the extraction bought is
 /// worth keeping; the extra move was not, and the out-param keeps both.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn decode_one_record(
     cursor: &mut SceCursor<'_>,
     out: &mut impl RecordOut,

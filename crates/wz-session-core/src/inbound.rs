@@ -29,10 +29,12 @@
 // arm is UNCONDITIONAL — it needs no generated body codec, so every build of
 // this (already `alloc`-gated) module reads a z16, an ext chain and a body
 // with these four.
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use crate::parse_error::InboundParseError;
 
+#[cfg(feature = "alloc")]
 use crate::ext_chain::decode_ext_chain;
 #[cfg(any(
     feature = "codec-init-body",
@@ -42,9 +44,10 @@ use crate::ext_chain::decode_ext_chain;
 ))]
 use crate::ext_chain::decode_handshake_ext_chain;
 pub use crate::ext_chain::ExtChainOwned;
+#[cfg(feature = "alloc")]
 use crate::link::RxBytes;
 // `CodecError` is named only by the `Frame` arm, which is `codec-frame`'s.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 use sce_forge_runtime::codec::CodecError;
 use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::ext_entry::ExtEntryOwned;
@@ -54,7 +57,7 @@ use wz_codecs::wire_const;
 use wz_codecs::close::Close;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::{InitBody, InitBodyOwned};
-#[cfg(feature = "codec-join")]
+#[cfg(all(feature = "alloc", feature = "codec-join"))]
 use wz_codecs::join::JoinOwned;
 #[cfg(feature = "codec-keep-alive")]
 use wz_codecs::keep_alive::KeepAlive;
@@ -182,7 +185,7 @@ pub enum InboundFrame {
     /// `InboundFrame::Unknown { mid: 0x05 }`, which the FSM dispatch
     /// in `inbound_to_fsm_event` maps to `FramingError` (graceful
     /// session teardown rather than silent data loss).
-    #[cfg(feature = "codec-frame")]
+    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
     Frame {
         reliable: bool,
         sn: u64,
@@ -214,7 +217,7 @@ pub enum InboundFrame {
     /// path on completion. R311im — gated on `reassembly`; when the
     /// feature is off the `0x06` arm falls through to `Unknown { mid: 0x06 }`,
     /// mapped to `FramingError` (graceful teardown rather than silent loss).
-    #[cfg(feature = "reassembly")]
+    #[cfg(all(feature = "alloc", feature = "reassembly"))]
     Fragment {
         reliable: bool,
         sn: u64,
@@ -257,7 +260,7 @@ pub enum InboundFrame {
     /// form is projected back during decode (R311kr,
     /// [`crate::join_decode::decode_join`]), the same boundary rule
     /// `Open`'s lease follows.
-    #[cfg(feature = "codec-join")]
+    #[cfg(all(feature = "alloc", feature = "codec-join"))]
     Join {
         has_ext: bool,
         body: JoinOwned,
@@ -285,6 +288,11 @@ pub enum InboundFrame {
     /// kept rather than projected away because it is what says WHICH of the
     /// two is meaningful — and because upstream reserves 0b11, which never
     /// reaches this variant (the arm refuses it, as zenoh's decoder does).
+    ///
+    /// Heap profile only (the body and the chain are owned): a build with no
+    /// allocator reads a transport OAM as [`InboundFrame::Unknown`], and both
+    /// project to the same framing error.
+    #[cfg(feature = "alloc")]
     Oam {
         id: u16,
         encoding: u8,
@@ -297,7 +305,7 @@ pub enum InboundFrame {
     /// Only the passive observer constructs this envelope; the universal
     /// participant decoder does not accept it. The carried network decoder
     /// judges the complete body separately, as it does a Frame's payload.
-    #[cfg(feature = "codec-frame")]
+    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
     Network { payload: Vec<u8> },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
@@ -352,23 +360,24 @@ impl InboundFrame {
             InboundFrame::KeepAlive { extensions, .. } => {
                 judge(wire_const::T_MID_KEEP_ALIVE, extensions)
             }
-            #[cfg(feature = "codec-frame")]
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Frame { extensions, .. } => judge(wire_const::T_MID_FRAME, extensions),
-            #[cfg(feature = "reassembly")]
+            #[cfg(all(feature = "alloc", feature = "reassembly"))]
             InboundFrame::Fragment { extensions, .. } => {
                 judge(wire_const::T_MID_FRAGMENT, extensions)
             }
-            #[cfg(feature = "codec-join")]
+            #[cfg(all(feature = "alloc", feature = "codec-join"))]
             InboundFrame::Join { extensions, .. } => judge(wire_const::T_MID_JOIN, extensions),
             // Its own `judge_ext_chain` call rather than the local `judge`
             // helper: that helper folds under the `codec-*` union above and
             // this arm carries no gate, so it would vanish in a build that
             // still has this variant.
+            #[cfg(feature = "alloc")]
             InboundFrame::Oam { extensions, .. } => crate::ext_admit::judge_ext_chain(
                 crate::ext_admit::ExtCarrier::Transport(wire_const::T_MID_OAM),
                 extensions.iter().map(|e| e.header),
             ),
-            #[cfg(feature = "codec-frame")]
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => ExtAdmission::Unjudged,
             InboundFrame::Unknown { .. } => ExtAdmission::Unjudged,
         }
@@ -406,18 +415,19 @@ impl InboundFrame {
             InboundFrame::Close { .. } => "Close",
             #[cfg(feature = "codec-keep-alive")]
             InboundFrame::KeepAlive { .. } => "KeepAlive",
-            #[cfg(feature = "codec-frame")]
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Frame { .. } => "Frame",
-            #[cfg(feature = "reassembly")]
+            #[cfg(all(feature = "alloc", feature = "reassembly"))]
             InboundFrame::Fragment { .. } => "Fragment",
-            #[cfg(feature = "codec-join")]
+            #[cfg(all(feature = "alloc", feature = "codec-join"))]
             InboundFrame::Join { .. } => "Join",
+            #[cfg(feature = "alloc")]
             InboundFrame::Oam { .. } => "Oam",
             // NOT "Unknown message" and not the MID in hex: this is the
             // variant's name like every other arm, and the MID a reader needs is
             // on the variant for whoever wants it. A name that folded the byte
             // in would make two frames with different MIDs two different kinds.
-            #[cfg(feature = "codec-frame")]
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => "Network",
             InboundFrame::Unknown { .. } => "Unknown",
         }
@@ -464,18 +474,19 @@ impl InboundFrame {
             InboundFrame::Close { .. } => 3,
             #[cfg(feature = "codec-keep-alive")]
             InboundFrame::KeepAlive { .. } => 4,
-            #[cfg(feature = "codec-frame")]
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Frame { .. } => 5,
-            #[cfg(feature = "reassembly")]
+            #[cfg(all(feature = "alloc", feature = "reassembly"))]
             InboundFrame::Fragment { .. } => 6,
-            #[cfg(feature = "codec-join")]
+            #[cfg(all(feature = "alloc", feature = "codec-join"))]
             InboundFrame::Join { .. } => 7,
+            #[cfg(feature = "alloc")]
             InboundFrame::Oam { .. } => 8,
             // 255 and not 9, for the reason the doc above states: an unknown
             // MID is not the ninth kind, it is the absence of a kind, and
             // leaving the low numbers contiguous is what lets a tenth arm be
             // added without a consumer's switch falling through to this one.
-            #[cfg(feature = "codec-frame")]
+            #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => 9,
             // 10 and 11 are TAKEN, by the scouting namespace's
             // Scout and Hello (`ScoutingFrame::kind_code`): the two share one
@@ -492,7 +503,7 @@ impl InboundFrame {
 /// when no such ext is present — a pre-QoS frame, byte-identical to today. The
 /// scan is feature-agnostic (wz reads whatever the peer sent); honoring vs
 /// dropping a non-DEFAULT priority is the [`crate::drive`] admit seam's call.
-#[cfg(feature = "codec-frame")]
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn ext_qos_priority(extensions: &[ExtEntryOwned]) -> crate::qos::Priority {
     extensions
         .iter()
@@ -539,7 +550,7 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 /// the markers are unit extensions.
 #[cfg(all(
     feature = "codec-frame",
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "session-unicast"
 ))]
 #[derive(Debug, Clone, Copy)]
@@ -554,7 +565,7 @@ pub(crate) struct InPlaceExtChain {
 
 #[cfg(all(
     feature = "codec-frame",
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "session-unicast"
 ))]
 impl InPlaceExtChain {
@@ -596,6 +607,7 @@ impl InPlaceExtChain {
     /// What a receive path hands a consumer that is given the owned chain (the
     /// `extensions` of a `FramePayload`), made only when one is: a frame whose
     /// every record is lent never pays for it.
+    #[cfg(feature = "alloc")]
     pub(crate) fn owned(
         &self,
         unit: &[u8],
@@ -680,7 +692,14 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
 /// they consume the remainder by construction, which is why upstream puts them
 /// last in a batch (`zenoh-codec-1.5.0/src/transport/frame.rs:173`).
 pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
-    parse_unit(bytes, None)
+    #[cfg(feature = "alloc")]
+    {
+        parse_unit(bytes, None)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        parse_unit(bytes)
+    }
 }
 
 /// Whether `datagram` opens a unicast handshake: its first byte is an INIT transport
@@ -710,6 +729,7 @@ pub fn is_init_syn(datagram: &[u8]) -> bool {
 /// correctly and share nothing. On an owned unit the payload is a copy, which is
 /// exactly what [`parse_inbound_consuming`] does, so a caller that has not made
 /// its unit lent loses nothing by calling this.
+#[cfg(feature = "alloc")]
 pub fn parse_inbound_consuming_in(
     unit: &RxBytes,
 ) -> Result<(InboundFrame, usize), InboundParseError> {
@@ -733,7 +753,7 @@ pub(crate) struct FrameHead<C> {
 // unicast drive (`drive`, gated on `alloc` and `session-unicast`).
 #[cfg(all(
     feature = "codec-frame",
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "session-unicast"
 ))]
 impl FrameHead<InPlaceExtChain> {
@@ -789,7 +809,7 @@ fn decode_frame_head<C>(
 /// is `unit[offset..]`.
 #[cfg(all(
     feature = "codec-frame",
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "session-unicast"
 ))]
 pub(crate) fn parse_frame_in_place(
@@ -916,8 +936,9 @@ pub(crate) fn parse_fragment_in_place(
 /// whose payload is a tail of the unit (`Frame`).
 fn parse_unit(
     bytes: &[u8],
-    origin: Option<&RxBytes>,
+    #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
 ) -> Result<(InboundFrame, usize), InboundParseError> {
+    #[cfg(feature = "alloc")]
     debug_assert!(
         origin.map_or(true, |o| core::ptr::eq(o.as_slice(), bytes)),
         "the origin of a decode is the very bytes being decoded"
@@ -1033,7 +1054,7 @@ fn parse_unit(
                 bytes.len() - cursor.remaining(),
             ))
         }
-        #[cfg(feature = "codec-frame")]
+        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         wire_const::T_MID_FRAME => {
             let head =
                 decode_frame_head(flags, has_ext, &mut cursor, decode_ext_chain, Vec::new())?;
@@ -1073,7 +1094,7 @@ fn parse_unit(
                 bytes.len() - cursor.remaining(),
             ))
         }
-        #[cfg(feature = "reassembly")]
+        #[cfg(all(feature = "alloc", feature = "reassembly"))]
         wire_const::T_MID_FRAGMENT => {
             // Body mirrors T_MID_FRAME: VLE sn, optional Z-gated ext chain,
             // then tail payload. The R (reliable) and M (more) bits live in
@@ -1124,7 +1145,7 @@ fn parse_unit(
         // `decode_join` is the SSOT shared with the multicast participant path
         // (`crate::join_decode`), which is what keeps the S bit's two optional
         // fields and the T bit's lease UNIT projected in exactly one place.
-        #[cfg(feature = "codec-join")]
+        #[cfg(all(feature = "alloc", feature = "codec-join"))]
         wire_const::T_MID_JOIN => {
             let (join, consumed) = crate::join_decode::decode_join_body(header, &bytes[1..])?;
             let body = join.try_into_owned()?;
@@ -1151,6 +1172,7 @@ fn parse_unit(
         }
         // Transport OAM, DELEGATED like the JOIN arm above rather than spelled
         // out here — see [`decode_oam`] for the second, measured reason.
+        #[cfg(feature = "alloc")]
         wire_const::T_MID_OAM => decode_oam(header, bytes),
         // Zero: see the `# What `0` means` section on this function.
         other => Ok((InboundFrame::Unknown { mid: other }, 0)),
@@ -1214,20 +1236,20 @@ pub fn inbound_to_fsm_event(
         InboundFrame::Close { .. } => Some(E::PeerClose),
         #[cfg(feature = "codec-keep-alive")]
         InboundFrame::KeepAlive { .. } => None,
-        #[cfg(feature = "codec-frame")]
+        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         InboundFrame::Frame { .. } => None,
         // R311im — Fragment is not a session-state trigger (like Frame);
         // the drive loop routes it to the ReassemblyDispatcher and, on
         // chain completion, the reassembled message re-enters the Frame
         // payload dispatch path.
-        #[cfg(feature = "reassembly")]
+        #[cfg(all(feature = "alloc", feature = "reassembly"))]
         InboundFrame::Fragment { .. } => None,
         // R311y605 — a JOIN is a MULTICAST message and has no place on a
         // unicast session, so it stays a framing error here. Deliberately
         // identical to the pre-R311y605 outcome, when it fell through to
         // `Unknown` and hit the arm below: gaining the ability to DECODE a
         // message must not change what the session FSM does with it.
-        #[cfg(feature = "codec-join")]
+        #[cfg(all(feature = "alloc", feature = "codec-join"))]
         InboundFrame::Join { .. } => Some(E::FramingError),
         // Transport OAM, on the same rule the JOIN arm above states: gaining
         // the ability to DECODE a message must not change what the session FSM
@@ -1236,9 +1258,10 @@ pub fn inbound_to_fsm_event(
         // cannot act on — byte-for-byte the outcome it had while it fell
         // through to `Unknown`. What changed is the OBSERVER's reach, which is
         // where the defect was.
+        #[cfg(feature = "alloc")]
         InboundFrame::Oam { .. } => Some(E::FramingError),
         // This observer envelope does not extend the participant's protocol.
-        #[cfg(feature = "codec-frame")]
+        #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         InboundFrame::Network { .. } => Some(E::FramingError),
         InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
@@ -1311,6 +1334,7 @@ fn decode_keep_alive(
 /// binaries shows ZERO symbols present in the baseline and absent without it.
 /// Keeping the boundary is therefore the honest fix and lowering the floor
 /// would have been the silencing.
+#[cfg(feature = "alloc")]
 #[inline(never)]
 fn decode_oam(header: u8, bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
     let mut cursor = SceCursor::new(&bytes[1..]);

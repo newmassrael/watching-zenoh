@@ -11,21 +11,24 @@
 //!
 //! Layer: §5.C link-tier value-type surface.
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use wz_runtime_core::Runtime;
 
 use crate::reliability::Reliability;
 
 // The `ActionsHandle` GAT below references `SessionLinkActions`, which lives
-// behind the same `all(alloc, session-unicast)` gate as the action bundle
-// itself (lib.rs); these imports + the GAT are therefore gated identically so
-// the `SessionRuntime` trait still compiles on a minus-session-unicast subset.
-#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+// behind the same gate as the action bundle itself (lib.rs: a heap or a slot
+// profile, and `session-unicast`); these imports + the GAT are therefore gated
+// identically so the `SessionRuntime` trait still compiles on a
+// minus-session-unicast subset.
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 use crate::session_actions::SessionLinkActions;
-#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 use core::ops::Deref;
-#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 use wz_runtime_core::TimeSource;
 
 /// R311y453 — which LINK PROTOCOL a transport speaks, as a RULE sees it: the wz
@@ -320,6 +323,9 @@ impl LinkKind {
     /// transport's scheme is stated once and every emitter inherits it. The match
     /// is wildcard-free for the same reason it is there: a new variant must state
     /// its scheme rather than inherit a plausible-looking neighbour's.
+    ///
+    /// Heap profile only: the locator is built as a `String`.
+    #[cfg(feature = "alloc")]
     pub fn locator_for(&self, address: &str) -> String {
         use alloc::format;
         match self {
@@ -687,6 +693,7 @@ pub trait BoxedLinkDriver {
     /// Read here, on the link driver, because it is the only object that knows
     /// its own scheme and its own local address — deriving it from a dial
     /// locator instead would be wrong for an ACCEPTED link, which never had one.
+    #[cfg(feature = "alloc")]
     fn link_subject(&self) -> Option<&LinkSubject> {
         None
     }
@@ -854,7 +861,7 @@ impl LinkEndpoints {
     /// The two ends as owned `String`s, for a consumer that renders them (the
     /// admin space's link list): moved out as they are where they already are
     /// `String`s, copied where they are fixed text.
-    #[cfg(feature = "adminspace-core")]
+    #[cfg(all(feature = "alloc", feature = "adminspace-core"))]
     pub fn into_strings(self) -> (String, String) {
         #[cfg(not(feature = "session-slot"))]
         {
@@ -887,6 +894,11 @@ impl LinkEndpoints {
 ///
 /// Every field is an [`Option`], and the distinction is load-bearing — see
 /// [`interfaces`](Self::interfaces).
+///
+/// Heap profile only: the interface names and the certificate's common name are
+/// owned text, and what reads them is the §5.16 rule engine, which is the heap
+/// profile's.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkSubject {
     /// What KIND of link the transport is, or `None` when the driver cannot say
@@ -936,6 +948,7 @@ pub struct LinkSubject {
     pub cert_common_name: Option<String>,
 }
 
+#[cfg(feature = "alloc")]
 impl LinkSubject {
     /// A subject nothing is known about — every axis indeterminate. What a
     /// driver with no transport identity reports, and the value a
@@ -1153,7 +1166,7 @@ pub trait SessionRuntime: Runtime + Sized {
     /// reach the bundle through the opaque handle without naming `Arc` / `Rc`.
     ///
     /// [`LinkSink`]: SessionRuntime::LinkSink
-    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
+    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
     type ActionsHandle<T: TimeSource>: Clone + Deref<Target = SessionLinkActions<Self, T>>;
 
     /// Wrap an owned [`SessionLinkActions`] bundle in the per-profile shared
@@ -1365,8 +1378,13 @@ impl Drop for SlotLease {
 ///
 /// Reads are through [`core::ops::Deref`] to `[u8]`, whichever arm it
 /// is.
+///
+/// Heap profile only: the owned arm is a `Vec`. The per-session slot profile reads a
+/// frame where its pool slot holds it and hands nothing up that outlives the read.
+#[cfg(feature = "alloc")]
 pub struct RxBytes(RxRepr);
 
+#[cfg(feature = "alloc")]
 enum RxRepr {
     Owned(Vec<u8>),
     #[cfg(feature = "rx-shared-bytes")]
@@ -1384,6 +1402,7 @@ enum RxRepr {
     },
 }
 
+#[cfg(feature = "alloc")]
 impl RxBytes {
     /// R3255 -- the `range` of slot `slot` of `home`, ADOPTING one reference the
     /// home has already counted for the caller: the count the pool set when it
@@ -1652,6 +1671,7 @@ impl RxBytes {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl From<Vec<u8>> for RxBytes {
     fn from(bytes: Vec<u8>) -> Self {
         Self(RxRepr::Owned(bytes))
@@ -1659,8 +1679,10 @@ impl From<Vec<u8>> for RxBytes {
 }
 
 /// R3124 -- the slices of a payload in order ([`RxBytes::slices`]): a view of each, where it lies.
+#[cfg(feature = "alloc")]
 pub struct RxSlices<'a>(RxSlicesRepr<'a>);
 
+#[cfg(feature = "alloc")]
 enum RxSlicesRepr<'a> {
     /// The payload was built from several slices.
     #[cfg(feature = "rx-shared-bytes")]
@@ -1669,6 +1691,7 @@ enum RxSlicesRepr<'a> {
     One(Option<&'a [u8]>),
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> Iterator for RxSlices<'a> {
     type Item = &'a [u8];
 
@@ -1681,6 +1704,7 @@ impl<'a> Iterator for RxSlices<'a> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl core::ops::Deref for RxBytes {
     type Target = [u8];
 
@@ -1689,6 +1713,7 @@ impl core::ops::Deref for RxBytes {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl AsRef<[u8]> for RxBytes {
     fn as_ref(&self) -> &[u8] {
         self.as_slice()
@@ -1697,6 +1722,7 @@ impl AsRef<[u8]> for RxBytes {
 
 /// A lent frame's clone shares its storage, as upstream's `ZSlice` clone does;
 /// an owned one's copies, as the `Vec` it is.
+#[cfg(feature = "alloc")]
 impl Clone for RxBytes {
     fn clone(&self) -> Self {
         match &self.0 {
@@ -1723,50 +1749,59 @@ impl Clone for RxBytes {
 
 /// The bytes, as a `Vec` of them prints: which arm holds them is not part of
 /// what a frame says.
+#[cfg(feature = "alloc")]
 impl core::fmt::Debug for RxBytes {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         core::fmt::Debug::fmt(self.as_slice(), f)
     }
 }
 
+#[cfg(feature = "alloc")]
 impl PartialEq for RxBytes {
     fn eq(&self, other: &Self) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl Eq for RxBytes {}
 
+#[cfg(feature = "alloc")]
 impl PartialEq<[u8]> for RxBytes {
     fn eq(&self, other: &[u8]) -> bool {
         self.as_slice() == other
     }
 }
 
+#[cfg(feature = "alloc")]
 impl PartialEq<&[u8]> for RxBytes {
     fn eq(&self, other: &&[u8]) -> bool {
         self.as_slice() == *other
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<const N: usize> PartialEq<[u8; N]> for RxBytes {
     fn eq(&self, other: &[u8; N]) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<const N: usize> PartialEq<&[u8; N]> for RxBytes {
     fn eq(&self, other: &&[u8; N]) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl PartialEq<Vec<u8>> for RxBytes {
     fn eq(&self, other: &Vec<u8>) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl PartialEq<RxBytes> for Vec<u8> {
     fn eq(&self, other: &RxBytes) -> bool {
         self.as_slice() == other.as_slice()
@@ -1775,6 +1810,7 @@ impl PartialEq<RxBytes> for Vec<u8> {
 
 /// Inbound frame received from a link: its bytes, owned or lent (see
 /// [`RxBytes`]), and where a shared medium says they came from.
+#[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct RxFrame {
     pub bytes: RxBytes,
@@ -1789,6 +1825,7 @@ pub struct RxFrame {
     pub src: Option<core::net::SocketAddr>,
 }
 
+#[cfg(feature = "alloc")]
 impl RxFrame {
     /// A point-to-point inbound frame (no source attribution needed — the
     /// link has one implicit peer). The common case for unicast links.
@@ -1813,6 +1850,7 @@ impl RxFrame {
 /// emits only Ready / Rx / Lost; backpressure + framing_error +
 /// tx_drained land when their consumers (codec-level decoder +
 /// session FSM) are wired.
+#[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub enum LinkEvent {
     Ready,

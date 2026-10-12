@@ -20,12 +20,15 @@
 //! `LeaseCheckOutcome`) plus the wz-codecs `ExtEntry` projection from
 //! `FramePayload.extensions`. Alloc-gated due to the Vec fields.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(feature = "alloc")]
 use wz_codecs::ext_entry::ExtEntryOwned;
 
 use crate::lease::{KeepAliveCheckOutcome, LeaseCheckOutcome};
 use crate::link::LostCause;
+#[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 use crate::parse_error::InboundParseError;
 
@@ -57,6 +60,11 @@ pub enum DriverLoopOutcome {
     /// records. The session FSM is unchanged (Frame receipt is not a
     /// session-state trigger); the application layer dispatches
     /// `messages` against its per-MID handler set.
+    ///
+    /// The heap profile's outcome: it owns the decoded batch. The per-session slot
+    /// profile delivers each record where its frame lies (`InPlaceRecord`) and
+    /// reports `SideEffectOnly` when the frame is done.
+    #[cfg(feature = "alloc")]
     FramePayload {
         reliable: bool,
         sn: u64,
@@ -248,7 +256,7 @@ pub enum DriverLoopOutcome {
     /// reassembled message re-enters the same per-MID dispatch path a
     /// `T_MID_FRAME` payload would). The session FSM is unchanged (fragment
     /// receipt is not a session-state trigger, like `Frame`).
-    #[cfg(feature = "reassembly")]
+    #[cfg(all(feature = "alloc", feature = "reassembly"))]
     Fragment {
         reliable: bool,
         sn: u64,
@@ -830,7 +838,7 @@ impl<'a> InPlaceRecord<'a> {
 /// chain's real decoded priority, the multicast caller passes DEFAULT (its
 /// per-priority conduits stay deferred, R311y215 step 8), so the synthesized
 /// whole-frame outcome carries the same band the un-fragmented path would.
-#[cfg(feature = "reassembly")]
+#[cfg(all(feature = "alloc", feature = "reassembly"))]
 pub fn reassembled_frame_outcome(
     reliable: bool,
     sn: u64,
@@ -858,7 +866,7 @@ pub fn reassembled_frame_outcome(
 /// are copied once into a buffer the messages share
 /// ([`parse_frame_payload_lending`](crate::network_message::parse_frame_payload_lending)),
 /// as before.
-#[cfg(feature = "reassembly")]
+#[cfg(all(feature = "alloc", feature = "reassembly"))]
 pub fn reassembled_chain_outcome(
     reliable: bool,
     sn: u64,
