@@ -8,11 +8,15 @@
 //! runtime in statics.
 //!
 //! What it adds is the heap counted over the WHOLE run and read back to the crate that
-//! asked for each allocation. The multicast session's encoders and the owned wire
-//! mirrors of a queued `Put` are `wz-session-core`'s and still allocate (fixed-memory
-//! step S9d takes them), so the count is not zero; what is held here is that none of
-//! it is asked for by a SHELL crate: the e2e, the lwIP session glue, the link or the
-//! cooperative runtime.
+//! asked for each allocation. Built without the `heap` feature (fixed-memory step S9e,
+//! `--no-default-features --features fixed-memory,loopif-multicast`) no crate of the
+//! graph links `alloc` for the session tier: the JOIN is written into an array, the
+//! queued `Put` is framed into one lent buffer, and each record received is lent where
+//! its datagram lies. The count over the whole run is then ZERO, which is what is held.
+//! Built with `heap` the session tier's owned forms are in play and still allocate, so
+//! what is held is the weaker claim the step before this one held: that none of it is
+//! asked for by a SHELL crate (the e2e, the lwIP session glue, the link or the
+//! cooperative runtime).
 //!
 //! One run per process: lwIP is process-global and its group membership is the
 //! process's. A run on statics that already ran is refused and is checked here, since
@@ -46,11 +50,12 @@ impl ClockSource for FrozenClock {
     }
 }
 
-/// The crates that may still ask the heap for memory: the session tier's, which
-/// fixed-memory step S9d takes. Everything else is the shell (the e2e, the lwIP session
+/// The crates that may still ask the heap for memory when the build names `heap`: the
+/// session tier's owned forms. Everything else is the shell (the e2e, the lwIP session
 /// glue, the link, the cooperative runtime) or an allocation no workspace frame owns,
 /// and neither may ask. The list is the allowed set and not the shell's names so that
 /// an allocation whose frames carry no owner is a failure and not a pass.
+#[cfg(feature = "heap")]
 const SESSION_TIER: [&str; 4] = [
     "crates/wz-session-core",
     "crates/wz-codecs",
@@ -117,14 +122,27 @@ fn the_fixed_multicast_profile_round_trips_with_no_shell_crate_asking_the_heap()
         "the same pump, asked to stop, leaves the group announced; {report:#?}"
     );
 
-    let asked_by_the_shell: Vec<_> = owners
-        .keys()
-        .filter(|owner| !SESSION_TIER.iter().any(|tier| owner.ends_with(tier)))
-        .collect();
-    assert!(
-        asked_by_the_shell.is_empty(),
-        "no shell crate may ask the heap for memory, and {asked_by_the_shell:?} did; every \
-         owner: {owners:?}"
+    // With the heap named the session tier's owned forms are in play, and the claim is
+    // that no SHELL crate asks for memory.
+    #[cfg(feature = "heap")]
+    {
+        let asked_by_the_shell: Vec<_> = owners
+            .keys()
+            .filter(|owner| !SESSION_TIER.iter().any(|tier| owner.ends_with(tier)))
+            .collect();
+        assert!(
+            asked_by_the_shell.is_empty(),
+            "no shell crate may ask the heap for memory, and {asked_by_the_shell:?} did; \
+             every owner: {owners:?}"
+        );
+    }
+    // Without it nothing is in play that could ask: the whole run, the session tier
+    // included, takes nothing from the allocator.
+    #[cfg(not(feature = "heap"))]
+    assert_eq!(
+        n, 0,
+        "a build with no heap feature allocates nothing over the whole run; by crate: \
+         {owners:?}"
     );
 
     // THE REFUSAL: a second run on statics that already ran is refused by the

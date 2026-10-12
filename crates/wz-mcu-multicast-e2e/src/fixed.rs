@@ -16,21 +16,23 @@
 //! Stopped transition and the cleared table are the pump's, so the two forms prove the
 //! same transitions.
 //!
-//! What the run still asks the heap for is the session tier's: the encoders of
-//! `wz-session-core` and the owned wire mirrors of a queued `Put`. None of it is this
-//! crate's, which the crate enforces by not linking `alloc`.
+//! The run asks the heap for nothing on a build without the `heap` feature (S9e): the
+//! JOIN is written into an array, the queued `Put` is a borrowed offer framed into one
+//! lent buffer a datagram at a time, and the received records are lent where their
+//! datagram lies. It is written against the profile-agnostic seams of `wz-session-core`
+//! (`multicast_tx_emit_offer`, `IterationEvent::delivers_push`), so a build that does
+//! name `heap` runs the same code over the owned forms.
 
 use wz::link_lwip::rx_sockets::{
     bind_session_multicast_rx_in, SessionMulticastRxPool, SESSION_MULTICAST_GROUP_DEFAULT,
 };
 use wz::runtime_coop::RuntimeCell;
 use wz::session_lwip::multicast_drive::{LwipMulticastDriver, MulticastSession, MulticastSlots};
-use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-use wz_session_core::multicast_join::encode_join;
+use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::MulticastParams;
-use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::multicast_tx::{multicast_tx_emit_offer, multicast_tx_offer_put_literal};
 use wz_session_core::sn::{self, MulticastTxConduits};
 
 use crate::{
@@ -85,17 +87,13 @@ struct Observed {
 
 impl Observed {
     fn observe(&mut self, event: IterationEvent<'_>) {
-        match event {
-            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                if messages
-                    .iter()
-                    .any(|m| matches!(m, NetworkMessage::Push(_)))
-                {
-                    self.saw_push = true;
-                }
-            }
-            IterationEvent::ReassemblyDropped(_) => self.saw_drop = true,
-            _ => {}
+        // A Push is delivered as an owned batch on the heap profile and as a lent
+        // record on the slot profile: one question, whichever form arrived.
+        if event.delivers_push() {
+            self.saw_push = true;
+        }
+        if matches!(event, IterationEvent::ReassemblyDropped(_)) {
+            self.saw_drop = true;
         }
     }
 }
@@ -115,23 +113,32 @@ fn payload() -> [u8; PAYLOAD_LEN] {
 /// would ride the whole-Frame admit path instead).
 fn tx_fragments(payload: &[u8], own: &MulticastParams) -> bool {
     let mut probe_sn = MulticastTxConduits::new(sn::mask_from_res(own.seq_num_res));
-    match multicast_put_literal(KEYEXPR, payload) {
-        Ok(item) => multicast_tx_emit(item, &mut probe_sn, own).datagrams.len() > 1,
-        Err(_) => false,
-    }
+    let Some(offer) = multicast_tx_offer_put_literal(KEYEXPR, payload) else {
+        return false;
+    };
+    // The datagram buffer the lent form frames into: the group's batch is all it holds.
+    let mut scratch = [0u8; BATCH_SIZE as usize];
+    let mut datagrams = 0usize;
+    multicast_tx_emit_offer(offer, &mut probe_sn, own, &mut scratch, &mut |_| {
+        datagrams += 1
+    });
+    datagrams > 1
 }
 
-/// The JOIN of the pre-admitted peer: a zid distinct from ours (so it is admitted, not
-/// own-zid-filtered) advertising `next_sn 0` on a fresh ring, and the SAME `batch_size`
-/// as ours (a mismatch would fail `validate_join` and the echoed fragments would hit an
-/// `UnknownPeer` drop).
-fn peer_join() -> impl core::ops::Deref<Target = [u8]> {
+/// The JOIN of the pre-admitted peer, written into `buf`: a zid distinct from ours (so
+/// it is admitted, not own-zid-filtered) advertising `next_sn 0` on a fresh ring, and
+/// the SAME `batch_size` as ours (a mismatch would fail `validate_join` and the echoed
+/// fragments would hit an `UnknownPeer` drop).
+fn peer_join(buf: &mut [u8; JOIN_MAX_BYTES]) -> &[u8] {
     let mut peer = params(PEER_ZID);
     peer.batch_size = BATCH_SIZE;
-    encode_join(
+    let len = encode_join_into_slice(
         &peer,
         &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+        buf,
     )
+    .expect("a JOIN fits JOIN_MAX_BYTES, which bounds every one the encoder writes");
+    &buf[..len]
 }
 
 /// This node's parameters: the fixture at the tiny batch budget.
@@ -230,7 +237,8 @@ where
 
     // Pre-admit the peer at our loopback source, before the driver wraps the socket
     // (see `peer_join`).
-    let _ = socket.send_to(group, PORT, &peer_join());
+    let mut join = [0u8; JOIN_MAX_BYTES];
+    let _ = socket.send_to(group, PORT, peer_join(&mut join));
 
     let own = own_params();
     let payload = payload();
@@ -247,7 +255,7 @@ where
     };
 
     // One queued Put on the reliable channel; the pull-seam yields it once.
-    let mut pending: Option<MulticastTxItem> = multicast_put_literal(KEYEXPR, &payload).ok();
+    let mut pending = multicast_tx_offer_put_literal(KEYEXPR, &payload);
 
     // The bounded round trip: the peer JOIN, the Put's fragments, their reassembly.
     let mut seen = Observed::default();

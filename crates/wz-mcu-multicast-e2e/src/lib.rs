@@ -12,8 +12,8 @@
 
 //! wz-mcu-multicast-e2e — the MCU multicast transport e2e SSOT (R311mi).
 //!
-//! `run_multicast_e2e` (the heap form; with `fixed-memory` the crate has
-//! `run_multicast_e2e_fixed` over `MulticastE2eStatics` instead) exercises the full
+//! `run_multicast_e2e` (the heap form, the `heap` feature's; the `fixed-memory`
+//! feature has `run_multicast_e2e_fixed` over `MulticastE2eStatics`) exercises the full
 //! MCU multicast feature profile end
 //! to end over a REAL lwIP loopback, through the Stage 4b
 //! [`wz::session_lwip::multicast_drive::run_multicast_session`] sync drive
@@ -69,21 +69,21 @@
 // Fixed-memory step S9c -- the heap form below is the one this crate always had, byte
 // for byte (the footprint gate measures its image, and a refactor that shared code with
 // the new form moved that image by 468 bytes), and it links `alloc` as before. The
-// `fixed-memory` feature replaces it with a form that links no `alloc`: statics, a pump
-// in a cell of a table and the step loop in place of `run_multicast_session`
-// (`fixed`). What the session tier below still allocates (the encoders and the owned
-// wire mirrors) is `wz-session-core`'s, the next step's.
-#[cfg(not(feature = "fixed-memory"))]
+// `fixed-memory` feature adds a form that links no `alloc`: statics, a pump in a cell
+// of a table and the step loop in place of `run_multicast_session` (`fixed`). Built
+// without `heap` (S9e), no crate of the graph links `alloc` either: the session tier
+// frames a Put into one lent buffer and lends each received record where it lies.
+#[cfg(feature = "heap")]
 extern crate alloc;
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz::link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz::runtime_coop::CoopRuntime;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz::session_lwip::multicast_drive::{
     run_multicast_session, run_multicast_session_with_shutdown, LwipMulticastDriver,
 };
@@ -109,50 +109,60 @@ pub use wz::link_lwip::LwipLink;
 // boundary as the acceptor's ReassemblyDropReason re-export).
 pub use wz_session_core::multicast_params::MulticastOutcome;
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz_session_core::multicast_join::encode_join;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz_session_core::multicast_params::MulticastDriveConfig;
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::multicast_params::MulticastParams;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz_session_core::network_message::NetworkMessage;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 use wz_session_core::sn::{self, MulticastTxConduits};
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::WhatAmI;
 
 /// The multicast transport group + port the e2e binds + multicasts to:
 /// `224.0.0.224:7446` (zenoh's `Z_CONFIG_MULTICAST_LOCATOR_DEFAULT`).
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const PORT: u16 = 7446;
 /// The bounded peer-table capacity for the dispatcher. One peer (ours, at the
 /// loopback source) is admitted; 4 is ample headroom.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const MAX_PEERS: usize = 4;
 /// Iteration cap on the drive loop. The fragment chain completes within the
 /// first few iterations (one fragment delivered per loopback poll); the
 /// remainder spin the (frozen-clock no-op) JOIN/sweep branches. Bounds a
 /// regression so a stuck loop fails fast instead of hanging.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const MAX_ITERS: usize = 32;
 /// The tiny group-wide frame budget that forces the oversize Put to fragment.
 /// `validate_join` admits a peer JOIN only when its advertised `batch_size`
 /// matches the receiver's, so BOTH the self params and the crafted peer JOIN
 /// carry this value (a mismatch would silently reject the JOIN and the echoed
 /// fragments would hit an `UnknownPeer` drop).
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const BATCH_SIZE: u16 = 64;
 /// The oversize payload length. 200 bytes exceeds the 64-byte batch budget
 /// (so the frame fragments) while staying under the owned-push codec's
 /// payload cap — the same sizing the AP + C1m fragmentation tests use.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const PAYLOAD_LEN: usize = 200;
 /// The literal keyexpr the Put publishes on.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const KEYEXPR: &str = "demo/mc";
 /// Our own zenoh id (the §3.2 self key; own-zid JOINs are beacon-filtered).
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const SELF_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
 /// The crafted peer's zenoh id — distinct from ours so its JOIN is admitted
 /// (not own-zid-filtered), creating the peer entry the echoed fragments match.
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 const PEER_ZID: &[u8] = &[0x01, 0x02, 0x03, 0x04];
 
 /// The full e2e result: the multicast drive [`MulticastOutcome`] plus the
@@ -217,7 +227,7 @@ pub struct MulticastE2eReport {
 /// elapses, so the run is fully deterministic — the fragment chain is
 /// delivered FIFO over loopback and reassembles in order); the deploy bin
 /// passes its SysTick clock.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> MulticastE2eReport {
     run_multicast_e2e_with_progress(link, clock_source, |_stage| {})
 }
@@ -261,7 +271,7 @@ impl MulticastStage {
 /// `on_stage` runs between the e2e's phases, so a bare-metal image prints one
 /// console line and a host test pushes into a vector. A caller that wants no
 /// announcements uses [`run_multicast_e2e`], whose no-op compiles away.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(feature = "heap")]
 pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>(
     link: &LwipLink,
     clock_source: C,
@@ -417,6 +427,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
 /// peer JOIN built with one `zid` is admitted by a loop running another. The
 /// caller overrides `batch_size` to the tiny value that forces fragmentation
 /// (and matches it on both sides so `validate_join` admits the peer).
+#[cfg(any(feature = "heap", feature = "fixed-memory"))]
 fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
         version: 0x09,

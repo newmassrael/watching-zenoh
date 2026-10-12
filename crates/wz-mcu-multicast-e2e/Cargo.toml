@@ -84,7 +84,21 @@ path = "src/lib.rs"
 name = "host_multicast_fixed_e2e"
 required-features = ["fixed-memory", "loopif-multicast"]
 
+# The heap form of the e2e exists only with the heap (S9e).
+[[test]]
+name = "host_multicast_e2e"
+required-features = ["heap"]
+
 [features]
+default = ["heap"]
+# S9e -- the heap: the cooperative runtime's heap task pool and the session core's
+# owned forms, which the heap form of the e2e (`run_multicast_e2e`, over a `Vec`
+# of datagrams, a boxed owned `Put`, the lwIP session shell on the heap) is written
+# over. On by default, so every existing caller builds unchanged; the fixed-memory
+# profile of the image is built without it (`default-features = false`) and then no
+# crate in its graph carries `alloc`.
+heap = ["wz/session-lwip", "wz-session-core/alloc"]
+
 # R311y190 — loopback multicast egress routing (forwards `wz/loopif-multicast`
 # down to the wz-link-lwip `route_multicast_over_loopback` FFI seam). With this
 # on AND a testmode lwIP port (`crates/lwip-sys/port/cross-test-mcast`), the
@@ -96,9 +110,10 @@ loopif-multicast = ["wz/loopif-multicast"]
 # S9c -- the fixed-memory profile of the e2e: the multicast session on the per-session
 # slot (a pump in a cell of `MulticastSlots`), the group socket in a static pool and
 # the runtime in a static cell, through `run_multicast_e2e_fixed` over statics the image
-# declares. The crate links no `alloc` under it; it replaces the heap form
-# (`run_multicast_e2e`, which links `alloc` as it always did and draws its socket and
-# runtime from the heap): a build has one of them.
+# declares. The crate links no `alloc` under it, and neither does any crate of its graph
+# when `heap` is off (S9e: the multicast TX frames into one lent buffer, the RX lends
+# each record where its datagram lies). It is the form an image without an allocator
+# names; the heap form is `heap`'s, and a build that names both has both.
 fixed-memory = [
     "dep:wz-session-lwip",
     "dep:wz-link-lwip",
@@ -108,15 +123,16 @@ fixed-memory = [
 ]
 
 [dependencies]
-# The composable-framework boundary. `session-lwip` lights up
+# The composable-framework boundary. `session-lwip-fixed` lights up
 # `wz::{session_lwip, link_lwip, runtime_coop}` together with the
-# lwip_real_build cfg; transport-multicast / transport-fragmentation /
+# lwip_real_build cfg, with no heap (the `heap` feature adds it as `session-lwip`);
+# transport-multicast / transport-fragmentation /
 # codec-push wire the full multicast profile through the facade ->
 # session-lwip -> runtime-coop -> session-core funnel. transport-
 # fragmentation implies reassembly, so the inbound Fragment RX arm + the
 # outbound fragment split both light up.
 wz = { path = "../wz", default-features = false, features = [
-    "session-lwip",
+    "session-lwip-fixed",
     "transport-multicast",
     "transport-fragmentation",
     "codec-push",
@@ -127,10 +143,9 @@ wz = { path = "../wz", default-features = false, features = [
 # MulticastTxItem / multicast_put_literal / encode_join / TxSn /
 # DriverLoopOutcome / IterationEvent / NetworkMessage). The feature set
 # matches the facade funnel above so cargo unifies one wz-session-core
-# instance (transport-fragmentation pulls reassembly + codec-fragment +
-# alloc; codec-push pulls codec-frame).
+# instance (transport-fragmentation pulls reassembly + codec-fragment;
+# codec-push pulls codec-frame). `alloc` is the `heap` feature's.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
-    "alloc",
     "no_std",
     # Round 1955 — the second ROM profile selector, set here for the same
     # reason `no_std` is: this crate is the composition boundary, so the

@@ -1036,6 +1036,32 @@ pub type MulticastTxOffer<'a> = MulticastTxItem;
 ))]
 pub type MulticastTxOffer<'a> = MulticastTxPut<'a>;
 
+/// A reliable, DEFAULT-band literal Put as the build's [`MulticastTxOffer`]: the owned
+/// item `multicast_put_literal` builds on the heap profile, or the borrowed
+/// `MulticastTxPut` over `keyexpr` and `payload` on a build with no allocator. One
+/// call for both, so a caller that queues a Put names no profile. `None` when the
+/// owned message cannot be built (a keyexpr longer than the codec's text bound); the
+/// borrowed form reports that where it is framed (`MulticastTxRefused::Unencodable`).
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_offer_put_literal<'a>(
+    keyexpr: &'a str,
+    payload: &'a [u8],
+) -> Option<MulticastTxOffer<'a>> {
+    multicast_put_literal(keyexpr, payload).ok()
+}
+/// See the heap form of this function.
+#[cfg(all(
+    not(feature = "alloc"),
+    feature = "codec-push",
+    feature = "transport-tx-lend"
+))]
+pub fn multicast_tx_offer_put_literal<'a>(
+    keyexpr: &'a str,
+    payload: &'a [u8],
+) -> Option<MulticastTxOffer<'a>> {
+    Some(MulticastTxPut::literal(keyexpr, payload))
+}
+
 /// Why `multicast_tx_emit_lent` sent nothing.
 #[cfg(all(feature = "codec-push", feature = "transport-tx-lend"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
