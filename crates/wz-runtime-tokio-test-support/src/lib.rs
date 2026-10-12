@@ -785,7 +785,7 @@ fn random_draw() -> u64 {
 /// Reads no address back from the socket and takes none from the kernel: the
 /// number is the one this function asked for, and a bind that fails (a number
 /// something already holds, or a live process has claimed) is drawn again, at
-/// most [`FREE_PORT_ATTEMPTS`] times.
+/// most `FREE_PORT_ATTEMPTS` times (a private constant, so a code span).
 ///
 /// Capacity: every number returned stays claimed until the process exits, and
 /// the range is shared by every process that picks through this crate at the
