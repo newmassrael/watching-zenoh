@@ -273506,6 +273506,38 @@
         "The sibling writer in the socket cell (wz-link-lwip Inner::init_in_place) has one gated field of the same shape; its package is not a census finding today, and it stays as it is until it is."
       ]
     },
+    "Round 3318": {
+      "decision_summary": "The hosted run of the Round 3315 push failed the QEMU job of Layer Q twice, and the first is a regression of that push: the FreeRTOS demo image stopped booting (a 30 s timeout after its first line). Cause, measured from the two images: the socket state of the lwIP link, built by Inner::new(), went through a MaybeUninit local and a copy out, and the state is the receive queue (24.7 KB for a session socket), so the demo task's frame grew from 4,816 to 28,056 bytes on a 16 KiB task stack with the stack-overflow check on. The in-place construction meant for the fixed-memory node had been applied to the heap form as a by-value copy. The heap form is now built where it stays as well: the box is allocated, then init_in_place writes it, and the by-value constructor is gone, so no caller can build the state as a value. The second red, the multicast image's text 604 bytes under its baseline, was this same code; with the repair it is inside the band on both targets, so the baselines stay.",
+      "changes_bullets": [
+        "crates/wz-link-lwip/src/lib.rs: Inner::new() is removed; Inner::boxed() allocates the box and calls init_in_place, which bind uses; init_in_place writes its fields with ptr::write, so a gated line opens with a path and not a macro; the docs say why there is no by-value constructor."
+      ],
+      "verification_bullets": [
+        "On a build host: the FreeRTOS demo built from the Round 3317 tree stops after its first line, and the same demo from the tree before the in-place work and from this repair boots to its session PASS and its epoch PASS; the demo task's frame is 4,816 bytes in the two that boot and 28,056 in the one that does not, read from the disassembly.",
+        "On a build host: the multicast image measures 66492 (thumbv7m) and 66060 (thumbv7em-hf) bytes of text against the baselines 66296 and 66104, inside the 256-byte band; the link crate's tests pass in both storage modes (52 unit tests each, 9 in the static-storage allocation test), clippy with warnings denied is clean in both, and the feature-public-surface census check passes.",
+        "NOT verified here: the hosted measurement of the repaired image, which can differ from a build host's by a few bytes, and the other jobs of the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "A frame budget over the images Layer Q builds would have caught this before a boot did: the entry function's frame against the stack its image declares. Not built yet; the frame tables of this round were read by hand."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3315 push failed the QEMU job of Layer Q twice, and the first is a regression of that push: the FreeRTOS demo image stopped booting (a 30 s timeout after its first line). Cause, measured from the two images: the socket state of the lwIP link, built by Inner::new(), went through a MaybeUninit local and a copy out, and the state is the receive queue (24.7 KB for a session socket), so the demo task's frame grew from 4,816 to 28,056 bytes on a 16 KiB task stack with the stack-overflow check on. The in-place construction meant for the fixed-memory node had been applied to the heap form as a by-value copy. The heap form is now built where it stays as well: the box is allocated, then init_in_place writes it, and the by-value constructor is gone, so no caller can build the state as a value. The second red, the multicast image's text 604 bytes under its baseline, was this same code; with the repair it is inside the band on both targets, so the baselines stay.",
+      "publishable_changes_bullets": [
+        "crates/wz-link-lwip/src/lib.rs: Inner::new() is removed; Inner::boxed() allocates the box and calls init_in_place, which bind uses; init_in_place writes its fields with ptr::write, so a gated line opens with a path and not a macro; the docs say why there is no by-value constructor."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the FreeRTOS demo built from the Round 3317 tree stops after its first line, and the same demo from the tree before the in-place work and from this repair boots to its session PASS and its epoch PASS; the demo task's frame is 4,816 bytes in the two that boot and 28,056 in the one that does not, read from the disassembly.",
+        "On a build host: the multicast image measures 66492 (thumbv7m) and 66060 (thumbv7em-hf) bytes of text against the baselines 66296 and 66104, inside the 256-byte band; the link crate's tests pass in both storage modes (52 unit tests each, 9 in the static-storage allocation test), clippy with warnings denied is clean in both, and the feature-public-surface census check passes.",
+        "NOT verified here: the hosted measurement of the repaired image, which can differ from a build host's by a few bytes, and the other jobs of the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A frame budget over the images Layer Q builds would have caught this before a boot did: the entry function's frame against the stack its image declares. Not built yet; the frame tables of this round were read by hand."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
