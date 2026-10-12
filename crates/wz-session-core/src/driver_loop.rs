@@ -948,10 +948,13 @@ impl IterationEvent<'_> {
 /// ([`WalkedRecord::Skipped`](crate::network_message::WalkedRecord::Skipped)) raises
 /// no event. An OWNED record is the caller's (it builds the outcome that reports it),
 /// so it is not handled here.
+///
+/// Its callers are the unicast walk (`drive`, which is `session-unicast`) and the
+/// multicast walk of a build with no allocator; a test build that has neither carries
+/// no caller, so `test` is not a reason to compile it.
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     ),
