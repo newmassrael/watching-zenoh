@@ -388,26 +388,43 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     // `run` is the node's loop.
     #[inline(never)]
     pub unsafe fn init_in_place(at: *mut Self) {
-        use core::ptr::addr_of_mut;
+        use core::ptr::{self, addr_of_mut};
+        // Each gated statement opens with the path `ptr::write(`, not with the
+        // `addr_of_mut!` macro: the feature-public-surface census reads a gated
+        // line that starts with a macro call as a macro that may expand to a public
+        // item, and a statement here is not one.
         // SAFETY: the caller's; each field is written once through a pointer to it.
         unsafe {
-            addr_of_mut!((*at).subscribers).write(SubscriberTable::with_sink_backing());
+            ptr::write(
+                addr_of_mut!((*at).subscribers),
+                SubscriberTable::with_sink_backing(),
+            );
             #[cfg(feature = "switchboard")]
-            addr_of_mut!((*at).switchboard).write(SwitchboardRegistry::new());
+            ptr::write(addr_of_mut!((*at).switchboard), SwitchboardRegistry::new());
             #[cfg(feature = "query-queryable")]
-            addr_of_mut!((*at).queryables).write(QueryableRegistry::with_sink_backing());
+            ptr::write(
+                addr_of_mut!((*at).queryables),
+                QueryableRegistry::with_sink_backing(),
+            );
             #[cfg(feature = "declare-subscriber")]
-            addr_of_mut!((*at).remote_subscribers)
-                .write(RemoteSubscriberTable::with_sink_backing());
+            ptr::write(
+                addr_of_mut!((*at).remote_subscribers),
+                RemoteSubscriberTable::with_sink_backing(),
+            );
             #[cfg(feature = "declare-queryable")]
-            addr_of_mut!((*at).remote_queryables).write(RemoteQueryableTable::with_sink_backing());
+            ptr::write(
+                addr_of_mut!((*at).remote_queryables),
+                RemoteQueryableTable::with_sink_backing(),
+            );
             #[cfg(feature = "liveliness-token")]
-            addr_of_mut!((*at).liveliness).write(LivelinessRegistry::new());
+            ptr::write(addr_of_mut!((*at).liveliness), LivelinessRegistry::new());
             #[cfg(feature = "liveliness-token")]
-            addr_of_mut!((*at).local_tokens).write(LocalTokenRegistry::new());
+            ptr::write(addr_of_mut!((*at).local_tokens), LocalTokenRegistry::new());
             #[cfg(feature = "liveliness-subscriber")]
-            addr_of_mut!((*at).liveliness_subscribers)
-                .write(LivelinessSubscriberTable::with_sink_backing());
+            ptr::write(
+                addr_of_mut!((*at).liveliness_subscribers),
+                LivelinessSubscriberTable::with_sink_backing(),
+            );
         }
     }
 
