@@ -273604,6 +273604,40 @@
         "The Zephyr fixed-memory row (64 KB main stack, frames of 19 KB, 15 KB and 10 KB at most) is not under the gate yet: its ELF is built in a different job, by west. It is the same rule over a different image source."
       ]
     },
+    "Round 3321": {
+      "decision_summary": "The frame budget of Round 3320 covered the two FreeRTOS images, which a final QEMU lane builds with cargo. The image the rule was learned on is the fixed-memory Zephyr node, whose first boot on the kit died on a 69,040-byte frame of its main function on a 32,768-byte stack and which a load run had not seen. It is under the same rule now: the gate reads the main stack from the overlay that sets it (CONFIG_MAIN_STACK_SIZE of the fixed overlay, 65,536 bytes) and the frames from the ELF west linked, with the objdump of the SDK that linked it, which Layer Qzb names from the same cache as the nm beside it. The check runs for the row whose overlay list carries the fixed overlay, after its build. What the rule still does not do is sum a call chain: the node's real worst case was run, admit and spawn_pump together, about 35 KB, and each of them is under half of 64 KB. That sum is the runtime stack reading of the lab run, and a static bound over the call graph is not built.",
+      "changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: the zephyr-fixed image (its stack read from the fixed overlay, its entry fixed_node::run); --elf and --objdump name an ELF built where the caller says.",
+        "scripts/run-ci.sh: Layer Qzb runs the check after the build of the row that carries the fixed overlay."
+      ],
+      "verification_bullets": [
+        "On a build host, over west builds of this node kept from the bench work: the build that died on its first dial reads a 69,040-byte frame for fixed_node::run against a 65,536-byte stack (budget 32,768) and fails, naming the function; the two later builds read a 10,256-byte entry frame and a largest frame of 19,104 (spawn_pump) and pass. The control is the real image that failed on silicon, not a synthetic one.",
+        "The selftest and the population check pass with the third image (declared stack 65,536 read once from the overlay).",
+        "NOT verified here: the check inside a hosted Layer Qzb run, which builds the row with west on the runner; the objdump name is derived from the build's cache as the nm beside it is, and a hosted run is what shows that derivation on that toolchain."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "A bound over a call chain, not one frame: the sum of the frames along the deepest path of the call graph against the stack, which the lab run's peak reading stands in for today."
+      ],
+      "publishable_decision_summary": "The frame budget of Round 3320 covered the two FreeRTOS images, which a final QEMU lane builds with cargo. The image the rule was learned on is the fixed-memory Zephyr node, whose first boot on the kit died on a 69,040-byte frame of its main function on a 32,768-byte stack and which a load run had not seen. It is under the same rule now: the gate reads the main stack from the overlay that sets it (CONFIG_MAIN_STACK_SIZE of the fixed overlay, 65,536 bytes) and the frames from the ELF west linked, with the objdump of the SDK that linked it, which Layer Qzb names from the same cache as the nm beside it. The check runs for the row whose overlay list carries the fixed overlay, after its build. What the rule still does not do is sum a call chain: the node's real worst case was run, admit and spawn_pump together, about 35 KB, and each of them is under half of 64 KB. That sum is the runtime stack reading of the lab run, and a static bound over the call graph is not built.",
+      "publishable_changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: the zephyr-fixed image (its stack read from the fixed overlay, its entry fixed_node::run); --elf and --objdump name an ELF built where the caller says.",
+        "scripts/run-ci.sh: Layer Qzb runs the check after the build of the row that carries the fixed overlay."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, over west builds of this node kept from the bench work: the build that died on its first dial reads a 69,040-byte frame for fixed_node::run against a 65,536-byte stack (budget 32,768) and fails, naming the function; the two later builds read a 10,256-byte entry frame and a largest frame of 19,104 (spawn_pump) and pass. The control is the real image that failed on silicon, not a synthetic one.",
+        "The selftest and the population check pass with the third image (declared stack 65,536 read once from the overlay).",
+        "NOT verified here: the check inside a hosted Layer Qzb run, which builds the row with west on the runner; the objdump name is derived from the build's cache as the nm beside it is, and a hosted run is what shows that derivation on that toolchain."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A bound over a call chain, not one frame: the sum of the frames along the deepest path of the call graph against the stack, which the lab run's peak reading stands in for today."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
