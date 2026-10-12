@@ -418,16 +418,26 @@ IMAGES: dict[str, Image] = {
     ),
     # S9c -- the node of the Zephyr image on the fixed-memory profile: sessions, sockets,
     # interfaces, endpoints, status rows and console lines in storage the staticlib
-    # declares. It stays `pending`, and the residual is NOT the node's: `zephyr_image!`
-    # declares the global allocator over the kernel heap, `wz-runtime-zephyr` links `alloc`,
-    # the MAC drivers' bring-up lines are built with `format!`, and the session tier's
-    # crates allocate. Built here with the stand-in for the board's build values, which is
-    # a compile and a link-input check: no `west` image was built and nothing was booted.
+    # declares.
+    #
+    # S9e -- GATED, as the admin node of the lwIP image is. The image declares no allocator
+    # (`zephyr_image_no_heap!`), `wz-runtime-zephyr` is built without its `alloc` (the
+    # kernel-heap allocator and the Zephyr socket stack are its heap profile's; its
+    # clock-check line is a value and its stack line is printed by the firmware), the MAC
+    # drivers' bring-up lines are printed into the fixed console buffer, and the session
+    # tier is the slot profile's, with the facade's `platform-zephyr-fixed` and the
+    # deploy's `heap` feature (the heap profile, the default) both left off.
+    #
+    # Built with the stand-in for the board's build values, which is a compile and a
+    # link-input check: a staticlib has no link step of its own, so the proof is the
+    # symbols of the archive and the crates of its graph, and the toolchain's refusal
+    # holds where the kernel's image link would take it. No `west` image was built and
+    # nothing was booted on the kit; the CMake build does not select this profile yet.
     "zephyr-admin-node-fixed": Image(
         "deploy/zephyr-admin-node/rust/Cargo.toml",
         "staticlib",
         "wz-zephyr-admin-node",
-        "pending",
+        "gated",
         (
             Build(
                 V7EMHF,
@@ -435,10 +445,9 @@ IMAGES: dict[str, Image] = {
                 ("net-lwip-mac", "mac-cyt4bf", "fixed-memory"),
                 env=ZEPHYR_BUILD_VALUES,
                 label="cyt4bf-lwip-fixed",
+                no_default_features=True,
             ),
         ),
-        "the Zephyr allocator bridge (`zephyr_image!`), wz-runtime-zephyr, the MAC drivers'"
-        " `format!` bring-up lines and the session tier's crates: the node shell itself is fixed",
         ci=False,
     ),
     "zephyr-app": Image(
