@@ -273710,6 +273710,50 @@
         "The preflight of a push that adds a test runs the count-guard oracle over the whole push range (BX pointed at the build host) and not over the last commit; the hook defers it, so the range is the preflight's to run."
       ]
     },
+    "Round 3324": {
+      "decision_summary": "The selector language gains two fields, for filtering by content and by sender. `value` compares the payload bytes as the publisher put them, after decompression and reassembly and before any encoding, with contains, == and != against a quoted text (escapes include \\xNN) or 0x and whole bytes; it is undecided, never false, where the payload cannot be told: a Del, a query value this reader cannot open, a payload on shared memory. `node` names a sender by the application's own word. The name table crosses as JSON; bind_nodes and the new door wz_dissect_selector_bind (ABI 35, document selector_bind revision 1) resolve each node term to the zid term its name stands for, and every other door refuses a selector that still holds one, so an unresolved name is never read as a miss. A bad table, a selector that does not compile, a name the table lacks and a name with two zids are four typed refusals. wz-analyze reads the same table as --node-names. selector_diagnose moves to revision 4.",
+      "changes_bullets": [
+        "crates/wz-capture/src/filter.rs: the fields value and node, the contains operator, backslash escapes in a quoted value, Content on the record view, NodeNames, bind_nodes and the selector_bind verdict; Filter::parse refuses a node term.",
+        "crates/wz-capture/src/agg.rs, exchange.rs, payload.rs: the three planes carry the payload bytes into the record view from one function, payload_content, the same carriers that classify sizes; the exchange plane keeps the request's bytes only when a term reads them.",
+        "crates/wz-capture/src/doc_revision.rs, fields_json.rs: selector_diagnose revision 4 and the selector_bind document, its refusal family declared and rendered by the carries gate.",
+        "crates/wz-capi-dissect: wz_dissect_selector_bind, ABI 35, the header's field table and door text; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py follow.",
+        "crates/wz-analyze: --node-names reads the same table; --select is compiled after the arguments are read."
+      ],
+      "verification_bullets": [
+        "On a build host: the library tests of wz-capture (default, no default features, and the dissect feature), wz-capi-dissect and wz-analyze pass, the new tests among them, with clippy clean on the three crates; the planes' tests read real Put, Query, Reply and Err bytes off the wire, including the three undecided states of the value term.",
+        "On a build host: layers C0, C0s and C1bz pass on the committed change, the count-guard oracle over the range from the Round 3323 tip reaches no guard, and the feature public surface census check passes.",
+        "NOT verified here: the hosted run of this push, and the C abi consumer test, which runs in its own hosted lane and was added to by this round; the consumer has not yet exercised the door."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The consumer's design side may still change the literal syntax of the value and node terms; the consumer says so before the pin is cut, and the pin is sent to it by sha.",
+        "A bound node term is an ordinary zid term, so a configured zid of eight to thirty-one digits that is absent from a capture is read as a prefix of another node's zid; a zid zenoh generates is thirty-two digits and cannot be one. An exact form would need its own spelling in the language.",
+        "The message-level selected verdict and the live handle read the same planes; nothing else in the tree builds a record view, and a plane added later must call payload_content."
+      ],
+      "publishable_decision_summary": "The selector language gains two fields, for filtering by content and by sender. `value` compares the payload bytes as the publisher put them, after decompression and reassembly and before any encoding, with contains, == and != against a quoted text (escapes include \\xNN) or 0x and whole bytes; it is undecided, never false, where the payload cannot be told: a Del, a query value this reader cannot open, a payload on shared memory. `node` names a sender by the application's own word. The name table crosses as JSON; bind_nodes and the new door wz_dissect_selector_bind (ABI 35, document selector_bind revision 1) resolve each node term to the zid term its name stands for, and every other door refuses a selector that still holds one, so an unresolved name is never read as a miss. A bad table, a selector that does not compile, a name the table lacks and a name with two zids are four typed refusals. wz-analyze reads the same table as --node-names. selector_diagnose moves to revision 4.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/filter.rs: the fields value and node, the contains operator, backslash escapes in a quoted value, Content on the record view, NodeNames, bind_nodes and the selector_bind verdict; Filter::parse refuses a node term.",
+        "crates/wz-capture/src/agg.rs, exchange.rs, payload.rs: the three planes carry the payload bytes into the record view from one function, payload_content, the same carriers that classify sizes; the exchange plane keeps the request's bytes only when a term reads them.",
+        "crates/wz-capture/src/doc_revision.rs, fields_json.rs: selector_diagnose revision 4 and the selector_bind document, its refusal family declared and rendered by the carries gate.",
+        "crates/wz-capi-dissect: wz_dissect_selector_bind, ABI 35, the header's field table and door text; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py follow.",
+        "crates/wz-analyze: --node-names reads the same table; --select is compiled after the arguments are read."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the library tests of wz-capture (default, no default features, and the dissect feature), wz-capi-dissect and wz-analyze pass, the new tests among them, with clippy clean on the three crates; the planes' tests read real Put, Query, Reply and Err bytes off the wire, including the three undecided states of the value term.",
+        "On a build host: layers C0, C0s and C1bz pass on the committed change, the count-guard oracle over the range from the Round 3323 tip reaches no guard, and the feature public surface census check passes.",
+        "NOT verified here: the hosted run of this push, and the C abi consumer test, which runs in its own hosted lane and was added to by this round; the consumer has not yet exercised the door."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The consumer's design side may still change the literal syntax of the value and node terms; the consumer says so before the pin is cut, and the pin is sent to it by sha.",
+        "A bound node term is an ordinary zid term, so a configured zid of eight to thirty-one digits that is absent from a capture is read as a prefix of another node's zid; a zid zenoh generates is thirty-two digits and cannot be one. An exact form would need its own spelling in the language.",
+        "The message-level selected verdict and the live handle read the same planes; nothing else in the tree builds a record view, and a plane added later must call payload_content."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
