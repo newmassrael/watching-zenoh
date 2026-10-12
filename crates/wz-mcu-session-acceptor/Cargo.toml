@@ -104,7 +104,7 @@ required-features = ["lwip"]
 # the e2e runs on any network stack through `AcceptorTopology`, and lwIP is
 # one topology among them.
 wz = { path = "../wz", default-features = false, features = [
-    "runtime-coop",
+    "runtime-coop-fixed",
     "codec-init-body",
     "codec-open-body",
     "codec-frame",
@@ -120,14 +120,13 @@ wz = { path = "../wz", default-features = false, features = [
 # MCU profile; the codec-* gates arrive via the facade funnel above and
 # unify onto this same wz-session-core instance.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
-    "alloc",
     "session-unicast",
     "no_std",
 ] }
 # R2917 — the cooperative drive loop the e2e steps (`session_drive`) and the
 # MCU construction seam (`session_runtime`), both behind `session-unicast`,
 # which the `lwip` topology used to bring in through wz-session-lwip.
-wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
+wz-runtime-coop = { path = "../wz-runtime-coop", features = ["session-unicast"] }
 # Direct dep SOLELY for DEP_LWIP_LWIP_REAL_BUILD -> lwip_real_build cfg
 # propagation in build.rs (mirrors wz-link-lwip / wz-session-lwip). No
 # FFI is called here. Optional since R2917: only the lwIP topology needs it.
@@ -161,7 +160,7 @@ default = ["lwip"]
 # the next step's. It replaces the heap form (`run_acceptor_e2e`,
 # `AcceptorTopology`, `LwipTopology`): a build has one of them.
 fixed-memory = [
-    "lwip",
+    "lwip-link",
     "dep:wz-session-lwip",
     "dep:wz-link-lwip",
     "wz-session-lwip/session-slot",
@@ -177,7 +176,19 @@ fixed-memory = [
 #
 # Round 3170 follow-up — this topology's link is the lwIP UDP driver, which
 # lends the datagram payload, so the session shell is built to try a lend.
-lwip = ["wz/session-lwip", "wz/transport-tx-lend", "dep:lwip-sys"]
+lwip = ["lwip-link", "heap", "wz/session-lwip"]
+
+# S9e -- the lwIP link and the shell that drives it, WITHOUT the heap: what the
+# fixed-memory profile names, so that no crate in its graph carries `alloc`. `lwip`
+# is this plus `heap`, which is what it always was; `fixed-memory` is this plus the
+# selector set.
+lwip-link = ["wz/session-lwip-fixed", "wz/transport-tx-lend", "dep:lwip-sys"]
+
+# S9e -- the heap: the cooperative runtime's heap task pool and the session core's
+# owned forms, which the heap form of the e2e (the `Rc` sink, the topology trait,
+# `run_acceptor_e2e`) is written over. `fixed-memory` replaces that form and does
+# not name this.
+heap = ["wz/runtime-coop", "wz-session-core/alloc", "wz-runtime-coop/alloc"]
 
 # Tier B transport reassembly. Threads `wz/reassembly` (the facade atomic
 # feature -> wz-session-lwip/reassembly -> wz-runtime-coop + wz-session-core)
@@ -193,7 +204,7 @@ reassembly = ["wz/reassembly", "wz-session-core/reassembly", "wz-runtime-coop/re
 # SESSION_RX_SLOT_SIZE, so the whole e2e topology fits the microbit 16 KB
 # budget (the deploy/mcu-session-acceptor thumbv6m bin enables this, lifting
 # the Layer Q.4 microbit lane from build-only to a real boot).
-buffer-pool-session-rx-slim = ["lwip", "wz/buffer-pool-session-rx-slim"]
+buffer-pool-session-rx-slim = ["lwip-link", "wz/buffer-pool-session-rx-slim"]
 
 [dev-dependencies]
 # critical-section's std impl backs CoopRuntime's critical_section::Mutex

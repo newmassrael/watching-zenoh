@@ -23,21 +23,30 @@
 //! session must own its share. `!Send` is fine: the MCU session runs on a
 //! local set, which is the reason the bundle is `Rc` in the first place.
 
-#[cfg(feature = "session-slot")]
+// S9e -- the observer these dispatch to registers heap-boxed sinks, so everything
+// that names it is the heap profile's; what a build with no allocator keeps is the
+// event seam ([`SessionEvents`]) and the reply sink that discards ([`NoReplies`]),
+// which an image's own dispatcher is written against.
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 use core::cell::OnceCell;
+#[cfg(feature = "alloc")]
 use core::cell::RefCell;
 
+#[cfg(feature = "alloc")]
 use core::ops::Deref;
 
+#[cfg(feature = "alloc")]
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::driver_loop::IterationEvent;
+#[cfg(feature = "alloc")]
 use wz_session_core::observer::ApplicationLayerObserver;
 #[cfg(feature = "session-slot")]
 use wz_session_core::reply_sink::{ReplySink, ReplyView};
+#[cfg(feature = "alloc")]
 use wz_session_core::session_actions::SessionLinkActions;
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 use wz_session_core::session_slot::SlotRef;
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 use wz_session_core::slot_observer::{Requesters, SlotObserver};
 
 /// The `on_event` that dispatches each iteration to `observer` and drains its
@@ -59,6 +68,7 @@ use wz_session_core::slot_observer::{Requesters, SlotObserver};
 /// beside the application's, in the growable form; the slot profile's own form is
 /// `dispatch_slot` over a process-wide `SlotObserver` and the session's tables in its
 /// slot.
+#[cfg(feature = "alloc")]
 pub fn dispatch_to<C, H, O>(observer: O, actions: H) -> impl FnMut(IterationEvent<'_>) + 'static
 where
     C: ClockSource + 'static,
@@ -101,7 +111,7 @@ impl ReplySink for NoReplies {
 /// Like every table of the profile it is `Sync` by the profile's rule: one
 /// cooperative task on one core drives every session and so reaches the observer, and
 /// never two at once.
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 pub struct SlotApp {
     observer: OnceCell<RefCell<SlotObserver>>,
 }
@@ -109,10 +119,10 @@ pub struct SlotApp {
 // SAFETY: the profile's rule, stated on the type. The observer is reached by the one
 // cooperative task that drives the node's sessions and, at startup, by the image
 // before any session runs, never from an interrupt and never by two at once.
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 unsafe impl Sync for SlotApp {}
 
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 impl SlotApp {
     /// An application with no observer yet, for a `static`.
     pub const fn new() -> Self {
@@ -145,7 +155,7 @@ impl SlotApp {
     }
 }
 
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 impl Default for SlotApp {
     fn default() -> Self {
         Self::new()
@@ -173,7 +183,7 @@ pub trait SessionEvents {
 /// It owns the handle (a counted reference to the slot, so the slot lives as long as
 /// the task that holds it) and the session's requesters; its size is what the
 /// runtime's task cell has to hold beside the pump's handle.
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 pub struct SlotDispatch<C, R, G>
 where
     C: ClockSource + 'static,
@@ -185,7 +195,7 @@ where
     requesters: Requesters<R, G>,
 }
 
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 impl<C, R, G> SlotDispatch<C, R, G>
 where
     C: ClockSource + 'static,
@@ -206,7 +216,7 @@ where
     }
 }
 
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 impl<C, R, G> SessionEvents for SlotDispatch<C, R, G>
 where
     C: ClockSource + 'static,
@@ -222,7 +232,7 @@ where
 }
 
 /// [`SlotDispatch`] as the `on_event` closure a session driver takes.
-#[cfg(feature = "session-slot")]
+#[cfg(all(feature = "session-slot", feature = "alloc"))]
 pub fn dispatch_slot<C, R, G>(
     observer: &'static RefCell<SlotObserver>,
     handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,

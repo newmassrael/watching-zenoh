@@ -47,7 +47,19 @@ name = "wz_session_lwip"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["alloc"]
+# S9e — the heap. It forwards every dependency feature that links the `alloc`
+# crate (the runtime's, the runtime core's, the session core's and the shell's), so
+# a build that does not name it names no allocator-bearing crate, which is what an
+# image on the per-session slot profile is built without (`default-features =
+# false`). On by default because every heap consumer of this crate has always had
+# it; the facade's `session-lwip` names it, and `session-lwip-fixed` does not.
+alloc = [
+    "wz-runtime-coop/alloc",
+    "wz-runtime-core/alloc",
+    "wz-session-core/alloc",
+    "wz-session-mcu/alloc",
+]
 # ARCHITECTURE section 9.1 — the session encodes straight into the datagram
 # this crate's UDP driver lends. Forwards wz-session-core's
 # `transport-tx-lend`; off by default because the lend attempt and the
@@ -276,7 +288,7 @@ adminspace-core = [
 # TimeSource trait surface (with_mutex_mut, now_monotonic_ms). alloc +
 # session-unicast pull the SessionRuntime binding (Stage 4a) so
 # SessionLinkActions<CoopRuntime<C>, CoopTime<C>> composes.
-wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
 # §5.C link tier: LwipUdpSocket / SessionRxSocket / bind_session_rx /
 # LwipLink. Empty without lwip_real_build (host/WZ_LWIP_PORT only).
 wz-link-lwip = { path = "../wz-link-lwip" }
@@ -284,14 +296,14 @@ wz-link-lwip = { path = "../wz-link-lwip" }
 # layer, admin node, connection manager and dialer. It was this crate's, and is
 # re-exported from here under its old paths; what stays here is lwIP's half of
 # it (`LwipUdpDriver`, `LwipLinks`, the multicast drive loop).
-wz-session-mcu = { path = "../wz-session-mcu" }
+wz-session-mcu = { path = "../wz-session-mcu", default-features = false }
 # Runtime-agnostic session SSOT: the action bundle, the engine-free FSM,
 # the shared drive-loop primitives. no_std selects the heapless engine;
 # alloc the Vec/String/Arc-backed bundle.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "session-unicast", "no_std"] }
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["session-unicast", "no_std"] }
 # The Runtime / TimeSource traits named directly by run_session
 # (with_mutex_mut for the lease-baseline read; now_monotonic_ms).
-wz-runtime-core = { path = "../wz-runtime-core", default-features = false, features = ["alloc"] }
+wz-runtime-core = { path = "../wz-runtime-core", default-features = false }
 # lwip-sys direct dep SOLELY for DEP_LWIP_LWIP_REAL_BUILD -> lwip_real_build
 # cfg propagation in build.rs (mirrors wz-link-lwip); no FFI used here.
 lwip-sys = { path = "../lwip-sys" }

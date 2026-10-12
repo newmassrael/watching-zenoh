@@ -78,7 +78,7 @@ wz-capi-pico = { path = "../wz-capi-pico", optional = true, default-features = f
 # R311y498 (§5.27 api-compat-c) — the zenoh-c-compatible C ABI, the sibling of
 # wz-capi-pico over the same session model. Optional + gated exactly as its twin.
 wz-capi-c = { path = "../wz-capi-c", optional = true, default-features = false }
-wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false, features = ["alloc"] }
+wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false }
 # R311ax — wz-runtime-coop enters the facade as an optional dep.
 # The `runtime-coop` feature pulls this crate with its `alloc`
 # feature on; lwIP's runtime-services-tier (CoopRuntime + CoopTime
@@ -550,9 +550,20 @@ runtime-async-std = []
 # build with a clear "pick one runtime per deploy" message rather
 # than silently building a bin that links both runtimes.
 runtime-coop = [
+    "runtime-coop-fixed",
+    "wz-runtime-coop/alloc",
+    "wz-runtime-core/alloc",
+]
+# S9e — the same runtime and link pair WITHOUT the heap: what a build on the
+# per-session slot profile (`session-slot`) names, so that no crate in its graph
+# carries `alloc` and the toolchain's own check that a program with no allocator
+# has none is the proof (the no-allocator link gate). `runtime-coop` is this plus
+# the heap, so a heap deploy is unchanged and a build that enables both has the
+# heap, as feature unification says. Alone it has no task pool: it composes with
+# `wz-runtime-coop/session-slot`, which a fixed-memory image names itself.
+runtime-coop-fixed = [
     "dep:wz-runtime-coop",
     "dep:wz-runtime-core",
-    "wz-runtime-coop/alloc",
     # R311az-3a / R311az-3b-ii — runtime-coop pulls the §5.C link tier
     # sibling. The MCU profile bundles runtime + link as a pair:
     # `CoopRuntime` (task pool + cooperative poll) + `LwipUdpSocket`
@@ -575,6 +586,13 @@ runtime-coop = [
 # re-export. The MCU live-session consumer the R311ir carry awaited.
 session-lwip = [
     "runtime-coop",
+    "session-lwip-fixed",
+    "wz-session-lwip/alloc",
+]
+# S9e — the session shell on the slot profile, with no heap (see
+# `runtime-coop-fixed`): `session-lwip` is this plus the heap.
+session-lwip-fixed = [
+    "runtime-coop-fixed",
     "dep:wz-session-lwip",
 ]
 # Transport reassembly (Tier B) — the composable-framework atomic feature
@@ -638,6 +656,7 @@ runtime-no-std = []
 runtime-tokio = [
     "dep:wz-runtime-tokio",
     "dep:wz-runtime-core",
+    "wz-runtime-core/alloc",
     "dep:sce-rust-runtime",
 ]
 runtime-tokio-uring = ["runtime-tokio"]

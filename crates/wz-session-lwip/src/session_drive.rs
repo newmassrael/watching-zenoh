@@ -28,6 +28,7 @@ use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_runtime_coop::{CoopLocalJoinHandle, CoopLocalSet};
 #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
+#[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 
 #[cfg(all(test, not(feature = "session-slot")))]
@@ -103,6 +104,8 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
         self.link.check_timeouts();
     }
 
+    // The copying receive is the heap profile's: its frame is an owned `RxFrame`.
+    #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
         if !self.head_is_mine() {
             return None;

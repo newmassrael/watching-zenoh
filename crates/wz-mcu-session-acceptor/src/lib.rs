@@ -60,19 +60,19 @@
 // the image declares), so a use that crept back would be a compile error and not a
 // silent allocation. The heap form (the topology trait, the lwIP topology, the `Rc`
 // sink) is this profile's absence.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 extern crate alloc;
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use alloc::rc::Rc;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz::runtime_coop::session_drive::{
     SessionDatagramLink, SessionDriveConfig, SessionPump, SessionRole,
 };
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz::runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_wire_fixtures::fixed as wires;
 
@@ -87,10 +87,10 @@ pub use wz_session_core::driver_loop::ReassemblyDropReason;
 
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::WhatAmI;
@@ -190,7 +190,7 @@ impl wz_session_core::entropy::EntropySource for FixtureEntropy {
 /// Absent under `fixed-memory`: its acceptor sink is an `Rc<dyn BoxedLinkDriver>` and
 /// its peer's receive a `Vec`. The profile's e2e is `run_acceptor_e2e_fixed`, over
 /// statics.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 pub trait AcceptorTopology {
     /// The acceptor's link as the drive loop reads it.
     type Link: SessionDatagramLink;
@@ -450,11 +450,23 @@ impl Run {
                 DriverLoopOutcome::AdvancedFsm => self.advanced_fsm += 1,
                 DriverLoopOutcome::SideEffectOnly => self.side_effect += 1,
                 DriverLoopOutcome::ParseError(_) => self.parse_error += 1,
+                #[cfg(feature = "heap")]
                 DriverLoopOutcome::FramePayload { sn, messages, .. } => {
                     self.frame_payload += 1;
                     if *sn == self.expected_data_sn {
                         self.frame_dispatched = true;
                         self.data_dispatch_msg_count = messages.len();
+                    }
+                }
+                // The same frame where there is no allocator: the session reports an
+                // empty one as such instead of as an empty batch (the fixture's
+                // application Frame carries no record).
+                #[cfg(not(feature = "heap"))]
+                DriverLoopOutcome::EmptyFrame { sn, .. } => {
+                    self.frame_payload += 1;
+                    if *sn == self.expected_data_sn {
+                        self.frame_dispatched = true;
+                        self.data_dispatch_msg_count = 0;
                     }
                 }
                 // A fragment was dispatched (before the ingest arms the
@@ -627,7 +639,7 @@ impl Run {
 /// MCU construction seam: the per-handshake cookie nonce and the cookie
 /// signing key are drawn from it. A board passes its own; a caller with no
 /// source passes [`FixtureEntropy`] by name.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 pub fn run_acceptor_e2e_on<T, C, E, H>(
     topology: T,
     clock_source: C,
@@ -663,7 +675,7 @@ where
 /// [`AcceptorStage::AwaitInitAck`] right after the opening `InitSyn`,
 /// [`AcceptorStage::AwaitOpenAck`] when the cookie is read off the `InitAck`,
 /// [`AcceptorStage::AwaitDispatch`] when the data is sent after `OpenAck`.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 pub fn run_acceptor_e2e_on_with_progress<T, C, E, H, S>(
     mut topology: T,
     clock_source: C,

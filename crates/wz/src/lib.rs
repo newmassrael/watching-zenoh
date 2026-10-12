@@ -41,7 +41,7 @@
 // binary picks AP (tokio) or MCU (lwip), never both. A test build
 // that wants to exercise both code paths must split into two
 // build invocations.
-#[cfg(all(feature = "runtime-tokio", feature = "runtime-coop"))]
+#[cfg(all(feature = "runtime-tokio", feature = "runtime-coop-fixed"))]
 compile_error!(
     "wz: `runtime-tokio` and `runtime-coop` are mutually exclusive — \
      enable exactly one per deploy. The AP profile uses runtime-tokio \
@@ -130,7 +130,7 @@ pub use wz_capi_c as capi_c;
 // AP-side `runtime_tokio` re-export so a generic consumer reading
 // `wz::runtime_tokio::TokioRuntime` and `wz::runtime_coop::CoopRuntime`
 // sees the same surface depth regardless of profile.
-#[cfg(feature = "runtime-coop")]
+#[cfg(feature = "runtime-coop-fixed")]
 pub use wz_runtime_coop as runtime_coop;
 
 // R311y28 — platform-freertos: the FreeRTOS COOPERATIVE SINGLE-TASK profile
@@ -197,7 +197,7 @@ compile_error!(
 // Replaces R311az-3a's `cfg(not(target_os = "none"))` gate so the
 // preset-cortex-m4-default catalog truthfulness reaches FULL closure
 // when WZ_LWIP_PORT is supplied by the deploy.
-#[cfg(all(feature = "runtime-coop", lwip_real_build))]
+#[cfg(all(feature = "runtime-coop-fixed", lwip_real_build))]
 pub use wz_link_lwip as link_lwip;
 
 // Stage 4b — the MCU session shell re-export. `wz::session_lwip` binds the
@@ -206,7 +206,7 @@ pub use wz_link_lwip as link_lwip;
 // the same `lwip_real_build` condition as `link_lwip` (the crate names
 // LwipUdpSocket, present only in a real lwIP build), so the namespace is
 // populated exactly when the underlying crate body is non-empty.
-#[cfg(all(feature = "session-lwip", lwip_real_build))]
+#[cfg(all(feature = "session-lwip-fixed", lwip_real_build))]
 pub use wz_session_lwip as session_lwip;
 
 // `runtime_core` re-export is needed by BOTH profiles (the trait
@@ -214,7 +214,7 @@ pub use wz_session_lwip as session_lwip;
 // cfg(any(..)) merges the two opt-in paths so consumers always
 // reach the trait surface through `wz::runtime_core::*` no matter
 // which concrete profile they picked.
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-coop"))]
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-coop-fixed"))]
 pub use wz_runtime_core as runtime_core;
 
 // R311il — the `wz::script` re-export (sce-rust-lua `LuaEngine` +

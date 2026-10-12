@@ -36,7 +36,16 @@ name = "wz_session_mcu"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["alloc"]
+
+# S9e — the heap: every dependency feature that links the `alloc` crate (the
+# runtime's, the session core's), so a build without it, which is the per-session
+# slot profile's, names no allocator-bearing crate. On by default because every
+# heap consumer of this crate has always had it.
+alloc = [
+    "wz-runtime-coop/alloc",
+    "wz-session-core/alloc",
+]
 
 # Exposes the in-memory network the shell's own tests run on, for a sibling
 # crate that wants a stack-neutral peer. Never in a production build.
@@ -93,10 +102,10 @@ adminspace-core = [
 [dependencies]
 # The cooperative runtime: CoopRuntime<C> + CoopTime<C>, the local task set the
 # sessions are spawned on, and the `SessionLinks` / `SessionDatagramLink` seams.
-wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
 # Runtime-agnostic session SSOT: the action bundle, the engine-free FSM, the
 # admin answerers. no_std selects the heapless engine; alloc the bundle.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "session-unicast", "no_std"] }
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["session-unicast", "no_std"] }
 # R2828 — `admin_host::ConnectControl` locks with the same IRQ-disabling Mutex
 # the cooperative runtime uses. No impl feature here: the firmware (or the std
 # impl in dev-dependencies, for host tests) supplies it at link time.
