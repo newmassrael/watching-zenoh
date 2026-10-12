@@ -387,11 +387,66 @@ def _dep_forwards(manifest_dir="crates"):
             rel = os.path.relpath(dep["path"], root)
             if rel.startswith("crates" + os.sep) and os.path.isdir(rel):
                 paths[dep["name"]] = rel
-        for feat, vals in (pkg.get("features") or {}).items():
-            for val in vals:
-                if isinstance(val, str) and val.startswith("dep:"):
-                    pulls.setdefault(feat, set()).add(val[4:])
+        for feat, deps in _attribute_pulls(pkg.get("features") or {}).items():
+            pulls.setdefault(feat, set()).update(deps)
     return pulls, paths
+
+
+def _attribute_pulls(features):
+    """One package's feature table -> {feature: {dep it is credited with pulling}}.
+
+    A feature owns the dependency its `dep:` entry names -- unless that feature is
+    only the INNER half of a split. S9e cut `runtime-coop` into `runtime-coop-fixed`
+    (the runtime with no heap, the one that names `dep:wz-runtime-coop`) and
+    `runtime-coop` (that plus the heap), and read as written the crate then had one
+    puller, the inner half, which no catalog atom is: the atom lost the API of the
+    crate it is, and its COMPLETE tag went red with no test to blame.
+
+    The outer feature is the one that STILL CONFIGURES the crate: it implies the inner
+    one (the same package's feature graph, transitively) and names the dependency
+    itself, as `dep/feature` (`wz-runtime-coop/alloc`; the strong form, which enables
+    the dependency). When there is one, the crate is credited to it, and the inner
+    half is left with nothing. A feature that merely implies the inner one without
+    naming the dependency (say `session-lwip` over `runtime-coop`), or that forwards a
+    knob weakly (`dep?/feature`, what a transport writes to the tokio runtime it
+    sits on), is not such an outer: that is a consumer, and crediting it would make
+    every consumer an owner, which is the phantom the shared-crate control exists to
+    stop.
+
+    Per package, because a feature name is not unique across the tree (`alloc` is in
+    most crates) and `dep/feature` is only a statement about THIS package's graph.
+    """
+    def implies(feat):
+        seen, stack = set(), [feat]
+        while stack:
+            for val in features.get(stack.pop(), ()):
+                if isinstance(val, str) and val in features and val not in seen:
+                    seen.add(val)
+                    stack.append(val)
+        return seen
+
+    def names_dep(feat, dep):
+        # `dep/feature` ENABLES the dependency; `dep?/feature` only forwards a knob to
+        # it when something else did, which is what a feature that merely consumes
+        # the runtime (a transport, an access knob) writes. Only the first is a claim
+        # on the crate.
+        return any(
+            isinstance(val, str) and val.startswith(dep + "/") for val in features.get(feat, ())
+        )
+
+    pulls = {}
+    for feat, vals in features.items():
+        for val in vals:
+            if not (isinstance(val, str) and val.startswith("dep:")):
+                continue
+            dep = val[4:]
+            outers = [
+                f for f in features
+                if f != feat and feat in implies(f) and names_dep(f, dep)
+            ]
+            for owner in outers or [feat]:
+                pulls.setdefault(owner, set()).add(dep)
+    return pulls
 
 
 # Open-debt item 831 -- what ARM 3 may call an owned symbol. A `pub mod` is a
@@ -1056,6 +1111,31 @@ def _selftest():
     # the feature pulls it: `ext-crate` has no in-tree path and must drop out.
     eq("ARM3 external: a dep with no in-tree path is not owned",
        _excl.get("feat-coop") == {"crates/wz-runtime-coop"}, True)
+    # ARM 3, the SPLIT (S9e): the dependency moved into an inner feature the atom
+    # implies. The atom, which still configures the crate (`wz-runtime-coop/alloc`),
+    # owns it; the inner half, which no atom is, owns nothing; a consumer that only
+    # implies the atom owns nothing either; and a crate a second, unrelated feature
+    # pulls is still nobody's.
+    _split = {
+        "feat-coop": ["feat-coop-fixed", "wz-runtime-coop/alloc", "wz-runtime-core/alloc"],
+        "feat-coop-fixed": ["dep:wz-runtime-coop", "dep:wz-runtime-core"],
+        "feat-consumer": ["feat-coop", "dep:wz-link"],
+        "feat-tokio": ["dep:wz-runtime-core"],
+        # A weak knob forward over the runtime: a consumer, not a claim on the crate.
+        "feat-transport": ["feat-coop", "wz-runtime-coop?/transport"],
+    }
+    _split_excl = _exclusive_crates(
+        _attribute_pulls(_split),
+        {**_paths, "wz-link": "crates/wz-link"},
+    )
+    eq("ARM3 split: the outer feature that still names the crate owns it",
+       _split_excl.get("feat-coop"), {"crates/wz-runtime-coop"})
+    eq("ARM3 split: the inner half and a consumer of the outer own nothing",
+       sorted(f for f in ("feat-coop-fixed", "feat-consumer", "feat-transport")
+              if f in _split_excl
+              and "crates/wz-runtime-coop" in _split_excl[f]), [])
+    eq("ARM3 split: a crate another feature also pulls stays shared",
+       sorted(c for dirs in _split_excl.values() for c in dirs if c.endswith("wz-runtime-core")), [])
     # ARM 3, the TWIN that must not regress: the live tree really does credit
     # the atom this arm was built for, and by a symbol its own lane names.
     if "CoopLocalSet" not in dep_ownership().get("runtime-coop", set()):
