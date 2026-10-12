@@ -220,6 +220,21 @@ pub fn encode_join_into<S: SceSink>(
     Ok(())
 }
 
+/// [`encode_join_into`] over a byte slice the caller holds: how many of `out`'s
+/// bytes the datagram occupies. The beacon of a drive loop that keeps no heap, from
+/// an array of [`JOIN_MAX_BYTES`] on its stack, where the loop does not name the
+/// sink the codec writes through. `CodecError::BufferOverflow` when `out` is too
+/// small.
+pub fn encode_join_into_slice(
+    params: &MulticastParams,
+    tx_sn: &MulticastTxConduits,
+    out: &mut [u8],
+) -> Result<usize, CodecError> {
+    let mut sink = sce_forge_runtime::codec::SliceSink::new(out);
+    encode_join_into(params, tx_sn, &mut sink)?;
+    Ok(sink.position())
+}
+
 /// A bound on one JOIN datagram [`encode_join_into`] writes, for a caller that
 /// holds an array for it: the flags byte, the longest base body the codec writes
 /// (`Join::MAX_ENCODED_BYTES`), the QoS extension (header, length and

@@ -147,10 +147,10 @@ use wz_runtime_coop::{
 };
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
-use wz_session_core::handshake_encode::encode_multicast_close;
+use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
 use wz_session_core::link::LostCause;
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
-use wz_session_core::multicast_join::encode_join;
+use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
 // R311mf/R311mh — multicast Fragment RX reassembly. The reassembly-divergent
 // tail (FrameOutOfOrder chain abort / Fragment reassembly / pre-Close peer-chain
@@ -170,19 +170,22 @@ use wz_session_core::multicast_rx::{
     dispatch_multicast_inbound_reassembling, sweep_multicast_reassembling,
 };
 // R311ly/R311lz — the shared TX emit SSOT (the AP loop calls the same).
-// MulticastTxItem is the unconditional pull-seam item type (uninhabited without
-// a TX body codec); multicast_tx_emit exists only when a TX body codec inhabits
-// it, so the import is gated on the same union as the SSOT fn. R311lz extended
-// the seam from codec-push-only to every forwarded TX variant (Push / queryable
+// `MulticastTxOffer` is the unconditional pull-seam item type of the build's
+// profile (the owned `MulticastTxItem` on the heap, a borrowed `Put` with no
+// allocator; uninhabited without a TX body codec), and `multicast_tx_emit_offer`
+// frames it either way, so the drain below carries no cfg. R311lz extended the
+// seam from codec-push-only to every forwarded TX variant (Push / queryable
 // Response + ResponseFinal / liveliness DeclareReply).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
-use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::multicast_tx::MulticastTxItem;
+use wz_session_core::multicast_tx::{multicast_tx_emit_offer, MulticastTxOffer};
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, MulticastTxConduits};
 // R311ma/R311mb/R311md — the no_std multicast reply backing (MulticastReplyQueue,
@@ -196,6 +199,7 @@ use wz_session_core::sn::{self, MulticastTxConduits};
 // so this crate names no wz_codecs type and provides ONLY the enqueue backing.
 #[cfg(all(
     not(feature = "session-slot"),
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -203,16 +207,22 @@ use wz_session_core::sn::{self, MulticastTxConduits};
     )
 ))]
 use alloc::collections::VecDeque;
-#[cfg(any(
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 use core::cell::RefCell;
-#[cfg(any(
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 
@@ -287,6 +297,7 @@ impl LwipMulticastDriver {
 /// codec-response-final / liveliness-token union).
 #[cfg(all(
     not(feature = "session-slot"),
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -300,6 +311,7 @@ pub struct MulticastReplyQueue {
 
 #[cfg(all(
     not(feature = "session-slot"),
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -326,6 +338,7 @@ impl MulticastReplyQueue {
 // onto the single-task queue (the MCU analogue of the AP backing's mpsc send).
 #[cfg(all(
     not(feature = "session-slot"),
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -372,6 +385,7 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
 /// critical section.
 #[cfg(all(
     feature = "session-slot",
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -388,6 +402,7 @@ pub struct MulticastReplyQueue<const N: usize> {
 // items inside are moved in and out by value.
 #[cfg(all(
     feature = "session-slot",
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -398,6 +413,7 @@ unsafe impl<const N: usize> Sync for MulticastReplyQueue<N> {}
 
 #[cfg(all(
     feature = "session-slot",
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -455,6 +471,7 @@ impl<const N: usize> MulticastReplyQueue<N> {
 
 #[cfg(all(
     feature = "session-slot",
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -471,6 +488,7 @@ impl<const N: usize> Default for MulticastReplyQueue<N> {
 /// queue is shared by a reference and the reply it cannot take is counted.
 #[cfg(all(
     feature = "session-slot",
+    feature = "alloc",
     any(
         feature = "codec-response",
         feature = "codec-response-final",
@@ -527,7 +545,7 @@ fn peer_key(src_addr: u32, src_port: u16) -> SocketAddr {
 ///   busy-poll loop pulls rather than `select!`s. Without a TX body codec the
 ///   item is uninhabited and the seam is inert (a publish-free / RX-only node
 ///   passes `|| None`).
-pub fn run_multicast_session<C, F, G, const MAX_PEERS: usize>(
+pub fn run_multicast_session<'g, C, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     runtime: &CoopRuntime<C>,
@@ -539,7 +557,7 @@ pub fn run_multicast_session<C, F, G, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     F: FnMut(IterationEvent<'_>),
-    G: FnMut() -> Option<MulticastTxItem>,
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
 {
     run_multicast_session_inner(
         dispatcher, cfg, runtime, link, driver, on_event, next_tx, None,
@@ -568,7 +586,7 @@ where
 /// Every other parameter is [`run_multicast_session`]'s, unchanged — that entry
 /// point is this one with a predicate that never fires, and both run ONE body.
 #[allow(clippy::too_many_arguments)]
-pub fn run_multicast_session_with_shutdown<C, F, G, H, const MAX_PEERS: usize>(
+pub fn run_multicast_session_with_shutdown<'g, C, F, G, H, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     runtime: &CoopRuntime<C>,
@@ -581,7 +599,7 @@ pub fn run_multicast_session_with_shutdown<C, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     F: FnMut(IterationEvent<'_>),
-    G: FnMut() -> Option<MulticastTxItem>,
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
     run_multicast_session_inner(
@@ -676,7 +694,7 @@ where
 /// paper over with a spin count: on a device the clock is what moves, and a
 /// deadline that never arrives is a stopped clock the face cannot fix.
 #[allow(clippy::too_many_arguments)]
-pub fn run_multicast_session_rejoining<C, F, G, H, B, D, const MAX_PEERS: usize>(
+pub fn run_multicast_session_rejoining<'g, C, F, G, H, B, D, const MAX_PEERS: usize>(
     mut new_dispatcher: D,
     cfg: MulticastDriveConfig<'_>,
     runtime: &CoopRuntime<C>,
@@ -691,7 +709,7 @@ pub fn run_multicast_session_rejoining<C, F, G, H, B, D, const MAX_PEERS: usize>
 where
     C: ClockSource,
     F: FnMut(IterationEvent<'_>),
-    G: FnMut() -> Option<MulticastTxItem>,
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
     B: FnMut() -> Option<LwipMulticastDriver>,
     D: FnMut() -> MulticastDispatcher<MAX_PEERS>,
@@ -759,7 +777,7 @@ where
 /// executor pass taken INLINE, at the two points this body always took it, so
 /// its behaviour is unchanged.
 #[allow(clippy::too_many_arguments)]
-fn run_multicast_session_inner<C, F, G, const MAX_PEERS: usize>(
+fn run_multicast_session_inner<'g, C, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     runtime: &CoopRuntime<C>,
@@ -772,7 +790,7 @@ fn run_multicast_session_inner<C, F, G, const MAX_PEERS: usize>(
 where
     C: ClockSource,
     F: FnMut(IterationEvent<'_>),
-    G: FnMut() -> Option<MulticastTxItem>,
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
 {
     let mut pump =
         MulticastPump::with_pass(dispatcher, cfg, runtime, link, driver, ExecutorPass::Inline);
@@ -803,6 +821,16 @@ enum ExecutorPass {
     Hosted,
 }
 
+/// Bytes of the datagram buffer the TX drain of a build with no allocator frames
+/// into: the most a UDP datagram carries over a 1500-byte Ethernet MTU (the IPv4 and
+/// UDP headers take 28), and the group's batch is held to it, so a Put larger than
+/// that leaves as a fragment chain, a datagram at a time, through this one buffer.
+#[cfg(not(feature = "alloc"))]
+const TX_SCRATCH_BYTES: usize = 1500 - 20 - 8;
+/// The heap profile frames into vectors of its own and keeps no buffer here.
+#[cfg(feature = "alloc")]
+const TX_SCRATCH_BYTES: usize = 0;
+
 /// One MCU multicast session, ready to be advanced one iteration at a time.
 ///
 /// Open-debt item 900 — one program holding SEVERAL sessions (a client session
@@ -830,6 +858,10 @@ pub struct MulticastPump<'a, C: ClockSource, const MAX_PEERS: usize> {
     // The TX mint state (per-channel next SN). The JOIN beacon advertises the
     // live values; the TX-codec drain mints from here per data frame.
     tx_sn: MulticastTxConduits,
+    // The datagram buffer a build with no allocator frames each offer into, a
+    // datagram at a time (`multicast_tx_emit_offer`); empty on the heap profile,
+    // which frames into vectors of its own.
+    tx_scratch: [u8; TX_SCRATCH_BYTES],
     next_join_ms: u64,
     next_sweep_ms: u64,
     iter: usize,
@@ -897,6 +929,7 @@ impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS>
             driver,
             pass,
             tx_sn,
+            tx_scratch: [0; TX_SCRATCH_BYTES],
             next_join_ms,
             next_sweep_ms,
             iter: 0,
@@ -918,7 +951,7 @@ impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS>
     /// loop handled one per iteration. That is what bounds how long a group
     /// under a flood can keep the thread from a sibling session: one datagram,
     /// then the step returns and the task yields.
-    pub fn step<'s, F, G>(
+    pub fn step<'s, 'g, F, G>(
         &mut self,
         on_event: &mut F,
         next_tx: &mut G,
@@ -926,7 +959,7 @@ impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS>
     ) -> Option<MulticastOutcome>
     where
         F: FnMut(IterationEvent<'_>),
-        G: FnMut() -> Option<MulticastTxItem>,
+        G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
         // The body below is the synchronous loop's, verbatim but for these
         // names: each is a disjoint borrow of one field.
@@ -940,6 +973,7 @@ impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS>
         let driver = &mut *self.driver;
         let clock = &self.clock;
         let tx_sn = &mut self.tx_sn;
+        let tx_scratch = &mut self.tx_scratch[..];
         let next_join_ms = &mut self.next_join_ms;
         let next_sweep_ms = &mut self.next_sweep_ms;
         let iter = &mut self.iter;
@@ -978,8 +1012,10 @@ impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS>
             // acknowledgement, and a node already leaving has no recovery to
             // take — its peers fall back to the lease sweep, which is exactly
             // the pre-round behaviour. `send_to_group` already drops the error.
-            let dgram = encode_multicast_close();
-            driver.send_to_group(&dgram);
+            let mut dgram = [0u8; 2];
+            if let Ok(len) = encode_multicast_close_into_slice(&mut dgram) {
+                driver.send_to_group(&dgram[..len]);
+            }
             // Pump before returning so the datagram actually LEAVES. The body
             // does the same after its TX drain, and for the same reason: on a
             // loopback netif `send_to` only queues, so without this the loop
@@ -1041,42 +1077,31 @@ impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS>
         if now >= *next_join_ms {
             // R311y227 — the DEFAULT conduit's live SNs (the single-conduit
             // beacon); a qos group additionally advertises per-priority ext_qos (C2).
-            let dgram = encode_join(params, tx_sn);
-            driver.send_to_group(&dgram);
+            // Written into an array on the stack (`encode_join_into_slice` is the
+            // JOIN `encode_join` is, byte for byte, over a heap vector), so the
+            // beacon takes nothing from an allocator on either profile.
+            let mut beacon = [0u8; JOIN_MAX_BYTES];
+            if let Ok(len) = encode_join_into_slice(params, tx_sn, &mut beacon) {
+                driver.send_to_group(&beacon[..len]);
+            }
             *next_join_ms = now.saturating_add(params.join_interval_ms);
         }
 
         // TxData: drain the application's pending outbound items, framing each
-        // through the shared multicast_tx_emit SSOT (the same the AP loop calls)
-        // and multicasting it to the group. Drained right after the JOIN beacon
-        // so the datagrams ride THIS iteration's run_until_idle. send_to_group is
-        // best-effort (multicast UDP); the SSOT's per-variant reliability flag is
-        // inert here (the MCU group socket takes no reliability arg). Gated on the
-        // TX-body-codec union (R311lz): every forwarded variant — Push, queryable
+        // through the shared multicast_tx_emit_offer SSOT (the same the AP loop
+        // calls the heap form of) and multicasting it to the group. Drained right
+        // after the JOIN beacon so the datagrams ride THIS iteration's
+        // run_until_idle. send_to_group is best-effort (multicast UDP); the SSOT's
+        // per-variant reliability flag is inert here (the MCU group socket takes
+        // no reliability arg). Every forwarded variant — Push, queryable
         // Response / ResponseFinal, liveliness DeclareReply — routes through the
         // one SSOT, so this drain is variant-agnostic (the item carries which).
-        #[cfg(any(
-            feature = "codec-push",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "liveliness-token"
-        ))]
-        while let Some(item) = next_tx() {
-            for dgram in multicast_tx_emit(item, tx_sn, params).datagrams {
-                driver.send_to_group(&dgram);
-            }
-        }
-        // No TX body codec: MulticastTxItem is uninhabited, so next_tx can only
-        // yield None; call it to keep the seam used (it stays in the signature for
-        // the RX-only build) and consume the unconstructable item type-correctly.
-        #[cfg(not(any(
-            feature = "codec-push",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "liveliness-token"
-        )))]
-        if let Some(item) = next_tx() {
-            match item {}
+        // With no TX body codec the offer is uninhabited, so `next_tx` can only
+        // yield `None` and the loop body is never entered.
+        while let Some(offer) = next_tx() {
+            multicast_tx_emit_offer(offer, tx_sn, params, tx_scratch, &mut |datagram| {
+                driver.send_to_group(datagram)
+            });
         }
 
         // Drive the lwIP input path (loopback / QEMU shape) + the runtime task
@@ -1184,7 +1209,7 @@ pub struct MulticastSession<const MAX_PEERS: usize> {
 ///
 /// `should_stop` is the same graceful-stop predicate the synchronous entry
 /// takes; pass `|| false` for a session that runs until its link is lost.
-pub async fn multicast_session_task<C, L, F, G, H, const MAX_PEERS: usize>(
+pub async fn multicast_session_task<'g, C, L, F, G, H, const MAX_PEERS: usize>(
     runtime: CoopRuntime<C>,
     link: L,
     session: MulticastSession<MAX_PEERS>,
@@ -1196,7 +1221,7 @@ where
     C: ClockSource,
     L: Deref<Target = LwipLink>,
     F: FnMut(IterationEvent<'_>),
-    G: FnMut() -> Option<MulticastTxItem>,
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
     let MulticastSession {
@@ -1247,7 +1272,7 @@ where
     C: ClockSource + 'static,
     L: Deref<Target = LwipLink> + 'static,
     F: FnMut(IterationEvent<'_>) + 'static,
-    G: FnMut() -> Option<MulticastTxItem> + 'static,
+    G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {
     local.spawn_local(multicast_session_task(
@@ -1459,7 +1484,7 @@ impl<C: ClockSource + 'static, const MAX_PEERS: usize> MulticastRef<C, MAX_PEERS
     /// Advance the pump by one iteration, for a firmware (or a test) that drives it
     /// by hand instead of as a task; [`MulticastPump::step`] with the pump this
     /// handle holds.
-    pub fn step<'s, F, G>(
+    pub fn step<'s, 'g, F, G>(
         &mut self,
         on_event: &mut F,
         next_tx: &mut G,
@@ -1467,7 +1492,7 @@ impl<C: ClockSource + 'static, const MAX_PEERS: usize> MulticastRef<C, MAX_PEERS
     ) -> Option<MulticastOutcome>
     where
         F: FnMut(IterationEvent<'_>),
-        G: FnMut() -> Option<MulticastTxItem>,
+        G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
         self.pump().step(on_event, next_tx, should_stop)
     }
@@ -1494,7 +1519,7 @@ impl<C: ClockSource + 'static, const MAX_PEERS: usize> Drop for MulticastRef<C, 
 /// once per executor pass and awaits [`yield_now`] between steps; the future is the
 /// cell's handle and the observer's and the loop's state, a few dozen bytes.
 #[cfg(feature = "session-slot")]
-pub async fn multicast_pump_task<C, F, G, H, const MAX_PEERS: usize>(
+pub async fn multicast_pump_task<'g, C, F, G, H, const MAX_PEERS: usize>(
     mut pump: MulticastRef<C, MAX_PEERS>,
     mut on_event: F,
     mut next_tx: G,
@@ -1503,7 +1528,7 @@ pub async fn multicast_pump_task<C, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     F: FnMut(IterationEvent<'_>),
-    G: FnMut() -> Option<MulticastTxItem>,
+    G: FnMut() -> Option<MulticastTxOffer<'g>>,
     H: FnMut() -> bool,
 {
     loop {
@@ -1531,7 +1556,7 @@ pub fn spawn_multicast_pump<C, F, G, H, const MAX_PEERS: usize>(
 where
     C: ClockSource + 'static,
     F: FnMut(IterationEvent<'_>) + 'static,
-    G: FnMut() -> Option<MulticastTxItem> + 'static,
+    G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
     H: FnMut() -> bool + 'static,
 {
     local
@@ -1547,7 +1572,10 @@ mod tests {
     // Round 3277 -- the binder of `test_bind`: one body on both profiles.
     use wz_link_lwip::test_bind::session_multicast_rx as bind_session_multicast_rx;
     use wz_session_core::multicast_dispatch::MulticastConfig;
-    use wz_session_core::multicast_params::MulticastParams;
+    use wz_session_core::multicast_join::encode_join;
+    use wz_session_core::multicast_params::{zid_vec, MulticastParams};
+    #[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
+    use wz_session_core::multicast_tx::multicast_tx_emit;
     use wz_session_core::WhatAmI;
 
     /// Frozen host clock — `now_us` is constant, so no JOIN-interval / lease
@@ -1568,7 +1596,7 @@ mod tests {
         MulticastParams {
             version: 0x09,
             whatami: WhatAmI::Peer,
-            zid: zid.to_vec(),
+            zid: zid_vec(zid),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,

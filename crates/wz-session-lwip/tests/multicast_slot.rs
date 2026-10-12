@@ -33,7 +33,7 @@ use wz_link_lwip::LwipLink;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, RuntimeCell};
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_join::encode_join;
-use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
+use wz_session_core::multicast_params::{zid_vec, MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::sample::QosLevel;
 use wz_session_core::sn::{self, MulticastTxConduits};
@@ -64,7 +64,7 @@ fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
         version: 0x09,
         whatami: WhatAmI::Peer,
-        zid: zid.to_vec(),
+        zid: zid_vec(zid),
         lease_ms: 5_000,
         join_interval_ms: 1,
         seq_num_res: 0x02,

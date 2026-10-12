@@ -118,7 +118,7 @@ fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
     MulticastParams {
         version: 0x09,
         whatami: WhatAmI::Peer,
-        zid: zid.to_vec(),
+        zid: wz_session_core::multicast_params::zid_vec(zid),
         lease_ms,
         join_interval_ms: 1,
         seq_num_res: 0x02,

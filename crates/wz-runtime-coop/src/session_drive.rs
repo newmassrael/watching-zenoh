@@ -74,7 +74,7 @@ use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, 
 use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
 use wz_session_core::drive::dispatch_datagram_reassembling;
-#[cfg(feature = "reassembly")]
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
 use wz_session_core::drive::report_outcome_reassembling;
 // R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
 // helper, not a unicast-drive one).

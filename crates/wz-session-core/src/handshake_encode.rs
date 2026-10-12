@@ -419,10 +419,38 @@ pub fn encode_close_into(
 /// separating that from dropping one link of an aggregated session.
 #[cfg(all(feature = "alloc", feature = "codec-close"))]
 pub fn encode_multicast_close() -> Vec<u8> {
-    encode_close(
-        crate::close_reason::CloseReason::Generic as u8,
-        /*session=*/ false,
-    )
+    encode_close(MULTICAST_CLOSE_REASON, MULTICAST_CLOSE_SESSION)
+}
+
+/// The reason a group member's voluntary departure carries: see
+/// [`encode_multicast_close`] for why both constants are what they are.
+#[cfg(feature = "codec-close")]
+const MULTICAST_CLOSE_REASON: u8 = crate::close_reason::CloseReason::Generic as u8;
+
+/// The scope of that Close: link-only, the S flag clear.
+#[cfg(feature = "codec-close")]
+const MULTICAST_CLOSE_SESSION: bool = false;
+
+/// [`encode_multicast_close`] into a byte slice the caller holds: how many of `out`'s
+/// bytes the datagram occupies (two). The departing Close of a drive loop that keeps
+/// no heap, written into an array on its stack. The reason and the scope are
+/// [`encode_multicast_close`]'s own constants, so the two cannot send different
+/// departures; `CodecError::BufferOverflow` when `out` has no room for them.
+#[cfg(feature = "codec-close")]
+pub fn encode_multicast_close_into_slice(out: &mut [u8]) -> Result<usize, CodecError> {
+    let (header, body) = out.split_first_mut().ok_or(CodecError::BufferOverflow)?;
+    *header = wire_const::T_MID_CLOSE
+        | if MULTICAST_CLOSE_SESSION {
+            wire_const::FLAG_T_CLOSE_S
+        } else {
+            0
+        };
+    let mut sink = sce_forge_runtime::codec::SliceSink::new(body);
+    Close {
+        reason: MULTICAST_CLOSE_REASON,
+    }
+    .encode(&mut sink)?;
+    Ok(1 + sink.position())
 }
 
 /// R311kx — wire bytes for a KeepAlive transport message: the bare

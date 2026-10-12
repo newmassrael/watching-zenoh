@@ -1749,6 +1749,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
 ) -> Result<(), crate::parse_error::InboundParseError> {
     use crate::driver_loop::IterationEvent;
+    #[cfg(feature = "alloc")]
     use crate::network_message::WalkedRecord;
     #[cfg(feature = "alloc")]
     let RecordCarrier {
@@ -1781,8 +1782,11 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     let mut outcome: Option<DriverLoopOutcome> = None;
     let mut dispatched = false;
     crate::network_message::try_for_each_record(payload, record, form, |one| {
+        // A build with no allocator walks no owned record: every one is lent.
+        #[cfg(not(feature = "alloc"))]
+        crate::driver_loop::report_lent_record(one, reliable, sn, priority, on_event);
+        #[cfg(feature = "alloc")]
         match one {
-            #[cfg(feature = "alloc")]
             WalkedRecord::Owned(one) => {
                 let outcome = match &mut outcome {
                     Some(outcome) => outcome,
@@ -2587,8 +2591,10 @@ pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
 
 // ── reassembly-pool drive (reassembly-gated; `reassembly` implies `codec-frame`,
 //    so `parse_frame_payload` above is in scope here too) ──
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+use crate::driver_loop::reassembled_chain_outcome;
 #[cfg(feature = "reassembly")]
-use crate::driver_loop::{reassembled_chain_outcome, IterationEvent, ReassemblyDropReason};
+use crate::driver_loop::{IterationEvent, ReassemblyDropReason};
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispatcher};
 
@@ -2604,6 +2610,10 @@ use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispa
 /// Generic over the pool dims (`SLOTS` / `CAP`) so the AP (32 / 1 MiB) and MCU
 /// (4 / 4096) profiles share one ingest path; the AP host passes its
 /// `TokioReassembly`, the MCU loop its `CoopReassembly`.
+///
+/// A build with no allocator has no `Fragment` outcome to drive the pool with (the
+/// fragment is staged where its datagram lies, `fragment_in_place`), so there the
+/// outcome is reported and a channel-gate rejection clears its chain, and that is all.
 #[cfg(feature = "reassembly")]
 pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S, F>(
     outcome: &DriverLoopOutcome,
@@ -2634,6 +2644,27 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
         });
         return;
     }
+    #[cfg(not(feature = "alloc"))]
+    let _ = now_ms;
+    #[cfg(feature = "alloc")]
+    report_fragment_outcome(outcome, reasm, actions, now_ms, on_event);
+}
+
+/// The `Fragment` half of [`report_outcome_reassembling`]: drive the pool with the
+/// fragment an owned outcome carries, and report what completed or was dropped.
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F>(
+    outcome: &DriverLoopOutcome,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    actions: &SessionLinkActions<R, T>,
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_>) + ?Sized,
+{
     let DriverLoopOutcome::Fragment {
         reliable,
         sn,
