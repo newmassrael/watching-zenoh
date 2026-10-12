@@ -7636,7 +7636,10 @@ layer_c1am_cargo_test_adminspace() {
     # not counted off the diff.
     # R3299 -- 7 -> 8: `the_writer_prints_what_the_string_form_does` joins
     # the `write_zenoh_hex` writer. The number is what the command PRINTED.
-    _runci_guarded_test "C1AM zid_hex 8" 8 \
+    # R3322 -- 8 -> 9: `two_spellings_of_one_zid_are_the_same_zid` joins
+    # `same_zid`, the comparison of two spellings of one id. PRINTED by the
+    # hosted run, whose red printed the missing leg.
+    _runci_guarded_test "C1AM zid_hex 9" 9 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
         cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
