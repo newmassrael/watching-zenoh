@@ -311,10 +311,19 @@ fn generated_sizes(header: &str) -> alloc::collections::BTreeMap<String, u64> {
 /// `scripts/nanopb-reference-sizes.sh` provisions all three in a throwaway virtual
 /// environment and runs this test. Without them the test skips, which is right on a
 /// machine that does not have the generator and is the reason the numbers above
-/// are written down.
+/// are written down. `WZ_NANOPB_REFERENCE_REQUIRE` turns that absence into a
+/// failure: a lane arms it (Layer C1bn), because a skip prints `ok` and reads as
+/// the generator's agreement.
 #[test]
 fn the_generators_own_sizes_are_the_numbers() {
+    let required = std::env::var("WZ_NANOPB_REFERENCE_REQUIRE")
+        .is_ok_and(|value| !value.is_empty() && value != "0");
     let Ok(dir) = std::env::var("WZ_NANOPB_REFERENCE_DIR") else {
+        assert!(
+            !required,
+            "WZ_NANOPB_REFERENCE_REQUIRE is set and WZ_NANOPB_REFERENCE_DIR is not: the \
+             generator's headers were not provisioned (scripts/nanopb-reference-sizes.sh)"
+        );
         std::eprintln!(
             "skip: WZ_NANOPB_REFERENCE_DIR is not set (see scripts/nanopb-reference-sizes.sh)"
         );

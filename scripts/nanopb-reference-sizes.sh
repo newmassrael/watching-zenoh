@@ -35,5 +35,6 @@ grep -H '^#define [A-Za-z_]*_size ' "$work"/out/*.pb.h
 
 cd "$root/crates"
 WZ_NANOPB_REFERENCE_DIR="$work/out" \
+WZ_NANOPB_REFERENCE_REQUIRE=1 \
 WZ_NANOPB_PROTO="$pkg/generator/proto/nanopb.proto" \
     cargo test -p wz-capture --lib proto_nanopb_tests -- --nocapture

@@ -13824,6 +13824,25 @@ layer_c1bn_passive_dissection_features() {
         echo "  C1bn FAIL: the .proto door oracle did not run"
         echo "$out"; return 1; }
 
+    # The nanopb size (`max_encoded_size` of `wz_dissect_proto_describe`), judged by
+    # nanopb's OWN generator, ARMED.
+    #
+    # `proto_nanopb` computes nanopb's `Message_size` by hand from the schema's
+    # options, so its expected numbers were written by the person who wrote the
+    # arithmetic. `scripts/nanopb-reference-sizes.sh` installs the generator (a
+    # pinned version, in a throwaway virtual environment), runs it on the three
+    # reference schemas and holds every generated `_size` macro equal to the
+    # arithmetic's. The test skips where the generator is absent, and a skip prints
+    # `ok`; `WZ_NANOPB_REFERENCE_REQUIRE=1` turns that into a failure, and until this
+    # leg existed no lane ran the script at all, so the comparison was a sentence.
+    # Nine tests of the module, MEASURED by this command on a build host: the eight
+    # that need no generator and the one that does.
+    out="$(WZ_NANOPB_REFERENCE_REQUIRE=1 bash scripts/nanopb-reference-sizes.sh 2>&1)" \
+        || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. 9 passed' <<<"$out" || {
+        echo "  C1bn FAIL: the nanopb size oracle did not run"
+        echo "$out"; return 1; }
+
     # R2118 (open-debt item 507) — what a deadline SAYS when the process it
     # spawned stalls, asserted where nothing has to be provisioned.
     #
