@@ -50,6 +50,14 @@ use crate::link::RxBytes;
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 use sce_forge_runtime::codec::CodecError;
 use sce_forge_runtime::codec::SceCursor;
+// Named by the heap variants and by `judge`, which the handshake arms call.
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive"
+))]
 use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::wire_const;
 
@@ -335,13 +343,17 @@ impl InboundFrame {
         // Each arm names its own MID constant rather than deriving one from a
         // stored header byte: the variants do not carry the header, and the
         // MID is what SELECTED the variant, so the constant is the fact.
+        // The union is the arms below that call it: the Frame, Fragment and Join
+        // variants exist only with `alloc`, so a slot profile with their codecs on
+        // carries no caller for it.
         #[cfg(any(
             feature = "codec-init-body",
             feature = "codec-open-body",
             feature = "codec-close",
             feature = "codec-keep-alive",
-            feature = "codec-frame",
-            feature = "codec-join"
+            all(feature = "alloc", feature = "codec-frame"),
+            all(feature = "alloc", feature = "reassembly"),
+            all(feature = "alloc", feature = "codec-join")
         ))]
         fn judge(mid: u8, entries: &[ExtEntryOwned]) -> ExtAdmission {
             crate::ext_admit::judge_ext_chain(
@@ -957,7 +969,7 @@ fn parse_unit(
         feature = "codec-open-body",
         feature = "codec-close",
         feature = "codec-keep-alive",
-        feature = "codec-frame"
+        all(feature = "alloc", feature = "codec-frame")
     ))]
     let flags = header & 0xE0;
     #[cfg(any(
@@ -965,7 +977,7 @@ fn parse_unit(
         feature = "codec-open-body",
         feature = "codec-close",
         feature = "codec-keep-alive",
-        feature = "codec-frame"
+        all(feature = "alloc", feature = "codec-frame")
     ))]
     let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
     // R311y879 — `codec-keep-alive` is DELIBERATELY absent from this third
@@ -980,7 +992,7 @@ fn parse_unit(
         feature = "codec-init-body",
         feature = "codec-open-body",
         feature = "codec-close",
-        feature = "codec-frame"
+        all(feature = "alloc", feature = "codec-frame")
     ))]
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {

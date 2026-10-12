@@ -240,7 +240,7 @@ pub(crate) fn begin_frame(
 pub(crate) fn frame_wire_reliability(bytes: &[u8]) -> crate::reliability::Reliability {
     let reliable = bytes
         .first()
-        .is_some_and(|h| h & wire_const::FLAG_T_FRAME_R != 0);
+        .is_some_and(|h| h & wz_codecs::wire_const::FLAG_T_FRAME_R != 0);
     if reliable {
         crate::reliability::Reliability::Reliable
     } else {
