@@ -16704,6 +16704,42 @@ install qemu-system-arm" || fail=1
             || fail=1
     fi
 
+    # ── Q.4 fixed — the FIXED-MEMORY acceptor image BOOT (S9e).
+    # Q.0n proves the image LINKS with no allocator (it is gated there); this boots
+    # it: the same acceptor scenario (InitSyn -> InitAck -> OpenSyn -> OpenAck ->
+    # Established plus a Frame dispatch) over a live lwIP loopback, but on the
+    # per-session slot profile with static link storage, the static pump and the
+    # static runtime, built `--no-default-features --features fixed-memory` so no
+    # crate of its graph names `alloc`. SYS_EXIT=0 and a stack peak => the image
+    # that carries no allocator also RUNS the handshake. mps2-an385 only: the
+    # ARMv6-M build links a map sized to the profile's tables, not the microbit's
+    # 16 KB, so there is no machine to boot it on and the v6m proof is the link.
+    if grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
+        if WZ_LWIP_PORT="$lwip_port" cargo build --release \
+            --manifest-path deploy/mcu-session-acceptor/Cargo.toml \
+            --target thumbv7m-none-eabi --bin mcu-session-acceptor \
+            --no-default-features --features fixed-memory --quiet; then
+            echo "  Q.4.mps2-an385.fixed build mcu-session-acceptor thumbv7m-none-eabi OK"
+            any_built=1
+            if [[ "$has_qemu" -ne 1 ]]; then
+                _q_unavailable "Q.4.mps2-an385.fixed run" \
+                    "qemu-system-arm not on PATH" || fail=1
+            elif ! run_qemu_case \
+                "Q.4.mps2-an385.fixed run mcu-session-acceptor (fixed-memory) via qemu-system-arm mps2-an385" \
+                cortex-m3 mps2-an385 \
+                "deploy/mcu-session-acceptor/target/thumbv7m-none-eabi/release/mcu-session-acceptor" \
+                stack; then
+                fail=1
+            fi
+        else
+            echo "  Q.4.mps2-an385.fixed build mcu-session-acceptor thumbv7m-none-eabi FAIL" >&2
+            fail=1
+        fi
+    else
+        _q_unavailable "Q.4.mps2-an385.fixed" "rustup target thumbv7m-none-eabi absent" \
+            || fail=1
+    fi
+
     # ── Q.5 — R311mi multicast footprint artifact (deploy/mcu-multicast-e2e).
     #
     # Cross-builds the FULL MCU multicast profile bin (session-lwip +
