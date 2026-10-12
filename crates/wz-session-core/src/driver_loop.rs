@@ -898,7 +898,13 @@ impl IterationEvent<'_> {
 /// so it is not handled here.
 #[cfg(all(
     feature = "codec-frame",
-    any(test, feature = "session-unicast", feature = "session-multicast")
+    any(test, feature = "session-unicast", feature = "session-multicast"),
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "session-slot"
+    )
 ))]
 pub(crate) fn report_lent_record(
     one: crate::network_message::WalkedRecord<'_>,

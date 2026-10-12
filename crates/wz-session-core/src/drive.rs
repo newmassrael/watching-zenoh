@@ -1783,8 +1783,27 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     let mut dispatched = false;
     crate::network_message::try_for_each_record(payload, record, form, |one| {
         // A build with no allocator walks no owned record: every one is lent.
-        #[cfg(not(feature = "alloc"))]
+        #[cfg(all(
+            not(feature = "alloc"),
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "session-slot"
+            )
+        ))]
         crate::driver_loop::report_lent_record(one, reliable, sn, priority, on_event);
+        // ... and one with no allocator and no lent kind walks no record at all.
+        #[cfg(all(
+            not(feature = "alloc"),
+            not(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "session-slot"
+            ))
+        ))]
+        let _ = one;
         #[cfg(feature = "alloc")]
         match one {
             WalkedRecord::Owned(one) => {
@@ -1811,6 +1830,12 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             }
             // Every lent kind becomes its in-place event in the one place that makes
             // them, shared with the multicast receive path.
+            #[cfg(any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "session-slot"
+            ))]
             lent => crate::driver_loop::report_lent_record(lent, reliable, sn, priority, on_event),
         }
         dispatched = true;
