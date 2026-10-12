@@ -1180,6 +1180,137 @@ static int check_proto_door(void) {
     return 0;
 }
 
+/* (ABI 34) -- THE THREE DOORS OF A WRITE, driven from C the way a consumer that
+ * builds a value and checks a key before sending it will: two key expressions
+ * related, the declaration rule that covers a key, and a root message described
+ * field by field. The Rust side owns the engines and the reader; this owns that
+ * the symbols, the shared file struct, the verdicts and the memory rule cross
+ * the boundary as the header says. */
+static int check_relate_match_describe_doors(void) {
+    char *doc = NULL;
+    int rc;
+
+    /* The relation is asked in a direction: `demo/$*` includes `demo/a`, and
+     * `demo/a` does not include `demo/$*`. Both are asked, so a swapped pair of
+     * arguments is the one that fails. */
+    rc = wz_dissect_keyexpr_relate("demo/**", "demo/a", &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "relate rc=%d", rc);
+    CHECK(strstr(doc, "\"name\":\"keyexpr_relate\"") != NULL &&
+              strstr(doc, "\"ok\":true,\"includes\":true,\"intersects\":true") !=
+                  NULL,
+          "a wildcard key must include the key under it: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_keyexpr_relate("demo/a", "demo/**", &doc);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(doc, "\"includes\":false,\"intersects\":true") != NULL,
+          "a key must not include the wildcard over it: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_keyexpr_relate("demo/a", "demo//b", &doc);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(doc, "\"ok\":false,\"which\":\"b\",\"chunk\":1,\"offset\":5,"
+                          "\"reason\":\"empty_chunk\"") != NULL,
+          "a refusal must name the side and the place: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_keyexpr_relate(NULL, "demo/a", &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a NULL key is an argument error rc=%d", rc);
+
+    /* The rule that covers a key is the first one written that does. */
+    rc = wz_dissect_declarations_match("demo/**=protobuf\ndemo/a=json", "demo/a",
+                                       &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "match rc=%d", rc);
+    CHECK(strstr(doc, "\"matched\":{\"index\":0,\"pattern\":\"demo/**\","
+                      "\"format\":\"protobuf\",\"schema\":null}") != NULL,
+          "the first covering rule wins: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_declarations_match("demo/a=json", "other/x", &doc);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(doc, "\"ok\":true,\"covered\":false}") != NULL &&
+              strstr(doc, "\"matched\"") == NULL,
+          "no covering rule is an answer and not a refusal: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_declarations_match("demo/**=protobuf", "demo/*", &doc);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(doc, "\"ok\":false,\"which\":\"keyexpr\",\"chunk\":1,"
+                          "\"offset\":5,") != NULL &&
+              strstr(doc, "\"reason\"") == NULL,
+          "a wildcard key must be refused without a reason: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_declarations_match("not a declaration", "demo/a", &doc);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(doc, "\"which\":\"declarations\",\"line\":0,") != NULL,
+          "a text that does not install must say so: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_declarations_match("demo/a=json", NULL, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a NULL key is an argument error rc=%d", rc);
+
+    /* A root message described: the field rows say the type, the label, the
+     * oneof and what an enum or a message points at. */
+    static const char schema_text[] =
+        "syntax = \"proto3\";\n"
+        "package m;\n"
+        "enum Mode { OFF = 0; ON = 1; }\n"
+        "message Root {\n"
+        "  uint32 sensor_id = 1;\n"
+        "  Mode mode = 2;\n"
+        "  repeated sint32 samples = 3;\n"
+        "  oneof pick { string name = 4; uint32 code = 5; }\n"
+        "}\n";
+    wz_dissect_proto_file file;
+    file.name = "m/root.proto";
+    file.text = (const unsigned char *)schema_text;
+    file.text_len = sizeof schema_text - 1;
+    rc = wz_dissect_proto_describe("m.Root", &file, 1, 0, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "describe rc=%d", rc);
+    CHECK(strstr(doc, "\"name\":\"proto_message\"") != NULL &&
+              strstr(doc, "\"ok\":true,\"root\":\"m.Root\"") != NULL,
+          "unexpected description: %s", doc);
+    CHECK(strstr(doc, "{\"name\":\"sensor_id\",\"json_name\":\"sensorId\","
+                      "\"number\":1,\"type\":\"uint32\",\"label\":\"singular\","
+                      "\"oneof\":null,\"packed\":null,\"enum\":null,"
+                      "\"message_type\":null,\"map\":null}") != NULL,
+          "a scalar row must carry every key: %s", doc);
+    CHECK(strstr(doc, "\"type\":\"enum\"") != NULL &&
+              strstr(doc, "\"enum\":{\"name\":\"m.Mode\",\"values\":[{\"name\":"
+                          "\"OFF\",\"number\":0},{\"name\":\"ON\",\"number\":1}]}") !=
+                  NULL,
+          "an enum field must say its values: %s", doc);
+    CHECK(strstr(doc, "\"type\":\"sint32\",\"label\":\"repeated\","
+                      "\"oneof\":null,\"packed\":true") != NULL,
+          "a repeated proto3 scalar is packed: %s", doc);
+    CHECK(strstr(doc, "\"oneof\":\"pick\"") != NULL,
+          "a oneof member must name its oneof: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+
+    /* A refused schema is a verdict with a place; the caller's bugs are the
+     * argument error with no string handed back. */
+    rc = wz_dissect_proto_describe("m.Missing", &file, 1, 0, &doc);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(doc, "\"ok\":false,\"file\":\"m/root.proto\"") != NULL,
+          "a root that is not defined must be refused: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+    rc = wz_dissect_proto_describe("m.Root", &file, 1, 1, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a root file outside the list rc=%d", rc);
+    rc = wz_dissect_proto_describe("m.Root", NULL, 1, 0, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null file list rc=%d", rc);
+    rc = wz_dissect_proto_describe("m.Root", &file, 0, 0, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "an empty file list rc=%d", rc);
+    return 0;
+}
+
 /* (ABI 29) -- THE VALUE DOOR, driven from C the way a consumer that lets a
  * person fill in a message will: the schema is the file list the declaration
  * door takes, the values are the JSON text the person's form produced, the
@@ -2716,7 +2847,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[13];
+    } revisioned[16];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -3135,6 +3266,33 @@ int main(void) {
                                        WZ_DISSECT_LIMITS_NONE,
                                        &revisioned[12].doc);
     CHECK(rc == WZ_DISSECT_OK, "session_table document rc=%d", rc);
+    /* (ABI 34) -- the three documents of the write doors, each at 1, the first
+     * revision a consumer could read. Built from the cheapest input each door
+     * answers: a refusal is the same document under the same envelope. */
+    revisioned[13].name = "keyexpr_relate";
+    revisioned[13].revision = 1;
+    revisioned[13].doc = NULL;
+    rc = wz_dissect_keyexpr_relate("demo/**", "demo/a", &revisioned[13].doc);
+    CHECK(rc == WZ_DISSECT_OK, "keyexpr_relate document rc=%d", rc);
+    revisioned[14].name = "declarations_match";
+    revisioned[14].revision = 1;
+    revisioned[14].doc = NULL;
+    rc = wz_dissect_declarations_match("demo/**=protobuf", "demo/a",
+                                       &revisioned[14].doc);
+    CHECK(rc == WZ_DISSECT_OK, "declarations_match document rc=%d", rc);
+    revisioned[15].name = "proto_message";
+    revisioned[15].revision = 1;
+    revisioned[15].doc = NULL;
+    {
+        static const char one_text[] =
+            "syntax = \"proto3\"; message M { int32 a = 1; }";
+        wz_dissect_proto_file one;
+        one.name = "a.proto";
+        one.text = (const unsigned char *)one_text;
+        one.text_len = sizeof one_text - 1;
+        rc = wz_dissect_proto_describe("M", &one, 1, 0, &revisioned[15].doc);
+    }
+    CHECK(rc == WZ_DISSECT_OK, "proto_message document rc=%d", rc);
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -3240,6 +3398,12 @@ int main(void) {
      * that schema's message, so a consumer that sends never writes the wire
      * format itself. */
     if (check_proto_encode_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 34) -- and the three doors that let a consumer build and check a write
+     * without reading a .proto or judging a key expression itself. */
+    if (check_relate_match_describe_doors() != 0) {
         return 1;
     }
 

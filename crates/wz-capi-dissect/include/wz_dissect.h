@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "session_table", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "keyexpr_diagnose", "keyexpr_relate", "declarations_match", "declarations_from_proto", "proto_message", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "session_table", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -1557,7 +1557,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 33
+#define WZ_DISSECT_ABI_REVISION 34
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2735,6 +2735,46 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  * @carries keyexpr_diagnose reason passenger */
 int wz_dissect_keyexpr_diagnose(const char *keyexpr, char **out);
 
+/* (ABI 34) -- THE RELATION OF TWO KEY EXPRESSIONS, without a capture: does the
+ * first include the second, do the two intersect.
+ *
+ * A consumer that picks which declared mapping covers a key, or that checks
+ * before sending that a key is one a subscriber would receive, has to ask how two
+ * key expressions relate. The one thing this library gave it was
+ * wz_dissect_keyexpr_diagnose, which judges ONE text, and answering the relation
+ * yourself means a second matcher that disagrees with the router exactly where
+ * `**` and `$*` are unusual. This asks the engines the C drop-in's
+ * z_keyexpr_includes and z_keyexpr_intersects ask, so the three cannot differ.
+ *
+ * Always returns WZ_DISSECT_OK for readable text and writes a verdict:
+ *
+ *     {"document":{"name":"keyexpr_relate","revision":1},"ok":true,
+ *      "includes":true,"intersects":true}
+ *     {"document":{...},"ok":false,"which":"a","chunk":1,"offset":5,
+ *      "reason":"empty_chunk","message":"..."}
+ *
+ * `includes` is true when `a` includes `b`: every key `b` matches, `a` matches
+ * too, so `demo/$*` includes `demo/a` and `demo/a` does NOT include `demo/$*`.
+ * `intersects` is true when some key matches both, and it is symmetric. What `a`
+ * includes it also intersects, so `includes` is never true beside a false
+ * `intersects`.
+ *
+ * A refusal names the text that is not a key expression, `which` being `a` or
+ * `b` (`a` is judged first), with the `chunk`, `offset`, `reason` and `message`
+ * wz_dissect_keyexpr_diagnose gives for it. Both texts go through the one
+ * validator before either relation is asked, so the relation is only ever
+ * computed over canonical keys, which is what the matcher assumes.
+ *
+ * A refusal is a successful DIAGNOSIS, so the memory rule is the one every
+ * document door keeps: OK means a string you own, an error means none. A text
+ * that is not valid UTF-8 or a null pointer is WZ_DISSECT_ERR_INVALID_ARG.
+ *
+ * @values keyexpr_relate reason
+ * @values keyexpr_relate which
+ * @carries keyexpr_relate reason passenger
+ * @carries keyexpr_relate which passenger */
+int wz_dissect_keyexpr_relate(const char *a, const char *b, char **out);
+
 /* One file of the schema wz_dissect_declarations_from_proto reads. 24 bytes on
  * a 64-bit target, 8-aligned, and like wz_dissect_record it is raw memory a
  * consumer fills by OFFSET, so a change to it is a new struct and a new door,
@@ -2920,6 +2960,131 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
                                        const wz_dissect_proto_file *files,
                                        size_t file_count, size_t root_file,
                                        char **out);
+
+/* (ABI 34) -- WHICH FORMAT RULE OF A DECLARATION TEXT COVERS A KEY, by the
+ * decoder's own judgement.
+ *
+ * A consumer that has the key a sample was published on and a declaration text
+ * needs to know which mapping applies to it: the first-covering-rule judgement
+ * the decoder makes for every sample, with the same overlap behaviour. Matching
+ * the text's patterns yourself is a second opinion about `**`, and which rule
+ * wins is the whole of the question. This asks the function the capture asks.
+ *
+ * Always returns WZ_DISSECT_OK for readable text and writes a verdict:
+ *
+ *     {"document":{"name":"declarations_match","revision":1},"ok":true,
+ *      "covered":true,
+ *      "matched":{"index":1,"pattern":"demo/$*","format":"protobuf",
+ *                 "schema":null}}
+ *     {"document":{...},"ok":true,"covered":false}
+ *     {"document":{...},"ok":false,"which":"declarations","line":2,
+ *      "text":"...","message":"..."}
+ *     {"document":{...},"ok":false,"which":"keyexpr","chunk":1,"offset":5,
+ *      "reason":"empty_chunk","message":"..."}
+ *
+ * `index` counts the FORMAT RULES, from 0, in the order they are tried: it is the
+ * `rule_index` a wz_dissect_declarations_diagnose line carries and the `index` of
+ * the `matched_rule` a field row reports. `pattern` is the rule's key expression
+ * as read, `format` the name of the decoder, the described format or the
+ * end-to-end profile it points at, and `schema` the body schema an end-to-end
+ * rule names, or null. `covered` is false when no rule covers the key, which is
+ * NOT a refusal, and `matched` is then ABSENT: no top-level key of a document is
+ * ever null.
+ *
+ * The key must be a LITERAL key expression: the decoder is asked about the key a
+ * sample was published on, and a key carrying a `*` is refused rather than matched
+ * as a pattern, which would answer a different question. `which` is
+ * `keyexpr` for it, with `chunk` and `offset` pointing at the first `*` and NO
+ * `reason`; a key that is not a key expression at all carries the `reason` words
+ * wz_dissect_keyexpr_diagnose gives. A declaration text that does not install is
+ * refused with `which` `declarations` and the keys
+ * wz_dissect_declarations_diagnose gives for the same text (`line`, `text`,
+ * `message` and, for a refused key, `pattern`, `chunk`, `offset`, `reason`).
+ *
+ * A refusal is a successful DIAGNOSIS, so the memory rule is the one every
+ * document door keeps: OK means a string you own, an error means none. A text
+ * that is not valid UTF-8 or a null pointer is WZ_DISSECT_ERR_INVALID_ARG.
+ *
+ * @values declarations_match reason
+ * @values declarations_match which
+ * @carries declarations_match reason passenger
+ * @carries declarations_match which discriminant */
+int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
+                                  char **out);
+
+/* (ABI 34) -- A ROOT MESSAGE OF A .proto SCHEMA, DESCRIBED field by field: what a
+ * person filling it in has to be shown.
+ *
+ * A consumer that lets a person type the fields of a message draws one input per
+ * field, and until this the only way to know the fields was to read the .proto
+ * itself: a second reader of a language inside the program that links this
+ * library. wz_dissect_declarations_from_proto gives the paths and the names and
+ * wz_dissect_proto_encode turns values into bytes; this gives the shape the
+ * values are of, from the one reader both already use.
+ *
+ * Takes what wz_dissect_declarations_from_proto takes, less the key pattern:
+ * `root_message` (the full name, package included), `files` and `file_count`
+ * (every file the root file might import, each a name and its bytes; nothing here
+ * opens a path and no callback runs) and `root_file` (the index of the file the
+ * user chose).
+ *
+ * Always returns WZ_DISSECT_OK for well formed arguments and writes a document:
+ *
+ *     {"document":{"name":"proto_message","revision":1},"ok":true,
+ *      "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading",
+ *       "file":"a.proto","syntax":"proto3","oneofs":[],
+ *       "fields":[{"name":"sensor_id","json_name":"sensorId","number":1,
+ *        "type":"uint32","label":"singular","oneof":null,"packed":null,
+ *        "enum":null,"message_type":null,"map":null}]}]}
+ *
+ * `messages` is the root message first, then every message it reaches, each ONCE;
+ * a field of type `message` names its message by full name in `message_type`,
+ * which is the `full_name` of one of the entries. A recursive message is
+ * described, where the declaration door refuses it: nothing is expanded into
+ * paths. Every key of a field row is present, and one that does not apply is
+ * null.
+ *
+ *     `type`   a scalar keyword (`double`, `float`, `int32`, `int64`, `uint32`,
+ *              `uint64`, `sint32`, `sint64`, `fixed32`, `fixed64`, `sfixed32`,
+ *              `sfixed64`, `bool`, `string`, `bytes`) or one of `enum`,
+ *              `message` and `map`
+ *     `label`  `singular`, `optional`, `required` or `repeated`. A map is
+ *              `repeated`, as it is on the wire
+ *     `oneof`  the oneof's name, or null for a field in none
+ *     `packed` a boolean for a repeated field of a packable type (whether it is
+ *              written as one run, by the syntax's default or the `packed`
+ *              option), null for every other field
+ *     `enum`   {"name":"pkg.Mode","values":[{"name":"A","number":0}, ...]} for a
+ *              field of type `enum`; an enum value's number is a bare number up
+ *              to 2^53 - 1 either way and the digits in a string beyond
+ *     `map`    {"key":"<scalar>","value":{"type":"...","enum":...,
+ *              "message_type":...}} for a field of type `map`; a map value's
+ *              `type` is a scalar keyword, `enum` or `message`
+ *
+ * The vocabularies are closed, and `syntax` (`proto2` or `proto3`, on a message)
+ * with them.
+ *
+ * A schema that is refused is a successful DIAGNOSIS, with the keys
+ * wz_dissect_declarations_from_proto gives (`file`, `line` and `column` together
+ * for a place in a file, `file` alone for a whole file, none for an argument,
+ * then `reason` and `message`), and for the same reasons: a syntax error, a type
+ * that is not defined, a root message that is not defined, and a `group` or an
+ * `extend` the root reaches. OK means a string you own, an error means none.
+ * WZ_DISSECT_ERR_INVALID_ARG is the caller's bug: a null pointer, a count of
+ * zero, a root index outside the list, two files with one name, a name that is
+ * not UTF-8.
+ *
+ * @values proto_message key
+ * @values proto_message label
+ * @values proto_message syntax
+ * @values proto_message type
+ * @carries proto_message key passenger
+ * @carries proto_message label passenger
+ * @carries proto_message syntax passenger
+ * @carries proto_message type passenger */
+int wz_dissect_proto_describe(const char *root_message,
+                              const wz_dissect_proto_file *files,
+                              size_t file_count, size_t root_file, char **out);
 
 /* (ABI 29) -- FIELD VALUES, AS JSON, TURNED INTO PROTOBUF WIRE BYTES by the
  * types a .proto schema gives them: the sending half of

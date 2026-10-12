@@ -2327,8 +2327,9 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     //
     // The verdict of `wz_dissect_declarations_match`, the door that asks the
     // function the capture asks for every sample (`FormatMap::matching_rule`) and
-    // so cannot disagree with a decode about an overlap. `{ok:true, matched}` with
-    // `matched` null or `{index, pattern, format, schema}`; a refusal says which
+    // so cannot disagree with a decode about an overlap. `{ok:true, covered}`, and
+    // beside `covered:true` a `matched` of `{index, pattern, format, schema}` (no
+    // top-level key is `null`: that is how an absent plane reads); a refusal says which
     // of its two inputs it is about (`which`: the declaration text, or the key),
     // and carries that input's own keys (the declaration verdict's for a text, the
     // key-expression verdict's for a key, with `reason` absent for a key that is a
@@ -9434,12 +9435,13 @@ pub const KEYEXPR_RELATE_R1_CARRIES: &[KeyCarries] = &[
 ];
 
 /// The match document's key set at revision 1, over every branch: the match
-/// (`matched` and, inside it, `index`, `pattern`, `format`, `schema`), a refused
-/// declaration text (`line`, `text`, and for a refused key `pattern`, `chunk`,
-/// `offset`, `reason`) and a refused key (`chunk`, `offset`, `reason`).
+/// (`covered` and, beside `true`, `matched` with `index`, `pattern`, `format`,
+/// `schema` inside it), a refused declaration text (`line`, `text`, and for a
+/// refused key `pattern`, `chunk`, `offset`, `reason`) and a refused key
+/// (`chunk`, `offset`, `reason`).
 pub const DECLARATIONS_MATCH_R1_KEYS: &[&str] = &[
-    "chunk", "document", "format", "index", "line", "matched", "message", "name", "offset", "ok",
-    "pattern", "reason", "revision", "schema", "text", "which",
+    "chunk", "covered", "document", "format", "index", "line", "matched", "message", "name",
+    "offset", "ok", "pattern", "reason", "revision", "schema", "text", "which",
 ];
 
 /// The two inputs a match can refuse, the words of `which`.

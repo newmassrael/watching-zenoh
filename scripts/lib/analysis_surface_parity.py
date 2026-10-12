@@ -481,6 +481,41 @@ ONLY_CAPI = {
         "no code that reads the language.",
         (),
     ),
+    "two key expressions related, without a capture": (
+        "wz_dissect_keyexpr_relate",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and picks which declared mapping covers a key, or checks before sending "
+        "that a key is one a subscriber would receive, must not keep a second "
+        "matcher beside the router's: a second matcher disagrees exactly where "
+        "`**` and `$*` are unusual. It asks the engines the C drop-in's "
+        "`z_keyexpr_includes` and `z_keyexpr_intersects` ask. The command line "
+        "analyses captures and relates no two key expressions; a flag that did "
+        "would be a convenience and not a missing capability.",
+        (),
+    ),
+    "the declaration rule that covers a key": (
+        "wz_dissect_declarations_match",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and holds a key and a declaration text must learn which mapping the "
+        "decoder applies from the decoder's own first-covering-rule judgement "
+        "and not from a second reading of the patterns. The command line reports "
+        "the rule that won for each row of a capture (`matched_rule`), so the "
+        "same answer reaches an operator by running; a flag that took a key and "
+        "a declaration text and printed the rule is a convenience.",
+        (),
+    ),
+    "a root message of a .proto schema described field by field": (
+        "wz_dissect_proto_describe",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and draws an input per field of a message must not read .proto itself: "
+        "a second reader of the language is a second opinion about which field "
+        "is which and of what type. It is the half between "
+        "`wz_dissect_declarations_from_proto` (names and paths) and "
+        "`wz_dissect_proto_encode` (values to bytes), over the same reader. The "
+        "command line has no screen that asks a person for field values, and its "
+        "operator reads a schema with the tools that ship with it.",
+        (),
+    ),
     "protobuf bytes written from field values under a .proto schema": (
         "wz_dissect_proto_encode",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "

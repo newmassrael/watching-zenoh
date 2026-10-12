@@ -187,11 +187,14 @@ pub const MATCH_REFUSALS: [&str; 2] = ["declarations", "keyexpr"];
 /// Which format rule of a declaration text covers a key, by the decoder's own
 /// judgement: the verdict `wz_dissect_declarations_match` hands back.
 ///
-/// `{envelope,"ok":true,"matched":M}` where `M` is `null` when no rule covers
-/// `keyexpr`, or `{"index":N,"pattern":"…","format":"…","schema":S}`: the FIRST
-/// format rule, in the order they are tried, that covers the key, which is the
-/// rule a field row reports as `matched_rule` and the one whose format decodes the
-/// payload. `index` counts the format rules from 0 (it is the `rule_index` a
+/// `{envelope,"ok":true,"covered":false}` when no rule covers `keyexpr`, or
+/// `{envelope,"ok":true,"covered":true,"matched":{"index":N,"pattern":"…",
+/// "format":"…","schema":S}}`: the FIRST format rule, in the order they are
+/// tried, that covers the key, which is the rule a field row reports as
+/// `matched_rule` and the one whose format decodes the payload. `matched` is
+/// written only beside `"covered":true`: no top-level key of a document is ever
+/// `null`, because a top-level `null` is how a plane absent from a build reads,
+/// and "no rule covers this key" is an answer. `index` counts the format rules from 0 (it is the `rule_index` a
 /// `declarations_diagnose` line carries), `pattern` is the rule's key expression
 /// as read, `format` the name of the decoder or the described format or the
 /// end-to-end profile it points at, and `schema` the body schema an
@@ -248,10 +251,10 @@ pub fn declarations_match_json(declarations: &str, keyexpr: &str) -> String {
         out.push('}');
         return out;
     }
-    out.push_str(",\"ok\":true,\"matched\":");
     match map.matching_rule(keyexpr) {
-        None => out.push_str("null"),
+        None => out.push_str(",\"ok\":true,\"covered\":false"),
         Some(found) => {
+            out.push_str(",\"ok\":true,\"covered\":true,\"matched\":");
             out.push_str(&format!("{{\"index\":{},\"pattern\":", found.rule.index));
             escape_into(&found.rule.pattern, &mut out);
             out.push_str(",\"format\":");
@@ -590,10 +593,13 @@ mod tests {
             Some("true"),
             "{declarations:?} {key}: {doc}"
         );
-        let found = top(&doc, "matched").expect("matched");
-        if found == "null" {
+        let covered = top(&doc, "covered").expect("covered");
+        if covered == "false" {
+            assert_eq!(top(&doc, "matched"), None, "{doc}");
             return None;
         }
+        assert_eq!(covered, "true", "{doc}");
+        let found = top(&doc, "matched").expect("matched");
         let entry = object_scopes(found).into_iter().next().expect("an object");
         let get = |k: &str| {
             entry
@@ -700,6 +706,7 @@ mod tests {
         assert_eq!(top(&wild, "offset"), Some("5"), "{wild}");
         assert_eq!(top(&wild, "reason"), None, "{wild}");
         assert_eq!(top(&wild, "matched"), None, "{wild}");
+        assert_eq!(top(&wild, "covered"), None, "{wild}");
 
         let bad = declarations_match_json("demo/**=protobuf", "demo//a");
         assert_eq!(top(&bad, "which"), Some("\"keyexpr\""), "{bad}");

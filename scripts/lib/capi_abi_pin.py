@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 33
+EXPECTED_VERSION = 34
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -325,6 +325,20 @@ EXPECTED_SYMBOLS = {
     # callback runs.
     "wz_dissect_pcap_session_table",
     "wz_dissect_live_session_table",
+    # (ABI 34) -- THREE DOORS for a consumer that builds and checks a write
+    # without reading a `.proto` or judging a key expression itself: two key
+    # expressions RELATED (includes, intersects) by the engines the C drop-in's
+    # `z_keyexpr_includes` and `z_keyexpr_intersects` ask, the format rule of a
+    # declaration text that covers a key by the decoder's own first-covering-rule
+    # judgement, and a root message of a `.proto` schema DESCRIBED field by field.
+    # Three symbols and three documents, each an own door because each is its own
+    # question. The memory rule does not move: each verdict is a `char*` released
+    # by `wz_dissect_string_free`, the schema files cross as bytes the CALLER
+    # already read (the struct `wz_dissect_declarations_from_proto` takes), nothing
+    # is retained between calls, and no callback runs.
+    "wz_dissect_keyexpr_relate",
+    "wz_dissect_declarations_match",
+    "wz_dissect_proto_describe",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

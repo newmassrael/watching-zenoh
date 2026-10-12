@@ -365,6 +365,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // reports the bytes it built.
     // 33, for `wz_dissect_pcap_session_table` and `wz_dissect_live_session_table`:
     // the capture read as sessions, one row per zid pair.
+    // 34, for `wz_dissect_keyexpr_relate`, `wz_dissect_declarations_match` and
+    // `wz_dissect_proto_describe`: two key expressions related, the declaration
+    // rule that covers a key, and a root message of a `.proto` schema described.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -382,7 +385,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 33;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 34;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -1933,23 +1936,221 @@ fn proto_verdict(
         }
         Err(bad) => {
             let mut s = format!("{{{head},\"ok\":false");
-            if let Some(file) = &bad.file {
-                s.push_str(",\"file\":");
-                wz_session_core::json::escape_into(file, &mut s);
-            }
-            for (position, at) in [("line", bad.line), ("column", bad.column)] {
-                if let Some(n) = at {
-                    s.push_str(&format!(",\"{position}\":{n}"));
-                }
-            }
-            s.push_str(",\"reason\":");
-            wz_session_core::json::escape_into(&bad.reason, &mut s);
-            s.push_str(",\"message\":");
-            wz_session_core::json::escape_into(&bad.to_string(), &mut s);
+            // The one writer of a schema's refusal, shared with the description
+            // document, so the two cannot spell it differently.
+            wz_capture::proto_describe_json::push_diagnostic(bad, &mut s);
             s.push('}');
             s
         }
     }
+}
+
+/// (ABI 34) THE RELATION OF TWO KEY EXPRESSIONS, without a capture: does the first
+/// include the second, do the two intersect.
+///
+/// # Why this is a door
+///
+/// A consumer that picks which declared mapping covers a key, or that checks
+/// before sending that a key is one a subscriber would receive, has to ask how two
+/// key expressions relate. The one thing the library gave it was
+/// [`wz_dissect_keyexpr_diagnose`], which judges ONE text; answering the relation
+/// itself means reimplementing the matcher, and a second matcher disagrees with the
+/// router exactly where `**` and `$*` are unusual. This asks the engines the C
+/// drop-in's `z_keyexpr_includes` and `z_keyexpr_intersects` ask, so the three
+/// cannot differ.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a verdict, for any two texts:
+///
+/// ```text
+/// {"document":{"name":"keyexpr_relate","revision":1},"ok":true,
+///  "includes":true,"intersects":true}
+/// {"document":{...},"ok":false,"which":"a","chunk":1,"offset":5,
+///  "reason":"empty_chunk","message":"..."}
+/// ```
+///
+/// `includes` is true when `a` includes `b`: every key `b` matches, `a` matches
+/// too, so `demo/**` includes `demo/a` and `demo/a` does not include `demo/**`.
+/// `intersects` is true when some key matches both and is symmetric. A refusal
+/// names the text that is not a key expression (`a` is judged before `b`) in the
+/// words [`wz_dissect_keyexpr_diagnose`] gives, so the two texts go through the one
+/// validator and the relation is only ever asked about canonical keys. A refusal
+/// is a successful DIAGNOSIS: the string is owned and freed like every other.
+///
+/// # Safety
+/// `a` and `b` must be NUL-terminated C strings and `out` a writable pointer to a
+/// `*mut c_char`. None of them may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_keyexpr_relate(
+    a: *const c_char,
+    b: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if a.is_null() || b.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(a), Ok(b)) = (
+        unsafe { std::ffi::CStr::from_ptr(a) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(b) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    write_string(wz_capture::diagnose_json::keyexpr_relate_json(a, b), out)
+}
+
+/// (ABI 34) WHICH FORMAT RULE OF A DECLARATION TEXT COVERS A KEY, by the decoder's
+/// own judgement.
+///
+/// # Why this is a door
+///
+/// A consumer that has a key a sample was published on, and a declaration text, needs
+/// to know which mapping applies to it: the same first-covering-rule judgement the
+/// decoder makes for every sample, with the same overlap behaviour. Matching the
+/// text's patterns itself is a second opinion about `**`, and the rule that wins is
+/// the whole of the question. This asks the function the capture asks.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a verdict, for any two texts:
+///
+/// ```text
+/// {"document":{"name":"declarations_match","revision":1},"ok":true,"covered":true,
+///  "matched":{"index":1,"pattern":"demo/**","format":"protobuf","schema":null}}
+/// {"document":{...},"ok":true,"covered":false}
+/// {"document":{...},"ok":false,"which":"declarations","line":2,"text":"...",
+///  "message":"..."}
+/// {"document":{...},"ok":false,"which":"keyexpr","chunk":1,"offset":5,
+///  "reason":"empty_chunk","message":"..."}
+/// ```
+///
+/// `index` counts the FORMAT RULES, from 0, in the order they are tried: it is the
+/// `rule_index` a `wz_dissect_declarations_diagnose` line carries and the `index`
+/// of the `matched_rule` a field row reports. `pattern` is the rule's key
+/// expression as read, `format` the name of the decoder, described format or
+/// end-to-end profile it points at, and `schema` the body schema an end-to-end rule
+/// names, or `null`. `covered` is `false` when no rule covers the key, which is
+/// not a refusal, and `matched` is then ABSENT: no top-level key of a document is
+/// ever `null`.
+///
+/// The key must be a LITERAL key expression: the decoder is asked about the key a
+/// sample was published on, and a key with a `*` is refused (`which` is `keyexpr`,
+/// with `chunk` and `offset` pointing at the first `*` and no `reason`) and not
+/// matched as a pattern, which would answer a different question. A declaration
+/// text that does not install is refused with the keys
+/// [`wz_dissect_declarations_diagnose`] gives for it. A refusal is a successful
+/// DIAGNOSIS: the string is owned and freed like every other.
+///
+/// # Safety
+/// `declarations` and `keyexpr` must be NUL-terminated C strings and `out` a
+/// writable pointer to a `*mut c_char`. None of them may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_declarations_match(
+    declarations: *const c_char,
+    keyexpr: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if declarations.is_null() || keyexpr.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(declarations), Ok(keyexpr)) = (
+        unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(keyexpr) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    write_string(
+        wz_capture::diagnose_json::declarations_match_json(declarations, keyexpr),
+        out,
+    )
+}
+
+/// (ABI 34) A ROOT MESSAGE OF A `.proto` SCHEMA, DESCRIBED field by field: what a
+/// person filling it in has to be shown.
+///
+/// # Why this is a door
+///
+/// A consumer that lets a person type the fields of a message draws one input per
+/// field, and until this the only way to know the fields was to read the `.proto`
+/// itself, which is a second reader of a language inside the program that links
+/// this library. [`wz_dissect_declarations_from_proto`] gives the paths and
+/// names and [`wz_dissect_proto_encode`] turns values into bytes; this gives the
+/// shape the values are of, from the one reader both already use.
+///
+/// # Arguments
+///
+/// The ones [`wz_dissect_declarations_from_proto`] takes, less the key pattern:
+/// `root_message` (the full name, package included), `files` and `file_count` (every
+/// file the root file might import, each a name and its bytes; nothing here opens a
+/// path), and `root_file` (the index of the file the user chose).
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a document, for any arguments that are well formed:
+///
+/// ```text
+/// {"document":{"name":"proto_message","revision":1},"ok":true,
+///  "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading","file":"a.proto",
+///   "syntax":"proto3","oneofs":[],"fields":[{"name":"sensor_id","json_name":"sensorId",
+///   "number":1,"type":"uint32","label":"singular","oneof":null,"packed":null,
+///   "enum":null,"message_type":null,"map":null}]}]}
+/// ```
+///
+/// `messages` is the root message first, then each message it reaches once; a field
+/// of type `message` names its message by full name in `message_type`. Every key of
+/// a field row is present and one that does not apply is `null`. `type` is a scalar
+/// keyword or `enum`, `message` or `map`; `label` is `singular`, `optional`,
+/// `required` or `repeated` (a map is `repeated`, as it is on the wire); `packed`
+/// is a boolean for a repeated field of a packable type and `null` otherwise; `enum`
+/// is `{"name","values":[{"name","number"}]}`; `map` is `{"key":"<scalar>","value":
+/// {"type","enum","message_type"}}`. The vocabularies are closed and declared in
+/// the document's revision. A schema that is refused is a successful DIAGNOSIS, as
+/// for [`wz_dissect_declarations_from_proto`], and with the same keys. A recursive
+/// message is described, where the declaration door refuses it: nothing is expanded.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for the caller's own bugs, the list
+/// [`wz_dissect_declarations_from_proto`] gives: a null pointer, a count of zero, a
+/// root index outside the list, a name or text pointer that is null where it may not
+/// be, two files with one name, a root name or file name that is not UTF-8.
+///
+/// # Safety
+/// `root_message` must be a NUL-terminated C string; `files` must point to
+/// `file_count` readable [`WzDissectProtoFile`] values, each `name` a NUL-terminated
+/// C string and each `text` readable for `text_len` bytes; `out` must be a writable
+/// pointer to a `*mut c_char`. None of `files`, `root_message` and `out` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_proto_describe(
+    root_message: *const c_char,
+    files: *const WzDissectProtoFile,
+    file_count: usize,
+    root_file: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if root_message.is_null()
+        || files.is_null()
+        || out.is_null()
+        || file_count == 0
+        || root_file >= file_count
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let Ok(root) = (unsafe { std::ffi::CStr::from_ptr(root_message) }).to_str() else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let given = match unsafe { proto_files(files, file_count) } {
+        Ok(given) => given,
+        Err(rc) => return rc,
+    };
+    write_string(
+        wz_capture::proto_describe_json::proto_message_json(root, &given, root_file),
+        out,
+    )
 }
 
 /// A PROTECTED FRAME BUILT UNDER A PROFILE THE CALLER DESCRIBES: an end-to-end
@@ -7402,7 +7603,12 @@ mod tests {
         // `wz_dissect_live_session_table`: two symbols, each a `char*` released
         // by `wz_dissect_string_free`; the live one takes the handle the other
         // doors already take, and no struct crosses.
-        assert_eq!(wz_dissect_abi_version(), 33);
+        // 34, for `wz_dissect_keyexpr_relate`, `wz_dissect_declarations_match` and
+        // `wz_dissect_proto_describe`: three symbols, each a `char*` released by
+        // `wz_dissect_string_free`; the two texts cross as C strings and the schema
+        // files as the struct `wz_dissect_declarations_from_proto` takes, so no
+        // struct is new.
+        assert_eq!(wz_dissect_abi_version(), 34);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -8149,6 +8355,11 @@ mod tests {
             // file, a whole file, and an argument. The key set differs by
             // branch, so a pin over one would leave the others' keys unwatched.
             (rev::DECLARATIONS_FROM_PROTO, from_proto_documents()),
+            // The three doors of ABI 34, each over every shape it writes, for the
+            // same reason: a success and each refusal carry different keys.
+            (rev::KEYEXPR_RELATE, keyexpr_relate_documents()),
+            (rev::DECLARATIONS_MATCH, declarations_match_documents()),
+            (rev::PROTO_MESSAGE, proto_message_documents()),
             // Every shape the two protected-frame doors write, for the same
             // reason: the refusal names its text by whichever position key
             // applies, so each branch has keys the others lack.
@@ -8309,6 +8520,28 @@ mod tests {
             (
                 rev::DECLARATIONS_FROM_PROTO,
                 from_proto_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
+            // None of the three doors of ABI 34 declares a plane.
+            (
+                rev::KEYEXPR_RELATE,
+                keyexpr_relate_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
+            (
+                rev::DECLARATIONS_MATCH,
+                declarations_match_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
+            (
+                rev::PROTO_MESSAGE,
+                proto_message_documents()
                     .into_iter()
                     .next()
                     .expect("a document"),
@@ -8502,6 +8735,12 @@ mod tests {
             // All four shapes: the failure branch OMITS its position keys and
             // must never write a `null` in their place.
             (rev::DECLARATIONS_FROM_PROTO, from_proto_documents()),
+            // Every shape of the three doors of ABI 34, for the same reason: no
+            // refusal writes a top-level `null`, and the `null` members of a
+            // field row or of a match are members and not a plane.
+            (rev::KEYEXPR_RELATE, keyexpr_relate_documents()),
+            (rev::DECLARATIONS_MATCH, declarations_match_documents()),
+            (rev::PROTO_MESSAGE, proto_message_documents()),
             // Every refusal shape of the protected-frame doors, for the same
             // reason: no position key is ever written as `null`.
             (rev::E2E_WRAP, e2e_wrap_documents()),
@@ -10215,6 +10454,338 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         s
+    }
+
+    /// Drive the key-expression relation the way C does.
+    fn call_keyexpr_relate(a: &str, b: &str) -> String {
+        let a = CString::new(a).expect("no interior NUL");
+        let b = CString::new(b).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_keyexpr_relate(a.as_ptr(), b.as_ptr(), &mut out) };
+        assert_eq!(
+            rc, WZ_DISSECT_OK,
+            "a refused key expression is a successful DIAGNOSIS, not an error"
+        );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
+    /// Drive the declaration match the way C does.
+    fn call_declarations_match(declarations: &str, keyexpr: &str) -> String {
+        let declarations = CString::new(declarations).expect("no interior NUL");
+        let keyexpr = CString::new(keyexpr).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_declarations_match(declarations.as_ptr(), keyexpr.as_ptr(), &mut out)
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "a refusal is a successful DIAGNOSIS");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
+    /// Drive the schema description the way C does: the files as a list, the
+    /// root by full name. `Err` carries the status of a refused argument.
+    fn call_proto_describe(
+        root: &str,
+        files: &[(&str, &[u8])],
+        root_file: usize,
+    ) -> Result<String, c_int> {
+        let root = CString::new(root).expect("no interior NUL");
+        let names: Vec<CString> = files
+            .iter()
+            .map(|(name, _)| CString::new(*name).expect("no interior NUL"))
+            .collect();
+        let entries: Vec<WzDissectProtoFile> = files
+            .iter()
+            .zip(&names)
+            .map(|((_, text), name)| WzDissectProtoFile {
+                name: name.as_ptr(),
+                text: if text.is_empty() {
+                    core::ptr::null()
+                } else {
+                    text.as_ptr()
+                },
+                text_len: text.len(),
+            })
+            .collect();
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_proto_describe(
+                root.as_ptr(),
+                entries.as_ptr(),
+                entries.len(),
+                root_file,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// A schema that reaches every key of the description document: an enum, a
+    /// map with a message value, a oneof, a packed field and a recursive field.
+    const DESCRIBED: &str = "syntax = \"proto3\";\n\
+        package demo;\n\
+        enum Mode { OFF = 0; ON = 1; }\n\
+        message Point { double x = 1; }\n\
+        message Shape {\n\
+          Mode mode = 1;\n\
+          map<string, Point> points = 2;\n\
+          repeated sint32 samples = 3;\n\
+          oneof pick { string name = 4; uint32 code = 5; }\n\
+          Shape parent = 6;\n\
+        }\n";
+
+    /// A declaration text with an end-to-end profile on ONE line, as a profile
+    /// definition is, and a rule that names it with a body schema.
+    const MATCH_PROFILE_TEXT: &str = "#demo-a={\"name\":\"demo-a\",\"fields\":[\
+        {\"name\":\"kind\",\"bytes\":1},{\"name\":\"crc\",\"bytes\":2},\
+        {\"name\":\"counter\",\"bytes\":1},{\"name\":\"length\",\"bytes\":2}],\
+        \"crc\":{\"field\":\"crc\",\"width\":16,\"poly\":\"0x1021\",\"init\":\"0xFFFF\",\
+        \"refin\":false,\"refout\":false,\"xorout\":0,\
+        \"cover\":[\"kind\",\"@payload\",\"counter\",\"length\"]},\
+        \"length\":{\"field\":\"length\",\"counts\":\"frame\"},\
+        \"counter\":{\"field\":\"counter\",\"max_gap\":4,\"timeout_ms\":100}}\n\
+        demo/p=demo-a@pkg.Pose";
+
+    /// One document of each shape the relation door writes.
+    fn keyexpr_relate_documents() -> Vec<String> {
+        vec![
+            call_keyexpr_relate("demo/**", "demo/a"),
+            call_keyexpr_relate("demo/a", "demo/b"),
+            call_keyexpr_relate("demo//a", "demo/b"),
+            call_keyexpr_relate("demo/a", "a?b"),
+        ]
+    }
+
+    /// One document of each shape the match door writes: a rule, no rule, a
+    /// rule with a body schema, a refused text, a refused text whose key is the
+    /// fault, a key that is not a key expression and one that is a wildcard.
+    fn declarations_match_documents() -> Vec<String> {
+        vec![
+            call_declarations_match("demo/**=protobuf", "demo/a"),
+            call_declarations_match("demo/a=json", "other/x"),
+            call_declarations_match(MATCH_PROFILE_TEXT, "demo/p"),
+            call_declarations_match("not a declaration", "demo/a"),
+            call_declarations_match("demo//a=protobuf", "demo/a"),
+            call_declarations_match("demo/**=protobuf", "demo//a"),
+            call_declarations_match("demo/**=protobuf", "demo/*"),
+        ]
+    }
+
+    /// One document of each shape the description door writes: the success,
+    /// a place in a file, and a whole file. The third shape of a refused schema,
+    /// an argument, cannot reach this door: the bad arguments are the caller's own
+    /// bug and come back as a status, not a document.
+    fn proto_message_documents() -> Vec<String> {
+        let one = |root: &str, text: &str| {
+            call_proto_describe(root, &[("a.proto", text.as_bytes())], 0).expect("the door answers")
+        };
+        vec![
+            one("demo.Shape", DESCRIBED),
+            one("M", "syntax = \"proto3\"; message M { Nope n = 1; }"),
+            one("Missing", "syntax = \"proto3\"; message M { int32 a = 1; }"),
+        ]
+    }
+
+    /// THE RELATION DOOR ANSWERS IN THE DIRECTION IT IS ASKED, through the C ABI:
+    /// `includes` is about the FIRST holding the second, so `demo/**` includes
+    /// `demo/a` and not the other way round, and the two are asked swapped so a
+    /// door that swapped them is the one that fails.
+    #[test]
+    fn the_relation_door_answers_in_the_direction_it_is_asked() {
+        let wide = call_keyexpr_relate("demo/**", "demo/a");
+        assert!(
+            wide.starts_with(&format!(
+                "{{{},\"ok\":true,\"includes\":true,\"intersects\":true}}",
+                wz_capture::doc_revision::envelope(wz_capture::doc_revision::KEYEXPR_RELATE)
+            )),
+            "{wide}"
+        );
+        let narrow = call_keyexpr_relate("demo/a", "demo/**");
+        assert!(
+            narrow.contains("\"includes\":false,\"intersects\":true"),
+            "{narrow}"
+        );
+        let apart = call_keyexpr_relate("demo/a", "demo/b");
+        assert!(
+            apart.contains("\"includes\":false,\"intersects\":false"),
+            "{apart}"
+        );
+        // The refusal names the side, the first before the second, and its place
+        // is the one the single-key door gives for the same text.
+        let refused = call_keyexpr_relate("demo/a", "demo//b");
+        assert!(
+            refused.contains(
+                "\"ok\":false,\"which\":\"b\",\"chunk\":1,\"offset\":5,\"reason\":\"empty_chunk\""
+            ),
+            "{refused}"
+        );
+        assert!(call_keyexpr_diagnose("demo//b")
+            .contains("\"chunk\":1,\"offset\":5,\"reason\":\"empty_chunk\""),);
+    }
+
+    /// THE MATCH DOOR ASKS THE DECODER, through the C ABI: the first covering rule
+    /// wins whichever is more specific, a key no rule covers matches nothing, and
+    /// a wildcard key is refused instead of being matched as a pattern.
+    #[test]
+    fn the_match_door_gives_the_decoders_first_covering_rule() {
+        let general_first = call_declarations_match("demo/**=protobuf\ndemo/a=json", "demo/a");
+        assert!(
+            general_first.contains(
+                "\"matched\":{\"index\":0,\"pattern\":\"demo/**\",\"format\":\"protobuf\",\"schema\":null}"
+            ),
+            "{general_first}"
+        );
+        let specific_first = call_declarations_match("demo/a=json\ndemo/**=protobuf", "demo/a");
+        assert!(
+            specific_first
+                .contains("\"matched\":{\"index\":0,\"pattern\":\"demo/a\",\"format\":\"json\""),
+            "{specific_first}"
+        );
+        let later = call_declarations_match("demo/a=json\ndemo/**=protobuf", "demo/b");
+        assert!(
+            later.contains("\"index\":1,\"pattern\":\"demo/**\""),
+            "{later}"
+        );
+        assert!(call_declarations_match("demo/a=json", "other/x")
+            .contains("\"ok\":true,\"covered\":false}"),);
+        assert!(!call_declarations_match("demo/a=json", "other/x").contains("\"matched\""));
+        let with_schema = call_declarations_match(MATCH_PROFILE_TEXT, "demo/p");
+        assert!(
+            with_schema.contains("\"format\":\"demo-a\",\"schema\":\"pkg.Pose\""),
+            "{with_schema}"
+        );
+        let wild = call_declarations_match("demo/**=protobuf", "demo/*");
+        assert!(
+            wild.contains("\"ok\":false,\"which\":\"keyexpr\",\"chunk\":1,\"offset\":5,"),
+            "{wild}"
+        );
+        assert!(!wild.contains("\"reason\""), "{wild}");
+        let bad_text = call_declarations_match("not a declaration", "demo/a");
+        assert!(
+            bad_text.contains("\"ok\":false,\"which\":\"declarations\",\"line\":0,"),
+            "{bad_text}"
+        );
+    }
+
+    /// THE DESCRIPTION DOOR DESCRIBES, through the C ABI, what the declaration door
+    /// declares: the same schema gives the same fields in the same order, and a
+    /// recursive message is described where the declaration door refuses it.
+    #[test]
+    fn the_description_door_describes_the_schema_the_declaration_door_reads() {
+        let doc = call_proto_describe("demo.Shape", &[("a.proto", DESCRIBED.as_bytes())], 0)
+            .expect("the door answers");
+        assert!(
+            doc.starts_with(&format!(
+                "{{{},\"ok\":true,\"root\":\"demo.Shape\",\"messages\":[",
+                wz_capture::doc_revision::envelope(wz_capture::doc_revision::PROTO_MESSAGE)
+            )),
+            "{doc}"
+        );
+        // The root first and each reached message once, in the order met.
+        let order: Vec<&str> = doc
+            .match_indices("\"full_name\":\"")
+            .map(|(at, _)| &doc[at + 13..])
+            .map(|rest| rest.split('"').next().expect("a name"))
+            .collect();
+        assert_eq!(order, ["demo.Shape", "demo.Point"], "{doc}");
+        // The declaration door refuses the recursion this schema has (`Shape`
+        // holds a `Shape`), and the description door describes it.
+        let declared = call_from_proto(
+            "demo/s",
+            "demo.Shape",
+            &[("a.proto", DESCRIBED.as_bytes())],
+            0,
+        )
+        .expect("the declaration door answers");
+        assert!(declared.contains("\"ok\":false"), "{declared}");
+        assert!(
+            doc.contains("\"name\":\"parent\"") && doc.contains("\"message_type\":\"demo.Shape\""),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("\"name\":\"samples\",\"json_name\":\"samples\",\"number\":3,\"type\":\"sint32\",\"label\":\"repeated\",\"oneof\":null,\"packed\":true"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("\"name\":\"name\",\"json_name\":\"name\",\"number\":4,\"type\":\"string\",\"label\":\"singular\",\"oneof\":\"pick\""),
+            "{doc}"
+        );
+        // A refused schema is a document with the declaration door's keys.
+        let bad = call_proto_describe(
+            "M",
+            &[("a.proto", b"syntax = \"proto3\"; message M { Nope n = 1; }")],
+            0,
+        )
+        .expect("a refusal is a document");
+        assert!(
+            bad.contains("\"ok\":false,\"file\":\"a.proto\",\"line\":1,\"column\":"),
+            "{bad}"
+        );
+    }
+
+    /// THE THREE DOORS REFUSE THE CALLER'S OWN BUGS AS A STATUS, never as a
+    /// document: a null pointer, a text that is not UTF-8, and, for the schema door,
+    /// a count of zero, a root index outside the list and two files of one name.
+    #[test]
+    fn the_new_doors_refuse_the_callers_bugs_with_a_status() {
+        let text = CString::new("demo/**").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let not_utf8: [u8; 3] = [0xff, 0xfe, 0];
+        for rc in [
+            unsafe { wz_dissect_keyexpr_relate(core::ptr::null(), text.as_ptr(), &mut out) },
+            unsafe { wz_dissect_keyexpr_relate(text.as_ptr(), core::ptr::null(), &mut out) },
+            unsafe {
+                wz_dissect_keyexpr_relate(text.as_ptr(), text.as_ptr(), core::ptr::null_mut())
+            },
+            unsafe { wz_dissect_keyexpr_relate(not_utf8.as_ptr().cast(), text.as_ptr(), &mut out) },
+            unsafe { wz_dissect_declarations_match(core::ptr::null(), text.as_ptr(), &mut out) },
+            unsafe { wz_dissect_declarations_match(text.as_ptr(), core::ptr::null(), &mut out) },
+            unsafe {
+                wz_dissect_declarations_match(text.as_ptr(), not_utf8.as_ptr().cast(), &mut out)
+            },
+        ] {
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+            assert!(out.is_null(), "an error must not hand back a string");
+        }
+        let one = [("a.proto", b"message M { int32 a = 1; }".as_slice())];
+        assert_eq!(
+            call_proto_describe("M", &one, 1),
+            Err(WZ_DISSECT_ERR_INVALID_ARG),
+            "a root index outside the list"
+        );
+        assert_eq!(
+            call_proto_describe("M", &[], 0),
+            Err(WZ_DISSECT_ERR_INVALID_ARG),
+            "no file at all"
+        );
+        let twice = [
+            ("a.proto", b"message M { int32 a = 1; }".as_slice()),
+            ("a.proto", b"message N { int32 a = 1; }".as_slice()),
+        ];
+        assert_eq!(
+            call_proto_describe("M", &twice, 0),
+            Err(WZ_DISSECT_ERR_INVALID_ARG),
+            "two files of one name"
+        );
     }
 
     /// Drive the declaration diagnostic the way C does.
