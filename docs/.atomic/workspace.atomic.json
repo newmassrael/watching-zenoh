@@ -273436,6 +273436,46 @@
         "Round 3314's carry said the fixed image had never been booted and that the Zephyr build did not select it; both are corrected by this entry. Its first measurements of the fixed image (two boots under load) ran with the stack overflowing silently and are not a record of the node's memory behaviour."
       ]
     },
+    "Round 3316": {
+      "decision_summary": "A consumer's address-sanitizer sweep reported that the C drop-in's z_view_keyexpr_from_str leaves 56 bytes per call that nothing can release, in nine of its test targets. Read against the code the report is right: every view kept an owned copy of the string on the heap behind its handle, and a view has no release call (zenoh-c's view is a plain struct dropped by leaving scope), so each call leaked a state and a string, 58 bytes. The module's text called the copy a strict superset of the contract; a copy that nothing can free is not one. A view now aliases the caller's bytes as zenoh-c's does: its 32 bytes hold a mark in the handle and the address and length beside it, nothing is allocated, the ABI size and symbols are unchanged, and the paths that free an owned keyexpr leave a view alone. The caller's string must now outlive its view; the consumer read its call sites where a short-lived buffer was plausible and found none, and every call here that keeps a keyexpr copies it.",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/abi.rs: the view keyexpr's alias form (a static mark in the handle, the address and length in the spare words), z_loaned_keyexpr_t::alias_text, is_view_alias_handle; the heap-handle constructor of the view is gone.",
+        "crates/wz-capi-c/src/keyexpr.rs: the four view constructors alias; keyexpr_str reads an alias (re-validating UTF-8 on each use, since the bytes are the caller's); keyexpr_mapping, z_keyexpr_drop and z_undeclare_keyexpr leave a view's mark alone; the module text states the contract and why the copy was a leak. Four unit tests.",
+        "crates/wz-capi-c/tests/view_keyexpr_no_leak.rs: a per-thread counting allocator over 40000 views of the four constructors, requiring the outstanding bytes not to move."
+      ],
+      "verification_bullets": [
+        "On a build host: the crate's unit tests 172 of 172 (four of them new), the new no-leak test, and every integration test of the crate that runs without a router (a test that needs a router or a peer process is ignored by its own guard and did not run); clippy with warnings denied and rustfmt on the crate, clean.",
+        "The control: the same no-leak test, added to the commit before the change and nothing else, fails there with 2,320,000 bytes still allocated after 40,000 views (58 per view); after the change it passes with the count unmoved. A test that passed on both would have proved nothing.",
+        "Read, not run: every call that keeps a keyexpr past its call (the subscriber, publisher, queryable, querier, advanced publisher, group and get declarations, and the zenoh_ext ones) copies the string with to_owned before keeping it; the others use it inside the call.",
+        "NOT verified here: an address-sanitizer run (the consumer's own sweep, against the landed commit, is the check that repeats their measurement); the lanes that build the crate with the shared-memory arm and the C programs of the interop tests, which a hosted run decides; the consumer's targets."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The consumer re-runs its sweep against the landed commit; a leak of another kind would show there and not here. The pico face already aliased and is unchanged.",
+        "A program that gives a view a short-lived buffer is now a use-after-free, as it is on zenoh-c; the old copy served it. Nothing in the repository's tests does so, and the consumer read the call sites where it was plausible (not every one) and found none."
+      ],
+      "publishable_decision_summary": "A consumer's address-sanitizer sweep reported that the C drop-in's z_view_keyexpr_from_str leaves 56 bytes per call that nothing can release, in nine of its test targets. Read against the code the report is right: every view kept an owned copy of the string on the heap behind its handle, and a view has no release call (zenoh-c's view is a plain struct dropped by leaving scope), so each call leaked a state and a string, 58 bytes. The module's text called the copy a strict superset of the contract; a copy that nothing can free is not one. A view now aliases the caller's bytes as zenoh-c's does: its 32 bytes hold a mark in the handle and the address and length beside it, nothing is allocated, the ABI size and symbols are unchanged, and the paths that free an owned keyexpr leave a view alone. The caller's string must now outlive its view; the consumer read its call sites where a short-lived buffer was plausible and found none, and every call here that keeps a keyexpr copies it.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/src/abi.rs: the view keyexpr's alias form (a static mark in the handle, the address and length in the spare words), z_loaned_keyexpr_t::alias_text, is_view_alias_handle; the heap-handle constructor of the view is gone.",
+        "crates/wz-capi-c/src/keyexpr.rs: the four view constructors alias; keyexpr_str reads an alias (re-validating UTF-8 on each use, since the bytes are the caller's); keyexpr_mapping, z_keyexpr_drop and z_undeclare_keyexpr leave a view's mark alone; the module text states the contract and why the copy was a leak. Four unit tests.",
+        "crates/wz-capi-c/tests/view_keyexpr_no_leak.rs: a per-thread counting allocator over 40000 views of the four constructors, requiring the outstanding bytes not to move."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the crate's unit tests 172 of 172 (four of them new), the new no-leak test, and every integration test of the crate that runs without a router (a test that needs a router or a peer process is ignored by its own guard and did not run); clippy with warnings denied and rustfmt on the crate, clean.",
+        "The control: the same no-leak test, added to the commit before the change and nothing else, fails there with 2,320,000 bytes still allocated after 40,000 views (58 per view); after the change it passes with the count unmoved. A test that passed on both would have proved nothing.",
+        "Read, not run: every call that keeps a keyexpr past its call (the subscriber, publisher, queryable, querier, advanced publisher, group and get declarations, and the zenoh_ext ones) copies the string with to_owned before keeping it; the others use it inside the call.",
+        "NOT verified here: an address-sanitizer run (the consumer's own sweep, against the landed commit, is the check that repeats their measurement); the lanes that build the crate with the shared-memory arm and the C programs of the interop tests, which a hosted run decides; the consumer's targets."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The consumer re-runs its sweep against the landed commit; a leak of another kind would show there and not here. The pico face already aliased and is unchanged.",
+        "A program that gives a view a short-lived buffer is now a use-after-free, as it is on zenoh-c; the old copy served it. Nothing in the repository's tests does so, and the consumer read the call sites where it was plausible (not every one) and found none."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
