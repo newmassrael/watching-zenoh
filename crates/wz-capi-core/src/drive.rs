@@ -168,7 +168,7 @@ impl Dialer {
     async fn open_scouted(&self, locator: &str, expected: &[u8]) -> Result<OpenedSession, ()> {
         let dial_cfg = dial_config(&self.tls, locator).map_err(|_| ())?;
         let session = self.open_with(locator, &dial_cfg).await?;
-        if session.peer_zid().as_deref() == Some(expected) {
+        if is_expected_peer(session.peer_zid().as_deref(), expected) {
             Ok(session)
         } else {
             session.drain_to_close().await;
@@ -508,7 +508,8 @@ impl<F> Drop for Pausable<F> {
 /// join handle.
 pub struct SessionState {
     pub shared: Arc<SharedSession>,
-    /// This session's own zid, the 16 bytes it puts on the wire in its INIT.
+    /// This session's own zid, zero-padded to 16 bytes; the INIT carries the same id with
+    /// the trailing zero bytes trimmed (see [`session_zids`]).
     ///
     /// R311y528 — minted on the CALLING thread in [`open_blocking`] and handed
     /// to the drive thread, rather than minted inside the drive future. pico's
@@ -567,7 +568,7 @@ impl SessionState {
     }
 
     /// This session's own zid (pico `z_info_zid`). Always the id the INIT
-    /// carried — see the field.
+    /// carried, padded — see the field.
     pub fn zid(&self) -> [u8; ZID_LENGTH] {
         self.zid
     }
@@ -663,29 +664,47 @@ const ZID_LENGTH: usize = 16;
 fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
     let mut zid = [0u8; ZID_LENGTH];
     getrandom::getrandom(&mut zid).ok()?;
+    // An id of all zero bytes names nothing (zenoh refuses it), as a failed source does.
+    if zid.iter().all(|byte| *byte == 0) {
+        return None;
+    }
     Some(zid)
 }
 
 /// The two forms of the id a session stands on, from ONE choice: what
 /// `z_info_zid` reports (sixteen bytes) and what the INIT carries.
 ///
-/// On the default path they are the same sixteen bytes. On a configured id they
-/// are the zero-padded and the trimmed form of it, and it is the trimmed one that
-/// goes on the wire: zenoh writes an id as the bytes up to its last non-zero one,
-/// so `c11e47c11e49` is six on the wire and a peer that logs the session's id
-/// reads it as such. `None` only when the entropy source fails on the default
-/// path, which fails the open.
+/// The first is the id zero-padded to sixteen bytes and the second the trimmed form of
+/// it, and it is the trimmed one that goes on the wire: zenoh writes an id as the bytes up
+/// to its last non-zero one, so `c11e47c11e49` is six on the wire and a peer that logs the
+/// session's id reads it as such. That holds for a minted id as much as for a configured
+/// one: a minted id whose last byte is zero (one in 256) is fifteen bytes on the wire, and
+/// the sixteen it used to put there made a node found through the routing graph, which
+/// holds the trimmed form, unequal to the same node met on a link. `None` only when the
+/// entropy source fails on the default path, which fails the open.
 ///
 /// A free function and not a block in [`open_blocking`] so that the choice can be
 /// held by a test that has no peer to look at the INIT.
 fn session_zids(configured: Option<ConfiguredZid>) -> Option<([u8; ZID_LENGTH], Vec<u8>)> {
     match configured {
         Some(configured) => Some((configured.padded(), configured.wire().to_vec())),
-        None => {
-            let minted = fresh_zid()?;
-            Some((minted, minted.to_vec()))
-        }
+        None => Some(minted_zids(fresh_zid()?)),
     }
+}
+
+/// The two forms of an id the session minted for itself, see [`session_zids`].
+fn minted_zids(minted: [u8; ZID_LENGTH]) -> ([u8; ZID_LENGTH], Vec<u8>) {
+    (
+        minted,
+        wz_runtime_tokio::zid_hex::canonical_zid(&minted).to_vec(),
+    )
+}
+
+/// Whether the node a link opened to is the one that was dialled. The expected id comes from
+/// the routing graph, which holds an id trimmed; the link holds the bytes the peer sent; the
+/// comparison is of the id, not of its spelling.
+fn is_expected_peer(peer: Option<&[u8]>, expected: &[u8]) -> bool {
+    peer.is_some_and(|peer| wz_runtime_tokio::zid_hex::same_zid(peer, expected))
 }
 
 /// The zid a config STATES for its session, checked and in the form zenoh puts
@@ -1723,7 +1742,7 @@ async fn scouted_connector(peers: ScoutedPeers) {
         tokio::select! {
             intent = intents.recv() => {
                 let Some(mut intent) = intent else { break };
-                if intent.zid == own_zid
+                if wz_runtime_tokio::zid_hex::same_zid(&intent.zid, &own_zid)
                     || shared.holds_peer(&intent.zid)
                     || dialing.borrow().contains(&intent.zid)
                 {
@@ -3065,12 +3084,57 @@ mod tests {
         assert_eq!(&state[..6], wire.as_slice(), "the same id");
         assert_eq!(&state[6..], &[0u8; 10], "padded for z_info_zid");
 
-        // No id: the same sixteen bytes in both forms, and a new one each time.
+        // No id: the trimmed form of the minted sixteen bytes on the wire, and a new one each
+        // time.
         let (state_a, wire_a) = session_zids(None).expect("entropy");
         let (state_b, _) = session_zids(None).expect("entropy");
-        assert_eq!(wire_a.as_slice(), &state_a[..], "one choice, two views");
-        assert_eq!(wire_a.len(), ZID_LENGTH);
+        assert_eq!(
+            wire_a.as_slice(),
+            wz_runtime_tokio::zid_hex::canonical_zid(&state_a),
+            "one choice, two views"
+        );
         assert_ne!(state_a, state_b, "a session with no id mints its own");
+    }
+
+    /// A minted id whose last byte is zero (one in 256) is fifteen bytes on the wire and
+    /// sixteen to `z_info_zid`, as a configured one is.
+    ///
+    /// It went out as sixteen. The routing graph holds an id trimmed, so a node a gossip
+    /// list named was not the node the link then opened to, the dial was closed, and the
+    /// chain of five peers of the gossip differential ended one link short in about one run in
+    /// fifty (its first node dials three others, in each of two arms).
+    #[test]
+    fn a_minted_id_with_a_zero_tail_goes_on_the_wire_trimmed() {
+        let mut minted = [0x11u8; ZID_LENGTH];
+        minted[ZID_LENGTH - 1] = 0;
+        let (state, wire) = minted_zids(minted);
+        assert_eq!(state, minted, "z_info_zid reports all sixteen");
+        assert_eq!(
+            wire.as_slice(),
+            &minted[..ZID_LENGTH - 1],
+            "the INIT's bytes"
+        );
+
+        let mut longer = [0x22u8; ZID_LENGTH];
+        longer[ZID_LENGTH - 3..].fill(0);
+        let (_, wire) = minted_zids(longer);
+        assert_eq!(wire.len(), ZID_LENGTH - 3, "every trailing zero byte goes");
+    }
+
+    /// The node a link opened to is the node that was dialled whatever the spelling of its id:
+    /// the expected one is read off the routing graph (trimmed), the other off the handshake.
+    #[test]
+    fn a_link_to_the_dialled_node_is_the_dialled_node_whatever_its_zero_tail() {
+        let trimmed = [0x0a, 0x0b, 0x0c];
+        let padded = [0x0a, 0x0b, 0x0c, 0x00];
+        assert!(is_expected_peer(Some(&padded), &trimmed));
+        assert!(is_expected_peer(Some(&trimmed), &padded));
+        assert!(is_expected_peer(Some(&trimmed), &trimmed));
+        assert!(!is_expected_peer(None, &trimmed), "no peer id is no match");
+        assert!(
+            !is_expected_peer(Some(&[0x0a, 0x0b, 0x0d, 0x00]), &trimmed),
+            "another node whose id has a zero tail is another node"
+        );
     }
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -3509,7 +3573,9 @@ mod tests {
                         if faces.is_empty() {
                             empty += 1;
                         } else if !faces.iter().any(|(session, _)| {
-                            session.actions().peer_zid().as_deref() == Some(&ours[..])
+                            // `ours` is the sixteen bytes `z_info_zid` reports and the wire
+                            // carries the id trimmed: the same id, in two spellings.
+                            is_expected_peer(session.actions().peer_zid().as_deref(), &ours[..])
                         }) {
                             foreign += 1;
                         }

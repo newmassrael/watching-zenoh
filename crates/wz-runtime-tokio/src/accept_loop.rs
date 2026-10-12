@@ -1820,7 +1820,12 @@ enum DialDecision {
 /// N faces regardless of zid and never consults this). O(held faces) — a mesh node
 /// holds tens, and this runs only on a dial-intent or a face-up, never per message.
 fn holds_zid(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, zid: &[u8]) -> bool {
-    faces.values().any(|z| z.as_deref() == Some(zid))
+    // The id and not its spelling: an intent holds the id from the routing graph (trimmed)
+    // and a face the bytes its peer sent.
+    faces.values().any(|z| {
+        z.as_deref()
+            .is_some_and(|held| crate::zid_hex::same_zid(held, zid))
+    })
 }
 
 /// Weigh a [`DialIntent`] against the held faces: dedup first (a peer already held

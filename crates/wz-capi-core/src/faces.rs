@@ -1807,11 +1807,13 @@ impl SharedSession {
         // first.
         let peer_zid = actions.peer_zid();
         if let Some(zid) = peer_zid.as_deref() {
-            if guard
-                .faces
-                .iter()
-                .any(|(held, face)| *held != id && face.peer_zid.as_deref() == Some(zid))
-            {
+            if guard.faces.iter().any(|(held, face)| {
+                *held != id
+                    && face
+                        .peer_zid
+                        .as_deref()
+                        .is_some_and(|held_zid| wz_runtime_tokio::zid_hex::same_zid(held_zid, zid))
+            }) {
                 return false;
             }
         }
@@ -2076,10 +2078,13 @@ impl SharedSession {
     /// is already held by a face the DIAL role made is not given a second one
     /// ([`Self::face_up`] states the rule).
     pub fn holds_peer(&self, zid: &[u8]) -> bool {
-        self.lock()
-            .faces
-            .values()
-            .any(|face| face.peer_zid.as_deref() == Some(zid))
+        // By the id and not its spelling: a caller holds the id from the routing graph
+        // (trimmed) and a face holds the bytes its peer sent.
+        self.lock().faces.values().any(|face| {
+            face.peer_zid
+                .as_deref()
+                .is_some_and(|held| wz_runtime_tokio::zid_hex::same_zid(held, zid))
+        })
     }
 
     /// A face left the live set (peer Close / link loss).

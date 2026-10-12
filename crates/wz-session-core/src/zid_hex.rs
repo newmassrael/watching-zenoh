@@ -48,6 +48,17 @@ pub fn canonical_zid(zid: &[u8]) -> &[u8] {
     &zid[..end]
 }
 
+/// Whether two byte strings name one zid.
+///
+/// A zid is a VALUE (the little-endian bytes of an id), not a byte string: one spelling has the
+/// trailing zero bytes and another does not (`[0x01]` and `[0x01, 0x00]`), and zenoh sends the
+/// trimmed one. The routing graph keeps a zid trimmed, a handshake keeps the bytes it was
+/// given, so a node found through the graph and the same node met on a link are equal here and
+/// unequal under `==`.
+pub fn same_zid(a: &[u8], b: &[u8]) -> bool {
+    canonical_zid(a) == canonical_zid(b)
+}
+
 /// Render a length-trimmed wire `zid` as the string zenoh prints for it.
 ///
 /// zenoh fills its keyexprs via `keformat`'s `set<S: Display>` (key_expr
@@ -240,6 +251,24 @@ mod tests {
                 "a spelling and its canonical form must print alike: {zid:?}"
             );
         }
+    }
+
+    /// Two spellings of one zid are one zid, and two zids are not one because they share a
+    /// prefix: a random zid whose last byte is zero (one in 256) is what makes the difference.
+    #[test]
+    fn two_spellings_of_one_zid_are_the_same_zid() {
+        assert!(same_zid(&[0x01, 0x02, 0x03], &[0x01, 0x02, 0x03, 0x00]));
+        assert!(same_zid(&[0x01, 0x02, 0x03, 0x00], &[0x01, 0x02, 0x03]));
+        assert!(same_zid(&[0x01], &[0x01]));
+        assert!(
+            !same_zid(&[0x01, 0x02, 0x03], &[0x01, 0x02, 0x04, 0x00]),
+            "a different id with a zero tail is a different id"
+        );
+        assert!(
+            !same_zid(&[0x01, 0x00, 0x02], &[0x01, 0x02]),
+            "a zero in the middle is a digit"
+        );
+        assert!(!same_zid(&[0x01, 0x02], &[0x01]), "a prefix is not the id");
     }
 
     /// A zid whose wire bytes are NOT a palindrome, so the per-byte
