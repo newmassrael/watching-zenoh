@@ -204,7 +204,10 @@ use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 // names the type", which is the drift class that has bitten this file
 // before. Both sites fully qualify instead, which cannot drift.
 use crate::response_build::ResponseReplyBuilder;
-#[cfg(any(feature = "alloc", feature = "codec-request"))]
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "codec-request", feature = "storage-profile")
+))]
 use crate::sample::QosLevel;
 #[cfg(feature = "alloc")]
 use crate::sample::SourceInfo;
