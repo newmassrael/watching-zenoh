@@ -22407,6 +22407,21 @@ layer_qa_mcu_admin_node_vs_zenohd() {
         qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
         -semihosting-config enable=on,target=native \
         -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
+        -kernel "$fw" || return 1
+
+    # S9e -- the same scenario against the FIXED-MEMORY image of this node, which the
+    # S8 gate holds to no allocator (Q.0n): what a stock zenohd is shown of it is what
+    # it is shown of the heap image (the same zid, the same legs, the same write). It
+    # is built over the heap binary's path, after the heap scenario has run.
+    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test)" cargo build --release \
+        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" \
+        --bin mcu-admin-node --no-default-features --features fixed-memory --quiet \
+        || { echo "  Qa.fixed build mcu-admin-node FAIL" >&2; return 1; }
+    echo "  Qa.fixed build mcu-admin-node $target (fixed-memory) OK"
+    _qa_scenario Qa.fixed 1000055434d7a77 - \
+        qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
+        -semihosting-config enable=on,target=native \
+        -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
         -kernel "$fw"
 }
 
