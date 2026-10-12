@@ -313,6 +313,10 @@ pub mod proto_decode;
 pub mod proto_decode_json;
 #[cfg(test)]
 mod proto_decode_tests;
+pub mod proto_describe;
+pub mod proto_describe_json;
+#[cfg(test)]
+mod proto_describe_tests;
 pub mod proto_encode;
 pub mod proto_encode_json;
 #[cfg(test)]

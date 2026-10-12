@@ -631,7 +631,7 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
 
 /// protoc's default JSON name for a field: each `_` is dropped and the letter
 /// after it is upper-cased (`descriptor.cc`, `ToJsonName`).
-fn default_json_name(name: &str) -> String {
+pub(crate) fn default_json_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut upper = false;
     for c in name.chars() {

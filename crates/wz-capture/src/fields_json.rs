@@ -6748,7 +6748,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 48] = [
+        let live: [(&str, &str, Vec<&'static str>); 56] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6907,6 +6907,62 @@ mod tests {
                     .iter()
                     .map(|f| f.word())
                     .collect(),
+            ),
+            // The relation and the match verdicts. Both carry the fault words,
+            // and each is held to the SAME walk the key-expression verdict is,
+            // so three declarations of one vocabulary cannot become three
+            // answers. `which` is the refused side for the relation and the
+            // refused input for the match; each is the list the emitter's own
+            // constant gives.
+            (
+                rev::KEYEXPR_RELATE,
+                "reason",
+                wz_session_core::keyexpr_canon::KeyexprFault::ALL
+                    .iter()
+                    .map(|f| f.word())
+                    .collect(),
+            ),
+            (
+                rev::KEYEXPR_RELATE,
+                "which",
+                crate::diagnose_json::RELATE_SIDES.to_vec(),
+            ),
+            (
+                rev::DECLARATIONS_MATCH,
+                "reason",
+                wz_session_core::keyexpr_canon::KeyexprFault::ALL
+                    .iter()
+                    .map(|f| f.word())
+                    .collect(),
+            ),
+            (
+                rev::DECLARATIONS_MATCH,
+                "which",
+                crate::diagnose_json::MATCH_REFUSALS.to_vec(),
+            ),
+            // The schema description's four, each held to the walk the reader
+            // exposes: the type words are the scalar keywords and the three
+            // that name a structure, a map's key is the scalar kinds a map may
+            // be keyed by, and the label and syntax lists are the reader's own.
+            (rev::PROTO_MESSAGE, "type", {
+                let mut words = crate::proto_describe::type_words();
+                words.sort_unstable();
+                words
+            }),
+            (
+                rev::PROTO_MESSAGE,
+                "key",
+                crate::proto_describe::map_key_words(),
+            ),
+            (
+                rev::PROTO_MESSAGE,
+                "label",
+                crate::proto_describe::LABEL_WORDS.to_vec(),
+            ),
+            (
+                rev::PROTO_MESSAGE,
+                "syntax",
+                crate::proto_describe::SYNTAX_WORDS.to_vec(),
             ),
             // The transport build document's three: what a layout row IS, how
             // its integer is laid out, and what its offset counts from. Each
@@ -7628,7 +7684,38 @@ mod tests {
         // word of one of its eight families must not bring keys another word
         // lacks, and this is the population that would show it.
         let session_docs = crate::session_table_tests::documents_for_the_carries_gate();
-        let docs: [(&str, Vec<&String>); 10] = [
+        // The relation and the match documents, over one pair per fault so that
+        // every `reason` word is rendered on each, a success of each kind, and
+        // each branch of a refusal. They carry no state, so nothing else is
+        // needed to reach their words.
+        let mut relate_verdicts: Vec<String> = alloc::vec![
+            crate::diagnose_json::keyexpr_relate_json("demo/**", "demo/a"),
+            crate::diagnose_json::keyexpr_relate_json("demo/a", "demo/b"),
+        ];
+        let mut match_verdicts: Vec<String> = alloc::vec![
+            crate::diagnose_json::declarations_match_json("demo/**=protobuf", "demo/a"),
+            crate::diagnose_json::declarations_match_json("demo/a=json", "other/x"),
+            crate::diagnose_json::declarations_match_json("demo/**=protobuf", "demo/*"),
+            crate::diagnose_json::declarations_match_json("not a declaration", "demo/a"),
+        ];
+        for (_, example) in fault_examples {
+            relate_verdicts.push(crate::diagnose_json::keyexpr_relate_json(example, "demo/a"));
+            relate_verdicts.push(crate::diagnose_json::keyexpr_relate_json("demo/a", example));
+            // A key that is not a key expression, and a declaration whose own
+            // key is the fault: the `reason` words under both branches.
+            match_verdicts.push(crate::diagnose_json::declarations_match_json(
+                "demo/a=json",
+                example,
+            ));
+            match_verdicts.push(crate::diagnose_json::declarations_match_json(
+                &alloc::format!("{example}=protobuf"),
+                "demo/a",
+            ));
+        }
+        // The description document, over a schema with every type word, label
+        // and syntax, and one of each shape of refusal.
+        let describe_docs = crate::proto_describe_tests::documents_for_the_carries_gate();
+        let docs: [(&str, Vec<&String>); 13] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -7641,6 +7728,9 @@ mod tests {
                 declaration_verdicts.iter().collect(),
             ),
             (rev::KEYEXPR_DIAGNOSE, keyexpr_verdicts.iter().collect()),
+            (rev::KEYEXPR_RELATE, relate_verdicts.iter().collect()),
+            (rev::DECLARATIONS_MATCH, match_verdicts.iter().collect()),
+            (rev::PROTO_MESSAGE, describe_docs.iter().collect()),
             (rev::TRANSPORT_BUILD, transport_docs.iter().collect()),
             (rev::TRANSPORT_LAYOUT, layout_docs.iter().collect()),
             (rev::E2E_OPEN, open_docs.iter().collect()),

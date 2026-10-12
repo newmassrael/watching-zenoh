@@ -1145,7 +1145,7 @@ impl<'a> Linker<'_, 'a> {
     /// Found with a work list and not by recursion: a chain of distinct
     /// messages can be as long as the schema, and this runs before the expansion
     /// whose depth bound would stop a recursive walk.
-    fn reached_from(&self, root: usize) -> Vec<usize> {
+    pub(crate) fn reached_from(&self, root: usize) -> Vec<usize> {
         let mut seen = alloc::vec![false; self.msgs.len()];
         let mut order = Vec::new();
         let mut pending = alloc::vec![root];
@@ -1173,7 +1173,7 @@ impl<'a> Linker<'_, 'a> {
     /// A group is a field of the message that holds it, and an extension is
     /// declared outside the message it extends, so a declaration for either
     /// message would have to leave a field out or invent a path for it.
-    fn refuse_what_the_root_reaches(&self, root: usize) -> Result<(), ProtoDiagnostic> {
+    pub(crate) fn refuse_what_the_root_reaches(&self, root: usize) -> Result<(), ProtoDiagnostic> {
         let root_name = self.msgs[root].full_name.as_str();
         for msg in self.reached_from(root) {
             let held = &self.msgs[msg];

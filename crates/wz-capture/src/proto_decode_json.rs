@@ -121,7 +121,7 @@ fn push_value(value: &Value, base: usize, out: &mut String) {
 /// The one place a decoded integer is written, so the non-negative half takes
 /// the workspace's integer door and the negative half mirrors it at the same
 /// line.
-fn push_integer(v: i128, out: &mut String) {
+pub(crate) fn push_integer(v: i128, out: &mut String) {
     match u64::try_from(v) {
         Ok(v) => u64_into(v, out),
         Err(_) if v.unsigned_abs() <= u128::from(MAX_EXACT_INTEGER) => {

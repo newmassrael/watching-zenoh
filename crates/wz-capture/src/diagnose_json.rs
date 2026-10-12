@@ -24,7 +24,11 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use crate::doc_revision::{envelope_into, DECLARATIONS_DIAGNOSE, KEYEXPR_DIAGNOSE};
+#[cfg(feature = "keyexpr-relation")]
+use crate::doc_revision::KEYEXPR_RELATE;
+use crate::doc_revision::{
+    envelope_into, DECLARATIONS_DIAGNOSE, DECLARATIONS_MATCH, KEYEXPR_DIAGNOSE,
+};
 use crate::payload::formats::FormatMap;
 use wz_session_core::json::escape_into;
 use wz_session_core::keyexpr_canon::{validate_keyexpr, KeyexprRefusal};
@@ -70,26 +74,38 @@ pub fn declarations_diagnose_json(declarations: &str) -> String {
             out.push_str("]}");
         }
         Err(bad) => {
-            out.push_str(&format!(",\"ok\":false,\"line\":{}", bad.line));
-            out.push_str(",\"text\":");
-            // The SAME escaper the rest of this ABI's documents use: the line is
-            // the operator's own text, quoted back so a UI can point at it
-            // without holding the input a second time.
-            escape_into(&bad.text, &mut out);
-            out.push_str(",\"message\":");
-            escape_into(&bad.error.to_string(), &mut out);
-            // A key that is not a key expression says where, from the same
-            // refusal `keyexpr_diagnose_json` writes. Any other refusal carries
-            // none of these four keys.
-            if let Some((pattern, refusal)) = bad.error.keyexpr_refusal() {
-                out.push_str(",\"pattern\":");
-                escape_into(pattern, &mut out);
-                push_refusal(refusal, &mut out);
-            }
+            out.push_str(",\"ok\":false");
+            push_declaration_refusal(&bad, &mut out);
             out.push('}');
         }
     }
     out
+}
+
+/// The keys of a refused declaration text, after `"ok":false`: `line`, `text`,
+/// `message`, and, when the line's KEY is not a key expression, `pattern`,
+/// `chunk`, `offset` and `reason`.
+///
+/// Written once for the two documents that carry a declaration's refusal
+/// (`declarations_diagnose` and `declarations_match`), so a consumer that holds
+/// both reads one spelling.
+fn push_declaration_refusal(bad: &crate::payload::formats::DeclarationError, out: &mut String) {
+    out.push_str(&format!(",\"line\":{}", bad.line));
+    out.push_str(",\"text\":");
+    // The SAME escaper the rest of this ABI's documents use: the line is
+    // the operator's own text, quoted back so a UI can point at it
+    // without holding the input a second time.
+    escape_into(&bad.text, out);
+    out.push_str(",\"message\":");
+    escape_into(&bad.error.to_string(), out);
+    // A key that is not a key expression says where, from the same
+    // refusal `keyexpr_diagnose_json` writes. Any other refusal carries
+    // none of these four keys.
+    if let Some((pattern, refusal)) = bad.error.keyexpr_refusal() {
+        out.push_str(",\"pattern\":");
+        escape_into(pattern, out);
+        push_refusal(refusal, out);
+    }
 }
 
 /// The verdict `wz_dissect_keyexpr_diagnose` hands back.
@@ -108,6 +124,144 @@ pub fn keyexpr_diagnose_json(keyexpr: &str) -> String {
             push_refusal(&refusal, &mut out);
             out.push_str(",\"message\":");
             escape_into(&refusal.to_string(), &mut out);
+        }
+    }
+    out.push('}');
+    out
+}
+
+/// The two sides of [`keyexpr_relate_json`], the words of its `which`.
+pub const RELATE_SIDES: [&str; 2] = ["a", "b"];
+
+/// The relation of two key expressions, which set one covers of the other, WITHOUT
+/// a capture and without a declaration line: the verdict `wz_dissect_keyexpr_relate`
+/// hands back.
+///
+/// `{envelope,"ok":true,"includes":B,"intersects":B}`: `includes` is true when `a`
+/// includes `b`, that is every key `b` matches is also matched by `a`, so
+/// `demo/**` includes `demo/a` and `demo/a` does not include `demo/**`.
+/// `intersects` is true when some key is matched by both, and it is symmetric.
+/// What `a` includes it also intersects, so `includes` is never true beside a
+/// false `intersects`.
+///
+/// A refusal is `{envelope,"ok":false,"which":"a"|"b",chunk,offset,reason,
+/// "message"}`: the first of the two texts, `a` before `b`, that is not a key
+/// expression, in the words `keyexpr_diagnose_json` gives. Both texts are judged
+/// by the one validator before either relation is asked, so the relation is only
+/// ever computed over keys that are canonical, which is what the matcher
+/// assumes.
+///
+/// The two relations are the engines the C drop-in's `z_keyexpr_includes` and
+/// `z_keyexpr_intersects` ask, over the chunks of each text, so this door, the
+/// drop-in and a router's own matching cannot differ about an overlap.
+#[cfg(feature = "keyexpr-relation")]
+pub fn keyexpr_relate_json(a: &str, b: &str) -> String {
+    use alloc::vec::Vec;
+    use wz_session_core::keyexpr_match::{keyexpr_includes_patterns, keyexpr_intersect_patterns};
+
+    let mut out = String::from("{");
+    envelope_into(KEYEXPR_RELATE, &mut out);
+    for (side, text) in [("a", a), ("b", b)] {
+        if let Err(refusal) = validate_keyexpr(text) {
+            out.push_str(&format!(",\"ok\":false,\"which\":\"{side}\""));
+            push_refusal(&refusal, &mut out);
+            out.push_str(",\"message\":");
+            escape_into(&refusal.to_string(), &mut out);
+            out.push('}');
+            return out;
+        }
+    }
+    let a_chunks: Vec<&str> = a.split('/').collect();
+    let b_chunks: Vec<&str> = b.split('/').collect();
+    out.push_str(&format!(
+        ",\"ok\":true,\"includes\":{},\"intersects\":{}}}",
+        keyexpr_includes_patterns(&a_chunks, &b_chunks),
+        keyexpr_intersect_patterns(&a_chunks, &b_chunks)
+    ));
+    out
+}
+
+/// The words of the `which` of [`declarations_match_json`]'s refusal.
+pub const MATCH_REFUSALS: [&str; 2] = ["declarations", "keyexpr"];
+
+/// Which format rule of a declaration text covers a key, by the decoder's own
+/// judgement: the verdict `wz_dissect_declarations_match` hands back.
+///
+/// `{envelope,"ok":true,"matched":M}` where `M` is `null` when no rule covers
+/// `keyexpr`, or `{"index":N,"pattern":"…","format":"…","schema":S}`: the FIRST
+/// format rule, in the order they are tried, that covers the key, which is the
+/// rule a field row reports as `matched_rule` and the one whose format decodes the
+/// payload. `index` counts the format rules from 0 (it is the `rule_index` a
+/// `declarations_diagnose` line carries), `pattern` is the rule's key expression
+/// as read, `format` the name of the decoder or the described format or the
+/// end-to-end profile it points at, and `schema` the body schema an
+/// end-to-end rule names, or `null` for every other rule and for an end-to-end
+/// rule that names none.
+///
+/// The answer comes from [`FormatMap::matching_rule`], the function the capture's
+/// decode asks for every sample, so a consumer that picks a mapping with this
+/// and one that decodes a capture cannot disagree about an overlap.
+///
+/// The key is a LITERAL key: it must be a key expression and must carry no
+/// wildcard, because the decoder is asked about the key a sample was published
+/// on. A key with a `*` is refused rather than matched as a pattern, which would
+/// answer a different question.
+///
+/// A refusal is `{envelope,"ok":false,"which":W,…}`. `declarations`: the text
+/// does not install, and the keys are the ones `declarations_diagnose` writes for
+/// the same refusal (`line`, `text`, `message`, and for a refused key `pattern`,
+/// `chunk`, `offset`, `reason`). `keyexpr`: `message`, `chunk` and `offset`, and
+/// `reason` when the key is not a key expression at all (the words of
+/// `keyexpr_diagnose`); a key that is one but carries a wildcard has no `reason`,
+/// and its `chunk` and `offset` point at the first `*`.
+pub fn declarations_match_json(declarations: &str, keyexpr: &str) -> String {
+    let mut out = String::from("{");
+    envelope_into(DECLARATIONS_MATCH, &mut out);
+    let mut map = FormatMap::new();
+    if let Err(bad) = map.declare_all_described(declarations) {
+        out.push_str(",\"ok\":false,\"which\":\"declarations\"");
+        push_declaration_refusal(&bad, &mut out);
+        out.push('}');
+        return out;
+    }
+    if let Err(refusal) = validate_keyexpr(keyexpr) {
+        out.push_str(",\"ok\":false,\"which\":\"keyexpr\"");
+        push_refusal(&refusal, &mut out);
+        out.push_str(",\"message\":");
+        escape_into(&refusal.to_string(), &mut out);
+        out.push('}');
+        return out;
+    }
+    if let Some(offset) = keyexpr.find('*') {
+        let chunk = keyexpr[..offset].matches('/').count();
+        out.push_str(&format!(
+            ",\"ok\":false,\"which\":\"keyexpr\",\"chunk\":{chunk},\"offset\":{offset},\
+             \"message\":"
+        ));
+        escape_into(
+            &format!(
+                "`{keyexpr}` carries a wildcard at byte {offset}: a rule is matched against \
+                 the key a sample was published on, which is a literal key"
+            ),
+            &mut out,
+        );
+        out.push('}');
+        return out;
+    }
+    out.push_str(",\"ok\":true,\"matched\":");
+    match map.matching_rule(keyexpr) {
+        None => out.push_str("null"),
+        Some(found) => {
+            out.push_str(&format!("{{\"index\":{},\"pattern\":", found.rule.index));
+            escape_into(&found.rule.pattern, &mut out);
+            out.push_str(",\"format\":");
+            escape_into(found.format.name(), &mut out);
+            out.push_str(",\"schema\":");
+            match map.e2e_for_keyexpr(keyexpr).and_then(|m| m.format.schema()) {
+                Some(schema) => escape_into(schema, &mut out),
+                None => out.push_str("null"),
+            }
+            out.push('}');
         }
     }
     out.push('}');
@@ -356,5 +510,226 @@ mod tests {
         for key in ["pattern", "chunk", "offset", "reason"] {
             assert_eq!(top(&doc, key), None, "{key}: {doc}");
         }
+    }
+
+    /// The relation of `a` to `b` as `(includes, intersects)`, from the document.
+    #[cfg(feature = "keyexpr-relation")]
+    fn related(a: &str, b: &str) -> (bool, bool) {
+        let doc = keyexpr_relate_json(a, b);
+        assert_eq!(top(&doc, "ok"), Some("true"), "{a} {b}: {doc}");
+        let bit = |key: &str| match top(&doc, key) {
+            Some("true") => true,
+            Some("false") => false,
+            other => panic!("{key} is {other:?} in {doc}"),
+        };
+        (bit("includes"), bit("intersects"))
+    }
+
+    /// THE RELATION, in the direction it is asked: `includes` is about `a`
+    /// holding `b` and not the other way, and `intersects` is symmetric. Every
+    /// row is also asked with the arguments swapped, so a relation that swapped
+    /// them, or read `includes` off the wrong engine, fails on the pair where
+    /// the two directions differ.
+    #[cfg(feature = "keyexpr-relation")]
+    #[test]
+    fn a_key_expression_relates_to_another_in_the_direction_it_is_asked() {
+        // (a, b, a includes b, b includes a, they intersect)
+        let rows = [
+            ("demo/**", "demo/a", true, false, true),
+            ("demo/*", "demo/a", true, false, true),
+            ("demo/a", "demo/a", true, true, true),
+            ("demo/a", "demo/b", false, false, false),
+            ("demo/*", "demo/a/b", false, false, false),
+            ("demo/**", "demo/*/x", true, false, true),
+            ("**", "demo/a", true, false, true),
+            ("demo/a$*", "demo/abc", true, false, true),
+            ("demo/*/x", "demo/y/*", false, false, true),
+        ];
+        let mut asymmetric = 0usize;
+        for (a, b, a_has_b, b_has_a, meet) in rows {
+            assert_eq!(related(a, b), (a_has_b, meet), "{a} against {b}");
+            assert_eq!(related(b, a), (b_has_a, meet), "{b} against {a}");
+            if a_has_b != b_has_a {
+                asymmetric += 1;
+            }
+        }
+        // Five of the nine are not symmetric in `includes`; a table of nothing but
+        // symmetric pairs would pass a swapped argument order.
+        assert_eq!(asymmetric, 5);
+    }
+
+    /// A REFUSAL NAMES THE TEXT, `a` before `b`, and goes through the one
+    /// validator, so its place is the key-expression door's own.
+    #[cfg(feature = "keyexpr-relation")]
+    #[test]
+    fn a_refused_text_is_named_and_a_comes_before_b() {
+        let doc = keyexpr_relate_json("demo//a", "demo/b");
+        assert_eq!(top(&doc, "ok"), Some("false"), "{doc}");
+        assert_eq!(top(&doc, "which"), Some("\"a\""), "{doc}");
+        let alone = keyexpr_diagnose_json("demo//a");
+        for key in ["chunk", "offset", "reason", "message"] {
+            assert_eq!(top(&doc, key), top(&alone, key), "{key}: {doc}");
+        }
+        let doc = keyexpr_relate_json("demo/a", "a?b");
+        assert_eq!(top(&doc, "which"), Some("\"b\""), "{doc}");
+        assert_eq!(top(&doc, "reason"), Some("\"sharp_or_question_mark\""));
+        // Both refused: the first is the one reported.
+        let doc = keyexpr_relate_json("a?b", "demo//a");
+        assert_eq!(top(&doc, "which"), Some("\"a\""), "{doc}");
+        // No relation is written beside a refusal.
+        for key in ["includes", "intersects"] {
+            assert_eq!(top(&doc, key), None, "{key}: {doc}");
+        }
+    }
+
+    /// The match answered as `(index, pattern, format, schema)`, or `None`.
+    fn matched(declarations: &str, key: &str) -> Option<(String, String, String, String)> {
+        let doc = declarations_match_json(declarations, key);
+        assert_eq!(
+            top(&doc, "ok"),
+            Some("true"),
+            "{declarations:?} {key}: {doc}"
+        );
+        let found = top(&doc, "matched").expect("matched");
+        if found == "null" {
+            return None;
+        }
+        let entry = object_scopes(found).into_iter().next().expect("an object");
+        let get = |k: &str| {
+            entry
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| String::from(*v))
+                .unwrap_or_else(|| panic!("no {k} in {found}"))
+        };
+        Some((get("index"), get("pattern"), get("format"), get("schema")))
+    }
+
+    /// THE FIRST RULE THAT COVERS THE KEY WINS, in the order they are written,
+    /// whichever is the more specific: that is the decoder's rule, and a consumer
+    /// that asked "longest pattern" would pick a different mapping on an overlap.
+    /// The same text with its two rules swapped must give the other answer.
+    #[test]
+    fn the_first_covering_rule_wins_and_swapping_the_rules_swaps_the_answer() {
+        let general_first = "demo/**=protobuf\ndemo/a=json";
+        let specific_first = "demo/a=json\ndemo/**=protobuf";
+        let want = |index: &str, pattern: &str, format: &str| {
+            Some((
+                String::from(index),
+                format!("{pattern:?}"),
+                format!("{format:?}"),
+                String::from("null"),
+            ))
+        };
+        assert_eq!(
+            matched(general_first, "demo/a"),
+            want("0", "demo/**", "protobuf")
+        );
+        assert_eq!(
+            matched(specific_first, "demo/a"),
+            want("0", "demo/a", "json")
+        );
+        // A key only the general rule covers is the general rule in both.
+        assert_eq!(
+            matched(general_first, "demo/b"),
+            want("0", "demo/**", "protobuf")
+        );
+        assert_eq!(
+            matched(specific_first, "demo/b"),
+            want("1", "demo/**", "protobuf")
+        );
+    }
+
+    /// `index` counts the FORMAT RULES: a name or a definition between two rules
+    /// does not move it, which is the `rule_index` the declaration verdict gives.
+    #[test]
+    fn the_index_is_the_rule_index_the_declaration_verdict_reports() {
+        let text = "demo/a=protobuf\ndemo/a:1=name\n#profile=a:u8\ndemo/b=profile\ndemo/c=json";
+        let (index, ..) = matched(text, "demo/c").expect("covered");
+        assert_eq!(index, "2");
+        let verdict = declarations_diagnose_json(text);
+        let lines = top(&verdict, "lines").expect("lines");
+        let last_rule: Vec<&str> = object_scopes(lines)
+            .into_iter()
+            .filter_map(|e| e.iter().find(|(k, _)| *k == "rule_index").map(|(_, v)| *v))
+            .collect();
+        assert_eq!(last_rule, ["0", "1", "2"], "{verdict}");
+    }
+
+    /// No rule covering the key is an answer, not a refusal.
+    #[test]
+    fn a_key_no_rule_covers_matches_nothing() {
+        assert_eq!(matched("demo/a=json", "other/x"), None);
+        assert_eq!(matched("", "demo/a"), None);
+    }
+
+    /// An end-to-end rule reports the profile as its format and the body schema
+    /// the rule names; one that names none reports `null`.
+    #[test]
+    fn an_end_to_end_rule_reports_its_profile_and_its_body_schema() {
+        // One line, as a declaration is: a profile definition and two rules that
+        // name it, one with a body schema and one without.
+        let text = "#demo-a={\"name\":\"demo-a\",\"fields\":[{\"name\":\"kind\",\"bytes\":1},\
+             {\"name\":\"crc\",\"bytes\":2},{\"name\":\"counter\",\"bytes\":1},\
+             {\"name\":\"length\",\"bytes\":2}],\
+             \"crc\":{\"field\":\"crc\",\"width\":16,\"poly\":\"0x1021\",\"init\":\"0xFFFF\",\
+             \"refin\":false,\"refout\":false,\"xorout\":0,\
+             \"cover\":[\"kind\",\"@payload\",\"counter\",\"length\"]},\
+             \"length\":{\"field\":\"length\",\"counts\":\"frame\"},\
+             \"counter\":{\"field\":\"counter\",\"max_gap\":4,\"timeout_ms\":100}}\n\
+             demo/p=demo-a@pkg.Pose\ndemo/q=demo-a";
+        let (_, _, format, schema) = matched(text, "demo/p").expect("covered");
+        assert_eq!(
+            (format.as_str(), schema.as_str()),
+            ("\"demo-a\"", "\"pkg.Pose\"")
+        );
+        let (_, _, format, schema) = matched(text, "demo/q").expect("covered");
+        assert_eq!((format.as_str(), schema.as_str()), ("\"demo-a\"", "null"));
+    }
+
+    /// THE KEY IS A LITERAL KEY. A key with a wildcard is refused and not matched
+    /// as a pattern, and a key that is not a key expression says why with the
+    /// key-expression door's words. The two have different keys: the wildcard has
+    /// no `reason`.
+    #[test]
+    fn a_wildcard_key_is_refused_and_a_malformed_one_says_why() {
+        let wild = declarations_match_json("demo/**=protobuf", "demo/*");
+        assert_eq!(top(&wild, "ok"), Some("false"), "{wild}");
+        assert_eq!(top(&wild, "which"), Some("\"keyexpr\""), "{wild}");
+        assert_eq!(top(&wild, "chunk"), Some("1"), "{wild}");
+        assert_eq!(top(&wild, "offset"), Some("5"), "{wild}");
+        assert_eq!(top(&wild, "reason"), None, "{wild}");
+        assert_eq!(top(&wild, "matched"), None, "{wild}");
+
+        let bad = declarations_match_json("demo/**=protobuf", "demo//a");
+        assert_eq!(top(&bad, "which"), Some("\"keyexpr\""), "{bad}");
+        assert_eq!(top(&bad, "reason"), Some("\"empty_chunk\""), "{bad}");
+        let alone = keyexpr_diagnose_json("demo//a");
+        for key in ["chunk", "offset"] {
+            assert_eq!(top(&bad, key), top(&alone, key), "{key}: {bad}");
+        }
+    }
+
+    /// A DECLARATION TEXT THAT DOES NOT INSTALL is refused with the keys the
+    /// declaration verdict writes for the same text, and is judged BEFORE the key.
+    #[test]
+    fn a_declaration_text_that_does_not_install_is_refused_as_the_declaration_door_does() {
+        for text in ["not a declaration", "demo//a=protobuf"] {
+            let doc = declarations_match_json(text, "demo/a");
+            let diag = declarations_diagnose_json(text);
+            assert_eq!(top(&doc, "which"), Some("\"declarations\""), "{doc}");
+            for key in [
+                "line", "text", "message", "pattern", "chunk", "offset", "reason",
+            ] {
+                assert_eq!(
+                    top(&doc, key),
+                    top(&diag, key),
+                    "{text:?} {key}\n{doc}\n{diag}"
+                );
+            }
+        }
+        // A bad key beside a bad text: the text is the one reported.
+        let doc = declarations_match_json("not a declaration", "demo//a");
+        assert_eq!(top(&doc, "which"), Some("\"declarations\""), "{doc}");
     }
 }

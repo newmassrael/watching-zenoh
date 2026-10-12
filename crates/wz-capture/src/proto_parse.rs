@@ -106,6 +106,27 @@ pub(crate) enum ScalarKind {
 }
 
 impl ScalarKind {
+    /// Every scalar kind, in the order the language guide lists them. The walk a
+    /// vocabulary of type words is held to, so a kind added to the enum is a
+    /// keyword a document has to declare.
+    pub(crate) const ALL: [Self; 15] = [
+        Self::Double,
+        Self::Float,
+        Self::Int32,
+        Self::Int64,
+        Self::Uint32,
+        Self::Uint64,
+        Self::Sint32,
+        Self::Sint64,
+        Self::Fixed32,
+        Self::Fixed64,
+        Self::Sfixed32,
+        Self::Sfixed64,
+        Self::Bool,
+        Self::String,
+        Self::Bytes,
+    ];
+
     /// The kind a type keyword names, or `None` for any other word.
     pub(crate) fn from_keyword(word: &str) -> Option<Self> {
         Some(match word {

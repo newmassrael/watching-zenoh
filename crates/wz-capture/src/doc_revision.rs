@@ -2305,6 +2305,71 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // THE RELATION OF TWO KEY EXPRESSIONS, WITHOUT A CAPTURE.
+    //
+    // A document of its own because it is the verdict of a door of its own
+    // (`wz_dissect_keyexpr_relate`) and the one verdict that takes TWO texts:
+    // `{ok:true, includes, intersects}`, or `{ok:false, which, chunk, offset,
+    // reason, message}` naming the text that was refused (`a` before `b`) in the
+    // words of `keyexpr_diagnose`. Both relations come from the engines the C
+    // drop-in's `z_keyexpr_includes` and `z_keyexpr_intersects` ask. Two
+    // families, both passengers: the side, and the fault.
+    DocumentShape {
+        document: KEYEXPR_RELATE,
+        revision: 1,
+        keys: KEYEXPR_RELATE_R1_KEYS,
+        retiring: &[],
+        families: KEYEXPR_RELATE_R1_FAMILIES,
+        planes: &[],
+        carries: KEYEXPR_RELATE_R1_CARRIES,
+    },
+    // WHICH FORMAT RULE OF A DECLARATION TEXT COVERS A KEY.
+    //
+    // The verdict of `wz_dissect_declarations_match`, the door that asks the
+    // function the capture asks for every sample (`FormatMap::matching_rule`) and
+    // so cannot disagree with a decode about an overlap. `{ok:true, matched}` with
+    // `matched` null or `{index, pattern, format, schema}`; a refusal says which
+    // of its two inputs it is about (`which`: the declaration text, or the key),
+    // and carries that input's own keys (the declaration verdict's for a text, the
+    // key-expression verdict's for a key, with `reason` absent for a key that is a
+    // key expression and carries a wildcard, which the decoder is never asked
+    // about). `which` is a DISCRIMINANT: the word decides whether `line` and
+    // `text`, or `chunk` and `offset` and no `line`, arrive; `reason` is a
+    // passenger.
+    DocumentShape {
+        document: DECLARATIONS_MATCH,
+        revision: 1,
+        keys: DECLARATIONS_MATCH_R1_KEYS,
+        retiring: &[],
+        families: DECLARATIONS_MATCH_R1_FAMILIES,
+        planes: &[],
+        carries: DECLARATIONS_MATCH_R1_CARRIES,
+    },
+    // A ROOT MESSAGE OF A `.proto` SCHEMA, DESCRIBED, or the place the schema was
+    // refused.
+    //
+    // The output of `wz_dissect_proto_describe`: the root message and every message
+    // it reaches, each once, with per field the name, the JSON name, the number, the
+    // type, the label, the oneof, whether a repeated field is packed, and what an
+    // `enum`, a `message` or a `map` points at. Every key of a field row is always
+    // present and one that does not apply is `null`; the refusal branch OMITS the
+    // position keys that do not apply, as `declarations_from_proto` does, because a
+    // top-level `null` is reserved for a plane. Four families, all passengers: the
+    // `type` of a field (and of a map's value), the `key` type of a map, the
+    // `label` and the message's `syntax`.
+    //
+    // It takes the integer rule for an enum value's number, which is an `i32` when
+    // legal and is not judged here: a bare number up to 2^53 - 1 either way and the
+    // digits in a string beyond.
+    DocumentShape {
+        document: PROTO_MESSAGE,
+        revision: 1,
+        keys: PROTO_MESSAGE_R1_KEYS,
+        retiring: &[],
+        families: PROTO_MESSAGE_R1_FAMILIES,
+        planes: &[],
+        carries: PROTO_MESSAGE_R1_CARRIES,
+    },
     // What building a protected frame under a caller-supplied profile did, or
     // why it refused.
     //
@@ -2811,6 +2876,15 @@ pub const KEYEXPR_DIAGNOSE: &str = "keyexpr_diagnose";
 /// The declarations a `.proto` schema comes to, or why it was refused
 /// (`wz_dissect_declarations_from_proto`).
 pub const DECLARATIONS_FROM_PROTO: &str = "declarations_from_proto";
+/// The relation of two key expressions, or which of them was refused
+/// (`wz_dissect_keyexpr_relate`).
+pub const KEYEXPR_RELATE: &str = "keyexpr_relate";
+/// The format rule of a declaration text that covers a key, or why the question
+/// was refused (`wz_dissect_declarations_match`).
+pub const DECLARATIONS_MATCH: &str = "declarations_match";
+/// A root message of a `.proto` schema described field by field, or why the
+/// schema was refused (`wz_dissect_proto_describe`).
+pub const PROTO_MESSAGE: &str = "proto_message";
 /// A protected frame built under a profile, or why it was refused
 /// (`wz_dissect_e2e_wrap`).
 pub const E2E_WRAP: &str = "e2e_wrap";
@@ -9312,6 +9386,211 @@ pub const DECLARATIONS_FROM_PROTO_R1_KEYS: &[&str] = &[
     "revision",
 ];
 
+/// The relation document's key set at revision 1, over BOTH branches:
+/// `{ok:true,includes,intersects}` and
+/// `{ok:false,which,chunk,offset,reason,message}`.
+pub const KEYEXPR_RELATE_R1_KEYS: &[&str] = &[
+    "chunk",
+    "document",
+    "includes",
+    "intersects",
+    "message",
+    "name",
+    "offset",
+    "ok",
+    "reason",
+    "revision",
+    "which",
+];
+
+/// The two sides of a relation, the words of `which`.
+pub const RELATE_SIDES_R1: &[&str] = &["a", "b"];
+
+/// The relation document's value families at revision 1: the refused side and the
+/// fault, which is the key-expression verdict's own eight words.
+pub const KEYEXPR_RELATE_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "reason",
+        values: KEYEXPR_FAULT_R1,
+    },
+    ValueFamily {
+        key: "which",
+        values: RELATE_SIDES_R1,
+    },
+];
+
+/// Both are PASSENGERS: a refusal of `a` and a refusal of `b` arrive with the
+/// same keys, and every fault arrives with the same `chunk`, `offset` and
+/// `message`.
+pub const KEYEXPR_RELATE_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "which",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The match document's key set at revision 1, over every branch: the match
+/// (`matched` and, inside it, `index`, `pattern`, `format`, `schema`), a refused
+/// declaration text (`line`, `text`, and for a refused key `pattern`, `chunk`,
+/// `offset`, `reason`) and a refused key (`chunk`, `offset`, `reason`).
+pub const DECLARATIONS_MATCH_R1_KEYS: &[&str] = &[
+    "chunk", "document", "format", "index", "line", "matched", "message", "name", "offset", "ok",
+    "pattern", "reason", "revision", "schema", "text", "which",
+];
+
+/// The two inputs a match can refuse, the words of `which`.
+pub const MATCH_REFUSALS_R1: &[&str] = &["declarations", "keyexpr"];
+
+/// The match document's value families at revision 1.
+pub const DECLARATIONS_MATCH_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "reason",
+        values: KEYEXPR_FAULT_R1,
+    },
+    ValueFamily {
+        key: "which",
+        values: MATCH_REFUSALS_R1,
+    },
+];
+
+/// `which` is a DISCRIMINANT and `reason` a PASSENGER.
+///
+/// A refused declaration text arrives with `line` and `text` and, when its key is
+/// the fault, the key's four; a refused key arrives with `chunk`, `offset` and
+/// `message` and no `line`, and with `reason` unless the key is a key expression
+/// that carries a wildcard. The envelope's `document` and the verdict's `ok`
+/// are beside every one, because the family key sits in the document's own object.
+pub const DECLARATIONS_MATCH_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "which",
+        shape: CarriesShape::Discriminant(&[
+            WordCarries {
+                word: "declarations",
+                shapes: &[
+                    &["document", "line", "message", "ok", "text"],
+                    &[
+                        "chunk", "document", "line", "message", "offset", "ok", "pattern",
+                        "reason", "text",
+                    ],
+                ],
+            },
+            WordCarries {
+                word: "keyexpr",
+                shapes: &[
+                    &["chunk", "document", "message", "offset", "ok"],
+                    &["chunk", "document", "message", "offset", "ok", "reason"],
+                ],
+            },
+        ]),
+    },
+];
+
+/// The description document's key set at revision 1, over both branches: the
+/// success (`root`, `messages`, per message `full_name`, `file`, `syntax`,
+/// `oneofs`, `fields`, per field `name`, `json_name`, `number`, `type`, `label`,
+/// `oneof`, `packed`, `enum` with its `name` and `values`, `message_type`, `map`
+/// with its `key` and `value`) and the refusal (`file`, `line`, `column`,
+/// `reason`, `message`).
+pub const PROTO_MESSAGE_R1_KEYS: &[&str] = &[
+    "column",
+    "document",
+    "enum",
+    "fields",
+    "file",
+    "full_name",
+    "json_name",
+    "key",
+    "label",
+    "line",
+    "map",
+    "message",
+    "message_type",
+    "messages",
+    "name",
+    "number",
+    "ok",
+    "oneof",
+    "oneofs",
+    "packed",
+    "reason",
+    "revision",
+    "root",
+    "syntax",
+    "type",
+    "value",
+    "values",
+];
+
+/// The words of a field's `type`: the scalar keywords, then `enum`, `message` and
+/// `map`. A map value's `type` is drawn from the same set, so the key is one
+/// family at two depths and carries the union.
+pub const PROTO_TYPE_R1: &[&str] = &[
+    "bool", "bytes", "double", "enum", "fixed32", "fixed64", "float", "int32", "int64", "map",
+    "message", "sfixed32", "sfixed64", "sint32", "sint64", "string", "uint32", "uint64",
+];
+
+/// The scalar keywords a map's key may be: the integral types, `bool` and
+/// `string`.
+pub const PROTO_MAP_KEY_R1: &[&str] = &[
+    "bool", "fixed32", "fixed64", "int32", "int64", "sfixed32", "sfixed64", "sint32", "sint64",
+    "string", "uint32", "uint64",
+];
+
+/// The labels of a field.
+pub const PROTO_LABEL_R1: &[&str] = &["optional", "repeated", "required", "singular"];
+
+/// The syntax a message's file declares.
+pub const PROTO_SYNTAX_R1: &[&str] = &["proto2", "proto3"];
+
+/// The description document's value families at revision 1.
+pub const PROTO_MESSAGE_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "key",
+        values: PROTO_MAP_KEY_R1,
+    },
+    ValueFamily {
+        key: "label",
+        values: PROTO_LABEL_R1,
+    },
+    ValueFamily {
+        key: "syntax",
+        values: PROTO_SYNTAX_R1,
+    },
+    ValueFamily {
+        key: "type",
+        values: PROTO_TYPE_R1,
+    },
+];
+
+/// All four are PASSENGERS: a field row has one shape whatever its type, label
+/// or syntax, with an inapplicable member `null` and not absent.
+pub const PROTO_MESSAGE_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "key",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "label",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "syntax",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "type",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The `e2e_wrap` document's key set at revision 1, over BOTH branches: the
 /// built frame with every step it took, and the refusal with whichever
 /// position keys apply.
@@ -14389,6 +14668,12 @@ mod tests {
             // The verdict on one key expression.
             (KEYEXPR_DIAGNOSE, 1),
             (DECLARATIONS_FROM_PROTO, 1),
+            // The relation of two key expressions.
+            (KEYEXPR_RELATE, 1),
+            // Which rule of a declaration text covers a key.
+            (DECLARATIONS_MATCH, 1),
+            // A root message of a `.proto` schema, described.
+            (PROTO_MESSAGE, 1),
             // A protected frame built and read under a caller's profile.
             // To 2 when the body could be described: `body_message`, `stage`
             // and the writer's position keys.

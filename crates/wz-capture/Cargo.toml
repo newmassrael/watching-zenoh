@@ -73,7 +73,30 @@ fixtures = ["network-codecs"]
 # its tests run in the same lane: a build that has the walker and not the
 # writers would be a build whose only difference is that one lane does not
 # compile the door.
-dissect = ["wz-session-core/dissect", "wz-session-core/transport-compose"]
+#
+# It also selects `keyexpr-relation`, below, because the documents the walker's
+# consumers read include the relation of two key expressions, and a build that has
+# the walker and not the relation would be a build whose only difference is that
+# one document cannot be rendered.
+dissect = [
+    "wz-session-core/dissect",
+    "wz-session-core/transport-compose",
+    "keyexpr-relation",
+]
+
+# The RELATION of two key expressions (`keyexpr_relate_json`): includes and
+# intersects, by the engines the C drop-in's `z_keyexpr_includes` and
+# `z_keyexpr_intersects` ask.
+#
+# DEFAULT-OFF, and not folded into `filter-wildcards`, for the reason that
+# feature's own comment gives for its three toggles: a feature named here is
+# unified into every crate that carries `wz-capture` anywhere in its graph,
+# including as a dev-dependency, so its choice would silently become
+# `wz-session-core`'s everywhere. `keyexpr-includes` is the one extra toggle this
+# needs. It implies `filter-wildcards`, because the relation degrades silently
+# without the wildcard arms (`**` becomes a literal chunk) and a relation that
+# answers wrongly on `demo/**` is worse than no relation.
+keyexpr-relation = ["filter-wildcards", "wz-session-core/keyexpr-includes"]
 
 # Lz4, so a session that negotiated compression is READ rather than
 # reported undecompressible.
