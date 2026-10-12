@@ -113,7 +113,9 @@ loopif-multicast = ["wz/loopif-multicast"]
 # declares. The crate links no `alloc` under it, and neither does any crate of its graph
 # when `heap` is off (S9e: the multicast TX frames into one lent buffer, the RX lends
 # each record where its datagram lies). It is the form an image without an allocator
-# names; the heap form is `heap`'s, and a build that names both has both.
+# names; the heap form is `heap`'s. A build has one of the two: the heap form binds its
+# socket with a heap constructor that `static-link-storage` (named below) takes away, so
+# a build that names both has the fixed form.
 fixed-memory = [
     "dep:wz-session-lwip",
     "dep:wz-link-lwip",

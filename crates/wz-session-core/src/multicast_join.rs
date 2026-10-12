@@ -16,7 +16,7 @@
 //!
 //! Alloc note: [`encode_join`] returns an owned `Vec` and exists on the heap
 //! profile only; [`encode_join_into`] writes the same datagram through a sink the
-//! caller holds, and [`MulticastParams`] holds its zid as the session bytes of its
+//! caller holds, and `MulticastParams` holds its zid as the session bytes of its
 //! profile, so the rest of the module (the decode, the validation, the sink
 //! encode) compiles with no allocator (fixed-memory step S9e).
 

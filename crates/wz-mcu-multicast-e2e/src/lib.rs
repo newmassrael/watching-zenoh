@@ -72,18 +72,20 @@
 // `fixed-memory` feature adds a form that links no `alloc`: statics, a pump in a cell
 // of a table and the step loop in place of `run_multicast_session` (`fixed`). Built
 // without `heap` (S9e), no crate of the graph links `alloc` either: the session tier
-// frames a Put into one lent buffer and lends each received record where it lies.
-#[cfg(feature = "heap")]
+// frames a Put into one lent buffer and lends each received record where it lies. A
+// build has one of the two forms: the heap form draws its socket from the heap
+// constructors `static-link-storage` (which `fixed-memory` names) takes away.
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 extern crate alloc;
 
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz::link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz::runtime_coop::CoopRuntime;
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz::session_lwip::multicast_drive::{
     run_multicast_session, run_multicast_session_with_shutdown, LwipMulticastDriver,
 };
@@ -109,21 +111,21 @@ pub use wz::link_lwip::LwipLink;
 // boundary as the acceptor's ReassemblyDropReason re-export).
 pub use wz_session_core::multicast_params::MulticastOutcome;
 
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::multicast_join::encode_join;
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::multicast_params::MulticastDriveConfig;
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::multicast_params::MulticastParams;
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::network_message::NetworkMessage;
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use wz_session_core::sn::{self, MulticastTxConduits};
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 use wz_session_core::WhatAmI;
@@ -227,7 +229,7 @@ pub struct MulticastE2eReport {
 /// elapses, so the run is fully deterministic — the fragment chain is
 /// delivered FIFO over loopback and reassembles in order); the deploy bin
 /// passes its SysTick clock.
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> MulticastE2eReport {
     run_multicast_e2e_with_progress(link, clock_source, |_stage| {})
 }
@@ -271,7 +273,7 @@ impl MulticastStage {
 /// `on_stage` runs between the e2e's phases, so a bare-metal image prints one
 /// console line and a host test pushes into a vector. A caller that wants no
 /// announcements uses [`run_multicast_e2e`], whose no-op compiles away.
-#[cfg(feature = "heap")]
+#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>(
     link: &LwipLink,
     clock_source: C,
