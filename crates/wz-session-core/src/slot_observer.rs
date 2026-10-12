@@ -32,8 +32,10 @@
 //! Reply drained before the `Final` that terminates it).
 
 // `Requesters` is generic over the application's reply sink and names no heap
-// type. `SlotObserver` below registers heap-boxed sinks, so it and everything
-// only it names sit behind `alloc`.
+// type, and neither is [`SlotObserverOf`]: the sinks it registers are the types an
+// [`ObserverSinks`] names. The liveliness planes and the switchboard register heap
+// forms, so they, and what only they name, sit behind `alloc`.
+use crate::decl_sink::{DeclSink, UndeclSink};
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
 use crate::declare::liveliness::LivelinessRegistry;
 #[cfg(feature = "liveliness-get")]
@@ -42,24 +44,22 @@ use crate::declare::liveliness_get::LivelinessGetRegistry;
 use crate::declare::liveliness_subscriber::LivelinessSubscriberTable;
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
 use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
-#[cfg(all(feature = "alloc", feature = "declare-queryable"))]
+#[cfg(feature = "declare-queryable")]
 use crate::declare::queryable::RemoteQueryableTable;
-#[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+#[cfg(feature = "declare-subscriber")]
 use crate::declare::subscriber::RemoteSubscriberTable;
-#[cfg(feature = "alloc")]
 use crate::driver_loop::IterationEvent;
-#[cfg(feature = "alloc")]
 use crate::peer_tables::PeerTables;
-#[cfg(feature = "alloc")]
 use crate::pubsub::SubscriberTable;
-#[cfg(all(feature = "alloc", feature = "query-queryable"))]
+#[cfg(feature = "query-queryable")]
 use crate::query::QueryableRegistry;
+use crate::query_sink::QuerySink;
 use crate::reply::ReplyRegistry;
 use crate::reply_sink::ReplySink;
-#[cfg(all(feature = "alloc", feature = "query-queryable"))]
+#[cfg(feature = "query-queryable")]
 use crate::reply_stage::{FinalStaging, ReplyStaging};
-#[cfg(feature = "alloc")]
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+use crate::sink::SampleSink;
 #[cfg(all(feature = "alloc", feature = "switchboard"))]
 use crate::switchboard::{EventInjector, SwitchboardRegistry};
 
@@ -100,26 +100,23 @@ impl<R: ReplySink, G: ReplySink> Default for Requesters<R, G> {
 }
 
 /// What the application registered, shared by every session of the process. See
-/// the module documentation. It registers heap-boxed sinks, so it is the
-/// heap-profile observer; a build with no allocator types its own registrations.
-#[cfg(feature = "alloc")]
-pub struct SlotObserver {
+/// the module documentation. The sinks it registers are the types `K` names
+/// ([`ObserverSinks`]): [`SlotObserver`] is the heap profile's, with boxed closures.
+pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks> {
     /// The local subscriptions. One registration serves every session.
-    pub subscribers: SubscriberTable<crate::sink::BoxedSink>,
+    pub subscribers: SubscriberTable<K::Subscriber>,
     /// The statechart switchboard (the keyexpr -> event table).
     #[cfg(feature = "switchboard")]
     pub switchboard: SwitchboardRegistry,
     /// The local queryables.
     #[cfg(feature = "query-queryable")]
-    pub queryables: QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+    pub queryables: QueryableRegistry<K::Queryable>,
     /// The application's listeners on the subscribers a peer declares.
     #[cfg(feature = "declare-subscriber")]
-    pub remote_subscribers:
-        RemoteSubscriberTable<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
+    pub remote_subscribers: RemoteSubscriberTable<K::Declared, K::Undeclared>,
     /// The application's listeners on the queryables a peer declares.
     #[cfg(feature = "declare-queryable")]
-    pub remote_queryables:
-        RemoteQueryableTable<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
+    pub remote_queryables: RemoteQueryableTable<K::Declared, K::Undeclared>,
     /// The application's listeners on the tokens a peer declares.
     #[cfg(feature = "liveliness-token")]
     pub liveliness:
@@ -133,23 +130,105 @@ pub struct SlotObserver {
         LivelinessSubscriberTable<crate::declare::liveliness_sample::BoxedLivelinessSampleSink>,
 }
 
+/// The sink types a node registers on its [`SlotObserverOf`]: one type for each kind of
+/// registration, which is what lets the observer name no heap type. The heap profile's
+/// ([`HeapSinks`]) are the boxed closures; a node with no allocator names closed types
+/// of its own (a function pointer and a `&'static` context, an enum over the few
+/// registrations it makes).
+pub trait ObserverSinks {
+    /// What a local subscription is delivered to.
+    type Subscriber: SampleSink;
+    /// What a local queryable is asked through.
+    type Queryable: QuerySink;
+    /// What a peer's declaration is announced to.
+    type Declared: DeclSink;
+    /// What a peer's undeclaration is announced to.
+    type Undeclared: UndeclSink;
+}
+
+/// The heap profile's registrations: boxed closures.
 #[cfg(feature = "alloc")]
-impl Default for SlotObserver {
+pub struct HeapSinks;
+
+#[cfg(feature = "alloc")]
+impl ObserverSinks for HeapSinks {
+    type Subscriber = crate::sink::BoxedSink;
+    type Queryable = crate::query_sink::BoxedQuerySink;
+    type Declared = crate::decl_sink::BoxedDeclSink;
+    type Undeclared = crate::decl_sink::BoxedUndeclSink;
+}
+
+/// A registration that cannot exist: a type with no values, for the kinds of
+/// registration a node makes none of. It stands in for them in [`NoSinks`], so a build
+/// with no allocator has a default observer type to name that registers nothing.
+#[derive(Debug, Clone, Copy)]
+pub enum NoSink {}
+
+impl SampleSink for NoSink {
+    fn deliver(&mut self, _sample: &dyn crate::sink::SampleView) {
+        match *self {}
+    }
+}
+
+impl QuerySink for NoSink {
+    fn handle(
+        &mut self,
+        _query: &dyn crate::query_sink::QueryView,
+        _out: &mut dyn crate::query_sink::ReplyOut,
+    ) {
+        match *self {}
+    }
+}
+
+impl DeclSink for NoSink {
+    fn on_declared(&mut self, _decl: &dyn crate::decl_sink::DeclView) {
+        match *self {}
+    }
+}
+
+impl UndeclSink for NoSink {
+    fn on_undeclared(&mut self, _id: u64) {
+        match *self {}
+    }
+}
+
+/// The observer with no registration of any kind.
+pub struct NoSinks;
+
+impl ObserverSinks for NoSinks {
+    type Subscriber = NoSink;
+    type Queryable = NoSink;
+    type Declared = NoSink;
+    type Undeclared = NoSink;
+}
+
+/// The sinks an observer is typed with when nothing else is named: the heap profile's
+/// where there is a heap, none where there is not.
+#[cfg(feature = "alloc")]
+pub type DefaultSinks = HeapSinks;
+/// See the heap form.
+#[cfg(not(feature = "alloc"))]
+pub type DefaultSinks = NoSinks;
+
+/// The observer of the heap profile, as it has always been named.
+#[cfg(feature = "alloc")]
+pub type SlotObserver = SlotObserverOf<HeapSinks>;
+
+impl<K: ObserverSinks> Default for SlotObserverOf<K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "alloc")]
-impl SlotObserver {
+impl<K: ObserverSinks> SlotObserverOf<K> {
     /// An observer with nothing registered.
     pub fn new() -> Self {
         Self {
-            subscribers: SubscriberTable::new(),
+            subscribers: SubscriberTable::with_sink_backing(),
             #[cfg(feature = "switchboard")]
             switchboard: SwitchboardRegistry::new(),
             #[cfg(feature = "query-queryable")]
-            queryables: QueryableRegistry::new(),
+            queryables: QueryableRegistry::with_sink_backing(),
             #[cfg(feature = "declare-subscriber")]
             remote_subscribers: RemoteSubscriberTable::with_sink_backing(),
             #[cfg(feature = "declare-queryable")]

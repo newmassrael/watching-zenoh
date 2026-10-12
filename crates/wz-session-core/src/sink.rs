@@ -183,6 +183,33 @@ pub trait SampleSink {
     fn deliver(&mut self, sample: &dyn SampleView);
 }
 
+/// The closed sink of a node with no allocator: a function and the state it works on,
+/// stored inline. Where [`BoxedSink`] erases the type of a capturing closure behind a
+/// `Box`, this names it: the state is a field, the function is a plain `fn` that is
+/// handed the state and the sample, so the registration stores nothing on the heap and
+/// the registry that holds it is typed by `S`.
+///
+/// A node that makes one kind of registration (the admin node's one config-write
+/// subscriber) types its table by this; one that makes several kinds writes the
+/// closed `enum` this module's docs describe and implements [`SampleSink`] for it.
+pub struct FnSink<S> {
+    state: S,
+    call: fn(&mut S, &dyn SampleView),
+}
+
+impl<S> FnSink<S> {
+    /// A sink that calls `call` with `state` and each matched sample.
+    pub const fn new(state: S, call: fn(&mut S, &dyn SampleView)) -> Self {
+        Self { state, call }
+    }
+}
+
+impl<S> SampleSink for FnSink<S> {
+    fn deliver(&mut self, sample: &dyn SampleView) {
+        (self.call)(&mut self.state, sample);
+    }
+}
+
 /// AP / `alloc`-profile adapter: wraps an arbitrary capturing closure in
 /// a heap `Box`, type-erasing it so a registry stores a homogeneous
 /// `BoxedSink` list of differently-captured closures (the dynamic-opt-in

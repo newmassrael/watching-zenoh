@@ -862,6 +862,28 @@ impl QueryView for SharedQuery<'_> {
 #[cfg(feature = "alloc")]
 type BoxedQueryFn = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static>;
 
+/// The closed query sink of a node with no allocator: a function and the state it
+/// works on, stored inline, the twin of [`crate::sink::FnSink`] for a queryable. The
+/// registry that holds it is typed by `S`, and the registration stores nothing on the
+/// heap.
+pub struct FnQuerySink<S> {
+    state: S,
+    call: fn(&mut S, &dyn QueryView, &mut dyn ReplyOut),
+}
+
+impl<S> FnQuerySink<S> {
+    /// A sink that calls `call` with `state` and each matched query.
+    pub const fn new(state: S, call: fn(&mut S, &dyn QueryView, &mut dyn ReplyOut)) -> Self {
+        Self { state, call }
+    }
+}
+
+impl<S> QuerySink for FnQuerySink<S> {
+    fn handle(&mut self, query: &dyn QueryView, out: &mut dyn ReplyOut) {
+        (self.call)(&mut self.state, query, out);
+    }
+}
+
 /// AP / `alloc`-profile adapter: wraps an arbitrary capturing handler in
 /// a heap `Box`, type-erasing it so a registry stores a homogeneous
 /// `BoxedQuerySink` list of differently-captured handlers (the
