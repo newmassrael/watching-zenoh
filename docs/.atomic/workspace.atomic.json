@@ -273256,6 +273256,46 @@
         "Q8 (gating the generated pool module behind session-slot) stays declined; Q3 and Q7 are closed by this round."
       ]
     },
+    "Round 3313": {
+      "decision_summary": "Three things, read against the code. (1) The deploy validator compared a session's pools with the slot ceiling and left out the typed slot the pools sit under, so pools that fit alone but not with the measured slot were accepted. The budget is now pools plus typed slot against the ceiling, the report states session_bytes, and the acceptor machine reads 40960 + 36704 = 77664 of 98304: the ceiling is not provisional-high, and lowering it to the slot's size, as round 3312 suggested, would have been wrong. (2) The open question about the default datagram lane is answered by the pinned upstream: queue size 2 per priority, wait_before_drop 1000 us, max_wait_before_drop_fragments 50000 us, wait_before_close 5000000 us, with the same room and deadline rules, so a chain dropped under load is upstream's behavior too; no change, no debt. (3) The placement check stays unarmed: 3 slots of 98304 bytes is 294912, and no region the inherited profile declares holds it.",
+      "changes_bullets": [
+        "scripts/lib/deploy_sessions.py: a session's budget is its pools plus the measured typed slot when the pool names a `typed_slot_image` (a typed slot over the ceiling by itself is refused once, by its own key); the report's session rows gain `typed_slot_bytes` and `session_bytes`, and `headroom_bytes` is the ceiling less both; the docstring says so; four selftest cases.",
+        "crates/wz-session-core/tests/session_slot_pool_deploy.rs: `every_declared_session_fits_the_generated_slot` reads `session_bytes`, the pools plus the typed slot, against the generated slot size."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host: the wz-session-core session_slot_pool_deploy test armed with WZ_DEPLOY_REPORT_REQUIRE=1 (exit 0, so a skip would have failed).",
+        "Locally: the deploy validator's selftest (0 failing, the four new cases among them), validate-deploy.sh, and the report of the acceptor machine (pools 40960, typed slot 36704, session 77664, headroom 20640).",
+        "The datagram-lane answer was read from the pinned upstream's config defaults and its transport pipeline source, and from wz's own session init params, link, deadline and writer queue sources; no run reproduced a dropped chain, and none was needed to compare the defaults and the rules.",
+        "Not verified here: the hosted run of this push and of the one before it."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The SRAM placement check (session_pool.section against the machine's memory.sram_regions) is built and unarmed because no shipped machine states regions. When one does it will refuse: 3 x 98304 = 294912 bytes against the 128K region sram1 that mcu_target.yaml declares, the largest region there. The numbers (slots, ceiling) or a region set the pool may name must change then, and the chip's larger SRAM must come from its datasheet, not from this file. This is a finding for the owner, not a repair made here.",
+        "The acceptor e2e is generic over its clock and entropy types, names no slot type and has no probe, so its slot is unmeasured.",
+        "The datagram-lane answer holds for the defaults; a deploy that sets tx/queue/size or the congestion waits is the deploy's own and is read by the config parity gates, not by this entry."
+      ],
+      "publishable_decision_summary": "Three things, read against the code. (1) The deploy validator compared a session's pools with the slot ceiling and left out the typed slot the pools sit under, so pools that fit alone but not with the measured slot were accepted. The budget is now pools plus typed slot against the ceiling, the report states session_bytes, and the acceptor machine reads 40960 + 36704 = 77664 of 98304: the ceiling is not provisional-high, and lowering it to the slot's size, as round 3312 suggested, would have been wrong. (2) The open question about the default datagram lane is answered by the pinned upstream: queue size 2 per priority, wait_before_drop 1000 us, max_wait_before_drop_fragments 50000 us, wait_before_close 5000000 us, with the same room and deadline rules, so a chain dropped under load is upstream's behavior too; no change, no debt. (3) The placement check stays unarmed: 3 slots of 98304 bytes is 294912, and no region the inherited profile declares holds it.",
+      "publishable_changes_bullets": [
+        "scripts/lib/deploy_sessions.py: a session's budget is its pools plus the measured typed slot when the pool names a `typed_slot_image` (a typed slot over the ceiling by itself is refused once, by its own key); the report's session rows gain `typed_slot_bytes` and `session_bytes`, and `headroom_bytes` is the ceiling less both; the docstring says so; four selftest cases.",
+        "crates/wz-session-core/tests/session_slot_pool_deploy.rs: `every_declared_session_fits_the_generated_slot` reads `session_bytes`, the pools plus the typed slot, against the generated slot size."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host: the wz-session-core session_slot_pool_deploy test armed with WZ_DEPLOY_REPORT_REQUIRE=1 (exit 0, so a skip would have failed).",
+        "Locally: the deploy validator's selftest (0 failing, the four new cases among them), validate-deploy.sh, and the report of the acceptor machine (pools 40960, typed slot 36704, session 77664, headroom 20640).",
+        "The datagram-lane answer was read from the pinned upstream's config defaults and its transport pipeline source, and from wz's own session init params, link, deadline and writer queue sources; no run reproduced a dropped chain, and none was needed to compare the defaults and the rules.",
+        "Not verified here: the hosted run of this push and of the one before it."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The SRAM placement check (session_pool.section against the machine's memory.sram_regions) is built and unarmed because no shipped machine states regions. When one does it will refuse: 3 x 98304 = 294912 bytes against the 128K region sram1 that mcu_target.yaml declares, the largest region there. The numbers (slots, ceiling) or a region set the pool may name must change then, and the chip's larger SRAM must come from its datasheet, not from this file. This is a finding for the owner, not a repair made here.",
+        "The acceptor e2e is generic over its clock and entropy types, names no slot type and has no probe, so its slot is unmeasured.",
+        "The datagram-lane answer holds for the defaults; a deploy that sets tx/queue/size or the congestion waits is the deploy's own and is read by the config parity gates, not by this entry."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
