@@ -7628,7 +7628,9 @@ layer_c1am_cargo_test_adminspace() {
     # R2978 -- 5 -> 7: two tests were added here, the canonical form and a
     # non-palindromic round trip. PRINTED by the guard running the command,
     # not counted off the diff.
-    _runci_guarded_test "C1AM zid_hex 7" 7 \
+    # R3299 -- 7 -> 8: `the_writer_prints_what_the_string_form_does` joins
+    # the `write_zenoh_hex` writer. The number is what the command PRINTED.
+    _runci_guarded_test "C1AM zid_hex 8" 8 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
         cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
@@ -10805,7 +10807,9 @@ layer_c1p_multicast() {
     # push into a lending queue) is four cases, and the one that fragments
     # needs `transport-fragmentation`, which this arm leaves out, so three
     # of them compile here. The arm above has no push codec and does not move.
-    _runci_guarded_test C1p 72 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # R3299 -- 72 -> 73, the printed number: the lent control walk adds
+    # `the_control_walk_lends_every_kind_in_wire_order_and_owns_nothing`.
+    _runci_guarded_test C1p 73 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
