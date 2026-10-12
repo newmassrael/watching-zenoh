@@ -272336,6 +272336,96 @@
         "The mechanism (a number re-handed to another bind(:0) under 8 copies on 2 cores) is a hypothesis for the parked accept_loop_holds_n_concurrent_peers symptom, LinkLost(PeerClosed); it is not tested and nothing here concludes it."
       ]
     },
+    "Round 3296": {
+      "decision_summary": "The shell crates stop allocating under the selector set (session-slot, static-link-storage, tx-lend-only, bounded-heapless), proved by compilation and by the S8 gate. Under the profile wz-runtime-coop, wz-session-lwip, wz-session-mcu, wz-link-lwip and the two e2e libraries drop `extern crate alloc`, so a creeping use is a compile error, and the S8 gate names no shell crate among those still carrying alloc. The admin node, the dialler and connect manager, the multicast pump (bounded reply queue with counted drop, pump in a static cell) and the link seam have slot forms; limits are deploy keys (connect_endpoints, multicast_replies) and an MCU with a session pool may accept several sessions. Four image profiles (acceptor, multicast, admin node, Zephyr node) are registered in the S8 gate as `pending`, none `gated`: the toolchain refuses their link for want of an allocator, and the residual is wz-session-core, wz-runtime-core and the codec owned mirrors, the next step.",
+      "changes_bullets": [
+        "Shell crates off the heap under the profile (each with a counting-allocator witness, a red-first mutant, and the crate named in the S8 gate if it regresses):",
+        "wz-runtime-coop: `extern crate alloc` only off the profile; the slot SessionRuntime has an uninhabited Shared pointer type; the Rc seam (SessionLinks, OpenedLink) is the heap form's.",
+        "wz-link-lwip: LwipLink::init_static, a `&'static` stack handle (once-only lwip_init); test static_link_handle (2).",
+        "wz-session-lwip: link seam generic over how the stack is held (StackHandle); the dialler over the session host; the multicast pump in a cell of MulticastSlots with a bounded reply queue that refuses and counts (MulticastReplyQueue<N>); slot_node (SlotAdminNode, SlotDialer, SessionFactory); tests multicast_slot (3), admin_node_slot (3).",
+        "wz-session-mcu: connect manager rows in a BoundedVec of MAX_STATIC_CONNECT; the slot dialler's parser shared; slot app layer (SlotApp, SlotDispatch, NoReplies); dispatch_to takes anything that derefs to the observer cell, so it needs no Rc on either profile.",
+        "wz-session-core: with_admin_session lends a session row; write_zenoh_hex, write_admin_region; caps::MAX_MULTICAST_REPLIES = 8; multicast_params::zid_vec; the deploy test pins the shell limits to the fixture's numbers.",
+        "wz-session-wire-fixtures: `fixed` module (Wire<N>) with the handshake frames; the Vec forms behind the `alloc` feature, on by default.",
+        "wz-mcu-session-acceptor, wz-mcu-multicast-e2e: a `fixed-memory` form over statics (AcceptorStatics, MulticastE2eStatics); the heap forms are unchanged code; host tests count the heap over the whole run (acceptor: zero; multicast: only the session tier asks).",
+        "deploy validator: connect_endpoints and multicast_replies are process keys; accept.max_sessions > 1 is accepted on an MCU or Zephyr machine that declares a session_pool; fixture deploy/mcu_session_acceptor.yaml declares 2.",
+        "wz-runtime-zephyr: glue::log_args (console line in a fixed buffer), StackWatch::observe_peak; session-slot drops ZephyrLinks.",
+        "Image profiles (feature fixed-memory, heap default): deploy/mcu-session-acceptor, mcu-multicast-e2e, mcu-admin-node (src/fixed.rs), zephyr-admin-node (fixed_node.rs, net_lwip fixed form); S8 gate rows for each, plus census-only rows with an allocator. All `pending`.",
+        "Registration: run-ci C1g 11, C1m legs (static link handle 2, multicast slot 3, admin node slot 3), C1n (fixed-memory e2e 1, wire fixtures 1), C1r (fixed-memory e2e 1), C1ns zephyr lib 26 -> 29, C1bz wz-mcu-session-acceptor 3 -> 1 (counted); nondefault-tests-gate rows; feature_public_surface_census rows (SELECTOR_ONLY_EDGE added, with selftest cases)."
+      ],
+      "verification_bullets": [
+        "Run on pc2 (remote build), at HEAD 84888277 unless stated:",
+        "run-ci layers, each green: A4, C1g, C1m, C1n, C1r, C1ns, C1bz (budgets two-way), Q (QEMU: acceptor frame/reasm on M3/M4/M7 and microbit slim, multicast loopback Q.6, footprint gates).",
+        "per-crate clippy -D warnings --all-targets, one command each: wz-session-lwip and wz-link-lwip --all-features; wz-runtime-coop, wz-session-mcu, wz-session-core (all-features), wz-mcu-session-acceptor and wz-mcu-multicast-e2e on both forms, wz-session-wire-fixtures both, wz-runtime-zephyr; cargo fmt --all --check clean.",
+        "lib tests default and slot sets: wz-session-mcu 20 / 6, wz-runtime-coop 18 / 16, wz-link-lwip 51 / 51, wz-session-lwip 9; zid_hex 8.",
+        "python deploy_sessions --selftest OK, validate-deploy OK, no_allocator_link_gate --selftest and --population OK (17 images), nondefault-tests-gate --census OK (14 crates).",
+        "S8 census over all 22 builds after: every row OK as its row says; mcu-link-noalloc-probe and mcu-noheap-probe still CLEAN; no profile image is `gated`.",
+        "mutants red then reverted: init_static box; reply-queue drop counter; claim-refusal counter; alloc in the node report; Dialer Exhausted to Refused; a leaked Box in the fixed acceptor e2e (n 1 vs 0); a Box in the fixed multicast e2e (owner outside the session tier); `extern crate alloc` in the multicast fixed e2e (gate names the crate: 6 vs 5).",
+        "the Q footprint gate for multicast-e2e read +468 B with the shared-helper refactor and failed; fixed by restoring the heap form's code, now 65120 against main's 65124 (checked on the same host and toolchain).",
+        "NOT verified: no profile image links (the toolchain refuses for want of an allocator), so none was booted; no QEMU run of a fixed-memory image; stack peak of the fixed node not measured; Zephyr staticlib compiled with the gate's stand-in for the board build values only (no west, no T2G hardware, nothing booted); hosted CI not read; the whole nondefault-tests-gate leg set and run-ci overall not run; feature_public_surface_census --check shows 3 findings on this branch (wz-session-core bounded-heapless x2, declare-undeclare) that pass on main and come from feature_gate_diagnostic.py, which this branch does not have: they clear on integration.",
+        "reason_review_pin_gate --check: one row moves, atom `runtime-zero-copy` on crates/wz-link-lwip/src/lib.rs, 2f0bf29436 -> c6b20cd957 (init_static added). The pins file was not edited."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "S9d (codec owned mirrors) is what lets a profile image link and be `gated`. The worklist is the census-only rows (an allocator present, the ELF line table naming every linked allocation branch):",
+        "mcu-session-acceptor-fixed-census: 13 source lines: wz-session-core drive.rs (3), inbound.rs (2), network_message.rs (2), accept_cookie.rs, link.rs, session_actions.rs; sce-forge-runtime storage.rs (2); sce-portable-bytes lib.rs.",
+        "mcu-multicast-e2e-fixed-census: 23 lines, adding frame_encode.rs, handshake_encode.rs, multicast_join.rs (encode_join returns a Vec), multicast_tx.rs (MulticastTxItem boxes owned wire messages), ext_chain.rs, wz-codecs join.rs and push.rs; MulticastParams.zid is still a Vec (multicast_params::zid_vec is the seam).",
+        "mcu-admin-node-fixed-census: 65 lines, mostly response_build.rs (11), reply_stage.rs (8), sample.rs (5), put_payload.rs (4); the declare owned mirrors.",
+        "The crates the toolchain names when it refuses the link: sce-forge-runtime, sce-portable-bytes, wz-codecs, wz-runtime-core, wz-session-core; third party: hashbrown, portable-atomic-util, zeroize. wz-session-core must stop naming its `alloc` feature on the profile (its session modules are gated on it).",
+        "Zephyr: zephyr_image! allocator, wz-runtime-zephyr (`extern crate alloc`, log_line, the core-clock line) and the MAC drivers' bring-up lines (format!) remain; the node shell itself is fixed (alloc symbols 107 -> 35).",
+        "A per-session Requesters is 4872 B and an async fn holds a by-value argument twice, so the task cell of the admin node is 12 KB (TASK_BYTES 12288): shrink Requesters or box nothing and pass by reference.",
+        "The slot admin node is lwIP-concrete (it lives in wz-session-lwip over SessionHost); a stack-neutral form is open. wz-session-mcu memory.rs and admin_node.rs stay heap-only.",
+        "Stack peak of the fixed node, QEMU boot of a fixed image, and the Zephyr image under west are not measured.",
+        "Pin row to re-read: atom runtime-zero-copy, crates/wz-link-lwip/src/lib.rs, to c6b20cd957 (init_static).",
+        "Integration: rebase onto main clears the 3 feature_public_surface_census findings (feature_gate_diagnostic.py); run-ci C1bz budget for wz-mcu-session-acceptor is 1 (counted on this lane's command); the heap acceptor image grew by 176 B of .text (ungated), the heap multicast image by -4 B (gated)."
+      ],
+      "publishable_decision_summary": "The shell crates stop allocating under the selector set (session-slot, static-link-storage, tx-lend-only, bounded-heapless), proved by compilation and by the S8 gate. Under the profile wz-runtime-coop, wz-session-lwip, wz-session-mcu, wz-link-lwip and the two e2e libraries drop `extern crate alloc`, so a creeping use is a compile error, and the S8 gate names no shell crate among those still carrying alloc. The admin node, the dialler and connect manager, the multicast pump (bounded reply queue with counted drop, pump in a static cell) and the link seam have slot forms; limits are deploy keys (connect_endpoints, multicast_replies) and an MCU with a session pool may accept several sessions. Four image profiles (acceptor, multicast, admin node, Zephyr node) are registered in the S8 gate as `pending`, none `gated`: the toolchain refuses their link for want of an allocator, and the residual is wz-session-core, wz-runtime-core and the codec owned mirrors, the next step.",
+      "publishable_changes_bullets": [
+        "Shell crates off the heap under the profile (each with a counting-allocator witness, a red-first mutant, and the crate named in the S8 gate if it regresses):",
+        "wz-runtime-coop: `extern crate alloc` only off the profile; the slot SessionRuntime has an uninhabited Shared pointer type; the Rc seam (SessionLinks, OpenedLink) is the heap form's.",
+        "wz-link-lwip: LwipLink::init_static, a `&'static` stack handle (once-only lwip_init); test static_link_handle (2).",
+        "wz-session-lwip: link seam generic over how the stack is held (StackHandle); the dialler over the session host; the multicast pump in a cell of MulticastSlots with a bounded reply queue that refuses and counts (MulticastReplyQueue<N>); slot_node (SlotAdminNode, SlotDialer, SessionFactory); tests multicast_slot (3), admin_node_slot (3).",
+        "wz-session-mcu: connect manager rows in a BoundedVec of MAX_STATIC_CONNECT; the slot dialler's parser shared; slot app layer (SlotApp, SlotDispatch, NoReplies); dispatch_to takes anything that derefs to the observer cell, so it needs no Rc on either profile.",
+        "wz-session-core: with_admin_session lends a session row; write_zenoh_hex, write_admin_region; caps::MAX_MULTICAST_REPLIES = 8; multicast_params::zid_vec; the deploy test pins the shell limits to the fixture's numbers.",
+        "wz-session-wire-fixtures: `fixed` module (Wire<N>) with the handshake frames; the Vec forms behind the `alloc` feature, on by default.",
+        "wz-mcu-session-acceptor, wz-mcu-multicast-e2e: a `fixed-memory` form over statics (AcceptorStatics, MulticastE2eStatics); the heap forms are unchanged code; host tests count the heap over the whole run (acceptor: zero; multicast: only the session tier asks).",
+        "deploy validator: connect_endpoints and multicast_replies are process keys; accept.max_sessions > 1 is accepted on an MCU or Zephyr machine that declares a session_pool; fixture deploy/mcu_session_acceptor.yaml declares 2.",
+        "wz-runtime-zephyr: glue::log_args (console line in a fixed buffer), StackWatch::observe_peak; session-slot drops ZephyrLinks.",
+        "Image profiles (feature fixed-memory, heap default): deploy/mcu-session-acceptor, mcu-multicast-e2e, mcu-admin-node (src/fixed.rs), zephyr-admin-node (fixed_node.rs, net_lwip fixed form); S8 gate rows for each, plus census-only rows with an allocator. All `pending`.",
+        "Registration: run-ci C1g 11, C1m legs (static link handle 2, multicast slot 3, admin node slot 3), C1n (fixed-memory e2e 1, wire fixtures 1), C1r (fixed-memory e2e 1), C1ns zephyr lib 26 -> 29, C1bz wz-mcu-session-acceptor 3 -> 1 (counted); nondefault-tests-gate rows; feature_public_surface_census rows (SELECTOR_ONLY_EDGE added, with selftest cases)."
+      ],
+      "publishable_verification_bullets": [
+        "Run on pc2 (remote build), at HEAD 84888277 unless stated:",
+        "run-ci layers, each green: A4, C1g, C1m, C1n, C1r, C1ns, C1bz (budgets two-way), Q (QEMU: acceptor frame/reasm on M3/M4/M7 and microbit slim, multicast loopback Q.6, footprint gates).",
+        "per-crate clippy -D warnings --all-targets, one command each: wz-session-lwip and wz-link-lwip --all-features; wz-runtime-coop, wz-session-mcu, wz-session-core (all-features), wz-mcu-session-acceptor and wz-mcu-multicast-e2e on both forms, wz-session-wire-fixtures both, wz-runtime-zephyr; cargo fmt --all --check clean.",
+        "lib tests default and slot sets: wz-session-mcu 20 / 6, wz-runtime-coop 18 / 16, wz-link-lwip 51 / 51, wz-session-lwip 9; zid_hex 8.",
+        "python deploy_sessions --selftest OK, validate-deploy OK, no_allocator_link_gate --selftest and --population OK (17 images), nondefault-tests-gate --census OK (14 crates).",
+        "S8 census over all 22 builds after: every row OK as its row says; mcu-link-noalloc-probe and mcu-noheap-probe still CLEAN; no profile image is `gated`.",
+        "mutants red then reverted: init_static box; reply-queue drop counter; claim-refusal counter; alloc in the node report; Dialer Exhausted to Refused; a leaked Box in the fixed acceptor e2e (n 1 vs 0); a Box in the fixed multicast e2e (owner outside the session tier); `extern crate alloc` in the multicast fixed e2e (gate names the crate: 6 vs 5).",
+        "the Q footprint gate for multicast-e2e read +468 B with the shared-helper refactor and failed; fixed by restoring the heap form's code, now 65120 against main's 65124 (checked on the same host and toolchain).",
+        "NOT verified: no profile image links (the toolchain refuses for want of an allocator), so none was booted; no QEMU run of a fixed-memory image; stack peak of the fixed node not measured; Zephyr staticlib compiled with the gate's stand-in for the board build values only (no west, no T2G hardware, nothing booted); hosted CI not read; the whole nondefault-tests-gate leg set and run-ci overall not run; feature_public_surface_census --check shows 3 findings on this branch (wz-session-core bounded-heapless x2, declare-undeclare) that pass on main and come from feature_gate_diagnostic.py, which this branch does not have: they clear on integration.",
+        "reason_review_pin_gate --check: one row moves, atom `runtime-zero-copy` on crates/wz-link-lwip/src/lib.rs, 2f0bf29436 -> c6b20cd957 (init_static added). The pins file was not edited."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "S9d (codec owned mirrors) is what lets a profile image link and be `gated`. The worklist is the census-only rows (an allocator present, the ELF line table naming every linked allocation branch):",
+        "mcu-session-acceptor-fixed-census: 13 source lines: wz-session-core drive.rs (3), inbound.rs (2), network_message.rs (2), accept_cookie.rs, link.rs, session_actions.rs; sce-forge-runtime storage.rs (2); sce-portable-bytes lib.rs.",
+        "mcu-multicast-e2e-fixed-census: 23 lines, adding frame_encode.rs, handshake_encode.rs, multicast_join.rs (encode_join returns a Vec), multicast_tx.rs (MulticastTxItem boxes owned wire messages), ext_chain.rs, wz-codecs join.rs and push.rs; MulticastParams.zid is still a Vec (multicast_params::zid_vec is the seam).",
+        "mcu-admin-node-fixed-census: 65 lines, mostly response_build.rs (11), reply_stage.rs (8), sample.rs (5), put_payload.rs (4); the declare owned mirrors.",
+        "The crates the toolchain names when it refuses the link: sce-forge-runtime, sce-portable-bytes, wz-codecs, wz-runtime-core, wz-session-core; third party: hashbrown, portable-atomic-util, zeroize. wz-session-core must stop naming its `alloc` feature on the profile (its session modules are gated on it).",
+        "Zephyr: zephyr_image! allocator, wz-runtime-zephyr (`extern crate alloc`, log_line, the core-clock line) and the MAC drivers' bring-up lines (format!) remain; the node shell itself is fixed (alloc symbols 107 -> 35).",
+        "A per-session Requesters is 4872 B and an async fn holds a by-value argument twice, so the task cell of the admin node is 12 KB (TASK_BYTES 12288): shrink Requesters or box nothing and pass by reference.",
+        "The slot admin node is lwIP-concrete (it lives in wz-session-lwip over SessionHost); a stack-neutral form is open. wz-session-mcu memory.rs and admin_node.rs stay heap-only.",
+        "Stack peak of the fixed node, QEMU boot of a fixed image, and the Zephyr image under west are not measured.",
+        "Pin row to re-read: atom runtime-zero-copy, crates/wz-link-lwip/src/lib.rs, to c6b20cd957 (init_static).",
+        "Integration: rebase onto main clears the 3 feature_public_surface_census findings (feature_gate_diagnostic.py); run-ci C1bz budget for wz-mcu-session-acceptor is 1 (counted on this lane's command); the heap acceptor image grew by 176 B of .text (ungated), the heap multicast image by -4 B (gated)."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
