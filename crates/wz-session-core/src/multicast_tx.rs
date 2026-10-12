@@ -28,24 +28,32 @@
 
 // Only the boxed variants (Push / Response / DeclareReply) name Box; a build
 // with only the unboxed ResponseFinal (or no data codec) must not import it.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "liveliness-token"
+    )
 ))]
 use alloc::boxed::Box;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 // R311y227 — the per-priority multicast conduit send-side band type. R2928 —
 // unconditional: every queue lane is named by it, whichever codecs are built.
 use crate::qos::Priority;
 
+#[cfg(feature = "alloc")]
 use crate::link::{RoomAnswer, RoomWait};
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 use crate::{
     link::LinkRoom,
@@ -81,7 +89,7 @@ pub enum MulticastTxItem {
     /// A pub/sub Push (`z_put` / `z_del` over multicast). Framed via the
     /// [`encode_frame_with_push`](crate::frame_encode::encode_frame_with_push)
     /// SSOT with a freshly minted channel SN.
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
     Push {
         /// The built Push network message
         /// ([`build_push_literal`](crate::push_build::build_push_literal) and
@@ -110,7 +118,7 @@ pub enum MulticastTxItem {
     /// transport through the same `_z_send_n_msg` path with
     /// `Z_RELIABILITY_RELIABLE`). The querier on the group matches it to
     /// its pending Query by request id.
-    #[cfg(feature = "codec-response")]
+    #[cfg(all(feature = "alloc", feature = "codec-response"))]
     Response {
         /// The built `Response` network message (drained from the
         /// observer's `pending_replies` via `QueryReply::into_response`).
@@ -124,7 +132,7 @@ pub enum MulticastTxItem {
     /// [`build_response_final`](crate::response_final_build::build_response_final)
     /// and framed via
     /// [`encode_frame_with_response_final`](crate::frame_encode::encode_frame_with_response_final).
-    #[cfg(feature = "codec-response-final")]
+    #[cfg(all(feature = "alloc", feature = "codec-response-final"))]
     ResponseFinal {
         /// The request id whose reply chain this frame terminates (drained
         /// from the observer's `pending_final_rids`).
@@ -149,7 +157,7 @@ pub enum MulticastTxItem {
     /// because the borrowed-arg sink seam resolves the keyexpr at drain (mirror
     /// of the unicast `SessionLinkActions: DeclareReplySink`, which routes the
     /// same owned form through its inherent `send_declare`).
-    #[cfg(feature = "liveliness-token")]
+    #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
     DeclareReply {
         /// The built `Declare` reply (a `DeclToken` for a held token, or the
         /// terminating `DeclFinal`), already owned via `Declare::try_into_owned`.
@@ -165,6 +173,7 @@ pub enum MulticastTxItem {
 /// send mode — the MCU `send_to_group` ignores it (multicast UDP is best-effort
 /// either way), while the AP `LinkDriver::send` maps it to
 /// `Reliability::{Reliable, BestEffort}`.
+#[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct MulticastTxFrames {
     /// The wire datagrams to multicast, in send order (one frame, or a
@@ -180,7 +189,13 @@ pub struct MulticastTxFrames {
 /// conduit, so the band is always elided to DEFAULT — no non-DEFAULT frame can
 /// ride (the pico-faithful 2-channel default), and a non-qos / pico receiver
 /// never decodes an "Unknown priority" frame.
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+#[cfg(any(
+    all(
+        feature = "alloc",
+        any(feature = "codec-push", feature = "codec-response")
+    ),
+    all(feature = "codec-push", feature = "transport-tx-lend")
+))]
 fn effective_mcast_priority(priority: Priority, is_qos: bool) -> Priority {
     #[cfg(feature = "transport-qos")]
     {
@@ -201,7 +216,13 @@ fn effective_mcast_priority(priority: Priority, is_qos: bool) -> Priority {
 /// a non-DEFAULT priority (zenoh OMITS the QoS ext on a DEFAULT / Data frame; the
 /// receiver decodes its ABSENCE as DEFAULT). `None` ⇒ byte-identical to the
 /// pre-qos wire — the anchor the layer3 byte-equiv tests pin.
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+#[cfg(any(
+    all(
+        feature = "alloc",
+        any(feature = "codec-push", feature = "codec-response")
+    ),
+    all(feature = "codec-push", feature = "transport-tx-lend")
+))]
 fn frame_ext_qos(priority: Priority) -> Option<Priority> {
     (priority != Priority::DEFAULT).then_some(priority)
 }
@@ -216,6 +237,10 @@ fn frame_ext_qos(priority: Priority) -> Option<Priority> {
 /// kept apart for the same reason: room is asked BEFORE a sequence number is
 /// minted, so a message that finds none spends no SN, and the datagram is
 /// enqueued only once it has one.
+///
+/// Heap profile only: the datagrams it takes are vectors. A build with no allocator
+/// frames into one buffer lent by the caller (`multicast_tx_emit_lent`).
+#[cfg(feature = "alloc")]
 pub trait MulticastTxQueue {
     /// Wait, within `wait`, for room on `priority`'s lane.
     fn wait_for_room(&mut self, priority: Priority, wait: RoomWait) -> RoomAnswer;
@@ -256,6 +281,7 @@ pub trait MulticastTxQueue {
 /// R2929 — one datagram a push puts on the queue, with the conduit and the
 /// sequence number it carries: a queue that writes later can say, as it
 /// writes, which SN has reached the wire (`MulticastTxConduits::written`).
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MulticastTxDatagram {
     /// The conduit's band: the effective priority the SN was minted on, and
@@ -272,19 +298,25 @@ pub struct MulticastTxDatagram {
 /// A queue that always has room and keeps what it is given: the pico-faithful
 /// shape, where a multicast send goes straight to the socket and there is no
 /// queue to be full (`multicast_tx_emit`'s backing).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 struct UnboundedCollect(Vec<Vec<u8>>);
 
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 impl MulticastTxQueue for UnboundedCollect {
     fn wait_for_room(&mut self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
@@ -313,11 +345,14 @@ impl MulticastTxQueue for UnboundedCollect {
 /// Gated on the union of the body codecs that inhabit [`MulticastTxItem`]: with
 /// none, the item is uninhabited and can never be enqueued, so the emit SSOT
 /// does not exist (the loops consume the uninhabited item with an empty match).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 pub fn multicast_tx_emit(
     item: MulticastTxItem,
@@ -337,11 +372,14 @@ pub fn multicast_tx_emit(
 /// The channel `item` rides: a Push's own flag; the replies are pinned
 /// reliable (a dropped reply / terminal hangs the peer's pending get, so they
 /// ride the reliable SN ring + R flag — zenoh-pico parity).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
     match item {
@@ -372,11 +410,14 @@ fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
 /// as a congestion drop and closes nothing
 /// (`io/zenoh-transport/src/multicast/tx.rs` @ `fn schedule_on_link(&self, msg: NetworkMessageRef) -> ZResult<bool> {`),
 /// where a unicast transport closes on a blocking one.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 pub fn multicast_tx_push<M, Q>(
     item: MulticastTxItem,
@@ -469,11 +510,14 @@ where
 /// zenoh's `is_droppable`: a best-effort message, or one whose congestion
 /// control is `Drop`
 /// (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bool {
     !reliable || congestion == crate::qos::CongestionControl::Drop
@@ -483,11 +527,14 @@ fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bo
 /// its bytes: the conduit, the frame's `ext_qos`, the channel, and whether the
 /// message may be dropped. The one reading of an item's QoS on the TX side;
 /// [`multicast_tx_push`] and [`multicast_tx_conduit`] both ask it.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 fn frame_meta(
     item: &MulticastTxItem,
@@ -572,11 +619,14 @@ fn frame_meta(
 /// batch (`io/zenoh-transport/src/common/pipeline.rs` @ `pub(crate) fn push_network_message(`),
 /// asks this for the conduit to lock and then pushes against it
 /// ([`MulticastTxConduit`]).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 pub fn multicast_tx_conduit(
     item: &MulticastTxItem,
@@ -636,11 +686,14 @@ impl MulticastTxMint for MulticastTxConduit<'_> {
 }
 
 /// What [`push_frame`] needs to know of a message besides its bytes.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 #[derive(Clone, Copy)]
 struct FrameMeta {
@@ -670,11 +723,14 @@ struct FrameMeta {
 /// ring-consecutive from the frame's: each further fragment mints exactly one,
 /// as that function's up-front mints do, so the two agree on the wire and on
 /// the ring whenever there is room throughout.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 fn push_frame<M, Q, P>(
     meta: FrameMeta,
@@ -787,7 +843,7 @@ where
 /// [`build_push_literal`](crate::push_build::build_push_literal); richer pushes
 /// (Del / best-effort / aliased keyexpr / metadata) construct the item
 /// directly.
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub fn multicast_put_literal(
     keyexpr_suffix: &str,
     payload: &[u8],
@@ -862,11 +918,14 @@ pub fn multicast_tx_stats_class(
 /// congestion drop is known only after, and by then the item is on the wire or
 /// gone. Without `transport-stats` there is nothing to count and the tally is
 /// empty.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 pub struct MulticastTxTally {
     #[cfg(feature = "transport-stats")]
@@ -875,11 +934,14 @@ pub struct MulticastTxTally {
     class: crate::stats::NetworkStatsClass,
 }
 
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
 ))]
 impl MulticastTxTally {
     /// The tally of `item`, by its own band and class
@@ -910,6 +972,231 @@ impl MulticastTxTally {
     }
 }
 
+// ─────────── the TX of a build with no allocator ───────────
+//
+// Fixed-memory step S9e. The emit above frames a queued item into a `Vec<Vec<u8>>`
+// of datagrams: a boxed owned message, a vector for the frame, a vector for each
+// fragment. A node with no allocator frames the same message into ONE buffer the
+// caller lends, a datagram at a time, from the borrowed `Push` over the text and the
+// bytes the caller holds ([`crate::lent_push::literal_put`]), and sends each datagram
+// before the buffer is written again. The wire is the same: the frame is
+// [`crate::frame_encode::encode_frame_envelope_into`] and a fragment is
+// [`crate::frame_encode::write_fragment`], the writers the heap emit uses, over the
+// same [`FragmentPlan`](crate::frame_encode::FragmentPlan), and the SN walk is the
+// emit's (`multicast_frame_or_fragments`), so the two cannot differ in a byte.
+
+/// A `Put` the multicast TX seam of a build with no allocator is offered: the
+/// literal keyexpr and the payload as the caller holds them, borrowed for the call
+/// that frames them. What `MulticastTxItem::Push` is on the heap profile, with no
+/// owned message and no box: nothing here outlives the emit.
+#[cfg(all(feature = "codec-push", feature = "transport-tx-lend"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MulticastTxPut<'a> {
+    /// The keyexpr, literal (the `id == 0` form, its suffix carried inline).
+    pub keyexpr: &'a str,
+    /// The payload.
+    pub payload: &'a [u8],
+    /// Channel selection, as for `MulticastTxItem::Push`: reliable mints on the
+    /// reliable ring, best-effort on the other.
+    pub reliable: bool,
+    /// The QoS band, clamped as the heap emit clamps it (to DEFAULT unless the group
+    /// negotiated `is_qos` under `transport-qos`).
+    pub priority: Priority,
+}
+
+#[cfg(all(feature = "codec-push", feature = "transport-tx-lend"))]
+impl<'a> MulticastTxPut<'a> {
+    /// A reliable, DEFAULT-band Put: `multicast_put_literal`'s item, borrowed.
+    pub const fn literal(keyexpr: &'a str, payload: &'a [u8]) -> Self {
+        Self {
+            keyexpr,
+            payload,
+            reliable: true,
+            priority: Priority::DEFAULT,
+        }
+    }
+}
+
+/// What the pull seam of a multicast drive loop yields, in the form of the build's
+/// profile: the owned, boxed [`MulticastTxItem`] of the heap profile, or a borrowed
+/// `MulticastTxPut` on a build with no allocator. The lifetime is the borrow the
+/// slot profile's form holds and the heap profile's does not need, so one signature
+/// serves both.
+#[cfg(any(
+    feature = "alloc",
+    not(feature = "codec-push"),
+    not(feature = "transport-tx-lend")
+))]
+pub type MulticastTxOffer<'a> = MulticastTxItem;
+/// See the heap form of this alias.
+#[cfg(all(
+    not(feature = "alloc"),
+    feature = "codec-push",
+    feature = "transport-tx-lend"
+))]
+pub type MulticastTxOffer<'a> = MulticastTxPut<'a>;
+
+/// Why `multicast_tx_emit_lent` sent nothing.
+#[cfg(all(feature = "codec-push", feature = "transport-tx-lend"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MulticastTxRefused {
+    /// The frame does not fit the group's batch (or the buffer lent) and this build
+    /// cuts no fragment chain: zenoh-pico's "Sending the message required
+    /// fragmentation feature that is deactivated". The heap emit passes such a frame
+    /// through whatever its size, which a buffer of fixed size cannot.
+    NeedsFragmentation,
+    /// A datagram of the message does not fit the buffer lent: a fragment's head and
+    /// chunk are at most the batch, so the buffer is smaller than the group's batch
+    /// budget allows for. Nothing is truncated.
+    DatagramTooSmall,
+    /// The message does not encode (a keyexpr longer than the codec's text bound).
+    Unencodable,
+}
+
+/// Frame `put` into the datagram buffer `datagram` and hand each datagram it becomes
+/// to `send`, in order: a single `T_MID_FRAME` when it fits the group's batch
+/// ([`MulticastParams::batch_size`](crate::multicast_params::MulticastParams::batch_size),
+/// held to the buffer's own length), else the `T_MID_FRAGMENT` chain it re-frames
+/// into. Answers how many datagrams were sent.
+///
+/// The no-allocator twin of the heap profile's `multicast_tx_emit`, with the same
+/// minting: the frame takes its conduit's next SN, and a chain takes one more for
+/// each further fragment, on the SAME conduit, so the ring stays consecutive and the
+/// next JOIN beacon advertises the post-chain `next_*`. `send` may borrow the
+/// buffer's bytes for the call only: the buffer is written again for the next
+/// datagram.
+#[cfg(all(feature = "codec-push", feature = "transport-tx-lend"))]
+pub fn multicast_tx_emit_lent(
+    put: &MulticastTxPut<'_>,
+    tx_sn: &mut crate::sn::MulticastTxConduits,
+    params: &crate::multicast_params::MulticastParams,
+    datagram: &mut [u8],
+    send: &mut dyn FnMut(&[u8]),
+) -> Result<usize, MulticastTxRefused> {
+    use crate::tx_buf::{CappedTxBuf, SliceTxBuf, TxBuf};
+
+    let priority = effective_mcast_priority(put.priority, params.is_qos);
+    let ext_qos = frame_ext_qos(priority);
+    let reliable = put.reliable;
+    let sn = tx_sn.mint(priority, reliable);
+    let mtu = core::cmp::min(params.batch_size as usize, datagram.len());
+    let flags = crate::frame_encode::frame_flags(reliable);
+    let push = crate::lent_push::literal_put(put.keyexpr, put.payload);
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| push.encode(sink);
+
+    // The frame whole, when it fits the batch: the cap makes a refusal mean "past it".
+    let whole = {
+        let mut buf = SliceTxBuf::new(&mut *datagram);
+        let mut capped = CappedTxBuf::new(&mut buf, mtu);
+        crate::frame_encode::encode_frame_envelope_into(&mut capped, sn, flags, ext_qos, body)
+            .ok()
+            .map(|()| TxBuf::len(&capped))
+    };
+    if let Some(len) = whole {
+        send(&datagram[..len]);
+        return Ok(1);
+    }
+
+    #[cfg(feature = "transport-fragmentation")]
+    {
+        use crate::frame_encode::{encoded_body_len, write_fragment, FragmentBody, FragmentPlan};
+        let encode: &crate::frame_encode::BodyEncoder<'_> = &body;
+        let body_len = encoded_body_len(encode).map_err(|_| MulticastTxRefused::Unencodable)?;
+        let mut plan = FragmentPlan::new(body_len, mtu, sn, tx_sn.mask(), ext_qos);
+        let mut sent = 0usize;
+        while let Some(span) = plan.next_span() {
+            // The first fragment rides the frame's SN, each further one mints the
+            // conduit's next, as `multicast_frame_or_fragments` does.
+            if sent > 0 {
+                tx_sn.mint(priority, reliable);
+            }
+            let len = {
+                let mut buf = SliceTxBuf::new(&mut *datagram);
+                write_fragment(
+                    &mut buf,
+                    &span,
+                    FragmentBody::Encoded(encode),
+                    reliable,
+                    ext_qos,
+                )
+                .map_err(|_| MulticastTxRefused::DatagramTooSmall)?;
+                TxBuf::len(&buf)
+            };
+            send(&datagram[..len]);
+            sent += 1;
+        }
+        Ok(sent)
+    }
+    #[cfg(not(feature = "transport-fragmentation"))]
+    {
+        Err(MulticastTxRefused::NeedsFragmentation)
+    }
+}
+
+/// Emit one offer of a pull seam: the heap profile's `multicast_tx_emit` over the
+/// owned item, or `multicast_tx_emit_lent` over a lent `Put`, whichever the
+/// build's [`MulticastTxOffer`] is, handing each datagram to `send`. Answers how many
+/// datagrams went out (none for a refused offer, which a best-effort multicast TX
+/// has no one to tell). `scratch` is the datagram buffer of the lent form and is not
+/// touched by the heap one.
+///
+/// One call for both profiles, so a drive loop carries no `cfg` at its TX drain, and
+/// a build with no TX body codec, whose offer cannot be made, matches on an empty
+/// type.
+pub fn multicast_tx_emit_offer(
+    offer: MulticastTxOffer<'_>,
+    tx_sn: &mut crate::sn::MulticastTxConduits,
+    params: &crate::multicast_params::MulticastParams,
+    scratch: &mut [u8],
+    send: &mut dyn FnMut(&[u8]),
+) -> usize {
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        )
+    ))]
+    {
+        let _ = scratch;
+        let frames = multicast_tx_emit(offer, tx_sn, params);
+        for datagram in &frames.datagrams {
+            send(datagram);
+        }
+        frames.datagrams.len()
+    }
+    #[cfg(all(
+        not(feature = "alloc"),
+        feature = "codec-push",
+        feature = "transport-tx-lend"
+    ))]
+    {
+        multicast_tx_emit_lent(&offer, tx_sn, params, scratch, send).unwrap_or(0)
+    }
+    #[cfg(not(any(
+        all(
+            feature = "alloc",
+            any(
+                feature = "codec-push",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "liveliness-token"
+            )
+        ),
+        all(
+            not(feature = "alloc"),
+            feature = "codec-push",
+            feature = "transport-tx-lend"
+        )
+    )))]
+    {
+        let _ = (tx_sn, params, scratch, send);
+        match offer {}
+    }
+}
+
 // R311y227 — the emit-level witness: `multicast_tx_emit` clamps the band by the
 // group's `is_qos`, selects the per-priority TX conduit, and writes the frame
 // `ext_qos` — the composition the sn.rs (conduit) + frame_encode (wire) unit
@@ -929,7 +1216,7 @@ mod qos_emit_tests {
         MulticastParams {
             version: 0x09,
             whatami: WhatAmI::Peer,
-            zid: alloc::vec![1, 2, 3, 4],
+            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,
@@ -1022,7 +1309,7 @@ mod push_tests {
         MulticastParams {
             version: 0x09,
             whatami: WhatAmI::Peer,
-            zid: alloc::vec![1, 2, 3, 4],
+            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,
@@ -1284,7 +1571,7 @@ mod lend_tests {
         MulticastParams {
             version: 0x09,
             whatami: WhatAmI::Peer,
-            zid: alloc::vec![1, 2, 3, 4],
+            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
             lease_ms: 5_000,
             join_interval_ms: 50,
             seq_num_res: 0x02,

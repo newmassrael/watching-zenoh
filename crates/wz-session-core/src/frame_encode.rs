@@ -701,7 +701,7 @@ pub fn encode_frame_with_push_qos(
 /// `emit_frame_or_fragments` as a consumer, so the former wire-emit
 /// codec union (R311jq) no longer bounds where the symbol is live —
 /// any fragmentation build slices.
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 fn vle_width(sn: u64) -> usize {
     let (mut width, mut v) = (1usize, sn);
     while v >= 0x80 {
@@ -726,7 +726,7 @@ fn vle_width(sn: u64) -> usize {
 /// prepend a stray `[0x31][priority]` to the reassembled batch and break the
 /// peer's `parse_frame_payload` (`0x31 & 0x1F` is not a valid network MID). The
 /// non-QoS / DEFAULT path passes `None` and slices exactly as before.
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 pub(crate) fn frame_wire_body(frame: &[u8], sn: u64, ext_qos: Option<Priority>) -> &[u8] {
     let mut off = 1 + vle_width(sn);
     if ext_qos.is_some() {
@@ -812,7 +812,7 @@ fn fragment_chunk_size(mtu: usize, qos: bool) -> usize {
 /// Number of `T_MID_FRAGMENT` frames a `body_len`-byte network message splits
 /// into at this `mtu`. The caller reserves exactly this many consecutive SNs
 /// before calling [`fragment_body`].
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 pub(crate) fn fragment_count(body_len: usize, mtu: usize, qos: bool) -> usize {
     let chunk = fragment_chunk_size(mtu, qos);
     // ceil(body_len / chunk), min 1 (an empty body still emits one final
@@ -836,7 +836,7 @@ pub(crate) fn fragment_count(body_len: usize, mtu: usize, qos: bool) -> usize {
 /// chain, so the priority must ride each chunk. The first fragment chains the
 /// QoS ext ahead of the `FRAGMENT_FIRST` marker (id order `0x1` then `0x2`). A
 /// `None` chain is byte-identical to the pre-QoS fragment wire.
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 pub fn fragment_body(
     body: &[u8],
     reliable: bool,
@@ -875,7 +875,11 @@ pub fn fragment_body(
 /// Byte-for-byte identical to [`fragment_body`]: that function is now this
 /// iterator collected, so the wire SSOT has ONE producer and cannot drift
 /// between the streaming and the whole-chain caller.
-#[cfg(feature = "transport-fragmentation")]
+///
+/// The heap profile's: each fragment is a vector. A build with no allocator walks the
+/// same [`FragmentPlan`] a fragment at a time and writes each into the buffer it is
+/// lent (`write_fragment`).
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 pub struct FragmentChain<'a> {
     body: &'a [u8],
     plan: FragmentPlan,
@@ -883,7 +887,7 @@ pub struct FragmentChain<'a> {
     ext_qos: Option<Priority>,
 }
 
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 impl<'a> FragmentChain<'a> {
     /// Start a chain over `body` with the same parameters [`fragment_body`]
     /// takes; `base_sn` is the oversize FRAME's already-minted SN, which IS
@@ -928,7 +932,7 @@ impl<'a> FragmentChain<'a> {
     }
 }
 
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 impl Iterator for FragmentChain<'_> {
     type Item = Vec<u8>;
 
@@ -1254,7 +1258,7 @@ impl TxBuf for BodyWindow<'_, '_> {
 /// marker (a patch-0 peer) then treats this as one more continuation
 /// fragment and stays in the same state it was already in, rather than being
 /// told a truncated chain ended cleanly.
-#[cfg(feature = "transport-fragmentation")]
+#[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priority>) -> Vec<u8> {
     build_fragment_wire(sn, &[], reliable, true, false, true, ext_qos)
 }
@@ -1328,7 +1332,7 @@ pub fn build_fragment_drop_wire(sn: u64, reliable: bool, ext_qos: Option<Priorit
 /// referenced it anyway — a break that only `--features
 /// transport-multicast,reassembly` could show, which no local gate builds
 /// (hosted Layers C3 and C1q both died on it, one error, two lanes).
-#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
+#[cfg(all(feature = "codec-fragment", feature = "reassembly", feature = "alloc"))]
 pub fn build_fragment_wire(
     sn: u64,
     payload: &[u8],
@@ -1451,7 +1455,7 @@ pub fn write_fragment_head(
 /// `ext_qos` is written as `begin_frame` writes it (`write_qos_ext`, never
 /// chained: a Frame carries no other extension), so its presence is the
 /// caller's decision and a DEFAULT priority is written when it is asked for.
-#[cfg(all(feature = "codec-frame", feature = "transport-qos"))]
+#[cfg(all(feature = "codec-frame", feature = "transport-qos", feature = "alloc"))]
 pub fn build_frame_wire(
     sn: u64,
     payload: &[u8],

@@ -10198,10 +10198,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             not(feature = "transport-stats")
         ))]
         {
-            use wz_codecs::msg_put::MsgPut;
-            use wz_codecs::push::{Push, PushVariant};
-            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-            use wz_codecs::wireexpr_local::WireexprLocal;
             self.dispatch_network_message(
                 priority,
                 reliable,
@@ -10210,29 +10206,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::sample::QosLevel::DEFAULT,
                 wz_codecs::push::Push::MAX_ENCODED_BYTES,
                 crate::stats::NetworkStatsClass::unread(),
-                |sink| {
-                    Push {
-                        // `N_MID_PUSH | N_flag` -- the `M` flag derives from the
-                        // WireexprLocal arm at encode time, as in
-                        // `build_push_literal`.
-                        header: wz_codecs::wire_const::N_MID_PUSH | 0x20,
-                        keyexpr: Wireexpr {
-                            body: WireexprVariant::WireexprLocal(WireexprLocal {
-                                id: 0,
-                                suffix_len: Some(keyexpr_suffix.len() as u64),
-                                suffix: Some(keyexpr_suffix),
-                            }),
-                        },
-                        extensions: None,
-                        body: PushVariant::CodecZenohMsgPut(MsgPut {
-                            header: 0x01,
-                            payload_len: Some(value.len() as u64),
-                            payload: Some(value),
-                            ..MsgPut::default()
-                        }),
-                    }
-                    .encode(sink)
-                },
+                // The borrowed composition the multicast TX of a build with no
+                // allocator encodes too (`multicast_tx::MulticastTxPut`).
+                |sink| crate::lent_push::literal_put(keyexpr_suffix, value).encode(sink),
             )
         }
         #[cfg(all(

@@ -44,6 +44,7 @@
 
 use crate::multicast_peer_arrived::MulticastPeerArrived;
 use crate::multicast_peer_lost::MulticastPeerLost;
+#[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 
 /// The counts one multicast transport takes, reported by the code that
@@ -66,25 +67,34 @@ pub trait MulticastStatsRecorder {
     /// push has succeeded: a message that found no room is
     /// [`Self::network_message_dropped`] instead, as upstream's multicast
     /// schedule counts one or the other.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        )
     ))]
     fn network_message_sent(&self, _tally: &crate::multicast_tx::MulticastTxTally) {}
 
     /// R2929 — a network message found no room on the transport's queue within
     /// its deadline: a congestion drop.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        )
     ))]
     fn network_message_dropped(&self, _tally: &crate::multicast_tx::MulticastTxTally) {}
 
-    /// The admitted peer `zid` sent `msg`.
+    /// The admitted peer `zid` sent `msg`. The owned message is the heap profile's:
+    /// a build with no allocator reads each record where its datagram lies and
+    /// counts none (`transport-stats` implies `alloc`, so it has no counts to take).
+    #[cfg(feature = "alloc")]
     fn network_message_received(&self, _zid: &[u8], _msg: &NetworkMessage) {}
 
     /// A peer was admitted to the group.
@@ -119,11 +129,14 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
         }
     }
 
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        )
     ))]
     fn network_message_sent(&self, tally: &crate::multicast_tx::MulticastTxTally) {
         if let Some(inner) = self {
@@ -131,11 +144,14 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
         }
     }
 
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        )
     ))]
     fn network_message_dropped(&self, tally: &crate::multicast_tx::MulticastTxTally) {
         if let Some(inner) = self {
@@ -143,6 +159,7 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
         }
     }
 
+    #[cfg(feature = "alloc")]
     fn network_message_received(&self, zid: &[u8], msg: &NetworkMessage) {
         if let Some(inner) = self {
             inner.network_message_received(zid, msg);
