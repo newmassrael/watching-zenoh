@@ -28,6 +28,8 @@
 //!        "counter":7,
 //!        "counter_error":false,"timeout_error":false,"counter_reason":"none",
 //!        "silence_ms":12,
+//!        "previous_counter":6,"first":false,"counter_step":1,
+//!        "max_gap":3,"timeout_ms":100,
 //!        "slot":{"keyexpr":"demo/a","zid":"...","identity":[{"name":"ident","value":N}]}}
 //! ```
 //!
@@ -51,9 +53,27 @@
 //!   received, which has no earlier frame to be silent since. `null` is "not
 //!   judged" and `false` is "judged and fine": a reader must not read an
 //!   unjudged frame as a good one.
+//! * **What a frame was judged AGAINST** (field document 35):
+//!   `previous_counter` is the counter the slot had last ACCEPTED before this
+//!   frame (a CRC error and a repetition accept nothing, so after either it is
+//!   unchanged; a step past the allowed gap is accepted, so it becomes the next
+//!   frame's), `first` is `true` exactly while the slot has accepted none, and
+//!   `counter_step` is the step from `previous_counter` to `counter` in the
+//!   counter's own width, the number [`crate::e2e_judge::Judge`] reaches its
+//!   verdict from. `max_gap` and `timeout_ms` are the limits of the profile the
+//!   slot's judge applied. `first` is how a reader tells a first frame from
+//!   one whose packet carried no timestamp, which `silence_ms` alone cannot.
+//!   All five are `null` when there is no slot to judge against; `counter_step`
+//!   is also `null` while `first` is `true` and for a frame whose CRC did not
+//!   match (its counter is not read), and `timeout_ms` for a frame whose packet
+//!   carried no timestamp (no timeout was judged).
 //! * `opened: false` is a payload that is not a frame: shorter than the header,
-//!   or not one run of bytes in the capture. Its block carries `why`, and the
-//!   keys above that need a frame are absent.
+//!   or not one run of bytes in the capture. Its block carries `why`, the
+//!   sentence, and `unopened_reason`, the word (`payload_shorter_than_header`
+//!   or `payload_not_contiguous`; the first alone also carries `payload_bytes`),
+//!   and the keys above that need a frame are absent. A history reply is not
+//!   either of these: only a `Push` carrying a `put` is read as a frame, so a
+//!   reply entry carries no `e2e` block at all.
 //!
 //! 64-bit values that can pass 2^53 (a CRC, a wide header field) are decimal
 //! strings beyond it, by the integer rule every document here keeps.
@@ -70,6 +90,18 @@ use crate::payload_decode::{push_matched_rule, E2eJudged};
 
 /// Write `null` or the number.
 fn push_optional(value: Option<u64>, out: &mut String) {
+    match value {
+        Some(value) => u64_into(value, out),
+        None => out.push_str("null"),
+    }
+}
+
+/// Write `null` or the number, for the facts a frame was judged under
+/// (`previous_counter`, `counter_step`, `max_gap`, `timeout_ms`). A function of
+/// its own, and not [`push_optional`], because the cells the integer-door gate
+/// names are one per call and these four were born at revision 35, while
+/// `silence_ms` was born at 34.
+fn push_counter_fact(value: Option<u64>, out: &mut String) {
     match value {
         Some(value) => u64_into(value, out),
         None => out.push_str("null"),
@@ -119,6 +151,13 @@ pub(crate) fn push_block(judged: &E2eJudged<'_>, out: &mut String) {
         }
         Outcome::Opened(opened) => push_opened(judged, opened, out),
     }
+    // The machine word beside the sentence, on exactly the blocks that have a
+    // sentence: `why` and `unopened_reason` arrive together or not at all.
+    if let Some(reason) = judged.outcome.unopened() {
+        out.push_str(",\"unopened_reason\":\"");
+        out.push_str(reason.word());
+        out.push('"');
+    }
     out.push('}');
 }
 
@@ -166,6 +205,27 @@ fn push_opened(judged: &E2eJudged<'_>, opened: &Opened, out: &mut String) {
     out.push_str(",\"silence_ms\":");
     push_optional(
         judgment.filter(|_| opened.timed).and_then(|j| j.silence_ms),
+        out,
+    );
+
+    // What the frame was judged AGAINST, so a reader does not have to guess it
+    // from `silence_ms` (which is `null` for a first frame and for a frame with
+    // no timestamp alike). All five are `null` when there is no slot to judge
+    // against, and the counter step and the timeout limit are `null` where that
+    // part of the judgement was not made.
+    out.push_str(",\"previous_counter\":");
+    push_counter_fact(judgment.and(opened.previous), out);
+    out.push_str(",\"first\":");
+    push_optional_bool(judgment.map(|_| opened.previous.is_none()), out);
+    out.push_str(",\"counter_step\":");
+    push_counter_fact(judgment.and(opened.step), out);
+    out.push_str(",\"max_gap\":");
+    push_counter_fact(judgment.map(|_| profile.counter().max_gap), out);
+    out.push_str(",\"timeout_ms\":");
+    push_counter_fact(
+        judgment
+            .filter(|_| opened.timed)
+            .map(|_| profile.counter().timeout_ms),
         out,
     );
 

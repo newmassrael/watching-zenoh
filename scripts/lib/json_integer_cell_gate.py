@@ -122,6 +122,10 @@ _E2E_BLOCK_HEADER = (
     "the `crc_computed`, `length_field`, `length_expected`, `counter` and `silence_ms` "
     "of an `e2e` block and the `value` of each entry of its `slot.identity`"
 )
+#: What a frame was judged against (field document 35): the four numbers the block
+#: gained, written by one function of their own so that their cell is born at 35
+#: and not at 34 with `silence_ms`.
+_E2E_BLOCK_FACTS_HEADER = "the `previous_counter`, `counter_step`, `max_gap` and `timeout_ms` of an `e2e` block"
 
 #: (file, enclosing fn) -> the cells that function writes through a door, one per call.
 CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
@@ -196,6 +200,15 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ),
     ("crates/wz-capture/src/e2e_row.rs", "push_optional"): (
         Cell("fields", "an e2e block's silence_ms", _E2E_BLOCK_HEADER, "`silence_ms`", born=34),
+    ),
+    ("crates/wz-capture/src/e2e_row.rs", "push_counter_fact"): (
+        Cell(
+            "fields",
+            "an e2e block's previous_counter, counter_step, max_gap and timeout_ms",
+            _E2E_BLOCK_FACTS_HEADER,
+            "`previous_counter`, `counter_step`, `max_gap` and `timeout_ms`",
+            born=35,
+        ),
     ),
     ("crates/wz-capture/src/e2e_json.rs", "push_fields"): (
         Cell("e2e_wrap", "a field's raw", _E2E_FIELD_HEADER, "a field's `raw`"),

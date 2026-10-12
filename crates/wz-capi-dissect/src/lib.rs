@@ -1230,7 +1230,9 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// layout. A key a profile rule covers has its frames read and judged: each
 /// `Push` entry gains an `e2e` block (field-document revision 34), with the
 /// CRC, the length facts, the counter and timeout verdicts and the slot the
-/// counter was judged in. See the header for the block.
+/// counter was judged in; revision 35 adds what the frame was judged against
+/// (the previous counter, the step, the limits) and a closed word for a payload
+/// that is not a frame. See the header for the block.
 ///
 /// ONE dialect for both surfaces, deliberately: a rule that a person tried in a
 /// terminal and then moved into a config file must not have to be re-spelled,
@@ -7700,6 +7702,20 @@ mod tests {
             "{doc}"
         );
         assert!(doc.contains("\"zid\":\"a1a1a1a1\""), "{doc}");
+        // What each frame was judged AGAINST (field document 35), in the order
+        // sent: the first has nothing before it; the repetition steps by zero
+        // from the 5 the first accepted and accepts nothing; the third steps one
+        // from that same 5.
+        for (previous, first, step) in [
+            ("null", "true", "null"),
+            ("5", "false", "0"),
+            ("5", "false", "1"),
+        ] {
+            let facts = format!(
+                "\"previous_counter\":{previous},\"first\":{first},\"counter_step\":{step},\"max_gap\":"
+            );
+            assert_eq!(doc.matches(&facts).count(), 1, "{facts}: {doc}");
+        }
         // No declarations, no block: a reader who registered nothing is told
         // nothing.
         let plain = call_fields_with_payloads(&e2e_capture(&[5]), 0, "").expect("reads");

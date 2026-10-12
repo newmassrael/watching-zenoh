@@ -211,10 +211,27 @@ pub(crate) fn pin_documents() -> Vec<String> {
         .expect("a profile key");
     let mut block = String::new();
     crate::e2e_row::push_block(&unreadable, &mut block);
+
+    // The same two blocks under a rule that names NO body schema, which is the
+    // other shape every `unopened_reason` word arrives in: `body_schema` is
+    // there only when the rule names one.
+    let bare = format!("#prof={}\ndemo/e2e/**=prof\n", profile_text("prof", 3));
+    let mut bare_short = Wire::new(Link::Tcp, true);
+    bare_short.put(true, Some(MS), "demo/e2e/a", b"short");
+    let mut bare_map = FormatMap::new();
+    bare_map.declare_all(&bare).expect("installs");
+    let bare_run = Declarations::new(&bare_map);
+    let bare_unreadable = bare_run
+        .judge_e2e("demo/e2e/a", None, None, None)
+        .expect("a profile key");
+    let mut bare_block = String::new();
+    crate::e2e_row::push_block(&bare_unreadable, &mut bare_block);
     alloc::vec![
         named.document(&declarations),
         unnamed.document(&declarations),
         block,
+        bare_short.document(&bare),
+        bare_block,
     ]
 }
 
@@ -500,6 +517,265 @@ fn the_timeout_is_judged_against_the_instants_the_capture_took_the_packets_at() 
             "{link:?}"
         );
         assert_eq!(silences, strings(&["null", "50", "200", "250"]), "{link:?}");
+    }
+}
+
+/// The five keys of the block that say what a frame was judged AGAINST, for
+/// every frame of a slot in order. The frames are chosen so that each of the
+/// five differs from what a wrong reading would print:
+///
+/// * the damaged frame sits between two valid ones, where "the previous
+///   frame's counter" (11) and "the last accepted counter" (10) differ;
+/// * the repetition has a step of zero, which is a number and not `null`;
+/// * the last frame's counter jump is past the gap, and it is still reported
+///   with the step it was judged by (8 against a `max_gap` of 3).
+///
+/// Every frame here is timed, so `timeout_ms` is the profile's limit on each;
+/// the untimed case is the next test's.
+#[test]
+fn a_frame_names_what_it_was_judged_against() {
+    const MS: u64 = 1_000_000;
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        wire.put(true, Some(MS), "demo/e2e/a", &frame(10, b"body"));
+        wire.put(
+            true,
+            Some(2 * MS),
+            "demo/e2e/a",
+            &damaged(frame(11, b"body")),
+        );
+        wire.put(true, Some(3 * MS), "demo/e2e/a", &frame(12, b"body"));
+        wire.put(true, Some(4 * MS), "demo/e2e/a", &frame(12, b"body"));
+        wire.put(true, Some(5 * MS), "demo/e2e/a", &frame(20, b"body"));
+        let doc = wire.document(&rules("demo/e2e/**=prof\n"));
+        let blocks = e2e_blocks(&doc);
+        assert_eq!(blocks.len(), 5, "{link:?}: {doc}");
+        let column =
+            |key: &str| -> Vec<Option<String>> { blocks.iter().map(|b| text(b, key)).collect() };
+        assert_eq!(
+            column("previous_counter"),
+            strings(&["null", "10", "10", "12", "12"]),
+            "{link:?}"
+        );
+        assert_eq!(
+            column("first"),
+            strings(&["true", "false", "false", "false", "false"]),
+            "{link:?}"
+        );
+        assert_eq!(
+            column("counter_step"),
+            strings(&["null", "null", "2", "0", "8"]),
+            "{link:?}: a first frame has nothing to step from and a damaged one is not read"
+        );
+        assert_eq!(
+            column("max_gap"),
+            strings(&["3", "3", "3", "3", "3"]),
+            "{link:?}"
+        );
+        assert_eq!(
+            column("timeout_ms"),
+            strings(&["100", "100", "100", "100", "100"]),
+            "{link:?}"
+        );
+        // The step IS the number the verdict was reached from: 2 and 0 are
+        // inside the gap of 3 (the second a repetition), 8 is past it.
+        assert_eq!(
+            verdicts(&doc),
+            expect(&[FINE, FINE, FINE, REPEAT, JUMP]),
+            "{link:?}"
+        );
+    }
+}
+
+/// A capture whose packets carry no time judges no timeout, and says so in
+/// the new key as in the old one: `timeout_ms` is `null` exactly where
+/// `timeout_error` is, on every frame, while `max_gap` and the counter facts
+/// are still there (the counter does not need a clock).
+#[test]
+fn an_untimed_capture_names_no_timeout_limit_but_still_names_the_counter_facts() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        wire.put(true, None, "demo/e2e/a", &frame(10, b"body"));
+        wire.put(true, None, "demo/e2e/a", &frame(11, b"body"));
+        let doc = wire.document(&rules("demo/e2e/**=prof\n"));
+        let blocks = e2e_blocks(&doc);
+        assert_eq!(blocks.len(), 2, "{link:?}: {doc}");
+        for block in &blocks {
+            assert_eq!(text(block, "timeout_error").as_deref(), Some("null"));
+            assert_eq!(
+                text(block, "timeout_ms").as_deref(),
+                Some("null"),
+                "{link:?}: no clock, no timeout judged: {doc}"
+            );
+            assert_eq!(text(block, "max_gap").as_deref(), Some("3"), "{link:?}");
+        }
+        assert_eq!(
+            [
+                text(&blocks[1], "previous_counter"),
+                text(&blocks[1], "counter_step")
+            ],
+            [Some(String::from("10")), Some(String::from("1"))],
+            "{link:?}"
+        );
+    }
+}
+
+/// A sender the capture never named has no slot, so nothing was judged against
+/// anything: all five keys are `null`, present and not absent.
+#[test]
+fn a_frame_with_no_slot_has_null_for_everything_it_was_judged_against() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, false);
+        wire.put(true, Some(1_000_000), "demo/e2e/a", &frame(1, b"body"));
+        wire.put(true, Some(2_000_000), "demo/e2e/a", &frame(2, b"body"));
+        let doc = wire.document(&rules("demo/e2e/**=prof\n"));
+        let blocks = e2e_blocks(&doc);
+        assert_eq!(blocks.len(), 2, "{link:?}");
+        for block in &blocks {
+            for key in [
+                "previous_counter",
+                "first",
+                "counter_step",
+                "max_gap",
+                "timeout_ms",
+            ] {
+                assert_eq!(
+                    text(block, key).as_deref(),
+                    Some("null"),
+                    "{link:?}: `{key}` of a frame with no slot: {doc}"
+                );
+            }
+        }
+    }
+}
+
+/// The counter of a profile is up to eight bytes wide, and what a frame was
+/// judged against goes through the integer door as the counter does: a number
+/// up to 2^53 - 1 and a decimal string past it.
+#[test]
+fn what_a_frame_was_judged_against_takes_the_integer_door_past_two_to_the_53() {
+    // The same profile as `profile_text`'s with the counter eight bytes wide.
+    let wide_text = String::from(
+        r#"{"name": "wide", "fields": [{"name": "crc", "bytes": 4}, {"name": "length", "bytes": 2}, {"name": "counter", "bytes": 8}], "crc": {"field": "crc", "width": 32, "poly": "0xF4ACFB13", "init": "0xFFFFFFFF", "refin": true, "refout": true, "xorout": "0xFFFFFFFF", "cover": ["length", "@payload", "counter"]}, "length": {"field": "length", "counts": "frame"}, "counter": {"field": "counter", "max_gap": 3, "timeout_ms": 100}}"#,
+    );
+    let wide = Profile::parse(&wide_text).expect("an eight-byte counter reads");
+    let big: u64 = 9_007_199_254_740_995;
+    let build_frame = |counter: u64| {
+        build(&wide, &Values::new().whole("counter", counter), b"b")
+            .expect("builds")
+            .bytes
+    };
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        wire.put(true, None, "demo/e2e/a", &build_frame(big));
+        wire.put(true, None, "demo/e2e/a", &build_frame(big + 2));
+        let declarations = format!("#wide={wide_text}\ndemo/e2e/**=wide\n");
+        let doc = wire.document(&declarations);
+        let blocks = e2e_blocks(&doc);
+        assert_eq!(blocks.len(), 2, "{link:?}: {doc}");
+        assert_eq!(
+            text(&blocks[1], "previous_counter").as_deref(),
+            Some("9007199254740995"),
+            "{link:?}: past 2^53 the previous counter is a decimal string: {doc}"
+        );
+        assert_eq!(text(&blocks[1], "counter_step").as_deref(), Some("2"));
+    }
+}
+
+/// `unopened_reason` is the word beside the sentence, on the blocks that have
+/// a sentence and on no other; the one that is too short also says how short.
+#[test]
+fn a_payload_that_is_not_a_frame_carries_a_closed_word_beside_its_sentence() {
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        wire.put(true, None, "demo/e2e/a", b"short");
+        wire.put(true, None, "demo/e2e/a", &frame(1, b"body"));
+        let doc = wire.document(&rules("demo/e2e/**=prof\n"));
+        let blocks = e2e_blocks(&doc);
+        assert_eq!(blocks.len(), 2, "{link:?}: {doc}");
+        let short = &blocks[0];
+        assert_eq!(text(short, "opened").as_deref(), Some("false"));
+        assert_eq!(
+            text(short, "unopened_reason").as_deref(),
+            Some("payload_shorter_than_header"),
+            "{link:?}"
+        );
+        assert_eq!(text(short, "payload_bytes").as_deref(), Some("5"));
+        assert!(
+            text(short, "why").is_some_and(|w| w.contains("5 bytes")),
+            "{doc}"
+        );
+        // A frame has no reason to be unopened, and none of the keys that
+        // need a frame exist on the block that is not one.
+        let read = &blocks[1];
+        assert_eq!(text(read, "opened").as_deref(), Some("true"));
+        assert_eq!(text(read, "unopened_reason"), None, "{link:?}");
+        assert_eq!(text(short, "previous_counter"), None, "{link:?}");
+    }
+    // The other word cannot be made by a capture here, so it is rendered from
+    // the outcome, as `pin_documents` does.
+    let mut map = FormatMap::new();
+    map.declare_all(&rules("demo/e2e/**=prof\n"))
+        .expect("installs");
+    let run = Declarations::new(&map);
+    let judged = run
+        .judge_e2e("demo/e2e/a", None, None, None)
+        .expect("a profile key");
+    let mut block = String::new();
+    crate::e2e_row::push_block(&judged, &mut block);
+    let value = parse(&block);
+    assert_eq!(text(&value, "opened").as_deref(), Some("false"));
+    assert_eq!(
+        text(&value, "unopened_reason").as_deref(),
+        Some("payload_not_contiguous")
+    );
+    assert_eq!(
+        text(&value, "payload_bytes"),
+        None,
+        "the unreadable word never carries a length: {block}"
+    );
+}
+
+/// The body of a key an end-to-end rule covers is named by the same
+/// `key:N=name` lines that name any other protobuf body, because the names are
+/// attached after the format has decoded, and the end-to-end format's decode
+/// hands back the schema-less fields of the body. The E2E rule is written
+/// FIRST (the first covering rule wins; the `=protobuf` line a schema door
+/// emits comes after it and is shadowed, its name lines still apply), and the
+/// control is the same capture with the line naming ANOTHER field number.
+#[test]
+fn the_body_of_an_end_to_end_key_is_named_by_the_key_n_name_lines() {
+    for link in LINKS {
+        let body = [0x08u8, 0x96, 0x01];
+        let mut wire = Wire::new(link, true);
+        wire.put(true, None, "demo/e2e/a", &frame(1, &body));
+        let named = wire.document(&rules(
+            "demo/e2e/**=prof@pkg.Pose\ndemo/e2e/a=protobuf\ndemo/e2e/a:1=temperature\n",
+        ));
+        assert!(
+            named.contains("\"path\":\"1\",\"name\":\"temperature\""),
+            "{link:?}: the body field is named: {named}"
+        );
+        let blocks = e2e_blocks(&named);
+        assert_eq!(blocks.len(), 1, "{link:?}");
+        assert_eq!(
+            text(&blocks[0], "body_schema").as_deref(),
+            Some("pkg.Pose"),
+            "{link:?}: the E2E rule won, the protobuf line behind it did not"
+        );
+
+        // The same capture with the name line on another field number: field 1
+        // is unnamed, so the name above came from the line and not from the
+        // frame or the format.
+        let mut control = Wire::new(link, true);
+        control.put(true, None, "demo/e2e/a", &frame(1, &body));
+        let unnamed = control.document(&rules(
+            "demo/e2e/**=prof@pkg.Pose\ndemo/e2e/a=protobuf\ndemo/e2e/a:2=temperature\n",
+        ));
+        assert!(
+            !unnamed.contains("\"name\":\"temperature\""),
+            "{link:?}: field 1 is not the one named: {unnamed}"
+        );
     }
 }
 

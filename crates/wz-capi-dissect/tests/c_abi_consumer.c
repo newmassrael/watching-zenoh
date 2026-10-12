@@ -2988,8 +2988,14 @@ int main(void) {
      * verdict of the `Push` frame (CRC, length facts, counter and timeout,
      * the slot it was judged in), and a `counter_reason` family is declared.
      * The block is ABSENT from every entry no profile rule covers. Keys arrive;
-     * nothing retires. */
-    revisioned[2].revision = 34;
+     * nothing retires.
+     * 35: the `e2e` block gains what a frame was judged AGAINST
+     * (`previous_counter`, `first`, `counter_step`, `max_gap`, `timeout_ms`)
+     * and `unopened_reason`, a closed word beside `why` on a block that is not
+     * a frame, declared as a discriminant family (the word
+     * `payload_shorter_than_header` brings `payload_bytes`). Keys arrive and
+     * a family is declared; nothing retires. */
+    revisioned[2].revision = 35;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

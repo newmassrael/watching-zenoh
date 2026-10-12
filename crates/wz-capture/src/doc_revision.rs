@@ -1951,6 +1951,54 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R34_CARRIES,
     },
+    // Revision 35 ADDS six keys to the `e2e` block and retires nothing: what a
+    // frame was judged AGAINST, and a closed word for a payload that was not a
+    // frame. A consumer pinned to 34 loses nothing.
+    //
+    // WHAT A FRAME WAS JUDGED AGAINST. `previous_counter` is the counter the
+    // frame's slot had last accepted before it (a CRC error and a repetition
+    // accept nothing, so after either it is unchanged; a step past the allowed
+    // gap is accepted, so it becomes the next frame's), `first` is `true`
+    // exactly while the slot has accepted none, `counter_step` is the step from
+    // the first to the frame's `counter` in the counter's own width (the number
+    // the judge reaches its counter verdict from, written once in the judge), and
+    // `max_gap` and `timeout_ms` are the limits of the profile that the slot's
+    // judge applied. A reader that needed the previous counter had to guess it:
+    // `silence_ms` is `null` for a first frame and for a frame whose packet
+    // carried no timestamp alike, so the two could not be told apart.
+    // `previous_counter`, `counter_step`, `max_gap` and `timeout_ms` are
+    // numbers through the integer door, as `counter` is (a counter of eight
+    // bytes passes 2^53). All five are `null` when there is no slot to judge
+    // against; `counter_step` is also `null` while `first` is `true` and for a
+    // frame whose CRC did not match, and `timeout_ms` for a frame whose packet
+    // carried no timestamp, because no timeout was judged.
+    //
+    // THE CLOSED WORD is `unopened_reason`, on the blocks that already carried
+    // the sentence `why` (`opened` is `false`) and on no other:
+    // `payload_not_contiguous` (the payload is not one run of bytes in the
+    // capture) and `payload_shorter_than_header`. It is a DISCRIMINANT, because
+    // the second word brings `payload_bytes` and the first never does, which the
+    // sentence never said. A history reply is neither: the judge reads only a
+    // `Push` carrying a `put`, so a reply entry carries no `e2e` block at all.
+    //
+    // The key is `unopened_reason` and not `reason`: `reason` is already a
+    // family of this document (the reassembly chain's), and a family is declared
+    // per key name, so a second meaning under it would make one word list
+    // wrong for one of its two users.
+    //
+    // STATE-DEPENDENT like the rest of the block: `previous_counter` and `first`
+    // are among the cells a live handle may write differently from the document
+    // that first wrote the row (`REVISABLE_ROW_CELLS`), for the reason the
+    // verdicts are.
+    DocumentShape {
+        document: FIELDS,
+        revision: 35,
+        keys: FIELDS_R35_KEYS,
+        retiring: &[],
+        families: FIELDS_R35_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R35_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -11255,6 +11303,374 @@ pub const FIELDS_R34_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The words of `unopened_reason` at revision 35: why a payload a profile rule
+/// covers was not read as a frame. Sorted. The words are the ledger's own
+/// (`crate::e2e_slots::Unopened`), and
+/// `the_declared_value_families_match_the_librarys_own_vocabularies` holds this
+/// list to that type's walk.
+pub const UNOPENED_REASON_R35: &[&str] = &["payload_not_contiguous", "payload_shorter_than_header"];
+
+/// What each `unopened_reason` word brings beside it, at revision 35: a
+/// DISCRIMINANT, because `payload_shorter_than_header` brings `payload_bytes`
+/// (how long the payload was, to set against the header) and
+/// `payload_not_contiguous` never does. Each word arrives in two shapes, with
+/// and without `body_schema`, which only a rule that names a schema carries.
+pub const UNOPENED_REASON_CARRIES_R35: &[WordCarries] = &[
+    WordCarries {
+        word: "payload_not_contiguous",
+        shapes: &[
+            &["body_schema", "matched_rule", "opened", "profile", "why"],
+            &["matched_rule", "opened", "profile", "why"],
+        ],
+    },
+    WordCarries {
+        word: "payload_shorter_than_header",
+        shapes: &[
+            &[
+                "body_schema",
+                "matched_rule",
+                "opened",
+                "payload_bytes",
+                "profile",
+                "why",
+            ],
+            &["matched_rule", "opened", "payload_bytes", "profile", "why"],
+        ],
+    },
+];
+
+/// The field document's key set at revision 35: revision 34's PLUS the six keys
+/// the `e2e` block gained (`previous_counter`, `first`, `counter_step`,
+/// `max_gap`, `timeout_ms`, `unopened_reason`; see `crate::e2e_row`).
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R35_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "compression",
+    "conduit",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "halves",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "under",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+    "zid",
+];
+
+/// The value families the field document declares at revision 35 — revision 34's
+/// PLUS `unopened_reason`, read from [`UNOPENED_REASON_R35`]. Written out in
+/// full, for the reason [`ValueFamily::values`] gives.
+pub const FIELDS_R35_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 35 — revision 34's
+/// PLUS `unopened_reason`, a DISCRIMINANT: `payload_shorter_than_header` brings
+/// `payload_bytes` and `payload_not_contiguous` does not (see
+/// [`UNOPENED_REASON_CARRIES_R35`]). Written out in full, because a slice cannot
+/// be spliced in a `const` and an alias would make the revision follow its
+/// predecessor.
+pub const FIELDS_R35_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -13936,7 +14352,11 @@ mod tests {
             // body its message carries: a key and a `body` family.
             // To 34 when a `Push` whose key a profile rule covers gained the
             // `e2e` block: keys, and a `counter_reason` family.
-            (FIELDS, 34),
+            // To 35 when the `e2e` block gained what a frame was judged
+            // against (`previous_counter`, `first`, `counter_step`, `max_gap`,
+            // `timeout_ms`) and `unopened_reason`, a closed word beside `why`:
+            // six keys and a family, no word moves and nothing retires.
+            (FIELDS, 35),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

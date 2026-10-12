@@ -468,7 +468,9 @@
  *
  * @values fields body
  *
- * AND WHAT THE END-TO-END JUDGE MADE OF A FRAME, at field-document revision 34.
+ * AND WHAT THE END-TO-END JUDGE MADE OF A FRAME, at field-document revision 35
+ * (the block arrived at 34; 35 added what a frame was judged AGAINST and a
+ * closed word for a payload that is not a frame, described below).
  *
  * A payload that carries an end-to-end protection header -- a length, an
  * identifier, a CRC, a counter, in a layout YOU describe -- is read and judged
@@ -490,6 +492,8 @@
  *            "counter":7,
  *            "counter_error":false,"timeout_error":false,
  *            "counter_reason":"none","silence_ms":12,
+ *            "previous_counter":6,"first":false,"counter_step":1,
+ *            "max_gap":3,"timeout_ms":100,
  *            "slot":{"keyexpr":"demo/a","zid":"...",
  *                    "identity":[{"name":"ident","value":N}]}}
  *
@@ -498,7 +502,27 @@
  * fragments is judged where its chain completed, and its block is on the
  * entry under `above_transport.carried`. Only a `Push` carrying a `put` is a
  * frame; a key a rule covers whose payload is not a frame says why:
- * `"opened":false` and a `why`, and the keys that need a frame are absent.
+ * `"opened":false`, a `why` (a sentence for a person) and an
+ * `unopened_reason` (a closed word for a machine: `payload_shorter_than_header`
+ * or `payload_not_contiguous`), and the keys that need a frame are absent.
+ * The first word also brings `payload_bytes`, how long the payload was, and the
+ * second never does. A history reply is neither: it is not a `Push`, so the
+ * entry that carries it has no `e2e` block at all.
+ *
+ * WHAT A FRAME WAS JUDGED AGAINST (field document 35). `previous_counter` is
+ * the counter the frame's slot had last ACCEPTED before it: a CRC error and a
+ * repetition accept nothing, so after either it is unchanged, and a step past
+ * the allowed gap is accepted, so it becomes the next frame's. `first` is
+ * `true` exactly while the slot has accepted none, which is how a first frame
+ * is told from a frame whose packet carried no timestamp (`silence_ms` is
+ * `null` for both). `counter_step` is the step from `previous_counter` to
+ * `counter` in the counter's own width, the number the counter verdict is
+ * reached from, so a reader does not redo the wrapping subtraction. `max_gap`
+ * and `timeout_ms` are the limits of the profile the slot's judge applied.
+ * All five are `null` when there is no slot to judge against; `counter_step`
+ * is also `null` while `first` is `true` and for a frame whose CRC did not
+ * match (its counter is not read), and `timeout_ms` for a frame whose packet
+ * carried no timestamp (no timeout was judged).
  *
  * `crc_error`, `counter_error` and `timeout_error` are the three booleans of
  * the protocol's receiver. A frame whose CRC does not match is NOT judged for
@@ -537,6 +561,7 @@
  * against the frames before it and not as a first reception.
  *
  * @values fields counter_reason
+ * @values fields unopened_reason
  *
  * AND WHEN A RECORD WAS CAPTURED, AND IN WHAT ORDER ROWS COME, at
  * field-document revision 31, selection-document revision 3, census revision 17
@@ -861,7 +886,10 @@
  * `slot.identity` (keys that exist from field document 34 and take the rule
  * from their first appearance: the block's `header` fields are the cells the
  * stateless doors' fields are, and a CRC or a counter of eight bytes can pass
- * the line); to the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census
+ * the line); to the `previous_counter`, `counter_step`, `max_gap` and
+ * `timeout_ms` of an `e2e` block (keys that exist from field document 35 and
+ * take the rule from their first appearance: a counter of eight bytes can pass
+ * the line, and so can the step between two of them); to the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census
  * latency object (keys that exist from census revision 17 and take the rule
  * from their first appearance: `total_ns` is a SUM, and 2^53 nanoseconds is 104
  * days of summed latency, which a long capture of many exchanges reaches); to
@@ -1171,7 +1199,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":34,"key":"kind","values":[...],
+ *     {"name":"fields","revision":35,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1218,6 +1246,7 @@
  * @carries fields selected passenger
  * @carries fields state discriminant
  * @carries fields under passenger
+ * @carries fields unopened_reason discriminant
  * @carries fields verdict passenger
  * @carries fields wrong passenger
  *
@@ -3860,7 +3889,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":34,"key":"state",
+ *     "value_families":[{"name":"fields","revision":35,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

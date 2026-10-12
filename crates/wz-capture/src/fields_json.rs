@@ -6748,7 +6748,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 47] = [
+        let live: [(&str, &str, Vec<&'static str>); 48] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6830,6 +6830,17 @@ mod tests {
                 rev::FIELDS,
                 "counter_reason",
                 crate::e2e_judge::CounterReason::ALL
+                    .iter()
+                    .map(|r| r.word())
+                    .collect(),
+            ),
+            // Revision 35 — why a payload a profile rule covers was not read as a
+            // frame. The walk is the ledger's own enum, whose word is an
+            // exhaustive match.
+            (
+                rev::FIELDS,
+                "unopened_reason",
+                crate::e2e_slots::Unopened::ALL
                     .iter()
                     .map(|r| r.word())
                     .collect(),
