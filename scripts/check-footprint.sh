@@ -902,8 +902,31 @@ declare -A BASELINE_MC_TEXT=(
     # DERIVED figures, not a hosted reading: the hosted baseline above plus this
     # host's same-tree delta (64636 + 420, 64456 + 524). data is 4 and bss 270120
     # here on every row, so the whole delta is ROM. Old: 64636/64456.
-    ["thumbv7m-none-eabi"]=65056
-    ["thumbv7em-none-eabihf"]=64980
+    #
+    # R3308 -- GREW +1240 / +1124 B (hosted reading of `d277eaa2` and `b24bc165`:
+    # 66296 / 66104; the runs of `eb7cf703` and before read 65068, +12). It lies
+    # inside `eb7cf703..d277eaa2`, the fixed-memory multicast stage (S9), whose
+    # `multicast_join` change added a JOIN encode that writes into a slice the caller
+    # holds. A per-symbol diff of the two trees on the thumbv7m image (llvm-nm -S,
+    # hashes stripped, one toolchain, one host) reads +1126 B of symbols against the
+    # hosted +1228; the other 102 B are section padding and alignment, not itemised:
+    #   `mcu_multicast_e2e::__cortex_m_rt_main`  +1182  (the image's main grew)
+    #   `wz_session_core::multicast_join::encode_join`  -454  (GONE: no standalone copy)
+    #   `SliceSink::write_vle_inner` +110, `SliceSink::write_bytes` +66  (NEW)
+    #   `__aeabi_memclr4`                        +174  (NEW)
+    #   `handshake_encode::encode_close`          -50  (GONE)
+    #   and renamed constants that are byte-neutral (+258 and -258, +137 and -137).
+    # INTENTIONAL, with the cause read as far as the symbols show it: the stage
+    # unified the JOIN framing of the heap and the no-allocator multicast images on
+    # one encoder (`encode_join_into`, over a Vec sink on the heap profile and a
+    # slice sink on the other), which keeps the two from drifting. The symbol diff
+    # shows that the standalone `encode_join` and `encode_close` left the image, the
+    # slice sink's writers arrived, and the main function grew by more than the
+    # symbols that left; it does not show WHICH inlining decision made main grow
+    # by 1182, and no commit of the arc was built on its own, so no single commit
+    # is named. data is 4 and bss 270112. Old: 65056/64980.
+    ["thumbv7m-none-eabi"]=66296
+    ["thumbv7em-none-eabihf"]=66104
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
