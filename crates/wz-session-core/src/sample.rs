@@ -65,12 +65,17 @@
 //! [`extract_qos`], [`extract_attachment`], and [`extract_source_info`]
 //! to project the relevant extension entries into the typed fields.
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(feature = "alloc")]
 use crate::link::RxBytes;
 use crate::vle::read_vle_u64;
-use sce_forge_runtime::codec::{CodecStorage, SceByteBuf, SceStr};
+use sce_forge_runtime::codec::CodecStorage;
+#[cfg(feature = "alloc")]
+use sce_forge_runtime::codec::{SceByteBuf, SceStr};
 
 use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(test)]
@@ -87,6 +92,10 @@ use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 /// time word + Zenoh ID bytes) but wz-owned, so it carries the
 /// `Clone`/`Debug`/`PartialEq` derives a `Sample` field reasonably
 /// needs.
+///
+/// The heap profile's value (`zid` is a `Vec`). The per-session slot profile reads
+/// a timestamp where its frame lies, through the codec's borrowed view.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct TimestampHint {
     /// NTP64 time word. zenoh-pico mirror: `_z_timestamp_t._time`.
@@ -97,6 +106,7 @@ pub struct TimestampHint {
     pub zid: Vec<u8>,
 }
 
+#[cfg(feature = "alloc")]
 impl TimestampHint {
     /// Project a decoded codec [`wz_codecs::timestamp::Timestamp`]
     /// into a wz-owned [`TimestampHint`].
@@ -161,6 +171,7 @@ impl TimestampHint {
 /// answer exactly (the trimmed bytes are the LE prefix; the pad supplies
 /// the zero high bytes uhlc compares against). A zid longer than 16 (a
 /// malformed input) is truncated to 16 — uhlc ids are exactly 16 bytes.
+#[cfg(feature = "alloc")]
 pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
     (ts.time, crate::zid_hex::zid_to_le_array(&ts.zid))
 }
@@ -169,6 +180,7 @@ pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
 /// `Timestamp` `Ord` semantic — `(time, 16-byte LE id)` lexicographic (see
 /// [`timestamp_order_key`]). The single comparison the storage newer-wins
 /// gate keys off.
+#[cfg(feature = "alloc")]
 pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
     timestamp_order_key(a) > timestamp_order_key(b)
 }
@@ -179,6 +191,10 @@ pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
 /// preserves the zenoh-pico `_z_encoding_t` semantic decomposition: a
 /// VLE-packed id word whose low bit gates an optional UTF-8 schema
 /// string.
+///
+/// The heap profile's value (`schema` is a `String`); the slot profile reads an
+/// encoding where its frame lies.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct EncodingHint {
     /// VLE-encoded id word. The low bit (`packed_id & 0x1`) signals
@@ -192,6 +208,7 @@ pub struct EncodingHint {
     pub schema: Option<String>,
 }
 
+#[cfg(feature = "alloc")]
 impl EncodingHint {
     /// Project a decoded codec [`wz_codecs::encoding::Encoding`] into
     /// a wz-owned [`EncodingHint`].
@@ -568,6 +585,7 @@ pub use crate::reliability::Reliability;
 /// derived from the `QosLevel` qos ext). External construction is via
 /// [`Sample::new_put`] / [`Sample::new_del`] plus optional `with_*`
 /// setters; intra-crate `dispatch_push` builds the full literal.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Sample {
@@ -631,6 +649,7 @@ pub struct Sample {
 // `sink::SampleView` delivery contract. The subscriber registry dispatches
 // an owned `Sample` to a `SampleSink` as `&self as &dyn SampleView`, so the
 // borrowed-accessor reads cost nothing (no copy, no third sample type).
+#[cfg(feature = "alloc")]
 impl crate::sink::SampleView for Sample {
     fn keyexpr(&self) -> &str {
         &self.keyexpr
@@ -669,8 +688,19 @@ impl crate::sink::SampleView for Sample {
     fn payload_shared(&self) -> Option<&RxBytes> {
         Some(&self.payload)
     }
+    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+        self.timestamp
+            .as_ref()
+            .map(|timestamp| (timestamp.time, timestamp.zid.as_slice()))
+    }
+    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+        self.encoding
+            .as_ref()
+            .map(|encoding| (encoding.packed_id, encoding.schema.as_deref()))
+    }
 }
 
+#[cfg(feature = "alloc")]
 impl Sample {
     /// R311gb-2b — materialize a borrowed [`SampleView`](crate::sink::SampleView)
     /// into an owned retention `Sample` (the AP retention form). Copies

@@ -34,6 +34,7 @@
 //! the fixed bounded backing refuses. Each is still delivered, as the copying
 //! path delivers it.
 
+#[cfg(feature = "alloc")]
 use core::cell::OnceCell;
 
 use wz_codecs::encoding::Encoding;
@@ -43,7 +44,9 @@ use wz_codecs::timestamp::Timestamp;
 use super::{fire_into, SubscriberPeer, SubscriberTable};
 use crate::driver_loop::InPlaceRecord;
 use crate::reliability::Reliability;
-use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+#[cfg(feature = "alloc")]
+use crate::sample::{EncodingHint, TimestampHint};
+use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
 use crate::sink::{SampleSink, SampleView};
 use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound};
@@ -59,8 +62,10 @@ struct LentSample<'s> {
     attachment: Option<&'s [u8]>,
     source_info: Option<SourceInfo>,
     timestamp: Option<&'s Timestamp<'s>>,
+    #[cfg(feature = "alloc")]
     timestamp_hint: OnceCell<TimestampHint>,
     encoding: Option<&'s Encoding<'s>>,
+    #[cfg(feature = "alloc")]
     encoding_hint: OnceCell<EncodingHint>,
 }
 
@@ -83,6 +88,7 @@ impl SampleView for LentSample<'_> {
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment
     }
+    #[cfg(feature = "alloc")]
     fn timestamp(&self) -> Option<&TimestampHint> {
         let ts = self.timestamp?;
         Some(
@@ -90,12 +96,22 @@ impl SampleView for LentSample<'_> {
                 .get_or_init(|| TimestampHint::from_view(ts)),
         )
     }
+    #[cfg(feature = "alloc")]
     fn encoding(&self) -> Option<&EncodingHint> {
         let encoding = self.encoding?;
         Some(
             self.encoding_hint
                 .get_or_init(|| EncodingHint::from_view(encoding)),
         )
+    }
+    // The parts are the wire's own fields, read where they lie: nothing is built to
+    // answer, so this is the accessor a build with no allocator has.
+    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+        self.timestamp.map(|ts| (ts.time, ts.zid))
+    }
+    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
+        self.encoding
+            .map(|encoding| (encoding.packed_id, encoding.schema))
     }
     fn source_info(&self) -> Option<&SourceInfo> {
         self.source_info.as_ref()
@@ -219,11 +235,13 @@ impl<C: SampleSink> SubscriberTable<C> {
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
                 self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
+                #[cfg(feature = "alloc")]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
             Err(Fallback::KeyexprPastBound) => {
                 self.in_place_fallbacks.keyexpr_past_bound =
                     self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
+                #[cfg(feature = "alloc")]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
         }
@@ -273,8 +291,10 @@ impl<C: SampleSink> SubscriberTable<C> {
             attachment: body.attachment,
             source_info: body.source_info,
             timestamp: body.timestamp,
+            #[cfg(feature = "alloc")]
             timestamp_hint: OnceCell::new(),
             encoding: body.encoding,
+            #[cfg(feature = "alloc")]
             encoding_hint: OnceCell::new(),
         };
         // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
@@ -292,6 +312,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// The fallback: the owned projection of `push`, delivered by the path the
     /// copying receive takes ([`Self::dispatch_push`]), so a Put the lent form
     /// cannot represent is delivered exactly as it always was.
+    #[cfg(feature = "alloc")]
     fn dispatch_owned_projection(
         &mut self,
         peer: &SubscriberPeer,

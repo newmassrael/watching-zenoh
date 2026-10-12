@@ -58,14 +58,16 @@ use crate::sample_kind::SampleKind;
 ///
 /// The four routing-essential accessors (resolved keyexpr literal,
 /// payload bytes, Put/Del kind, link-layer reliability) are
-/// unconditional — every profile reads them. The five richer
-/// metadata accessors (QoS, attachment, timestamp, encoding,
-/// source-info) are `alloc`-gated provided methods that default to
-/// `None`: their return types live in the `alloc`-gated
-/// [`crate::sample`] module, and a no-`alloc` MCU profile carries no
-/// such metadata. The AP [`crate::sample::Sample`] overrides all five
-/// so an AP subscriber keeps full-fidelity field access through the
-/// seam; the loose-bytes [`BorrowedSample`] keeps the `None` defaults.
+/// unconditional — every profile reads them. The richer metadata
+/// accessors are provided methods that default to `None`. QoS, the attachment
+/// and the source identification are there on every profile that selects a storage
+/// profile (their types are plain values and a slice); the timestamp and the encoding
+/// are read on every profile as their parts ([`timestamp_parts`](Self::timestamp_parts),
+/// [`encoding_parts`](Self::encoding_parts): borrowed, so nothing is built to answer),
+/// and as the owned hints (`timestamp`, `encoding`) on the `alloc` profile only,
+/// whose [`crate::sample::Sample`] overrides all of them so an AP subscriber keeps
+/// full-fidelity field access through the seam. The loose-bytes [`BorrowedSample`]
+/// keeps the `None` defaults.
 pub trait SampleView {
     /// Resolved keyexpr literal (peer DECLARE table lookup already applied).
     fn keyexpr(&self) -> &str;
@@ -77,14 +79,13 @@ pub trait SampleView {
     fn reliability(&self) -> Reliability;
 
     /// QoS level decoded from the Push outer extension chain, if any.
-    /// `alloc`-only (the type lives in the `alloc`-gated `sample`
-    /// module); defaults to `None` for views carrying no QoS.
-    #[cfg(feature = "alloc")]
+    /// Defaults to `None` for views carrying no QoS.
+    #[cfg(feature = "storage-profile")]
     fn qos(&self) -> Option<crate::sample::QosLevel> {
         None
     }
     /// Body-level attachment blob, if present. Defaults to `None`.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     fn attachment(&self) -> Option<&[u8]> {
         None
     }
@@ -111,8 +112,21 @@ pub trait SampleView {
         None
     }
     /// Body-level source identification, if present. Defaults to `None`.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        None
+    }
+    /// The body-level timestamp read where it lies, if present: the NTP64 time word
+    /// and the zid prefix bytes, which is what [`timestamp`](Self::timestamp)'s hint
+    /// holds, without the hint. Nothing is built to answer, so it is the accessor of a
+    /// profile with no allocator. Defaults to `None`.
+    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+        None
+    }
+    /// The body-level encoding read where it lies (Put-only on the wire), if present:
+    /// the packed id and the schema text, as [`encoding`](Self::encoding)'s hint
+    /// holds them. Defaults to `None`.
+    fn encoding_parts(&self) -> Option<(u32, Option<&str>)> {
         None
     }
     /// The payload as the shareable value the view holds it in, when it holds
