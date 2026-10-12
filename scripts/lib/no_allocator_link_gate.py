@@ -332,14 +332,25 @@ IMAGES: dict[str, Image] = {
     # S9c -- the fixed-memory profile of the multicast image: the group's session in a
     # cell of a static table, the group socket in a static pool, the runtime in a static
     # cell, no allocator and no `extern crate alloc` in the bin or in the e2e library.
-    # It stays `pending` for the reason the acceptor's profile does: the crates of the
-    # session tier carry `alloc` and the link is refused for want of an allocator; the
-    # row below this one names the allocation sites that remain.
+    #
+    # S9e -- GATED, as the acceptor's and the admin node's profiles are. The multicast
+    # modules of wz-session-core are gated on `storage-profile` and their owned forms on
+    # `alloc`, and each profile-selected seam answers by the build's profile under one
+    # name: the receive path reads a frame, a fragment and a JOIN where the datagram
+    # lies and lends each record (`multicast_rx`, `ingest_multicast_fragment_in_place`),
+    # the transmit path frames a borrowed `Put` into one buffer the loop lends, a datagram
+    # at a time (`multicast_tx_emit_lent`, over the same `FragmentPlan` and writers the
+    # heap emit uses), and the beacon and the departing Close are written into arrays
+    # (`encode_join_into_slice`, `encode_multicast_close_into_slice`). The vendored
+    # `sce-forge-runtime` and `sce-portable-bytes` are in the graph and carry no
+    # `alloc`: their allocation sites were reached only through the `alloc` feature of
+    # the wz crates that named it, which the multicast image no longer does
+    # (`transport-fragmentation` stopped implying it).
     "mcu-multicast-e2e-fixed": Image(
         "deploy/mcu-multicast-e2e/Cargo.toml",
         "bin",
         "mcu-multicast-e2e",
-        "pending",
+        "gated",
         (
             Build(
                 V7M,
@@ -349,9 +360,6 @@ IMAGES: dict[str, Image] = {
                 no_default_features=True,
             ),
         ),
-        "the session tier's own crates still carry `alloc` (wz-session-core, the JOIN"
-        " encoder and the owned TX mirror, wz-runtime-core, the codec owned mirrors):"
-        " the next step",
     ),
     # The same profile with an allocator, for the census alone (see the acceptor's).
     "mcu-multicast-e2e-fixed-census": Image(
@@ -361,7 +369,8 @@ IMAGES: dict[str, Image] = {
         "pending",
         (Build(V7M, "cross-test", ("fixed-memory", "heap"), label="mps2-fixed-heap"),),
         "the linked allocation sites of the multicast tier on the fixed-memory profile,"
-        " read with an allocator present (census only): the worklist of the next step",
+        " read with an allocator present (census only): the owned forms the `heap`"
+        " feature names, which the gated image does not",
         ci=False,
     ),
     "mcu-freertos-demo": Image(
