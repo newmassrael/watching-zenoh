@@ -589,10 +589,32 @@ const FREE_PORT_ATTEMPTS: usize = 64;
 /// pickers meet rarely, and nothing a function returning a `u16` can do closes
 /// it: that needs the caller to hold the listener until it hands the socket
 /// over, which the C ABI under test cannot accept.
+///
+/// CAPACITY, because the claim that keeps two processes apart has a price. A
+/// number handed out is claimed (see `claim_across_processes`) for as long as the
+/// process lives: this function cannot know when its caller has finished with
+/// the number, so it never lets one go. The numbers come from one range of at
+/// most 8192 (the span below the kernel's autoselect range), so the processes
+/// that pick through this crate AT THE SAME TIME share 8192 numbers between
+/// them, and a process that has been handed N of them leaves 8192 - N to the
+/// rest. `cargo test` runs one binary at a time and a binary asks for a few dozen
+/// at most, so the sequential case never comes near it. A runner that runs many
+/// binaries at once, or one binary in many copies, is bounded by the sum of what
+/// they ask for: when the range runs out the pick panics and says that the claim
+/// registry refused the draws, which is a different message from a number that
+/// something else holds.
 pub fn free_port() -> u16 {
+    hand_out(bind_unautoselected)
+}
+
+/// The ledger half of [`free_port`], with the source of candidates passed in so
+/// a test can feed it a candidate that was handed out before. A candidate that
+/// is in the ledger is rejected with its listener held, and the next one is
+/// taken.
+fn hand_out(mut candidate: impl FnMut() -> (std::net::TcpListener, u16)) -> u16 {
     let mut rejected = Vec::new();
     for _ in 0..FREE_PORT_ATTEMPTS {
-        let (listener, port) = bind_unautoselected();
+        let (listener, port) = candidate();
         let mut seen = HANDED_OUT_PORTS.lock().expect("port ledger");
         if seen.contains(&port) {
             // HELD, not dropped: releasing it here would let the very next
@@ -636,12 +658,23 @@ static CLAIMS: Mutex<Vec<std::fs::File>> = Mutex::new(Vec::new());
 /// leg in this tree can run a Windows implementation to test one.
 #[cfg(unix)]
 fn claim_across_processes(port: u16) -> bool {
-    use std::os::unix::io::AsRawFd;
-
     // SAFETY: `getuid` has no arguments and no memory effects.
     let uid = unsafe { libc::getuid() };
-    let dir = std::env::temp_dir().join(format!("wz-free-port-claims-{uid}"));
-    if std::fs::create_dir_all(&dir).is_err() {
+    claim_in(
+        &std::env::temp_dir().join(format!("wz-free-port-claims-{uid}")),
+        port,
+    )
+}
+
+/// [`claim_across_processes`] against the registry in `dir`. The directory is a
+/// parameter so that a test of the claim itself can use one no picker touches:
+/// a test that kills a holder and expects to claim its number is, in the shared
+/// directory, a race against every other process that is drawing numbers.
+#[cfg(unix)]
+fn claim_in(dir: &std::path::Path, port: u16) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    if std::fs::create_dir_all(dir).is_err() {
         return true;
     }
     let Ok(file) = std::fs::OpenOptions::new()
@@ -751,21 +784,30 @@ fn random_draw() -> u64 {
 ///
 /// Reads no address back from the socket and takes none from the kernel: the
 /// number is the one this function asked for, and a bind that fails (a number
-/// something already holds) is drawn again, at most [`FREE_PORT_ATTEMPTS`] times.
+/// something already holds, or a live process has claimed) is drawn again, at
+/// most [`FREE_PORT_ATTEMPTS`] times.
+///
+/// Capacity: every number returned stays claimed until the process exits, and
+/// the range is shared by every process that picks through this crate at the
+/// same time; see [`free_port`].
 pub fn bind_unautoselected() -> (std::net::TcpListener, u16) {
     let (first, last) = pick_range();
     let span = u64::from(last - first) + 1;
+    let (mut unbindable, mut claimed) = (0usize, 0usize);
     for _ in 0..FREE_PORT_ATTEMPTS {
         let port = first + (random_draw() % span) as u16;
-        if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) {
-            if claim_across_processes(port) {
-                return (listener, port);
-            }
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) if claim_across_processes(port) => return (listener, port),
+            Ok(_) => claimed += 1,
+            Err(_) => unbindable += 1,
         }
     }
     panic!(
-        "bind_unautoselected: {FREE_PORT_ATTEMPTS} draws from {first}..={last} were all \
-         already bound by something else on this host"
+        "bind_unautoselected: {FREE_PORT_ATTEMPTS} draws from {first}..={last} found no \
+         number. {unbindable} could not be bound (something else on this host holds the \
+         number) and {claimed} were refused by the claim registry (a live process picking \
+         through this crate holds the number: claims last until the process exits, so \
+         the {span} numbers of this range are shared by every such process at once)"
     );
 }
 
@@ -1128,9 +1170,9 @@ pub async fn establish_capability_pair(
 
 #[cfg(test)]
 mod port_tests {
+    use super::{autoselect_range, free_port, hand_out, refusing_port};
     #[cfg(unix)]
-    use super::claim_across_processes;
-    use super::{autoselect_range, free_port, refusing_port};
+    use super::{claim_across_processes, claim_in};
     use std::collections::BTreeSet;
 
     /// R2778 — the discriminator for `refusing_port`, moved here with the
@@ -1212,33 +1254,45 @@ mod port_tests {
     /// A number another LIVE process was handed is not handed out here, and is
     /// again once that process is gone.
     ///
-    /// The test runs itself twice. With `WZ_PORT_CLAIM_HOLDER` set it is the
-    /// holder: it takes a number from `free_port`, prints it and holds it until
-    /// its stdin closes. Without it, it starts that holder, reads the number, and
-    /// asks for a claim on the same number: that must be refused while the holder
-    /// lives and granted after the holder is killed (the kernel drops an `flock`
-    /// with its process, so a killed test strands nothing).
+    /// The test runs itself twice. With `WZ_PORT_CLAIM_HOLDER` set (to a
+    /// directory) it is the holder: it claims a number in that registry, prints
+    /// it and holds it until its stdin closes. Without it, it starts that holder,
+    /// reads the number, and asks for a claim on the same number: that must be
+    /// refused while the holder lives and granted after the holder is killed (the
+    /// kernel drops an `flock` with its process, so a killed test strands
+    /// nothing).
+    ///
+    /// The registry is a directory of this test's own. In the shared one, "the
+    /// number is claimable again" is a race against every other process drawing
+    /// numbers, and 24 copies of this binary on two cores lost it in 16 runs of
+    /// 960: another copy drew the number in the moments between the kill and the
+    /// claim.
     #[cfg(unix)]
     #[test]
     fn a_number_held_by_another_process_is_not_handed_out() {
         use std::io::{BufRead, Read, Write};
         use std::process::{Command, Stdio};
 
-        if std::env::var_os("WZ_PORT_CLAIM_HOLDER").is_some() {
-            let port = free_port();
-            std::println!("CLAIMED {port}");
+        const HELD: u16 = 40_000;
+        if let Some(dir) = std::env::var_os("WZ_PORT_CLAIM_HOLDER") {
+            assert!(
+                claim_in(std::path::Path::new(&dir), HELD),
+                "the holder claims"
+            );
+            std::println!("CLAIMED {HELD}");
             let _ = std::io::stdout().flush();
             let mut sink = Vec::new();
             let _ = std::io::stdin().read_to_end(&mut sink);
             return;
         }
+        let dir = std::env::temp_dir().join(format!("wz-claim-test-{}", std::process::id()));
         let mut holder = Command::new(std::env::current_exe().expect("this test binary"))
             .args([
                 "--exact",
                 "port_tests::a_number_held_by_another_process_is_not_handed_out",
                 "--nocapture",
             ])
-            .env("WZ_PORT_CLAIM_HOLDER", "1")
+            .env("WZ_PORT_CLAIM_HOLDER", &dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -1252,14 +1306,28 @@ mod port_tests {
             .find_map(|line| line.strip_prefix("CLAIMED ")?.parse().ok())
             .expect("the holder prints the number it holds");
         assert!(
-            !claim_across_processes(held),
+            !claim_in(&dir, held),
             "{held} is held by a live process and must not be claimable here"
         );
         holder.kill().expect("kill the holder");
         holder.wait().expect("reap the holder");
         assert!(
-            claim_across_processes(held),
+            claim_in(&dir, held),
             "{held} must be claimable again once its holder is gone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `free_port` claims what it hands out: the number it returns is refused to
+    /// a second claim, which is what keeps another process from being handed it.
+    /// This process holds the claim, so no other process can disturb the answer.
+    #[cfg(unix)]
+    #[test]
+    fn free_port_claims_the_number_it_hands_out() {
+        let port = free_port();
+        assert!(
+            !claim_across_processes(port),
+            "{port} was handed out and must stay claimed by this process"
         );
     }
 
@@ -1273,7 +1341,13 @@ mod port_tests {
             first <= last,
             "the autoselect range {first}..={last} is empty"
         );
-        for _ in 0..256 {
+        // 32 numbers, not more: every number handed out is claimed until this
+        // process exits (see `free_port`), and copies of this binary running at
+        // once share one range. Thirty-two is what the claim needs: a pick that
+        // drew from the kernel's pool lands inside the range on its FIRST draw,
+        // and one that overlapped the range by half misses all 32 with odds of
+        // one in four billion.
+        for _ in 0..32 {
             let port = free_port();
             assert!(
                 port < first || port > last,
@@ -1430,12 +1504,45 @@ mod port_tests {
     #[test]
     fn free_port_never_repeats() {
         let mut fresh = BTreeSet::new();
-        for _ in 0..256 {
+        // 32 numbers: each stays claimed until the process exits (see
+        // `free_port`), and the witness for the ledger itself is
+        // `a_candidate_handed_out_before_is_rejected`, which claims nothing.
+        for _ in 0..32 {
             assert!(
                 fresh.insert(free_port()),
                 "free_port handed out a port twice in one process"
             );
         }
+    }
+
+    /// The ledger of `free_port`, with the repeat supplied instead of waited for.
+    ///
+    /// Three candidates: a number, the same number again, and a third. The
+    /// first call takes the first. The second call must reject the repeat and
+    /// take the third. A draw from a range of thousands would repeat once in
+    /// many thousand tries, so waiting for one costs a claim per try; feeding
+    /// the repeat costs none, and a ledger without its `contains` check hands
+    /// the repeat out and fails here at once.
+    #[test]
+    fn a_candidate_handed_out_before_is_rejected() {
+        let bound = || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a probe bind");
+            let port = listener.local_addr().expect("probe address").port();
+            (listener, port)
+        };
+        let (one, first) = bound();
+        let (two, _) = bound();
+        let (three, third) = bound();
+        // The repeat is the first number again, held by the second listener: the
+        // function never reads the listener's own address.
+        let mut script = vec![(one, first), (two, first), (three, third)].into_iter();
+        let handed_first = hand_out(|| script.next().expect("a scripted candidate"));
+        let handed_next = hand_out(|| script.next().expect("a scripted candidate"));
+        assert_eq!(handed_first, first);
+        assert_eq!(
+            handed_next, third,
+            "the repeat of {first} was handed out instead of being rejected"
+        );
     }
 
     /// R311y889 — THE CONTROL, as a statement about the HOST rather than a
