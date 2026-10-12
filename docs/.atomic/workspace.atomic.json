@@ -273296,6 +273296,44 @@
         "The datagram-lane answer holds for the defaults; a deploy that sets tx/queue/size or the congestion waits is the deploy's own and is read by the config parity gates, not by this entry."
       ]
     },
+    "Round 3314": {
+      "decision_summary": "Hardware verdict on the T2G kit, under the owner's permission of 2026-10-10 for hardware writes: the lab's receive and transmit pool image with the INCR4 burst, built before the INCR4 default landed and not from this tree, two boots of one script under host load, read from the console counts lines, a capture and the MAC registers. The pool runs dry and recovers: 16 datagrams back to back while the session was not reading took it to free 0, refused 4 and 4 copied, and every later line has lent equal to returned, free 8 of 8, dropped 0. Fragments: a received fragment is lent in a slot, each reassembled UDP datagram is one session read copied (40 of 40), and a reply lwIP fragments is sent from its heap, 3 copied per reply, never in place. The MAC counted 1125 and 1131 resource errors, bursts past its 8 descriptors. A datagram from a stray address stalled the established session of this heap-form image for about 20 s. The kit is restored and read back equal to its pre-run reads.",
+      "changes_bullets": [
+        "No source file changed. The kit's M7 region was written twice (the pool image, then the restore of the region read before the first write); the CM0+ region and the saved original image were not written.",
+        "The load script, the UDP load tool and the register read are in the lab directory of the build host (a new directory beside the earlier two campaigns), with both runs' console, capture and register files."
+      ],
+      "verification_bullets": [
+        "Before the write: both regions read without a reset and hashed: M7 7902b54e, CM0+ 7d85cf45, the saved original bee8c20a, as documented. The pool image (sha256 4c9c49de) was written, verified, and run twice from a debugger reset (the reset boots of both runs printed READY and both pool lines).",
+        "Each run, from the host: a held router session; 40 ICMP echoes of 4000 bytes; 40 UDP datagrams of 4000 bytes; 16, 64, 256 and 1024 UDP datagrams of 100 bytes back to back; 20000 ICMP echoes of 1400 bytes and 4000 echoes of 4000 bytes at flood rate, all answered (no loss). Run one against run two: refused 212 and 208, session read copied 249 and 241, MAC resource errors 1125 and 1131, the session lost after the stray datagrams in the same places.",
+        "Restore: the M7 region written from the pre-run read, verified, both regions read back by a separate dump equal to the pre-run reads, the saved original unchanged, the restored boot printed READY, no debugger, capture or ping process left, the host address removed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Not measured: a start after the board's power was removed (physical), INCR8 and INCR16, throughput, latency, more than two boots, and a build of this tree (the image predates the INCR4 default, which changes the burst and not the pools).",
+        "The stray-datagram stall, as read from the code and the capture, not instrumented on the node: LwipUdpDriver::recv_with and the copying receive retarget the replies to the source of every datagram the session link reads, and the heap-form node's accepting session reads its listening socket alone, so a datagram from an unrelated address takes the reply path (the node sent a 2-byte message to the stray and nothing to the router until the router redialled). The slot profile reads only the lane peer's datagrams (head_is_mine) and its listener drops and counts strays, witnessed on a host by the flood-of-strays test; it has NOT been booted on the kit, and the Zephyr build does not select it yet. Decide at the profile switch whether the heap form takes the same filter or is retired.",
+        "The pool-exhaustion reading here came with a stalled session, which is the condition HW.35 names (more than 8 datagrams between two passes of the session loop); a session that reads steadily was not driven past 8 queued."
+      ],
+      "publishable_decision_summary": "Hardware verdict on the T2G kit, under the owner's permission of 2026-10-10 for hardware writes: the lab's receive and transmit pool image with the INCR4 burst, built before the INCR4 default landed and not from this tree, two boots of one script under host load, read from the console counts lines, a capture and the MAC registers. The pool runs dry and recovers: 16 datagrams back to back while the session was not reading took it to free 0, refused 4 and 4 copied, and every later line has lent equal to returned, free 8 of 8, dropped 0. Fragments: a received fragment is lent in a slot, each reassembled UDP datagram is one session read copied (40 of 40), and a reply lwIP fragments is sent from its heap, 3 copied per reply, never in place. The MAC counted 1125 and 1131 resource errors, bursts past its 8 descriptors. A datagram from a stray address stalled the established session of this heap-form image for about 20 s. The kit is restored and read back equal to its pre-run reads.",
+      "publishable_changes_bullets": [
+        "No source file changed. The kit's M7 region was written twice (the pool image, then the restore of the region read before the first write); the CM0+ region and the saved original image were not written.",
+        "The load script, the UDP load tool and the register read are in the lab directory of the build host (a new directory beside the earlier two campaigns), with both runs' console, capture and register files."
+      ],
+      "publishable_verification_bullets": [
+        "Before the write: both regions read without a reset and hashed: M7 7902b54e, CM0+ 7d85cf45, the saved original bee8c20a, as documented. The pool image (sha256 4c9c49de) was written, verified, and run twice from a debugger reset (the reset boots of both runs printed READY and both pool lines).",
+        "Each run, from the host: a held router session; 40 ICMP echoes of 4000 bytes; 40 UDP datagrams of 4000 bytes; 16, 64, 256 and 1024 UDP datagrams of 100 bytes back to back; 20000 ICMP echoes of 1400 bytes and 4000 echoes of 4000 bytes at flood rate, all answered (no loss). Run one against run two: refused 212 and 208, session read copied 249 and 241, MAC resource errors 1125 and 1131, the session lost after the stray datagrams in the same places.",
+        "Restore: the M7 region written from the pre-run read, verified, both regions read back by a separate dump equal to the pre-run reads, the saved original unchanged, the restored boot printed READY, no debugger, capture or ping process left, the host address removed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Not measured: a start after the board's power was removed (physical), INCR8 and INCR16, throughput, latency, more than two boots, and a build of this tree (the image predates the INCR4 default, which changes the burst and not the pools).",
+        "The stray-datagram stall, as read from the code and the capture, not instrumented on the node: LwipUdpDriver::recv_with and the copying receive retarget the replies to the source of every datagram the session link reads, and the heap-form node's accepting session reads its listening socket alone, so a datagram from an unrelated address takes the reply path (the node sent a 2-byte message to the stray and nothing to the router until the router redialled). The slot profile reads only the lane peer's datagrams (head_is_mine) and its listener drops and counts strays, witnessed on a host by the flood-of-strays test; it has NOT been booted on the kit, and the Zephyr build does not select it yet. Decide at the profile switch whether the heap form takes the same filter or is retired.",
+        "The pool-exhaustion reading here came with a stalled session, which is the condition HW.35 names (more than 8 datagrams between two passes of the session loop); a session that reads steadily was not driven past 8 queued."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
