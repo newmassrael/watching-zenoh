@@ -70,6 +70,7 @@
         "ci.yml:validate-codegen",
         "ci.yml:codegen-verify",
         "ci.yml:verdict-legs",
+        "ci.yml:session-planes",
         "ci.yml:nondefault",
         "ci.yml:defaults-off",
         "ci.yml:dissect",
@@ -104,6 +105,7 @@
       "prefixes": ["v0-rust-ci-"],
       "owners": ["ci.yml:ci"],
       "readers": [
+        "ci.yml:session-planes",
         "ci.yml:nondefault",
         "ci.yml:defaults-off",
         "ci.yml:dissect",

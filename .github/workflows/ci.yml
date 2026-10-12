@@ -544,73 +544,11 @@ jobs:
         # build is still validated by Layer C2 (-D warnings).
         run: bash scripts/run-ci.sh --layer C1b
 
-      - name: Layer C1c — cargo test -p wz-session-core --features codec-declare
-        # R311ds — same shape as C1b. The workspace test runs the
-        # codec-declare-gated wz-session-core declare tests only because
-        # wz-runtime-tokio's defaults transitively enable
-        # wz-session-core/codec-declare. This lane runs the 58 gated
-        # tests (54 R311ds behavioural + 4 R311dm thin) explicitly so
-        # coverage cannot silently drop if that transitive enable changes.
-        run: bash scripts/run-ci.sh --layer C1c
-
-      - name: Layer C1d — cargo test -p wz-session-core (pub/sub data plane)
-        # R311du — same shape as C1c. The migrated pubsub
-        # SubscriberRegistry test module gates on the full pub/sub
-        # data-plane feature union; the workspace lane runs them only via
-        # wz-runtime-tokio's transitive defaults. This lane enumerates
-        # the union explicitly so coverage cannot silently drop if those
-        # defaults change.
-        run: bash scripts/run-ci.sh --layer C1d
-
-      - name: Layer C1e — cargo test -p wz-session-core (query dispatch plane)
-        # R311dx — same shape as C1d. The migrated QueryableRegistry test
-        # module gates on the query dispatch feature union (query-queryable
-        # implies codec-request + codec-response, plus query-attachment /
-        # query-selector-parameters / query-reply-err / codec-response-final);
-        # the workspace lane runs them only via wz-runtime-tokio's transitive
-        # defaults. This lane enumerates the union explicitly so coverage
-        # cannot silently drop if those defaults change.
-        run: bash scripts/run-ci.sh --layer C1e
-
-      - name: Layer C1f — cargo test -p wz-session-core (reply dispatch plane)
-        # R311dy — same shape as C1e. The migrated ReplyRegistry test
-        # module gates on the reply dispatch union (codec-response +
-        # codec-response-final + pubsub-put + pubsub-delete +
-        # query-queryable, plus codec-push for the pubsub dispatch path);
-        # the workspace lane runs them only via wz-runtime-tokio's
-        # transitive defaults. This lane enumerates the union explicitly
-        # so coverage cannot silently drop if those defaults change.
-        run: bash scripts/run-ci.sh --layer C1f
-
-      - name: Layer C1g — cargo test -p wz-session-core (observer dispatch plane)
-        # R311dz — same shape as C1f. The migrated ApplicationLayerObserver
-        # test module gates on the full fan-out union (codec-push +
-        # codec-declare + query-queryable + liveliness-token +
-        # liveliness-subscriber + declare-subscriber + declare-queryable +
-        # codec-response-final + pubsub-put/delete). The lane also adds a
-        # composability build of the codec-declare-on / query-queryable-off
-        # subset, which composes the observer with the queryable slot
-        # elided — the arbitrary-subset class the maximal-preset C1c-f
-        # tests never exercise.
-        run: bash scripts/run-ci.sh --layer C1g
-
-      - name: Layer C1own — the own-space (M=0) witness lane (R311y740)
-        # R311y744 — wired here, one round LATE. R311y740 registered the lane
-        # in run-ci.sh and did not add it to this file, so it ran only in a
-        # local full sweep; Layer C0's unwired-lane gate (R311y581) caught it
-        # on the hosted run, which is exactly the job it exists for. The lane
-        # needs no provisioning beyond the toolchain this job already has.
-        run: bash scripts/run-ci.sh --layer C1own
-
-      - name: Layer C1h — wz-session-core arbitrary-subset composability matrix
-        # R311ea — the C1c-g lanes each build wz-session-core under ONE
-        # maximal feature union, so a gating regression that only shows in
-        # a deliberately-incomplete coherent subset passes CI invisibly.
-        # This lane builds the crate under several representative consumer
-        # profiles (minimal / pubsub-only / queryable-only / zget-reply /
-        # declare-observer / codec-declare-bare); deny-warnings turns every
-        # subset-specific unused-import / dead-code into a hard error.
-        run: bash scripts/run-ci.sh --layer C1h
+      # The seven wz-session-core lanes that sat here, Layers C1c, C1d, C1e, C1f,
+      # C1g, C1own and C1h, run in the `session-planes` job below. They were 412s
+      # of this job's 1666s on run 38226033377 and they share nothing with the
+      # lanes left here except third-party dependency builds: see the comment
+      # above that job for the measurement and for what the move costs.
 
       - name: Layer C1ca — the derived Open-body initial_sn
         # R311y816 — zenoh derives an OpenSyn / OpenAck `initial_sn` from the
@@ -1354,6 +1292,215 @@ jobs:
         # It mutates `report.rs` in place and restores it byte for byte on
         # every exit path; a hosted runner's checkout is discarded either way.
         run: bash scripts/run-ci.sh --layer C0mut
+
+  # ─────────────────────────────────────────────────────────────────
+  # The SESSION-PLANES job. Layers C1c, C1d, C1e, C1f, C1g, C1own and C1h peeled
+  # off `ci`.
+  #
+  # WHAT FIRED. Run 38226033377 ended `job-budget-margin: elapsed 1666s of 1800s
+  # budget (92%), alarm at 90%` on `validate + verify + test`, with EVERY lane
+  # above it green. The margin was the failure, which is what that guard says
+  # while there is still room to act. What grew the job is not measured here (the
+  # run before it was not read step by step for this change); the batch that
+  # crossed the alarm added test sets to the session core, which is the shape
+  # every earlier entry in this file records: cost grows monotonically in atom
+  # count and the growth lands on whichever job holds the lane.
+  #
+  # WHERE THE TIME WENT, measured off that run's own job log, largest first:
+  #
+  #     Layer C1        384s   cargo test --workspace
+  #     Layer C1g       199s   <- this job
+  #     Layer 0         148s
+  #     Layer C2         74s
+  #     Layer C4         66s
+  #     Layer C1ch       62s
+  #     Layer C1h        56s   <- this job
+  #     Layer C4b        50s
+  #     Layer C1d        48s   <- this job
+  #     Layer C1c        35s   <- this job
+  #     Layer C1bv       35s
+  #     Layer C1i        33s
+  #     Layer C1f        28s   <- this job
+  #     Layer C1own      26s   <- this job
+  #     Layer C1e        20s   <- this job
+  #     ...every other lane <25s each
+  #
+  # WHY THESE SEVEN AND NOT THE LARGEST ONE. Layer C1 is the single biggest
+  # entry, and it is also the one lane whose artifacts the rest of the job reads:
+  # it builds the third-party dependency set (tokio, the RocksDB-backed storage
+  # crates, the facade's tree) in the test profile once, and C2, C4, C4b and the
+  # `wz-runtime-tokio` lanes (C1ca, C1cb, C1i) build on it. Moving C1 would move
+  # that cost to whoever runs next and shorten nothing. The seven lanes here are
+  # the other kind. Each runs `cargo test -p wz-session-core --features <union>`
+  # or builds that one crate under a subset (`run-ci.sh`, layer_c1c .. layer_c1h
+  # and layer_c1own_own_space_witnesses): a package-scoped invocation resolves
+  # features for that package alone, so `wz-session-core` is compiled here under
+  # feature sets that no other lane in `ci` builds, and the workspace-unified
+  # build of C1 is a different set again. What they share with the lanes left in
+  # `ci` is third-party dependency builds, which this job restores from the same
+  # `rust-ci` cache entry as a READER. That is stated rather than assumed: the
+  # lanes are 412s of the job's 1666s, and the C1g step alone compiles the crate
+  # under three distinct feature unions (the observer union, the same on the
+  # bounded backing, and that plus the admin surface).
+  #
+  # WHAT THE SPLIT COSTS, stated rather than hidden. (1) These lanes sat after C1
+  # deliberately: a red workspace suite stopped the job before they ran. In their
+  # own job that ordering is gone, so a tree with a red baseline now pays for both
+  # jobs instead of failing early in one; that is runner minutes on an already
+  # broken tree, not a lost gate. (2) A cold cache costs this job its own compile
+  # of the crate under those feature sets plus the third-party set; the rust-ci
+  # entry is saved by `ci` from the default branch only, so a run on a pull
+  # request or on a first push after a manifest change starts cold, as every
+  # other reader of that class does.
+  #
+  # PREDICTION, to be checked by the first hosted run and not taken as measured:
+  # `ci` leaves 412s, which lands it at about 1254s (70% of 1800s) before the
+  # setup variance this file has measured at up to 384s on the checkout alone;
+  # this job lands near 700-900s with its own setup. If `ci` reads above 80% on
+  # that run the next peel is Layers C2, C4 and C4b together (190s), which share
+  # a clippy and facade-matrix set of their own.
+  #
+  # WHAT IT NEEDS: python3 (the runner image) for the own-space witness lint,
+  # cargo, and a tree that builds `wz-session-core` and its dependencies. No
+  # fetch-depth: no lane here reads history. No RocksDB engine, no pico CLI, no
+  # shellcheck or actionlint, and no disk prune: the lanes build one small crate
+  # under a handful of feature sets, which is not what overflowed the `ci` disk.
+  session-planes:
+    name: session-core feature planes (Layers C1c, C1d, C1e, C1f, C1g, C1own, C1h)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `submodules: recursive` is load-bearing: wz-session-core resolves
+        # sce-forge-runtime and its siblings through vendor/sce path deps.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # Keyed per JOB, on ci.yml's hash; see the `verdict-legs` copy for why
+        # RESTORE and SAVE are separate steps and why the save is `always()`.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The baseline pair and pkg-config, which `scripts/lib/apt_package_census.py`
+        # holds the README's prerequisite block to as what every building job
+        # installs. NOT `verdict-legs`'s full list and not `ci`'s: `cargo tree -p
+        # wz-session-core --all-features -e normal,build,dev -i bindgen` matches no
+        # package, so this job NEEDS none of bindgen's consumers (RocksDB, lwip,
+        # zenoh-pico, io-uring) and therefore no cmake and no compression
+        # libraries, and the crate's manifest names no TLS dependency, so no perl.
+        # The pair is carried as the baseline, not because a lane here needs it.
+        run: |
+          bash scripts/lib/apt-install.sh libclang-dev clang pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `rust-ci` class (.github/cache-classes.json): `ci` is
+        # its only saver, so one manifest change writes one entry and not one
+        # per job. `save-if: false` is the same arrangement `nondefault`,
+        # `defaults-off` and `dissect` use.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Layer C1c — cargo test -p wz-session-core --features codec-declare
+        # R311ds — same shape as C1b. The workspace test runs the
+        # codec-declare-gated wz-session-core declare tests only because
+        # wz-runtime-tokio's defaults transitively enable
+        # wz-session-core/codec-declare. This lane runs the 58 gated
+        # tests (54 R311ds behavioural + 4 R311dm thin) explicitly so
+        # coverage cannot silently drop if that transitive enable changes.
+        run: bash scripts/run-ci.sh --layer C1c
+
+      - name: Layer C1d — cargo test -p wz-session-core (pub/sub data plane)
+        # R311du — same shape as C1c. The migrated pubsub
+        # SubscriberRegistry test module gates on the full pub/sub
+        # data-plane feature union; the workspace lane runs them only via
+        # wz-runtime-tokio's transitive defaults. This lane enumerates
+        # the union explicitly so coverage cannot silently drop if those
+        # defaults change.
+        run: bash scripts/run-ci.sh --layer C1d
+
+      - name: Layer C1e — cargo test -p wz-session-core (query dispatch plane)
+        # R311dx — same shape as C1d. The migrated QueryableRegistry test
+        # module gates on the query dispatch feature union (query-queryable
+        # implies codec-request + codec-response, plus query-attachment /
+        # query-selector-parameters / query-reply-err / codec-response-final);
+        # the workspace lane runs them only via wz-runtime-tokio's transitive
+        # defaults. This lane enumerates the union explicitly so coverage
+        # cannot silently drop if those defaults change.
+        run: bash scripts/run-ci.sh --layer C1e
+
+      - name: Layer C1f — cargo test -p wz-session-core (reply dispatch plane)
+        # R311dy — same shape as C1e. The migrated ReplyRegistry test
+        # module gates on the reply dispatch union (codec-response +
+        # codec-response-final + pubsub-put + pubsub-delete +
+        # query-queryable, plus codec-push for the pubsub dispatch path);
+        # the workspace lane runs them only via wz-runtime-tokio's
+        # transitive defaults. This lane enumerates the union explicitly
+        # so coverage cannot silently drop if those defaults change.
+        run: bash scripts/run-ci.sh --layer C1f
+
+      - name: Layer C1g — cargo test -p wz-session-core (observer dispatch plane)
+        # R311dz — same shape as C1f. The migrated ApplicationLayerObserver
+        # test module gates on the full fan-out union (codec-push +
+        # codec-declare + query-queryable + liveliness-token +
+        # liveliness-subscriber + declare-subscriber + declare-queryable +
+        # codec-response-final + pubsub-put/delete). The lane also adds a
+        # composability build of the codec-declare-on / query-queryable-off
+        # subset, which composes the observer with the queryable slot
+        # elided — the arbitrary-subset class the maximal-preset C1c-f
+        # tests never exercise.
+        run: bash scripts/run-ci.sh --layer C1g
+
+      - name: Layer C1own — the own-space (M=0) witness lane (R311y740)
+        # R311y744 — wired here, one round LATE. R311y740 registered the lane
+        # in run-ci.sh and did not add it to this file, so it ran only in a
+        # local full sweep; Layer C0's unwired-lane gate (R311y581) caught it
+        # on the hosted run, which is exactly the job it exists for. The lane
+        # needs python3 and the toolchain, which this job has.
+        run: bash scripts/run-ci.sh --layer C1own
+
+      - name: Layer C1h — wz-session-core arbitrary-subset composability matrix
+        # R311ea — the C1c-g lanes each build wz-session-core under ONE
+        # maximal feature union, so a gating regression that only shows in
+        # a deliberately-incomplete coherent subset passes CI invisibly.
+        # This lane builds the crate under several representative consumer
+        # profiles (minimal / pubsub-only / queryable-only / zget-reply /
+        # declare-observer / codec-declare-bare); deny-warnings turns every
+        # subset-specific unused-import / dead-code into a hard error.
+        run: bash scripts/run-ci.sh --layer C1h
+
+      - name: Budget margin — this job's own clock
+        # The same guard as `ci`'s, with the floor of 20 its siblings use: a job
+        # peeled down this far should be told to give its budget back, not to
+        # grow.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R2163 — the NON-DEFAULT job. Layer C1cn peeled off `ci`.

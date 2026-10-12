@@ -217,6 +217,14 @@ _add(
         # `validate-codegen` for this job and took the install line with them.
         "codegen-verify",
         "verdict-legs",
+        # The session-planes job, peeled off `ci` for its budget. It builds only
+        # wz-session-core, and `cargo tree -p wz-session-core --all-features
+        # -e normal,build,dev -i bindgen` matches no package: it does NOT reach a
+        # bindgen consumer. It carries the pair anyway because the README's
+        # prerequisite block states them as the baseline of every job that builds
+        # (the check at the end of this file holds that claim), and the install is
+        # cached with the rest of the job's apt archive.
+        "session-planes",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
         # this row that reaches a member reaches it. Its Rust lanes do not reach
@@ -256,6 +264,7 @@ _add(
         "ci",
         "codegen-verify",
         "verdict-legs",
+        "session-planes",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
         # this row that reaches a member reaches it. Its Rust lanes do not reach
@@ -462,6 +471,12 @@ _add(
         "validate-codegen",
         "codegen-verify",
         "verdict-legs",
+        # The session-planes job, peeled off `ci` for its budget. It builds only
+        # wz-session-core (and what that crate resolves), which reaches neither
+        # bindgen nor ring nor cmake -- `cargo tree -p wz-session-core
+        # --all-features -e normal,build,dev -i bindgen` matches no package -- so
+        # it takes this row's package, which is kept on every job, and nothing else.
+        "session-planes",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
         # this row that reaches a member reaches it. Its Rust lanes do not reach
