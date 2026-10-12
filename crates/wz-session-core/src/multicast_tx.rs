@@ -1783,3 +1783,150 @@ mod lend_tests {
         assert_eq!(tx.advertise_default().next_reliable, 3);
     }
 }
+
+/// The TX of a build with no allocator, held against the heap emit it replaces: the
+/// same bytes on the wire and the same walk of the SN ring, in one build that has both.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "transport-tx-lend"
+))]
+mod lent_emit_tests {
+    use super::*;
+    use crate::multicast_params::MulticastParams;
+    use crate::sn::{mask_from_res, MulticastTxConduits};
+    use crate::WhatAmI;
+
+    fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
+        MulticastParams {
+            version: 0x09,
+            whatami: WhatAmI::Peer,
+            zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
+            lease_ms: 5_000,
+            join_interval_ms: 50,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size,
+            is_qos,
+            tx_queue: TxQueueConf::default(),
+        }
+    }
+
+    fn conduits(params: &MulticastParams) -> MulticastTxConduits {
+        MulticastTxConduits::new(mask_from_res(params.seq_num_res))
+    }
+
+    /// The datagrams the lent emit sends for `put`, in order, and what it answered.
+    fn lent(
+        put: &MulticastTxPut<'_>,
+        tx: &mut MulticastTxConduits,
+        params: &MulticastParams,
+        scratch: &mut [u8],
+    ) -> (Vec<Vec<u8>>, Result<usize, MulticastTxRefused>) {
+        let mut sent = Vec::new();
+        let answer = multicast_tx_emit_lent(put, tx, params, scratch, &mut |datagram| {
+            sent.push(datagram.to_vec());
+        });
+        (sent, answer)
+    }
+
+    /// For a Put that fits the batch, and (where the build fragments) for one that does
+    /// not, on both channels and with and without a QoS band: the datagrams are the heap
+    /// emit's byte for byte, and the ring stands where the heap emit leaves it, so the
+    /// next beacon advertises the same `next_*`.
+    #[test]
+    fn the_lent_emit_is_the_heap_emit_byte_for_byte() {
+        let mut compared = 0usize;
+        for batch_size in [64u16, 2_048] {
+            for payload_len in [0usize, 1, 20, 200] {
+                // Past the batch a build without fragmentation sends the frame whole
+                // from the heap and refuses it lent: not a pair to compare.
+                let fragments = payload_len + 16 > usize::from(batch_size);
+                if fragments && !cfg!(feature = "transport-fragmentation") {
+                    continue;
+                }
+                for reliable in [true, false] {
+                    for (is_qos, priority) in
+                        [(false, Priority::DEFAULT), (true, Priority::RealTime)]
+                    {
+                        let params = params(batch_size, is_qos);
+                        let payload: Vec<u8> = (0..payload_len)
+                            .map(|i| (i as u8).wrapping_mul(7))
+                            .collect();
+                        let put = MulticastTxPut {
+                            keyexpr: "demo/mc",
+                            payload: &payload,
+                            reliable,
+                            priority,
+                        };
+                        let mut heap_tx = conduits(&params);
+                        let item = MulticastTxItem::Push {
+                            push: Box::new(
+                                crate::push_build::build_push_literal("demo/mc", &payload)
+                                    .expect("a literal Put builds"),
+                            ),
+                            reliable,
+                            priority,
+                        };
+                        let heap = multicast_tx_emit(item, &mut heap_tx, &params).datagrams;
+
+                        let mut lent_tx = conduits(&params);
+                        let mut scratch = [0u8; 1_472];
+                        let (sent, answer) = lent(&put, &mut lent_tx, &params, &mut scratch);
+
+                        let what = alloc::format!(
+                            "batch {batch_size}, {payload_len} bytes, reliable {reliable}, \
+                             qos {is_qos}"
+                        );
+                        assert_eq!(answer, Ok(heap.len()), "{what}");
+                        assert_eq!(sent, heap, "{what}");
+                        assert_eq!(
+                            lent_tx.mint(priority, reliable),
+                            heap_tx.mint(priority, reliable),
+                            "the ring stands where the heap emit leaves it: {what}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(compared >= 16, "the sweep compared {compared} cases");
+    }
+
+    /// A buffer too small to hold even a fragment's head refuses the Put and sends
+    /// nothing: no truncated datagram ever reaches the wire.
+    #[test]
+    fn a_buffer_too_small_for_a_datagram_sends_nothing() {
+        let params = params(64, false);
+        let payload = [0x55u8; 200];
+        let put = MulticastTxPut::literal("demo/mc", &payload);
+        let mut tx = conduits(&params);
+        let mut scratch = [0u8; 1];
+        let (sent, answer) = lent(&put, &mut tx, &params, &mut scratch);
+        assert!(answer.is_err(), "refused, got {answer:?}");
+        assert!(sent.is_empty(), "nothing was sent: {sent:?}");
+    }
+
+    /// The offer seam of the heap profile is the heap emit: one call, the same datagrams.
+    #[test]
+    fn the_offer_seam_of_a_heap_build_is_the_heap_emit() {
+        let params = params(64, false);
+        let payload = [0xA5u8; 120];
+        let offer = multicast_tx_offer_put_literal("demo/mc", &payload).expect("builds");
+        let mut via_offer = conduits(&params);
+        let mut sent = Vec::new();
+        let count = multicast_tx_emit_offer(offer, &mut via_offer, &params, &mut [], &mut |d| {
+            sent.push(d.to_vec())
+        });
+        let mut direct = conduits(&params);
+        let heap = multicast_tx_emit(
+            multicast_put_literal("demo/mc", &payload).expect("builds"),
+            &mut direct,
+            &params,
+        )
+        .datagrams;
+        assert_eq!(count, heap.len());
+        assert_eq!(sent, heap);
+    }
+}
