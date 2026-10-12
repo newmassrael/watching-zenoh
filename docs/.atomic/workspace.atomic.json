@@ -273538,6 +273538,36 @@
         "A frame budget over the images Layer Q builds would have caught this before a boot did: the entry function's frame against the stack its image declares. Not built yet; the frame tables of this round were read by hand."
       ]
     },
+    "Round 3319": {
+      "decision_summary": "The hosted run of the Round 3317 push was red in both Layer C0 jobs on a gate the earlier red had hidden: round-fed-gate-reach found session_slot_bytes.py, which Round 3312 added, fed by what a round changes (the atomic store and the tracked corpus) and run by neither the pre-push hook nor a DEFERRED row. Layer C0 stops at its first failing leg, so the gate was never reached while the provenance lint was red in front of it; repairing that one is what showed this one. The gate cross-builds each image that names its slot type and reads one symbol's size from the linked ELF, so it cannot run in the hook: measured at 51.1 s for the first check after a source change (0.46 s when nothing changed), about seven tenths of the hook's whole block. It is deferred with that figure, and hosted Layer Q.0s, which already holds the cross toolchains, keeps owning it. No gate was loosened: the row is printed on every run, as every deferral is.",
+      "changes_bullets": [
+        "scripts/lib/round_fed_gate_reach.py: a DEFERRED row for session_slot_bytes.py, giving what it builds, the measured cost (51.1 s first check, 0.46 s unchanged) and the hosted layer that owns it."
+      ],
+      "verification_bullets": [
+        "On a build host: Layer C0 run whole from the repaired tree passes in 273 s, round-fed-gate-reach among its legs (130 gates accounted for, 11 deferred), and no leg behind it is red; the same layer on the hosted run reached 88 of 209 guarded legs before it stopped.",
+        "NOT verified here: the hosted run of this push, which judges the layer on the runner and the Q.frt repair of Round 3318."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "A fail-fast layer hides every gate behind its first red: a round that repays a Layer C0 red runs the whole layer on a build host before it pushes, as this one did after the fact."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3317 push was red in both Layer C0 jobs on a gate the earlier red had hidden: round-fed-gate-reach found session_slot_bytes.py, which Round 3312 added, fed by what a round changes (the atomic store and the tracked corpus) and run by neither the pre-push hook nor a DEFERRED row. Layer C0 stops at its first failing leg, so the gate was never reached while the provenance lint was red in front of it; repairing that one is what showed this one. The gate cross-builds each image that names its slot type and reads one symbol's size from the linked ELF, so it cannot run in the hook: measured at 51.1 s for the first check after a source change (0.46 s when nothing changed), about seven tenths of the hook's whole block. It is deferred with that figure, and hosted Layer Q.0s, which already holds the cross toolchains, keeps owning it. No gate was loosened: the row is printed on every run, as every deferral is.",
+      "publishable_changes_bullets": [
+        "scripts/lib/round_fed_gate_reach.py: a DEFERRED row for session_slot_bytes.py, giving what it builds, the measured cost (51.1 s first check, 0.46 s unchanged) and the hosted layer that owns it."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: Layer C0 run whole from the repaired tree passes in 273 s, round-fed-gate-reach among its legs (130 gates accounted for, 11 deferred), and no leg behind it is red; the same layer on the hosted run reached 88 of 209 guarded legs before it stopped.",
+        "NOT verified here: the hosted run of this push, which judges the layer on the runner and the Q.frt repair of Round 3318."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A fail-fast layer hides every gate behind its first red: a round that repays a Layer C0 red runs the whole layer on a build host before it pushes, as this one did after the fact."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
