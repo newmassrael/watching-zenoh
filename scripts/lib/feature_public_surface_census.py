@@ -450,6 +450,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset(
             {
                 "adminspace-core",
+                # Round 3301 -- `adminspace-fixed` joins, for the same reason as
+                # `adminspace-core` beside it: the admin node's slot-profile form is
+                # chosen by an MCU final binary, and the facade weak-forwards it.
+                "adminspace-fixed",
                 "adminspace-write",
                 "codec-response",
                 "codec-response-final",
@@ -478,7 +482,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # Round 3279 -- `session-slot` joins: the selector that takes `dial`,
         # `admin_node` and `memory` out of the shell and lets a slot handle stand in
         # for the `Rc` one (`app_layer::dispatch_to` takes either).
-        frozenset({"adminspace-core", "adminspace-write", "session-slot", "test-support"}),
+        frozenset(
+            {
+                "adminspace-core",
+                # Round 3301 -- `adminspace-fixed` joins (see the lwip row above).
+                "adminspace-fixed",
+                "adminspace-write",
+                "session-slot",
+                "test-support",
+            }
+        ),
     ),
     # Fixed-memory step S9c -- the acceptor e2e crate's one feature that gates a public
     # item: `fixed-memory` takes the heap form out and puts `pub mod fixed`
@@ -777,6 +790,7 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
     "wz-session-lwip": frozenset(
         {
             "adminspace-core",
+            "adminspace-fixed",
             "adminspace-write",
             "codec-response",
             "codec-response-final",
@@ -904,7 +918,13 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # (`any(test, feature = ..)`, `all(core, write)`), which is the second
     # clause's subject; the row is excused only while that stays true.
     "wz-session-mcu": frozenset(
-        {"adminspace-core", "adminspace-write", "session-slot", "test-support"}
+        {
+            "adminspace-core",
+            "adminspace-fixed",
+            "adminspace-write",
+            "session-slot",
+            "test-support",
+        }
     ),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz-runtime-zephyr": frozenset({"session-slot"}),

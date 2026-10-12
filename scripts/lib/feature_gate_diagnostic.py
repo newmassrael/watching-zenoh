@@ -545,6 +545,13 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # line of an attribute. All three are compound
                 # (`session_actions.rs`), which is exactly `compound-cfg`.
                 "declare-keyexpr",
+                # Round 3301 -- `declare-queryable` MOVED HERE from the method-only
+                # list below. S9 put its three public sites behind compound cfgs
+                # (`session_actions.rs`), so "every public item it gates is a method
+                # under a simple cfg" is no longer what the sites show, and rustc
+                # names no feature for a compound one: the word that is true is this
+                # one.
+                "declare-queryable",
                 # R3291 -- `declare-undeclare` LEFT this list: S9a moved
                 # `mark_aggregate_announced` into an `impl` under a bare
                 # `#[cfg(feature = "declare-undeclare")]` (`pubsub.rs`), a site
@@ -580,8 +587,13 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "adjudicates"
             )
             for f in (
+                # Round 3301 -- `adminspace-core` joins. S9e split the admin space in
+                # two: `adminspace-fixed` keeps the modules (and is probed), and this
+                # feature keeps the heap forms the allocator-free build does not have,
+                # which are methods (`LinkEndpoint::into_strings`, `admin_links`,
+                # `admin_session`), so no `module::name` path is left for it to gate.
+                "adminspace-core",
                 "declare-interest",
-                "declare-queryable",
                 "declare-token",
                 "declare-undeclare",
                 "multicast-declarations",
