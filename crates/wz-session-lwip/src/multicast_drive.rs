@@ -357,7 +357,7 @@ impl MulticastReplyEnqueue for MulticastReplyQueue {
 /// Declared by the image, shared by the sink that fills it (`&'static` is a
 /// [`MulticastReplyEnqueue`]) and the loop's `next_tx` that drains it:
 ///
-/// ```ignore
+/// ```text
 /// static REPLIES: MulticastReplyQueue<8> = MulticastReplyQueue::new();
 /// let sink = MulticastReplySink::new(&REPLIES);
 /// // next_tx: || REPLIES.pop()
@@ -1309,7 +1309,7 @@ impl<C: ClockSource + 'static, const MAX_PEERS: usize> MulticastCell<C, MAX_PEER
 /// session and its pump, in a `static`. The counterpart of
 /// [`wz_runtime_coop::session_drive::PumpSlots`], declared the same way:
 ///
-/// ```ignore
+/// ```text
 /// static GROUPS: MulticastSlots<BoardClock, 4, 1> = MulticastSlots::new();
 /// let pump = GROUPS.claim(runtime.clone(), link, session)?;
 /// spawn_multicast_pump(&local, pump, on_event, || REPLIES.pop(), || false)?;
