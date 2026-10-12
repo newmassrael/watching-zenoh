@@ -563,7 +563,10 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    any(feature = "session-unicast", feature = "session-multicast")
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
 ))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InPlaceExtChain {
@@ -578,7 +581,10 @@ pub(crate) struct InPlaceExtChain {
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    any(feature = "session-unicast", feature = "session-multicast")
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
 ))]
 impl InPlaceExtChain {
     /// No chain: what a message whose Z flag is clear carries.
@@ -769,7 +775,10 @@ pub(crate) struct FrameHead<C> {
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    any(feature = "session-unicast", feature = "session-multicast")
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
 ))]
 impl FrameHead<InPlaceExtChain> {
     /// Whether a participant may act on this frame's own extension chain: the
@@ -828,7 +837,10 @@ fn decode_frame_head<C>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    any(feature = "session-unicast", feature = "session-multicast")
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
 ))]
 pub(crate) fn parse_frame_in_place(
     unit: &[u8],
@@ -905,7 +917,10 @@ fn decode_fragment_head<C>(
 
 #[cfg(all(
     feature = "reassembly",
-    any(feature = "session-unicast", feature = "session-multicast")
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
 ))]
 impl FragmentHead<InPlaceExtChain> {
     /// The priority the fragment's QoS extension carries: the third part of
@@ -938,7 +953,10 @@ impl FragmentHead<InPlaceExtChain> {
 /// rest of its unit, so the payload is `unit[offset..]`.
 #[cfg(all(
     feature = "reassembly",
-    any(feature = "session-unicast", feature = "session-multicast")
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
 ))]
 pub(crate) fn parse_fragment_in_place(
     unit: &[u8],

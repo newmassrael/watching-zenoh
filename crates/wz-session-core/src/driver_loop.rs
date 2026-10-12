@@ -605,7 +605,10 @@ pub struct InPlaceRecord<'a> {
     all(feature = "session-slot", feature = "codec-frame")
 ))]
 #[cfg_attr(
-    not(any(feature = "session-unicast", feature = "session-multicast")),
+    not(any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )),
     allow(dead_code)
 )]
 #[derive(Clone, Copy, Debug)]
@@ -633,7 +636,11 @@ impl<'a> InPlaceRecord<'a> {
     /// band. Built by the unicast receive path alone (and the tests that stand
     /// in for it).
     #[cfg(all(
-        any(test, feature = "session-unicast", feature = "session-multicast"),
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        ),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -642,7 +649,10 @@ impl<'a> InPlaceRecord<'a> {
         )
     ))]
     #[cfg_attr(
-        not(any(feature = "session-unicast", feature = "session-multicast")),
+        not(any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )),
         allow(dead_code)
     )]
     fn of_frame(
@@ -663,10 +673,17 @@ impl<'a> InPlaceRecord<'a> {
     /// A Push record of a frame (see [`Self::reliable`] and its siblings).
     #[cfg(all(
         feature = "codec-push",
-        any(test, feature = "session-unicast", feature = "session-multicast")
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
     ))]
     #[cfg_attr(
-        not(any(feature = "session-unicast", feature = "session-multicast")),
+        not(any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )),
         allow(dead_code)
     )]
     pub(crate) fn push_of_frame(
@@ -681,10 +698,17 @@ impl<'a> InPlaceRecord<'a> {
     /// A Request record of a frame.
     #[cfg(all(
         feature = "codec-request",
-        any(test, feature = "session-unicast", feature = "session-multicast")
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
     ))]
     #[cfg_attr(
-        not(any(feature = "session-unicast", feature = "session-multicast")),
+        not(any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )),
         allow(dead_code)
     )]
     pub(crate) fn request_of_frame(
@@ -699,10 +723,17 @@ impl<'a> InPlaceRecord<'a> {
     /// A Response record of a frame.
     #[cfg(all(
         feature = "codec-response",
-        any(test, feature = "session-unicast", feature = "session-multicast")
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
     ))]
     #[cfg_attr(
-        not(any(feature = "session-unicast", feature = "session-multicast")),
+        not(any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )),
         allow(dead_code)
     )]
     pub(crate) fn response_of_frame(
@@ -718,10 +749,17 @@ impl<'a> InPlaceRecord<'a> {
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-declare",
-        any(test, feature = "session-unicast", feature = "session-multicast")
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
     ))]
     #[cfg_attr(
-        not(any(feature = "session-unicast", feature = "session-multicast")),
+        not(any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )),
         allow(dead_code)
     )]
     pub(crate) fn declare_of_frame(
@@ -738,10 +776,17 @@ impl<'a> InPlaceRecord<'a> {
         feature = "session-slot",
         feature = "codec-frame",
         feature = "codec-response-final",
-        any(test, feature = "session-unicast", feature = "session-multicast")
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
     ))]
     #[cfg_attr(
-        not(any(feature = "session-unicast", feature = "session-multicast")),
+        not(any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )),
         allow(dead_code)
     )]
     pub(crate) fn response_final_of_frame(
@@ -762,10 +807,17 @@ impl<'a> InPlaceRecord<'a> {
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-frame",
-        any(test, feature = "session-unicast", feature = "session-multicast")
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
     ))]
     #[cfg_attr(
-        not(any(feature = "session-unicast", feature = "session-multicast")),
+        not(any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )),
         allow(dead_code)
     )]
     pub(crate) fn interest_of_frame(
@@ -898,7 +950,11 @@ impl IterationEvent<'_> {
 /// so it is not handled here.
 #[cfg(all(
     feature = "codec-frame",
-    any(test, feature = "session-unicast", feature = "session-multicast"),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    ),
     any(
         feature = "codec-push",
         feature = "codec-request",

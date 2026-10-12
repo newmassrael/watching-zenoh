@@ -82,8 +82,9 @@
 use crate::driver_loop::{reassembled_chain_outcome, DriverLoopOutcome};
 // The event surface and the drop reason are the slot profile's too: a build with no
 // allocator reports a dropped chain and fans the records of a completed one, where it
-// has no owned outcome to report.
-#[cfg(feature = "reassembly")]
+// has no owned outcome to report. `driver_loop` is the storage profile's, so a build
+// with neither profile (the dispatcher and the chain-key helpers alone) has none of it.
+#[cfg(all(feature = "reassembly", feature = "storage-profile"))]
 use crate::driver_loop::{IterationEvent, ReassemblyDropReason};
 use crate::multicast_peer::{
     MulticastPeerActions, MulticastPeerEvent, MulticastPeerPolicy, MulticastPeerState,
@@ -95,7 +96,7 @@ use crate::multicast_peer::{
 // module is not, so the original import through it was an E0432 on the
 // no-alloc MCU profile (run-ci Layer G.12).
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
-#[cfg(feature = "reassembly")]
+#[cfg(all(feature = "reassembly", feature = "storage-profile"))]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::ReassemblyDispatcher;
@@ -1787,7 +1788,11 @@ pub(crate) fn ingest_multicast_fragment_counted<
 /// it were handed over, as the frame walk drops a payload (a multicast peer has no
 /// session to tell: the datagram stays unanswered). Nothing is counted per network
 /// message (the owned messages `transport-stats` counts by are the heap profile's).
-#[cfg(all(feature = "reassembly", not(feature = "alloc")))]
+#[cfg(all(
+    feature = "reassembly",
+    feature = "storage-profile",
+    not(feature = "alloc")
+))]
 #[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, as above
 pub(crate) fn ingest_multicast_fragment_in_place<
     const MAX_PEERS: usize,

@@ -60,7 +60,9 @@ excluded="wz-ap-demo"
 # which keeps its code and its tests under the same `-D warnings` the other crates
 # are under. The heap form is the crate's default, so the lanes that build defaults
 # already reach it.
-profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot"
+# `wz-mcu-multicast-e2e` joined at S9e: its `heap` default is what named `alloc`, and
+# without it the facade's cooperative runtime has no task pool to be built over.
+profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory"
 
 # The minimal profile feature of $1, or nothing when the crate is not in tier 4.
 profile_of() {
