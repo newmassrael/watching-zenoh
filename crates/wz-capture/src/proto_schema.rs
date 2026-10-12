@@ -510,6 +510,8 @@ pub(crate) struct Linker<'f, 'a> {
     symbols: BTreeMap<String, Symbol>,
     pub(crate) msgs: Vec<Msg>,
     pub(crate) enums: Vec<EnumInfo>,
+    /// Per file, its own `option` statements, in the order written.
+    pub(crate) file_options: Vec<Vec<FieldOption>>,
 }
 
 impl<'f, 'a> Linker<'f, 'a> {
@@ -547,6 +549,7 @@ impl<'f, 'a> Linker<'f, 'a> {
             symbols: BTreeMap::new(),
             msgs: Vec::new(),
             enums: Vec::new(),
+            file_options: alloc::vec![Vec::new(); files.len()],
         };
         linker.load(root_file, &mut Vec::new())?;
         Ok(linker)
@@ -742,6 +745,7 @@ impl<'a> Linker<'_, 'a> {
         // What this file's importers will be able to see, and what this file
         // itself can: `import public` re-exports, a plain `import` does not.
         self.syntaxes[file] = ast.syntax;
+        self.file_options[file] = ast.options.clone();
         let mut exports = BTreeSet::from([file]);
         let mut visible = BTreeSet::from([file]);
         for (dep, kind) in deps {

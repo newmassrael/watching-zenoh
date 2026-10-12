@@ -3296,7 +3296,7 @@ int main(void) {
                                        &revisioned[14].doc);
     CHECK(rc == WZ_DISSECT_OK, "declarations_match document rc=%d", rc);
     revisioned[15].name = "proto_message";
-    revisioned[15].revision = 2;
+    revisioned[15].revision = 3;
     revisioned[15].doc = NULL;
     {
         static const char one_text[] =

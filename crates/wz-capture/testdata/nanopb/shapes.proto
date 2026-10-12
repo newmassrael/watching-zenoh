@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+// Reference cases for how nanopb merges its options and sizes a oneof, and what
+// it leaves out. Sized by nanopb's generator in
+// `scripts/nanopb-reference-sizes.sh`.
+
+syntax = "proto2";
+import "nanopb.proto";
+
+message Leaf {
+  optional uint32 member = 1;
+}
+
+// A oneof is the largest of its members.
+message Choice {
+  oneof pick {
+    uint32 small = 1 [(nanopb).int_size = IS_8];
+    string text = 2 [(nanopb).max_size = 20];
+    Leaf leaf = 3;
+  }
+  optional uint32 tail = 4;
+}
+
+// `no_unions` makes the members fields of their own, so the sizes add.
+message Flat {
+  option (nanopb_msgopt).no_unions = true;
+  oneof pick {
+    uint32 small = 1 [(nanopb).int_size = IS_8];
+    string text = 2 [(nanopb).max_size = 20];
+  }
+}
+
+// A field set to `FT_IGNORE` is not in the message.
+message Ignored {
+  optional uint32 kept = 1;
+  optional uint32 dropped = 2 [(nanopb).type = FT_IGNORE];
+}
+
+// `fixed_length` and `fixed_count` change the C type, not the size.
+message Fixed {
+  optional bytes blob = 1 [(nanopb).max_size = 16, (nanopb).fixed_length = true];
+  repeated uint32 values = 2 [(nanopb).max_count = 4, (nanopb).fixed_count = true];
+}
+
+// The aggregate form of the options.
+message Aggregate {
+  optional uint32 narrow = 1 [(nanopb) = {int_size: IS_16}];
+  optional string text = 2 [(nanopb) = {max_size: 8}];
+  repeated uint32 values = 3 [(nanopb) = {max_count: 3 int_size: IS_8}];
+}
+
+// `required` and `optional` are sized alike.
+message Labelled {
+  required uint32 a = 1;
+  optional string s = 2 [(nanopb).max_size = 4];
+  optional sint32 z = 3;
+}
+
+// A message-level option is the default of its fields; a field's own wins.
+message MessageDefaults {
+  option (nanopb_msgopt).max_size = 8;
+  option (nanopb_msgopt).max_count = 2;
+  optional string a = 1;
+  repeated uint32 b = 2;
+  optional bytes c = 3 [(nanopb).max_size = 4];
+  repeated string d = 4 [(nanopb).max_count = 1];
+}
+
+// A message nanopb is told not to generate.
+message Skipped {
+  option (nanopb_msgopt).skip_message = true;
+  optional uint32 a = 1;
+}
+
+// A deprecated field the generator is told to drop.
+message Dropped {
+  option (nanopb_msgopt).discard_deprecated = true;
+  optional uint32 kept = 1;
+  optional uint32 old = 2 [deprecated = true];
+}

@@ -324,6 +324,9 @@ mod proto_encode_tests;
 /// The `.proto` tokenizer behind [`proto_schema`], private for the reason
 /// [`payload_builtin`] is.
 mod proto_lex;
+pub mod proto_nanopb;
+#[cfg(test)]
+mod proto_nanopb_tests;
 /// The `.proto` parser behind [`proto_schema`] and [`proto_encode`]: the part of
 /// the syntax tree the declaration and value doors need, and the refusals that
 /// are syntax.

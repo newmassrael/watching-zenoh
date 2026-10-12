@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+// Reference cases for the largest encoded size nanopb gives a message
+// (`proto_nanopb`). Every message is sized by nanopb's own generator in
+// `scripts/nanopb-reference-sizes.sh`, and the numbers the tests expect are the
+// ones it wrote. Each message is annotated with the rule it exercises.
+
+syntax = "proto3";
+import "nanopb.proto";
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  MODE_ACTIVE = 1;
+}
+
+// A value of 300 takes two bytes as a varint.
+enum Wide {
+  WIDE_ZERO = 0;
+  WIDE_BIG = 300;
+}
+
+// A negative value takes ten.
+enum Signed {
+  SIGNED_ZERO = 0;
+  SIGNED_NEG = -1;
+}
+
+// Every scalar, a string and a bytes with a bound, an enum, and `int_size`.
+message Everything {
+  uint32 id = 1 [(nanopb).int_size = IS_16];
+  int32 counter = 2;
+  uint32 narrowed = 3 [(nanopb).int_size = IS_16];
+  sint32 zig = 4;
+  bool flag = 5;
+  float ratio = 6;
+  double precise = 7;
+  string text = 8 [(nanopb).max_size = 256];
+  bytes blob = 9 [(nanopb).max_size = 64];
+  int64 wide_signed = 10;
+  uint64 wide_unsigned = 11;
+  sint64 wide_zig = 12;
+  fixed32 near_fixed = 13;
+  fixed64 far_fixed = 14;
+  Mode mode = 15;
+}
+
+// A repeated field is its element, its tag, and `max_count` times that.
+message Samples {
+  uint32 id = 1 [(nanopb).int_size = IS_16];
+  repeated float values = 2 [(nanopb).max_count = 10];
+}
+
+message Coordinate {
+  sint32 latitude = 1;
+  sint32 longitude = 2;
+  uint32 accuracy = 3 [(nanopb).int_size = IS_16];
+}
+
+// A message field is the submessage, its length prefix and its tag; a nested
+// message is a message of its own.
+message Placed {
+  message Calibration {
+    uint32 offset = 1 [(nanopb).int_size = IS_16];
+  }
+  uint32 id = 1 [(nanopb).int_size = IS_16];
+  Coordinate position = 2;
+  Calibration calibration = 3;
+  uint32 stamp = 4;
+}
+
+message Leaf {
+  uint32 member = 1;
+}
+
+// Enums, strings, bytes, `max_length`, and repeated enums, messages and strings,
+// with tags that take two bytes.
+message Compat {
+  uint32 id = 1 [(nanopb).int_size = IS_16];
+  Mode mode = 10;
+  string text = 11 [(nanopb).max_size = 33];
+  bytes blob = 12 [(nanopb).max_size = 32];
+  string by_length = 13 [(nanopb).max_length = 32];
+  Leaf leaf = 20;
+  repeated uint32 numbers = 22 [(nanopb).max_count = 8];
+  repeated Mode modes = 23 [(nanopb).max_count = 8];
+  repeated Leaf leaves = 24 [(nanopb).max_count = 4];
+  repeated string names = 25 [(nanopb).max_count = 4, (nanopb).max_size = 33];
+}
+
+// An enum is as wide as its widest value.
+message Enums {
+  Mode mode = 1;
+  Wide wide = 2;
+  Signed signed = 3;
+}
+
+// Where a varint gains a byte: a count of one, a tag at 16 and at 2048, a string
+// of 1 byte, a bytes of 127 and of 128, a `max_length` of 127.
+message Boundary {
+  repeated uint32 one = 1 [(nanopb).max_count = 1];
+  repeated uint32 two = 2 [(nanopb).max_count = 2];
+  string tiny = 3 [(nanopb).max_size = 1];
+  bytes seven = 4 [(nanopb).max_size = 127];
+  bytes eight = 5 [(nanopb).max_size = 128];
+  string long_text = 6 [(nanopb).max_length = 127];
+  uint32 far = 16;
+  uint32 farther = 2048;
+  uint64 narrow_64 = 17 [(nanopb).int_size = IS_8];
+  sint64 zig_16 = 18 [(nanopb).int_size = IS_16];
+  int32 narrow_signed = 19 [(nanopb).int_size = IS_8];
+  bool flag_16 = 20 [(nanopb).int_size = IS_16];
+}
+
+// No static size: a string and a bytes with no bound, a repeated field with no
+// count, and a message that holds one.
+message Unbounded {
+  string text = 1;
+}
+
+message UnboundedBytes {
+  bytes blob = 1;
+}
+
+message Uncounted {
+  repeated int32 values = 1;
+}
+
+message HoldsUnbounded {
+  uint32 id = 1;
+  Unbounded inner = 2;
+}

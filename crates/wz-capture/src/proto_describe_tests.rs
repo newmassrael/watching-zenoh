@@ -307,7 +307,7 @@ fn the_document_has_one_shape_for_every_row_and_closed_words() {
         0,
     );
     assert!(
-        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":2},\"ok\":true,"),
+        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":3},\"ok\":true,"),
         "{doc}"
     );
     // A field row with nothing to point at writes every key, `null` where it
@@ -636,6 +636,24 @@ pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
         proto_message_json("demo.Rich", &both, 0),
         proto_message_json("Opt", &files(&[("a.proto", OPTIONED)]), 0),
         proto_message_json("Point", &files(&[("a.proto", COMMENTED)]), 0),
+        // Messages with no nanopb size, for two of the reasons: a string with no
+        // bound, and a message that holds itself.
+        proto_message_json(
+            "U",
+            &files(&[(
+                "a.proto",
+                "syntax = \"proto3\"; message U { string s = 1; }"
+            )]),
+            0,
+        ),
+        proto_message_json(
+            "T",
+            &files(&[(
+                "a.proto",
+                "syntax = \"proto3\"; message T { T next = 1; uint32 v = 2; }",
+            )]),
+            0,
+        ),
         proto_message_json(
             "Reading",
             &files(&[(

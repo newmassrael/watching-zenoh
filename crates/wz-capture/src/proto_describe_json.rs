@@ -10,11 +10,12 @@
 //! # `proto_message`
 //!
 //! ```text
-//! {"document":{"name":"proto_message","revision":2},"ok":true,
+//! {"document":{"name":"proto_message","revision":3},"ok":true,
 //!  "root":"pkg.Reading",
 //!  "messages":[{"full_name":"pkg.Reading","file":"reading.proto","syntax":"proto3",
 //!    "oneofs":[],"comment":" One reading.\n","trailing_comment":null,
 //!    "options":[{"name":"(ext).id","kind":"integer","value":7}],
+//!    "max_encoded_size":6,"max_encoded_size_reason":null,
 //!    "fields":[{"name":"sensor_id","json_name":"sensorId","number":1,
 //!      "type":"uint32","label":"singular","oneof":null,"packed":null,
 //!      "enum":null,"message_type":null,"map":null,
@@ -52,6 +53,13 @@
 //!   `aggregate` (`value` the text between the braces of a `{ ... }` value, as
 //!   written). An option is not judged: a value no consumer of that option could
 //!   read is still listed;
+//! * `max_encoded_size` and `max_encoded_size_reason`, on a message row only: the
+//!   most bytes the message takes encoded, in nanopb's own arithmetic from the
+//!   nanopb options written in the schema (the number the generated `Message_size`
+//!   macro holds), by the integer rule below; or `null` and then the reason there
+//!   is none, one of `unbounded_field`, `recursive_message`,
+//!   `message_not_generated`, `unmodelled_option`, `too_large` and `too_deep`
+//!   (see [`crate::proto_nanopb`]). Exactly one of the two keys is `null`;
 //! * `oneof` is the oneof's name, or `null` for a field that is in none;
 //! * `packed` is a boolean for a repeated field of a packable type (whether it
 //!   is written as one run) and `null` for every other field;
@@ -157,6 +165,19 @@ fn push_message(message: &MessageDescription, out: &mut String) {
     out.push(']');
     push_comments(&message.comment, &message.trailing_comment, out);
     push_options(&message.options, out);
+    // A number, or `null` and the reason there is none: never one without the
+    // other, so a consumer reads either key alone.
+    match message.max_encoded_size {
+        Ok(bytes) => {
+            out.push_str(",\"max_encoded_size\":");
+            push_integer(i128::from(bytes), out);
+            out.push_str(",\"max_encoded_size_reason\":null");
+        }
+        Err(why) => out.push_str(&format!(
+            ",\"max_encoded_size\":null,\"max_encoded_size_reason\":\"{}\"",
+            why.word()
+        )),
+    }
     out.push_str(",\"fields\":[");
     for (i, field) in message.fields.iter().enumerate() {
         if i > 0 {

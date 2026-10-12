@@ -2393,6 +2393,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: PROTO_MESSAGE_R2_CARRIES,
     },
+    // THE LARGEST A MESSAGE CAN BE ONCE NANOPB HAS ENCODED IT.
+    //
+    // A firmware that links nanopb sizes its encode buffer with the generated
+    // `Message_size` macro, and the person writing the schema wants that number
+    // while writing it. Revision 3 adds to a message row `max_encoded_size`, the
+    // number by nanopb's own arithmetic over the nanopb options written in the
+    // schema, or `null` with `max_encoded_size_reason`, one of a closed set, where
+    // nanopb gives the message no static size or this reader does not model what
+    // decides it. Nothing retires and nothing moves.
+    //
+    // The reason is a PASSENGER: the key is on every message row, `null` when the
+    // message has a size.
+    DocumentShape {
+        document: PROTO_MESSAGE,
+        revision: 3,
+        keys: PROTO_MESSAGE_R3_KEYS,
+        retiring: &[],
+        families: PROTO_MESSAGE_R3_FAMILIES,
+        planes: &[],
+        carries: PROTO_MESSAGE_R3_CARRIES,
+    },
     // What building a protected frame under a caller-supplied profile did, or
     // why it refused.
     //
@@ -9707,6 +9728,113 @@ pub const PROTO_MESSAGE_R2_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The description document's key set at revision 3: revision 2's PLUS, on a
+/// message row, `max_encoded_size` and `max_encoded_size_reason`. Nothing retires.
+pub const PROTO_MESSAGE_R3_KEYS: &[&str] = &[
+    "column",
+    "comment",
+    "document",
+    "enum",
+    "fields",
+    "file",
+    "full_name",
+    "json_name",
+    "key",
+    "kind",
+    "label",
+    "line",
+    "map",
+    "max_encoded_size",
+    "max_encoded_size_reason",
+    "message",
+    "message_type",
+    "messages",
+    "name",
+    "number",
+    "ok",
+    "oneof",
+    "oneofs",
+    "options",
+    "packed",
+    "reason",
+    "revision",
+    "root",
+    "syntax",
+    "trailing_comment",
+    "type",
+    "value",
+    "values",
+];
+
+/// Why a message has no `max_encoded_size`: the words of
+/// `max_encoded_size_reason`, `null` when it has one.
+pub const PROTO_SIZE_REASON_R3: &[&str] = &[
+    "message_not_generated",
+    "recursive_message",
+    "too_deep",
+    "too_large",
+    "unbounded_field",
+    "unmodelled_option",
+];
+
+/// The description document's value families at revision 3: revision 2's and the
+/// reason a message has no size.
+pub const PROTO_MESSAGE_R3_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "key",
+        values: PROTO_MAP_KEY_R1,
+    },
+    ValueFamily {
+        key: "kind",
+        values: PROTO_OPTION_KIND_R2,
+    },
+    ValueFamily {
+        key: "label",
+        values: PROTO_LABEL_R1,
+    },
+    ValueFamily {
+        key: "max_encoded_size_reason",
+        values: PROTO_SIZE_REASON_R3,
+    },
+    ValueFamily {
+        key: "syntax",
+        values: PROTO_SYNTAX_R1,
+    },
+    ValueFamily {
+        key: "type",
+        values: PROTO_TYPE_R1,
+    },
+];
+
+/// All six are PASSENGERS: a message row has one shape whether it has a size or
+/// not, the size being a number or `null` and the reason the other way round.
+pub const PROTO_MESSAGE_R3_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "key",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "label",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "max_encoded_size_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "syntax",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "type",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The `e2e_wrap` document's key set at revision 1, over BOTH branches: the
 /// built frame with every step it took, and the refusal with whichever
 /// position keys apply.
@@ -14792,7 +14920,9 @@ mod tests {
             // To 2 when a message and a field gained the comments `protoc`
             // attaches to them and every option as written: `comment`,
             // `trailing_comment`, `options` and, inside an option, `kind`.
-            (PROTO_MESSAGE, 2),
+            // To 3 when a message gained its nanopb size: `max_encoded_size`
+            // and `max_encoded_size_reason`.
+            (PROTO_MESSAGE, 3),
             // A protected frame built and read under a caller's profile.
             // To 2 when the body could be described: `body_message`, `stage`
             // and the writer's position keys.

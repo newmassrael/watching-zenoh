@@ -3030,11 +3030,12 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  *
  * Always returns WZ_DISSECT_OK for well formed arguments and writes a document:
  *
- *     {"document":{"name":"proto_message","revision":2},"ok":true,
+ *     {"document":{"name":"proto_message","revision":3},"ok":true,
  *      "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading",
  *       "file":"a.proto","syntax":"proto3","oneofs":[],
  *       "comment":" One reading.\n","trailing_comment":null,
  *       "options":[{"name":"(ext).id","kind":"integer","value":7}],
+ *       "max_encoded_size":6,"max_encoded_size_reason":null,
  *       "fields":[{"name":"sensor_id","json_name":"sensorId","number":1,
  *        "type":"uint32","label":"singular","oneof":null,"packed":null,
  *        "enum":null,"message_type":null,"map":null,
@@ -3102,6 +3103,20 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  *              between the braces of a {...} value, as written). An option is
  *              not judged: a value nobody could read is still listed.
  *
+ * NANOPB SIZE (revision 3). A message row also carries `max_encoded_size` and
+ * `max_encoded_size_reason`: the most bytes the message takes encoded, in nanopb's
+ * own arithmetic over the nanopb options written in the schema (the number the
+ * generated `Message_size` macro holds), a number by the rule the enum numbers
+ * follow; or null, and then the reason there is none, one of `unbounded_field`
+ * (a string or bytes with no max_size, or a repeated field, a map included, with
+ * no max_count), `recursive_message` (nanopb breaks a cycle by turning one message
+ * into callbacks, and which one depends on the order it met them),
+ * `message_not_generated` (the message or one it holds is skipped by
+ * skip_message), `unmodelled_option` (an option that changes the size and is not
+ * modelled, such as type_override, or a modelled one with a value that cannot be
+ * read), `too_large` and `too_deep`. Exactly one of the two keys is null. Only the
+ * options written in the .proto are read; nanopb's separate .options file is not.
+ *
  * A schema that is refused is a successful DIAGNOSIS, with the keys
  * wz_dissect_declarations_from_proto gives (`file`, `line` and `column` together
  * for a place in a file, `file` alone for a whole file, none for an argument,
@@ -3115,11 +3130,13 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  * @values proto_message key
  * @values proto_message kind
  * @values proto_message label
+ * @values proto_message max_encoded_size_reason
  * @values proto_message syntax
  * @values proto_message type
  * @carries proto_message key passenger
  * @carries proto_message kind passenger
  * @carries proto_message label passenger
+ * @carries proto_message max_encoded_size_reason passenger
  * @carries proto_message syntax passenger
  * @carries proto_message type passenger */
 int wz_dissect_proto_describe(const char *root_message,

@@ -60,6 +60,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::proto_nanopb::SizeRefusal;
 use crate::proto_parse::{FieldOption, Label, OptionValue, ScalarKind, Syntax};
 use crate::proto_schema::{FieldKind, Linker, MapValueKind, ProtoDiagnostic, ProtoFile};
 
@@ -224,6 +225,9 @@ pub struct MessageDescription {
     pub trailing_comment: Option<String>,
     /// The message's own `option` statements, in the order written.
     pub options: Vec<OptionDescription>,
+    /// The most bytes the message takes encoded, by nanopb's arithmetic, or the
+    /// reason it has no number (see [`crate::proto_nanopb`]).
+    pub max_encoded_size: Result<u64, SizeRefusal>,
 }
 
 /// The root message and the messages it reaches.
@@ -267,8 +271,10 @@ pub fn describe_proto(
         values: linker.enums[idx].values.clone(),
     };
 
+    let reached = linker.reached_from(root);
+    let mut sizes = crate::proto_nanopb::encoded_sizes(&linker, &reached);
     let mut messages = Vec::new();
-    for idx in linker.reached_from(root) {
+    for idx in reached {
         let msg = &linker.msgs[idx];
         let proto3 = msg.syntax == Syntax::Proto3;
         let mut fields = Vec::with_capacity(msg.fields.len());
@@ -363,6 +369,9 @@ pub fn describe_proto(
             comment: msg.docs.leading.clone(),
             trailing_comment: msg.docs.trailing.clone(),
             options: describe_options(&msg.options),
+            max_encoded_size: sizes
+                .remove(&idx)
+                .unwrap_or(Err(SizeRefusal::UnmodelledOption)),
         });
     }
     Ok(ProtoDescription {

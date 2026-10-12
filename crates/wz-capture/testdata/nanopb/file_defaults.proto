@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+// Reference cases for the options of a FILE: the default of every message in it,
+// a map's entry fields (which can have no options of their own), and a nested
+// message, which takes the file's options and not those of the message around it.
+// Sized by nanopb's generator in `scripts/nanopb-reference-sizes.sh`.
+
+syntax = "proto3";
+import "nanopb.proto";
+
+option (nanopb_fileopt).max_size = 16;
+option (nanopb_fileopt).max_count = 3;
+
+// The map's key takes the file's `max_size`; the map has its own `max_count`.
+message Dict {
+  map<string, uint32> entries = 1 [(nanopb).max_count = 4];
+}
+
+message Names {
+  string first = 1;
+  repeated string others = 2;
+  bytes blob = 3 [(nanopb).max_size = 2];
+}
+
+// `Inner` has the file's `max_size` of 16, and `Outer.label` the message's 4.
+message Outer {
+  option (nanopb_msgopt).max_size = 4;
+  message Inner {
+    string text = 1;
+  }
+  string label = 1;
+  Inner inner = 2;
+}
+
+// A map whose values are messages, and a map with no `max_count` of its own.
+message Registry {
+  map<string, Names> by_name = 1 [(nanopb).max_count = 2];
+  map<string, uint32> unbounded_entries = 2;
+}

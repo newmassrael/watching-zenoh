@@ -2091,10 +2091,11 @@ pub unsafe extern "C" fn wz_dissect_declarations_match(
 /// [`WZ_DISSECT_OK`] with a document, for any arguments that are well formed:
 ///
 /// ```text
-/// {"document":{"name":"proto_message","revision":2},"ok":true,
+/// {"document":{"name":"proto_message","revision":3},"ok":true,
 ///  "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading","file":"a.proto",
 ///   "syntax":"proto3","oneofs":[],"comment":" One reading.\n","trailing_comment":null,
 ///   "options":[{"name":"(ext).id","kind":"integer","value":7}],
+///   "max_encoded_size":6,"max_encoded_size_reason":null,
 ///   "fields":[{"name":"sensor_id","json_name":"sensorId",
 ///   "number":1,"type":"uint32","label":"singular","oneof":null,"packed":null,
 ///   "enum":null,"message_type":null,"map":null,"comment":null,
@@ -2109,6 +2110,12 @@ pub unsafe extern "C" fn wz_dissect_declarations_match(
 /// `integer`, `float`, `string` and `aggregate`. The rule that decides which
 /// comment belongs to which declaration is `protoc`'s, stated on
 /// `wz_capture::proto_describe_json`.
+///
+/// A message row also carries `max_encoded_size`, the most bytes the message takes
+/// encoded by nanopb's own arithmetic over the nanopb options written in the schema,
+/// or `null` and then `max_encoded_size_reason`, one of `unbounded_field`,
+/// `recursive_message`, `message_not_generated`, `unmodelled_option`, `too_large`
+/// and `too_deep`: exactly one of the two keys is `null`.
 ///
 /// `messages` is the root message first, then each message it reaches once; a field
 /// of type `message` names its message by full name in `message_type`. Every key of

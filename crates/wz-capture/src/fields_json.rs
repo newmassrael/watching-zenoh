@@ -6748,7 +6748,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 56] = [
+        let live: [(&str, &str, Vec<&'static str>); 57] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6970,6 +6970,13 @@ mod tests {
                 "syntax",
                 crate::proto_describe::SYNTAX_WORDS.to_vec(),
             ),
+            // The reasons a message has no nanopb size, one per refusal the
+            // arithmetic can give.
+            (rev::PROTO_MESSAGE, "max_encoded_size_reason", {
+                let mut words = crate::proto_nanopb::REFUSAL_WORDS.to_vec();
+                words.sort_unstable();
+                words
+            }),
             // The transport build document's three: what a layout row IS, how
             // its integer is laid out, and what its offset counts from. Each
             // walk is the type the report is built with, so a word a row can
