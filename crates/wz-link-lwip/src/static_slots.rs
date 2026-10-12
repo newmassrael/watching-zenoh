@@ -86,15 +86,37 @@ impl<T, const S: usize> SlotPool<T, S> {
     /// `init` runs only once a cell is claimed, so a refused claim builds
     /// nothing, and it is written straight into the cell.
     pub fn claim_with(&'static self, init: impl FnOnce() -> T) -> Option<Slot<T>> {
+        // SAFETY: the closure writes a whole `T` at the pointer it is given.
+        unsafe {
+            self.claim_in_place(|at| {
+                // By value: the `T` is a value of its own on the stack until it is
+                // written, which is what `claim_in_place` exists to avoid for a large one.
+                at.write(init());
+            })
+        }
+    }
+
+    /// [`claim_with`](Self::claim_with) for a `T` too large to be a value on the stack:
+    /// the cell is claimed and `init` is given a pointer to it, to write the `T` there
+    /// field by field. A session socket's state is 24.7 KB, and a node whose stack is
+    /// 32 KB cannot build one by value below the frames that already stand.
+    ///
+    /// # Safety
+    ///
+    /// `init` must write a valid `T` at the pointer before it returns (it is then read as
+    /// one, and dropped as one). The pointer is aligned and the cell is the caller's alone
+    /// while `init` runs, holding no value.
+    pub unsafe fn claim_in_place(&'static self, init: impl FnOnce(*mut T)) -> Option<Slot<T>> {
         for (cell, flag) in self.cells.iter().zip(self.taken.iter()) {
             if !take(flag) {
                 continue;
             }
             let value =
                 NonNull::new(cell.get().cast::<T>()).expect("a cell of a static is not null");
-            // SAFETY: the flag made this cell ours alone, and a free cell holds
-            // no value, so nothing is dropped or aliased by writing it.
-            unsafe { value.as_ptr().write(init()) };
+            // The flag made this cell ours alone, and a free cell holds no value, so
+            // nothing is dropped or aliased by writing it; `init` is the caller's to make
+            // whole (this function's contract).
+            init(value.as_ptr());
             return Some(Slot { value, taken: flag });
         }
         // Counted with a load and a store: see the module's threading note.
@@ -277,5 +299,39 @@ mod tests {
             0,
             "and its value is not dropped"
         );
+    }
+
+    /// An in-place claim hands `init` the cell's own address and never builds a `T` of
+    /// its own, and a refused claim runs nothing.
+    #[test]
+    fn an_in_place_claim_is_written_through_the_pointer_and_a_refused_one_writes_nothing() {
+        static POOL: SlotPool<[u32; 4], 1> = SlotPool::new();
+        let mut seen = 0usize;
+        // SAFETY: the closure writes the whole array.
+        let first = unsafe {
+            POOL.claim_in_place(|at| {
+                seen = at as usize;
+                at.write([7; 4]);
+            })
+        }
+        .expect("claim");
+        std::assert_eq!(*first, [7; 4]);
+        std::assert_eq!(
+            seen,
+            &*first as *const [u32; 4] as usize,
+            "the pointer init was given is the cell the slot holds"
+        );
+
+        let mut ran = false;
+        // SAFETY: never runs: the only cell is taken.
+        let refused = unsafe {
+            POOL.claim_in_place(|at| {
+                ran = true;
+                at.write([0; 4]);
+            })
+        };
+        std::assert!(refused.is_none());
+        std::assert!(!ran, "a refused claim runs no initialiser");
+        std::assert_eq!(POOL.refusals(), 1);
     }
 }

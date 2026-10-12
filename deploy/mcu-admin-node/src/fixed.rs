@@ -43,7 +43,7 @@ use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitP
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{Requesters, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
@@ -173,7 +173,7 @@ static ETH0: EthernetPool<Lan9118, 1> = EthernetPool::new();
 /// registered on it).
 struct Factory {
     key: [u8; 32],
-    observer: &'static RefCell<SlotObserverOf<Sinks>>,
+    observer: &'static ObserverCell<Sinks>,
 }
 
 impl SessionFactory<SystickClockRef> for Factory {
@@ -250,28 +250,34 @@ pub fn run() -> ! {
     // The application's registrations, on the observer every session of the node
     // dispatches to: the config-write subscriber and the admin queryable. A node whose
     // registrations were refused is not started, rather than started deaf.
-    let mut observer = SlotObserverOf::<Sinks>::new();
-    if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control).is_err()
-    {
-        fail("the config subscriber was refused");
-    }
+    //
+    // The observer is built in `NODE.app`, where it stays, and registered on there: it is
+    // 16 KB, and a value of it passed through the install is four copies of it in this
+    // function's frame.
     let identity = match FixedNodeIdentity::new(zid_hex, "peer", "wz-mcu-admin-node", &[LOCATOR]) {
         Ok(identity) => identity,
         Err(_) => fail("the node's identity does not fit"),
     };
-    if host_admin_queryable_fixed(
-        &mut observer.queryables,
-        identity,
-        &NODE.status,
-        &NODE.admin,
-        Some(&NODE.control),
-        Some(&NODE.control),
-    )
-    .is_err()
-    {
-        fail("the admin queryable was refused");
-    }
-    let Ok(observer) = NODE.app.install(observer) else {
+    let installed = NODE.app.install_with(|observer| {
+        if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control)
+            .is_err()
+        {
+            fail("the config subscriber was refused");
+        }
+        if host_admin_queryable_fixed(
+            &mut observer.queryables,
+            identity,
+            &NODE.status,
+            &NODE.admin,
+            Some(&NODE.control),
+            Some(&NODE.control),
+        )
+        .is_err()
+        {
+            fail("the admin queryable was refused");
+        }
+    });
+    let Ok((observer, ())) = installed else {
         fail("the observer was installed twice");
     };
 

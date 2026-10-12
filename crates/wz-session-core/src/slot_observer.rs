@@ -35,6 +35,8 @@
 // type, and neither is [`SlotObserverOf`]: the sinks it registers are the types an
 // [`ObserverSinks`] names. The liveliness planes and the switchboard register heap
 // forms, so they, and what only they name, sit behind `alloc`.
+use core::mem::MaybeUninit;
+
 use crate::decl_sink::{DeclSink, UndeclSink};
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
 use crate::declare::liveliness::LivelinessRegistry;
@@ -220,26 +222,217 @@ impl<K: ObserverSinks> Default for SlotObserverOf<K> {
     }
 }
 
+/// Where a cell stands: nothing in it, an observer nobody holds, or one a guard holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CellState {
+    Empty,
+    Idle,
+    Held,
+}
+
+/// A second [`ObserverCell::init_with`] on a cell that already holds its observer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AlreadyInitialised;
+
+/// The process-wide observer's place, for a `static`: empty until [`Self::init_with`]
+/// builds the observer in it, once, and lent through [`Self::borrow_mut`] after that,
+/// one holder at a time (the rule `RefCell` keeps, with the same panic on a second).
+///
+/// It exists for the observer's size. A `RefCell<SlotObserverOf>` can only be filled by
+/// value, and the value passes through every call that hands it on: on a 32 KB stack the
+/// four copies the install of the Zephyr node made came to 69 KB of the node's main
+/// frame, and the node's own loop ran below its stack. Here the observer is written
+/// field by field into the cell where it stays, and the callback that registers on it
+/// holds a reference to it, never the value.
+pub struct ObserverCell<K: ObserverSinks> {
+    state: core::cell::Cell<CellState>,
+    value: core::cell::UnsafeCell<MaybeUninit<SlotObserverOf<K>>>,
+}
+
+impl<K: ObserverSinks> ObserverCell<K> {
+    /// An empty cell, for a `static`.
+    pub const fn new() -> Self {
+        Self {
+            state: core::cell::Cell::new(CellState::Empty),
+            value: core::cell::UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    /// Build the observer in the cell (nothing registered) and hand it to `register`,
+    /// which holds it while it runs. The cell is `Held` meanwhile, so a `borrow_mut`
+    /// from inside `register` is the panic it would be on a `RefCell`.
+    ///
+    /// # Errors
+    ///
+    /// [`AlreadyInitialised`] if the cell holds its observer already, which is then
+    /// left as it was.
+    pub fn init_with<R>(
+        &self,
+        register: impl FnOnce(&mut SlotObserverOf<K>) -> R,
+    ) -> Result<R, AlreadyInitialised> {
+        if self.state.get() != CellState::Empty {
+            return Err(AlreadyInitialised);
+        }
+        self.state.set(CellState::Held);
+        let at = self.value.get().cast::<SlotObserverOf<K>>();
+        // SAFETY: the cell is empty, so nothing refers into it and nothing in it needs
+        // dropping; `at` is the cell's own storage, aligned for the observer.
+        unsafe { SlotObserverOf::init_in_place(at) };
+        // SAFETY: just written; the cell is `Held`, so this is the only reference.
+        let result = register(unsafe { &mut *at });
+        self.state.set(CellState::Idle);
+        Ok(result)
+    }
+
+    /// Whether the observer has been built.
+    pub fn is_initialised(&self) -> bool {
+        self.state.get() != CellState::Empty
+    }
+
+    /// Lend the observer, or `None` for a cell with no observer yet or one a guard
+    /// holds.
+    pub fn try_borrow_mut(&self) -> Option<ObserverGuard<'_, K>> {
+        if self.state.get() != CellState::Idle {
+            return None;
+        }
+        self.state.set(CellState::Held);
+        Some(ObserverGuard { cell: self })
+    }
+
+    /// Lend the observer.
+    ///
+    /// # Panics
+    ///
+    /// On a cell with no observer yet and on one a guard holds: a dispatch reached
+    /// from inside a dispatch, which the profile's one cooperative task never does.
+    pub fn borrow_mut(&self) -> ObserverGuard<'_, K> {
+        match self.state.get() {
+            CellState::Idle => {}
+            CellState::Empty => panic!("the observer cell was borrowed before it was built"),
+            CellState::Held => panic!("the observer cell is already borrowed"),
+        }
+        self.state.set(CellState::Held);
+        ObserverGuard { cell: self }
+    }
+}
+
+impl<K: ObserverSinks> Default for ObserverCell<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: ObserverSinks> Drop for ObserverCell<K> {
+    fn drop(&mut self) {
+        if self.state.get() != CellState::Empty {
+            // SAFETY: a cell that is not empty holds an observer `init_with` built, and
+            // `&mut self` means no guard is out.
+            unsafe { self.value.get_mut().assume_init_drop() };
+        }
+    }
+}
+
+/// The observer, lent by an [`ObserverCell`] until the guard drops.
+pub struct ObserverGuard<'a, K: ObserverSinks> {
+    cell: &'a ObserverCell<K>,
+}
+
+impl<K: ObserverSinks> core::ops::Deref for ObserverGuard<'_, K> {
+    type Target = SlotObserverOf<K>;
+
+    fn deref(&self) -> &SlotObserverOf<K> {
+        // SAFETY: a guard exists only for a built observer, and holds the cell `Held`.
+        unsafe { (*self.cell.value.get()).assume_init_ref() }
+    }
+}
+
+impl<K: ObserverSinks> core::ops::DerefMut for ObserverGuard<'_, K> {
+    fn deref_mut(&mut self) -> &mut SlotObserverOf<K> {
+        // SAFETY: as in `deref`, and the cell is `Held`, so this is the one reference.
+        unsafe { (*self.cell.value.get()).assume_init_mut() }
+    }
+}
+
+impl<K: ObserverSinks> Drop for ObserverGuard<'_, K> {
+    fn drop(&mut self) {
+        self.cell.state.set(CellState::Idle);
+    }
+}
+
 impl<K: ObserverSinks> SlotObserverOf<K> {
     /// An observer with nothing registered.
+    ///
+    /// By value, so the whole observer (about 16 KB in the Zephyr node's image) is one
+    /// more value on the caller's stack. A node whose stack is a few tens of KB places
+    /// it with [`ObserverCell::init_with`] instead, which builds it where it stays.
     pub fn new() -> Self {
-        Self {
-            subscribers: SubscriberTable::with_sink_backing(),
-            #[cfg(feature = "switchboard")]
-            switchboard: SwitchboardRegistry::new(),
-            #[cfg(feature = "query-queryable")]
-            queryables: QueryableRegistry::with_sink_backing(),
-            #[cfg(feature = "declare-subscriber")]
-            remote_subscribers: RemoteSubscriberTable::with_sink_backing(),
-            #[cfg(feature = "declare-queryable")]
-            remote_queryables: RemoteQueryableTable::with_sink_backing(),
-            #[cfg(feature = "liveliness-token")]
-            liveliness: LivelinessRegistry::new(),
-            #[cfg(feature = "liveliness-token")]
-            local_tokens: LocalTokenRegistry::new(),
-            #[cfg(feature = "liveliness-subscriber")]
-            liveliness_subscribers: LivelinessSubscriberTable::with_sink_backing(),
+        let mut observer = MaybeUninit::<Self>::uninit();
+        // SAFETY: `init_in_place` writes every field, which `every_field_is_written`
+        // below holds to the field list at compile time.
+        unsafe {
+            Self::init_in_place(observer.as_mut_ptr());
+            observer.assume_init()
         }
+    }
+
+    /// Write an observer with nothing registered at `at`, one registry at a time, so the
+    /// observer is never a value of its own on any stack: the largest value this holds
+    /// is one registry. The single list of fields, which [`Self::new`] shares.
+    ///
+    /// # Safety
+    ///
+    /// `at` must be aligned and valid for a write of `Self`. What it held is not
+    /// dropped.
+    // Not inlined: its temporaries (one registry each) would otherwise be part of the
+    // frame of whoever calls it, for as long as that frame lives. The Zephyr node's
+    // `run` is the node's loop.
+    #[inline(never)]
+    pub unsafe fn init_in_place(at: *mut Self) {
+        use core::ptr::addr_of_mut;
+        // SAFETY: the caller's; each field is written once through a pointer to it.
+        unsafe {
+            addr_of_mut!((*at).subscribers).write(SubscriberTable::with_sink_backing());
+            #[cfg(feature = "switchboard")]
+            addr_of_mut!((*at).switchboard).write(SwitchboardRegistry::new());
+            #[cfg(feature = "query-queryable")]
+            addr_of_mut!((*at).queryables).write(QueryableRegistry::with_sink_backing());
+            #[cfg(feature = "declare-subscriber")]
+            addr_of_mut!((*at).remote_subscribers)
+                .write(RemoteSubscriberTable::with_sink_backing());
+            #[cfg(feature = "declare-queryable")]
+            addr_of_mut!((*at).remote_queryables).write(RemoteQueryableTable::with_sink_backing());
+            #[cfg(feature = "liveliness-token")]
+            addr_of_mut!((*at).liveliness).write(LivelinessRegistry::new());
+            #[cfg(feature = "liveliness-token")]
+            addr_of_mut!((*at).local_tokens).write(LocalTokenRegistry::new());
+            #[cfg(feature = "liveliness-subscriber")]
+            addr_of_mut!((*at).liveliness_subscribers)
+                .write(LivelinessSubscriberTable::with_sink_backing());
+        }
+    }
+
+    /// A field added to [`SlotObserverOf`] and not written by `init_in_place` would be
+    /// read uninitialised. This destructures the struct with no `..`, so adding a field
+    /// without naming it here (and so without writing it above) does not compile.
+    #[allow(dead_code)]
+    fn every_field_is_written(observer: Self) {
+        let Self {
+            subscribers: _,
+            #[cfg(feature = "switchboard")]
+                switchboard: _,
+            #[cfg(feature = "query-queryable")]
+                queryables: _,
+            #[cfg(feature = "declare-subscriber")]
+                remote_subscribers: _,
+            #[cfg(feature = "declare-queryable")]
+                remote_queryables: _,
+            #[cfg(feature = "liveliness-token")]
+                liveliness: _,
+            #[cfg(feature = "liveliness-token")]
+                local_tokens: _,
+            #[cfg(feature = "liveliness-subscriber")]
+                liveliness_subscribers: _,
+        } = observer;
     }
 
     /// Fan an [`IterationEvent`] of one session into every registry, against that

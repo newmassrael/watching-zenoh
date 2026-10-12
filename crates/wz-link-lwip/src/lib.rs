@@ -740,15 +740,57 @@ struct Inner<const N: usize, const Q: usize> {
 
 impl<const N: usize, const Q: usize> Inner<N, Q> {
     /// A socket's state before its pcb exists: nothing queued, nothing dropped.
+    ///
+    /// By value, for a socket whose state lives in a heap box. The state is the receive
+    /// queue's size (24.7 KB for a session socket), so a socket in a static cell is
+    /// written by [`Self::init_in_place`] instead.
+    #[cfg_attr(feature = "static-link-storage", allow(dead_code))]
     fn new() -> Self {
-        Self {
-            pcb: NonNull::dangling(),
-            rx_queue: Queue::new(),
-            rx_drops: 0,
-            #[cfg(feature = "rx-hold")]
-            hold_lent: false,
-            _pin: PhantomPinned,
+        let mut inner = core::mem::MaybeUninit::<Self>::uninit();
+        // SAFETY: `init_in_place` writes every field, which `every_field_is_written`
+        // holds to the field list at compile time.
+        unsafe {
+            Self::init_in_place(inner.as_mut_ptr());
+            inner.assume_init()
         }
+    }
+
+    /// Write a socket's state before its pcb exists at `at`, field by field, so the
+    /// state is never a value of its own on any stack. The single list of fields, which
+    /// [`Self::new`] shares.
+    ///
+    /// # Safety
+    ///
+    /// `at` must be aligned and valid for a write of `Self`; what it held is not dropped.
+    // Not inlined, so the queue's size is not part of the frame of the caller, which is
+    // the node's loop on the dial path.
+    #[inline(never)]
+    unsafe fn init_in_place(at: *mut Self) {
+        use core::ptr::addr_of_mut;
+        // SAFETY: the caller's; each field is written once through a pointer to it.
+        unsafe {
+            addr_of_mut!((*at).pcb).write(NonNull::dangling());
+            addr_of_mut!((*at).rx_queue).write(Queue::new());
+            addr_of_mut!((*at).rx_drops).write(0);
+            #[cfg(feature = "rx-hold")]
+            addr_of_mut!((*at).hold_lent).write(false);
+            addr_of_mut!((*at)._pin).write(PhantomPinned);
+        }
+    }
+
+    /// A field added to `Inner` and not written by `init_in_place` would be read
+    /// uninitialised: this destructures the struct with no `..`, so adding one without
+    /// naming it here, and so without writing it above, does not compile.
+    #[allow(dead_code)]
+    fn every_field_is_written(inner: Self) {
+        let Self {
+            pcb: _,
+            rx_queue: _,
+            rx_drops: _,
+            #[cfg(feature = "rx-hold")]
+                hold_lent: _,
+            _pin: _,
+        } = inner;
     }
 }
 
@@ -1041,9 +1083,11 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         port: u16,
         pool: &'static UdpSocketPool<N, Q, S>,
     ) -> Result<Self, LinkError> {
-        let slot = pool
-            .0
-            .claim_with(Inner::new)
+        // In place: the socket's state is its receive queue, 24.7 KB for a session
+        // socket, and the dial path runs this below the node's loop on a 32 KB stack.
+        //
+        // SAFETY: `init_in_place` writes every field of the state it is given.
+        let slot = unsafe { pool.0.claim_in_place(|at| Inner::init_in_place(at)) }
             .ok_or(LinkError::SlotsExhausted)?;
         // SAFETY: a slot's value stays in its cell of a `static` until the slot
         // drops, and the cell is not reused before the value is dropped in place,

@@ -50,7 +50,7 @@ use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitP
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{Requesters, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::WhatAmI;
 use wz_session_lwip::driver::LwipUdpDriver;
 use wz_session_lwip::listener::SessionListener;
@@ -167,7 +167,7 @@ fn params(zid: u8) -> SessionInitParams {
 /// registered on it).
 struct Factory<const S: usize> {
     zid: u8,
-    observer: &'static RefCell<SlotObserverOf<Sinks<S>>>,
+    observer: &'static ObserverCell<Sinks<S>>,
 }
 
 /// The registrations the node's observer holds: all closed types.
@@ -214,25 +214,24 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
 
     // The application's registrations, on the observer every session of the node
     // dispatches to: the config-write subscriber and the admin queryable.
-    let mut observer = SlotObserverOf::<Sinks<S>>::new();
-    host_connect_writes_fixed(&mut observer.subscribers, &zid_hex, "peer", &s.control)
-        .expect("the config subscriber is registered");
     let locator = format!("udp/127.0.0.1:{port}");
     let identity = FixedNodeIdentity::new(&zid_hex, "peer", "wz-test", &[locator.as_str()])
         .expect("the identity fits");
-    host_admin_queryable_fixed(
-        &mut observer.queryables,
-        identity,
-        &s.status,
-        &s.admin,
-        Some(&s.control),
-        Some(&s.control),
-    )
-    .expect("the admin queryable is registered");
-    let observer = s
+    let (observer, ()) = s
         .app
-        .install(observer)
-        .ok()
+        .install_with(|observer| {
+            host_connect_writes_fixed(&mut observer.subscribers, &zid_hex, "peer", &s.control)
+                .expect("the config subscriber is registered");
+            host_admin_queryable_fixed(
+                &mut observer.queryables,
+                identity,
+                &s.status,
+                &s.admin,
+                Some(&s.control),
+                Some(&s.control),
+            )
+            .expect("the admin queryable is registered");
+        })
         .expect("the observer is installed once");
 
     let host: &'static Host<S> = Box::leak(Box::new(SessionHost::new(

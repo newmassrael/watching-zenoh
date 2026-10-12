@@ -25,11 +25,13 @@
 //! graph names `alloc`. The no-allocator link gate (S8) takes that as its proof: a
 //! program that allocates anywhere does not link without a global allocator.
 //!
-//! What the proof does NOT cover: the image has not been built by `west` (no Zephyr SDK
-//! here) and its CMake build does not select this profile yet, so the staticlib compiles
-//! only through the S8 gate's stand-in for the board's build values, which is a compile
-//! and a link-input check, and nothing was booted on the T2G kit. The longest console
-//! line the buffer holds is `glue::LOG_LINE_BYTES`; a longer one is cut.
+//! The CMake build selects this profile with `CONFIG_WZ_FIXED_MEMORY`
+//! (`overlays/t2g_fixed.conf`), `west` builds and links the image (Layer Qzb, the table's
+//! `rmii-dp83825i-fixed` row), and it has been booted on the T2G kit with both pools
+//! (the lab record is in the ledger). What the S8 proof does NOT cover is the Zephyr
+//! kernel's own heap, which the image still configures and the shared CMake still keeps
+//! a symbol for, and which this file does not use. The longest console line the buffer
+//! holds is `glue::LOG_LINE_BYTES`; a longer one is cut.
 
 use core::cell::RefCell;
 
@@ -55,7 +57,7 @@ use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitP
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{Requesters, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
@@ -184,7 +186,7 @@ static NODE: Statics = Statics::new();
 struct Factory {
     zid: [u8; 6],
     key: [u8; 32],
-    observer: &'static RefCell<SlotObserverOf<Sinks>>,
+    observer: &'static ObserverCell<Sinks>,
 }
 
 impl SessionFactory<Clock> for Factory {
@@ -224,6 +226,49 @@ fn locator(address: [u8; 4]) -> FixedText<LOCATOR_BYTES> {
     let mut text = FixedText::new();
     let _ = write!(text, "udp/{a}.{b}.{c}.{d}:{LISTEN_PORT}");
     text
+}
+
+/// Build the observer in `NODE.app`, where it stays, and register the node's own surface on
+/// it: the config-write subscriber and the admin queryable. The reason, as the console
+/// line, when one is refused.
+///
+/// Its own function, not inlined into [`run`], for the stack: the temporaries of the
+/// registration (the identity, the registries' sinks) are as large as a few KB, and a
+/// frame that holds them is held by `run` for as long as the node runs, below which every
+/// session's work is done on a 32 KB stack. The observer itself is 16 KB and is never a
+/// value: a value of it passed through an install cost `run` 69 KB of frame.
+#[inline(never)]
+fn install_observer(
+    zid_hex: &str,
+    locators: &[&str],
+) -> Result<&'static ObserverCell<Sinks>, &'static core::ffi::CStr> {
+    let identity = FixedNodeIdentity::new(zid_hex, "peer", VERSION, locators)
+        .map_err(|_| c"wz: FAIL - the node's identity does not fit its fixed fields")?;
+    let installed = NODE.app.install_with(|observer| {
+        if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control)
+            .is_err()
+        {
+            return Err(c"wz: FAIL - the node's observer refused its config subscriber");
+        }
+        if host_admin_queryable_fixed(
+            &mut observer.queryables,
+            identity,
+            &NODE.status,
+            &NODE.admin,
+            Some(&NODE.control),
+            Some(&NODE.control),
+        )
+        .is_err()
+        {
+            return Err(c"wz: FAIL - the node's observer refused its admin queryable");
+        }
+        Ok(())
+    });
+    match installed {
+        Ok((observer, Ok(()))) => Ok(observer),
+        Ok((_, Err(why))) => Err(why),
+        Err(_) => Err(c"wz: FAIL - the observer was installed twice"),
+    }
 }
 
 /// Assemble the node over `net` and run it. Returns only when it cannot start; the value
@@ -268,35 +313,12 @@ pub fn run(mut net: LwipMacNet) -> i32 {
     // dispatches to: the config-write subscriber and the admin queryable. A node whose
     // registrations were refused would run without its admin space: stop instead, with
     // the reason.
-    let mut observer = SlotObserverOf::<Sinks>::new();
-    if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control).is_err()
-    {
-        log(c"wz: FAIL - the node's observer refused its config subscriber");
-        return 3;
-    }
-    let identity = match FixedNodeIdentity::new(zid_hex, "peer", VERSION, &locator_refs[..count]) {
-        Ok(identity) => identity,
-        Err(_) => {
-            log(c"wz: FAIL - the node's identity does not fit its fixed fields");
+    let observer = match install_observer(zid_hex, &locator_refs[..count]) {
+        Ok(observer) => observer,
+        Err(why) => {
+            log(why);
             return 3;
         }
-    };
-    if host_admin_queryable_fixed(
-        &mut observer.queryables,
-        identity,
-        &NODE.status,
-        &NODE.admin,
-        Some(&NODE.control),
-        Some(&NODE.control),
-    )
-    .is_err()
-    {
-        log(c"wz: FAIL - the node's observer refused its admin queryable");
-        return 3;
-    }
-    let Ok(observer) = NODE.app.install(observer) else {
-        log(c"wz: FAIL - the observer was installed twice");
-        return 3;
     };
 
     let host: Host = SessionHost::new(

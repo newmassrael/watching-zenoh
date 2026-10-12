@@ -27,9 +27,7 @@
 // that names it is the heap profile's; what a build with no allocator keeps is the
 // event seam ([`SessionEvents`]) and the reply sink that discards ([`NoReplies`]),
 // which an image's own dispatcher is written against.
-#[cfg(feature = "session-slot")]
-use core::cell::OnceCell;
-#[cfg(any(feature = "alloc", feature = "session-slot"))]
+#[cfg(feature = "alloc")]
 use core::cell::RefCell;
 
 #[cfg(feature = "alloc")]
@@ -47,7 +45,9 @@ use wz_session_core::session_actions::SessionLinkActions;
 #[cfg(feature = "session-slot")]
 use wz_session_core::session_slot::SlotRef;
 #[cfg(feature = "session-slot")]
-use wz_session_core::slot_observer::{DefaultSinks, ObserverSinks, Requesters, SlotObserverOf};
+use wz_session_core::slot_observer::{
+    AlreadyInitialised, DefaultSinks, ObserverCell, ObserverSinks, Requesters, SlotObserverOf,
+};
 
 /// The `on_event` that dispatches each iteration to `observer` and drains its
 /// staged output through `actions`, the session's own send path.
@@ -98,22 +98,27 @@ impl ReplySink for NoReplies {
 /// startup into a `static`.
 ///
 /// `SlotObserver::new` is not `const` (its registries are built, not zeroed), so the
-/// `static` is an empty cell and the image installs the observer it built and
-/// registered on, once, before the first session runs:
+/// `static` is an empty cell and the image builds the observer IN it and registers on
+/// it, once, before the first session runs:
 ///
 /// ```ignore
 /// static APP: SlotApp = SlotApp::new();
-/// let mut observer = SlotObserver::new();
-/// observer.subscribers.register_sink(..)?;
-/// let observer = APP.install(observer).ok().expect("installed once");
+/// let (observer, registered) = APP
+///     .install_with(|observer| observer.subscribers.register_sink(..))
+///     .ok()
+///     .expect("installed once");
 /// ```
+///
+/// In place, and not by value: the observer is about 16 KB, and an install that takes it
+/// as an argument holds it again in every call that hands it on (four copies, 69 KB of
+/// the Zephyr node's main frame, on a 32 KB stack).
 ///
 /// Like every table of the profile it is `Sync` by the profile's rule: one
 /// cooperative task on one core drives every session and so reaches the observer, and
 /// never two at once.
 #[cfg(feature = "session-slot")]
 pub struct SlotApp<K: ObserverSinks = DefaultSinks> {
-    observer: OnceCell<RefCell<SlotObserverOf<K>>>,
+    observer: ObserverCell<K>,
 }
 
 // SAFETY: the profile's rule, stated on the type. The observer is reached by the one
@@ -127,37 +132,34 @@ impl<K: ObserverSinks> SlotApp<K> {
     /// An application with no observer yet, for a `static`.
     pub const fn new() -> Self {
         Self {
-            observer: OnceCell::new(),
+            observer: ObserverCell::new(),
         }
     }
 
-    /// Install the observer the image built, once. A second install hands the
-    /// observer back.
-    // The observer is handed back whole (10 KB of registries) because boxing it, the
-    // lint's remedy, would allocate; the caller of a refused install drops it.
-    #[allow(clippy::result_large_err)]
-    pub fn install(
+    /// Build the observer in the application, once, and hand it to `register`, which
+    /// registers the image's sinks on it. Returns the cell the sessions dispatch to and
+    /// what `register` returned. A second install leaves the observer as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`AlreadyInitialised`] if an observer was installed before.
+    pub fn install_with<R>(
         &'static self,
-        observer: SlotObserverOf<K>,
-    ) -> Result<&'static RefCell<SlotObserverOf<K>>, SlotObserverOf<K>>
+        register: impl FnOnce(&mut SlotObserverOf<K>) -> R,
+    ) -> Result<(&'static ObserverCell<K>, R), AlreadyInitialised>
     where
         K: 'static,
     {
-        self.observer
-            .set(RefCell::new(observer))
-            .map_err(RefCell::into_inner)?;
-        Ok(self
-            .observer
-            .get()
-            .expect("an observer that was just installed is there"))
+        let registered = self.observer.init_with(register)?;
+        Ok((&self.observer, registered))
     }
 
-    /// The installed observer, if any.
-    pub fn get(&'static self) -> Option<&'static RefCell<SlotObserverOf<K>>>
+    /// The installed observer's cell, if one was installed.
+    pub fn get(&'static self) -> Option<&'static ObserverCell<K>>
     where
         K: 'static,
     {
-        self.observer.get()
+        self.observer.is_initialised().then_some(&self.observer)
     }
 }
 
@@ -197,7 +199,7 @@ where
     G: ReplySink,
     K: ObserverSinks + 'static,
 {
-    observer: &'static RefCell<SlotObserverOf<K>>,
+    observer: &'static ObserverCell<K>,
     handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
     requesters: Requesters<R, G>,
 }
@@ -212,7 +214,7 @@ where
 {
     /// The application layer of the session `handle` names, over `observer`.
     pub fn new(
-        observer: &'static RefCell<SlotObserverOf<K>>,
+        observer: &'static ObserverCell<K>,
         handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
         requesters: Requesters<R, G>,
     ) -> Self {
@@ -243,7 +245,7 @@ where
 /// [`SlotDispatch`] as the `on_event` closure a session driver takes.
 #[cfg(feature = "session-slot")]
 pub fn dispatch_slot<C, R, G, K>(
-    observer: &'static RefCell<SlotObserverOf<K>>,
+    observer: &'static ObserverCell<K>,
     handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
     requesters: Requesters<R, G>,
 ) -> impl FnMut(IterationEvent<'_>) + 'static
