@@ -80,6 +80,30 @@ const TASK_BYTES: usize = 12288;
 /// Timers the runtime holds: the handshake and lease deadlines of the sessions.
 const TIMERS: usize = 4;
 
+/// The table of session slots this image places: one type for the assertion below, the
+/// size constant and the probe.
+type Slots = SessionSlots<
+    CoopRuntime<ZephyrClock<TICK_HZ>>,
+    CoopTime<ZephyrClock<TICK_HZ>>,
+    LwipUdpDriver,
+    ZephyrEntropy,
+    SESSIONS,
+>;
+/// The bytes ONE typed session slot takes in this image, as the compiler lays it out for
+/// the target the image is built for.
+const SLOT_BYTES: usize = Slots::slot_bytes();
+
+/// The measured size of one typed session slot, as the SIZE of a symbol: build the image
+/// with `--features slot-bytes-probe` and `nm -S` prints it. A number only the compiler
+/// knows has no other way out of a build for another architecture, and a symbol's size
+/// is a value every `nm` prints. `scripts/lib/session_slot_bytes.py` builds it, reads it
+/// and holds the committed `deploy/session_slot_bytes.json` equal to it. Off by default:
+/// the array is the slot's size again in RAM, which a shipped image must not spend.
+#[cfg(feature = "slot-bytes-probe")]
+#[no_mangle]
+#[used]
+pub static WZ_SESSION_SLOT_BYTES: [u8; SLOT_BYTES] = [0; SLOT_BYTES];
+
 // The tables above are held under the numbers the deploy file states for the machine
 // (`session_pool`): the sessions fit the generated table, the runtime's tables fit the
 // task and timer ceilings, and ONE typed session slot, as the compiler lays it out for
@@ -101,14 +125,7 @@ const _: () = {
         "TIMERS exceeds the deploy file's max_timers"
     );
     assert!(
-        SessionSlots::<
-            CoopRuntime<ZephyrClock<TICK_HZ>>,
-            CoopTime<ZephyrClock<TICK_HZ>>,
-            LwipUdpDriver,
-            ZephyrEntropy,
-            SESSIONS,
-        >::slot_bytes()
-            <= SLOT_SIZE,
+        SLOT_BYTES <= SLOT_SIZE,
         "one typed session slot exceeds the generated slot ceiling"
     );
 };
@@ -124,8 +141,7 @@ type Node<'a> = SlotAdminNode<'a, Clock, &'static LwipLink, Factory, SESSIONS, S
 /// Everything the node declares, in one `static`.
 struct Statics {
     runtime: RuntimeCell<Clock, TASKS, TASK_BYTES, TIMERS>,
-    sessions:
-        SessionSlots<CoopRuntime<Clock>, CoopTime<Clock>, LwipUdpDriver, ZephyrEntropy, SESSIONS>,
+    sessions: Slots,
     pumps: PumpSlots<Clock, LwipSessionLink<&'static LwipLink>, SESSIONS>,
     listener: SessionListener<LANES>,
     status: FixedNodeStatus<SESSIONS>,

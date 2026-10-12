@@ -132,6 +132,15 @@ What the table adds to the checks above:
                 `MEMP_NUM_UDP_PCB` and the number must be at least `max_sessions +
                 1`: each slot is one UDP socket and the listener is one more. The
                 number is read from the header and stated nowhere else.
+    typed_slot_image  optional; a key of `deploy/session_slot_bytes.json`, the image
+                whose typed session slot the report states. The record holds the
+                bytes ONE typed slot takes, MEASURED from the size of a probe symbol
+                in the built image (`scripts/lib/session_slot_bytes.py`, which holds
+                the file equal to a fresh build), so the number is the compiler's and
+                never an estimate. The key is refused when the image is not in the
+                record or when its measured slot exceeds the ceiling the pool states;
+                the report carries the bytes and the headroom, or `null` when the
+                machine names no image.
     limits      the machine's `limits` may name only the keys in
                 `LIMIT_KEYS`, and a session's own `limits` may only LOWER the
                 machine's value: the slot is sized by the machine's number, so
@@ -204,7 +213,15 @@ GROUP_KEYS = frozenset({"endpoint", "join_interval_ms", "lease_ms"})
 # deploy can state; NEW means the limit has no constant yet (it is a growable
 # table or an unbounded buffer on the MCU profile today).
 POOL_KEYS = frozenset(
-    {"ref", "max_sessions", "slot_bytes", "process", "section", "lwip_opts"}
+    {
+        "ref",
+        "max_sessions",
+        "slot_bytes",
+        "process",
+        "section",
+        "lwip_opts",
+        "typed_slot_image",
+    }
 )
 PROCESS_KEYS = frozenset(
     {
@@ -967,7 +984,55 @@ def session_pool_problems(
         errors.extend(_placement_problems(path, machine, numbers))
         if "lwip_opts" in pool:
             errors.extend(_lwip_problems(path, repo_root, pool, numbers))
+        if "typed_slot_image" in pool:
+            errors.extend(_typed_slot_problems(path, repo_root, pool, numbers))
     return errors
+
+
+SLOT_RECORD = "deploy/session_slot_bytes.json"
+
+
+def typed_slot(repo_root: Path, image: object) -> dict | str:
+    """The measured typed-slot entry for `image`, or why there is none.
+
+    The record is `deploy/session_slot_bytes.json`, written by
+    `scripts/lib/session_slot_bytes.py` from the size of a probe symbol in the built
+    image: a number the compiler alone knows, held equal to a fresh measurement by
+    that script's `--check`. This module reads it and states it nowhere.
+    """
+    if not isinstance(image, str) or not image:
+        return "must name an image of the record `" + SLOT_RECORD + "`"
+    try:
+        record = json.loads((repo_root / SLOT_RECORD).read_text())
+    except (OSError, ValueError) as err:
+        return f"the record `{SLOT_RECORD}` cannot be read ({err})"
+    images = record.get("images") if isinstance(record, dict) else None
+    if not isinstance(images, dict):
+        return f"the record `{SLOT_RECORD}` holds no `images` mapping"
+    found = images.get(image)
+    if not isinstance(found, dict) or not _positive_int(found.get("slot_bytes")):
+        return f"`{image}` is not measured in `{SLOT_RECORD}` (it measures: {', '.join(sorted(images))})"
+    return found
+
+
+def _typed_slot_problems(path: str, repo_root: Path, pool: dict, numbers: dict) -> list[str]:
+    """Does the MEASURED typed slot of the machine's image fit the ceiling it names?
+
+    The images assert the same at compile time against the generated `SLOT_SIZE`;
+    this holds the deploy file's own ceiling (an inline pool states one, and a `ref`
+    pool's is the document's) to the measurement, so a file that lowers the ceiling
+    below what the image's slot takes is refused where it is written.
+    """
+    found = typed_slot(repo_root, pool["typed_slot_image"])
+    if isinstance(found, str):
+        return [f"{path}.typed_slot_image: {found}"]
+    if found["slot_bytes"] > numbers["slot_bytes"]:
+        return [
+            f"{path}.typed_slot_image: `{pool['typed_slot_image']}` measures "
+            f"{found['slot_bytes']} bytes per typed slot ({found.get('target')}), more "
+            f"than the {numbers['slot_bytes']} a session slot holds"
+        ]
+    return []
 
 
 def _declared_regions(machine: dict) -> dict | None:
@@ -1072,6 +1137,18 @@ def session_pool_report(machine_name: str, machine: dict, repo_root: Path) -> di
     report["pool"] = dict(
         numbers, total_bytes=numbers["max_sessions"] * numbers["slot_bytes"]
     )
+    # The MEASURED typed slot (never an estimate): `null` for a machine that names no
+    # measured image, so the editor can tell "not measured" from a number.
+    report["pool"]["typed_slot"] = None
+    if "typed_slot_image" in pool:
+        found = typed_slot(repo_root, pool["typed_slot_image"])
+        if isinstance(found, dict):
+            report["pool"]["typed_slot"] = {
+                "image": pool["typed_slot_image"],
+                "target": found.get("target"),
+                "bytes": found["slot_bytes"],
+                "headroom_bytes": numbers["slot_bytes"] - found["slot_bytes"],
+            }
     if "lwip_opts" in pool:
         pcbs = lwip_udp_pcbs(repo_root, pool["lwip_opts"])
         report["lwip"] = {
@@ -1667,6 +1744,47 @@ def _pool_selftest(repo_root: Path) -> int:
         "a header path that is no string is refused",
         mutate(lambda m: m["session_pool"].update(lwip_opts=4)),
         "must be the path of an lwipopts.h",
+    )
+    # The MEASURED typed slot (the record `deploy/session_slot_bytes.json`).
+    def typed(image, slot_bytes=98304):
+        def apply(m):
+            m["session_pool"]["slot_bytes"] = slot_bytes
+            m["session_pool"]["typed_slot_image"] = image
+
+        return apply
+
+    check(
+        "a measured image whose slot fits the ceiling is accepted",
+        mutate(typed("mcu-admin-node")),
+        None,
+    )
+    check(
+        "a ceiling below the measured slot is refused naming the image and both numbers",
+        mutate(typed("mcu-admin-node", slot_bytes=9000)),
+        "typed_slot_image: `mcu-admin-node` measures",
+    )
+    check(
+        "an image the record does not measure is refused naming the ones it does",
+        mutate(typed("no-such-image")),
+        "`no-such-image` is not measured in `deploy/session_slot_bytes.json` (it measures: ",
+    )
+    check(
+        "an image that is no string is refused",
+        mutate(typed(4)),
+        "must name an image of the record",
+    )
+    report = session_pool_report("m", mutate(typed("mcu-admin-node")), repo_root)
+    measured = (report["pool"] or {}).get("typed_slot") or {}
+    expect_equal(
+        "the report states the measured bytes and the headroom against the ceiling",
+        (measured.get("bytes", 0) + measured.get("headroom_bytes", 0), measured.get("image")),
+        (98304, "mcu-admin-node"),
+    )
+    report = session_pool_report("m", _pool_fixture(), repo_root)
+    expect_equal(
+        "a machine that names no image has no typed slot, null and not a guess",
+        (report["pool"] or {}).get("typed_slot", "absent"),
+        None,
     )
     check(
         "an admin reply buffer of exactly the reply payload bound is accepted",

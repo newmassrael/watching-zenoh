@@ -128,6 +128,10 @@ fixed-memory = [
     "wz-session-mcu/adminspace-fixed",
     "wz-session-core/session-slot",
 ]
+# The measurement of one typed session slot (`scripts/lib/session_slot_bytes.py`): with
+# it the fixed-memory image declares `WZ_SESSION_SLOT_BYTES`, a symbol whose SIZE is the
+# slot's size. Off by default, because the array is that size again in RAM.
+slot-bytes-probe = []
 
 [dependencies]
 # critical-section IMPL provider: the staticlib root defines it over Zephyr's

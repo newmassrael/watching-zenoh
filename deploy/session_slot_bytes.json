@@ -1,0 +1,19 @@
+{
+  "about": "The bytes ONE typed session slot takes in each image, as the compiler lays it out for the target, read from the size of the WZ_SESSION_SLOT_BYTES probe symbol (scripts/lib/session_slot_bytes.py; build the image with the cargo feature slot-bytes-probe). Regenerate with `session_slot_bytes.py --write` in the commit that moves a number. `rustc` is information, not compared.",
+  "schema": 1,
+  "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "images": {
+    "mcu-admin-node": {
+      "gate_image": "mcu-admin-node-fixed",
+      "build": "mps2-fixed",
+      "target": "thumbv7m-none-eabi",
+      "slot_bytes": 36704
+    },
+    "zephyr-admin-node": {
+      "gate_image": "zephyr-admin-node-fixed",
+      "build": "cyt4bf-lwip-fixed",
+      "target": "thumbv7em-none-eabihf",
+      "slot_bytes": 36696
+    }
+  }
+}

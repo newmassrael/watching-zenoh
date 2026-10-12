@@ -49,6 +49,10 @@ machines:
       # Layer Q.4): the validator holds its UDP socket count to the table (one per
       # slot and one for the listener). A board image ships its own header.
       lwip_opts: crates/lwip-sys/port/cross-test/lwipopts.h
+      # The image whose typed session slot the report states, as MEASURED from the
+      # built image (`deploy/session_slot_bytes.json`, `scripts/lib/session_slot_bytes.py`):
+      # this machine's admin node. The validator refuses a ceiling below it.
+      typed_slot_image: mcu-admin-node
       process:
         max_tasks: 8
         max_timers: 16

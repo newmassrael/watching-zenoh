@@ -16424,6 +16424,35 @@ gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it" || fail=1
         _q_unavailable "Q.0n" "no nm that demangles Rust v0 symbols (rustup component llvm-tools)" || fail=1
     fi
 
+    # ── Q.0s — the typed session slot, MEASURED (scripts/lib/session_slot_bytes.py).
+    #
+    # `size_of` of one session slot is a number only the compiler knows for the target
+    # the image is built for, and the deploy report states it, so it is measured: each
+    # image that names its slot type builds with the `slot-bytes-probe` feature, which
+    # declares a symbol whose SIZE is the slot's, and `deploy/session_slot_bytes.json`
+    # is held equal to what `nm -S` reads. The builds are the S8 gate's own (the same
+    # target, lwIP port and build values), so the deps Q.0n compiled are reused and
+    # only the image crate is built again.
+    local slotbytes_key slotbytes_target
+    if python3 scripts/lib/no_allocator_link_gate.py --nm > /dev/null 2>&1; then
+        # The list is read on fd 4, as Q.0n reads its own on fd 3.
+        while read -r slotbytes_key slotbytes_target <&4; do
+            if ! grep -q "^${slotbytes_target}$" <<< "$installed"; then
+                _q_unavailable "Q.0s.${slotbytes_key}.${slotbytes_target}" \
+                    "rustup target ${slotbytes_target} absent" || fail=1
+                continue
+            fi
+            if ! python3 scripts/lib/session_slot_bytes.py --check --image "$slotbytes_key"; then
+                echo "  Q.0s.${slotbytes_key}.${slotbytes_target} FAIL" >&2
+                fail=1
+                continue
+            fi
+            echo "  Q.0s.${slotbytes_key}.${slotbytes_target} OK"
+        done 4< <(python3 scripts/lib/session_slot_bytes.py --list)
+    else
+        _q_unavailable "Q.0s" "no nm that demangles Rust v0 symbols (rustup component llvm-tools)" || fail=1
+    fi
+
     # Sub-lane matrix: machine|cpu|target|run_policy. Parallel
     # arrays kept as a single colon-delimited table so a new
     # (machine, cpu, target, run_policy) tuple is one line of
