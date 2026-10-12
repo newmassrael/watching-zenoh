@@ -255,8 +255,9 @@ const CONFIG_SUBSCRIBER_ID: u64 = 2;
 /// An admin key (`@/<zid>/<whatami>/**` or `.../config/**`) in fixed text.
 type KeyText = FixedText<{ caps::MAX_KEYEXPR_BYTES }>;
 
-/// Why a node was not built: the admin keys its identity names did not fit, which
-/// is found at startup, where it can be fixed, and not at the first declaration.
+/// Which input a node's construction refused: the admin keys its identity names
+/// did not fit, which is found at startup, where it can be fixed, and not at the
+/// first declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRefused {
     /// A key built from the node's zid and role is wider than
