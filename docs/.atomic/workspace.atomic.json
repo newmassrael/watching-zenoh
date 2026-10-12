@@ -273680,6 +273680,36 @@
         "Three more comparisons of an id read off the wire with an id from the node's own session (the scouting responder's own-Hello test, the scout initiator's self-echo test, the multicast join's own-id test) stay raw. They compare two wire forms that are both trimmed now; a peer that sent an untrimmed id would still differ there."
       ]
     },
+    "Round 3323": {
+      "decision_summary": "The hosted run of the Round 3322 push was red in one job, Layer C1am of the routing and adminspace lanes, on a count guard: it expects exactly 8 tests to pass in wz-session-core's zid_hex under the adminspace-core feature, and the repair added a ninth, the test of same_zid. The count-guard oracle (guarded_count_gate.py) would have caught it: it selects a guard when the push adds a test to a module the guard's filter names, and runs it. It was not run over the push range before the push, and the pre-push hook defers it; the one run before the push was over a single later commit, which reached no guard. The guard is now 9; the oracle run over the whole range reaches that one guard and measures 9 passed. Nothing else in the run was red when this was written: the api-compat-c job, which carries the gossip differential against libzenohc that Round 3322 was for, passed, as did the cross-impl lanes, the layers C0 and E and the zephyr boots.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: the C1am guard over zid_hex counts 9, not 8, with the round that moved it."
+      ],
+      "verification_bullets": [
+        "On a build host: the guard's own command (cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet) prints 9 passed, and the count-guard oracle over the range from the Round 3321 tip to this push reaches one guard, this one, and measures 9 passed.",
+        "NOT verified here: the hosted run of this push, and the Layer Q job of the run that was red, which was still running when this was written."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The preflight of a push that adds a test runs the count-guard oracle over the whole push range (BX pointed at the build host) and not over the last commit; the hook defers it, so the range is the preflight's to run."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3322 push was red in one job, Layer C1am of the routing and adminspace lanes, on a count guard: it expects exactly 8 tests to pass in wz-session-core's zid_hex under the adminspace-core feature, and the repair added a ninth, the test of same_zid. The count-guard oracle (guarded_count_gate.py) would have caught it: it selects a guard when the push adds a test to a module the guard's filter names, and runs it. It was not run over the push range before the push, and the pre-push hook defers it; the one run before the push was over a single later commit, which reached no guard. The guard is now 9; the oracle run over the whole range reaches that one guard and measures 9 passed. Nothing else in the run was red when this was written: the api-compat-c job, which carries the gossip differential against libzenohc that Round 3322 was for, passed, as did the cross-impl lanes, the layers C0 and E and the zephyr boots.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: the C1am guard over zid_hex counts 9, not 8, with the round that moved it."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the guard's own command (cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet) prints 9 passed, and the count-guard oracle over the range from the Round 3321 tip to this push reaches one guard, this one, and measures 9 passed.",
+        "NOT verified here: the hosted run of this push, and the Layer Q job of the run that was red, which was still running when this was written."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The preflight of a push that adds a test runs the count-guard oracle over the whole push range (BX pointed at the build host) and not over the last commit; the hook defers it, so the range is the preflight's to run."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
