@@ -15,6 +15,7 @@
 //! output makes it the alloc-profile encoder (`alloc`-gated at the
 //! `lib.rs` module declaration).
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
@@ -28,6 +29,7 @@ use crate::tx_buf::{EncodeBuf, TxBuf, TxSink};
 
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareOwned};
+#[cfg(feature = "alloc")]
 use wz_codecs::interest::{Interest, InterestOwned};
 // R311y578 (G7) — tracks [`oam_body`]'s gate exactly, `session-unicast`
 // included: the import exists for that one signature, so any predicate the
@@ -212,6 +214,7 @@ pub(crate) fn frame_wire_reliability(bytes: &[u8]) -> crate::reliability::Reliab
 /// ceiling, since the inner codec's worst-case bound is used directly.
 /// R311jq lifts the prefix write into [`begin_frame`] so the batching
 /// open-frame writer shares the same bytes-producing code.
+#[cfg(feature = "alloc")]
 pub(crate) fn encode_frame_envelope<P>(
     sn: u64,
     parent_flags: u8,
@@ -394,6 +397,7 @@ pub(crate) fn response_final_body(
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+#[cfg(feature = "alloc")]
 pub(crate) fn interest_body(
     interest: &InterestOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
@@ -547,6 +551,7 @@ pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool)
 /// Interest may arrive after a peer-side state change and the peer's
 /// resolver may serve a stale history snapshot — useful only for
 /// fuzz / negative tests.
+#[cfg(feature = "alloc")]
 pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bool) -> Vec<u8> {
     encode_frame_envelope(
         sn,
@@ -1452,6 +1457,7 @@ pub fn build_frame_wire(
 /// its size (zenoh-pico "Sending the message required fragmentation
 /// feature that is deactivated") — the signature stays stable so the
 /// drive loop carries no cfg at the call site.
+#[cfg(feature = "alloc")]
 pub fn multicast_frame_or_fragments(
     frame: Vec<u8>,
     sn: u64,

@@ -84,13 +84,15 @@
 //! cost byte-parity, which is why the builders and not this setter are the
 //! production path.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::CodecStorage;
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use wz_codecs::declare::DeclareOwned;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zint::ExtZint;
+#[cfg(feature = "alloc")]
 use wz_codecs::interest::InterestOwned;
 
 use crate::ext_nodeid::{self, EXT_ENC_Z64};
@@ -153,6 +155,7 @@ pub fn qos_ext<S: CodecStorage>(qos: QosLevel) -> ExtEntryOwned<S> {
 /// lane is measuring. Out-of-line, the decision cannot flip: codec-close's
 /// elision reads +1824B, against +1792B for a tree with this whole envelope
 /// change reverted.
+#[cfg(feature = "alloc")]
 #[inline(never)]
 pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
     alloc::vec![qos_ext(QOS_DECLARE)]
@@ -165,6 +168,7 @@ pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
 ///
 /// Carrier-agnostic because the chain is: the two public readers below differ
 /// only in which struct's field they hand over.
+#[cfg(feature = "alloc")]
 fn read_qos_chain<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosLevel {
     read_qos_in(exts.map(Vec::as_slice))
 }
@@ -186,6 +190,7 @@ pub(crate) fn read_qos_in<E: crate::ext_view::ExtEntryView>(exts: Option<&[E]>) 
 /// The header byte is passed in rather than the message, because WHICH header
 /// carries the bit is the only thing the Declare and Interest arms do not
 /// share; everything above it does, which is why it is one function.
+#[cfg(feature = "alloc")]
 fn set_qos_chain<S: CodecStorage>(
     exts: &mut Option<Vec<ExtEntryOwned<S>>>,
     header: &mut u8,
@@ -205,11 +210,13 @@ fn set_qos_chain<S: CodecStorage>(
 /// NONE of its six routing-hat propagation sites mean, every one of which
 /// stamps `QoSType::INTEREST` (R2316 re-measured both populations against the
 /// pinned 1.10.0 reference; the earlier "five of six" was the 1.5.0-era count).
+#[cfg(feature = "alloc")]
 pub fn read_interest_qos(interest: &InterestOwned) -> QosLevel {
     read_qos_chain(interest.extensions.as_ref())
 }
 
 /// Set an `Interest`'s `ext_qos` (`QosLevel::DEFAULT` removes it).
+#[cfg(feature = "alloc")]
 pub fn set_interest_qos(interest: &mut InterestOwned, qos: QosLevel) {
     set_qos_chain(&mut interest.extensions, &mut interest.header, qos);
 }
@@ -217,13 +224,13 @@ pub fn set_interest_qos(interest: &mut InterestOwned, qos: QosLevel) {
 /// Read a Declare's `ext_qos`. Absent means `QosLevel::DEFAULT` — the state
 /// every Declare wz emitted before R311y801, and every Declare a pico peer
 /// emits at all.
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub fn read_declare_qos(declare: &DeclareOwned) -> QosLevel {
     read_qos_chain(declare.extensions.as_ref())
 }
 
 /// Set a Declare's `ext_qos` (`QosLevel::DEFAULT` REMOVES it).
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) {
     set_qos_chain(&mut declare.extensions, &mut declare.header, qos);
 }
@@ -238,7 +245,7 @@ pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) {
 /// `msg.ext_qos` when the query is remote), and a stock `get` sends
 /// `QoSType::REQUEST`, whose `Block` makes it non-DEFAULT, so the reply
 /// carries the extension too.
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
 pub fn read_request_qos(request: &crate::wire::RequestOwned) -> QosLevel {
     read_qos_chain(request.extensions.as_ref())
 }
@@ -247,12 +254,13 @@ pub fn read_request_qos(request: &crate::wire::RequestOwned) -> QosLevel {
 /// upstream's decoder leaves the field. Read by the stats registry, whose
 /// `priority` label is the message's own band
 /// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `self.ext_qos.get_priority()`).
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub fn read_push_qos(push: &crate::wire::PushOwned) -> QosLevel {
     read_qos_chain(push.extensions.as_ref())
 }
 
 /// R2825 — read an `OAM`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
+#[cfg(feature = "alloc")]
 pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
     read_qos_chain(oam.extensions.as_ref())
 }
@@ -271,7 +279,7 @@ pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
 /// forwards `msg.ext_qos` unchanged, which is what wz did and upstream does
 /// not; [`relay_response`](crate::response_build::relay_response) now stamps
 /// it through [`set_response_qos`].
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub fn read_response_qos(response: &crate::wire::ResponseOwned) -> QosLevel {
     read_qos_chain(response.extensions.as_ref())
 }
@@ -289,7 +297,7 @@ pub fn read_response_qos(response: &crate::wire::ResponseOwned) -> QosLevel {
 /// already holds a responder id would otherwise leave here in an order no
 /// upstream router emits. Receivers accept either order; the bytes are what
 /// a capture compares.
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub fn set_response_qos(response: &mut crate::wire::ResponseOwned, qos: QosLevel) {
     let exts = &mut response.extensions;
     if let Some(list) = exts.as_mut() {
@@ -309,7 +317,7 @@ pub fn set_response_qos(response: &mut crate::wire::ResponseOwned, qos: QosLevel
 
 /// R2595 — read a `ResponseFinal`'s `ext_qos`. Absent means `QosLevel::DEFAULT`,
 /// which is what every final from a pico peer means: pico writes none.
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
 pub fn read_response_final_qos(
     response_final: &wz_codecs::response_final::ResponseFinalOwned,
 ) -> QosLevel {
@@ -321,7 +329,7 @@ pub fn read_response_final_qos(
 /// chain also holds the responder identity and is therefore built in one place,
 /// a final's chain holds this and nothing else, so the setter IS the builder's
 /// emit step.
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
 pub fn set_response_final_qos(
     response_final: &mut wz_codecs::response_final::ResponseFinalOwned,
     qos: QosLevel,

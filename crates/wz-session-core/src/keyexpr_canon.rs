@@ -676,6 +676,36 @@ pub fn validate_keyexpr(text: &str) -> Result<(), KeyexprRefusal> {
 #[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
 
+/// The text an outbound-keyexpr refusal quotes ([`OutboundKeyexprError`]): a `String`
+/// on the heap profile, and on a build with no allocator a text of the length a
+/// keyexpr can have there ([`crate::caps::MAX_KEYEXPR_BYTES`]). It is DIAGNOSTIC: what a
+/// person reads in the refusal's message, never a value anything acts on, so a quote
+/// longer than the bound is cut at a character boundary rather than refused.
+#[cfg(feature = "alloc")]
+pub type DiagnosticText = String;
+/// See the heap form of this alias.
+#[cfg(all(feature = "storage-profile", not(feature = "alloc")))]
+pub type DiagnosticText = heapless::String<{ crate::caps::MAX_KEYEXPR_BYTES }>;
+
+/// `text` as a [`DiagnosticText`].
+#[cfg(feature = "alloc")]
+fn diagnostic_text(text: &str) -> DiagnosticText {
+    text.to_string()
+}
+
+/// `text` as a [`DiagnosticText`], cut at the last character boundary that fits.
+#[cfg(all(feature = "storage-profile", not(feature = "alloc")))]
+fn diagnostic_text(text: &str) -> DiagnosticText {
+    let mut end = text.len().min(crate::caps::MAX_KEYEXPR_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = DiagnosticText::new();
+    // Cannot fail: `end` is at most the capacity.
+    let _ = out.push_str(&text[..end]);
+    out
+}
+
 /// Errors returned by [`check_outbound_keyexpr_pico_safe`] when an
 /// outbound DECLARE-side keyexpr (after mapping-table reconstruction)
 /// would either fail the structural canon or trip a known buggy
@@ -730,7 +760,7 @@ use alloc::string::{String, ToString};
 /// intervening chunk: with the closer adjacent to the `**`, pico's
 /// `pos - 3` offset addresses the `**` chunk correctly and the result
 /// is bug #1 (wrong output) rather than an abort.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundKeyexprError {
     /// Input failed the structural keyexpr grammar (empty chunk,
@@ -746,13 +776,13 @@ pub enum OutboundKeyexprError {
     PicoBugThreeFamily {
         /// The full input keyexpr (post mapping-table
         /// reconstruction), preserved verbatim for diagnostics.
-        keyexpr: String,
+        keyexpr: DiagnosticText,
         /// The trailing `*`-shape chunk that closed the bug window.
-        offending_chunk: String,
+        offending_chunk: DiagnosticText,
     },
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 impl fmt::Display for OutboundKeyexprError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -772,7 +802,7 @@ impl fmt::Display for OutboundKeyexprError {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 impl core::error::Error for OutboundKeyexprError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -820,7 +850,7 @@ impl core::error::Error for OutboundKeyexprError {
 ///     Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
 /// ));
 /// ```
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyexprError> {
     // Structural canon (empty chunks, reserved chars, unbound `$`,
     // bare `*` mid-chunk, …). We discard the canonized output and
@@ -869,8 +899,8 @@ pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyex
     for chunk in input.split('/') {
         let abort = |offending: &str| {
             Err(OutboundKeyexprError::PicoBugThreeFamily {
-                keyexpr: input.to_string(),
-                offending_chunk: offending.to_string(),
+                keyexpr: diagnostic_text(input),
+                offending_chunk: diagnostic_text(offending),
             })
         };
         if chunk == "**" {
@@ -916,7 +946,7 @@ pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyex
 /// caller of [`check_outbound_keyexpr_pico_safe`] does not run
 /// `collapse_dsl_runs` first; doing so would have to handle chunk
 /// boundary effects (`$*$*` straddling `/` is not a single chunk).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
     if chunk == "*" || chunk == "**" {
         return true;

@@ -49,15 +49,17 @@
 //! (`SessionActions::outbound_mappings`); only the plumbing to the registries
 //! was missing.
 
+#[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
 
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
 #[cfg(feature = "bounded-heapless")]
 use crate::id_map::IdMap;
 use crate::id_map::PeerAliases;
 use sce_forge_runtime::codec::{CodecStorage, SceStr};
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::wireexpr::{WireexprOwnedVariant, WireexprVariant};
 
@@ -161,6 +163,10 @@ pub fn wireexpr_names_a_declaration<S: CodecStorage>(body: &WireexprOwnedVariant
 /// [`resolve_wireexpr_in`] with [`MappingSpaces::with_own`] and gets the `M=0`
 /// arm answered out of the right space. This peer-only form stays for the
 /// callers that have no second space to offer.
+///
+/// The heap profile's form: it returns a `String` out of a `HashMap`. The bounded
+/// forms ([`resolve_wireexpr_into`], [`resolve_wireexpr_view`]) are the slot's.
+#[cfg(feature = "alloc")]
 pub fn resolve_wireexpr<S: CodecStorage>(
     body: &WireexprOwnedVariant<S>,
     table: &HashMap<u64, String>,
@@ -184,7 +190,9 @@ pub fn resolve_wireexpr<S: CodecStorage>(
 pub trait OwnMappingSpace {
     /// The literal keyexpr this node declared for `id`, or `None` when it
     /// declared none (or retracted it). `id == 0` is never asked — it names no
-    /// mapping on either arm.
+    /// mapping on either arm. Heap profile only: it answers with a `String`, and
+    /// a space with no allocator is read through [`Self::append_own_mapping`].
+    #[cfg(feature = "alloc")]
     fn resolve_own_mapping(&self, id: u64) -> Option<String>;
 
     /// [`Self::resolve_own_mapping`] appended to `out` instead of returned, for
@@ -192,9 +200,12 @@ pub trait OwnMappingSpace {
     /// ([`resolve_wireexpr_view`]): `None` when this node declared nothing for
     /// `id`, `Some(Err(..))` when the literal does not fit what `out` has left.
     ///
-    /// The provided form goes through [`Self::resolve_own_mapping`], so it pays
-    /// that answer's `String`; a space that can lend its literal for the length
-    /// of the call overrides it and copies straight into `out`.
+    /// On the heap profile the provided form goes through
+    /// [`Self::resolve_own_mapping`], so it pays that answer's `String`; a space
+    /// that can lend its literal for the length of the call overrides it and
+    /// copies straight into `out`. A build with no allocator has no
+    /// [`Self::resolve_own_mapping`], and every space it holds writes this one.
+    #[cfg(feature = "alloc")]
     fn append_own_mapping(
         &self,
         id: u64,
@@ -203,10 +214,20 @@ pub trait OwnMappingSpace {
         let literal = self.resolve_own_mapping(id)?;
         Some(out.push_str(&literal))
     }
+
+    /// See the heap form of this method: with no allocator it is the only answer a
+    /// space gives.
+    #[cfg(not(feature = "alloc"))]
+    fn append_own_mapping(
+        &self,
+        id: u64,
+        out: &mut KeyexprBuf,
+    ) -> Option<Result<(), crate::bounded::CapacityFull<()>>>;
 }
 
 /// A plain table is an own space too — the shape tests and any future per-face
 /// local-mapping table use, without reaching for the locked session surface.
+#[cfg(feature = "alloc")]
 impl OwnMappingSpace for HashMap<u64, String> {
     fn resolve_own_mapping(&self, id: u64) -> Option<String> {
         self.get(&id).cloned()
@@ -259,13 +280,13 @@ impl OwnMappingSpace for HashMap<u64, String> {
 ///   single-task loop never shares across tasks, and adds a dependency
 ///   wz-session-core does not otherwise carry. `Rc` is the correct lowering for
 ///   that model, which is why the bundle handle itself already uses it.
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub type SharedOwnMappingSpace = alloc::sync::Arc<dyn OwnMappingSpace + Send + Sync>;
 
 /// See the `target_has_atomic = "ptr"` arm for the full rationale: ARMv6-M has
 /// no `alloc::sync::Arc` to name, and its single-task drive loop shares the
 /// session bundle as `Rc` already.
-#[cfg(not(target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", not(target_has_atomic = "ptr")))]
 pub type SharedOwnMappingSpace = alloc::rc::Rc<dyn OwnMappingSpace>;
 
 /// The TWO id spaces a face can consult, carried side by side.
@@ -295,6 +316,8 @@ pub struct MappingSpaces<'a> {
 /// plain map to callers that need a `&HashMap`, and a closed pair keeps that.
 #[derive(Clone, Copy)]
 enum PeerSpace<'a> {
+    /// The heap profile's plain map; a build with no allocator has none.
+    #[cfg(feature = "alloc")]
     Map(&'a HashMap<u64, String>),
     /// Only a build whose [`PeerAliases`] is not the plain map has this arm.
     #[cfg(feature = "bounded-heapless")]
@@ -305,6 +328,7 @@ impl<'a> PeerSpace<'a> {
     /// The literal keyexpr the peer declared for `id`.
     fn literal(&self, id: u64) -> Option<&'a str> {
         match *self {
+            #[cfg(feature = "alloc")]
             PeerSpace::Map(map) => map.get(&id).map(String::as_str),
             #[cfg(feature = "bounded-heapless")]
             PeerSpace::Table(table) => table.find(id).map(|text| text.as_str()),
@@ -329,6 +353,7 @@ impl<'a> PeerSpaceView<'a> {
     /// How many ids the peer has declared.
     pub fn len(&self) -> usize {
         match self.0 {
+            #[cfg(feature = "alloc")]
             PeerSpace::Map(map) => map.len(),
             PeerSpace::Table(table) => table.count(),
         }
@@ -342,6 +367,7 @@ impl<'a> PeerSpaceView<'a> {
 
 impl<'a> MappingSpaces<'a> {
     /// Only the peer's space is known. `M=0` aliases refuse.
+    #[cfg(feature = "alloc")]
     pub fn peer_only(peer: &'a HashMap<u64, String>) -> Self {
         Self {
             peer: PeerSpace::Map(peer),
@@ -350,6 +376,7 @@ impl<'a> MappingSpaces<'a> {
     }
 
     /// Both spaces are known. `M=1` reads the peer's, `M=0` reads ours.
+    #[cfg(feature = "alloc")]
     pub fn with_own(peer: &'a HashMap<u64, String>, own: &'a dyn OwnMappingSpace) -> Self {
         Self {
             peer: PeerSpace::Map(peer),
@@ -438,6 +465,7 @@ impl<'a> MappingSpaces<'a> {
 /// It is deliberately NOT a widening: converting a table yields
 /// [`MappingSpaces::peer_only`], so an `M=0` alias still refuses. The conversion
 /// cannot invent a space the caller does not have.
+#[cfg(feature = "alloc")]
 impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a> {
     fn from(peer: &'a HashMap<u64, String>) -> Self {
         Self::peer_only(peer)
@@ -462,6 +490,7 @@ impl<'a> From<&'a PeerAliases> for MappingSpaces<'a> {
 /// Never reads one space to answer for the other. Both sides number their
 /// mappings from 1, so a wrong-space read very likely FINDS an entry and
 /// returns a confident, wrong keyexpr.
+#[cfg(feature = "alloc")]
 pub fn resolve_wireexpr_in<S: CodecStorage>(
     body: &WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'_>,
@@ -683,6 +712,7 @@ fn resolve_parts<'k>(
 /// A caller holding only the peer's space ([`MappingSpaces::peer_only`]) gets
 /// exactly the pre-existing behaviour: with no second space there is nothing to
 /// disagree with, and the rule collapses to the one-space lookup.
+#[cfg(feature = "alloc")]
 pub fn resolve_declared_keyexpr<S: CodecStorage>(
     body: &WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'_>,
@@ -821,7 +851,7 @@ enum Space {
 /// copies of "which space does a D_KEXPR scope name" is two chances to answer
 /// it differently, and the whole point of the question is that the wire does
 /// not answer it.
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub fn absorb_keyexpr_into(table: &mut HashMap<u64, String>, declare: &DeclareOwned) {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {

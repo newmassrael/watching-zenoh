@@ -60,9 +60,12 @@
 //! does; what upstream does not keep across that boundary is the negotiated
 //! `State`, and that is the part this cookie now carries for wz too.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{SceCursor, SceSink, SliceSink, VecSink};
+#[cfg(feature = "alloc")]
+use sce_forge_runtime::codec::VecSink;
+use sce_forge_runtime::codec::{SceCursor, SceSink, SliceSink};
 
 use crate::accept_state::{AcceptState, NegotiatedExtensions};
 use crate::session_init_params::{session_bytes, SessionBytes};
@@ -158,7 +161,32 @@ pub struct AcceptCookieState {
 /// Wire form: `0` alone for `None`; `1 ‖ challenge(8, LE) ‖ key_len(2, LE) ‖
 /// key(key_len)` for `Some`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MultilinkAcceptState(pub Option<(u64, Vec<u8>)>);
+pub struct MultilinkAcceptState(pub Option<(u64, MultilinkKey)>);
+
+/// The initiator's encoded public key, as the accept state holds it: a growable
+/// `Vec` on the heap profile.
+#[cfg(feature = "alloc")]
+pub type MultilinkKey = Vec<u8>;
+
+/// The initiator's encoded public key, as the accept state holds it: NOTHING, on a
+/// build with no allocator.
+///
+/// Multilink needs `std` (the aggregation link set is a `std::sync::Mutex`), so a
+/// build that links no allocator cannot offer it, and the one arm of the accept
+/// state it can mint is `None`. The type says so: a `MultilinkAcceptState` whose
+/// key is this has no `Some` to build, and a cookie that claims one is refused as
+/// malformed rather than carried in a buffer it was never sized for.
+#[cfg(not(feature = "alloc"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultilinkKey {}
+
+#[cfg(not(feature = "alloc"))]
+impl MultilinkKey {
+    /// The key's bytes; unreachable, as no value of this type exists.
+    pub fn as_slice(&self) -> &[u8] {
+        match *self {}
+    }
+}
 
 /// Write the multilink member into `w`: the one byte `0` for `None`, else `1 ‖
 /// challenge(8, LE) ‖ key_len(2, LE) ‖ key`. `None` for a key too long to carry
@@ -194,7 +222,17 @@ impl MultilinkAcceptState {
                 if key.len() != len {
                     return Err(CookieError::Malformed);
                 }
-                Ok(Self(Some((challenge, key.to_vec()))))
+                #[cfg(feature = "alloc")]
+                {
+                    Ok(Self(Some((challenge, key.to_vec()))))
+                }
+                // A build with no allocator minted no key, so a cookie that
+                // carries one was not minted by it.
+                #[cfg(not(feature = "alloc"))]
+                {
+                    let _ = challenge;
+                    Err(CookieError::Malformed)
+                }
             }
             _ => Err(CookieError::Malformed),
         }
@@ -231,6 +269,10 @@ pub enum CookieError {
 /// Returns `None` when `peer_zid` is outside the protocol's 1..=16, because a
 /// cookie for a zid the wire cannot carry is not a value this function should
 /// invent.
+///
+/// The heap profile's form (it returns a `Vec`); [`encode_accept_cookie_into`] is the
+/// same cookie written into an array the caller holds.
+#[cfg(feature = "alloc")]
 pub fn encode_accept_cookie(key: &SigningKey, state: &AcceptCookieState) -> Option<Vec<u8>> {
     let view = AcceptCookieView {
         peer_zid: &state.peer_zid,

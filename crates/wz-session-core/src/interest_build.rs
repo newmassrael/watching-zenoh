@@ -17,12 +17,17 @@
 //! builders carry no codec feature gate (mirroring the ungated
 //! `frame_encode::encode_frame_with_interest`).
 
+#[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::wire_const;
 
+#[cfg(feature = "alloc")]
 use wz_codecs::interest::InterestOwned;
+#[cfg(feature = "alloc")]
 use wz_codecs::interest_body::InterestBodyOwned;
+#[cfg(feature = "alloc")]
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+#[cfg(feature = "alloc")]
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
 /// R279 — build an `Interest` network-message that subscribes to the
@@ -78,6 +83,7 @@ use wz_codecs::wireexpr_local::WireexprLocalOwned;
 /// `Local` wireexpr arm; the `Nonlocal` arm (M=0) for keyexprs
 /// rooted in the peer's mapping table is reserved for a future
 /// `_nonlocal` companion builder mirroring the DECLARE pattern.
+#[cfg(feature = "alloc")]
 pub fn build_interest_liveliness_subscriber(
     interest_id: u64,
     history: bool,
@@ -123,6 +129,7 @@ pub fn build_interest_liveliness_subscriber(
 /// [`build_interest_liveliness_subscriber`] via
 /// [`build_liveliness_token_interest`] (one SSOT; the two differ only in
 /// the outer C / F bits).
+#[cfg(feature = "alloc")]
 pub fn build_interest_liveliness_get(
     interest_id: u64,
     keyexpr_mapping_id: u64,
@@ -196,6 +203,7 @@ pub fn build_interest_liveliness_get(
 /// `flags |= _Z_INTEREST_FLAG_KEYEXPRS | _Z_INTEREST_FLAG_AGGREGATE | _Z_INTEREST_FLAG_FUTURE;`),
 /// so a copy that dropped the bit drew a gateway answer under the gateway's own
 /// wider key, which the filter never matched and never opened on.
+#[cfg(feature = "alloc")]
 pub fn build_interest_propagated(
     interest_id: u64,
     kinds: InterestKinds,
@@ -336,6 +344,7 @@ impl core::ops::BitOr for InterestKinds {
 /// (`commons/zenoh-protocol/src/network/interest.rs` @ `interest -= InterestOptions::RESTRICTED`),
 /// so `keyexpr: None` here is exactly its `wire_expr: None`. N and M follow the
 /// keyexpr too — an absent wireexpr has neither a suffix nor a mapping arm.
+#[cfg(feature = "alloc")]
 fn build_restricted_interest(
     interest_id: u64,
     kinds: InterestKinds,
@@ -426,6 +435,7 @@ pub(crate) const fn interest_body_header(
 /// an aggregated ANSWER is the receiving side's business and unchanged: an
 /// aggregate is an ordinary declaration on a wild keyexpr, matched by
 /// intersection like any other.
+#[cfg(feature = "alloc")]
 fn build_interest_composed(
     interest_id: u64,
     kinds: InterestKinds,
@@ -447,6 +457,7 @@ fn build_interest_composed(
 /// to [`InterestKinds::TOKENS`]. Kept as a named wrapper because the two
 /// public liveliness builders differ only in C / F and share this kind
 /// choice; inlining it would restate `TOKENS` at both.
+#[cfg(feature = "alloc")]
 fn build_liveliness_token_interest(
     interest_id: u64,
     current: bool,
@@ -489,6 +500,7 @@ fn build_liveliness_token_interest(
 /// interest.rs:69`) nor reads it (`:130`) in that mode, so the body bytes
 /// would be parsed as the NEXT message. [`build_interest_final`] is the
 /// Final, and it emits no body at all.
+#[cfg(feature = "alloc")]
 pub fn build_interest_subscribers(
     interest_id: u64,
     current: bool,
@@ -517,6 +529,7 @@ pub fn build_interest_subscribers(
 /// What it feeds on the wz side is `RemoteQueryableRegistry` — the backing
 /// of `Querier::get_matching_status` and the querier-scoped matching
 /// listener.
+#[cfg(feature = "alloc")]
 pub fn build_interest_queryables(
     interest_id: u64,
     current: bool,
@@ -543,6 +556,7 @@ pub fn build_interest_queryables(
 /// both planes should send ONE Interest rather than two — two interests mean
 /// two ids, two Finals, and two independent `DeclFinal` terminations to
 /// correlate.
+#[cfg(feature = "alloc")]
 pub fn build_interest_kinds(
     interest_id: u64,
     kinds: InterestKinds,
@@ -568,6 +582,7 @@ pub fn build_interest_kinds(
 /// answers, and nothing else in this tree needed to say so. The bit is a
 /// request to the peer, not a capability of ours; see [`InterestKinds`] for why
 /// wz stages no aggregate reply of its own.
+#[cfg(feature = "alloc")]
 pub fn build_interest_kinds_with_aggregate(
     interest_id: u64,
     kinds: InterestKinds,
@@ -599,6 +614,7 @@ pub fn build_interest_kinds_with_aggregate(
 /// two bytes for `interest_id <= 0xFF`. No inner body (the
 /// `_Z_INTEREST_NOT_FINAL_MASK` gate at interest.h:35 — C||F — is
 /// clear), no extensions.
+#[cfg(feature = "alloc")]
 pub fn build_interest_final(interest_id: u64) -> InterestOwned {
     InterestOwned {
         header: wire_const::N_MID_INTEREST,
@@ -617,6 +633,7 @@ pub fn build_interest_final(interest_id: u64) -> InterestOwned {
 /// `mode: InterestMode::Final,`), where [`build_interest_final`] -- the api
 /// plane's, which zenoh-pico's own `_z_make_interest_final` matches -- carries
 /// no extension at all. R2903's broker sent the bare one upstream.
+#[cfg(feature = "alloc")]
 pub fn build_interest_final_propagated(interest_id: u64) -> InterestOwned {
     let mut interest = build_interest_final(interest_id);
     crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);

@@ -28,6 +28,7 @@
 //! `SigningKey` / `SigningKeyTooShort` / `generate_cookie_hmac_sha256`
 //! so its callsites resolve unchanged.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use hmac::{Hmac, Mac};
@@ -159,7 +160,9 @@ impl SigningKey {
 
     /// Construct a key from owned bytes. The input is moved into a
     /// `Zeroizing` wrapper; passing a shorter-than-32-byte slice
-    /// returns the typed error without retaining the bytes.
+    /// returns the typed error without retaining the bytes. Heap profile only:
+    /// it takes a `Vec`, and [`Self::from_slice`] is the constructor with none.
+    #[cfg(feature = "alloc")]
     pub fn new(bytes: Vec<u8>) -> Result<Self, SigningKeyTooShort> {
         if bytes.len() < SIGNING_KEY_BYTES {
             // Zeroize the rejected input before returning — the
@@ -287,6 +290,10 @@ impl SigningKey {
 /// zenoh's, is never serialized, so it carries no endianness contract with
 /// any peer; `to_le_bytes` is named here only so the derivation is
 /// reproducible across the hosts a single deploy might mix.
+///
+/// The heap profile's form: it returns a `Vec`. The slot profile mints through
+/// [`cookie_payload_tag`], into an array.
+#[cfg(feature = "alloc")]
 pub fn generate_cookie_hmac_sha256(
     cookie_signing_key: &SigningKey,
     peer_zid: &[u8],

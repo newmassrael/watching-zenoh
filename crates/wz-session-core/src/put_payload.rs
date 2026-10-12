@@ -32,6 +32,7 @@
 //! [`collect_payload`](crate::put_payload::collect_payload) takes it as a
 //! closure so this crate stays the no_std half.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf, SceList};
@@ -217,6 +218,10 @@ pub enum PayloadFault {
 /// This is what upstream's receiver does with a ZBuf of mixed slices: each
 /// shared-memory slice becomes the buffer it names, and the payload reads as
 /// their concatenation.
+///
+/// Heap profile only, as every collector below: the payload is returned as a `Vec`,
+/// and the slot profile hands the application the bytes where they lie.
+#[cfg(feature = "alloc")]
 pub fn collect_payload<S: CodecStorage>(
     put: &MsgPutOwned<S>,
     resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
@@ -234,6 +239,7 @@ pub fn collect_payload<S: CodecStorage>(
 /// upstream writes a payload as slices: the value of a query is the same list
 /// after the same marker, and what a slice is owed does not depend on which
 /// message it arrived in.
+#[cfg(feature = "alloc")]
 pub fn collect_slices<S: CodecStorage>(
     slices: &[ZbufSliceOwned<S>],
     resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
@@ -257,6 +263,7 @@ pub fn collect_slices<S: CodecStorage>(
 /// The value of a query was the one list of slices this module collected only as bytes,
 /// so a queryable that was sent a chunk was handed a copy of it; upstream hands it the
 /// buffer.
+#[cfg(feature = "alloc")]
 pub fn collect_slices_shared<S: CodecStorage>(
     slices: &[ZbufSliceOwned<S>],
     resolve: impl FnMut(&[u8]) -> Option<crate::link::RxBytes>,
@@ -281,6 +288,7 @@ pub fn collect_slices_shared<S: CodecStorage>(
 /// R3124 -- the slices are returned apart. Joining them is a new buffer and the copy
 /// upstream's `ZBuf` avoids by holding them apart; what joins them, if anything does, is the
 /// caller.
+#[cfg(feature = "alloc")]
 fn walk_slices<S: CodecStorage, R>(
     slices: &[ZbufSliceOwned<S>],
     mut resolve: impl FnMut(&[u8]) -> Option<R>,
@@ -337,6 +345,7 @@ fn walk_slices<S: CodecStorage, R>(
 /// R3124 -- and a Put of SEVERAL slices is delivered as the slices, kept apart, each shared
 /// memory slice the page it names and none copied
 /// ([`collect_slices_shared`]); the payload is one run only when a reader asks for one.
+#[cfg(feature = "alloc")]
 pub fn collect_wire_payload(
     put: &MsgPutOwned<crate::wire::WireStorage>,
     resolve: impl FnMut(&[u8]) -> Option<crate::link::RxBytes>,
@@ -496,6 +505,7 @@ pub(crate) fn slice_list(
 
 /// The serialized descriptor of every shared-memory slice of a Put's payload, in order. Empty for
 /// a Put that carries none, which is nearly every Put.
+#[cfg(feature = "alloc")]
 pub fn shm_descriptors<S: CodecStorage>(put: &MsgPutOwned<S>) -> Vec<&[u8]> {
     match layout(put) {
         PutPayload::Inline(_) => Vec::new(),
@@ -504,6 +514,7 @@ pub fn shm_descriptors<S: CodecStorage>(put: &MsgPutOwned<S>) -> Vec<&[u8]> {
 }
 
 /// The serialized descriptor of every shared-memory slice of a list of slices, in order.
+#[cfg(feature = "alloc")]
 pub fn shm_descriptors_of<S: CodecStorage>(slices: &[ZbufSliceOwned<S>]) -> Vec<&[u8]> {
     slices
         .iter()

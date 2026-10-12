@@ -32,12 +32,17 @@
 //!   with `all`, so a remote that reports no interface at all satisfies any
 //!   interface filter. That is upstream's reading and it is kept.
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
+use wz_codecs::whatami::WhatAmI;
+#[cfg(feature = "alloc")]
+use wz_codecs::whatami::WhatAmIMatcher;
 
 use crate::extbound::{Bound, Region};
+#[cfg(feature = "alloc")]
 use crate::zid_hex::canonical_zid;
 
 /// What a node's south is: the one preset, or a list of subregions
@@ -50,11 +55,16 @@ pub enum SouthPartition {
     Auto,
     /// Subregion `i` is `subregions[i]`; a remote is assigned the first one whose
     /// filters match it.
+    ///
+    /// Heap profile only: the list is owned text and zids. A node with no allocator
+    /// is on the `auto` preset, which is the only partition it can state.
+    #[cfg(feature = "alloc")]
     Custom(Vec<SouthSubregion>),
 }
 
 /// One south subregion's membership rule
 /// (`commons/zenoh-config/src/gateway.rs` @ `pub struct GatewayExplicitSouthConf {`).
+#[cfg(feature = "alloc")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SouthSubregion {
     /// `None` matches every remote, an empty list matches none.
@@ -63,6 +73,7 @@ pub struct SouthSubregion {
 
 /// One filter of a subregion
 /// (`commons/zenoh-config/src/gateway.rs` @ `pub struct GatewayFiltersConf {`).
+#[cfg(feature = "alloc")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RegionFilter {
     /// The roles the remote may have.
@@ -133,6 +144,7 @@ impl core::fmt::Display for RegionError {
 }
 
 /// `is_match` for one subregion's filter list.
+#[cfg(feature = "alloc")]
 fn matches_filters(filters: Option<&[RegionFilter]>, remote: &RemoteFacts<'_>) -> bool {
     let Some(filters) = filters else {
         return true;
@@ -177,23 +189,33 @@ pub fn transient_region_of(
     partition: &SouthPartition,
     remote: &RemoteFacts<'_>,
 ) -> Result<Option<Region>, RegionError> {
-    let SouthPartition::Custom(subregions) = partition else {
-        return Ok(None);
-    };
-    match subregions
-        .iter()
-        .position(|s| matches_filters(s.filters.as_deref(), remote))
+    #[cfg(feature = "alloc")]
     {
-        Some(id) => {
-            if remote.whatami == WhatAmI::Router && mode != WhatAmI::Router {
-                return Err(RegionError::RouterSubregionOfNonRouter);
+        let SouthPartition::Custom(subregions) = partition else {
+            return Ok(None);
+        };
+        match subregions
+            .iter()
+            .position(|s| matches_filters(s.filters.as_deref(), remote))
+        {
+            Some(id) => {
+                if remote.whatami == WhatAmI::Router && mode != WhatAmI::Router {
+                    return Err(RegionError::RouterSubregionOfNonRouter);
+                }
+                Ok(Some(Region::South {
+                    id,
+                    mode: remote.whatami,
+                }))
             }
-            Ok(Some(Region::South {
-                id,
-                mode: remote.whatami,
-            }))
+            None => Ok(Some(Region::North)),
         }
-        None => Ok(Some(Region::North)),
+    }
+    // Without an allocator the one partition is `Auto`: no rule places a remote.
+    #[cfg(not(feature = "alloc"))]
+    {
+        let SouthPartition::Auto = partition;
+        let _ = (mode, remote);
+        Ok(None)
     }
 }
 

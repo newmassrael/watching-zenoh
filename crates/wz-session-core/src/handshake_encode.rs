@@ -25,14 +25,17 @@
 // subset must not carry the unused imports (CI denies warnings). `VecSink`
 // is the heap `encode_close`'s alone: Init and Open are written through the
 // buffer seam (`encode_init_into` / `encode_open_into`) whatever the buffer is.
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close"
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close"
+    )
 ))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "codec-close")]
+#[cfg(all(feature = "alloc", feature = "codec-close"))]
 use sce_forge_runtime::codec::VecSink;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::whatami::WhatAmI;
@@ -74,7 +77,7 @@ use wz_codecs::open_body::OpenBody;
 /// verified byte-identical to zenoh-pico's `_z_init_encode` by
 /// `crates/wz-integration-tests/tests/layer3_init_body.rs`. The
 /// transport-message header is one byte: `(flags) | T_MID_INIT`.
-#[cfg(feature = "codec-init-body")]
+#[cfg(all(feature = "alloc", feature = "codec-init-body"))]
 pub fn encode_init(
     params: &SessionInitParams,
     is_ack: bool,
@@ -204,7 +207,7 @@ pub fn encode_init_into(
 /// drive OpenSyn directly without an inbound parse cycle. The
 /// argument is ignored when `is_ack=true` (OpenAck carries no
 /// cookie field per transport.c:300-302).
-#[cfg(feature = "codec-open-body")]
+#[cfg(all(feature = "alloc", feature = "codec-open-body"))]
 pub fn encode_open(
     params: &SessionInitParams,
     is_ack: bool,
@@ -335,7 +338,7 @@ pub fn encode_open_into(
 /// reason both record: out-of-line, the inlining decision cannot FLIP between
 /// the baseline and the minus build, so the name the catalog's claim is
 /// checked by exists in one and not in the other.
-#[cfg(feature = "codec-close")]
+#[cfg(all(feature = "alloc", feature = "codec-close"))]
 #[inline(never)]
 pub fn encode_close(reason: u8, session: bool) -> Vec<u8> {
     let parent_flags = if session {
@@ -414,7 +417,7 @@ pub fn encode_close_into(
 /// Contrast [`encode_close`]'s `session = true` unicast callers: there the
 /// whole logical session is torn down, and the S bit is the only thing
 /// separating that from dropping one link of an aggregated session.
-#[cfg(feature = "codec-close")]
+#[cfg(all(feature = "alloc", feature = "codec-close"))]
 pub fn encode_multicast_close() -> Vec<u8> {
     encode_close(
         crate::close_reason::CloseReason::Generic as u8,

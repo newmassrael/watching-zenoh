@@ -29,7 +29,8 @@ pub(crate) fn read_vle_u64(bytes: &[u8]) -> Option<(u64, usize)> {
 /// Append `v` to `out` as a VLE — the write twin of [`read_vle_u64`]. Delegates
 /// to the `sce_forge_runtime` sink codec (the VLE SSOT): a `u64` caps at 9 bytes
 /// per canonical zenoh/pico. Consumed by `source_info_ext`, `response_build`,
-/// and the `extauth_usrpwd` OpenSyn body.
+/// and the `extauth_usrpwd` OpenSyn body. Heap profile only: it grows a `Vec`.
+#[cfg(feature = "alloc")]
 pub(crate) fn encode_vle_u64_into(out: &mut alloc::vec::Vec<u8>, v: u64) {
     use sce_forge_runtime::codec::{SceSink, VecSink};
     VecSink::new(out)
@@ -43,6 +44,8 @@ pub(crate) fn encode_vle_u64_into(out: &mut alloc::vec::Vec<u8>, v: u64) {
 /// `{user, hmac}` is two of these, pubkey's RSA-key `{n, e}` + ciphertext are
 /// three. `pub` so the AP-only pubkey method (in `wz-runtime-tokio`) consumes
 /// the same definition as no_std usrpwd — one framing, two crates, zero drift.
+/// Heap profile only: it grows a `Vec`.
+#[cfg(feature = "alloc")]
 pub fn write_zbuf(out: &mut alloc::vec::Vec<u8>, bytes: &[u8]) {
     encode_vle_u64_into(out, bytes.len() as u64);
     out.extend_from_slice(bytes);
@@ -51,7 +54,9 @@ pub fn write_zbuf(out: &mut alloc::vec::Vec<u8>, bytes: &[u8]) {
 /// Read one zenoh `ZBuf` (VLE length + that many bytes) from `cursor`, the read
 /// twin of [`write_zbuf`]. `None` on truncation / malformed VLE / a length that
 /// overruns the buffer. The cursor advances past the bytes so successive ZBufs
-/// in one body read in sequence (usrpwd's two, pubkey's three).
+/// in one body read in sequence (usrpwd's two, pubkey's three). Heap profile
+/// only: it returns an owned `Vec`.
+#[cfg(feature = "alloc")]
 pub fn read_zbuf(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
 ) -> Option<alloc::vec::Vec<u8>> {
@@ -71,6 +76,7 @@ mod tests {
         assert_eq!(read_vle_u64(&[0x7F]), Some((127, 1)));
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn encode_vle_u64_into_round_trips_through_the_reader() {
         // The writer SSOT (delegating to the sce_forge_runtime VLE codec)
@@ -115,6 +121,7 @@ mod tests {
         assert!(read_vle_u64(&[]).is_none());
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn zbuf_round_trips_through_the_cursor() {
         use sce_forge_runtime::codec::SceCursor;
@@ -134,6 +141,7 @@ mod tests {
         assert_eq!(read_zbuf(&mut t), None);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn read_vle_u64_reads_the_canonical_9_byte_cap() {
         // Canonical zenoh/pico u64: 9 bytes, the 9th carrying a full 8 data bits

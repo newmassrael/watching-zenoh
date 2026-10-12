@@ -22,8 +22,10 @@
 //! types) plus `0xFFFF` for a custom encoding whose whole string rides the schema
 //! field (`zenoh/src/api/encoding.rs:88-628`).
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
 
+#[cfg(feature = "alloc")]
 use crate::sample::EncodingHint;
 
 /// zenoh `EncodingId` (`commons/zenoh-protocol/src/core/encoding.rs:18`).
@@ -50,6 +52,7 @@ const fn packed_no_schema(id: EncodingId) -> u32 {
     (id as u32) << 1
 }
 
+#[cfg(feature = "alloc")]
 impl EncodingHint {
     /// zenoh `Encoding::ZENOH_BYTES` (id 0) — the default/empty encoding (raw
     /// bytes, no interpretation). The wz mirror of `encoding-empty`.
@@ -175,6 +178,7 @@ pub fn id_for_mime(mime: &str) -> Option<EncodingId> {
 /// (`commons/zenoh-protocol/src/network/request.rs` @ `q.ext_body.as_ref().map_or(0, |b| b.payload.len())`),
 /// and the Query VALUE decoder needs the same split, so both read it here
 /// rather than each re-deriving where the encoding ends.
+#[cfg(feature = "alloc")]
 pub fn split_value_body(value: &[u8]) -> Option<(EncodingHint, &[u8])> {
     let mut cursor = sce_forge_runtime::codec::SceCursor::new(value);
     let encoding = wz_codecs::encoding::Encoding::decode(&mut cursor).ok()?;
@@ -188,6 +192,7 @@ pub fn split_value_body(value: &[u8]) -> Option<(EncodingHint, &[u8])> {
 /// `api/encoding.rs:604-628`): a known MIME maps to its predefined id; a
 /// `"mime;schema"` form splits the schema off; an UNKNOWN MIME falls back to the
 /// custom id ([`ID_CUSTOM`]) carrying the WHOLE string as the schema.
+#[cfg(feature = "alloc")]
 pub fn encoding_from_mime(s: &str) -> EncodingHint {
     let (packed_id, schema) = encoding_parts_from_mime(s);
     EncodingHint {
@@ -219,6 +224,7 @@ pub fn encoding_parts_from_mime(s: &str) -> (u32, Option<&str>) {
 /// Render an [`EncodingHint`] back to its MIME string (zenoh `Encoding::to_string`):
 /// a predefined id -> its MIME name (plus `";schema"` when a schema is set); the
 /// custom id -> the schema string verbatim; an unknown predefined id -> empty.
+#[cfg(feature = "alloc")]
 pub fn encoding_to_mime(e: &EncodingHint) -> String {
     let mut out = String::new();
     write_encoding_mime_parts(e.packed_id, e.schema.as_deref(), &mut out);

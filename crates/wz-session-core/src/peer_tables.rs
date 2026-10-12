@@ -134,6 +134,7 @@ impl PeerTables {
     /// to be moved in would cost the stack its whole size.
     pub fn forget_peer(&mut self) {
         self.subscribers.forget_peer();
+        #[cfg(feature = "alloc")]
         self.subscribers.clear_own_mapping_space();
         self.subscribers.clear_own_zid();
         self.remote_subscribers.forget();

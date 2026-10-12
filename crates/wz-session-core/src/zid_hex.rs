@@ -12,7 +12,9 @@
 //! zid needs the identical recipe, so it lives here and `storage_replication`
 //! re-exports it (keeping every existing call site + cross-impl test intact).
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 /// Normalise a (length-trimmed) `zid` to the full 16-byte little-endian array
@@ -60,6 +62,10 @@ pub fn canonical_zid(zid: &[u8]) -> &[u8] {
 /// crate sits below this one; `wz-runtime-tokio`'s
 /// `a_zid_displays_as_the_key_expression_renders_it` holds the two to one
 /// answer.
+///
+/// The heap profile's form (it returns a `String`); [`write_zenoh_hex`] is the
+/// same text written into a buffer the caller holds.
+#[cfg(feature = "alloc")]
 pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
     let id = u128::from_le_bytes(zid_to_le_array(zid));
     let s = alloc::format!("{id:02x}");
@@ -107,6 +113,9 @@ pub fn write_zenoh_hex(zid: &[u8], out: &mut dyn core::fmt::Write) -> core::fmt:
 /// neither zenoh nor uhlc screens it out. Measured, not assumed: a stock zenohd
 /// loads `dst_zid: "+1"` and resolves it to `"1"`. Mirroring the quirk is what
 /// keeps the two implementations accepting the same documents.
+///
+/// The heap profile's form: it returns the trimmed bytes as a `Vec`.
+#[cfg(feature = "alloc")]
 pub fn zenoh_hex_to_zid(hex: &str) -> Option<Vec<u8>> {
     if hex.is_empty() || hex.starts_with('0') || hex.contains(|c: char| c.is_ascii_uppercase()) {
         return None;

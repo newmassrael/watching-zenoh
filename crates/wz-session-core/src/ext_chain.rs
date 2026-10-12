@@ -13,6 +13,7 @@
 //! that needs only one half does not drag the other in (and never trips
 //! dead-code under `-D warnings`).
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use wz_codecs::ext_entry::ExtEntryOwned;
 
@@ -223,23 +224,26 @@ pub const QUERY_EXT_CHAIN_DEPTH: usize = 8;
 /// outer ext; the transport composer). The handshake encoders write their chain
 /// straight after the body through [`encode_ext_chain_into`] and do not call
 /// this.
-#[cfg(any(
-    feature = "session-extauth",
-    feature = "transport-compose",
-    // The unit tests of `passive` (which builds the same wire from the same
-    // entries) and of the lend-only chain writer below, under the feature sets
-    // their own modules are compiled at.
-    all(
-        test,
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-frame"
-    ),
-    all(
-        test,
-        feature = "tx-lend-only",
-        any(feature = "codec-init-body", feature = "codec-open-body")
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "session-extauth",
+        feature = "transport-compose",
+        // The unit tests of `passive` (which builds the same wire from the same
+        // entries) and of the lend-only chain writer below, under the feature sets
+        // their own modules are compiled at.
+        all(
+            test,
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-close",
+            feature = "codec-frame"
+        ),
+        all(
+            test,
+            feature = "tx-lend-only",
+            any(feature = "codec-init-body", feature = "codec-open-body")
+        )
     )
 ))]
 pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
@@ -294,6 +298,10 @@ pub(crate) fn encode_ext_chain_into(
 /// to carry had to be grown twice by feature-SUBSET builds (R311y605,
 /// R311y607) and each growth was a defect until it was found; there is no
 /// longer a list to be short of.
+///
+/// The heap profile's form: it returns a growable `Vec`. The slot profile reads
+/// its chain through [`decode_handshake_ext_chain`], into an array.
+#[cfg(feature = "alloc")]
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
 ) -> Result<Vec<ExtEntryOwned>, crate::parse_error::InboundParseError> {
@@ -318,6 +326,7 @@ pub(crate) fn decode_ext_chain(
 // writes its chain through the `_into` form: the profile's own lib leg runs it.
 #[cfg(all(
     test,
+    feature = "alloc",
     feature = "tx-lend-only",
     any(feature = "codec-init-body", feature = "codec-open-body")
 ))]

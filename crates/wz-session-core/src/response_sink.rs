@@ -235,7 +235,7 @@ impl<S: LivelinessGetPrune + ?Sized> LivelinessGetPrune for &S {
 // actually drains through a refcounted sink (no caller today — the MCU drive
 // loop does not run the reply drain).
 
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: ResponseOwned) {
@@ -247,7 +247,7 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
     }
 }
 
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<S: DeclareReplySink + ?Sized> DeclareReplySink for alloc::sync::Arc<S> {
     #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
@@ -267,7 +267,7 @@ impl<S: DeclareReplySink + ?Sized> DeclareReplySink for alloc::sync::Arc<S> {
     }
 }
 
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<S: LivelinessGetPrune + ?Sized> LivelinessGetPrune for alloc::sync::Arc<S> {
     #[cfg(feature = "liveliness-get")]
     fn prune_liveliness_get_interest(&self, interest_id: u64) {
