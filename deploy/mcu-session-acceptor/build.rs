@@ -35,7 +35,14 @@ fn main() {
     // `INCLUDE memory.x` only against the per-target OUT_DIR copy emitted
     // below, not a crate-root file that would shadow it.
     let target = env::var("TARGET").expect("TARGET set by cargo");
-    let memory_x: &[u8] = if target == "thumbv6m-none-eabi" {
+    //
+    // The fixed-memory profile on ARMv6-M is the exception: its tables do not fit
+    // the microbit's 16 KB, so it links against a map with the RAM they take
+    // (`memory-v6m-fixed.x` says why and how much).
+    let fixed_memory = env::var_os("CARGO_FEATURE_FIXED_MEMORY").is_some();
+    let memory_x: &[u8] = if target == "thumbv6m-none-eabi" && fixed_memory {
+        include_bytes!("memory-v6m-fixed.x")
+    } else if target == "thumbv6m-none-eabi" {
         include_bytes!("memory-microbit.x")
     } else {
         include_bytes!("memory-mps2.x")
@@ -45,6 +52,8 @@ fn main() {
     println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=memory-mps2.x");
     println!("cargo:rerun-if-changed=memory-microbit.x");
+    println!("cargo:rerun-if-changed=memory-v6m-fixed.x");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FIXED_MEMORY");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=TARGET");
 

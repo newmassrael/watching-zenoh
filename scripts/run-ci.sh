@@ -9909,6 +9909,12 @@ layer_c1g_cargo_test_observer() {
         && cargo clippy -p wz-session-core --all-targets --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,session-unicast,session-unicast-accept,codec-init-body,codec-open-body,session-slot --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,session-unicast,codec-close,session-slot --quiet -- -D warnings) || return 1
+    # S9e -- the same selector with NO allocator: `session-slot` without `alloc` is
+    # the profile the no-allocator link gate builds an image on, and a use of the heap
+    # that crept into it is a compile error here before it is a link error there. The
+    # set is the acceptor image's (the handshake codecs, the frame, keep-alive, close).
+    (cd crates \
+        && cargo clippy -p wz-session-core --lib --no-default-features --features no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,session-slot --quiet -- -D warnings) || return 1
     # Every combination the selector touches must compile and be clean WITH and
     # WITHOUT it: a symbol the lend-only profile stops using is dead there, and one
     # the heap profile stops using after a refactor is dead there. `--all-features`
@@ -11240,7 +11246,8 @@ layer_c1m_session_lwip() {
             --features session-unicast-open,session-unicast-accept,pubsub-put,static-link-storage \
             --quiet -- -D warnings) || return 1
     (cd crates \
-        && cargo clippy -p wz-runtime-coop --all-targets --features rx-in-place,reassembly \
+        && cargo clippy -p wz-runtime-coop --all-targets \
+            --features alloc,wz-session-core/alloc,rx-in-place,reassembly \
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put \
@@ -11372,7 +11379,7 @@ layer_c1m_session_lwip() {
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
         --test session_pump_allocations --quiet || return 1
     _runci_guarded_test "C1m coop static runtime" 16 \
-        cargo test -p wz-runtime-coop --features session-slot \
+        cargo test -p wz-runtime-coop --features alloc,session-slot \
         --lib static_tests:: --quiet || return 1
     # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
     # a node holds at most the generated MAX_SESSIONS sessions, and every table a
@@ -11455,10 +11462,10 @@ layer_c1m_session_lwip() {
             --features adminspace-core,adminspace-write,session-slot \
             --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-coop --all-targets \
-            --features session-slot,reassembly \
+            --features alloc,wz-session-core/alloc,session-slot,reassembly \
             --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-coop --all-targets \
-            --features session-slot \
+            --features alloc,wz-session-core/alloc,session-slot \
             --quiet -- -D warnings) || return 1
     (cd crates \
         && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
@@ -11607,7 +11614,7 @@ layer_c1n_mcu_session_acceptor() {
     # does not cover this leg, and the honest local check is running the
     # command in the guard verbatim, which reports 5.
     _runci_guarded_test "C1n coop cookie-nonce draw" 5 \
-        cargo test -p wz-runtime-coop --features session-unicast \
+        cargo test -p wz-runtime-coop --features alloc,wz-session-core/alloc,session-unicast \
         --lib cookie_nonce_draw_tests:: --quiet || return 1
     _runci_guarded_test "C1n entropy port" 3 \
         cargo test -p wz-session-core --lib entropy:: --quiet || return 1
@@ -11619,7 +11626,8 @@ layer_c1n_mcu_session_acceptor() {
         cargo test -p wz-session-core --lib signing_key::tests::key_draw_ --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-coop --features session-unicast \
+        && cargo clippy -p wz-runtime-coop \
+            --features alloc,wz-session-core/alloc,session-unicast \
             --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-mcu-session-acceptor --features reassembly \
             --all-targets --quiet -- -D warnings \
@@ -15942,7 +15950,7 @@ layer_g_cross_compile_cortex_m() {
         # cross-compiles on ARMv6-M. This IS the no-alloc M0 session reach the
         # prior rounds deferred; M3/M4/M7/M33 + RISC-V IMAC keep building too.
         if (cd crates && cargo build -p wz-runtime-coop \
-            --target "$t" --features session-unicast --quiet); then
+            --target "$t" --features alloc,wz-session-core/alloc,session-unicast --quiet); then
             echo "  G.10 session-unicast MCU $t OK"
         else
             echo "  G.10 session-unicast MCU $t FAIL" >&2

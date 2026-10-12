@@ -86,10 +86,19 @@ tree's other ratchets follow, so the day a real image becomes alloc-free the
 proof starts guarding it. A `deploy/` image that has no row FAILS (the
 population is derived from `deploy/**/Cargo.toml`, not listed).
 
-Today the one gated image is `mcu-link-noalloc-probe` (the link tier on
-`static-link-storage`, a socket out of a static pool, no session crate); it is
-the positive control. Every shipped image is `pending`, and the report is the
+Two images are gated beside the probes. `mcu-link-noalloc-probe` (the link tier
+on `static-link-storage`, a socket out of a static pool, no session crate) is
+the positive control. `mcu-session-acceptor-fixed` (S9e) is the first image of the
+SESSION tier on the per-session slot profile that links with no allocator, on
+ARMv7-M and ARMv6-M. The other shipped images are `pending`, and the report is the
 worklist for the steps that remove their allocations.
+
+A gated image that also has a heap profile (the `heap` feature of a deploy crate)
+names its allocator under a feature. The static check then judges what each of the
+image's gated builds turns on, not what the manifest mentions: an allocator crate
+declared `optional` and a `#[global_allocator]` or `extern crate alloc` behind a
+`cfg(feature = ..)` that no gated build enables are not the image's. The units the
+build itself compiled confirm it (half 2).
 
 ## Modes
 
@@ -228,19 +237,21 @@ IMAGES: dict[str, Image] = {
     # S9c -- the FIXED-MEMORY PROFILE of the same image: the session tier on the
     # per-session slot, static link storage and the static pump and runtime, with no
     # allocator and no `extern crate alloc` in the bin or the e2e library. It is the
-    # first image that is the SESSION tier (an acceptor with a pump) on that profile, and
-    # it does not link yet: the shell crates are clean (the census names none of them),
-    # and what stands in its way is `wz-session-core` (the session modules are gated on
-    # its `alloc` feature), `wz-runtime-core` (the `Runtime` error enum boxes a panic
-    # payload), the codec owned mirrors (`wz-codecs`, `sce-forge-runtime`,
-    # `sce-portable-bytes`) and the third party `portable-atomic-util`. Every one is the
-    # next step's; promote the row the day the toolchain stops refusing the link and the
-    # crate list is empty.
+    # first image that is the SESSION tier (an acceptor with a pump) on that profile.
+    #
+    # S9e -- GATED. No crate of its graph names `alloc` any more: wz-session-core's
+    # session modules are gated on its `storage-profile` feature (which `session-slot`
+    # implies and `alloc` also implies) and its owned forms on `alloc`, the cooperative
+    # runtime's `alloc` is the heap forms' only, wz-runtime-core's is left off (its error
+    # enum is then the payload-less one), and the codec crates carry `alloc` only through
+    # `wz-codecs/alloc`, which the heap profile names. Nothing the image links is an
+    # allocator, which the toolchain's own refusal ("no global memory allocator found")
+    # said it could not be until then.
     "mcu-session-acceptor-fixed": Image(
         "deploy/mcu-session-acceptor/Cargo.toml",
         "bin",
         "mcu-session-acceptor",
-        "pending",
+        "gated",
         (
             Build(
                 V7M,
@@ -249,9 +260,12 @@ IMAGES: dict[str, Image] = {
                 label="mps2-fixed",
                 no_default_features=True,
             ),
-            # The same profile on ARMv6-M (no native atomics, `portable-atomic`): the
-            # slim session socket pool is what a 16 KB part could hold, and the build is
-            # the check that the fixed-memory shell compiles there as well.
+            # The same profile on ARMv6-M (no native atomics, `portable-atomic`) with the
+            # slim session socket pool. It links against `memory-v6m-fixed.x`, a map with
+            # the RAM the profile's tables take, and not against the microbit's 9 KB: the
+            # tables are sized by `wz-session-core`'s build-wide capacity constants, which
+            # no per-deploy limit lowers yet (the file says how much it overflowed). The
+            # proof here is the allocator's absence on ARMv6-M code, not the part's fit.
             Build(
                 V6M,
                 "microbit-minimal",
@@ -260,25 +274,6 @@ IMAGES: dict[str, Image] = {
                 no_default_features=True,
             ),
         ),
-        "the session tier's own crates still carry `alloc`: wz-session-core (its session"
-        " modules are gated on the feature), wz-runtime-core, the codec owned mirrors"
-        " (wz-codecs, sce-forge-runtime, sce-portable-bytes): the next step",
-    ),
-    # S9c -- the same profile WITH an allocator, for the census alone: the image above
-    # cannot link, so the census reads no call site out of it, and this one is the
-    # same code plus the `heap` feature's allocator, which lets the ELF's line table
-    # name every branch to an allocation that is still LINKED (a branch the run never
-    # takes: the e2e run of this profile allocates nothing on the host). That list is
-    # the worklist of the step that makes the row above link.
-    "mcu-session-acceptor-fixed-census": Image(
-        "deploy/mcu-session-acceptor/Cargo.toml",
-        "bin",
-        "mcu-session-acceptor",
-        "pending",
-        (Build(V7M, "cross-test", ("fixed-memory",), label="mps2-fixed-heap"),),
-        "the linked allocation sites of the session tier on the fixed-memory profile,"
-        " read with an allocator present (census only): the worklist of the next step",
-        ci=False,
     ),
     "mcu-admin-node": Image(
         "deploy/mcu-admin-node/Cargo.toml",
@@ -1624,16 +1619,125 @@ def population_problems(root: Path, images: dict[str, Image]) -> list[str]:
         if img.status == "pending" and not img.pending:
             problems.append(f"{name}: a pending image states no reason")
         if img.status == "gated":
-            deps = [d for d in ALLOCATOR_DEPS if re.search(rf"^\s*{re.escape(d)}\s*=", text, re.M)]
-            if deps:
-                problems.append(f"{name}: gated, but its manifest depends on an allocator crate: {', '.join(deps)}")
-            src_dir = manifest.parent / "src"
-            for rs in sorted(src_dir.rglob("*.rs")) if src_dir.is_dir() else []:
-                body = strip_comments(rs.read_text(errors="replace"))
-                if re.search(r"#\s*\[\s*global_allocator\s*\]", body):
-                    problems.append(f"{name}: gated, but {rs.relative_to(root)} declares a #[global_allocator]")
-                if re.search(r"extern\s+crate\s+alloc\b", body):
-                    problems.append(f"{name}: gated, but {rs.relative_to(root)} writes `extern crate alloc`")
+            problems.extend(gated_image_problems(root, name, img, text))
+    return problems
+
+
+def manifest_features(text: str) -> dict[str, list[str]]:
+    """The `[features]` table of a manifest: feature name -> its members, read
+    textually (no TOML library: the gate runs on the tree's Python floor)."""
+    m = re.search(r"^\[features\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    if not m:
+        return {}
+    body = re.sub(r"#[^\n]*", "", m.group(1))
+    table: dict[str, list[str]] = {}
+    for fname, items in re.findall(r"^\s*([A-Za-z0-9_\-]+)\s*=\s*\[(.*?)\]", body, re.M | re.S):
+        table[fname] = re.findall(r'"([^"]*)"', items)
+    return table
+
+
+def feature_closure(table: dict[str, list[str]], build: Build) -> set[str]:
+    """Every feature of the image's own manifest that `build` turns on, and every
+    optional dependency (`dep:name`) they reach: the set a `cfg(feature = ..)` in
+    the image's own source is evaluated against."""
+    todo = list(build.features)
+    if not build.no_default_features:
+        todo.append("default")
+    seen: set[str] = set()
+    while todo:
+        feature = todo.pop()
+        if feature in seen:
+            continue
+        seen.add(feature)
+        for member in table.get(feature, []):
+            if "/" in member:
+                continue  # a feature of a dependency, not of this manifest
+            todo.append(member)
+    return seen
+
+
+def attrs_before(body: str, pos: int) -> list[str]:
+    """The attributes written directly in front of the item that starts at `pos`
+    (innermost last), each as its inner text. Walks backwards over `#[ .. ]`,
+    matching brackets, so an attribute that spans lines is read whole."""
+    found: list[str] = []
+    end = pos
+    while True:
+        j = end
+        while j > 0 and body[j - 1].isspace():
+            j -= 1
+        if j == 0 or body[j - 1] != "]":
+            break
+        depth, k = 0, j - 1
+        while k >= 0:
+            if body[k] == "]":
+                depth += 1
+            elif body[k] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k <= 0 or body[k - 1] != "#":
+            break
+        found.append(body[k + 1 : j - 1].strip())
+        end = k - 1
+    return list(reversed(found))
+
+
+def active_in(body: str, pos: int, features: set[str], target: str) -> bool:
+    """Whether the item at `pos` is compiled when `features` are on: every `cfg`
+    in front of it must hold. A predicate the evaluator has no value for counts as
+    holding, so the gate never clears an item on a guess."""
+    for attr in attrs_before(body, pos):
+        expr = cfg_expr_of(attr)
+        if expr is None:
+            continue
+        try:
+            if not eval_cfg(expr, features, target):
+                return False
+        except UnknownCfg:
+            continue
+    return True
+
+
+def gated_image_problems(root: Path, name: str, img: Image, text: str) -> list[str]:
+    """What a `gated` image's own manifest and sources must not carry: an
+    allocator crate, a `#[global_allocator]`, an `extern crate alloc`. An image
+    that has both a heap profile and a profile with none (the `heap` feature of a
+    deploy crate) names the allocator under a feature, and what is judged is what
+    each of its gated builds turns ON: the declaration is allowed where it is off in
+    every build and a problem where any build has it, which the units of the build
+    itself then confirm."""
+    problems: list[str] = []
+    table = manifest_features(text)
+    closures = [(build, feature_closure(table, build)) for build in img.builds]
+    for dep in ALLOCATOR_DEPS:
+        decl = re.search(rf"^\s*{re.escape(dep)}\s*=(.*)$", text, re.M)
+        if not decl:
+            continue
+        if not re.search(r"optional\s*=\s*true", decl.group(1)):
+            problems.append(f"{name}: gated, but its manifest depends on an allocator crate: {dep}")
+            continue
+        # An optional dependency is on where a feature names it as `dep:name`, or,
+        # when no feature does, through the feature the dependency's own name makes.
+        named = any(f"dep:{dep}" in members for members in table.values())
+        for build, closure in closures:
+            reached = any(f"dep:{dep}" in table.get(f, []) for f in closure) if named else dep in closure
+            if reached:
+                problems.append(
+                    f"{name}: gated, but its build [{build.label}] turns on the allocator crate {dep}"
+                )
+    src_dir = (root / img.manifest).parent / "src"
+    for rs in sorted(src_dir.rglob("*.rs")) if src_dir.is_dir() else []:
+        body = strip_comments(rs.read_text(errors="replace"))
+        for pattern, what in (
+            (r"#\s*\[\s*global_allocator\s*\]", "declares a #[global_allocator]"),
+            (r"extern\s+crate\s+alloc\b", "writes `extern crate alloc`"),
+        ):
+            for hit in re.finditer(pattern, body):
+                if any(active_in(body, hit.start(), closure, build.target) for build, closure in closures):
+                    problems.append(f"{name}: gated, but {rs.relative_to(root)} {what}")
+                    break
     return problems
 
 
@@ -1934,6 +2038,55 @@ def _selftest() -> int:
         check(any("deploy/b" in p for p in population_problems(root, table)), "an unclassified deploy image fails")
         (root / "deploy/a/src/main.rs").write_text("#[global_allocator]\nstatic H: X = X;\n")
         check(any("global_allocator" in p for p in population_problems(root, table)), "a gated image with an allocator fails")
+
+    # a profile of an image that also has a heap profile: the allocator is named
+    # under a feature, and what is judged is what the gated builds turn on (S9e)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "deploy/a/src").mkdir(parents=True)
+        manifest = (
+            '[package]\nname = "a"\n[[bin]]\nname = "a"\n'
+            '[dependencies]\nembedded-alloc = { version = "0.6", optional = true }\n'
+            '[features]\ndefault = ["heap"]\n'
+            "# the heap profile\nheap = [\"dep:embedded-alloc\"]\nfixed-memory = []\n"
+        )
+        (root / "deploy/a/Cargo.toml").write_text(manifest)
+        main_rs = (
+            '#[cfg(feature = "heap")]\nextern crate alloc;\n'
+            '#[cfg(feature = "heap")]\n#[global_allocator]\nstatic HEAP: X = X;\n'
+            "fn main() {}\n"
+        )
+        (root / "deploy/a/src/main.rs").write_text(main_rs)
+        profile = {
+            "a": Image("deploy/a/Cargo.toml", "bin", "a", "gated", (Build(V7M, features=("fixed-memory",), no_default_features=True),))
+        }
+        check(population_problems(root, profile) == [], f"a profile without the heap feature is clean: {population_problems(root, profile)}")
+        defaults = {"a": Image("deploy/a/Cargo.toml", "bin", "a", "gated", (Build(V7M, features=("fixed-memory",)),))}
+        got = population_problems(root, defaults)
+        check(any("embedded-alloc" in p for p in got), f"default features turn the allocator crate on: {got}")
+        check(any("global_allocator" in p for p in got), f"default features turn the allocator on: {got}")
+        check(any("extern crate alloc" in p for p in got), f"default features turn alloc on: {got}")
+        explicit = {"a": Image("deploy/a/Cargo.toml", "bin", "a", "gated", (Build(V7M, features=("heap",), no_default_features=True),))}
+        check(any("embedded-alloc" in p for p in population_problems(root, explicit)), "naming the heap feature turns it on")
+        # an allocator crate that is not optional is the image's, whatever the build
+        (root / "deploy/a/Cargo.toml").write_text(manifest.replace(", optional = true", ""))
+        check(
+            any("embedded-alloc" in p for p in population_problems(root, profile)),
+            "a non-optional allocator crate fails a profile too",
+        )
+        # an allocator not under any feature is the image's, whatever the build
+        (root / "deploy/a/Cargo.toml").write_text(manifest)
+        (root / "deploy/a/src/main.rs").write_text("extern crate alloc;\nfn main() {}\n")
+        check(
+            any("extern crate alloc" in p for p in population_problems(root, profile)),
+            "an unconditional `extern crate alloc` fails a profile",
+        )
+        # a cfg that is not a feature is not read as one: the item stays on
+        (root / "deploy/a/src/main.rs").write_text('#[cfg(target_os = "none")]\nextern crate alloc;\nfn main() {}\n')
+        check(
+            any("extern crate alloc" in p for p in population_problems(root, profile)),
+            "a target cfg does not clear an `extern crate alloc`",
+        )
 
     if failures:
         for f in failures:

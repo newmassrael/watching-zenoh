@@ -91,25 +91,24 @@ wz-mcu-stack = { path = "../../crates/wz-mcu-stack" }
 # wz facade or wz-session-core directly — the lib is the composition
 # boundary (it enables session-lwip + the handshake codecs on the facade).
 #
-# `default-features = false` and `lwip` named: the profile below turns on the
-# crate's `fixed-memory` form, which is the lwIP topology's replacement.
-wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor", default-features = false, features = ["lwip"] }
+# `default-features = false` and no feature named: the heap form (`lwip`) is the
+# `heap` feature's and the `fixed-memory` form (the lwIP topology's replacement) is
+# the profile's, so a build of the profile names no heap feature of any crate.
+wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor", default-features = false }
 
 [features]
 default = ["heap"]
 # The image with an allocator: the session stack on `embedded-alloc`'s heap, the
 # shape every image of this crate has had.
-heap = ["dep:embedded-alloc"]
+heap = ["dep:embedded-alloc", "wz-mcu-session-acceptor/lwip"]
 
 # S9c -- the FIXED-MEMORY PROFILE of this image: the session tier on the
 # per-session slot, static link storage and the static pump and runtime, with no
 # allocator and no `extern crate alloc` in this bin or in the e2e library under it
 # (`wz_mcu_session_acceptor::run_acceptor_e2e_fixed` over statics declared here).
-# Built with `--no-default-features --features fixed-memory`. The image does not
-# link yet, and says why: `wz-session-core` (which the session tier names with its
-# `alloc` feature, since its session modules are gated on it) and the codec owned
-# mirrors still carry `extern crate alloc`, so rustc refuses the link for want of a
-# global allocator. The S8 gate lists exactly those crates as this image's worklist.
+# Built with `--no-default-features --features fixed-memory`. No crate in the graph
+# carries `alloc` (S9e), so the image links with no `#[global_allocator]` and a use of
+# the heap that crept in would be a compile or a link error, not a silent allocation.
 fixed-memory = ["wz-mcu-session-acceptor/fixed-memory"]
 
 # Tier B on-target reassembly: switches the boot scenario to
