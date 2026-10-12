@@ -272984,6 +272984,42 @@
         "Read the hosted runs of the pushes since the dissect doors landed, per job, first in the next round."
       ]
     },
+    "Round 3306": {
+      "decision_summary": "The hosted run of b24bc165 was read job by job and four jobs were red from three causes, each repaid at its cause. (1) The discard-site lint found `.remove(&idx)` in the schema description, where the call takes each message's computed size out of a map the same call built: nothing captured is dropped, so the site is registered with that reason. (2) The C1p count guard expected 73 and the run printed 76: the guard moves to the printed number. (3) Two diagnose_json tests of the declaration door used a wildcard pattern as incidental text and failed in the build without filter-wildcards: the key-refusal test now uses a literal pattern and runs everywhere, the test whose subject is a wildcard rule is gated on the feature, and a twin asserts the refusal in the build that lacks it.",
+      "changes_bullets": [
+        "discard_site_lint: ALLOWED gains the `.remove(&idx)` site of wz-capture proto_describe.rs, with the reason that the map is a local of the call holding an arithmetic result and a missing index is described as a refusal, not dropped.",
+        "run-ci.sh Layer C1p: the guard for the session-multicast, reassembly, codec-push, codec-join arm moves 73 to 76, the number the hosted run printed.",
+        "wz-capture diagnose_json tests: `a_wildcard_key_is_refused_and_a_malformed_one_says_why` declares a literal pattern; `the_first_covering_rule_wins_and_swapping_the_rules_swaps_the_answer` is gated on filter-wildcards; the new `a_wildcard_pattern_is_refused_as_a_declaration_without_the_matcher` asserts the refusal when the feature is off."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host, never the coordinating host: the wz-capture library tests whose names contain diagnose_json, once with default features off (11 passed, the new twin and the literal-pattern key test among them) and once on the defaults (12 passed); clippy -D warnings --all-targets of wz-capture on its defaults (exit 0). Locally: the discard-site lint (OK, 28 sites registered), cargo fmt through the commit hook.",
+        "Not verified here: the C1p count of 76 is the number the hosted run printed and was not re-run; wz-capture with the dissect feature; the hosted run of this push and of the two before it."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The three extra multicast tests that moved the C1p count to 76 are not attributed to a commit; the number is the printed one. Next step if wanted: diff the test list of that arm at R3299 and now.",
+        "The hosted run of 10b13892 (the first tree with no PARTIAL atom) was not yet complete when this was written; a gate that refuses an empty PARTIAL set would show there first."
+      ],
+      "publishable_decision_summary": "The hosted run of b24bc165 was read job by job and four jobs were red from three causes, each repaid at its cause. (1) The discard-site lint found `.remove(&idx)` in the schema description, where the call takes each message's computed size out of a map the same call built: nothing captured is dropped, so the site is registered with that reason. (2) The C1p count guard expected 73 and the run printed 76: the guard moves to the printed number. (3) Two diagnose_json tests of the declaration door used a wildcard pattern as incidental text and failed in the build without filter-wildcards: the key-refusal test now uses a literal pattern and runs everywhere, the test whose subject is a wildcard rule is gated on the feature, and a twin asserts the refusal in the build that lacks it.",
+      "publishable_changes_bullets": [
+        "discard_site_lint: ALLOWED gains the `.remove(&idx)` site of wz-capture proto_describe.rs, with the reason that the map is a local of the call holding an arithmetic result and a missing index is described as a refusal, not dropped.",
+        "run-ci.sh Layer C1p: the guard for the session-multicast, reassembly, codec-push, codec-join arm moves 73 to 76, the number the hosted run printed.",
+        "wz-capture diagnose_json tests: `a_wildcard_key_is_refused_and_a_malformed_one_says_why` declares a literal pattern; `the_first_covering_rule_wins_and_swapping_the_rules_swaps_the_answer` is gated on filter-wildcards; the new `a_wildcard_pattern_is_refused_as_a_declaration_without_the_matcher` asserts the refusal when the feature is off."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host, never the coordinating host: the wz-capture library tests whose names contain diagnose_json, once with default features off (11 passed, the new twin and the literal-pattern key test among them) and once on the defaults (12 passed); clippy -D warnings --all-targets of wz-capture on its defaults (exit 0). Locally: the discard-site lint (OK, 28 sites registered), cargo fmt through the commit hook.",
+        "Not verified here: the C1p count of 76 is the number the hosted run printed and was not re-run; wz-capture with the dissect feature; the hosted run of this push and of the two before it."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The three extra multicast tests that moved the C1p count to 76 are not attributed to a commit; the number is the printed one. Next step if wanted: diff the test list of that arm at R3299 and now.",
+        "The hosted run of 10b13892 (the first tree with no PARTIAL atom) was not yet complete when this was written; a gate that refuses an empty PARTIAL set would show there first."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
