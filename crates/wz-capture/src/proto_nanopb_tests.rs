@@ -313,7 +313,9 @@ fn generated_sizes(header: &str) -> alloc::collections::BTreeMap<String, u64> {
 /// machine that does not have the generator and is the reason the numbers above
 /// are written down. `WZ_NANOPB_REFERENCE_REQUIRE` turns that absence into a
 /// failure: a lane arms it (Layer C1bn), because a skip prints `ok` and reads as
-/// the generator's agreement.
+/// the generator's agreement. What a machine must already have for that is stated
+/// by the armed-oracle census: `python3` with the module `ensurepip` (the script
+/// builds a virtual environment) and the `descriptor.proto` named above.
 #[test]
 fn the_generators_own_sizes_are_the_numbers() {
     let required = std::env::var("WZ_NANOPB_REFERENCE_REQUIRE")

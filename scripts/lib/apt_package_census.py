@@ -404,6 +404,20 @@ _add(
     "skipping.",
     ["dissect"],
 )
+# The ADJUDICATOR for the nanopb size (`max_encoded_size`): nanopb's own
+# generator, installed by `scripts/nanopb-reference-sizes.sh --generate` into a
+# virtual environment. Layer C1bn runs `proto_nanopb_tests` with
+# `WZ_NANOPB_REFERENCE_REQUIRE=1`, so `python3 -m venv` has to work on that job,
+# and Debian ships `python3` without the module it needs (`ensurepip`) until this
+# package is installed. The same ONE job as `protobuf-compiler` above.
+_add(
+    "python3-venv",
+    "ensurepip, which `python3 -m venv` needs to build the virtual environment "
+    "nanopb's generator is installed into; Layer C1bn compares the nanopb size "
+    "with that generator, armed with WZ_NANOPB_REFERENCE_REQUIRE so its absence "
+    "reds instead of skipping.",
+    ["dissect"],
+)
 # The `cmake` rows are DERIVED below as well as listed here; the list is what
 # makes an unjustified site fail by name, the derivation is what stops this
 # reason from being believed after the tree stops supporting it.

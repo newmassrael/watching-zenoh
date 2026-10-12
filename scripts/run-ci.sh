@@ -13835,10 +13835,24 @@ layer_c1bn_passive_dissection_features() {
     # arithmetic's. The test skips where the generator is absent, and a skip prints
     # `ok`; `WZ_NANOPB_REFERENCE_REQUIRE=1` turns that into a failure, and until this
     # leg existed no lane ran the script at all, so the comparison was a sentence.
+    # The script runs here in its `--generate` mode and `cargo` is run by this lane
+    # with the arming in front of it, which is the one shape the armed-oracle census
+    # reads (and the machine it demands is a row there: python3 with `ensurepip`, and
+    # the `descriptor.proto` of libprotobuf-dev; PyPI for the two pinned packages is a
+    # fact about the network the census has no kind for).
     # Nine tests of the module, MEASURED by this command on a build host: the eight
     # that need no generator and the one that does.
-    out="$(WZ_NANOPB_REFERENCE_REQUIRE=1 bash scripts/nanopb-reference-sizes.sh 2>&1)" \
-        || { echo "$out"; return 1; }
+    nanopb_work="$(mktemp -d "${TMPDIR:-/tmp}/wz-nanopb-lane.XXXXXX")"
+    bash scripts/nanopb-reference-sizes.sh --generate "$nanopb_work" \
+        > "$nanopb_work/generate.log" 2>&1 \
+        || { cat "$nanopb_work/generate.log"; rm -rf "$nanopb_work"; return 1; }
+    out="$(
+        # shellcheck disable=SC1091
+        source "$nanopb_work/env"
+        cd crates && WZ_NANOPB_REFERENCE_REQUIRE=1 cargo test -p wz-capture --lib \
+            proto_nanopb_tests --quiet 2>&1
+    )" || { echo "$out"; rm -rf "$nanopb_work"; return 1; }
+    rm -rf "$nanopb_work"
     grep -qE '^test result: ok\. 9 passed' <<<"$out" || {
         echo "  C1bn FAIL: the nanopb size oracle did not run"
         echo "$out"; return 1; }

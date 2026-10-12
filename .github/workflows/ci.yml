@@ -1893,9 +1893,16 @@ jobs:
           # the compiler in one package and the `descriptor.proto` it needs to
           # print a descriptor (/usr/include/google/protobuf/descriptor.proto) in
           # the other, and a runner with only the first would skip.
+          # `python3-venv` — nanopb's own generator is the ADJUDICATOR for the nanopb
+          # size (`max_encoded_size`): `scripts/nanopb-reference-sizes.sh --generate`
+          # installs it into a virtual environment and Layer C1bn runs the test with
+          # `WZ_NANOPB_REFERENCE_REQUIRE=1`. Debian ships `python3` without the
+          # module `python3 -m venv` needs (`ensurepip`) until this package is
+          # installed, and a runner without it would fail the lane for a reason
+          # that is not the arithmetic's.
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
             cmake libclang-dev clang perl pkg-config tcpdump \
-            libpcap-dev netbase protobuf-compiler libprotobuf-dev
+            libpcap-dev netbase protobuf-compiler libprotobuf-dev python3-venv
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'

@@ -144,6 +144,21 @@ ROWS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
         "wz-session-core/tests/session_slot_pool_deploy.rs",
         (("program", "python3"), ("python-module", "yaml")),
     ),
+    # The nanopb size arithmetic held to nanopb's own generator
+    # (`scripts/nanopb-reference-sizes.sh --generate`, then the test armed). Three
+    # oracles: `python3`, the module `ensurepip` (Debian ships `venv` without it
+    # unless `python3-venv` is installed, and `import venv` alone passes without it,
+    # which is why the module named is the one `python3 -m venv` actually needs), and
+    # the `descriptor.proto` the test reads. The two pinned PyPI packages need the
+    # network, and the census has no oracle kind for a network.
+    "WZ_NANOPB_REFERENCE_REQUIRE": (
+        "wz-capture/src/proto_nanopb_tests.rs",
+        (
+            ("program", "python3"),
+            ("python-module", "ensurepip"),
+            ("file", "/usr/include/google/protobuf/descriptor.proto"),
+        ),
+    ),
 }
 
 KINDS = ("file", "program", "python-module")
