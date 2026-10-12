@@ -44,7 +44,11 @@ use wz_session_core::locality::Locality;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::sample_kind::SampleKind;
-use wz_session_core::sink::{BoxedSink, SampleView};
+#[cfg(not(feature = "session-slot"))]
+use wz_session_core::sink::BoxedSink;
+#[cfg(feature = "session-slot")]
+use wz_session_core::sink::FnSink;
+use wz_session_core::sink::SampleView;
 #[cfg(feature = "session-slot")]
 use wz_session_core::text_out::FixedText;
 #[cfg(feature = "adminspace-fixed")]
@@ -327,16 +331,16 @@ pub fn host_connect_writes(
 /// space of the node `zid_hex` / `whatami` and apply every write it receives to
 /// `control`.
 ///
-/// The pattern is built in fixed text and the sink keeps the zid in fixed text, so
-/// the registration costs the heap what every sink costs it, one box for the sink
-/// itself (`BoxedSink::new`), once, at startup.
+/// The pattern is built in fixed text and the sink is a closed [`ConnectWriteSink`]
+/// that keeps the zid in fixed text beside the control it applies to, so the
+/// registration allocates nothing: the table is typed by the sink and holds it inline.
 ///
 /// `Err` when the table refuses the registration: full, a pattern past
 /// `caps::MAX_KEYEXPR_BYTES`, or a zid wider than a zenoh id (32 digits) that no
 /// real node has, which is refused by the pattern's own overflow and not cut.
 #[cfg(feature = "session-slot")]
 pub fn host_connect_writes_fixed(
-    subscribers: &mut wz_session_core::pubsub::SubscriberTable<BoxedSink>,
+    subscribers: &mut wz_session_core::pubsub::SubscriberTable<ConnectWriteSink>,
     zid_hex: &str,
     whatami: &'static str,
     control: &'static ConnectControl,
@@ -356,15 +360,40 @@ pub fn host_connect_writes_fixed(
         .register_sink(
             pattern,
             Locality::Any,
-            BoxedSink::new(move |sample: &dyn SampleView| {
-                let body = match sample.kind() {
-                    SampleKind::Put => ConfigWriteBody::Put(sample.payload()),
-                    SampleKind::Del => ConfigWriteBody::Del,
-                };
-                control.apply(zid.prefix(), whatami, sample.keyexpr(), body);
-            }),
+            FnSink::new(
+                ConnectWriteState {
+                    control,
+                    zid,
+                    whatami,
+                },
+                apply_connect_write,
+            ),
         )
         .map(|_id| ())
+}
+
+/// What the config-write subscriber of the slot profile holds: the control a write
+/// is applied to, and the node's identity, which is part of the key a write names.
+#[cfg(feature = "session-slot")]
+pub struct ConnectWriteState {
+    control: &'static ConnectControl,
+    zid: FixedText<32>,
+    whatami: &'static str,
+}
+
+/// The sink of the slot profile's config-write subscriber ([`host_connect_writes_fixed`]).
+#[cfg(feature = "session-slot")]
+pub type ConnectWriteSink = FnSink<ConnectWriteState>;
+
+#[cfg(feature = "session-slot")]
+fn apply_connect_write(state: &mut ConnectWriteState, sample: &dyn SampleView) {
+    let body = match sample.kind() {
+        SampleKind::Put => ConfigWriteBody::Put(sample.payload()),
+        SampleKind::Del => ConfigWriteBody::Del,
+    };
+    state
+        .control
+        .apply(state.zid.prefix(), state.whatami, sample.keyexpr(), body);
 }
 
 // The tests drive an `ApplicationLayerObserver`, the growable profile's; the slot

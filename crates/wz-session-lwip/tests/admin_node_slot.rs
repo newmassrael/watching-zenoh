@@ -50,7 +50,7 @@ use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitP
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{Requesters, SlotObserver};
+use wz_session_core::slot_observer::{Requesters, SlotObserverOf};
 use wz_session_core::WhatAmI;
 use wz_session_lwip::driver::LwipUdpDriver;
 use wz_session_lwip::listener::SessionListener;
@@ -58,7 +58,7 @@ use wz_session_lwip::session_host::SessionHost;
 use wz_session_lwip::slot_node::{SessionFactory, SlotAdminNode};
 use wz_session_lwip::{LwipLinks, LwipSessionLink};
 use wz_session_mcu::admin_fixed::{
-    host_admin_queryable_fixed, AdminHost, FixedNodeIdentity, FixedNodeStatus,
+    host_admin_queryable_fixed, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
 };
 use wz_session_mcu::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
@@ -114,7 +114,7 @@ type LinkRef = &'static LwipLink;
 type Slots<const S: usize> = SessionSlots<Rt, CoopTime<Frozen>, LwipUdpDriver, Counting, S>;
 type Pumps<const P: usize> = PumpSlots<Frozen, LwipSessionLink<LinkRef>, P>;
 type Host<const S: usize> = SessionHost<Frozen, LinkRef, Counting, S, S>;
-type Node<const S: usize> = SlotAdminNode<'static, Frozen, LinkRef, Factory, S, S, LANES>;
+type Node<const S: usize> = SlotAdminNode<'static, Frozen, LinkRef, Factory<S>, S, S, LANES>;
 
 /// Everything one node declares, as an image would in its statics.
 struct Statics<const S: usize> {
@@ -127,7 +127,7 @@ struct Statics<const S: usize> {
     status: FixedNodeStatus<S>,
     control: ConnectControl,
     admin: AdminHost<1024>,
-    app: SlotApp,
+    app: SlotApp<Sinks<S>>,
 }
 
 impl<const S: usize> Statics<S> {
@@ -165,14 +165,17 @@ fn params(zid: u8) -> SessionInitParams {
 /// What the node makes its sessions from: the entropy, the parameters and the
 /// application layer (the process-wide observer, with the node's own admin surface
 /// registered on it).
-struct Factory {
+struct Factory<const S: usize> {
     zid: u8,
-    observer: &'static RefCell<SlotObserver>,
+    observer: &'static RefCell<SlotObserverOf<Sinks<S>>>,
 }
 
-impl SessionFactory<Frozen> for Factory {
+/// The registrations the node's observer holds: all closed types.
+type Sinks<const S: usize> = AdminSinks<1024, S>;
+
+impl<const S: usize> SessionFactory<Frozen> for Factory<S> {
     type Entropy = Counting;
-    type Events = SlotDispatch<Frozen, NoReplies, NoReplies>;
+    type Events = SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<S>>;
 
     fn entropy(&mut self) -> Counting {
         Counting(self.zid)
@@ -211,7 +214,7 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
 
     // The application's registrations, on the observer every session of the node
     // dispatches to: the config-write subscriber and the admin queryable.
-    let mut observer = SlotObserver::new();
+    let mut observer = SlotObserverOf::<Sinks<S>>::new();
     host_connect_writes_fixed(&mut observer.subscribers, &zid_hex, "peer", &s.control)
         .expect("the config subscriber is registered");
     let locator = format!("udp/127.0.0.1:{port}");
@@ -239,7 +242,7 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
         link,
     )));
     let links: &'static LwipLinks<LinkRef> = Box::leak(Box::new(LwipLinks::new(link, &s.sockets)));
-    let factory: &'static RefCell<Factory> =
+    let factory: &'static RefCell<Factory<S>> =
         Box::leak(Box::new(RefCell::new(Factory { zid, observer })));
     let node = SlotAdminNode::new(
         host,
@@ -514,7 +517,7 @@ fn a_written_endpoint_is_dialled_and_a_remote_write_makes_the_other_node_dial_ba
 /// cell sized by hand.
 #[test]
 fn the_task_cell_holds_the_application_layer_of_a_session() {
-    let events = std::mem::size_of::<SlotDispatch<Frozen, NoReplies, NoReplies>>();
+    let events = std::mem::size_of::<SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<N>>>();
     let requesters = std::mem::size_of::<Requesters<NoReplies, NoReplies>>();
     println!(
         "application layer {events} B, of which requesters {requesters} B; cell {TASK_BYTES} B"

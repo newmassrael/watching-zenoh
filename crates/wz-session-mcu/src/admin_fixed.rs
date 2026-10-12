@@ -49,8 +49,9 @@ use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps;
 use wz_session_core::locality::Locality;
 use wz_session_core::query::QueryableRegistry;
-use wz_session_core::query_sink::BoxedQuerySink;
+use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
+use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 use wz_session_core::text_out::{FixedText, TextOut};
 
 use crate::admin_status::{
@@ -388,13 +389,13 @@ impl<const BODY: usize> Default for AdminHost<BODY> {
 /// [`AdminReplyArena::answer`], the `config` leg from `config` (`{}` when `None`),
 /// and, with `connect`, the connection status leg `@/<zid>/<whatami>/status/connect`.
 /// A denied read answers nothing and the query is still terminated. The registration
-/// itself allocates once (the boxed sink), at startup.
+/// allocates nothing: the sink is a closed [`AdminQuerySink`] the registry holds inline.
 ///
 /// `Err` when the registry's queryable table refuses the registration: full, or the
 /// pattern past `caps::MAX_KEYEXPR_BYTES`; the node must then say it answers no
 /// admin GET, not run as if it did.
 pub fn host_admin_queryable_fixed<const BODY: usize, const SESSIONS: usize>(
-    queryables: &mut QueryableRegistry<BoxedQuerySink>,
+    queryables: &mut QueryableRegistry<AdminQuerySink<BODY, SESSIONS>>,
     identity: FixedNodeIdentity,
     status: &'static FixedNodeStatus<SESSIONS>,
     host: &'static AdminHost<BODY>,
@@ -406,63 +407,107 @@ pub fn host_admin_queryable_fixed<const BODY: usize, const SESSIONS: usize>(
     let pattern = pattern
         .finish()
         .map_err(|_| RegisterError::KeyexprTooLong)?;
-    let answer = BoxedQuerySink::new(move |query, out| {
-        critical_section::with(|cs| {
-            let state = status.state.borrow(cs).borrow();
-            let Ok(mut arena) = host.arena.borrow(cs).try_borrow_mut() else {
-                let busy = host.busy.borrow(cs);
-                busy.set(busy.get().saturating_add(1));
-                return;
-            };
-            let zid_hex = identity.zid_hex.prefix();
-            if state.permit_read {
-                if let Some(source) = connect {
-                    // A refusal is counted by the arena and answered to the querier;
-                    // the answer below still runs.
-                    let _ = arena.serve_leg(
-                        query,
-                        out,
-                        zid_hex,
-                        identity.whatami,
-                        CONNECT_STATUS_TAIL,
-                        AdminLegEncoding::Json,
-                        |body| {
-                            write_connect_status(
-                                source,
-                                state
-                                    .endpoints
-                                    .iter()
-                                    .map(|row| (row.endpoint.prefix(), &row.status)),
-                                body,
-                            )
-                        },
-                    );
-                }
-            }
-            let facts = AdminNodeFacts {
-                zid_hex,
-                whatami: identity.whatami,
-                version: identity.version.prefix(),
-                // This node's config is its connection control, which holds
-                // `connect/endpoints` and nothing else, so no document ever set
-                // `metadata`: `null`, upstream's value for a config that sets none.
-                metadata_json: "null",
-                read: state.permit_read,
-                stats: None,
-                locators: identity.locators.iter().map(FixedText::prefix),
-                sessions: state.sessions.iter().map(FixedAdminSession::view),
-                // This node holds unicast sessions only, so there is no group member
-                // to list: upstream's answer for a node without one.
-                multicast_peers: core::iter::empty(),
-            };
-            // The answer's refusals are counted in the arena.
-            let _ = arena.answer(query, out, facts, &[], &[], |buffer| match config {
-                Some(view) => view.write_config_json(buffer),
-                None => buffer.push_str("{}"),
-            });
-        });
-    });
+    let answer = FnQuerySink::new(
+        AdminQueryState {
+            identity,
+            status,
+            host,
+            config,
+            connect,
+        },
+        answer_admin_query::<BODY, SESSIONS>,
+    );
     queryables
         .register_sink(pattern, Locality::Any, false, answer)
         .map(|_id| ())
+}
+
+/// What the node's admin queryable holds: its identity and the statics it answers from.
+pub struct AdminQueryState<const BODY: usize, const SESSIONS: usize> {
+    identity: FixedNodeIdentity,
+    status: &'static FixedNodeStatus<SESSIONS>,
+    host: &'static AdminHost<BODY>,
+    config: Option<&'static (dyn ConfigView + Sync)>,
+    connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
+}
+
+/// The sink of the node's admin queryable ([`host_admin_queryable_fixed`]): a closed
+/// type, so the registry is typed by it and the registration allocates nothing.
+pub type AdminQuerySink<const BODY: usize, const SESSIONS: usize> =
+    FnQuerySink<AdminQueryState<BODY, SESSIONS>>;
+
+/// The registrations of the admin node, as the sinks its observer is typed with
+/// ([`wz_session_core::slot_observer::SlotObserverOf`]): the config-write subscriber
+/// and the admin queryable, both closed, and no listener on a peer's declarations.
+pub struct AdminSinks<const BODY: usize, const SESSIONS: usize>;
+
+impl<const BODY: usize, const SESSIONS: usize> ObserverSinks for AdminSinks<BODY, SESSIONS> {
+    type Subscriber = crate::admin_host::ConnectWriteSink;
+    type Queryable = AdminQuerySink<BODY, SESSIONS>;
+    type Declared = NoSink;
+    type Undeclared = NoSink;
+}
+
+/// One admin GET, answered from the node's status in the host's arena.
+fn answer_admin_query<const BODY: usize, const SESSIONS: usize>(
+    held: &mut AdminQueryState<BODY, SESSIONS>,
+    query: &dyn QueryView,
+    out: &mut dyn ReplyOut,
+) {
+    let identity = &held.identity;
+    let (status, host, config, connect) = (held.status, held.host, held.config, held.connect);
+    critical_section::with(|cs| {
+        let state = status.state.borrow(cs).borrow();
+        let Ok(mut arena) = host.arena.borrow(cs).try_borrow_mut() else {
+            let busy = host.busy.borrow(cs);
+            busy.set(busy.get().saturating_add(1));
+            return;
+        };
+        let zid_hex = identity.zid_hex.prefix();
+        if state.permit_read {
+            if let Some(source) = connect {
+                // A refusal is counted by the arena and answered to the querier;
+                // the answer below still runs.
+                let _ = arena.serve_leg(
+                    query,
+                    out,
+                    zid_hex,
+                    identity.whatami,
+                    CONNECT_STATUS_TAIL,
+                    AdminLegEncoding::Json,
+                    |body| {
+                        write_connect_status(
+                            source,
+                            state
+                                .endpoints
+                                .iter()
+                                .map(|row| (row.endpoint.prefix(), &row.status)),
+                            body,
+                        )
+                    },
+                );
+            }
+        }
+        let facts = AdminNodeFacts {
+            zid_hex,
+            whatami: identity.whatami,
+            version: identity.version.prefix(),
+            // This node's config is its connection control, which holds
+            // `connect/endpoints` and nothing else, so no document ever set
+            // `metadata`: `null`, upstream's value for a config that sets none.
+            metadata_json: "null",
+            read: state.permit_read,
+            stats: None,
+            locators: identity.locators.iter().map(FixedText::prefix),
+            sessions: state.sessions.iter().map(FixedAdminSession::view),
+            // This node holds unicast sessions only, so there is no group member
+            // to list: upstream's answer for a node without one.
+            multicast_peers: core::iter::empty(),
+        };
+        // The answer's refusals are counted in the arena.
+        let _ = arena.answer(query, out, facts, &[], &[], |buffer| match config {
+            Some(view) => view.write_config_json(buffer),
+            None => buffer.push_str("{}"),
+        });
+    });
 }

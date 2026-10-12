@@ -28,7 +28,7 @@ use wz::runtime_coop::session_drive::PumpSlots;
 use wz::runtime_coop::session_runtime::SessionHandle;
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz::session_lwip::admin_fixed::{
-    host_admin_queryable_fixed, AdminHost, FixedNodeIdentity, FixedNodeStatus,
+    host_admin_queryable_fixed, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
 };
 use wz::session_lwip::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz::session_lwip::app_layer::{NoReplies, SlotApp, SlotDispatch};
@@ -43,7 +43,7 @@ use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitP
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{Requesters, SlotObserver};
+use wz_session_core::slot_observer::{Requesters, SlotObserverOf};
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
@@ -92,8 +92,12 @@ struct Statics {
     /// opts in, because being reconfigured is what it is for.
     control: ConnectControl,
     admin: AdminHost<1024>,
-    app: SlotApp,
+    app: SlotApp<Sinks>,
 }
+
+/// The registrations the node's observer holds, all closed types: the config-write
+/// subscriber and the admin queryable.
+type Sinks = AdminSinks<1024, SESSIONS>;
 
 // SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative
 // loop on one core, which is the only thing that reaches these tables; each member is
@@ -125,12 +129,12 @@ static ETH0: EthernetPool<Lan9118, 1> = EthernetPool::new();
 /// registered on it).
 struct Factory {
     key: [u8; 32],
-    observer: &'static RefCell<SlotObserver>,
+    observer: &'static RefCell<SlotObserverOf<Sinks>>,
 }
 
 impl SessionFactory<SystickClockRef> for Factory {
     type Entropy = ClockSeededXorshift;
-    type Events = SlotDispatch<SystickClockRef, NoReplies, NoReplies>;
+    type Events = SlotDispatch<SystickClockRef, NoReplies, NoReplies, Sinks>;
 
     fn entropy(&mut self) -> ClockSeededXorshift {
         ClockSeededXorshift::seeded()
@@ -202,7 +206,7 @@ pub fn run() -> ! {
     // The application's registrations, on the observer every session of the node
     // dispatches to: the config-write subscriber and the admin queryable. A node whose
     // registrations were refused is not started, rather than started deaf.
-    let mut observer = SlotObserver::new();
+    let mut observer = SlotObserverOf::<Sinks>::new();
     if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control).is_err()
     {
         fail("the config subscriber was refused");

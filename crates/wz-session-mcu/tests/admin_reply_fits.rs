@@ -37,10 +37,10 @@ use wz_session_core::caps;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
-use wz_session_core::query_sink::BoxedQuerySink;
 use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_mcu::admin_fixed::{
-    host_admin_queryable_fixed, AdminHost, FixedNodeIdentity, FixedNodeStatus, IdentityRefused,
+    host_admin_queryable_fixed, AdminHost, AdminQuerySink, FixedNodeIdentity, FixedNodeStatus,
+    IdentityRefused,
 };
 use wz_session_mcu::admin_host::ConnectControl;
 use wz_session_mcu::admin_status::DialStatus;
@@ -152,7 +152,8 @@ fn the_whole_admin_surface_is_served_by_one_get_with_zero_allocations() {
     static HOST: AdminHost<1024> = AdminHost::new();
     static CONTROL: ConnectControl = ConnectControl::new(true);
 
-    let mut registry: QueryableRegistry<BoxedQuerySink> = QueryableRegistry::with_sink_backing();
+    let mut registry: QueryableRegistry<AdminQuerySink<1024, 3>> =
+        QueryableRegistry::with_sink_backing();
     host_admin_queryable_fixed(
         &mut registry,
         identity(),
@@ -223,7 +224,8 @@ fn a_leg_past_the_reply_buffer_is_refused_counted_and_typed_while_the_others_are
     static HOST: AdminHost<96> = AdminHost::new();
     static CONTROL: ConnectControl = ConnectControl::new(true);
 
-    let mut registry: QueryableRegistry<BoxedQuerySink> = QueryableRegistry::with_sink_backing();
+    let mut registry: QueryableRegistry<AdminQuerySink<96, 3>> =
+        QueryableRegistry::with_sink_backing();
     host_admin_queryable_fixed(
         &mut registry,
         identity(),

@@ -39,7 +39,7 @@ use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_ms};
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz::session_lwip::admin_fixed::{
-    host_admin_queryable_fixed, AdminHost, FixedNodeIdentity, FixedNodeStatus,
+    host_admin_queryable_fixed, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
 };
 use wz::session_lwip::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz::session_lwip::app_layer::{NoReplies, SlotApp, SlotDispatch};
@@ -53,7 +53,7 @@ use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitP
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{Requesters, SlotObserver};
+use wz_session_core::slot_observer::{Requesters, SlotObserverOf};
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
@@ -98,8 +98,12 @@ struct Statics {
     /// opts in, because being reconfigured is what it is for.
     control: ConnectControl,
     admin: AdminHost<1024>,
-    app: SlotApp,
+    app: SlotApp<Sinks>,
 }
+
+/// The registrations the node's observer holds, all closed types: the config-write
+/// subscriber and the admin queryable.
+type Sinks = AdminSinks<1024, SESSIONS>;
 
 // SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative
 // loop on one thread, which is the only thing that reaches these tables; each member is
@@ -129,12 +133,12 @@ static NODE: Statics = Statics::new();
 struct Factory {
     zid: [u8; 6],
     key: [u8; 32],
-    observer: &'static RefCell<SlotObserver>,
+    observer: &'static RefCell<SlotObserverOf<Sinks>>,
 }
 
 impl SessionFactory<Clock> for Factory {
     type Entropy = ZephyrEntropy;
-    type Events = SlotDispatch<Clock, NoReplies, NoReplies>;
+    type Events = SlotDispatch<Clock, NoReplies, NoReplies, Sinks>;
 
     fn entropy(&mut self) -> ZephyrEntropy {
         ZephyrEntropy
@@ -213,7 +217,7 @@ pub fn run(mut net: LwipMacNet) -> i32 {
     // dispatches to: the config-write subscriber and the admin queryable. A node whose
     // registrations were refused would run without its admin space: stop instead, with
     // the reason.
-    let mut observer = SlotObserver::new();
+    let mut observer = SlotObserverOf::<Sinks>::new();
     if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control).is_err()
     {
         log(c"wz: FAIL - the node's observer refused its config subscriber");

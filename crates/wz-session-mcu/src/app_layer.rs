@@ -27,15 +27,15 @@
 // that names it is the heap profile's; what a build with no allocator keeps is the
 // event seam ([`SessionEvents`]) and the reply sink that discards ([`NoReplies`]),
 // which an image's own dispatcher is written against.
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
+#[cfg(feature = "session-slot")]
 use core::cell::OnceCell;
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "session-slot"))]
 use core::cell::RefCell;
 
 #[cfg(feature = "alloc")]
 use core::ops::Deref;
 
-#[cfg(feature = "alloc")]
+#[cfg(any(feature = "alloc", feature = "session-slot"))]
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::driver_loop::IterationEvent;
 #[cfg(feature = "alloc")]
@@ -44,10 +44,10 @@ use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::reply_sink::{ReplySink, ReplyView};
 #[cfg(feature = "alloc")]
 use wz_session_core::session_actions::SessionLinkActions;
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
+#[cfg(feature = "session-slot")]
 use wz_session_core::session_slot::SlotRef;
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-use wz_session_core::slot_observer::{Requesters, SlotObserver};
+#[cfg(feature = "session-slot")]
+use wz_session_core::slot_observer::{DefaultSinks, ObserverSinks, Requesters, SlotObserverOf};
 
 /// The `on_event` that dispatches each iteration to `observer` and drains its
 /// staged output through `actions`, the session's own send path.
@@ -111,19 +111,19 @@ impl ReplySink for NoReplies {
 /// Like every table of the profile it is `Sync` by the profile's rule: one
 /// cooperative task on one core drives every session and so reaches the observer, and
 /// never two at once.
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-pub struct SlotApp {
-    observer: OnceCell<RefCell<SlotObserver>>,
+#[cfg(feature = "session-slot")]
+pub struct SlotApp<K: ObserverSinks = DefaultSinks> {
+    observer: OnceCell<RefCell<SlotObserverOf<K>>>,
 }
 
 // SAFETY: the profile's rule, stated on the type. The observer is reached by the one
 // cooperative task that drives the node's sessions and, at startup, by the image
 // before any session runs, never from an interrupt and never by two at once.
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-unsafe impl Sync for SlotApp {}
+#[cfg(feature = "session-slot")]
+unsafe impl<K: ObserverSinks> Sync for SlotApp<K> {}
 
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-impl SlotApp {
+#[cfg(feature = "session-slot")]
+impl<K: ObserverSinks> SlotApp<K> {
     /// An application with no observer yet, for a `static`.
     pub const fn new() -> Self {
         Self {
@@ -138,8 +138,11 @@ impl SlotApp {
     #[allow(clippy::result_large_err)]
     pub fn install(
         &'static self,
-        observer: SlotObserver,
-    ) -> Result<&'static RefCell<SlotObserver>, SlotObserver> {
+        observer: SlotObserverOf<K>,
+    ) -> Result<&'static RefCell<SlotObserverOf<K>>, SlotObserverOf<K>>
+    where
+        K: 'static,
+    {
         self.observer
             .set(RefCell::new(observer))
             .map_err(RefCell::into_inner)?;
@@ -150,13 +153,16 @@ impl SlotApp {
     }
 
     /// The installed observer, if any.
-    pub fn get(&'static self) -> Option<&'static RefCell<SlotObserver>> {
+    pub fn get(&'static self) -> Option<&'static RefCell<SlotObserverOf<K>>>
+    where
+        K: 'static,
+    {
         self.observer.get()
     }
 }
 
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-impl Default for SlotApp {
+#[cfg(feature = "session-slot")]
+impl<K: ObserverSinks> Default for SlotApp<K> {
     fn default() -> Self {
         Self::new()
     }
@@ -183,28 +189,30 @@ pub trait SessionEvents {
 /// It owns the handle (a counted reference to the slot, so the slot lives as long as
 /// the task that holds it) and the session's requesters; its size is what the
 /// runtime's task cell has to hold beside the pump's handle.
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-pub struct SlotDispatch<C, R, G>
+#[cfg(feature = "session-slot")]
+pub struct SlotDispatch<C, R, G, K = DefaultSinks>
 where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
+    K: ObserverSinks + 'static,
 {
-    observer: &'static RefCell<SlotObserver>,
+    observer: &'static RefCell<SlotObserverOf<K>>,
     handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
     requesters: Requesters<R, G>,
 }
 
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-impl<C, R, G> SlotDispatch<C, R, G>
+#[cfg(feature = "session-slot")]
+impl<C, R, G, K> SlotDispatch<C, R, G, K>
 where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
+    K: ObserverSinks + 'static,
 {
     /// The application layer of the session `handle` names, over `observer`.
     pub fn new(
-        observer: &'static RefCell<SlotObserver>,
+        observer: &'static RefCell<SlotObserverOf<K>>,
         handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
         requesters: Requesters<R, G>,
     ) -> Self {
@@ -216,12 +224,13 @@ where
     }
 }
 
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-impl<C, R, G> SessionEvents for SlotDispatch<C, R, G>
+#[cfg(feature = "session-slot")]
+impl<C, R, G, K> SessionEvents for SlotDispatch<C, R, G, K>
 where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
+    K: ObserverSinks + 'static,
 {
     fn on_event(&mut self, event: IterationEvent<'_>) {
         let mut peers = self.handle.peers().borrow_mut();
@@ -232,9 +241,9 @@ where
 }
 
 /// [`SlotDispatch`] as the `on_event` closure a session driver takes.
-#[cfg(all(feature = "session-slot", feature = "alloc"))]
-pub fn dispatch_slot<C, R, G>(
-    observer: &'static RefCell<SlotObserver>,
+#[cfg(feature = "session-slot")]
+pub fn dispatch_slot<C, R, G, K>(
+    observer: &'static RefCell<SlotObserverOf<K>>,
     handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
     requesters: Requesters<R, G>,
 ) -> impl FnMut(IterationEvent<'_>) + 'static
@@ -242,6 +251,7 @@ where
     C: ClockSource + 'static,
     R: ReplySink + 'static,
     G: ReplySink + 'static,
+    K: ObserverSinks + 'static,
 {
     let mut dispatch = SlotDispatch::new(observer, handle, requesters);
     move |event| dispatch.on_event(event)
