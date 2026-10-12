@@ -33,8 +33,15 @@
 //! Host-test level: no board runs it, and the stack the lent record takes is not
 //! measured here.
 
+// Not on the slot profile WITH `reassembly`: there `SessionPump::new` does not
+// exist, because the pump's staging table must lie in a cell of the pump table
+// (`PumpSlots::claim`), and this file builds its pumps with `new`. The slot profile
+// without `reassembly` is this file's and is built and run by the C1m leg that
+// names it; clippy builds the other, which is why the gate is here and not at the
+// use.
 #![cfg(all(
     feature = "session-slot",
+    not(feature = "reassembly"),
     feature = "session-unicast-open",
     feature = "session-unicast-accept",
     feature = "declare-subscriber",
