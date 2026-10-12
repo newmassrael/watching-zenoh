@@ -20,11 +20,17 @@
 //! action bodies stay gated on their codec / handshake-role feature —
 //! cfg-off is a documented no-emit no-op, not a build error.
 
-#[cfg(any(not(feature = "session-slot"), feature = "session-extshm"))]
+#[cfg(all(
+    feature = "alloc",
+    any(not(feature = "session-slot"), feature = "session-extshm")
+))]
 use alloc::boxed::Box;
+#[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 // AtomicU64 portability: the `no_std` (MCU) profile pulls `portable-atomic`
 // (critical-section emulated AtomicU64 for thumbv6m et al.); the host / alloc
@@ -77,6 +83,7 @@ use crate::peer_init_caps::PeerInitCaps;
 // (the reconnect module rides this module's own alloc+session-unicast gate)
 // so the signature-stable `replay_declarations` / `declaration_cache_snapshot`
 // surface keeps its types when `session-reconnect` is off (R311g1).
+#[cfg(feature = "alloc")]
 use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
 // Reliability is the signature type of the R311kw `send_wire` seam, so it
 // is used iff at least one wire-emit body is active: the handshake / close
@@ -148,6 +155,7 @@ use crate::parse_error::InboundParseError;
 // signature-stable (R311j) — only their bodies are codec-gated, the
 // signatures reference these types in every subset — so the import must be
 // codec-agnostic (mirrors the ungated session_glue re-export it came from).
+#[cfg(feature = "alloc")]
 use crate::metadata::{PushMetadata, QueryMetadata};
 
 // outbound zenoh-pico-safety gate for the declare-* action methods
@@ -164,9 +172,9 @@ use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 // `encode_close_into` over a lent slot, so it is named only where it is called.)
 #[cfg(all(feature = "codec-close", not(feature = "tx-lend-only")))]
 use crate::handshake_encode::encode_close;
-#[cfg(feature = "codec-init-body")]
+#[cfg(all(feature = "alloc", feature = "codec-init-body"))]
 use crate::handshake_encode::encode_init;
-#[cfg(feature = "codec-open-body")]
+#[cfg(all(feature = "alloc", feature = "codec-open-body"))]
 use crate::handshake_encode::encode_open;
 
 // R3b — the Z_EXT_AUTH dispatch wired into the four handshake send/recv stages.
@@ -1586,6 +1594,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// single-key lookup); the contended-write penalty of RwLock
     /// would dwarf the read parallelism gain at the expected
     /// access pattern.
+    #[cfg(feature = "alloc")]
     pub outbound_mappings: R::Mutex<HashMap<u64, String>>,
     /// A4 (session-reconnect) — declaration cache. Mirrors zenoh-pico's
     /// `_z_session_t._declaration_cache` slot
@@ -1823,6 +1832,11 @@ pub struct LinkState<R: SessionRuntime> {
     /// here has already come out of the decompressor and must not go back in —
     /// which is why [`crate::drive::dispatch_pending`] re-enters at
     /// `dispatch_unit` and not at `dispatch_link_event`.
+    ///
+    /// The heap profile's: the residue is a value of its own (`RxBytes`). A build with
+    /// no allocator parks nothing: it reads the rest of the datagram where it lies
+    /// ([`crate::drive::dispatch_datagram`]).
+    #[cfg(feature = "alloc")]
     pub pending_batch: R::Mutex<Option<crate::link::RxBytes>>,
     /// R84 — monotonic timestamp in milliseconds captured when the
     /// session FSM enters the `Established` state. Populated by the
@@ -2186,6 +2200,12 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     pub link: LinkState<R>,
     /// R2952 (open-debt item 835) — the runtime's block-first hand-off, if it
     /// has one. See [`SessionLinkActions::install_block_first_handoff`].
+    ///
+    /// The heap profile's: the hand-off is a boxed closure and the job it runs owns
+    /// the encoded message. A session in a slot has no second thread to hand to, and
+    /// sends a block-first message as a blocking one, which is what a session with
+    /// no hand-off installed does.
+    #[cfg(feature = "alloc")]
     pub block_first_handoff: R::Mutex<Option<BlockFirstHandoff>>,
 }
 
@@ -2202,6 +2222,7 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
 ///
 /// A build with no dispatch arm sends no network message, so nothing there
 /// builds or reads one.
+#[cfg(feature = "alloc")]
 #[cfg_attr(
     not(any(
         feature = "codec-push",
@@ -2252,12 +2273,14 @@ enum DispatchStage {
     Fresh,
     /// A block-first message's background push: already observed, already
     /// holding its slot, so it is pushed as it stands.
+    #[cfg(feature = "alloc")]
     Scheduled,
 }
 
 /// R2952 — the runtime's hand-off: run a [`BlockFirstJob`] off the sending
 /// thread (tokio: `spawn_blocking`, upstream's own seam). `Send + Sync` because
 /// the session it lives in is shared across the runtime's threads.
+#[cfg(feature = "alloc")]
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
 
 /// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
@@ -2417,6 +2440,7 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // same question of the same table — before R311y739 the receive path could not
 // ask it at all, so a peer naming our id was answered `None` and dropped.
 impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R, T> {
+    #[cfg(feature = "alloc")]
     fn resolve_own_mapping(&self, id: u64) -> Option<String> {
         self.resolve_outbound_mapping(id)
     }
@@ -2424,6 +2448,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     // The literal is copied out of the table under the lock, straight into the
     // caller's buffer: the in-place receive path resolves an `M=0` alias with
     // no `String` in between.
+    #[cfg(feature = "alloc")]
     fn append_own_mapping(
         &self,
         id: u64,
@@ -2432,6 +2457,18 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
         R::with_mutex_mut(&self.outbound_mappings, |table| {
             table.get(&id).map(|literal| out.push_str(literal))
         })
+    }
+
+    // A session with no allocator declares no keyexpr of its own (`declare-keyexpr`
+    // needs `alloc`), so no `M=0` alias names anything of ours: the answer is the one
+    // a face with no space of its own gives.
+    #[cfg(not(feature = "alloc"))]
+    fn append_own_mapping(
+        &self,
+        _id: u64,
+        _out: &mut crate::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
+        None
     }
 }
 
@@ -2582,6 +2619,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link: Self::hold_link(LinkState {
                 driver,
                 last_inbound_at: R::new_mutex(None::<u64>),
+                #[cfg(feature = "alloc")]
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
                 established_at: R::new_mutex(None::<u64>),
                 last_outbound_at: R::new_mutex(None::<u64>),
@@ -2694,6 +2732,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
                 tx_conduits: TxConduits::new(),
+                #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
                 #[cfg(feature = "session-reconnect")]
                 declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
@@ -2722,6 +2761,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 multilink_pubkey: R::new_mutex(None),
             }),
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
+            #[cfg(feature = "alloc")]
             block_first_handoff: R::new_mutex(None),
         }
     }
@@ -2767,6 +2807,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::wrap_actions(Self {
             core,
             link,
+            #[cfg(feature = "alloc")]
             block_first_handoff: R::new_mutex(None),
         })
     }
@@ -2805,6 +2846,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `InterceptorContext` impls need exactly this one datum, and publishing the
     /// whole write seam so they could reach it would hand every consumer
     /// `send_blocking` as well. Borrows `self`, so the read costs no allocation.
+    /// Heap profile only, as [`crate::link::LinkSubject`] is.
+    #[cfg(feature = "alloc")]
     pub fn link_subject(&self) -> Option<&crate::link::LinkSubject> {
         self.link_driver().link_subject()
     }
@@ -2832,7 +2875,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is the load-bearing fact for an admin client asking "is this one session
     /// over two links?", so dropping such a link would corrupt the answer in order
     /// to tidy a string.
-    #[cfg(feature = "adminspace-core")]
+    #[cfg(all(feature = "alloc", feature = "adminspace-core"))]
     pub fn admin_links(&self) -> Vec<crate::adminspace::AdminLink> {
         self.link_endpoints_all()
             .into_iter()
@@ -2858,6 +2901,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// A link whose driver cannot name its endpoints still gets an entry with
     /// blank ends, for the reason `admin_links` states: the COUNT is the
     /// load-bearing answer.
+    ///
+    /// Heap profile only: it returns a `Vec`. A session in a slot has one link, and the
+    /// admin node reads its endpoints in place ([`Self::with_admin_session`]).
+    #[cfg(feature = "alloc")]
     pub fn link_endpoints_all(&self) -> Vec<crate::link::LinkEndpoints> {
         let render = |driver: &dyn BoxedLinkDriver| match driver.link_endpoints() {
             Some(e) => e.clone(),
@@ -3688,17 +3735,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The core decides which link and how long; the link driver does the
     /// waiting, because the sans-IO core has no primitive that blocks.
     #[allow(clippy::too_many_arguments)]
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
     ))]
     fn schedule_block_first<P>(
         &self,
@@ -3759,17 +3809,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// then give its slot back — upstream's `spawn_blocking` body
     /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `let _ = block_first_notifier.notify();`).
     /// Called by the runtime's hand-off, off the thread that sent it.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
     ))]
     pub fn run_block_first_job(&self, job: BlockFirstJob) {
         let BlockFirstJob {
@@ -3801,18 +3854,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// runtime installs its hand-off on every build without mirroring this
     /// crate's feature union. Such a build sends no network message, so no job
     /// is ever scheduled and there is nothing to run.
-    #[cfg(not(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    )))]
+    #[cfg(all(
+        feature = "alloc",
+        not(any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        ))
+    ))]
     pub fn run_block_first_job(&self, job: BlockFirstJob) {
         drop(job);
     }
@@ -3821,6 +3877,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// function that runs [`Self::run_block_first_job`] off the calling
     /// thread. Installed by a runtime that has one (tokio, from its
     /// `wrap_actions`); a session without one sends block-first as blocking.
+    #[cfg(feature = "alloc")]
     pub fn install_block_first_handoff(&self, handoff: BlockFirstHandoff) {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
@@ -4483,6 +4540,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// layer's per-face peer identity — the key a peer-mesh graph keys faces on.
     /// Reads [`remote_peer_zid`](Self::remote_peer_zid); see that field for why
     /// it is distinct from the R86 cookie-HMAC slot.
+    ///
+    /// Heap profile only: it copies the zid out into a `Vec`.
+    #[cfg(feature = "alloc")]
     pub fn peer_zid(&self) -> Option<Vec<u8>> {
         R::with_mutex_mut(&self.remote_peer_zid, |slot| {
             slot.as_deref().map(<[u8]>::to_vec)
@@ -4671,7 +4731,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// bypassing the `dispatch_script` singleton race that bites
     /// when multiple tests in one binary share the
     /// `INSTALLED`/Lua-engine globals.
-    #[cfg(feature = "codec-init-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-init-body"))]
     pub fn encode_init_with_role(
         &self,
         is_ack: bool,
@@ -4701,7 +4761,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     pub fn encode_open_with_role(
         &self,
         is_ack: bool,
@@ -6141,11 +6201,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let zid = R::with_mutex_mut(&self.remote_peer_zid, |slot| slot.clone()).unwrap_or_default();
         let whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
         let region = self.peer_region();
+        #[cfg(feature = "alloc")]
         let interfaces: Vec<&str> = self
             .link_subject()
             .and_then(|subject| subject.interfaces.as_deref())
             .map(|names| names.iter().map(String::as_str).collect())
             .unwrap_or_default();
+        // The interfaces are read only by a custom partition's filters, which are the
+        // heap profile's; the one partition a build with no allocator states is `Auto`,
+        // which asks nothing of them.
+        #[cfg(not(feature = "alloc"))]
+        let interfaces: [&str; 0] = [];
         let decided = match whatami {
             Some(whatami) => {
                 let facts = crate::region_partition::RemoteFacts {
@@ -6204,6 +6270,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// announced, or `"unknown"` where that does not compute
     /// ([`crate::extbound::admin_region`]). Every admin host reads it here, so
     /// no host can compute it differently.
+    #[cfg(feature = "alloc")]
     pub fn admin_region(&self) -> alloc::string::String {
         crate::extbound::admin_region(
             self.params.whatami,
@@ -7589,6 +7656,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// frame it returns holds a range of `unit` where the other one holds a
     /// copy (see [`crate::inbound::parse_inbound_consuming_in`]). Everything
     /// the handler does with the frame is the same code, in `observe_inbound`.
+    #[cfg(feature = "alloc")]
     pub fn handle_inbound_consuming_in(
         &self,
         unit: &crate::link::RxBytes,
@@ -7748,6 +7816,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Empty input parks nothing: an absent residue and a zero-length one are
     /// the same fact, and storing `Some(vec![])` would make the drain hand the
     /// dispatcher an empty unit to fail on.
+    ///
+    /// Heap profile only: a parked residue is a value of its own. A build with no
+    /// allocator parks nothing and reads the rest of the datagram where it lies.
+    #[cfg(feature = "alloc")]
     pub fn park_pending_batch(&self, residue: &[u8]) {
         self.park_pending_unit(crate::link::RxBytes::from(residue.to_vec()));
     }
@@ -7757,6 +7829,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`RxBytes::subslice`](crate::link::RxBytes::subslice)), so a lent frame
     /// stays one storage across the batch it carried instead of being copied
     /// out whole.
+    #[cfg(feature = "alloc")]
     pub fn park_pending_unit(&self, residue: crate::link::RxBytes) {
         if residue.is_empty() {
             return;
@@ -7767,6 +7840,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R311y632 (§17) — take the parked remainder, if any.
+    #[cfg(feature = "alloc")]
     pub fn take_pending_batch(&self) -> Option<crate::link::RxBytes> {
         R::with_mutex_mut(&self.link.pending_batch, |slot| slot.take())
     }
@@ -8185,6 +8259,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // has no block-first at all): see [`Self::schedule_block_first`].
         // Scheduled or dropped, it is a sent message to the caller, as
         // upstream's `schedule` reports it.
+        #[cfg(feature = "alloc")]
         if stage == DispatchStage::Fresh
             && congestion == crate::qos::CongestionControl::BlockFirst
             && self.schedule_block_first(
@@ -10825,6 +10900,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// zenoh-pico mirror: the read-side of
     /// `_z_session_t._local_resources`, queried via
     /// `_z_get_resource_by_id` on the publish path.
+    #[cfg(feature = "alloc")]
     pub fn resolve_outbound_mapping(&self, mapping_id: u64) -> Option<String> {
         R::with_mutex_mut(&self.outbound_mappings, |table| {
             table.get(&mapping_id).cloned()
@@ -10924,6 +11000,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // kept tokio-side per the test_fixtures dev-dep-cycle rationale) and a
     // future MCU resolver reach through the re-exported type.
     #[allow(dead_code)]
+    #[cfg(feature = "alloc")]
     pub fn reconstruct_outbound_keyexpr(
         &self,
         mapping_id: u64,
@@ -12004,8 +12081,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// order. Test/diagnostic surface; the replay itself goes through
     /// [`Self::replay_declarations`].
     ///
-    /// R311g1 — signature-stability: always present; returns the empty
-    /// vec when `session-reconnect` is off (no cache storage exists).
+    /// R311g1 — signature-stability: always present on the heap profile; returns
+    /// the empty vec when `session-reconnect` is off (no cache storage exists).
+    /// A session in a slot has no reconnect supervisor and no such surface.
+    #[cfg(feature = "alloc")]
     pub fn declaration_cache_snapshot(&self) -> Vec<CachedDeclaration> {
         #[cfg(feature = "session-reconnect")]
         {
@@ -12162,7 +12241,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// once (see [`ReplayDeclarationsError`]).
     ///
     /// R311g1 — signature-stability: `Err(FeatureDisabled)` when
-    /// `session-reconnect` is off.
+    /// `session-reconnect` is off. Heap profile only, as the snapshot above.
+    #[cfg(feature = "alloc")]
     pub fn replay_declarations(&self) -> Result<usize, ReplayDeclarationsError> {
         #[cfg(feature = "session-reconnect")]
         {

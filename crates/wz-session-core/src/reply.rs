@@ -126,18 +126,18 @@ use crate::reply_acceptance::{ReplyAcceptance, ReplyAcceptanceStored};
 // Put / Del body into `InboundReplyBody`, independent of the pub/sub
 // publisher markers. `query-reply` implies `codec-response`, so the
 // outer `codec-response` requirement holds in every arm of the `any`.
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
+#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
 // R311y739 — the two-space PAIR is `alloc`-only: the `dispatch_messages` /
 // `dispatch_iteration_event` signatures name it under that gate alone, while
 // only the `Response` arm inside them resolves and so carries `codec-response`.
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::{ResponseOwned, ResponseOwnedVariant};
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::wireexpr_resolve::MappingSpaces;
 #[cfg(all(
     feature = "codec-response",
-    feature = "alloc",
+    feature = "storage-profile",
     any(
         feature = "pubsub-put",
         feature = "pubsub-delete",
@@ -157,7 +157,9 @@ use wz_codecs::response_final::ResponseFinalOwned;
 // gets the wire-side `Response` dispatch path with the loopback
 // bridge elided.
 #[cfg(feature = "alloc")]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(feature = "storage-profile")]
+use crate::driver_loop::IterationEvent;
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 #[cfg(all(feature = "query-queryable", feature = "alloc"))]
@@ -913,7 +915,7 @@ impl<C: ReplySink> Default for ReplyRegistry<C> {
 
 /// ARCHITECTURE section 9.2 -- the delivery of a Response the in-place receive
 /// path lends ([`IterationEvent::InPlace`]).
-#[cfg(all(feature = "alloc", feature = "codec-response"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 mod in_place;
 
 impl<C: ReplySink> ReplyRegistry<C> {
@@ -1546,7 +1548,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// ([`IterationEvent::InPlace`]) is delivered as a view over the frame
     /// (`dispatch_response_in_place`); every other lent record is not this
     /// registry's.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -1554,6 +1556,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(messages, peer_keyexpr_table);
             }
@@ -2880,7 +2883,7 @@ mod tests {
     /// projects through `from_view` with both preserved (closes the latent gap
     /// where `BorrowedReply` could not represent the side-bands, so the
     /// elevated-to-SSOT `from_view` silently dropped them for that source).
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn from_view_is_lossless_for_a_borrowed_reply_attachment() {
         use crate::reply_sink::{BorrowedReply, ReplyView};
@@ -2912,7 +2915,7 @@ mod tests {
     /// Retaining a reply whose attachment is a range of a frame takes a second
     /// reference to that frame, for the Put arm and for the Del arm alike; it
     /// does not copy the bytes out.
-    #[cfg(all(feature = "alloc", feature = "rx-shared-bytes"))]
+    #[cfg(all(feature = "storage-profile", feature = "rx-shared-bytes"))]
     #[test]
     fn a_kept_reply_shares_the_attachment_its_view_holds_shared() {
         use crate::link::RxBytes;
@@ -4358,7 +4361,7 @@ mod tests {
 // (C1c-g each pin a reply-consumer marker ON, cfg'ing the module out).
 #[cfg(test)]
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "codec-response",
     not(feature = "pubsub-put"),
     not(feature = "pubsub-delete"),
@@ -4561,7 +4564,7 @@ mod decode_isolation_tests {
 /// a proof that never runs is not a proof.
 #[cfg(test)]
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "codec-response",
     feature = "query-reply",
     not(feature = "pubsub-timestamp"),

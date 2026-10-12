@@ -17,19 +17,23 @@
 // the map it always was on the growable backing and a bounded table on the fixed
 // one. The no-alloc control plane stores observers in a `BoundedVec` and fires
 // through the borrowed `DeclView` seam.
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::{key_text, DeclaredQueryable};
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredQueryables, IdMap};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use wz_codecs::declare::DeclareVariant;
 
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
@@ -37,15 +41,21 @@ use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
 use crate::declare::matching::{BoxedMatchingSink, MatchingWatchList};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::driver_loop::IterationEvent;
 #[cfg(feature = "alloc")]
 use crate::locality::Locality;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 
 // R311y797 — one peer-declared queryable, as the membership table holds
@@ -284,11 +294,11 @@ pub struct RemoteQueryablePeer {
     /// S9a — a [`DeclaredQueryables`]: a `HashMap` on the growable backing and,
     /// on the fixed one, a table of [`crate::caps::MAX_REMOTE_DECLS`] rows whose
     /// full state refuses a NEW id, counts it, and announces nothing for it.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     declared: DeclaredQueryables,
     /// `DeclQueryable`s refused because their keyexpr is longer than a row's
     /// text. Counted with the table's own refusals.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     oversize: u32,
 }
 
@@ -304,15 +314,15 @@ impl RemoteQueryablePeer {
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
         Self {
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             declared: DeclaredQueryables::new(),
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             oversize: 0,
         }
     }
 
     /// A peer that has declared nothing.
-    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
         Self {
             declared: DeclaredQueryables::new(),
@@ -326,7 +336,7 @@ impl RemoteQueryablePeer {
     /// (test fixtures, metrics) and for the `get_matching_status`
     /// implementation that wants to short-circuit when no peer is
     /// declared at all.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn declared_count(&self) -> usize {
         self.declared.count()
     }
@@ -335,7 +345,7 @@ impl RemoteQueryablePeer {
     /// `(id, resolved_keyexpr)` pairs. Ordering is unspecified. Useful for
     /// debug surfaces that want to enumerate every peer-side declaration; the
     /// `has_matching` accessor below is the production consult path.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.declared
             .entries()
@@ -347,7 +357,7 @@ impl RemoteQueryablePeer {
     /// `QueryableInfo::complete`. Separate from `iter_declared` rather
     /// than replacing it because every existing consumer wants the pair
     /// and would otherwise have to destructure a flag it ignores.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter_declared_info(&self) -> impl Iterator<Item = (u64, &str, bool)> + '_ {
         self.declared
             .entries()
@@ -358,7 +368,7 @@ impl RemoteQueryablePeer {
     /// it was full ([`crate::caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer
     /// than a row's text. Always zero on the growable backing, where nothing is
     /// refused.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
         self.declared.refusals().saturating_add(self.oversize)
     }
@@ -396,7 +406,7 @@ impl RemoteQueryablePeer {
     /// querier whose target demands COMPLETE responders must ask through
     /// [`Self::has_matching_for`], which reads the completeness this
     /// registry now stores.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
         declared_answers(
             &self.declared,
@@ -416,7 +426,7 @@ impl RemoteQueryablePeer {
 
     /// Drop everything the peer declared, in place; the refusal count is kept.
     /// Returns how many declarations were dropped.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn forget(&mut self) -> usize {
         let dropped = self.declared.count();
         self.declared.reset();
@@ -474,27 +484,27 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
 
     /// R288 — count of currently-declared peer queryables; see
     /// [`RemoteQueryablePeer::declared_count`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn declared_count(&self) -> usize {
         self.peer.declared_count()
     }
 
     /// R288 — iterate over currently-declared peer queryables; see
     /// [`RemoteQueryablePeer::iter_declared`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.peer.iter_declared()
     }
 
     /// R311y797 — see [`RemoteQueryablePeer::iter_declared_info`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter_declared_info(&self) -> impl Iterator<Item = (u64, &str, bool)> + '_ {
         self.peer.iter_declared_info()
     }
 
     /// Backbone for `Querier::get_matching_status`; see
     /// [`RemoteQueryablePeer::has_matching`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
         self.peer.has_matching(query_keyexpr)
     }
@@ -539,7 +549,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
 
     /// R311y799 — the peer's link died: drop every declaration it had made; see
     /// [`RemoteQueryableTable::flush_declarations_on_link_loss`].
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -605,7 +615,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     }
 
     /// `IterationEvent` adapter; mirror of the sibling registries.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -617,7 +627,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
 
     /// R311y797 — [`Self::dispatch_iteration_event`] threading the session-local
     /// half.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -760,7 +770,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     /// stays silent. pico makes no distinction between the two planes here — its
     /// connection-dropped sweep drops SUBSCRIBER and QUERYABLE targets
     /// alike, because both live in the same target list.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
         peer: &mut RemoteQueryablePeer,
@@ -893,7 +903,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     /// read by the projection both forms share
     /// ([`crate::queryable_info::read_queryable_info_in`]); what is done with them
     /// is `apply_declared` for both.
-    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "session-slot"
+    ))]
     pub fn dispatch_declare_view_with_local<'a>(
         &mut self,
         peer: &mut RemoteQueryablePeer,
@@ -934,7 +948,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     /// read, whichever form carried the declaration: bind it in the peer's table
     /// (refusing and counting past the table's room or a row's text), fan it to the
     /// observers through the no-heap SSOT, and flip-fire the matching watches.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_declared(
         &mut self,
         peer: &mut RemoteQueryablePeer,
@@ -985,7 +999,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     /// fired from inside the `on_undecl` chain observes the post-undeclare state;
     /// a missing id is silent), fan it to the observers, and flip-fire the
     /// matching watches.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_undeclared(
         &mut self,
         peer: &mut RemoteQueryablePeer,
@@ -1037,7 +1051,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     }
 
     /// `IterationEvent` adapter; mirror of the sibling registries.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         peer: &mut RemoteQueryablePeer,
@@ -1050,7 +1064,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     /// R311y797 — [`Self::dispatch_iteration_event`] threading the
     /// session-local half; the entry point the observer fan uses, so an
     /// inbound frame's declarations re-evaluate against BOTH halves.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
         peer: &mut RemoteQueryablePeer,
@@ -1060,6 +1074,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages_with_local(
                     peer,

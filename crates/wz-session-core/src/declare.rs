@@ -110,7 +110,7 @@ pub mod liveliness_get;
 /// instead of a `Vec`: a keyexpr deeper than
 /// [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS) matches
 /// nothing, the conservative answer every sibling scan gives an over-deep key.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub(crate) fn declared_intersects(declared: &crate::id_map::DeclaredKeys, keyexpr: &str) -> bool {
     use crate::bounded::BoundedVec;
     use crate::id_map::IdMap;

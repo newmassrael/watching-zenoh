@@ -80,16 +80,22 @@
 // map it always was on the growable backing and a bounded table on the fixed one.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use wz_codecs::declare::DeclareVariant;
 
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 #[cfg(feature = "alloc")]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(feature = "storage-profile")]
+use crate::driver_loop::IterationEvent;
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredKeys, IdMap};
 // R2662 — `keyexpr_pattern_matches` is gone from this module: both fan paths
 // were its last callers, so a token keyexpr cannot be read as a literal here
@@ -100,14 +106,18 @@ use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf};
 // R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
 // `dispatch_iteration_event` name it in their signatures under that gate alone,
 // while only the `Declare` arm inside them resolves and so carries `codec-declare`.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::wireexpr_resolve::MappingSpaces;
 
 // R311ek / R311gb — the pure-data sample types are codec-agnostic +
@@ -206,11 +216,11 @@ pub struct PeerTokens {
     /// application-written: a history replay is owed from the tokens THIS
     /// session's peer holds, so a replay run against another session's table
     /// would hand one peer's tokens to a subscriber of the other.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     table: DeclaredKeys,
     /// `DeclToken`s refused because their keyexpr is longer than a row's text.
     /// Counted with the table's own refusals ([`Self::refusals`]).
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     oversize: u32,
 }
 
@@ -226,15 +236,15 @@ impl PeerTokens {
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
         Self {
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             table: DeclaredKeys::new(),
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             oversize: 0,
         }
     }
 
     /// A peer that has declared no token.
-    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
         Self {
             table: DeclaredKeys::new(),
@@ -246,7 +256,7 @@ impl PeerTokens {
     /// currently tracked. Equal to the number of `DeclToken` arrivals
     /// minus matching `UndeclToken` arrivals; bounded by the peer's
     /// declared token set. Test / diagnostic surface only.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn count(&self) -> usize {
         self.table.count()
     }
@@ -254,7 +264,7 @@ impl PeerTokens {
     /// How many `DeclToken`s this table refused: for a NEW id because it was
     /// full ([`caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer than a row's
     /// text. Always zero on the growable backing, where nothing is refused.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
         self.table.refusals().saturating_add(self.oversize)
     }
@@ -276,7 +286,7 @@ impl PeerTokens {
     /// a session with no liveliness subscriber at all still reports what its
     /// peer holds, which is what upstream's client hat does
     /// (`zenoh/src/net/routing/hat/client/token.rs` @ `fn sourced_tokens`).
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.table
             .entries()
@@ -284,7 +294,7 @@ impl PeerTokens {
     }
 
     /// Drop every token the peer declared, in place; the refusal counts are kept.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn forget(&mut self) {
         self.table.reset();
     }
@@ -351,19 +361,19 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
 
     /// Snapshot of how many peer-side `DeclToken` records are currently tracked;
     /// see [`PeerTokens::count`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn peer_token_count(&self) -> usize {
         self.peer.count()
     }
 
     /// How many `DeclToken`s this registry refused; see [`PeerTokens::refusals`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn peer_token_refusals(&self) -> u32 {
         self.peer.refusals()
     }
 
     /// The peer tokens this session currently knows; see [`PeerTokens::iter`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter_peer_tokens(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.peer.iter()
     }
@@ -437,7 +447,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
 
     /// [`LivelinessSubscriberTable::dispatch_iteration_event`] for this
     /// registry's peer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -449,7 +459,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
 
     /// [`LivelinessSubscriberTable::dispatch_iteration_event_unclaimed`] for this
     /// registry's peer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -731,7 +741,11 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// [`crate::declare_ext_keyexpr::resolve_ext_keyexpr_in`], each the rule the
     /// owned form's resolver shares); what is done with the result is
     /// `apply_token_declared` / `apply_token_undeclared` for both.
-    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "session-slot"
+    ))]
     pub fn dispatch_declare_view_historical<'a>(
         &mut self,
         peer: &mut PeerTokens,
@@ -773,7 +787,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
 
     /// What a declared peer token does once its keyexpr is resolved, whichever
     /// form carried the declaration: bind it and fan a `Put` to the matching slots.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_token_declared(
         &mut self,
         peer: &mut PeerTokens,
@@ -818,7 +832,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// spaces it resolves against): fan a `Delete` to the matching slots, under the
     /// keyexpr the table held for the id or, for an id it never held, the one the
     /// retraction carries.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_token_undeclared<'k, E: crate::ext_view::ExtEntryView>(
         &mut self,
         peer: &mut PeerTokens,
@@ -903,7 +917,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// consumer may depend on either.
     /// R311y536 — the BODY is `alloc`-gated, not the function, and the
     /// asymmetry is the defect this closes. `peer_token_table` is itself
-    /// `#[cfg(feature = "alloc")]` (it is the wire-side resolution state; the
+    /// `#[cfg(feature = "storage-profile")]` (it is the wire-side resolution state; the
     /// no-alloc control plane takes the keyexpr directly through
     /// `dispatch_sample_borrowed`), and this method reached that field, plus
     /// `alloc::vec::Vec` and `String`, with no gate at all. So every no-alloc
@@ -925,7 +939,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// and nothing is collected, so a link loss allocates nothing on the fixed
     /// backing. `peer` is the session whose link was lost.
     pub fn flush_peer_tokens_on_link_loss(&mut self, peer: &mut PeerTokens) -> usize {
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
             while let Some(id) = peer.table.entries().map(|(id, _)| id).min() {
@@ -945,7 +959,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
             }
             flushed
         }
-        #[cfg(not(feature = "alloc"))]
+        #[cfg(not(feature = "storage-profile"))]
         {
             let _ = peer;
             0
@@ -995,7 +1009,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// resolution state and does not exist on the no-alloc control plane, so
     /// `0` is the honest answer there — nothing is known to replay.
     pub fn replay_known_tokens(&mut self, peer: &PeerTokens, interest_id: u64) -> usize {
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "storage-profile")]
         {
             let slots = &mut self.slots;
             let peer_token_table = &peer.table;
@@ -1064,7 +1078,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
             }
             replayed
         }
-        #[cfg(not(feature = "alloc"))]
+        #[cfg(not(feature = "storage-profile"))]
         {
             let _ = (peer, interest_id);
             0
@@ -1271,7 +1285,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// through [`Self::dispatch_messages`]; other variants are
     /// no-ops here (the liveliness signal path lives entirely in the
     /// `Declare` / `Interest` MIDs).
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         peer: &mut PeerTokens,
@@ -1283,7 +1297,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
 
     /// [`Self::dispatch_iteration_event`] with the claim filter of
     /// [`Self::dispatch_messages_unclaimed`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
         peer: &mut PeerTokens,
@@ -1293,6 +1307,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
             }
@@ -2574,7 +2589,7 @@ mod tests {
     /// exercises both R311xx fixes together: the responder gates the
     /// replay on the CURRENT bit, and the subscriber completes the
     /// snapshot on the `DeclFinal` (not an `Interest(Final)`).
-    #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
+    #[cfg(all(feature = "storage-profile", feature = "liveliness-token"))]
     #[test]
     fn responder_replay_drives_subscriber_put_and_history_complete() {
         use crate::bounded::BoundedVec;

@@ -16,22 +16,34 @@
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use wz_codecs::declare::DeclareVariant;
 
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::driver_loop::IterationEvent;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+use crate::wireexpr_resolve::resolve_wireexpr_in;
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::wireexpr_resolve::MappingSpaces;
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf};
 
 /// Application-layer registry tracking the peer's outbound
@@ -188,7 +200,11 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// is decoded where its frame lies, funnelled through the same no-heap fire
     /// SSOT. The keyexpr is resolved by [`resolve_wireexpr_view`] into a bounded
     /// buffer; one past it is counted ([`Self::oversize`]) and not announced.
-    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "session-slot"
+    ))]
     pub fn dispatch_declare_view<'a>(
         &mut self,
         body: &DeclareVariant<'a>,
@@ -267,7 +283,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     }
 
     /// `IterationEvent` adapter; mirror of the other Remote* registries.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -278,7 +294,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
 
     /// [`Self::dispatch_iteration_event`] with the claim filter of
     /// [`Self::dispatch_messages_unclaimed`].
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -287,6 +303,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
             }
@@ -411,7 +428,7 @@ mod tests {
     /// THE DISCRIMINATOR is the collision: id 7 is in BOTH spaces under
     /// different literals, so a wrong-space read fires a confident wrong
     /// keyexpr rather than nothing.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     #[test]
     fn an_own_space_alias_resolves_in_our_space_on_the_liveliness_token_plane() {
         let mut reg = LivelinessRegistry::new();
@@ -441,7 +458,7 @@ mod tests {
     }
 
     /// ANTI-VACUITY twin: with only the peer's space the same record refuses.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     #[test]
     fn without_an_own_space_the_liveliness_token_plane_refuses_the_same_alias() {
         let mut reg = LivelinessRegistry::new();

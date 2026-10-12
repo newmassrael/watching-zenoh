@@ -19,16 +19,20 @@
 // `DeclaredKeys` (S9a): the map it always was on the growable backing and a
 // bounded table on the fixed one. The no-alloc control plane stores observers in a
 // `BoundedVec` and fires through the borrowed `DeclView` seam.
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredKeys, IdMap};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use wz_codecs::declare::DeclareVariant;
 
 // The shared [`DeclObserverPair`] holds the bounded observer lists +
@@ -36,23 +40,29 @@ use wz_codecs::declare::DeclareVariant;
 // (no-heap fire currency) are unconditional; the `BorrowedDecl` builder +
 // `Boxed*` adapters + the wire-codec / envelope imports carry the
 // narrower gates.
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::declare::declared_intersects;
 #[cfg(all(feature = "session-matching", feature = "alloc"))]
 use crate::declare::matching::{BoxedMatchingSink, MatchingWatchList};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::driver_loop::IterationEvent;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
-#[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "session-slot"
+))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_into, KeyexprBuf, MappingSpaces};
 
 /// R311y797 — everything a publisher's matching verdict depends on, as
@@ -185,12 +195,12 @@ pub struct RemoteSubscriberPeer {
     /// S9a — a [`DeclaredKeys`]: a `HashMap` on the growable backing and, on the
     /// fixed one, a table of [`crate::caps::MAX_REMOTE_DECLS`] rows whose full
     /// state refuses a NEW id, counts it, and announces nothing for it.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     declared: DeclaredKeys,
     /// `DeclSubscriber`s refused because their keyexpr is longer than the table's
     /// text (a [`DeclaredKeys`] row holds [`crate::caps::MAX_KEYEXPR_BYTES`] bytes
     /// on the fixed backing). Counted with the table's own refusals.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     oversize: u32,
 }
 
@@ -206,15 +216,15 @@ impl RemoteSubscriberPeer {
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
         Self {
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             declared: DeclaredKeys::new(),
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             oversize: 0,
         }
     }
 
     /// A peer that has declared nothing.
-    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
         Self {
             declared: DeclaredKeys::new(),
@@ -226,7 +236,7 @@ impl RemoteSubscriberPeer {
     /// whose inbound `DeclSubscriber` has been dispatched and whose
     /// `UndeclSubscriber` has not). Pub-side mirror of the Q-side
     /// `declared_count`.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn declared_count(&self) -> usize {
         self.declared.count()
     }
@@ -234,7 +244,7 @@ impl RemoteSubscriberPeer {
     /// R290 — iterate over currently-declared peer subscribers as
     /// `(id, resolved_keyexpr)` pairs. Pub-side mirror of the Q-side
     /// `iter_declared`. Ordering is unspecified.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.declared.entries().map(|(id, ke)| (id, ke.as_str()))
     }
@@ -243,7 +253,7 @@ impl RemoteSubscriberPeer {
     /// it was full ([`crate::caps::MAX_REMOTE_DECLS`]), or for a keyexpr longer
     /// than a row's text. Always zero on the growable backing, where nothing is
     /// refused.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn refusals(&self) -> u32 {
         self.declared.refusals().saturating_add(self.oversize)
     }
@@ -261,7 +271,7 @@ impl RemoteSubscriberPeer {
     /// one-side wildcard, two-side wildcard overlap); the semantic
     /// is symmetric across Pub-side and Q-side because the matcher
     /// itself is symmetric.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
         declared_intersects(&self.declared, publish_keyexpr)
     }
@@ -277,7 +287,7 @@ impl RemoteSubscriberPeer {
 
     /// Drop everything the peer declared, in place; the refusal count is kept.
     /// Returns how many declarations were dropped.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn forget(&mut self) -> usize {
         let dropped = self.declared.count();
         self.declared.reset();
@@ -336,21 +346,21 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
 
     /// R290 — count of currently-declared peer subscribers; see
     /// [`RemoteSubscriberPeer::declared_count`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn declared_count(&self) -> usize {
         self.peer.declared_count()
     }
 
     /// R290 — iterate over currently-declared peer subscribers; see
     /// [`RemoteSubscriberPeer::iter_declared`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.peer.iter_declared()
     }
 
     /// Backbone for `Publisher::get_matching_status`; see
     /// [`RemoteSubscriberPeer::has_matching`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
         self.peer.has_matching(publish_keyexpr)
     }
@@ -395,7 +405,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
 
     /// R311y799 — the peer's link died: drop every declaration it had made; see
     /// [`RemoteSubscriberTable::flush_declarations_on_link_loss`].
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -464,7 +474,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
 
     /// Convenience adapter over an `IterationEvent`; see
     /// [`RemoteSubscriberTable::dispatch_iteration_event`].
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -476,7 +486,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
 
     /// R311y788 — [`Self::dispatch_iteration_event`] carrying the
     /// session-local half of the matching verdict.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -650,7 +660,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     /// (R311y521) DOES deliver to the application, and that asymmetry is
     /// upstream's too — `_z_liveliness_subscription_undeclare_all` calls
     /// the subscriber callbacks where the write filter does not.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
         peer: &mut RemoteSubscriberPeer,
@@ -790,7 +800,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     /// [`resolve_wireexpr_view`], the rule the owned form's resolver shares); what is
     /// done with the resolved keyexpr is `apply_declared` for both, so a
     /// rule lives in one place.
-    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "session-slot"
+    ))]
     pub fn dispatch_declare_view_with_local<'a>(
         &mut self,
         peer: &mut RemoteSubscriberPeer,
@@ -828,7 +842,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     /// form carried the declaration: bind it in the peer's table (refusing and
     /// counting past the table's room or a row's text), fan it to the observers
     /// through the no-heap SSOT, and re-evaluate the matching watches.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_declared(
         &mut self,
         peer: &mut RemoteSubscriberPeer,
@@ -869,7 +883,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     /// undeclaration: drop the membership entry first (so a `get_matching_status`
     /// fired from inside the `on_undecl` chain observes the post-undeclare state),
     /// fan it to the observers, and re-evaluate the matching watches.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_undeclared(
         &mut self,
         peer: &mut RemoteSubscriberPeer,
@@ -933,7 +947,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     /// and forwards to [`Self::dispatch_messages`]. Mirror of the
     /// sibling registries. Other `IterationEvent` variants (`Lease`,
     /// non-FramePayload `Poll` outcomes) are no-ops.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         peer: &mut RemoteSubscriberPeer,
@@ -948,7 +962,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     /// [`Self::dispatch_declare_with_local`]. This is the entry point the
     /// production observer fan uses, so both runtime profiles get the
     /// local half without either of them mirroring the local table.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
         peer: &mut RemoteSubscriberPeer,
@@ -958,6 +972,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages_with_local(
                     peer,

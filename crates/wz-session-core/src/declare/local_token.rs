@@ -97,11 +97,15 @@ use alloc::string::String;
 use wz_codecs::interest::InterestOwned;
 
 #[cfg(feature = "alloc")]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(feature = "storage-profile")]
+use crate::driver_loop::IterationEvent;
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 #[cfg(feature = "alloc")]
-use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
+use crate::wireexpr_resolve::resolve_wireexpr_in;
+#[cfg(feature = "storage-profile")]
+use crate::wireexpr_resolve::MappingSpaces;
 
 /// One staged declarer-side interest-response record. The no-heap
 /// replacement for the prior owned `DeclareOwned` staging: it carries
@@ -365,7 +369,7 @@ impl LocalTokenRegistry {
     /// held token (a registered token's keyexpr fits the same bound), so it is
     /// answered with the terminating `Final` alone, as the subscriber side
     /// answers it.
-    #[cfg(all(feature = "alloc", feature = "session-slot"))]
+    #[cfg(all(feature = "storage-profile", feature = "session-slot"))]
     pub fn respond_to_interest_view<'a>(
         &self,
         interest: &wz_codecs::interest::Interest<'a>,
@@ -444,7 +448,7 @@ impl LocalTokenRegistry {
     /// Non-`FramePayload` events (Lease branch, non-poll outcomes) are
     /// no-ops. `alloc`-gated (consumes owned messages). Returns the refused
     /// chain count of [`Self::dispatch_messages`].
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &self,
         event: IterationEvent<'_>,
@@ -453,6 +457,7 @@ impl LocalTokenRegistry {
     ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(messages, peer_keyexpr_table, pending)
             }
@@ -783,7 +788,7 @@ mod tests {
     /// `alloc` inbound-parse path: an InterestFinal (C/F both clear) is
     /// the subscriber's own terminator, not a request — the declarer
     /// stages nothing.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn final_interest_is_noop() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -816,7 +821,7 @@ mod tests {
     /// `alloc` inbound-parse path: a non-final Interest whose body does
     /// NOT target tokens is out of scope for the liveliness-token
     /// declarer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn non_tokens_interest_is_noop() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -848,7 +853,7 @@ mod tests {
     /// pre-fix gate was "non-final" (C|F), which wrongly replied to a
     /// FUTURE-only (C-clear) interest; this pins the corrected
     /// CURRENT-only gate.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn future_only_interest_stages_nothing() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -883,7 +888,7 @@ mod tests {
 
     /// `alloc` inbound-parse path: a non-final TOKENS Interest funnels
     /// through to the no-heap staging SSOT.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn tokens_interest_stages_matching_response() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -919,7 +924,7 @@ mod tests {
     /// `MAX_LOCAL_TOKENS + 1` = 9 items; four in one frame need 36 against 32.
     /// Three are staged whole, the fourth is refused whole and reported, and
     /// every staged chain still ends in its own `Final`.
-    #[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
+    #[cfg(all(feature = "storage-profile", feature = "bounded-heapless"))]
     #[test]
     fn a_frame_of_interests_past_the_buffer_refuses_the_chain_that_does_not_fit() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -968,7 +973,7 @@ mod tests {
     /// resolves `ours/**` in our space and `theirs/**` in the peer's, and one
     /// token is registered under each prefix. Reading the wrong space replays
     /// the OTHER token — a confident wrong answer, not silence.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn an_own_space_alias_resolves_in_our_space_on_the_local_token_interest_plane() {
         use alloc::string::ToString;
@@ -1028,7 +1033,7 @@ mod tests {
     /// ANTI-VACUITY twin: with only the peer's space the same Interest
     /// resolves nothing, so NO token is replayed (the bare `Final` still
     /// terminates the chain — an unresolvable interest is not a hang).
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn without_an_own_space_the_local_token_interest_plane_refuses_the_same_alias() {
         use alloc::string::ToString;

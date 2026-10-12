@@ -80,11 +80,15 @@ pub use crate::reply_sink::BoxedReplySink;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 
 #[cfg(feature = "alloc")]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(feature = "storage-profile")]
+use crate::driver_loop::IterationEvent;
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 #[cfg(feature = "alloc")]
-use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
+use crate::wireexpr_resolve::resolve_wireexpr_in;
+#[cfg(feature = "storage-profile")]
+use crate::wireexpr_resolve::MappingSpaces;
 
 /// One outstanding liveliness get. Private to this module; consumers
 /// interact through [`LivelinessGetRegistry::register`] /
@@ -482,7 +486,11 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// [`resolve_wireexpr_view`](crate::wireexpr_resolve::resolve_wireexpr_view)
     /// into a bounded buffer; a reply past it is counted
     /// ([`Self::oversize`]) and not delivered.
-    #[cfg(all(feature = "alloc", feature = "codec-declare", feature = "session-slot"))]
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "codec-declare",
+        feature = "session-slot"
+    ))]
     pub fn dispatch_declare_view<'a>(
         &mut self,
         declare: &wz_codecs::declare::Declare<'a>,
@@ -543,7 +551,7 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// Routes `FramePayload` events through [`Self::dispatch_messages`];
     /// other variants (Lease branch, non-poll outcomes) are no-ops.
     /// `alloc`-gated (consumes owned messages).
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
         event: IterationEvent<'_>,
@@ -551,6 +559,7 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(messages, peer_keyexpr_table);
             }
@@ -603,7 +612,7 @@ impl LivelinessGetRegistry<BoxedReplySink> {
     }
 }
 
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "storage-profile"))]
 mod tests {
     //! Behavioural tests for `LivelinessGetRegistry`. `Arc<Mutex<…>>`
     //! capture cells use `std` under `#[cfg(test)]` per the wz-codecs
@@ -668,7 +677,7 @@ mod tests {
     /// THE DISCRIMINATOR is the collision: id 7 is in BOTH spaces under
     /// different literals, so a wrong-space read delivers a confident wrong
     /// keyexpr to the requester rather than dropping the reply.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn an_own_space_alias_resolves_in_our_space_on_the_liveliness_get_plane() {
         let mut reg = LivelinessGetRegistry::new();
@@ -694,7 +703,7 @@ mod tests {
     }
 
     /// ANTI-VACUITY twin: with only the peer's space the same reply refuses.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn without_an_own_space_the_liveliness_get_plane_refuses_the_same_alias() {
         let mut reg = LivelinessGetRegistry::new();

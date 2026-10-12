@@ -100,9 +100,9 @@ use alloc::string::String;
 
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 use crate::id_map::key_text;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 use crate::id_map::{IdMap, PeerAliases};
 use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
@@ -122,25 +122,31 @@ use crate::registry_error::RegisterError;
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
-#[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+#[cfg(all(feature = "storage-profile", feature = "declare-subscriber"))]
 use crate::wireexpr_resolve::resolve_wireexpr_into;
 // R2385 — the DECLARED keyexpr's own scope has a rule of its own (the D_KEXPR
 // header has no mapping bit), and `absorb_declare` is its only caller here, so
 // this import carries that arm's gate rather than the wider `any(..)` above.
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+#[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 use crate::wireexpr_resolve::{resolve_declared_keyexpr_into, KeyexprBuf};
 // R311y739 — the two-space PAIR is `alloc`-gated only: the `own_mapping_space`
 // field and the `mapping_spaces()` accessor exist in every `alloc` profile,
 // including one with no wire-dispatch consumer compiled in, whereas the
 // resolver call above is reached only from those consumers.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 // R311y740 — `OwnMappingSpace` itself is no longer NAMED by this module: the
 // field and its setter go through the per-profile `SharedOwnMappingSpace`
 // alias, which spells the `dyn` type per target. It survives only in doc links
 // here, and those are fully qualified (an import kept alive by doc links alone
 // is an `unused_imports` error under this workspace's `-D warnings`, and the
 // subset lanes are where that surfaces).
-use crate::wireexpr_resolve::{MappingSpaces, SharedOwnMappingSpace};
+use crate::wireexpr_resolve::MappingSpaces;
+// The handle on the session's own id space is a reference-counted pointer, the heap
+// profile's. A session in a slot installs none (its own space is read through the
+// slot's handle, which the registry does not take yet), and reads `M=0` aliases as
+// the relay face does.
+#[cfg(feature = "alloc")]
+use crate::wireexpr_resolve::SharedOwnMappingSpace;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 // R311gb (Track 2) — these wire-dispatch-supporting imports feed the
@@ -162,7 +168,9 @@ use crate::wire::{PushOwned, PushOwnedVariant};
 ))]
 use crate::attachment::{decode_attachment_ext_shared, ATTACHMENT_EXT_ID_PUSH};
 #[cfg(feature = "alloc")]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(feature = "storage-profile")]
+use crate::driver_loop::IterationEvent;
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 // R311y530 — the inbound SUBSCRIBER-Interest parse (`declare-subscriber`), the
@@ -181,8 +189,10 @@ use crate::sample::extract_qos;
 use crate::sample::extract_source_info;
 #[cfg(all(feature = "pubsub-put", feature = "alloc"))]
 use crate::sample::EncodingHint;
+#[cfg(feature = "storage-profile")]
+use crate::sample::Reliability;
 #[cfg(feature = "alloc")]
-use crate::sample::{Reliability, Sample};
+use crate::sample::Sample;
 #[cfg(all(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete")
@@ -285,7 +295,7 @@ pub struct SubscriberTable<C: SampleSink> {
     /// The Puts the in-place receive path could not deliver lent and delivered
     /// through the owned projection instead, by why; see [`InPlaceFallbacks`].
     #[cfg(all(
-        feature = "alloc",
+        feature = "storage-profile",
         any(feature = "pubsub-put", feature = "pubsub-delete")
     ))]
     in_place_fallbacks: InPlaceFallbacks,
@@ -306,7 +316,7 @@ pub struct SubscriberTable<C: SampleSink> {
 /// asked to be told and what is staged back (written by the interest plane while
 /// it holds a keyexpr resolved out of the first).
 pub struct SubscriberPeer {
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     naming: PeerNaming,
     #[cfg(feature = "declare-subscriber")]
     interests: InterestSide,
@@ -314,7 +324,7 @@ pub struct SubscriberPeer {
 
 /// What a session's peer has named, and what names OUR side: its keyexpr aliases,
 /// the id space of our own bundle, and our zid. See [`SubscriberPeer`].
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 struct PeerNaming {
     /// R121d — peer-side keyexpr alias table. Populated from
     /// inbound `Declare(DeclKexpr)` records; cleared per-id by
@@ -340,7 +350,7 @@ struct PeerNaming {
     /// backing, and on the fixed one a table of
     /// [`caps::MAX_PEER_KEYEXPR_ALIASES`] rows whose full state refuses a NEW id
     /// and counts it.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     aliases: PeerAliases,
     /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
@@ -440,7 +450,7 @@ struct InterestSide {
 /// the owned projection takes. Counted so a profile can see how much of its
 /// traffic pays that.
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -486,7 +496,7 @@ pub struct SubInterestRefusals {
 /// ARCHITECTURE section 9.2 -- the delivery of a Push the in-place receive path
 /// lends ([`IterationEvent::InPlace`]).
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 mod in_place;
@@ -692,7 +702,7 @@ impl<C: SampleSink> SubscriberTable<C> {
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
             #[cfg(all(
-                feature = "alloc",
+                feature = "storage-profile",
                 any(feature = "pubsub-put", feature = "pubsub-delete")
             ))]
             in_place_fallbacks: InPlaceFallbacks::default(),
@@ -702,7 +712,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// What the in-place receive path's Puts cost in owned fallbacks since this
     /// registry was built; see [`InPlaceFallbacks`].
     #[cfg(all(
-        feature = "alloc",
+        feature = "storage-profile",
         any(feature = "pubsub-put", feature = "pubsub-delete")
     ))]
     pub fn in_place_fallbacks(&self) -> InPlaceFallbacks {
@@ -930,13 +940,14 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// S9a — `peer` is the side of the registry the sending peer owns (its
     /// aliases, its interests), passed in so one table serves many sessions; a
     /// [`SubscriberRegistry`] passes its own.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event(
         &mut self,
         peer: &mut SubscriberPeer,
         event: IterationEvent<'_>,
     ) {
         match event {
+            #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                 messages, reliable, ..
             }) => {
@@ -1116,7 +1127,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// into. The keyexpr is resolved by the rule both forms share
     /// ([`crate::wireexpr_resolve::resolve_wireexpr_view`]).
     #[cfg(all(
-        feature = "alloc",
+        feature = "storage-profile",
         feature = "declare-subscriber",
         feature = "session-slot"
     ))]
@@ -2011,7 +2022,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// The PUBLISHER-side locality gate is the caller's, exactly as it
     /// is for [`local_publish`](Self::local_publish) — pico's
     /// `ctx->allow_local` (`filtering.c:66`, `:127`).
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn has_local_matching(&self, publish_keyexpr: &str) -> bool {
         let mut publish_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
         for c in publish_keyexpr.split('/') {
@@ -2083,9 +2094,10 @@ impl SubscriberPeer {
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
         Self {
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             naming: PeerNaming {
                 aliases: PeerAliases::new(),
+                #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 own_zid: None,
             },
@@ -2095,11 +2107,12 @@ impl SubscriberPeer {
     }
 
     /// An empty side, for a session that has heard nothing yet.
-    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
         Self {
             naming: PeerNaming {
                 aliases: PeerAliases::new(),
+                #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 own_zid: None,
             },
@@ -2117,7 +2130,7 @@ impl SubscriberPeer {
     /// The counted refusals are kept: they say what the peer asked for and was
     /// told no to over the life of the table, not what it holds now.
     pub fn forget_peer(&mut self) {
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "storage-profile")]
         self.naming.aliases.reset();
         #[cfg(feature = "declare-subscriber")]
         self.interests.forget();
@@ -2169,7 +2182,7 @@ impl SubscriberPeer {
     /// the field, as it always did. A consumer that must READ the raw peer half
     /// now goes through [`MappingSpaces::peer`], which cannot be reached
     /// without first holding the pair.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn mapping_spaces(&self) -> MappingSpaces<'_> {
         self.naming.spaces()
     }
@@ -2206,7 +2219,7 @@ impl SubscriberPeer {
     }
 
     /// How many keyexpr aliases the peer has declared and not retracted.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn alias_count(&self) -> usize {
         self.naming.aliases.count()
     }
@@ -2214,7 +2227,7 @@ impl SubscriberPeer {
     /// How many `DeclKexpr` for a NEW id this side refused because its alias
     /// table was full ([`caps::MAX_PEER_KEYEXPR_ALIASES`]). Always zero on the
     /// growable backing, where nothing is refused.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn alias_refusals(&self) -> u32 {
         self.naming.aliases.refusals()
     }
@@ -2235,7 +2248,7 @@ impl SubscriberPeer {
     /// integration is currently caller-driven (see the wz-runtime-tokio
     /// `Session::set_own_zid`); an auto-wire from
     /// the session-FSM completion event is an R232+ carry.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn set_own_zid_bytes(&mut self, zid: &[u8]) -> bool {
         if !(1..=16).contains(&zid.len()) {
             return false;
@@ -2255,7 +2268,7 @@ impl SubscriberPeer {
     /// session close or re-init). Subsequent dispatches behave as
     /// if `set_own_zid` had never been called: no self-echo dedup,
     /// every wire-arrived Push fires its matching subscribers.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn clear_own_zid(&mut self) {
         self.naming.own_zid = None;
     }
@@ -2264,7 +2277,7 @@ impl SubscriberPeer {
     /// and test purposes. Returns the same slice that
     /// [`SubscriberTable::dispatch`] compares against
     /// `source_info.zid_prefix()`.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
         self.naming.own_zid.as_deref()
     }
@@ -2379,7 +2392,11 @@ impl SubscriberPeer {
     /// bounded buffer, so the slot profile absorbs an alias without the heap and
     /// without the owned `DeclareOwned` it could not build. Every other arm is
     /// another registry's, as in the owned form.
-    #[cfg(all(feature = "codec-declare", feature = "alloc", feature = "session-slot"))]
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "storage-profile",
+        feature = "session-slot"
+    ))]
     pub(crate) fn absorb_declare_view(&mut self, body: &wz_codecs::declare::DeclareVariant<'_>) {
         use wz_codecs::declare::DeclareVariant;
         match body {
@@ -2416,15 +2433,20 @@ impl SubscriberPeer {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 impl PeerNaming {
     /// The two id spaces this session resolves a keyexpr against: the peer's
     /// aliases and, when installed, our own.
     fn spaces(&self) -> MappingSpaces<'_> {
+        #[cfg(feature = "alloc")]
         let own = self
             .own_mapping_space
             .as_ref()
             .map(|own| &**own as &dyn crate::wireexpr_resolve::OwnMappingSpace);
+        // A session in a slot installs no own space: it reads an `M=0` alias as the
+        // relay face does, which refuses it.
+        #[cfg(not(feature = "alloc"))]
+        let own = None;
         MappingSpaces::for_aliases(&self.aliases, own)
     }
 }
@@ -2447,7 +2469,7 @@ impl InterestSide {
     }
 
     /// No interest registered, nothing staged.
-    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
     fn new() -> Self {
         Self {
             rows: BoundedVec::new(),
@@ -2701,13 +2723,13 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     }
 
     /// [`SubscriberPeer::mapping_spaces`] for this registry's peer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn mapping_spaces(&self) -> MappingSpaces<'_> {
         self.peer.mapping_spaces()
     }
 
     /// [`SubscriberPeer::resolve_inbound_mapping`] for this registry's peer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn resolve_inbound_mapping(&self, id: u64) -> Option<String> {
         self.peer.resolve_inbound_mapping(id)
     }
@@ -2721,19 +2743,19 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     }
 
     /// [`SubscriberPeer::clear_own_zid`] for this registry's peer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn clear_own_zid(&mut self) {
         self.peer.clear_own_zid();
     }
 
     /// [`SubscriberPeer::own_zid`] for this registry's peer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
         self.peer.own_zid()
     }
 
     /// [`SubscriberTable::dispatch_iteration_event`] for this registry's peer.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event(&mut self, event: IterationEvent<'_>) {
         self.table.dispatch_iteration_event(&mut self.peer, event);
     }
@@ -6350,7 +6372,7 @@ mod tests {
 // exactly those two builds, which the symmetric (both-on) lanes never do.
 #[cfg(test)]
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "codec-push",
     any(
         all(feature = "pubsub-put", not(feature = "pubsub-delete")),
@@ -6454,7 +6476,7 @@ mod decode_isolation_tests {
 // every metadata feature OFF — so these RUN there.
 #[cfg(test)]
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "codec-push",
     feature = "pubsub-put",
     not(feature = "pubsub-timestamp"),

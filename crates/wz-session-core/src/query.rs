@@ -106,11 +106,11 @@ use crate::registry_error::RegisterError;
 // R311y834 — the only consumers are `QueryResponder` and the dispatcher, both
 // of which carry `all(codec-request, alloc)`; without them the name is unused,
 // which is the cfg-gated-import shape Layer C1cf exists to catch.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::reply_acceptance::ReplyKeyExpr;
 // S9a — the replies a queryable stages and the Finals owed after them: a `Vec`
 // on the growable backing and tables that refuse and count on the fixed one.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::reply_stage::{
     EncodingParts, FinalStage, FinalStaging, PartsBody, PartsKind, ReplyParts, ReplyStage,
     ReplyStaging,
@@ -120,7 +120,7 @@ use crate::reply_stage::{
 // so the import must carry the same gate — otherwise a
 // `codec-response`-without-`alloc` subset compiles the import but not its
 // sole user (Layer C1h regression).
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
+#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
 use sce_forge_runtime::codec::CodecError;
 
 // R311gb (Track 2) — HashMap (peer-keyexpr table) + the driver-loop /
@@ -146,7 +146,7 @@ use sce_forge_runtime::codec::CodecError;
 // `dispatch_borrowed`) carries none of these — the same wire-data-helper
 // split as `SubscriberRegistry::dispatch_push` (R311g1 signature
 // stability), now also alloc-aware.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::wire::parts::QueryOwned;
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::wire::{RequestOwned, RequestOwnedVariant};
@@ -157,7 +157,7 @@ use crate::wire::{RequestOwned, RequestOwnedVariant};
 // entries into `Vec<QueryReply>` and do not need codec-response.
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wire::ResponseOwned;
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::wireexpr_resolve::{
     resolve_wireexpr_in, resolve_wireexpr_into, KeyexprBuf, KeyexprPastBound, MappingSpaces,
 };
@@ -166,7 +166,9 @@ use crate::wireexpr_resolve::{
 use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::driver_loop::DriverLoopOutcome;
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+use crate::driver_loop::IterationEvent;
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 // R311gb (Track 2) — the seam traits (`QuerySink` bounds the table,
@@ -175,21 +177,21 @@ use crate::network_message::NetworkMessage;
 // `BorrowedQuery` is built only by the `alloc` wire fire path, and
 // `BoxedQuerySink` is the AP closure adapter, so those two carry the
 // narrower gates.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::query_sink::BorrowedQuery;
 #[cfg(feature = "alloc")]
 use crate::query_sink::BoxedQuerySink;
 // `ReplyMeta` carries `alloc`-gated hint types and its only sites here are
 // `QueryResponder`'s staging methods, so it follows `BorrowedQuery`'s gate —
 // the one that block itself carries — rather than the unconditional trio's.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::query_sink::ReplyMeta;
 // `ReplyError` is what `QueryResponder`'s keyed staging methods return, so it
 // carries their gate for the same reason `ReplyMeta` does.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 use crate::query_sink::ReplyError;
 use crate::query_sink::{QuerySink, QueryView, ReplyOut};
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
+#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
 // R311y315 — `ResponseErrBuilder` is deliberately NOT imported here.
 // Its only two code sites (the `into_response` Err arm and the Err
 // round-trip test) are both gated on `query-reply-err`, so an import
@@ -198,7 +200,9 @@ use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 // before. Both sites fully qualify instead, which cannot drift.
 use crate::response_build::ResponseReplyBuilder;
 #[cfg(feature = "alloc")]
-use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+use crate::sample::{EncodingHint, TimestampHint};
+#[cfg(feature = "storage-profile")]
+use crate::sample::{QosLevel, SourceInfo};
 
 /// R311v — extract the attachment payload view from an inbound
 /// [`Query`]'s extensions chain.
@@ -219,7 +223,7 @@ use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 // extraction. cfg-off: callback always observes attachment=None.
 // Signature stable (returns Option), behavior change is the early
 // short-circuit at the function entry.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
     #[cfg(not(feature = "query-attachment"))]
     {
@@ -243,7 +247,7 @@ fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
 /// `descriptors` or the four stats partitions answered every GET as if none
 /// had been given. Upstream's admin handler reads `query.parameters()` on the
 /// query it was routed (`zenoh/src/net/runtime/adminspace.rs` @ `query.parameters().get("per_transport") != Some("false"),`).
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 pub fn query_parameters(query: &QueryOwned) -> Option<&[u8]> {
     #[cfg(feature = "query-selector-parameters")]
     {
@@ -274,7 +278,7 @@ pub fn request_query_parameters(request: &RequestOwned) -> Option<&[u8]> {
 // Signature stable (returns Option); `query-source-info` off
 // short-circuits to None so a `codec-request` subset that does not
 // compose querier provenance carries no source-info decode path.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 fn extract_query_source_info(query: &QueryOwned) -> Option<crate::sample::SourceInfo> {
     #[cfg(not(feature = "query-source-info"))]
     {
@@ -644,13 +648,13 @@ pub enum QueryReply {
 /// `transport-shm` there is none to name and the option is the uninhabited one, so the same
 /// signature serves both builds and no site has to spell the difference.
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "codec-response",
     feature = "transport-shm"
 ))]
 type ShmDescriptorArg = Option<crate::extshm::ShmDescriptor>;
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "codec-response",
     not(feature = "transport-shm")
 ))]
@@ -886,7 +890,7 @@ impl QueryReply {
 ///
 /// R311dx — `codec-request`-gated: only [`QueryableRegistry::fire_matching_queryables`]
 /// constructs a `QueryResponder`, so it shares the registry's gate.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 pub struct QueryResponder<'a> {
     rid: u64,
     /// The query's keyexpr. Borrowed when the responder is built over the
@@ -927,7 +931,7 @@ pub struct QueryResponder<'a> {
     qos: QosLevel,
 }
 
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<'a> QueryResponder<'a> {
     /// R311li — public constructor: the Session-tier deferred queryable
     /// job (wz-runtime-tokio) builds a responder over its own reply
@@ -1548,7 +1552,7 @@ impl<'a> QueryResponder<'a> {
 }
 
 /// The responder identity as the borrowed `(zid, eid)` a staged reply carries.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 fn responder_parts(responder: &Option<(heapless::Vec<u8, 16>, u32)>) -> Option<(&[u8], u32)> {
     responder.as_ref().map(|(zid, eid)| (zid.as_slice(), *eid))
 }
@@ -1597,7 +1601,7 @@ fn responder_parts(responder: &Option<(heapless::Vec<u8, 16>, u32)>) -> Option<(
 /// PhantomData scaffolding, not a semantic gate, mirroring how
 /// `SubscriberRegistry` leaves `SampleSink::deliver` ungated and gates
 /// only the `codec-push` wire arms).
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl ReplyOut for QueryResponder<'_> {
     fn reply(&mut self, payload: &[u8]) {
         // The refusal is counted by the stage; a handler that must KNOW calls
@@ -1739,7 +1743,7 @@ impl<C: QuerySink> Default for QueryableRegistry<C> {
 
 /// ARCHITECTURE section 9.2 -- the dispatch of a Request the in-place receive
 /// path lends ([`IterationEvent::InPlace`]).
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 mod in_place;
 
 impl<C: QuerySink> QueryableRegistry<C> {
@@ -1951,7 +1955,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `complete && INCLUDES`. Inclusion is strictly stronger, so the
     /// verdict stays sound in the direction that matters — every pair this
     /// reports `true` for the dispatch would also fire.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "storage-profile")]
     pub fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool {
         let mut query_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
         for c in query_keyexpr.split('/') {
@@ -2065,7 +2069,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
 /// R3061 -- public, because [`QueryableRegistry::local_query_with_value`] takes it: that entry
 /// point carries a value beside these three and has no argument left to spend on them
 /// singly.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 #[derive(Debug, Clone, Copy)]
 pub struct QueryEnvelope {
     /// The request id (correlation key).
@@ -2082,7 +2086,7 @@ pub struct QueryEnvelope {
 /// (`QueryableRegistry::fire_matching_queryables`) or from a Request read where
 /// its frame lies (`dispatch_request_in_place`), and fired by one body
 /// (`QueryableRegistry::fire_projection`).
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 struct QueryProjection<'q> {
     /// The selector parameters.
     parameters: Option<&'q [u8]>,
@@ -2099,7 +2103,7 @@ struct QueryProjection<'q> {
     attachment_shared: Option<crate::link::RxBytes>,
 }
 
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchOutcome {
     /// Whether the Request carried a RESOLVABLE Query body and was therefore
@@ -2121,7 +2125,7 @@ pub struct DispatchOutcome {
     pub matched: usize,
 }
 
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl DispatchOutcome {
     /// The Request never reached the queryable table (non-Query body, or an
     /// unresolvable keyexpr): nothing fired and nothing is owed.
@@ -2137,7 +2141,7 @@ impl DispatchOutcome {
 // alloc)` (the `codec-request` codec_group + the `alloc` reply
 // accumulator). The control plane above (table + register + matching +
 // `dispatch_borrowed`) stays un-gated.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<C: QuerySink> QueryableRegistry<C> {
     /// Route an inbound [`Request`] through the queryable table.
     ///
@@ -5681,7 +5685,7 @@ mod tests {
 // module out).
 #[cfg(test)]
 #[cfg(all(
-    feature = "alloc",
+    feature = "storage-profile",
     feature = "query-queryable",
     not(feature = "query-attachment"),
     not(feature = "query-selector-parameters"),
@@ -5900,7 +5904,7 @@ mod request_decode_isolation_tests {
 // `query-queryable` build measuring nothing. Same reasoning the
 // receive-side decode-isolation module above already applies in the other
 // direction.
-#[cfg(all(test, feature = "query-queryable", feature = "alloc"))]
+#[cfg(all(test, feature = "query-queryable", feature = "storage-profile"))]
 mod local_matching_tests {
     use super::*;
     use crate::locality::Locality;
