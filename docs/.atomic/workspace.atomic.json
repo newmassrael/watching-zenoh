@@ -273168,6 +273168,50 @@
         "The nanopb arithmetic is now agreed with the generator on the three reference schemas only; a schema shape outside them (a oneof of messages, extensions) is not covered by that agreement."
       ]
     },
+    "Round 3311": {
+      "decision_summary": "Three things. (1) The hosted run of 8e5aa565 read Layer 0 red because the two assertion blocks added to the standalone admin node crates were not rustfmt-shaped (those crates are outside the commit hook's format check), and Layer C0 red because the armed-oracle census reads an arming only as an env prefix directly before cargo and the nanopb leg armed through a script. Both are repaired: the blocks are reformatted; the script only generates and the lane runs the armed test itself, with a census row for what the machine needs, python3-venv installed on the job, and the generator's protobuf pinned. (2) Open-debt item 877, the MAC's single-beat DMA burst: the first driver commit chose single beats as valid on any bus, three sources agree INCR4 is the block's reset and none recommends another, and the kit ran INCR4, so the default is the reset value; the evidence is small and is stated with its limits. (3) Layer E's one unexplained failure was not reproduced in 80 runs on a build host and is carried, not closed.",
+      "changes_bullets": [
+        "deploy/mcu-admin-node and deploy/zephyr-admin-node fixed.rs / fixed_node.rs: the three number assertions are in the shape rustfmt writes them.",
+        "scripts/nanopb-reference-sizes.sh gains `--generate DIR` (generate and write DIR/env); its default mode is unchanged and its `protobuf` is pinned to 7.36.2 beside nanopb 0.4.9.1.",
+        "scripts/run-ci.sh Layer C1bn: the leg generates with `--generate`, sources the env in a subshell and runs `WZ_NANOPB_REFERENCE_REQUIRE=1 cargo test` itself, requiring `9 passed`.",
+        "scripts/lib/armed_oracle_census.py: a row for WZ_NANOPB_REFERENCE_REQUIRE (python3, the module ensurepip, descriptor.proto); scripts/lib/apt_package_census.py: a row for python3-venv on the passive-dissection job, which installs it in .github/workflows/ci.yml; the test's doc names the machine it needs.",
+        "crates/wz-eth-mac-cyt4bf: the DMA burst defaults to INCR4, the block's reset value, with the sources and the kit run written beside the field; the model tests are updated (two commits cherry-picked from the branch f877)."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host, never the coordinating host: cargo test of wz-eth-mac-cyt4bf (70 passed) and clippy -D warnings --all-targets of it (exit 0); cargo fmt --check of deploy/mcu-admin-node and of deploy/zephyr-admin-node/rust (both exit 0); scripts/nanopb-reference-sizes.sh in its default mode (exit 0), and the C1bn leg line for line as a script (--generate, source of the env, WZ_NANOPB_REFERENCE_REQUIRE=1 cargo test: 9 passed); the Layer E test pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping 40 times idle and 40 times pinned to one core: 80 of 80 passed.",
+        "Locally: the armed-oracle census (check and selftest), the apt package census, the silent-skip gate, the audit (REMAINING 0), the atom test graph selftest, both census gates, the self-report lint, the python-floor lint, the reason pin gate, the depth census, bash -n of both scripts.",
+        "Not verified here: Layer C1bn itself on a hosted runner (python3-venv installed by apt, PyPI reachable); the T2G images were not rebuilt for 877 and no kit run was made in this round; actionlint on the ci.yml change; the hosted run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open-debt item 877 is answered for the default and is not closed for what it did not measure: debugger resets only (no start after power was removed), six boots per image, INCR8 and INCR16, throughput and latency. The receive ring is 8 descriptors against a pool of 16 slots and the driver never reads RX_RESOURCE_ERRORS, so a burst past the ring is refused in hardware without a count; a larger ring or that counter in the pool line is the product step if burst tolerance is ever claimed.",
+        "Layer E, pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping, printed \"Unable to open session!\" once in the hosted run of f1a42b27 and passed 80 of 80 on a build host (40 idle, 40 on one core). Unexplained and not closed; if it fails again on a hosted run, read the z_pong side of that run first.",
+        "Read the hosted Layer C1bn leg of this push first: python3-venv is installed by apt, PyPI must be reachable for the two pinned packages; if it is not, vendor the pinned generator instead of skipping the leg."
+      ],
+      "publishable_decision_summary": "Three things. (1) The hosted run of 8e5aa565 read Layer 0 red because the two assertion blocks added to the standalone admin node crates were not rustfmt-shaped (those crates are outside the commit hook's format check), and Layer C0 red because the armed-oracle census reads an arming only as an env prefix directly before cargo and the nanopb leg armed through a script. Both are repaired: the blocks are reformatted; the script only generates and the lane runs the armed test itself, with a census row for what the machine needs, python3-venv installed on the job, and the generator's protobuf pinned. (2) Open-debt item 877, the MAC's single-beat DMA burst: the first driver commit chose single beats as valid on any bus, three sources agree INCR4 is the block's reset and none recommends another, and the kit ran INCR4, so the default is the reset value; the evidence is small and is stated with its limits. (3) Layer E's one unexplained failure was not reproduced in 80 runs on a build host and is carried, not closed.",
+      "publishable_changes_bullets": [
+        "deploy/mcu-admin-node and deploy/zephyr-admin-node fixed.rs / fixed_node.rs: the three number assertions are in the shape rustfmt writes them.",
+        "scripts/nanopb-reference-sizes.sh gains `--generate DIR` (generate and write DIR/env); its default mode is unchanged and its `protobuf` is pinned to 7.36.2 beside nanopb 0.4.9.1.",
+        "scripts/run-ci.sh Layer C1bn: the leg generates with `--generate`, sources the env in a subshell and runs `WZ_NANOPB_REFERENCE_REQUIRE=1 cargo test` itself, requiring `9 passed`.",
+        "scripts/lib/armed_oracle_census.py: a row for WZ_NANOPB_REFERENCE_REQUIRE (python3, the module ensurepip, descriptor.proto); scripts/lib/apt_package_census.py: a row for python3-venv on the passive-dissection job, which installs it in .github/workflows/ci.yml; the test's doc names the machine it needs.",
+        "crates/wz-eth-mac-cyt4bf: the DMA burst defaults to INCR4, the block's reset value, with the sources and the kit run written beside the field; the model tests are updated (two commits cherry-picked from the branch f877)."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host, never the coordinating host: cargo test of wz-eth-mac-cyt4bf (70 passed) and clippy -D warnings --all-targets of it (exit 0); cargo fmt --check of deploy/mcu-admin-node and of deploy/zephyr-admin-node/rust (both exit 0); scripts/nanopb-reference-sizes.sh in its default mode (exit 0), and the C1bn leg line for line as a script (--generate, source of the env, WZ_NANOPB_REFERENCE_REQUIRE=1 cargo test: 9 passed); the Layer E test pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping 40 times idle and 40 times pinned to one core: 80 of 80 passed.",
+        "Locally: the armed-oracle census (check and selftest), the apt package census, the silent-skip gate, the audit (REMAINING 0), the atom test graph selftest, both census gates, the self-report lint, the python-floor lint, the reason pin gate, the depth census, bash -n of both scripts.",
+        "Not verified here: Layer C1bn itself on a hosted runner (python3-venv installed by apt, PyPI reachable); the T2G images were not rebuilt for 877 and no kit run was made in this round; actionlint on the ci.yml change; the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open-debt item 877 is answered for the default and is not closed for what it did not measure: debugger resets only (no start after power was removed), six boots per image, INCR8 and INCR16, throughput and latency. The receive ring is 8 descriptors against a pool of 16 slots and the driver never reads RX_RESOURCE_ERRORS, so a burst past the ring is refused in hardware without a count; a larger ring or that counter in the pool line is the product step if burst tolerance is ever claimed.",
+        "Layer E, pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping, printed \"Unable to open session!\" once in the hosted run of f1a42b27 and passed 80 of 80 on a build host (40 idle, 40 on one core). Unexplained and not closed; if it fails again on a hosted run, read the z_pong side of that run first.",
+        "Read the hosted Layer C1bn leg of this push first: python3-venv is installed by apt, PyPI must be reachable for the two pinned packages; if it is not, vendor the pinned generator instead of skipping the leg."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
