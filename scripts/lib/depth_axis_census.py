@@ -1208,7 +1208,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # its differential files name its symbols), so it leaves the census with its grade.
 # `runtime-zero-copy` is the one PARTIAL atom left. UNREACHED and NO_SYMBOL hold at
 # 0 and 0. READ off the census's own FAIL line, `reached: 1 against a pin of 2`.
-PIN_REACHED = 1
+# R3305 -- REACHED 1 -> 0. `runtime-zero-copy` leaves PARTIAL for COMPLETE, the
+# last PARTIAL atom: the transmit half, the writer queue, the batching stage and
+# the receive side are built and witnessed, and the two pool images ran on the
+# T2G kit. It was a reached PARTIAL atom, so it leaves the census with its
+# grade and the census is empty by design (`partial_atoms()` now admits the
+# empty set when COMPLETE atoms prove the reader reads grades). UNREACHED and
+# NO_SYMBOL hold at 0 and 0. READ off the census's own FAIL line, `reached: 0
+# against a pin of 1`.
+PIN_REACHED = 0
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2734,7 +2742,12 @@ PIN_NO_SYMBOL = 0
 # commit that grades the atom, so none of its anchors is ever counted here.
 # `runtime-zero-copy` is not touched and is the one PARTIAL atom left. READ off
 # the census's own FAIL line, `wz citations: 20 against a pin of 216`.
-PIN_WZ_CITATIONS = 20
+# R3305 -- 20 -> 0, DOWNWARD, the last atom. `runtime-zero-copy` leaves PARTIAL
+# for COMPLETE and takes its citations out of the census with it, the closing
+# paragraph of its reason among them: the paragraph is appended in the same
+# commit that grades the atom, so none of its anchors is counted here. No
+# PARTIAL atom is left.
+PIN_WZ_CITATIONS = 0
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2841,6 +2854,7 @@ def partial_atoms() -> dict[str, str]:
     if not isinstance(entries, dict):
         raise Fatal(f"{STORE} holds no `inventory_entries` mapping.")
     out: dict[str, str] = {}
+    complete = 0
     for eid, entry in entries.items():
         if eid.startswith(PRESET_PREFIX) or eid.startswith(DEBT_PREFIX):
             continue
@@ -2848,10 +2862,18 @@ def partial_atoms() -> dict[str, str]:
         head = HEAD_TAG.match(reason)
         if head and head.group(1).upper() == "PARTIAL":
             out[eid] = reason
-    if not out:
+        elif head and head.group(1).upper() == "COMPLETE":
+            complete += 1
+    if not out and not complete:
+        # R3305. An empty PARTIAL set is the END STATE of the catalog (the audit's
+        # REMAINING reaches 0), so it is no longer refused by itself. What is
+        # still refused is a zero that could come from a head-tag reader that
+        # read nothing: the empty set is accepted only when the same reader
+        # finds COMPLETE atoms, the positive control that it is reading grades.
         raise Fatal(
-            "no atom is graded PARTIAL. Every axis below would report zero of "
-            "zero, which reads exactly like a clean surface."
+            "no atom is graded PARTIAL and none is graded COMPLETE either. Every "
+            "axis below would report zero of zero, which reads exactly like a "
+            "clean surface."
         )
     return out
 
