@@ -273212,6 +273212,50 @@
         "Read the hosted Layer C1bn leg of this push first: python3-venv is installed by apt, PyPI must be reachable for the two pinned packages; if it is not, vendor the pinned generator instead of skipping the leg."
       ]
     },
+    "Round 3312": {
+      "decision_summary": "Two open questions of the N-session pool design are decided and closed. Q7, peer tables per session or one partitioned observer: per session. It was built in S9a (what a peer writes lives in each slot, the application's registrations once per process), and its reason, that a wire id is scoped by its session so one table conflates two peers and a flood fills it for all, is witnessed by tests that drive the same id from two sessions; the design note calling it inferred and awaiting the owner was stale. Q3, the typed slot's size: measured, not estimated. Each fixed image that names its slot type declares, behind a cargo feature, a symbol whose size is the slot's; a script builds it as the S8 gate does, reads the size with nm and holds a committed record equal to it; the deploy report states the bytes and the headroom and refuses a ceiling below them. Measured: 36704 bytes on thumbv7m and 36696 on thumbv7em-hf, under the 98304 ceiling.",
+      "changes_bullets": [
+        "deploy/mcu-admin-node and deploy/zephyr-admin-node: the session slot table has one named type (`Slots`) that the placed `static`, the ceiling assertion and the probe share; the cargo feature `slot-bytes-probe` (off by default) declares `WZ_SESSION_SLOT_BYTES`, a zeroed array of the slot's size, so the symbol's SIZE is the slot's.",
+        "scripts/lib/session_slot_bytes.py: builds each subject with the probe in the S8 gate's own build (target, lwIP port, build values), reads the symbol's size with `nm -S`, and `--check` holds `deploy/session_slot_bytes.json` equal to it (`--write` regenerates, `--list` names the subjects, `--selftest` runs twelve controls); the record holds 36704 (mcu-admin-node, thumbv7m) and 36696 (zephyr-admin-node, thumbv7em-hf).",
+        "scripts/run-ci.sh Layer Q: leg Q.0s runs `--check` per subject beside Q.0n, on the targets Q.0n already builds.",
+        "scripts/lib/deploy_sessions.py: the key `session_pool.typed_slot_image` names a measured image; the report states `pool.typed_slot` (image, target, bytes, headroom_bytes, or null for a machine that names none) and a ceiling below the measured bytes is refused; four selftest cases; deploy/mcu_session_acceptor.yaml names `mcu-admin-node`."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host, never the coordinating host: session_slot_bytes.py --write (both images built with the probe, rustc 1.97.0: 36704 and 36696) and then --check against the committed record (exit 0); cargo fmt --check of deploy/mcu-admin-node and of deploy/zephyr-admin-node/rust (both exit 0); the no-allocator gate of mcu-admin-node-fixed (thumbv7m) and of zephyr-admin-node-fixed (thumbv7em-hf) on their default builds, without the probe (both exit 0).",
+        "Locally: the session_slot_bytes selftest (twelve controls), the deploy validator's selftest (the four new cases among them) and validate-deploy.sh, the deploy report of the acceptor machine (typed slot 36704, headroom 61600), bash -n of run-ci.sh, and the cheap gate batch (audit, atom test graph, both census gates, self-report and python-floor lints, reason pin gate, depth census, silent-skip, discard-site, armed-oracle, the S8 gate's selftest and population).",
+        "Not verified here: Layer Q.0s on a hosted runner (the targets and the nm it needs are Q.0n's, so a gap would show in both); the extra time of its two builds in the cross-compile job; the hosted run of this push. Q7 was decided from the code and its tests as they are; no new test was written for it."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The slot ceiling 98304 is provisional and now has a measurement under it: 36704 bytes per typed slot, 61600 bytes of headroom (63 percent). Next step if wanted: replace the ceiling by the measured size rounded up with a stated margin, in the commit that regenerates session_slot_pool_mcu.scxml (Layer B2 regen takes about 1170 s), and let the compile-time assertions of the images hold the margin. The ceiling also bounds the pools one session takes (the validator's budget), so lowering it moves that check.",
+        "The acceptor e2e is generic over its clock and entropy types, names no slot type and has no probe; its slot is a different number, unmeasured.",
+        "The measured number depends on rustc's layout: a toolchain bump that moves it is reported by Q.0s as the number moving, and the record is regenerated in that commit.",
+        "Q8 (gating the generated pool module behind session-slot) stays declined; Q3 and Q7 are closed by this round."
+      ],
+      "publishable_decision_summary": "Two open questions of the N-session pool design are decided and closed. Q7, peer tables per session or one partitioned observer: per session. It was built in S9a (what a peer writes lives in each slot, the application's registrations once per process), and its reason, that a wire id is scoped by its session so one table conflates two peers and a flood fills it for all, is witnessed by tests that drive the same id from two sessions; the design note calling it inferred and awaiting the owner was stale. Q3, the typed slot's size: measured, not estimated. Each fixed image that names its slot type declares, behind a cargo feature, a symbol whose size is the slot's; a script builds it as the S8 gate does, reads the size with nm and holds a committed record equal to it; the deploy report states the bytes and the headroom and refuses a ceiling below them. Measured: 36704 bytes on thumbv7m and 36696 on thumbv7em-hf, under the 98304 ceiling.",
+      "publishable_changes_bullets": [
+        "deploy/mcu-admin-node and deploy/zephyr-admin-node: the session slot table has one named type (`Slots`) that the placed `static`, the ceiling assertion and the probe share; the cargo feature `slot-bytes-probe` (off by default) declares `WZ_SESSION_SLOT_BYTES`, a zeroed array of the slot's size, so the symbol's SIZE is the slot's.",
+        "scripts/lib/session_slot_bytes.py: builds each subject with the probe in the S8 gate's own build (target, lwIP port, build values), reads the symbol's size with `nm -S`, and `--check` holds `deploy/session_slot_bytes.json` equal to it (`--write` regenerates, `--list` names the subjects, `--selftest` runs twelve controls); the record holds 36704 (mcu-admin-node, thumbv7m) and 36696 (zephyr-admin-node, thumbv7em-hf).",
+        "scripts/run-ci.sh Layer Q: leg Q.0s runs `--check` per subject beside Q.0n, on the targets Q.0n already builds.",
+        "scripts/lib/deploy_sessions.py: the key `session_pool.typed_slot_image` names a measured image; the report states `pool.typed_slot` (image, target, bytes, headroom_bytes, or null for a machine that names none) and a ceiling below the measured bytes is refused; four selftest cases; deploy/mcu_session_acceptor.yaml names `mcu-admin-node`."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host, never the coordinating host: session_slot_bytes.py --write (both images built with the probe, rustc 1.97.0: 36704 and 36696) and then --check against the committed record (exit 0); cargo fmt --check of deploy/mcu-admin-node and of deploy/zephyr-admin-node/rust (both exit 0); the no-allocator gate of mcu-admin-node-fixed (thumbv7m) and of zephyr-admin-node-fixed (thumbv7em-hf) on their default builds, without the probe (both exit 0).",
+        "Locally: the session_slot_bytes selftest (twelve controls), the deploy validator's selftest (the four new cases among them) and validate-deploy.sh, the deploy report of the acceptor machine (typed slot 36704, headroom 61600), bash -n of run-ci.sh, and the cheap gate batch (audit, atom test graph, both census gates, self-report and python-floor lints, reason pin gate, depth census, silent-skip, discard-site, armed-oracle, the S8 gate's selftest and population).",
+        "Not verified here: Layer Q.0s on a hosted runner (the targets and the nm it needs are Q.0n's, so a gap would show in both); the extra time of its two builds in the cross-compile job; the hosted run of this push. Q7 was decided from the code and its tests as they are; no new test was written for it."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The slot ceiling 98304 is provisional and now has a measurement under it: 36704 bytes per typed slot, 61600 bytes of headroom (63 percent). Next step if wanted: replace the ceiling by the measured size rounded up with a stated margin, in the commit that regenerates session_slot_pool_mcu.scxml (Layer B2 regen takes about 1170 s), and let the compile-time assertions of the images hold the margin. The ceiling also bounds the pools one session takes (the validator's budget), so lowering it moves that check.",
+        "The acceptor e2e is generic over its clock and entropy types, names no slot type and has no probe; its slot is a different number, unmeasured.",
+        "The measured number depends on rustc's layout: a toolchain bump that moves it is reported by Q.0s as the number moving, and the record is regenerated in that commit.",
+        "Q8 (gating the generated pool module behind session-slot) stays declined; Q3 and Q7 are closed by this round."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
