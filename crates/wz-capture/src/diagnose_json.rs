@@ -615,6 +615,11 @@ mod tests {
     /// whichever is the more specific: that is the decoder's rule, and a consumer
     /// that asked "longest pattern" would pick a different mapping on an overlap.
     /// The same text with its two rules swapped must give the other answer.
+    ///
+    /// `filter-wildcards`, because the general rule is a wildcard pattern and a
+    /// build without the matcher refuses that text before any key is judged
+    /// (the twin below asserts that refusal in the build that has it).
+    #[cfg(feature = "filter-wildcards")]
     #[test]
     fn the_first_covering_rule_wins_and_swapping_the_rules_swaps_the_answer() {
         let general_first = "demo/**=protobuf\ndemo/a=json";
@@ -697,9 +702,14 @@ mod tests {
     /// as a pattern, and a key that is not a key expression says why with the
     /// key-expression door's words. The two have different keys: the wildcard has
     /// no `reason`.
+    ///
+    /// The declaration text is a LITERAL pattern on purpose: the refusal under
+    /// test belongs to the key, and a wildcard pattern would make the text itself
+    /// refuse in a build without `filter-wildcards`, which is a different door's
+    /// answer and not the one asserted here.
     #[test]
     fn a_wildcard_key_is_refused_and_a_malformed_one_says_why() {
-        let wild = declarations_match_json("demo/**=protobuf", "demo/*");
+        let wild = declarations_match_json("demo/a=protobuf", "demo/*");
         assert_eq!(top(&wild, "ok"), Some("false"), "{wild}");
         assert_eq!(top(&wild, "which"), Some("\"keyexpr\""), "{wild}");
         assert_eq!(top(&wild, "chunk"), Some("1"), "{wild}");
@@ -708,13 +718,26 @@ mod tests {
         assert_eq!(top(&wild, "matched"), None, "{wild}");
         assert_eq!(top(&wild, "covered"), None, "{wild}");
 
-        let bad = declarations_match_json("demo/**=protobuf", "demo//a");
+        let bad = declarations_match_json("demo/a=protobuf", "demo//a");
         assert_eq!(top(&bad, "which"), Some("\"keyexpr\""), "{bad}");
         assert_eq!(top(&bad, "reason"), Some("\"empty_chunk\""), "{bad}");
         let alone = keyexpr_diagnose_json("demo//a");
         for key in ["chunk", "offset"] {
             assert_eq!(top(&bad, key), top(&alone, key), "{key}: {bad}");
         }
+    }
+
+    /// WITHOUT THE WILDCARD MATCHER a wildcard pattern in the text is refused as a
+    /// declaration, whatever the key is, and the answer names the feature that
+    /// would make it answerable.
+    #[cfg(not(feature = "filter-wildcards"))]
+    #[test]
+    fn a_wildcard_pattern_is_refused_as_a_declaration_without_the_matcher() {
+        let doc = declarations_match_json("demo/**=protobuf", "demo/a");
+        assert_eq!(top(&doc, "ok"), Some("false"), "{doc}");
+        assert_eq!(top(&doc, "which"), Some("\"declarations\""), "{doc}");
+        assert!(doc.contains("filter-wildcards"), "{doc}");
+        assert_eq!(top(&doc, "covered"), None, "{doc}");
     }
 
     /// A DECLARATION TEXT THAT DOES NOT INSTALL is refused with the keys the

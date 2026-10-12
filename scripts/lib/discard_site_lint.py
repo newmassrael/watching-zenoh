@@ -163,6 +163,15 @@ ALLOWED = [
         "a traversal's own work list, built and consumed inside one call; "
         "nothing captured is in it",
     ),
+    (
+        "wz-capture/proto_describe.rs",
+        ".remove(&idx)",
+        "R3306 -- the description of a schema takes each message's computed "
+        "size out of a map the same call just built from the schema, once per "
+        "message. The map is a local of the call and holds an arithmetic "
+        "result, not captured evidence; an index the map lacks is not dropped "
+        "silently, it is described as a refusal (`UnmodelledOption`)",
+    ),
     # R2516 (open-debt item 713) — the `wz-capture/agg.rs` UNDECLARE row is GONE
     # rather than re-spelled, and the difference is the point. R2513 gave each
     # keyexpr id a BINDING HISTORY, so an undeclare no longer removes anything:

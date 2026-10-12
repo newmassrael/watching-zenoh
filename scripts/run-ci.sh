@@ -10809,7 +10809,11 @@ layer_c1p_multicast() {
     # of them compile here. The arm above has no push codec and does not move.
     # R3299 -- 72 -> 73, the printed number: the lent control walk adds
     # `the_control_walk_lends_every_kind_in_wire_order_and_owns_nothing`.
-    _runci_guarded_test C1p 73 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # R3306 -- 73 -> 76, the printed number of the hosted run of `b24bc165`
+    # ("running 76 tests", 76 passed, 627 filtered out). The count moved with the
+    # tests of the lent walks that landed after R3299; the number is what the
+    # command prints and nothing here derives it.
+    _runci_guarded_test C1p 76 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
