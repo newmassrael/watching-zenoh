@@ -273476,6 +273476,36 @@
         "A program that gives a view a short-lived buffer is now a use-after-free, as it is on zenoh-c; the old copy served it. Nothing in the repository's tests does so, and the consumer read the call sites where it was plausible (not every one) and found none."
       ]
     },
+    "Round 3317": {
+      "decision_summary": "The hosted run of the Round 3315 push failed Layer C0 in two jobs on one gate, feature-public-surface, and the finding is real: the in-place observer writer (SlotObserverOf::init_in_place) carried its feature gates on statements that open with the addr_of_mut! macro, and the census reads a gated line that starts with a macro call as a macro that may expand to a public item. It so attached query-queryable, declare-queryable and liveliness-subscriber to a public path and refuted the declarations of two of them. The statements are not items, but a macro's expansion is unreadable from the text, so the census cannot tell. Repaired at the source, not in the declarations: each gated statement now opens with ptr::write(addr_of_mut!(field), value), the same write, so the census classifies it as the statement it is. No declaration was loosened and the census was not taught a special case.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/slot_observer.rs: init_in_place writes each field with ptr::write(addr_of_mut!(..), ..) instead of addr_of_mut!(..).write(..); the order, the values and the gates are unchanged, and a comment says why the statement opens with the path."
+      ],
+      "verification_bullets": [
+        "Locally: the feature-public-surface census check and its selftest, gate-provenance lint and rustfmt, all passing; before the change the census check failed with the three findings the hosted jobs printed.",
+        "NOT run here: a build of the crate or its tests (a build host decides; the change is the same write through a function call instead of a method, over the same pointer and value); the other jobs of the failed hosted run, which were still running when this was written."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The sibling writer in the socket cell (wz-link-lwip Inner::init_in_place) has one gated field of the same shape; its package is not a census finding today, and it stays as it is until it is."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3315 push failed Layer C0 in two jobs on one gate, feature-public-surface, and the finding is real: the in-place observer writer (SlotObserverOf::init_in_place) carried its feature gates on statements that open with the addr_of_mut! macro, and the census reads a gated line that starts with a macro call as a macro that may expand to a public item. It so attached query-queryable, declare-queryable and liveliness-subscriber to a public path and refuted the declarations of two of them. The statements are not items, but a macro's expansion is unreadable from the text, so the census cannot tell. Repaired at the source, not in the declarations: each gated statement now opens with ptr::write(addr_of_mut!(field), value), the same write, so the census classifies it as the statement it is. No declaration was loosened and the census was not taught a special case.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/slot_observer.rs: init_in_place writes each field with ptr::write(addr_of_mut!(..), ..) instead of addr_of_mut!(..).write(..); the order, the values and the gates are unchanged, and a comment says why the statement opens with the path."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the feature-public-surface census check and its selftest, gate-provenance lint and rustfmt, all passing; before the change the census check failed with the three findings the hosted jobs printed.",
+        "NOT run here: a build of the crate or its tests (a build host decides; the change is the same write through a function call instead of a method, over the same pointer and value); the other jobs of the failed hosted run, which were still running when this was written."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The sibling writer in the socket cell (wz-link-lwip Inner::init_in_place) has one gated field of the same shape; its package is not a census finding today, and it stays as it is until it is."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
