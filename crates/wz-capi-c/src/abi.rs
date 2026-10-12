@@ -924,6 +924,29 @@ pub struct z_loaned_keyexpr_t {
     pub(crate) _pad: [u8; 32 - std::mem::size_of::<Handle>()],
 }
 
+/// What a VIEW keyexpr's `handle` holds while the view ALIASES the caller's bytes, which is
+/// zenoh-c's contract for the view family: the address of this static. It is never null, so
+/// `handle.is_null()` still means "empty", and it is never a heap block, so the paths that
+/// free an owned keyexpr's state can tell a view from one and leave it alone.
+static VIEW_ALIAS_MARK: u8 = 0;
+
+/// The value an aliasing view keeps in `handle`.
+#[inline]
+pub(crate) fn view_alias_mark() -> Handle {
+    std::ptr::addr_of!(VIEW_ALIAS_MARK).cast_mut().cast()
+}
+
+/// Whether `handle` is the mark of an aliasing view and not a boxed keyexpr state.
+#[inline]
+pub(crate) fn is_view_alias_handle(handle: Handle) -> bool {
+    handle == view_alias_mark()
+}
+
+/// The pointer and the length of the aliased bytes sit in the first two words after the handle.
+const VIEW_WORD: usize = std::mem::size_of::<usize>();
+
+const _: () = assert!(32 - std::mem::size_of::<Handle>() >= 2 * VIEW_WORD);
+
 impl z_view_keyexpr_t {
     #[inline]
     pub(crate) fn null_value() -> Self {
@@ -933,11 +956,18 @@ impl z_view_keyexpr_t {
         }
     }
 
+    /// A view that ALIASES `text`, as zenoh-c's does: the struct keeps the address and the
+    /// length of the caller's bytes and allocates nothing, so there is nothing to release and a
+    /// copy of the struct is as good as the original. The caller's string must outlive every
+    /// use of the view (zenoh-c's contract, and the one the drop-in is written against).
     #[inline]
-    pub(crate) fn from_handle(handle: Handle) -> Self {
+    pub(crate) fn alias(text: &str) -> Self {
+        let mut pad = [0u8; 32 - std::mem::size_of::<Handle>()];
+        pad[..VIEW_WORD].copy_from_slice(&(text.as_ptr() as usize).to_ne_bytes());
+        pad[VIEW_WORD..2 * VIEW_WORD].copy_from_slice(&text.len().to_ne_bytes());
         Self {
-            handle,
-            _pad: [0u8; 32 - std::mem::size_of::<Handle>()],
+            handle: view_alias_mark(),
+            _pad: pad,
         }
     }
 }
@@ -960,6 +990,28 @@ impl z_loaned_keyexpr_t {
             handle,
             _pad: [0u8; 32 - std::mem::size_of::<Handle>()],
         }
+    }
+
+    /// The text an ALIASING view points at, or `None` when this is not one, or when the bytes
+    /// the caller owns are no longer UTF-8 (they are re-read on every use, because they are the
+    /// caller's to change).
+    ///
+    /// # Safety
+    /// If this is an aliasing view, the caller's string it was made over must still be live.
+    #[inline]
+    pub(crate) unsafe fn alias_text<'a>(&self) -> Option<&'a str> {
+        if !is_view_alias_handle(self.handle) {
+            return None;
+        }
+        let ptr = usize::from_ne_bytes(self._pad[..VIEW_WORD].try_into().ok()?);
+        let len = usize::from_ne_bytes(self._pad[VIEW_WORD..2 * VIEW_WORD].try_into().ok()?);
+        if ptr == 0 {
+            return None;
+        }
+        // SAFETY: the caller's contract — the string the view was made over is live, and it
+        // had `len` bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+        std::str::from_utf8(bytes).ok()
     }
 }
 

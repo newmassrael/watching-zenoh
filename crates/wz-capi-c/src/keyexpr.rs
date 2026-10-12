@@ -5,20 +5,27 @@
 //!
 //! zenoh-c's `z_view_keyexpr_from_str` ALIASES the `const char*` it is given
 //! rather than copying it, and upstream's `z_put.c` relies on that: the string it
-//! passes is `args.keyexpr`, which outlives the put. wz stores an owned copy
-//! behind the handle instead, which is a strict superset of the contract (a
-//! caller whose string dies early is served correctly here and would be a
-//! use-after-free upstream) and costs one allocation per view.
+//! passes is `args.keyexpr`, which outlives the put. So does this one: a view is
+//! the address and the length of the caller's bytes, kept in the view's own
+//! 32 bytes, and it allocates nothing.
 //!
-//! The divergence is recorded rather than hidden because it is observable in one
-//! direction: a program that mutates its buffer AFTER constructing the view and
-//! expects the put to see the new bytes gets the OLD bytes here. Upstream's
-//! examples do not do that, and a copy is the safe direction to differ in.
+//! An earlier form stored an owned copy on the heap behind the handle, as the
+//! safe direction to differ in. It was not: a view has no release call (zenoh-c's
+//! is a plain struct, there is no `z_view_keyexpr_drop`), so every view leaked its
+//! copy, which a consumer's address-sanitizer sweep found as 56 bytes per call in
+//! nine test targets. A copy that nothing can free is not a superset of the
+//! contract.
+//!
+//! The contract is therefore zenoh-c's: the caller's string must outlive every
+//! use of the view, and a program that changes its buffer after constructing the
+//! view sees the change. A call that KEEPS the keyexpr (a declaration, a
+//! subscription) copies it itself, as it did before.
 
 use std::ffi::{c_char, CStr};
 
 use crate::abi::{
-    z_loaned_keyexpr_t, z_moved_keyexpr_t, z_owned_keyexpr_t, z_view_keyexpr_t, Handle,
+    is_view_alias_handle, z_loaned_keyexpr_t, z_moved_keyexpr_t, z_owned_keyexpr_t,
+    z_view_keyexpr_t, Handle,
 };
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EPARSE, Z_OK};
@@ -119,6 +126,10 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
     if handle.is_null() {
         return None;
     }
+    if is_view_alias_handle(handle) {
+        // SAFETY: the caller's contract — a view's string is live while it is used.
+        return unsafe { (*ke).alias_text() };
+    }
     // SAFETY: a live `Box<KeyexprState>` this crate leaked.
     Some(&unsafe { &*(handle as *const KeyexprState) }.keyexpr)
 }
@@ -152,8 +163,7 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str(
         if let Err(code) = require_canonical(text) {
             return code;
         }
-        let handle = Box::into_raw(Box::new(KeyexprState::new(text.to_owned()))) as Handle;
-        unsafe { *this_ = z_view_keyexpr_t::from_handle(handle) };
+        unsafe { *this_ = z_view_keyexpr_t::alias(text) };
         Z_OK
     })
 }
@@ -204,9 +214,8 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
     let Ok(text) = (unsafe { CStr::from_ptr(s) }).to_str() else {
         return;
     };
-    let handle = Box::into_raw(Box::new(KeyexprState::new(text.to_owned()))) as Handle;
     // SAFETY: the slot was gravestoned above.
-    unsafe { *this_ = z_view_keyexpr_t::from_handle(handle) };
+    unsafe { *this_ = z_view_keyexpr_t::alias(text) };
 }
 
 /// Construct a view keyexpr from a pointer plus LENGTH (zenoh-c
@@ -240,8 +249,7 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr(
         if let Err(code) = require_canonical(text) {
             return code;
         }
-        let handle = Box::into_raw(Box::new(KeyexprState::new(text.to_owned()))) as Handle;
-        unsafe { *this_ = z_view_keyexpr_t::from_handle(handle) };
+        unsafe { *this_ = z_view_keyexpr_t::alias(text) };
         Z_OK
     })
 }
@@ -815,7 +823,9 @@ pub unsafe extern "C" fn z_keyexpr_drop(this_: *mut z_moved_keyexpr_t) {
     // SAFETY: the caller's contract.
     let handle = unsafe { (*this_)._this.handle };
     unsafe { (*this_)._this = z_owned_keyexpr_t::null_value() };
-    if !handle.is_null() {
+    // A view's mark is not a heap block: a program that hands one to a drop (a view has
+    // none) must not free the static.
+    if !handle.is_null() && !is_view_alias_handle(handle) {
         // SAFETY: every owned keyexpr's handle is a `Box::into_raw`.
         drop(unsafe { Box::from_raw(handle as *mut KeyexprState) });
     }
@@ -953,9 +963,8 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
     let Some(text) = (unsafe { substr(start, len) }) else {
         return;
     };
-    let handle = Box::into_raw(Box::new(KeyexprState::new(text.to_owned()))) as Handle;
     // SAFETY: the slot was gravestoned above.
-    unsafe { *this_ = z_view_keyexpr_t::from_handle(handle) };
+    unsafe { *this_ = z_view_keyexpr_t::alias(text) };
 }
 
 /// The wire alias a [`z_declare_keyexpr`] bound to this keyexpr, or `None` for
@@ -969,7 +978,8 @@ pub(crate) unsafe fn keyexpr_mapping(ke: *const z_loaned_keyexpr_t) -> Option<u6
     }
     // SAFETY: the caller's contract.
     let handle = unsafe { (*ke).handle };
-    if handle.is_null() {
+    if handle.is_null() || is_view_alias_handle(handle) {
+        // A view is never declared.
         return None;
     }
     // SAFETY: a live `KeyexprState` this crate leaked.
@@ -1046,7 +1056,7 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
         // SAFETY: the caller's contract.
         let handle = unsafe { (*key_expr)._this.handle };
         unsafe { (*key_expr)._this = z_owned_keyexpr_t::null_value() };
-        let mapping = if handle.is_null() {
+        let mapping = if handle.is_null() || is_view_alias_handle(handle) {
             None
         } else {
             // SAFETY: every owned keyexpr's handle is a `Box::into_raw`.
@@ -1087,6 +1097,99 @@ mod tests {
                 Some("demo/example/**"),
                 "the constructor read past its length into the parameters"
             );
+        }
+    }
+
+    /// A view is the caller's bytes and nothing else: no heap block behind the handle (so
+    /// there is nothing a view could leak), the same text read through the loan, and a change
+    /// the caller makes to its buffer afterwards is what the view reads — zenoh-c's contract.
+    #[test]
+    fn a_view_aliases_the_callers_bytes_and_owns_nothing() {
+        let mut buffer = *b"demo/a/b\0";
+        // The caller's pointer, which it keeps writing through after the view exists.
+        let bytes = buffer.as_mut_ptr();
+        let mut view = z_view_keyexpr_t::null_value();
+        // SAFETY: `buffer` is a live NUL-terminated buffer and `view` a live local.
+        unsafe {
+            assert_eq!(z_view_keyexpr_from_str(&mut view, bytes.cast()), Z_OK);
+            assert!(
+                is_view_alias_handle(view.handle),
+                "a view's handle is the mark, not a heap block"
+            );
+            assert_eq!(keyexpr_str(z_view_keyexpr_loan(&view)), Some("demo/a/b"));
+            assert_eq!(keyexpr_mapping(z_view_keyexpr_loan(&view)), None);
+            assert!(!z_view_keyexpr_is_empty(&view));
+
+            *bytes.add(5) = b'x';
+            assert_eq!(
+                keyexpr_str(z_view_keyexpr_loan(&view)),
+                Some("demo/x/b"),
+                "the view reads the caller's buffer, which is the caller's to change"
+            );
+
+            // A bitwise copy of a view is as good as the original: nothing in it is owned.
+            let copy = std::ptr::read(&view);
+            assert_eq!(keyexpr_str(z_view_keyexpr_loan(&copy)), Some("demo/x/b"));
+        }
+    }
+
+    /// All four constructors alias, and the counted ones alias exactly `len` bytes.
+    #[test]
+    fn every_view_constructor_aliases() {
+        let text = c"demo/example/**?value=1";
+        let mut views = [
+            z_view_keyexpr_t::null_value(),
+            z_view_keyexpr_t::null_value(),
+            z_view_keyexpr_t::null_value(),
+            z_view_keyexpr_t::null_value(),
+        ];
+        // SAFETY: `text` is a live C string and the views live locals.
+        unsafe {
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut views[0], c"demo/a".as_ptr()),
+                Z_OK
+            );
+            z_view_keyexpr_from_str_unchecked(&mut views[1], c"demo/b".as_ptr());
+            assert_eq!(
+                z_view_keyexpr_from_substr(&mut views[2], text.as_ptr(), 15),
+                Z_OK
+            );
+            z_view_keyexpr_from_substr_unchecked(&mut views[3], text.as_ptr(), 12);
+            let expected = ["demo/a", "demo/b", "demo/example/**", "demo/example"];
+            for (view, want) in views.iter().zip(expected) {
+                assert!(is_view_alias_handle(view.handle), "{want} is not an alias");
+                assert_eq!(keyexpr_str(z_view_keyexpr_loan(view)), Some(want));
+            }
+        }
+    }
+
+    /// The bytes are re-read on every use, so a buffer the caller turns into something that
+    /// is not UTF-8 reads as no keyexpr and not as undefined behaviour.
+    #[test]
+    fn a_view_over_bytes_that_stopped_being_utf8_reads_as_nothing() {
+        let mut buffer = *b"demo/a/b\0";
+        let bytes = buffer.as_mut_ptr();
+        let mut view = z_view_keyexpr_t::null_value();
+        // SAFETY: a live buffer and view.
+        unsafe {
+            assert_eq!(z_view_keyexpr_from_str(&mut view, bytes.cast()), Z_OK);
+            *bytes.add(6) = 0xFF;
+            assert_eq!(keyexpr_str(z_view_keyexpr_loan(&view)), None);
+        }
+    }
+
+    /// The gravestone is still the one thing `is_empty` answers true for.
+    #[test]
+    fn the_empty_view_is_still_empty_and_an_alias_is_not() {
+        let mut view = z_view_keyexpr_t::null_value();
+        // SAFETY: a live view and a live C string.
+        unsafe {
+            assert!(z_view_keyexpr_is_empty(&view));
+            assert_eq!(z_view_keyexpr_from_str(&mut view, c"demo/a".as_ptr()), Z_OK);
+            assert!(!z_view_keyexpr_is_empty(&view));
+            z_view_keyexpr_empty(&mut view);
+            assert!(z_view_keyexpr_is_empty(&view));
+            assert_eq!(keyexpr_str(z_view_keyexpr_loan(&view)), None);
         }
     }
 
