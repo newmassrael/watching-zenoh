@@ -61,6 +61,34 @@ pub fn decode_join_body(header: u8, body: &[u8]) -> Result<(Join<'_>, usize), Co
     Ok((join, body.len() - cursor.remaining()))
 }
 
+/// How many bytes the JOIN at the front of `bytes` occupies: its header, its base
+/// body and its extension chain, which the header's Z flag says is there.
+///
+/// What a walk over a batched datagram needs to reach the message behind a JOIN. It is
+/// read by the decode that reads the JOIN ([`decode_join_body`]) and the entry decode the
+/// owned chain is read by, under the same depth bound, so no second statement of where a
+/// JOIN ends exists. `None` for a non-JOIN MID or a JOIN that does not decode.
+pub fn join_message_len(bytes: &[u8]) -> Option<usize> {
+    let header = *bytes.first()?;
+    if header & 0x1f != wire_const::T_MID_JOIN {
+        return None;
+    }
+    let (_, base) = decode_join_body(header, &bytes[1..]).ok()?;
+    let base_end = 1 + base;
+    if header & wire_const::FLAG_T_Z == 0 {
+        return Some(base_end);
+    }
+    let chain = &bytes[base_end..];
+    let mut cursor = SceCursor::new(chain);
+    for _ in 0..crate::parse_error::MAX_EXT_CHAIN_DEPTH {
+        let entry = wz_codecs::ext_entry::ExtEntry::decode(&mut cursor).ok()?;
+        if !entry.z() {
+            return Some(base_end + chain.len() - cursor.remaining());
+        }
+    }
+    None
+}
+
 /// If `bytes` is a multicast JOIN datagram, decode its full body (a
 /// borrowed view into `bytes`). Returns `None` for a non-JOIN MID or a
 /// malformed body. The returned `lease` is ALWAYS milliseconds — the

@@ -1805,48 +1805,9 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                     take_record_back(messages, one);
                 }
             }
-            #[cfg(feature = "codec-push")]
-            WalkedRecord::Push(push) => on_event(IterationEvent::InPlace(
-                crate::driver_loop::InPlaceRecord::push_of_frame(push, reliable, sn, priority),
-            )),
-            #[cfg(feature = "codec-request")]
-            WalkedRecord::Request(request) => on_event(IterationEvent::InPlace(
-                crate::driver_loop::InPlaceRecord::request_of_frame(
-                    request, reliable, sn, priority,
-                ),
-            )),
-            #[cfg(feature = "codec-response")]
-            WalkedRecord::Response(response) => on_event(IterationEvent::InPlace(
-                crate::driver_loop::InPlaceRecord::response_of_frame(
-                    response, reliable, sn, priority,
-                ),
-            )),
-            // The slot profile's control records, lent as the data records are.
-            #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
-            WalkedRecord::Declare(declare) => on_event(IterationEvent::InPlace(
-                crate::driver_loop::InPlaceRecord::declare_of_frame(
-                    declare, reliable, sn, priority,
-                ),
-            )),
-            #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
-            WalkedRecord::ResponseFinal(response_final) => on_event(IterationEvent::InPlace(
-                crate::driver_loop::InPlaceRecord::response_final_of_frame(
-                    response_final,
-                    reliable,
-                    sn,
-                    priority,
-                ),
-            )),
-            #[cfg(feature = "session-slot")]
-            WalkedRecord::Interest(interest) => on_event(IterationEvent::InPlace(
-                crate::driver_loop::InPlaceRecord::interest_of_frame(
-                    interest, reliable, sn, priority,
-                ),
-            )),
-            // Read and judged, and nothing reads it further: no event, and the walk
-            // counts it as a record dispatched.
-            #[cfg(feature = "session-slot")]
-            WalkedRecord::Skipped => {}
+            // Every lent kind becomes its in-place event in the one place that makes
+            // them, shared with the multicast receive path.
+            lent => crate::driver_loop::report_lent_record(lent, reliable, sn, priority, on_event),
         }
         dispatched = true;
         Ok(())

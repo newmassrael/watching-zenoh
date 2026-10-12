@@ -563,7 +563,7 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    feature = "session-unicast"
+    any(feature = "session-unicast", feature = "session-multicast")
 ))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InPlaceExtChain {
@@ -578,7 +578,7 @@ pub(crate) struct InPlaceExtChain {
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    feature = "session-unicast"
+    any(feature = "session-unicast", feature = "session-multicast")
 ))]
 impl InPlaceExtChain {
     /// No chain: what a message whose Z flag is clear carries.
@@ -648,6 +648,7 @@ impl InPlaceExtChain {
 
     /// Whether a participant may act on a message of `mid` carrying this chain:
     /// the rule [`InboundFrame::ext_admission`] applies to the decoded message.
+    #[cfg(feature = "session-unicast")]
     pub(crate) fn admission(&self, mid: u8) -> crate::ext_admit::ExtAdmission {
         crate::ext_admit::judge_ext_chain(
             crate::ext_admit::ExtCarrier::Transport(mid),
@@ -768,11 +769,13 @@ pub(crate) struct FrameHead<C> {
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    feature = "session-unicast"
+    any(feature = "session-unicast", feature = "session-multicast")
 ))]
 impl FrameHead<InPlaceExtChain> {
     /// Whether a participant may act on this frame's own extension chain: the
-    /// rule [`InboundFrame::ext_admission`] applies to a decoded `Frame`.
+    /// rule [`InboundFrame::ext_admission`] applies to a decoded `Frame`. The unicast
+    /// receive path's rule, as for a fragment.
+    #[cfg(feature = "session-unicast")]
     pub(crate) fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
         self.chain.admission(wire_const::T_MID_FRAME)
     }
@@ -825,7 +828,7 @@ fn decode_frame_head<C>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "storage-profile",
-    feature = "session-unicast"
+    any(feature = "session-unicast", feature = "session-multicast")
 ))]
 pub(crate) fn parse_frame_in_place(
     unit: &[u8],
@@ -858,6 +861,11 @@ pub(crate) struct FragmentHead<C> {
     pub(crate) reliable: bool,
     pub(crate) sn: u64,
     pub(crate) more: bool,
+    /// Read into an owned outcome (the heap profile's) and by the unicast receive path.
+    #[cfg_attr(
+        not(any(feature = "alloc", feature = "session-unicast")),
+        allow(dead_code)
+    )]
     pub(crate) has_ext: bool,
     pub(crate) chain: C,
 }
@@ -895,7 +903,10 @@ fn decode_fragment_head<C>(
     })
 }
 
-#[cfg(all(feature = "reassembly", feature = "session-unicast"))]
+#[cfg(all(
+    feature = "reassembly",
+    any(feature = "session-unicast", feature = "session-multicast")
+))]
 impl FragmentHead<InPlaceExtChain> {
     /// The priority the fragment's QoS extension carries: the third part of
     /// its chain key.
@@ -909,6 +920,9 @@ impl FragmentHead<InPlaceExtChain> {
     }
 
     /// Whether a participant may act on the fragment's own extension chain.
+    /// The unicast receive path's rule; a group member's fragment is read as the
+    /// owned decode reads it, which leaves its own chain to the records.
+    #[cfg(feature = "session-unicast")]
     pub(crate) fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
         self.chain.admission(wire_const::T_MID_FRAGMENT)
     }
@@ -922,7 +936,10 @@ impl FragmentHead<InPlaceExtChain> {
 /// slot from where the unit lies ([`parse_frame_in_place`]'s twin): nothing is
 /// copied and nothing is allocated to read the head. A `Fragment` consumes the
 /// rest of its unit, so the payload is `unit[offset..]`.
-#[cfg(all(feature = "reassembly", feature = "session-unicast"))]
+#[cfg(all(
+    feature = "reassembly",
+    any(feature = "session-unicast", feature = "session-multicast")
+))]
 pub(crate) fn parse_fragment_in_place(
     unit: &[u8],
 ) -> Option<Result<(FragmentHead<InPlaceExtChain>, usize), InboundParseError>> {

@@ -79,9 +79,12 @@
 // helpers below need only the dispatcher and stay reassembly-only (the
 // no-alloc MCU composition keeps them).
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-use crate::driver_loop::{
-    reassembled_chain_outcome, DriverLoopOutcome, IterationEvent, ReassemblyDropReason,
-};
+use crate::driver_loop::{reassembled_chain_outcome, DriverLoopOutcome};
+// The event surface and the drop reason are the slot profile's too: a build with no
+// allocator reports a dropped chain and fans the records of a completed one, where it
+// has no owned outcome to report.
+#[cfg(feature = "reassembly")]
+use crate::driver_loop::{IterationEvent, ReassemblyDropReason};
 use crate::multicast_peer::{
     MulticastPeerActions, MulticastPeerEvent, MulticastPeerPolicy, MulticastPeerState,
 };
@@ -92,7 +95,7 @@ use crate::multicast_peer::{
 // module is not, so the original import through it was an E0432 on the
 // no-alloc MCU profile (run-ci Layer G.12).
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::ReassemblyDispatcher;
@@ -1762,6 +1765,90 @@ pub(crate) fn ingest_multicast_fragment_counted<
         }
         on_event(IterationEvent::Poll(&o));
     }
+    if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
+        on_event(IterationEvent::ReassemblyDropped(reason));
+    }
+}
+
+/// [`ingest_multicast_fragment_counted`] for a build with no allocator: the same
+/// pipeline (the per-peer, per-channel SN gate, the abort of the channel's chain on an
+/// out-of-order fragment, the chain staged under the slot-index key with the peer's
+/// negotiated markers armed), with the completed chain READ IN THE SLOT its fragments
+/// were staged into and handed over record by record, as a `Frame`'s payload is:
+/// ARCHITECTURE section 9.3, the one copy a reassembled message costs is the staging
+/// of its fragments. The heap form decodes the chain into an owned batch and fans it
+/// as one `FramePayload`; this form has no owned batch to build, so each Push, Request
+/// and Response record is lent as
+/// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace), the
+/// control kinds likewise, and a chain that carries no record is reported as an empty
+/// frame, as an empty `Frame` is.
+///
+/// A completed chain whose records do not decode is dropped after the records before
+/// it were handed over, as the frame walk drops a payload (a multicast peer has no
+/// session to tell: the datagram stays unanswered). Nothing is counted per network
+/// message (the owned messages `transport-stats` counts by are the heap profile's).
+#[cfg(all(feature = "reassembly", not(feature = "alloc")))]
+#[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, as above
+pub(crate) fn ingest_multicast_fragment_in_place<
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+    S,
+    F,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    src: SocketAddr,
+    reliable: bool,
+    sn: u64,
+    more: bool,
+    priority: crate::qos::Priority,
+    markers: crate::extfragment::FragmentMarkers,
+    payload: &[u8],
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_>),
+{
+    let (peer_idx, sn_mask) =
+        match dispatcher.ingest_fragment_by_src_qos(src, priority, reliable, sn, now_ms) {
+            FragmentIngest::Admitted { peer_idx, sn_mask } => (peer_idx, sn_mask),
+            FragmentIngest::OutOfOrder { peer_idx } => {
+                reasm.abort_channel(&multicast_chain_key(peer_idx), priority, reliable);
+                return;
+            }
+            FragmentIngest::UnknownPeer | FragmentIngest::SessionNotRunning => return,
+        };
+    let key = multicast_chain_key(peer_idx);
+    reasm.set_fragmentation_markers(dispatcher.peer_honours_fragment_markers(peer_idx));
+    // The member the chain is from, copied out of the peer table before the ingest
+    // takes the Router: it is named to the observer ahead of the records, as the
+    // heap form names it ahead of its `Poll`.
+    let member = dispatcher
+        .peer_zid_by_src(src)
+        .map(MulticastPeerId::from_wire);
+    let ingest_outcome = reasm.ingest(
+        ReassemblyFragment {
+            peer_key: &key,
+            reliable,
+            sn,
+            more: u8::from(more),
+            payload,
+            priority,
+            markers,
+        },
+        sn_mask,
+        now_ms,
+        |chain| {
+            if let Some(member) = member {
+                on_event(IterationEvent::MulticastSource(member));
+            }
+            // A completed chain that does not decode ends its walk where it fails,
+            // and nothing more is owed to the sender of a datagram on a group.
+            let _ = crate::driver_loop::walk_lent_payload(chain, reliable, sn, priority, on_event);
+        },
+    );
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
         on_event(IterationEvent::ReassemblyDropped(reason));
     }

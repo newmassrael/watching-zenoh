@@ -74,9 +74,10 @@ use crate::reassembly_slot::{
 };
 use sce_rust_runtime::Engine;
 // R311mh — `sweep_reporting` (below) raises an IterationEvent on a timed-out
-// chain; the event surface needs `alloc` (the driver_loop module), so the
-// reporting wrapper is alloc-gated within this reassembly-gated module.
-#[cfg(feature = "alloc")]
+// chain; the event surface is the `driver_loop` module's, which a storage profile
+// (heap or per-session slot) compiles, so the reporting wrapper is gated on that
+// within this reassembly-gated module.
+#[cfg(feature = "storage-profile")]
 use crate::driver_loop::IterationEvent;
 
 /// A completed chain's bytes, as the Router delivers them (ARCHITECTURE
@@ -1047,7 +1048,7 @@ fn chunk_event(more: u8) -> ReassemblySlotFragmentChunkPayload {
 /// drive module — that is what let the multicast sweep SSOT
 /// ([`crate::multicast_rx::sweep_multicast_reassembling`]) reuse it without a
 /// false `session-unicast` coupling.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "storage-profile")]
 pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, S, F>(
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,

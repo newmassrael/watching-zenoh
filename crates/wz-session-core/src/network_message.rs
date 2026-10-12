@@ -410,7 +410,7 @@ fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
     feature = "codec-frame",
     feature = "codec-declare",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn declare_view_admission(
     declare: &wz_codecs::declare::Declare<'_>,
@@ -437,7 +437,7 @@ fn declare_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn interest_view_admission(
     interest: &wz_codecs::interest::Interest<'_>,
@@ -452,7 +452,7 @@ fn interest_view_admission(
     feature = "codec-frame",
     feature = "codec-response-final",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn response_final_view_admission(
     response_final: &wz_codecs::response_final::ResponseFinal<'_>,
@@ -468,7 +468,7 @@ fn response_final_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn oam_view_admission(oam: &wz_codecs::oam::Oam<'_>) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
@@ -496,7 +496,7 @@ fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn push_view_admission(push: &wz_codecs::push::Push<'_>) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::ZenohBody as Z;
@@ -570,7 +570,7 @@ fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-request",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn request_view_admission(
     request: &wz_codecs::request::Request<'_>,
@@ -590,7 +590,7 @@ fn request_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn response_view_admission(
     response: &wz_codecs::response::Response<'_>,
@@ -882,7 +882,10 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 /// other record is the build's [`WireStorage`] copy of the payload's bytes either
 /// way, and so is every record with [`RecordForm::Owned`]: the payload need only
 /// outlive the walk.
-#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+#[cfg(all(
+    feature = "codec-frame",
+    any(test, feature = "session-unicast", feature = "session-multicast")
+))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordForm {
     /// Every record is decoded into its owned message.
@@ -916,8 +919,14 @@ pub(crate) enum RecordForm {
 ///
 /// Read by the unicast receive path; a test build without it reads only the
 /// kinds its own tests walk.
-#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
-#[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+#[cfg(all(
+    feature = "codec-frame",
+    any(test, feature = "session-unicast", feature = "session-multicast")
+))]
+#[cfg_attr(
+    not(any(feature = "session-unicast", feature = "session-multicast")),
+    allow(dead_code)
+)]
 pub(crate) enum WalkedRecord<'r> {
     /// The record's owned message, the one entry of the buffer.
     #[cfg(feature = "alloc")]
@@ -978,7 +987,10 @@ pub(crate) fn for_each_record(
 /// stops it after that record, and is the walk's answer. What a receive path
 /// needs when handing a record over can itself fail (the owned extension chain
 /// of the `Frame` it came in, made only when an owned record needs it).
-#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+#[cfg(all(
+    feature = "codec-frame",
+    any(test, feature = "session-unicast", feature = "session-multicast")
+))]
 pub(crate) fn try_for_each_record(
     payload: &[u8],
     record: &mut RecordBuf,
@@ -1068,7 +1080,7 @@ pub(crate) fn try_for_each_record(
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    any(test, feature = "session-unicast"),
+    any(test, feature = "session-unicast", feature = "session-multicast"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1094,7 +1106,7 @@ fn lend_record(
 /// The refusal a lent record's admission makes, as the owned walk makes it.
 #[cfg(all(
     feature = "codec-frame",
-    any(test, feature = "session-unicast"),
+    any(test, feature = "session-unicast", feature = "session-multicast"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1116,7 +1128,7 @@ fn admit_lent(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 #[inline(never)]
 fn lend_push(
@@ -1132,7 +1144,7 @@ fn lend_push(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-request",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 #[inline(never)]
 fn lend_request(
@@ -1148,7 +1160,7 @@ fn lend_request(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 #[inline(never)]
 fn lend_response(
@@ -1166,7 +1178,7 @@ fn lend_response(
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 enum Walk {
     Continue,
@@ -1187,7 +1199,7 @@ enum Walk {
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn lend_any_record(
     cursor: &mut SceCursor<'_>,
@@ -1220,7 +1232,7 @@ fn lend_any_record(
     feature = "codec-frame",
     feature = "codec-declare",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 #[inline(never)]
 fn lend_declare(
@@ -1237,7 +1249,7 @@ fn lend_declare(
     feature = "codec-frame",
     feature = "codec-response-final",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 #[inline(never)]
 fn lend_response_final(
@@ -1253,7 +1265,7 @@ fn lend_response_final(
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 #[inline(never)]
 fn lend_interest(
@@ -1269,7 +1281,7 @@ fn lend_interest(
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 #[inline(never)]
 fn lend_oam(
@@ -1288,7 +1300,7 @@ fn lend_oam(
 #[cfg(all(
     feature = "codec-frame",
     feature = "session-slot",
-    any(test, feature = "session-unicast")
+    any(test, feature = "session-unicast", feature = "session-multicast")
 ))]
 fn lend_unknown(
     cursor: &mut SceCursor<'_>,

@@ -14,11 +14,13 @@
 //! calls [`encode_join`] on the beacon tick and [`decode_join`] /
 //! [`validate_join`] in its RX classifier.
 //!
-//! Alloc note: [`encode_join`] returns an owned `Vec` and
-//! [`MulticastParams`] carries a `Vec` zid, so the module is alloc-gated
-//! as a whole; a no-alloc MCU TX variant (sink-based encode, heapless
-//! params) is a follow-up shaped by the MCU multicast loop itself.
+//! Alloc note: [`encode_join`] returns an owned `Vec` and exists on the heap
+//! profile only; [`encode_join_into`] writes the same datagram through a sink the
+//! caller holds, and [`MulticastParams`] holds its zid as the session bytes of its
+//! profile, so the rest of the module (the decode, the validation, the sink
+//! encode) compiles with no allocator (fixed-memory step S9e).
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 // R311y605 — the cursor is now `decode_join_qos`'s alone: the base-body decode
@@ -29,7 +31,9 @@ use alloc::vec::Vec;
 use sce_forge_runtime::codec::SceCursor;
 #[cfg(feature = "transport-qos")]
 use sce_forge_runtime::codec::SliceSink;
-use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
+#[cfg(feature = "alloc")]
+use sce_forge_runtime::codec::VecSink;
+use sce_forge_runtime::codec::{CodecError, SceSink};
 use wz_codecs::join::Join;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
@@ -95,6 +99,7 @@ const JOIN_PATCH_EXT_HEADER: u8 = crate::extpatch::PATCH_EXT_ID | crate::ext_hea
 /// A1c — the JOIN advertises the LIVE per-channel `next_sn` from `tx_sn`
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
 /// before these, so the next data frame this node mints is admitted).
+#[cfg(feature = "alloc")]
 pub fn encode_join(params: &MulticastParams, tx_sn: &MulticastTxConduits) -> Vec<u8> {
     let mut dgram = Vec::with_capacity(Join::MAX_ENCODED_BYTES + 1);
     encode_join_into(params, tx_sn, &mut VecSink::new(&mut dgram))
@@ -296,13 +301,15 @@ fn write_join_patch_ext<S: SceSink>(out: &mut S, level: u8) -> Result<(), CodecE
 /// assumed a position would therefore see a patch level from exactly one of the
 /// two beacon shapes.
 ///
-/// So this reuses the two SSOTs that already exist for the unicast half rather
-/// than hand-rolling a third walker: `crate::ext_chain::decode_ext_chain` for
-/// the Z-bit continuation loop (depth-bounded, so a malformed peer cannot pin
-/// the decoder — a code span rather than a link, because that module is private
-/// and this function is not) and [`crate::extpatch::peer_patch`] for the id /
-/// encoding match and the level projection. The Init and Join halves of one
-/// wire fact are read by one function each way.
+/// So this reuses the SSOTs that already exist for the unicast half rather
+/// than hand-rolling a third walker: the generated entry decoder for the Z-bit
+/// continuation loop (depth-bounded by `MAX_EXT_CHAIN_DEPTH`, as the owned decode
+/// is, so a malformed peer cannot pin the decoder) and
+/// [`crate::extpatch::patch_of_entry`] for the id / encoding match and the level
+/// projection, which [`crate::extpatch::peer_patch`] applies to an owned chain. The
+/// chain is read entry by entry where it lies and never owned, so a build with no
+/// allocator reads it too. The Init and Join halves of one wire fact are read by one
+/// rule each way.
 #[cfg(feature = "reassembly")]
 pub fn decode_join_patch(bytes: &[u8]) -> u8 {
     let Some(&header) = bytes.first() else {
@@ -321,10 +328,21 @@ pub fn decode_join_patch(bytes: &[u8]) -> u8 {
         return crate::extpatch::NO_PATCH;
     };
     let mut cursor = sce_forge_runtime::codec::SceCursor::new(&bytes[1 + consumed..]);
-    match crate::ext_chain::decode_ext_chain(&mut cursor) {
-        Ok(entries) => crate::extpatch::peer_patch(&entries),
-        Err(_) => crate::extpatch::NO_PATCH,
+    // An unparseable chain, or one deeper than the bound the owned decode refuses,
+    // announces nothing: it reads as the owned decode's `Err` read.
+    let mut announced = None;
+    for _ in 0..crate::parse_error::MAX_EXT_CHAIN_DEPTH {
+        let Ok(entry) = wz_codecs::ext_entry::ExtEntry::decode(&mut cursor) else {
+            return crate::extpatch::NO_PATCH;
+        };
+        if announced.is_none() {
+            announced = crate::extpatch::patch_of_entry(&entry);
+        }
+        if !entry.z() {
+            return announced.unwrap_or(crate::extpatch::NO_PATCH);
+        }
     }
+    crate::extpatch::NO_PATCH
 }
 
 /// R311y227 — decode the JOIN QoS-SN extension into the announcer's per-priority
@@ -359,8 +377,12 @@ pub fn decode_join_qos(
     if ext_header & EXT_FULL_ID_MASK != JOIN_QOS_EXT_HEADER {
         return None; // leading ext is not the QoS-SN advertisement
     }
-    let ext_body = crate::vle::read_zbuf(&mut cursor)?;
-    let mut inner = SceCursor::new(&ext_body);
+    // The ZBuf is a VLE length and that many bytes; its body is read where it lies
+    // (`crate::vle::read_zbuf` copies it onto the heap, which a build with no
+    // allocator does not have).
+    let ext_len = usize::try_from(cursor.read_vle_u64().ok()?).ok()?;
+    let ext_body = cursor.peek_slice(ext_len).ok()?;
+    let mut inner = SceCursor::new(ext_body);
     let mut pairs = [crate::sn::MulticastRxPair::default(); crate::qos::Priority::NUM];
     for p in pairs.iter_mut() {
         p.reliable = inner.read_vle_u64().ok()?;
@@ -440,7 +462,7 @@ mod tests {
         MulticastParams {
             version: 0x09,
             whatami: WhatAmI::Peer,
-            zid: zid.to_vec(),
+            zid: crate::multicast_params::zid_vec(zid),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,

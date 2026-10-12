@@ -348,8 +348,11 @@ pub mod scout_params;
 /// (`MulticastParams`: version / whatami / zid / lease / join cadence).
 /// Pure owned value type; alloc-gated (Vec zid), like [`scout_params`]. The
 /// inputs the AP multicast drive loop (`wz-runtime-tokio::multicast_glue`)
-/// packs into each periodic JOIN beacon (session-fsm §3.1/§3.2).
-#[cfg(feature = "alloc")]
+/// packs into each periodic JOIN beacon (session-fsm §3.1/§3.2). The `zid` is
+/// [`session_init_params::SessionBytes`], as the unicast parameters' is: a `Vec` on
+/// the heap profile and an array on the per-session slot profile, so the module
+/// compiles on either (fixed-memory step S9e).
+#[cfg(feature = "storage-profile")]
 pub mod multicast_params;
 
 /// R311eq — static scouting mode: `ScoutingMode` discriminator +
@@ -847,6 +850,13 @@ pub mod initial_sn;
 /// the pub/sub data plane.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
+
+/// A literal-keyexpr `Put` as the codec's BORROWED `Push` over the caller's own text
+/// and bytes: what a send with no allocator encodes where the heap profile builds
+/// [`push_build::build_push_literal`]'s owned message. One composition for the unicast
+/// lend-only send and the multicast no-allocator TX. `codec-push` gated.
+#[cfg(feature = "codec-push")]
+pub mod lent_push;
 
 /// The payload of a Put body and the one rule that picks between its two wire
 /// layouts (a length and bytes, or the slices a shared-memory Put carries).
@@ -1865,7 +1875,7 @@ pub mod multicast_dispatch;
 #[cfg(all(
     feature = "session-multicast",
     feature = "codec-join",
-    feature = "alloc"
+    feature = "storage-profile"
 ))]
 pub mod multicast_join;
 
@@ -1882,7 +1892,7 @@ pub mod multicast_join;
     feature = "codec-join",
     feature = "codec-frame",
     feature = "codec-close",
-    feature = "alloc"
+    feature = "storage-profile"
 ))]
 pub mod multicast_rx;
 
@@ -1895,7 +1905,7 @@ pub mod multicast_rx;
     feature = "codec-join",
     feature = "codec-frame",
     feature = "codec-close",
-    feature = "alloc"
+    feature = "storage-profile"
 ))]
 pub mod multicast_stats;
 
@@ -1912,7 +1922,7 @@ pub mod multicast_stats;
 #[cfg(all(
     feature = "session-multicast",
     feature = "codec-frame",
-    feature = "alloc"
+    feature = "storage-profile"
 ))]
 pub mod multicast_tx;
 

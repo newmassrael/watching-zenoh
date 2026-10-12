@@ -268,10 +268,14 @@ reassembly = ["dep:sce-rust-runtime", "codec-frame"]
 # (the SSOT `layer3_fragment.rs` checks against zenoh-pico
 # `_z_fragment_encode`), and `reassembly` so enabling fragmentation also
 # enables the symmetric RX path (full-duplex, mirroring zenoh-pico's
-# single `Z_FEATURE_FRAGMENTATION`); `alloc` for the `Vec<Vec<u8>>`
-# fragment buffers — the TX path is the AP/alloc profile, MCU TX
-# fragmentation is a follow-up.
-transport-fragmentation = ["reassembly", "codec-fragment", "alloc"]
+# single `Z_FEATURE_FRAGMENTATION`).
+#
+# S9e -- it no longer implies `alloc`: the `Vec<Vec<u8>>` fragment buffers
+# (`fragment_body`, `multicast_frame_or_fragments`) are the heap profile's, and a
+# build on the per-session slot profile cuts a chain a fragment at a time into the
+# datagram it is lent (`FragmentPlan`, `write_fragment`), so a heap build names
+# `alloc` beside this feature and a `session-slot` build does not.
+transport-fragmentation = ["reassembly", "codec-fragment"]
 
 # transport-lowlatency — runtime-negotiated lean transport, the wz mirror of
 # zenoh's lowlatency unicast transport (`init.rs:162` zextunit!(0x5,false)).

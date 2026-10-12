@@ -5,8 +5,9 @@
 //!
 //! The inputs the multicast drive loop packs into each outbound JOIN frame
 //! (`sources/codecs/join.scxml` body = version + cbyte + zid + lease +
-//! next-sn), plus the periodic-emit cadence. Pure owned value type;
-//! alloc-gated (the `zid` is a `Vec<u8>`). The multicast sibling of
+//! next-sn), plus the periodic-emit cadence. Pure owned value type; the `zid` is
+//! the session bytes of its profile (a `Vec<u8>` on the heap profile, an array on the
+//! per-session slot profile). The multicast sibling of
 //! [`crate::scout_params::ScoutParams`] (active scouting) and
 //! [`crate::session_init_params::SessionInitParams`] (unicast handshake) —
 //! kept separate so the handshake-free multicast transport does not couple
@@ -18,9 +19,9 @@
 //! members admit it (`MulticastDispatcher::ingest_join`). So these params
 //! describe THIS peer's self-advertisement, not a negotiation.
 
-use alloc::vec::Vec;
-
 use wz_codecs::whatami::WhatAmI;
+
+use crate::session_init_params::{session_bytes, SessionBytes, ZID_MAX};
 
 /// R311kq — the PROTOCOL default an omitted JOIN `sn_res` / `batch_size`
 /// optional means (zenoh-pico `_Z_DEFAULT_RESOLUTION_SIZE`, protocol/
@@ -58,13 +59,15 @@ pub fn unpack_res_cbyte(cbyte: u8) -> (u8, u8) {
 /// A zid in the form [`MulticastParams::zid`] holds it, copied from `src`.
 ///
 /// The seam a shell that links no `alloc` writes its parameters through: it names
-/// the value, never the `Vec` type behind it, so it compiles with no `alloc` of its
-/// own. The unicast parameters have the same seam (`session_init_params::zid_bytes`)
-/// and it is already profile-sensitive there; the multicast `zid` is still the
-/// growable form on every profile, which is the one allocation here, and the day
-/// it takes a bounded inline value this function takes it too and no caller changes.
-pub fn zid_vec(src: &[u8]) -> Vec<u8> {
-    src.to_vec()
+/// the value, never the type behind it, so it compiles with no `alloc` of its own.
+/// The unicast parameters have the same seam
+/// ([`zid_bytes`](crate::session_init_params::zid_bytes)) and the multicast `zid` is
+/// the same value: a `Vec` on the heap profile and an array of [`ZID_MAX`] bytes on
+/// the per-session slot profile, where it is held by value in the session's own
+/// storage. Panics when `src` is longer than [`ZID_MAX`]: a zid longer than the wire
+/// carries is a construction mistake, not a runtime condition.
+pub fn zid_vec(src: &[u8]) -> SessionBytes<ZID_MAX> {
+    session_bytes::<ZID_MAX>(src).expect("a zid is at most 16 bytes on the wire")
 }
 
 /// Inputs for each outbound multicast JOIN frame plus the periodic-emit
@@ -88,7 +91,7 @@ pub struct MulticastParams {
     /// `zid_len - 1` into the JOIN cbyte high nibble and appends the bytes;
     /// it is the key group members admit the peer under (the §3.2
     /// per-peer-table key).
-    pub zid: Vec<u8>,
+    pub zid: SessionBytes<ZID_MAX>,
     /// The lease window this peer advertises in its JOIN (milliseconds).
     /// Group members hold the peer alive for at least this long after each
     /// JOIN; the local sweep lease ([`crate::multicast_dispatch::MulticastConfig::lease_ms`])

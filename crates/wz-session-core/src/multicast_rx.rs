@@ -28,8 +28,12 @@
 
 use core::net::SocketAddr;
 
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(feature = "alloc")]
+use crate::driver_loop::DriverLoopOutcome;
+use crate::driver_loop::IterationEvent;
+#[cfg(feature = "alloc")]
 use crate::inbound::{parse_inbound, parse_inbound_consuming_in, InboundFrame};
+#[cfg(feature = "alloc")]
 use crate::link::RxBytes;
 use crate::multicast_dispatch::{FrameIngest, JoinOutcome, MulticastDispatcher};
 #[cfg(feature = "transport-qos")]
@@ -38,20 +42,25 @@ use crate::multicast_join::{decode_join, validate_join};
 use crate::multicast_params::MulticastParams;
 use crate::multicast_peer_arrived::MulticastPeerArrived;
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLostReason};
+#[cfg(feature = "alloc")]
 use crate::network_message::parse_frame_payload_in;
 use crate::wire_const;
 use wz_codecs::whatami::WhatAmI;
 // R311mh — the reassembly-divergent tail SSOT (dispatch_multicast_inbound_reassembling
 // below): the Fragment / FrameOutOfOrder / Close handlers a reassembly-capable
 // loop layers onto the classify. Gated like ingest_multicast_fragment.
+#[cfg(feature = "alloc")]
 use crate::multicast_dispatch::count_received_network_messages;
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-use crate::multicast_dispatch::{
-    abort_peer_chains, ingest_multicast_fragment_counted, multicast_chain_key,
-};
+use crate::multicast_dispatch::ingest_multicast_fragment_counted;
+#[cfg(all(feature = "reassembly", not(feature = "alloc")))]
+use crate::multicast_dispatch::ingest_multicast_fragment_in_place;
+#[cfg(feature = "reassembly")]
+use crate::multicast_dispatch::{abort_peer_chains, multicast_chain_key};
 use crate::multicast_stats::MulticastStatsRecorder;
+#[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::ReassemblyDispatcher;
 
 /// What an inbound multicast datagram still needs from the caller AFTER the
@@ -97,6 +106,10 @@ fn multicast_message_len(msg: &[u8]) -> Option<usize> {
         // batch ends with one. Answered from the MID alone so an admitted data
         // frame is never parsed a second time just to be told it was last.
         Some(wire_const::T_MID_FRAME) | Some(wire_const::T_MID_FRAGMENT) => None,
+        // A JOIN's extent is read by the JOIN decode itself, which the slot profile's
+        // transport-message parse (it owns nothing a JOIN carries) cannot answer.
+        Some(wire_const::T_MID_JOIN) => crate::join_decode::join_message_len(msg)
+            .filter(|consumed| *consumed > 0 && *consumed < msg.len()),
         _ => crate::inbound::parse_inbound_consuming(msg)
             .ok()
             .map(|(_, consumed)| consumed)
@@ -140,7 +153,15 @@ where
     R: MulticastStatsRecorder + ?Sized,
 {
     walk_multicast_inbound(
-        dispatcher, params, bytes, None, src, now_ms, on_event, stats,
+        dispatcher,
+        params,
+        bytes,
+        #[cfg(feature = "alloc")]
+        None,
+        src,
+        now_ms,
+        on_event,
+        stats,
     )
 }
 
@@ -154,6 +175,10 @@ where
 /// recognisable as part of `unit`; this is not [`dispatch_multicast_inbound`]
 /// over a copy. The walk, the verdicts and everything the observer sees are the
 /// same code, [`dispatch_multicast_inbound`]'s own, with an origin to share.
+///
+/// Heap profile only: a datagram that is shared is an [`RxBytes`], which is a `Vec` or a
+/// reference to one. The slot profile reads the datagram where the link wrote it.
+#[cfg(feature = "alloc")]
 pub fn dispatch_multicast_inbound_in<F, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
@@ -189,7 +214,7 @@ fn walk_multicast_inbound<F, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
-    origin: Option<&RxBytes>,
+    #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
@@ -202,11 +227,13 @@ where
     let mut pos = 0usize;
     loop {
         let msg = &bytes[pos..];
+        #[cfg(feature = "alloc")]
         let msg_unit = origin.and_then(|unit| unit.subslice(pos..bytes.len()));
         let next = dispatch_multicast_message(
             dispatcher,
             params,
             msg,
+            #[cfg(feature = "alloc")]
             msg_unit.as_ref(),
             src,
             now_ms,
@@ -244,7 +271,7 @@ fn dispatch_multicast_message<F, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
-    origin: Option<&RxBytes>,
+    #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
@@ -381,6 +408,13 @@ where
             }
             MulticastRxNext::Done
         }
+        // The slot profile reads the frame where its datagram lies and lends each record
+        // (`dispatch_multicast_frame_in_place`); the heap profile decodes an owned batch.
+        #[cfg(not(feature = "alloc"))]
+        Some(wire_const::T_MID_FRAME) => {
+            dispatch_multicast_frame_in_place(dispatcher, bytes, src, now_ms, on_event, stats)
+        }
+        #[cfg(feature = "alloc")]
         Some(wire_const::T_MID_FRAME) => {
             // A1b data plane: decode, admit against the sender's per-channel SN
             // gate (which also refreshes its lease), and fan the NetworkMessage
@@ -519,6 +553,56 @@ where
     }
 }
 
+/// The `Frame` arm of [`dispatch_multicast_message`] for the slot profile: the frame is
+/// read where its datagram lies, admitted by the same per-channel SN gate, and each record
+/// of its payload is lent to the observer as [`IterationEvent::InPlace`], preceded by the
+/// [`IterationEvent::MulticastSource`] that names the member.
+///
+/// A payload that stops decoding ends the walk where it fails, with the records before it
+/// already handed over: a multicast peer has no session to tell, so the datagram stays
+/// unanswered, which is also what the owned form does with a batch that does not decode
+/// (there nothing before the failure has been handed over, because the batch is decoded
+/// whole first). The messages are not counted per network message: the owned messages
+/// `transport-stats` counts by are the heap profile's.
+#[cfg(not(feature = "alloc"))]
+fn dispatch_multicast_frame_in_place<F, R, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    bytes: &[u8],
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+    stats: &R,
+) -> MulticastRxNext
+where
+    F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
+{
+    let Some(Ok((head, payload_at))) = crate::inbound::parse_frame_in_place(bytes) else {
+        return MulticastRxNext::Done;
+    };
+    stats.transport_message_received();
+    let (reliable, sn, priority) = (head.reliable, head.sn, head.priority());
+    match dispatcher.ingest_frame_by_src_qos(src, priority, reliable, sn, now_ms) {
+        FrameIngest::Admitted => {
+            if let Some(zid) = dispatcher.peer_zid_by_src(src) {
+                on_event(IterationEvent::MulticastSource(MulticastPeerId::from_wire(
+                    zid,
+                )));
+            }
+            let _ = crate::driver_loop::walk_lent_payload(
+                &bytes[payload_at..],
+                reliable,
+                sn,
+                priority,
+                on_event,
+            );
+            MulticastRxNext::Done
+        }
+        FrameIngest::OutOfOrder => MulticastRxNext::FrameOutOfOrder { reliable, priority },
+        _ => MulticastRxNext::Done,
+    }
+}
+
 /// The reassembly-aware RX dispatch: [`dispatch_multicast_inbound`] PLUS the
 /// reassembly-divergent tail, applied with the caller's reassembly Router so
 /// the out-of-order-Frame chain abort, Fragment reassembly, and pre-Close
@@ -532,7 +616,7 @@ where
 /// without a Router). zenoh-pico parity: the Close tail aborts the peer's
 /// chains BEFORE `close_by_src`, so a recycled slot index can never continue a
 /// dead peer's chain.
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[cfg(feature = "reassembly")]
 #[allow(clippy::too_many_arguments)] // the plain entry point's seven plus the caller's Router
 pub fn dispatch_multicast_inbound_reassembling<
     F,
@@ -556,7 +640,16 @@ pub fn dispatch_multicast_inbound_reassembling<
     R: MulticastStatsRecorder + ?Sized,
 {
     walk_multicast_inbound_reassembling(
-        dispatcher, reasm, params, bytes, None, src, now_ms, on_event, stats,
+        dispatcher,
+        reasm,
+        params,
+        bytes,
+        #[cfg(feature = "alloc")]
+        None,
+        src,
+        now_ms,
+        on_event,
+        stats,
     )
 }
 
@@ -602,7 +695,7 @@ pub fn dispatch_multicast_inbound_reassembling_in<
 }
 
 /// The walk behind [`dispatch_multicast_inbound_reassembling`] and its `_in` twin.
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[cfg(feature = "reassembly")]
 #[allow(clippy::too_many_arguments)] // the entry point's eight plus the origin
 fn walk_multicast_inbound_reassembling<
     F,
@@ -616,7 +709,7 @@ fn walk_multicast_inbound_reassembling<
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     params: &MulticastParams,
     bytes: &[u8],
-    origin: Option<&RxBytes>,
+    #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
@@ -633,11 +726,13 @@ fn walk_multicast_inbound_reassembling<
     let mut pos = 0usize;
     loop {
         let msg = &bytes[pos..];
+        #[cfg(feature = "alloc")]
         let msg_unit = origin.and_then(|unit| unit.subslice(pos..bytes.len()));
         match dispatch_multicast_message(
             dispatcher,
             params,
             msg,
+            #[cfg(feature = "alloc")]
             msg_unit.as_ref(),
             src,
             now_ms,
@@ -662,6 +757,28 @@ fn walk_multicast_inbound_reassembling<
                     reasm.abort_channel(&multicast_chain_key(idx), priority, reliable);
                 }
             }
+            // The slot profile stages the fragment from where its datagram lies and
+            // lends the records of a completed chain
+            // (`ingest_multicast_fragment_in_place`).
+            #[cfg(not(feature = "alloc"))]
+            MulticastRxNext::Fragment => {
+                if let Some(Ok((head, payload_at))) = crate::inbound::parse_fragment_in_place(msg) {
+                    ingest_multicast_fragment_in_place(
+                        dispatcher,
+                        reasm,
+                        src,
+                        head.reliable,
+                        head.sn,
+                        head.more,
+                        head.priority(),
+                        head.markers(),
+                        &msg[payload_at..],
+                        now_ms,
+                        on_event,
+                    );
+                }
+            }
+            #[cfg(feature = "alloc")]
             MulticastRxNext::Fragment => {
                 // SN-gate per peer, reassemble per (slot, channel) chain; a
                 // completed chain fans the SAME FramePayload Poll a whole Frame does
@@ -734,7 +851,7 @@ fn walk_multicast_inbound_reassembling<
 /// `multicast_glue` and MCU `multicast_drive` loops stop hand-mirroring the
 /// identical `sweep_reporting` + `sweep_with(abort_peer_chains)` pair. A
 /// non-reassembly loop calls the bare `sweep` instead.
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[cfg(feature = "reassembly")]
 pub fn sweep_multicast_reassembling<
     F,
     const MAX_PEERS: usize,
@@ -762,7 +879,12 @@ pub fn sweep_multicast_reassembling<
     });
 }
 
-#[cfg(all(test, feature = "session-multicast", feature = "codec-join"))]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "session-multicast",
+    feature = "codec-join"
+))]
 mod batch_walk_tests {
     use super::*;
     use crate::multicast_dispatch::MulticastConfig;
@@ -778,7 +900,7 @@ mod batch_walk_tests {
         MulticastParams {
             version: 0x09,
             whatami: WhatAmI::Peer,
-            zid: zid.to_vec(),
+            zid: crate::multicast_params::zid_vec(zid),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,

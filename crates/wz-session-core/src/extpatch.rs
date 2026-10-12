@@ -101,16 +101,25 @@ pub type PatchLevel = u8;
 pub const PATCH_BITS: u32 = PatchLevel::BITS;
 
 pub fn peer_patch(extensions: &[ExtEntryOwned]) -> PatchLevel {
+    extensions
+        .iter()
+        .find_map(patch_of_entry)
+        .unwrap_or(NO_PATCH)
+}
+
+/// One entry's part in [`peer_patch`]: the announced level when the entry is the
+/// patch extension with its z64 body, `None` otherwise (and the scan goes on).
+///
+/// Over [`ExtEntryView`](crate::ext_view::ExtEntryView) so a chain read where its
+/// message lies, entry by entry and never owned (the JOIN's, on a build with no
+/// allocator), answers by the rule the owned chain is answered by.
+pub fn patch_of_entry<E: crate::ext_view::ExtEntryView>(ext: &E) -> Option<PatchLevel> {
     let want = crate::ext_header::ext_eid(PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64);
-    for ext in extensions {
-        if crate::ext_header::ext_eid(ext.header) != want {
-            continue;
-        }
-        if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
-            return PatchLevel::try_from(z.value).unwrap_or(PatchLevel::MAX);
-        }
+    if ext.eid() != want {
+        return None;
     }
-    NO_PATCH
+    ext.zint()
+        .map(|value| PatchLevel::try_from(value).unwrap_or(PatchLevel::MAX))
 }
 
 /// R311y605 — the ENTRY wz puts on an Init, now built here.

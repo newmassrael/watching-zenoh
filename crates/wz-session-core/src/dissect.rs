@@ -8652,7 +8652,7 @@ mod tests {
         let base = MulticastParams {
             version: 0x09,
             whatami: WhatAmI::Peer,
-            zid: alloc::vec![0x01, 0x02, 0x03, 0x04],
+            zid: crate::multicast_params::zid_vec(&[0x01, 0x02, 0x03, 0x04]),
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,

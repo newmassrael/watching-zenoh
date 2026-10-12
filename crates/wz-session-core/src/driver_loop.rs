@@ -604,7 +604,10 @@ pub struct InPlaceRecord<'a> {
     feature = "codec-response",
     all(feature = "session-slot", feature = "codec-frame")
 ))]
-#[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "session-unicast", feature = "session-multicast")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug)]
 enum LentRecord<'a> {
     #[cfg(feature = "codec-push")]
@@ -630,7 +633,7 @@ impl<'a> InPlaceRecord<'a> {
     /// band. Built by the unicast receive path alone (and the tests that stand
     /// in for it).
     #[cfg(all(
-        any(test, feature = "session-unicast"),
+        any(test, feature = "session-unicast", feature = "session-multicast"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -638,7 +641,10 @@ impl<'a> InPlaceRecord<'a> {
             all(feature = "session-slot", feature = "codec-frame")
         )
     ))]
-    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "session-unicast", feature = "session-multicast")),
+        allow(dead_code)
+    )]
     fn of_frame(
         record: LentRecord<'a>,
         reliable: bool,
@@ -655,8 +661,14 @@ impl<'a> InPlaceRecord<'a> {
     }
 
     /// A Push record of a frame (see [`Self::reliable`] and its siblings).
-    #[cfg(all(feature = "codec-push", any(test, feature = "session-unicast")))]
-    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    #[cfg(all(
+        feature = "codec-push",
+        any(test, feature = "session-unicast", feature = "session-multicast")
+    ))]
+    #[cfg_attr(
+        not(any(feature = "session-unicast", feature = "session-multicast")),
+        allow(dead_code)
+    )]
     pub(crate) fn push_of_frame(
         push: &'a wz_codecs::push::Push<'a>,
         reliable: bool,
@@ -667,8 +679,14 @@ impl<'a> InPlaceRecord<'a> {
     }
 
     /// A Request record of a frame.
-    #[cfg(all(feature = "codec-request", any(test, feature = "session-unicast")))]
-    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    #[cfg(all(
+        feature = "codec-request",
+        any(test, feature = "session-unicast", feature = "session-multicast")
+    ))]
+    #[cfg_attr(
+        not(any(feature = "session-unicast", feature = "session-multicast")),
+        allow(dead_code)
+    )]
     pub(crate) fn request_of_frame(
         request: &'a wz_codecs::request::Request<'a>,
         reliable: bool,
@@ -679,8 +697,14 @@ impl<'a> InPlaceRecord<'a> {
     }
 
     /// A Response record of a frame.
-    #[cfg(all(feature = "codec-response", any(test, feature = "session-unicast")))]
-    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    #[cfg(all(
+        feature = "codec-response",
+        any(test, feature = "session-unicast", feature = "session-multicast")
+    ))]
+    #[cfg_attr(
+        not(any(feature = "session-unicast", feature = "session-multicast")),
+        allow(dead_code)
+    )]
     pub(crate) fn response_of_frame(
         response: &'a wz_codecs::response::Response<'a>,
         reliable: bool,
@@ -694,9 +718,12 @@ impl<'a> InPlaceRecord<'a> {
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-declare",
-        any(test, feature = "session-unicast")
+        any(test, feature = "session-unicast", feature = "session-multicast")
     ))]
-    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "session-unicast", feature = "session-multicast")),
+        allow(dead_code)
+    )]
     pub(crate) fn declare_of_frame(
         declare: &'a wz_codecs::declare::Declare<'a>,
         reliable: bool,
@@ -711,9 +738,12 @@ impl<'a> InPlaceRecord<'a> {
         feature = "session-slot",
         feature = "codec-frame",
         feature = "codec-response-final",
-        any(test, feature = "session-unicast")
+        any(test, feature = "session-unicast", feature = "session-multicast")
     ))]
-    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "session-unicast", feature = "session-multicast")),
+        allow(dead_code)
+    )]
     pub(crate) fn response_final_of_frame(
         response_final: &'a wz_codecs::response_final::ResponseFinal<'a>,
         reliable: bool,
@@ -732,9 +762,12 @@ impl<'a> InPlaceRecord<'a> {
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-frame",
-        any(test, feature = "session-unicast")
+        any(test, feature = "session-unicast", feature = "session-multicast")
     ))]
-    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "session-unicast", feature = "session-multicast")),
+        allow(dead_code)
+    )]
     pub(crate) fn interest_of_frame(
         interest: &'a wz_codecs::interest::Interest<'a>,
         reliable: bool,
@@ -829,6 +862,140 @@ impl<'a> InPlaceRecord<'a> {
             _ => None,
         }
     }
+}
+
+impl IterationEvent<'_> {
+    /// Whether the event hands the application a `Push`: a record lent where its
+    /// frame lies ([`IterationEvent::InPlace`]), or, on the heap profile, an owned
+    /// batch with a Push in it ([`IterationEvent::Poll`] of a `FramePayload`).
+    ///
+    /// The one question a consumer that only wants to know a Push arrived asks, whichever
+    /// profile delivered it: the two forms are different events, and a reader that
+    /// matched only one of them would miss every Push the other delivers.
+    #[cfg(feature = "codec-push")]
+    pub fn delivers_push(&self) -> bool {
+        match self {
+            IterationEvent::InPlace(record) => record.push().is_some(),
+            #[cfg(feature = "alloc")]
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
+                .iter()
+                .any(|m| matches!(m, crate::network_message::NetworkMessage::Push(_))),
+            _ => false,
+        }
+    }
+}
+
+/// Hand one record a walk LENT ([`crate::network_message::try_for_each_record`]) to
+/// `on_event` as the in-place event that carries it
+/// ([`IterationEvent::InPlace`]), with the carrying frame's own reliability, SN and
+/// priority. The one place a lent record becomes an event, shared by the unicast
+/// receive path and the multicast one, so a Push is delivered the same whichever
+/// transport it arrived on.
+///
+/// A record the walk read and judged and no consumer reads further
+/// ([`WalkedRecord::Skipped`](crate::network_message::WalkedRecord::Skipped)) raises
+/// no event. An OWNED record is the caller's (it builds the outcome that reports it),
+/// so it is not handled here.
+#[cfg(all(
+    feature = "codec-frame",
+    any(test, feature = "session-unicast", feature = "session-multicast")
+))]
+pub(crate) fn report_lent_record(
+    one: crate::network_message::WalkedRecord<'_>,
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    on_event: &mut dyn FnMut(IterationEvent<'_>),
+) {
+    use crate::network_message::WalkedRecord;
+    match one {
+        // Owned: the caller's, see above.
+        #[cfg(feature = "alloc")]
+        WalkedRecord::Owned(_) => {}
+        #[cfg(feature = "codec-push")]
+        WalkedRecord::Push(push) => on_event(IterationEvent::InPlace(
+            InPlaceRecord::push_of_frame(push, reliable, sn, priority),
+        )),
+        #[cfg(feature = "codec-request")]
+        WalkedRecord::Request(request) => on_event(IterationEvent::InPlace(
+            InPlaceRecord::request_of_frame(request, reliable, sn, priority),
+        )),
+        #[cfg(feature = "codec-response")]
+        WalkedRecord::Response(response) => on_event(IterationEvent::InPlace(
+            InPlaceRecord::response_of_frame(response, reliable, sn, priority),
+        )),
+        // The slot profile's control records, lent as the data records are.
+        #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+        WalkedRecord::Declare(declare) => on_event(IterationEvent::InPlace(
+            InPlaceRecord::declare_of_frame(declare, reliable, sn, priority),
+        )),
+        #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+        WalkedRecord::ResponseFinal(response_final) => on_event(IterationEvent::InPlace(
+            InPlaceRecord::response_final_of_frame(response_final, reliable, sn, priority),
+        )),
+        #[cfg(feature = "session-slot")]
+        WalkedRecord::Interest(interest) => on_event(IterationEvent::InPlace(
+            InPlaceRecord::interest_of_frame(interest, reliable, sn, priority),
+        )),
+        // Read and judged, and nothing reads it further: no event, and the walk
+        // counts it as a record dispatched.
+        #[cfg(feature = "session-slot")]
+        WalkedRecord::Skipped => {}
+    }
+}
+
+/// Walk a data payload's records where they lie, handing each to `on_event` as
+/// [`report_lent_record`] does, before the next is decoded: what a `Frame`'s payload
+/// and a reassembled chain are read through on a profile that lends every record
+/// ([`RecordForm::LentControl`](crate::network_message::RecordForm::LentControl)). A
+/// payload with no record is reported as one empty frame
+/// ([`DriverLoopOutcome::EmptyFrame`]), as the unicast walk reports it.
+///
+/// An error from a record ends the walk after the records before it were handed over.
+/// The walk takes no session and holds one record at a time, so it allocates nothing
+/// whatever the peer put in the payload.
+///
+/// The multicast receive path of a build with no allocator; the heap profile decodes a
+/// batch owned (`multicast_rx`).
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "session-slot",
+    feature = "session-multicast",
+    not(feature = "alloc")
+))]
+pub(crate) fn walk_lent_payload(
+    payload: &[u8],
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    on_event: &mut dyn FnMut(IterationEvent<'_>),
+) -> Result<(), crate::parse_error::InboundParseError> {
+    use crate::network_message::{new_record_buf, try_for_each_record, RecordForm};
+    let mut record = new_record_buf();
+    let mut dispatched = false;
+    try_for_each_record(payload, &mut record, RecordForm::LentControl, |one| {
+        report_lent_record(one, reliable, sn, priority, &mut *on_event);
+        dispatched = true;
+        Ok(())
+    })?;
+    if !dispatched {
+        #[cfg(feature = "alloc")]
+        on_event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages: alloc::vec::Vec::new(),
+            has_ext: false,
+            extensions: alloc::vec::Vec::new(),
+            priority,
+        }));
+        #[cfg(not(feature = "alloc"))]
+        on_event(IterationEvent::Poll(&DriverLoopOutcome::EmptyFrame {
+            reliable,
+            sn,
+            priority,
+        }));
+    }
+    Ok(())
 }
 
 /// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters
