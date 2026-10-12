@@ -273568,6 +273568,42 @@
         "A fail-fast layer hides every gate behind its first red: a round that repays a Layer C0 red runs the whole layer on a build host before it pushes, as this one did after the fact."
       ]
     },
+    "Round 3320": {
+      "decision_summary": "The Round 3318 regression was found by a boot that timed out, and nothing between the commit that moved the frame and that timeout compared a stack with the frames that run on it: a task stack is a number an image declares, a frame is a number only the compiler knows. A gate now holds them together. For each FreeRTOS image Layer Q builds, it reads the task's stack from the constant the task is created with, reads every function's frame from the linked ELF's disassembly (the pushes, the stack-pointer subtractions, and the movw/movt pair behind a register subtraction), and fails a frame over half the stack: a frame that big leaves the call chain nothing, which no measurement of the callees repairs. It runs before the boot, so a hang is preceded by its cause. The task's own entry function must be found with a frame, and an image with almost no frames is refused, not read as small ones. The hook runs only the part needing no build: each image's stack read once from its source.",
+      "changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: the gate, with --check for a built image, --population for the declared stacks, --selftest for the frame reader and the rule, and --list.",
+        "scripts/run-ci.sh: Layer C0 runs the selftest and the population; Layer Q runs the check after the Q.frt and Q.frt2 builds, before their boots.",
+        ".githooks/pre-push: the population check, which reads two source constants and builds nothing."
+      ],
+      "verification_bullets": [
+        "On a build host, on real images: the FreeRTOS demo's largest frame is 4,816 bytes against a 16,384-byte stack (budget 8,192) and the two-session image's is 15,152 against 32,768 (budget 16,384), both passing. The CONTROL: the disassembly of the Round 3317 image, which did not boot, reads a 28,056-byte frame and the gate fails it, naming the function; the disassemblies of the tree before the in-place work and of the Round 3318 repair read 4,816 and pass. A control built from synthetic text alone would not have shown the reader understands this toolchain's output.",
+        "On a build host: Layer C0 run whole with the gate wired passes in 230 s, its selftest and population among the legs, and the round-fed gate accounts for the hook's population leg.",
+        "NOT verified here: the hosted run of this push. The two-session image's largest frame is 92 percent of its budget; that is a measurement to watch and not a defect, since its runtime stack verdict reads a peak of 25,688 of 32,768 bytes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The Zephyr fixed-memory row (64 KB main stack, frames of 19 KB, 15 KB and 10 KB at most) is not under the gate yet: its ELF is built in a different job, by west. It is the same rule over a different image source."
+      ],
+      "publishable_decision_summary": "The Round 3318 regression was found by a boot that timed out, and nothing between the commit that moved the frame and that timeout compared a stack with the frames that run on it: a task stack is a number an image declares, a frame is a number only the compiler knows. A gate now holds them together. For each FreeRTOS image Layer Q builds, it reads the task's stack from the constant the task is created with, reads every function's frame from the linked ELF's disassembly (the pushes, the stack-pointer subtractions, and the movw/movt pair behind a register subtraction), and fails a frame over half the stack: a frame that big leaves the call chain nothing, which no measurement of the callees repairs. It runs before the boot, so a hang is preceded by its cause. The task's own entry function must be found with a frame, and an image with almost no frames is refused, not read as small ones. The hook runs only the part needing no build: each image's stack read once from its source.",
+      "publishable_changes_bullets": [
+        "scripts/lib/stack_frame_gate.py: the gate, with --check for a built image, --population for the declared stacks, --selftest for the frame reader and the rule, and --list.",
+        "scripts/run-ci.sh: Layer C0 runs the selftest and the population; Layer Q runs the check after the Q.frt and Q.frt2 builds, before their boots.",
+        ".githooks/pre-push: the population check, which reads two source constants and builds nothing."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, on real images: the FreeRTOS demo's largest frame is 4,816 bytes against a 16,384-byte stack (budget 8,192) and the two-session image's is 15,152 against 32,768 (budget 16,384), both passing. The CONTROL: the disassembly of the Round 3317 image, which did not boot, reads a 28,056-byte frame and the gate fails it, naming the function; the disassemblies of the tree before the in-place work and of the Round 3318 repair read 4,816 and pass. A control built from synthetic text alone would not have shown the reader understands this toolchain's output.",
+        "On a build host: Layer C0 run whole with the gate wired passes in 230 s, its selftest and population among the legs, and the round-fed gate accounts for the hook's population leg.",
+        "NOT verified here: the hosted run of this push. The two-session image's largest frame is 92 percent of its budget; that is a measurement to watch and not a defect, since its runtime stack verdict reads a peak of 25,688 of 32,768 bytes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The Zephyr fixed-memory row (64 KB main stack, frames of 19 KB, 15 KB and 10 KB at most) is not under the gate yet: its ELF is built in a different job, by west. It is the same rule over a different image source."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
