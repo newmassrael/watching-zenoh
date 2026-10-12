@@ -37,7 +37,7 @@
 # runtime its whole binary is about.
 #
 # The SET is pinned, not counted: a crate that starts failing is named, and a
-# NEW crate is refused until it is placed in one of the three tiers. That is
+# NEW crate is refused until it is placed in one of the named tiers. That is
 # this project's own rule — pin the set, not the count.
 #
 # Usage:
@@ -52,6 +52,26 @@ lib_only="wz-codecs wz-ap-demo-app wz-switchboard-example"
 # reaches `wz::runtime_tokio`; bare deletes the runtime, so there is no
 # reduced combination of it to grade.
 excluded="wz-ap-demo"
+# Tier 4: bare is not a form of the crate, its MINIMAL VALID PROFILE is. S9 made the
+# memory profile a choice the build must make (`alloc` for the heap forms,
+# `session-slot` for the static ones), and `wz-runtime-coop` refuses a build that
+# makes neither, so a crate that leans on it has no bare combination to grade. It
+# is graded with the smallest profile that is one, `<crate>:<feature>`, all targets,
+# which keeps its code and its tests under the same `-D warnings` the other crates
+# are under. The heap form is the crate's default, so the lanes that build defaults
+# already reach it.
+profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory"
+
+# The minimal profile feature of $1, or nothing when the crate is not in tier 4.
+profile_of() {
+    local entry
+    for entry in $profile_min; do
+        if [[ "${entry%%:*}" == "$1" ]]; then
+            echo "${entry#*:}"
+            return
+        fi
+    done
+}
 
 cd "$(dirname "$0")/../../crates" || exit 1
 
@@ -85,6 +105,8 @@ if [[ $list_members -eq 1 ]]; then
             echo "$pkg excluded"
         elif [[ " $lib_only " == *" $pkg "* ]]; then
             echo "$pkg lib-only"
+        elif [[ -n "$(profile_of "$pkg")" ]]; then
+            echo "$pkg profile"
         else
             echo "$pkg all-targets"
         fi
@@ -99,9 +121,13 @@ for pkg in "${members[@]}"; do
     if [[ " $excluded " == *" $pkg "* ]]; then
         continue
     fi
+    profile="$(profile_of "$pkg")"
     if [[ " $lib_only " == *" $pkg "* ]]; then
         mode="lib-only"
         args=(clippy -p "$pkg" --no-default-features --quiet)
+    elif [[ -n "$profile" ]]; then
+        mode="all-targets, profile $profile"
+        args=(clippy -p "$pkg" --no-default-features --features "$profile" --all-targets --quiet)
     else
         mode="all-targets"
         args=(clippy -p "$pkg" --no-default-features --all-targets --quiet)
@@ -123,7 +149,11 @@ done
 # exempt it. Only checkable on the SWEEP: a subset run legitimately names none
 # of them. Same rule the literal-key gate and the C1bz budget already follow.
 if [[ $# -eq 0 ]]; then
-    for named in $lib_only $excluded; do
+    profile_names=""
+    for entry in $profile_min; do
+        profile_names="$profile_names ${entry%%:*}"
+    done
+    for named in $lib_only $excluded $profile_names; do
         found=0
         for m in "${members[@]}"; do
             [[ "$m" == "$named" ]] && found=1 && break
