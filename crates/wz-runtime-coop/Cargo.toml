@@ -103,6 +103,11 @@ alloc = [
     "wz-runtime-core/alloc",
     "dep:portable-atomic-util",
     "portable-atomic-util/alloc",
+    # The session core's own heap forms, when the session core is in the build: a
+    # heap build that names `session-unicast` or `reassembly` beside `alloc` gets
+    # the owned frame forms that code reads, as it did when `session-unicast`
+    # implied `alloc`.
+    "wz-session-core?/alloc",
 ]
 
 # R311ih — static scouting mode on the MCU profile. The MCU session
