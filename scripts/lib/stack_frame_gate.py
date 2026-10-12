@@ -69,7 +69,7 @@ MIN_FRAMED_FUNCTIONS = 50
 @dataclass(frozen=True)
 class Image:
     key: str
-    elf: str  # relative to the repository root
+    elf: str | None  # relative to the repository root; None where the build dir is the caller's
     source: str  # the file that declares the task's stack
     pattern: str  # one capture group: the stack, in `unit` bytes
     unit: int
@@ -95,6 +95,17 @@ IMAGES = (
         pattern=r"const WZ_TASK_STACK_WORDS: u16 = (\d+);",
         unit=4,
         entry="wz_task",
+    ),
+    # The Zephyr node on the fixed-memory profile: its main thread's stack is the overlay's
+    # `CONFIG_MAIN_STACK_SIZE`, and the image is built by west into a directory Layer Qzb
+    # owns, so the caller names the ELF and the objdump of the SDK that linked it.
+    Image(
+        key="zephyr-fixed",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_fixed.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="fixed_node::run",
     ),
 )
 
@@ -206,7 +217,9 @@ def judge(
     return ok, lines
 
 
-def objdump() -> str:
+def objdump(chosen: str | None) -> str:
+    if chosen:
+        return chosen
     for name in ("arm-none-eabi-objdump", "llvm-objdump", "rust-objdump"):
         path = shutil.which(name)
         if path:
@@ -214,15 +227,17 @@ def objdump() -> str:
     raise SystemExit("stack-frame: no objdump on PATH (arm-none-eabi-objdump, llvm-objdump)")
 
 
-def check(key: str) -> int:
+def check(key: str, elf_arg: str | None, objdump_arg: str | None) -> int:
     image = next((i for i in IMAGES if i.key == key), None)
     if image is None:
         raise SystemExit(f"stack-frame: unknown image `{key}` (have {[i.key for i in IMAGES]})")
-    elf = ROOT / image.elf
+    if image.elf is None and not elf_arg:
+        raise SystemExit(f"stack-frame: {key}: its ELF is built where the caller says; pass --elf")
+    elf = Path(elf_arg) if elf_arg else ROOT / str(image.elf)
     if not elf.is_file():
-        raise SystemExit(f"stack-frame: {key}: {image.elf} is not built")
+        raise SystemExit(f"stack-frame: {key}: {elf} is not built")
     proc = subprocess.run(
-        [objdump(), "-d", "-C", str(elf)], capture_output=True, text=True, check=False
+        [objdump(objdump_arg), "-d", "-C", str(elf)], capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:
         raise SystemExit(f"stack-frame: {key}: objdump failed: {proc.stderr[-300:]}")
@@ -314,6 +329,8 @@ def main() -> int:
     mode.add_argument("--population", action="store_true", help="read every declared stack")
     mode.add_argument("--selftest", action="store_true", help="drive the reader and the rule")
     mode.add_argument("--list", action="store_true", help="print the image keys")
+    parser.add_argument("--elf", help="the built ELF, for an image whose build dir is the caller's")
+    parser.add_argument("--objdump", help="the objdump of the toolchain that linked the ELF")
     args = parser.parse_args()
     if args.list:
         print("\n".join(i.key for i in IMAGES))
@@ -322,7 +339,7 @@ def main() -> int:
         return selftest()
     if args.population:
         return population()
-    return check(args.check)
+    return check(args.check, args.elf, args.objdump)
 
 
 if __name__ == "__main__":
