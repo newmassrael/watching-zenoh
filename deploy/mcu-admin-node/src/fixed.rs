@@ -74,9 +74,18 @@ const TIMERS: usize = 4;
 const _: () = {
     use wz_session_core::caps::{MAX_TASKS, MAX_TIMERS};
     use wz_session_core::session_slot_pool_mcu::{SLOT_COUNT, SLOT_SIZE};
-    assert!(SESSIONS <= SLOT_COUNT, "SESSIONS exceeds the generated session table");
-    assert!(TASKS <= MAX_TASKS, "TASKS exceeds the deploy file's max_tasks");
-    assert!(TIMERS <= MAX_TIMERS, "TIMERS exceeds the deploy file's max_timers");
+    assert!(
+        SESSIONS <= SLOT_COUNT,
+        "SESSIONS exceeds the generated session table"
+    );
+    assert!(
+        TASKS <= MAX_TASKS,
+        "TASKS exceeds the deploy file's max_tasks"
+    );
+    assert!(
+        TIMERS <= MAX_TIMERS,
+        "TIMERS exceeds the deploy file's max_timers"
+    );
     assert!(
         SessionSlots::<
             CoopRuntime<SystickClockRef>,
