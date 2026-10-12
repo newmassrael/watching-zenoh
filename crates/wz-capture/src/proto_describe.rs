@@ -29,7 +29,7 @@
 //!
 //! A message and a field also carry the comments `protoc` attaches to them (the
 //! leading and the trailing comment, by `protoc`'s own rule, which the lexer
-//! implements: [`crate::proto_lex::Gap`]) and every option written on them, in the
+//! implements: `crate::proto_lex::Gap`) and every option written on them, in the
 //! order written, none dropped and none judged. A consumer that builds a form from
 //! the schema thereby reads the words the author wrote about a field and the
 //! options the author set on it (an extension's option included) from the one

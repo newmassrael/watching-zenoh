@@ -38,7 +38,7 @@
 //!   `*` and a newline, a continuation line losing its leading white space and
 //!   one `*`. A message's trailing comment is the one after its `{`. The rule
 //!   for which comment belongs to which declaration is `protoc`'s and is stated
-//!   on [`crate::proto_lex::Gap`]: a comment on the line of the declaration
+//!   on `crate::proto_lex::Gap`: a comment on the line of the declaration
 //!   before trails that one; a comment on the lines before a declaration, with
 //!   no blank line between, leads it; a blank line detaches a comment from both;
 //! * `options` is an array, empty for none, of the options written on the field

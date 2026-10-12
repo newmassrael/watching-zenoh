@@ -130,7 +130,9 @@ pub fn keyexpr_diagnose_json(keyexpr: &str) -> String {
     out
 }
 
-/// The two sides of [`keyexpr_relate_json`], the words of its `which`.
+/// The two sides of `keyexpr_relate_json`, the words of its `which`. (A code span
+/// and not a link: that function exists only with `keyexpr-relation`, and the
+/// documentation of the default build must not name an item it does not have.)
 pub const RELATE_SIDES: [&str; 2] = ["a", "b"];
 
 /// The relation of two key expressions, which set one covers of the other, WITHOUT
