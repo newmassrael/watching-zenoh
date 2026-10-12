@@ -273096,6 +273096,40 @@
         "The footprint of the final tree is read by the hosted Layer Q.5 of the run that carries this push."
       ]
     },
+    "Round 3309": {
+      "decision_summary": "The hosted run of f1a42b27 was read while it ran and two steps were red. Layer C1bw failed because cargo doc -D warnings of wz-capture refused three doc links added with the schema description and the relation door: two public docs linked the private lexer type Gap, and one linked keyexpr_relate_json, a function that exists only with the keyexpr-relation feature, so the default build documented an item it does not have. The three are code spans now; cargo doc with warnings denied passes on a build host and the C1bz budget of wz-capture holds. Layer E failed once, in pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping, where the real zenoh-pico z_ping could not open a session against the z_pong drop-in. That lane passed in every hosted run read before it, 31 of its 32 tests passed here, and nothing this push changed touches it, so it is recorded as one observation and not as a repaired red; it is to be measured, not retried.",
+      "changes_bullets": [
+        "wz-capture diagnose_json: the doc of `RELATE_SIDES` names `keyexpr_relate_json` as a code span with the reason it is not a link.",
+        "wz-capture proto_describe and proto_describe_json: the two mentions of the lexer's `Gap` are code spans, not links to a private item."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host, never the coordinating host: cargo doc -p wz-capture --no-deps with RUSTDOCFLAGS=-Dwarnings (exit 0); Layer C1bz for the crate wz-capture alone (WZ_C1BZ_ONLY=wz-capture; it passed, saying the stale-budget-line check needs the full lane).",
+        "Not verified here: the full C1bz lane; the other cargo doc targets of Layer C1bw (the accessor-reach census reads the doc build and was not run); the hosted run of this push; the Layer E observation, which was not reproduced or measured."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Layer E, pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping (crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs, assert at line 4756): z_ping printed \"Unable to open session!\" once against the drop-in, in the run of f1a42b27 (job 114803926962). Unexplained. Suspect, not shown: the readiness probe (wait_for_tcp_accept_alive) connects to the drop-in before z_ping does, and the drop-in holds one accepted session at a time. Next step: run this test about forty times on a build host, read the z_pong side when it fails, and fix at the cause; a retry would hide it.",
+        "The accessor-reach census and the rest of Layer C1bw read the doc build of wz-capture, which failed before them in that run: read their verdicts on the run that carries this push."
+      ],
+      "publishable_decision_summary": "The hosted run of f1a42b27 was read while it ran and two steps were red. Layer C1bw failed because cargo doc -D warnings of wz-capture refused three doc links added with the schema description and the relation door: two public docs linked the private lexer type Gap, and one linked keyexpr_relate_json, a function that exists only with the keyexpr-relation feature, so the default build documented an item it does not have. The three are code spans now; cargo doc with warnings denied passes on a build host and the C1bz budget of wz-capture holds. Layer E failed once, in pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping, where the real zenoh-pico z_ping could not open a session against the z_pong drop-in. That lane passed in every hosted run read before it, 31 of its 32 tests passed here, and nothing this push changed touches it, so it is recorded as one observation and not as a repaired red; it is to be measured, not retried.",
+      "publishable_changes_bullets": [
+        "wz-capture diagnose_json: the doc of `RELATE_SIDES` names `keyexpr_relate_json` as a code span with the reason it is not a link.",
+        "wz-capture proto_describe and proto_describe_json: the two mentions of the lexer's `Gap` are code spans, not links to a private item."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host, never the coordinating host: cargo doc -p wz-capture --no-deps with RUSTDOCFLAGS=-Dwarnings (exit 0); Layer C1bz for the crate wz-capture alone (WZ_C1BZ_ONLY=wz-capture; it passed, saying the stale-budget-line check needs the full lane).",
+        "Not verified here: the full C1bz lane; the other cargo doc targets of Layer C1bw (the accessor-reach census reads the doc build and was not run); the hosted run of this push; the Layer E observation, which was not reproduced or measured."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer E, pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping (crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs, assert at line 4756): z_ping printed \"Unable to open session!\" once against the drop-in, in the run of f1a42b27 (job 114803926962). Unexplained. Suspect, not shown: the readiness probe (wait_for_tcp_accept_alive) connects to the drop-in before z_ping does, and the drop-in holds one accepted session at a time. Next step: run this test about forty times on a build host, read the z_pong side when it fails, and fix at the cause; a retry would hide it.",
+        "The accessor-reach census and the rest of Layer C1bw read the doc build of wz-capture, which failed before them in that run: read their verdicts on the run that carries this push."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
