@@ -131,13 +131,11 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
         "the second of the pair, released beside the first and for the same "
         "child",
     ),
-    "crates/wz-runtime-tokio-test-support/src/lib.rs::free_port::listener": (
-        "listen-picker",
-        "free_port returns a bare u16 for a C ABI that must bind the number "
-        "itself; the number is drawn from outside the kernel's autoselect range, "
-        "so no bind(:0) in the process can be given it, and its own doc states "
-        "the residue a u16 cannot close",
-    ),
+    # `free_port` has no row any more, and that is the repair rather than a gap:
+    # it no longer binds `:0` and reads the number back, it binds a number it
+    # chose outside the kernel's autoselect range (`bind_unautoselected`), so
+    # the shape this gate looks for -- a number the KERNEL assigned and the
+    # socket then released -- does not exist in it.
     "crates/wz-runtime-tokio-test-support/src/lib.rs::old_shape::<temp>": (
         "bind-probe",
         "the old bind-read-drop shape reproduced ON PURPOSE, to count how often "

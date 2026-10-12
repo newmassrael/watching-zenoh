@@ -615,7 +615,14 @@ ABI_USE = re.compile(r"^\s*pub\s+use\b")
 #: non-dev edges. Empty means no library consumes it at all.
 TEST_ONLY_REACH: dict[str, frozenset[str]] = {
     "wz-codecs-test-support": frozenset(),
-    "wz-runtime-tokio-test-support": frozenset({"wz-e2e-harness"}),
+    # `wz-integration-tests` (a `publish = false` library) became a consumer
+    # through a normal edge when `PortReservation` began drawing its numbers
+    # from `bind_unautoselected`, so that the child reservations and `free_port`
+    # share one picker; `wz-host-interop-tests` reaches it through that library.
+    # Both are test-only crates and the predicate above holds them.
+    "wz-runtime-tokio-test-support": frozenset(
+        {"wz-e2e-harness", "wz-integration-tests", "wz-host-interop-tests"}
+    ),
 }
 
 
