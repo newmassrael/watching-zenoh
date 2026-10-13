@@ -1571,6 +1571,30 @@ impl RouterSessionsView {
     }
 }
 
+/// The sessions a router holds, as the lifecycle close query reads them: every
+/// registered face and every joined aggregated link. The linkstate peer's
+/// directory (`LinkstateSessionDirectory`) for the third host, with the same
+/// reasoning: a close ends the session with a peer, which is every link to it.
+#[cfg(feature = "session-close-ingress")]
+pub struct RouterSessionDirectory {
+    faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
+    joined: Rc<RefCell<HashMap<FaceId, Arc<SessionLinkActions>>>>,
+}
+
+#[cfg(feature = "session-close-ingress")]
+impl wz_session_core::lifecycle_query::SessionDirectory for RouterSessionDirectory {
+    fn order_close(&self, peer_zid: &[u8]) -> wz_session_core::lifecycle_query::CloseOrder {
+        let faces = self.faces.borrow();
+        let joined = self.joined.borrow();
+        let links: Vec<&SessionLinkActions> = faces
+            .values()
+            .map(|face| &*face.actions)
+            .chain(joined.values().map(|link| &**link))
+            .collect();
+        wz_session_core::lifecycle_query::order_close_over(links, peer_zid)
+    }
+}
+
 /// R2685 — a read-only handle over a router's live DECLARATION tables,
 /// rendering the admin `subscriber/**` and `queryable/**` introspection legs.
 ///
@@ -1838,6 +1862,13 @@ pub struct RouterForwarder {
     /// [`LinkstateNetView`] already makes for the two graphs. Use sites are
     /// unchanged — `Rc<RefCell<T>>` derefs to `RefCell<T>`.
     faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
+    /// The joined aggregated links of the sessions in [`Self::faces`]: a second or
+    /// later physical link of a peer's session is not a face of its own, so the
+    /// table above holds only the primary. Kept so a lifecycle close can order
+    /// EVERY link to a peer closed ([`Self::lifecycle_directory`]), the joined ones
+    /// as well as the registered one.
+    #[cfg(feature = "session-close-ingress")]
+    joined_links: Rc<RefCell<HashMap<FaceId, Arc<SessionLinkActions>>>>,
     /// R2639 — the gossip AUTOCONNECT policy, part of the residual that named
     /// `gossip` / `gossip_multihop` / `gossip_target` / `AutoConnect` as never
     /// wired into this forwarder's nets.
@@ -2353,6 +2384,8 @@ impl RouterForwarder {
                 timestamping,
             ),
             faces: Rc::new(RefCell::new(HashMap::new())),
+            #[cfg(feature = "session-close-ingress")]
+            joined_links: Rc::new(RefCell::new(HashMap::new())),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
             // enables autoconnect behaves byte-for-byte as before.
             autoconnect: Cell::new(AutoConnect::disabled(self_zid)),
@@ -2593,6 +2626,17 @@ impl RouterForwarder {
     #[cfg(feature = "adminspace-core")]
     pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
         self.sessions_view().admin_sessions()
+    }
+
+    /// A handle over the sessions this router holds, for the lifecycle queries to
+    /// close them by (`wz_session_core::lifecycle_query`); see
+    /// [`RouterSessionDirectory`].
+    #[cfg(feature = "session-close-ingress")]
+    pub fn lifecycle_directory(&self) -> RouterSessionDirectory {
+        RouterSessionDirectory {
+            faces: Rc::clone(&self.faces),
+            joined: Rc::clone(&self.joined_links),
+        }
     }
 
     /// A read-only handle over the live face set — the admin host's `sessions[]`
@@ -8111,6 +8155,27 @@ impl FaceForwarder for RouterForwarder {
         true
     }
 
+    /// A joined link of a peer's session: remembered so a lifecycle close reaches
+    /// it. Routing is unchanged -- the router has always served a joined link's
+    /// inbound as the primary's, and this adds no routing state.
+    #[cfg(feature = "session-close-ingress")]
+    fn register_joined(
+        &self,
+        joined_id: FaceId,
+        _primary_id: FaceId,
+        actions: &Arc<SessionLinkActions>,
+    ) {
+        self.joined_links
+            .borrow_mut()
+            .insert(joined_id, Arc::clone(actions));
+    }
+
+    /// The joined link left the aggregate.
+    #[cfg(feature = "session-close-ingress")]
+    fn deregister_joined(&self, joined_id: FaceId) {
+        self.joined_links.borrow_mut().remove(&joined_id);
+    }
+
     /// Item 751 -- the pin refuses a remote its region rules cannot place
     /// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_region_of(`
     /// answers an error), and so does this router. Every region the rules can
@@ -9249,6 +9314,52 @@ mod tests {
             3,
             "the view is live, not a snapshot taken when it was made"
         );
+    }
+
+    /// The lifecycle close query reads the router's held sessions: a close orders
+    /// every link to the peer closed (the registered face and a link joined to it,
+    /// across both tiers) and leaves another peer's session alone. The router
+    /// remembers joined links only for this, so the second link is the case under
+    /// test, and the control is the peer a close must not touch.
+    #[cfg(feature = "session-close-ingress")]
+    #[test]
+    fn a_lifecycle_close_orders_every_link_to_the_peer_and_no_other() {
+        use wz_session_core::lifecycle_query::{CloseOrder, SessionDirectory};
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (primary, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (joined, _s2) = face(zid(0xAA), WIRE_ROUTER);
+        let (other, _s3) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &primary);
+        fwd.register(FaceId(1), &other);
+        fwd.register_joined(FaceId(2), FaceId(0), &joined);
+
+        let directory = fwd.lifecycle_directory();
+        assert_eq!(
+            directory.order_close(zid(0xAA).as_slice()),
+            CloseOrder {
+                newly_ordered: 2,
+                already_ordered: 0
+            }
+        );
+        assert!(primary.close_ordered() && joined.close_ordered());
+        assert!(!other.close_ordered(), "CONTROL: another peer's session");
+        assert_eq!(
+            directory.order_close(zid(0xAA).as_slice()),
+            CloseOrder {
+                newly_ordered: 0,
+                already_ordered: 2
+            }
+        );
+
+        // The joined link leaving the aggregate leaves it out of the next close.
+        let (second, _s4) = face(zid(0xDD), WIRE_PEER);
+        let (second_joined, _s5) = face(zid(0xDD), WIRE_PEER);
+        fwd.register(FaceId(3), &second);
+        fwd.register_joined(FaceId(4), FaceId(3), &second_joined);
+        fwd.deregister_joined(FaceId(4));
+        assert_eq!(directory.order_close(zid(0xDD).as_slice()).newly_ordered, 1);
+        assert!(!second_joined.close_ordered());
     }
 
     /// R2860 — the router reports each face's NEGOTIATED `shm`, per face.

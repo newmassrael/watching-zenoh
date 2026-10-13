@@ -249,6 +249,11 @@ preset-ap-full = [
     # the key declared here and absent from the preset, the AP-full build would
     # compile the cache in with no path that turns it on.
     "routing-interceptor-hotreload",
+    # The session lifecycle queries (`--session-lifecycle`), the demo key for the
+    # `session-close-ingress` atom the facade preset carries: with the key declared
+    # and absent here, the AP-full binary would compile the ingress in with no argv
+    # that hosts it.
+    "session-close-ingress",
     "tls",
     "quic",
     "quic-datagram",
@@ -684,6 +689,13 @@ session-extqos = ["transport-qos", "wz/session-extqos"]
 # inert. The old second arm applied every write unpermitted, which upstream never
 # does. Layer E6 builds the binary with this feature.
 adminspace-write = ["wz/adminspace-write"]
+# The session lifecycle queries -- a GET that closes the session with a peer and is
+# answered with a verdict, and a GET that lists the verbs the node has. Forwards the
+# facade's `session-close-ingress` (the seam; `wz-session-core::lifecycle_query` is
+# the answerer) and compiles the demo's `--session-lifecycle` /
+# `--session-close-permit` host. Implies `routing-peer`: the sessions it closes are
+# the ones a mesh forwarder holds, and the directory is read off its face table.
+session-close-ingress = ["routing-peer", "wz/session-close-ingress"]
 # R311y508 — forwards the version-keyed per-(face, keyexpr) interceptor cache.
 # Implies `routing-peer` because the cache lives on the peer forwarder's ingress
 # admit path; a demo built without the peer mode has no path to cache for.

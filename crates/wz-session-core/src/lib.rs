@@ -1760,6 +1760,17 @@ pub mod reconnect;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod drive;
 
+/// The session lifecycle as a QUERY: close a session and be answered with a
+/// verdict, and ask a node which lifecycle verbs it has. The verb is the one
+/// [`drive::SessionLifecycleInjector`] takes as a Push, with a reply path.
+#[cfg(all(
+    feature = "storage-profile",
+    feature = "session-unicast",
+    feature = "session-close-ingress",
+    feature = "alloc"
+))]
+pub mod lifecycle_query;
+
 /// SCE-generated multicast session-LEVEL state machine (Round A). The emit
 /// comes from `sources/session/session_fsm_multicast.scxml`; R311y22b:
 /// COMMITTED at `out/wz-session-core/session_fsm_multicast_sm.rs`, `include!`-ed

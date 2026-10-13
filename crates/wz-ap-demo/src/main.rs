@@ -849,6 +849,8 @@ fn demo_main() -> ExitCode {
                     config_writable,
                     config_write_permit,
                     no_admin_read,
+                    session_lifecycle: rest.iter().any(|a| a == "--session-lifecycle"),
+                    session_close_permit: rest.iter().any(|a| a == "--session-close-permit"),
                     metadata: metadata.clone(),
                     put_key,
                     put_payload,
@@ -1153,6 +1155,9 @@ fn demo_main() -> ExitCode {
                     // named and left open. Parsed identically (a bare presence flag) so
                     // one spelling means one thing across run-modes.
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
+                    // The lifecycle queries: the same two bare flags `--peer` parses.
+                    session_lifecycle: rest.iter().any(|a| a == "--session-lifecycle"),
+                    session_close_permit: rest.iter().any(|a| a == "--session-close-permit"),
                     // R2393 (§5.23 adminspace-write) — the write-side twin, the SAME
                     // bare presence flag `--peer` and `--storage-host` parse, so one
                     // spelling means one thing across every run-mode that hosts an
@@ -2101,6 +2106,22 @@ fn demo_main() -> ExitCode {
             "wz-ap-demo: --reply and --reply-err are mutually exclusive; a queryable \
              answers a Query with an OK reply OR an ERR reply, not both",
         );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    // The session lifecycle queries are hosted by the two mesh run-modes, and the
+    // permit means nothing without the host: refused rather than ignored, for the
+    // reason the pair-checks above give.
+    let has_flag = |flag: &str| rest.iter().any(|a| a == flag);
+    if has_flag("--session-lifecycle") && !(has_flag("--peer") || has_flag("--router-hat")) {
+        eprintln!("wz-ap-demo: --session-lifecycle requires --peer or --router-hat");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if has_flag("--session-close-permit") && !has_flag("--session-lifecycle") {
+        eprintln!("wz-ap-demo: --session-close-permit requires --session-lifecycle");
         eprintln!();
         print_usage();
         return ExitCode::from(2);

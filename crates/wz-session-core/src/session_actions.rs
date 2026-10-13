@@ -501,6 +501,13 @@ pub struct OutOfBandState {
     /// R2678 — close this session (`session.close`).
     #[cfg(feature = "session-close-ingress")]
     pub close: bool,
+    /// A close has been ASKED of this session at least once, ever. `close` above
+    /// is take-once (the drive loop clears it when it raises the event), so it
+    /// cannot say whether a close was already ordered; this is the sticky half,
+    /// set with it and never cleared. What a lifecycle query reads to tell a
+    /// session it has just ordered closed from one already on its way out.
+    #[cfg(feature = "session-close-ingress")]
+    pub close_ordered: bool,
     /// R2923 — a message that could not wait out congestion found no room on
     /// its link in `wait_before_close`: close the session as unresponsive
     /// (`tx.congestion.exhaust`), as zenoh's `handle_push_result` closes its
@@ -7941,7 +7948,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// rather than incidental.
     #[cfg(feature = "session-close-ingress")]
     pub fn request_close(&self) {
-        self.core.out_of_band.raise(|s| s.close = true);
+        self.core.out_of_band.raise(|s| {
+            s.close = true;
+            s.close_ordered = true;
+        });
+    }
+
+    /// Whether a close has ever been asked of this session through
+    /// [`Self::request_close`]: true from the first request on, whether or not
+    /// the drive loop has raised it yet. A session the peer or a timeout closed
+    /// first is not reported here; it leaves the node's session table when its
+    /// drive loop ends.
+    #[cfg(feature = "session-close-ingress")]
+    pub fn close_ordered(&self) -> bool {
+        self.core.out_of_band.take(|s| s.close_ordered)
     }
 
     /// R2678 — take the close request, if one is standing.

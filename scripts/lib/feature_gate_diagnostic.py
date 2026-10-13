@@ -414,11 +414,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # gates is compound: the feature has exactly ONE `#[cfg]` site
                 # in this package, and it is that module's.
                 "runtime-tokio-uring",
-                # R2973 — `session-close-ingress`: see the note in
-                # `NO_PUBLIC_PATH` above. One public site
-                # (`pub mod session_lifecycle_open`), gated on an `all(..)` of six
-                # features, so every public item it gates is compound.
-                "session-close-ingress",
+                # R2973 — `session-close-ingress` LEFT this list when the lifecycle
+                # queries gave it public sites under a SIMPLE cfg (the
+                # `lifecycle_query` re-export, the two session directories and the
+                # forwarders' `lifecycle_directory`): it was deferred only because
+                # its one public site was compound, and a probe can now name it.
                 "storage-mgr-dynamic-volume-loading",
                 "time-hlc",
                 "transport-link-raweth",

@@ -250,6 +250,18 @@ pub(crate) fn print_usage() {
     eprintln!("                             this node holds at once. A peer arriving at the bound");
     eprintln!("                             is refused before it enters the table; default 1000,");
     eprintln!("                             which is zenoh's own.");
+    eprintln!("    --session-lifecycle      host the session lifecycle queries (the");
+    eprintln!("                             `session-close-ingress` build feature): a GET on");
+    eprintln!("                             @/<zid>/<role>/session/close/<peer-zid> closes the");
+    eprintln!("                             WHOLE session with that peer (every link) and is");
+    eprintln!("                             answered with one JSON verdict (closing / already_");
+    eprintln!("                             closed / not_found / refused), and a GET on");
+    eprintln!("                             @/<zid>/<role>/session/verbs lists the verbs bound.");
+    eprintln!("                             Requires --peer or --router-hat.");
+    eprintln!("    --session-close-permit   let that close run. Without it every close is");
+    eprintln!("                             answered `refused`; the verbs query still lists");
+    eprintln!("                             `close`, because the node knows it. Requires");
+    eprintln!("                             --session-lifecycle.");
     eprintln!("    --router-link-weight <zid>=<weight>");
     eprintln!(
         "                             zenoh routing.router.linkstate.transport_weights — the"

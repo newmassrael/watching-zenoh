@@ -540,6 +540,15 @@ pub use wz_session_core::sink;
 /// `&QueryEvent` and `&mut ReplyEmitter`).
 pub use wz_session_core::query_sink;
 
+/// The session lifecycle as a QUERY: close a session and be answered with a
+/// verdict, and ask which lifecycle verbs a node has. Re-exported so a host that
+/// binds the `session-close-ingress` seam names it beside `query_sink`; the
+/// directories over this runtime's face tables are
+/// `linkstate_forward::LinkstateSessionDirectory` and
+/// `router_forward::RouterSessionDirectory`.
+#[cfg(feature = "session-close-ingress")]
+pub use wz_session_core::lifecycle_query;
+
 /// R311gb-3c — reply-delivery seam (`ReplyKind` + `ReplyView` accessor
 /// contract + `ReplySink` DIP trait + the `alloc` `BoxedReplySink`
 /// closure adapter). Re-exported so AP consumers name

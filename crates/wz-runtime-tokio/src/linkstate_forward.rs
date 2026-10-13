@@ -381,7 +381,11 @@ pub struct LinkstateForwarder {
     /// Held faces keyed by id — each carries its send seam and (once its zid
     /// is known) its graph link. The single source for both "who do I flood
     /// to" and "which graph link did this list arrive on".
-    faces: RefCell<HashMap<FaceId, FaceState>>,
+    ///
+    /// Shared (`Rc`) so a handle over the held sessions can be given to a query
+    /// handler this forwarder stores ([`Self::lifecycle_directory`]); the handler
+    /// is registered INTO the forwarder and so cannot borrow it back at query time.
+    faces: Rc<RefCell<HashMap<FaceId, FaceState>>>,
     /// Running total of link-state lists ingested — the control-plane work
     /// witness.
     ingested: Cell<usize>,
@@ -673,7 +677,10 @@ pub struct LinkstateForwarder {
     /// shared-memory slices that arrive on the joined link are acknowledged through THIS link's
     /// handoff (`SessionLinkActions::acknowledge_shm_slice`), whose counters are the ones the
     /// joined link's peer named, and not through the primary face's.
-    joined_faces: RefCell<HashMap<FaceId, JoinedFace>>,
+    ///
+    /// Shared with [`Self::lifecycle_directory`], for the reason `faces` is: a close
+    /// of a peer's session closes every link to it, the joined ones included.
+    joined_faces: Rc<RefCell<HashMap<FaceId, JoinedFace>>>,
     /// R3123 -- the session actions of the JOINED link the message being forwarded arrived on,
     /// for the span of one [`forward`](FaceForwarder::forward) call, or `None` when it arrived on
     /// a face of its own. The relay opens its pass on it, so a slice is acknowledged to the peer
@@ -1148,7 +1155,7 @@ impl LinkstateForwarder {
                 self_whatami,
                 timestamping,
             ),
-            faces: RefCell::new(HashMap::new()),
+            faces: Rc::new(RefCell::new(HashMap::new())),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             #[cfg(feature = "transport-shm")]
@@ -1187,7 +1194,7 @@ impl LinkstateForwarder {
             sub_redelivery: RefCell::new(VecDeque::new()),
             query_redelivery: RefCell::new(VecDeque::new()),
             forward_depth: Cell::new(0),
-            joined_faces: RefCell::new(HashMap::new()),
+            joined_faces: Rc::new(RefCell::new(HashMap::new())),
             receiving_link: RefCell::new(None),
             trees_dirty: Cell::new(false),
             trees_delay,
@@ -1715,6 +1722,34 @@ impl crate::interceptor::InterceptorSink for LinkstateForwarder {
 struct JoinedFace {
     primary: FaceId,
     actions: Arc<SessionLinkActions>,
+}
+
+/// The sessions a linkstate peer holds, as the lifecycle close query reads them:
+/// every primary face and every joined aggregated link, which are the links of
+/// the sessions this node has.
+///
+/// A close orders EVERY link to the peer closed, not only the registered face: an
+/// aggregate is one face in the table and several drive loops, each tearing down
+/// its own link, so ordering the primary alone would leave the joined links up
+/// under a session the caller was told is closing.
+#[cfg(feature = "session-close-ingress")]
+pub struct LinkstateSessionDirectory {
+    faces: Rc<RefCell<HashMap<FaceId, FaceState>>>,
+    joined: Rc<RefCell<HashMap<FaceId, JoinedFace>>>,
+}
+
+#[cfg(feature = "session-close-ingress")]
+impl wz_session_core::lifecycle_query::SessionDirectory for LinkstateSessionDirectory {
+    fn order_close(&self, peer_zid: &[u8]) -> wz_session_core::lifecycle_query::CloseOrder {
+        let faces = self.faces.borrow();
+        let joined = self.joined.borrow();
+        let links: Vec<&SessionLinkActions> = faces
+            .values()
+            .map(|face| &*face.actions)
+            .chain(joined.values().map(|link| &*link.actions))
+            .collect();
+        wz_session_core::lifecycle_query::order_close_over(links, peer_zid)
+    }
 }
 
 /// R3123 -- marks, for the span of one [`forward`](FaceForwarder::forward) call, the joined link
@@ -3575,6 +3610,19 @@ impl LinkstateForwarder {
                 )
             })
             .collect()
+    }
+
+    /// A handle over the sessions this peer holds, for the lifecycle queries to
+    /// close them by (`wz_session_core::lifecycle_query`). Its own value for the
+    /// reason [`LinkstateNetView`] is: the query handler is stored inside the
+    /// forwarder and cannot borrow it back at query time. It shares the live face
+    /// tables, so it answers from the sessions as they are when the query arrives.
+    #[cfg(feature = "session-close-ingress")]
+    pub fn lifecycle_directory(&self) -> LinkstateSessionDirectory {
+        LinkstateSessionDirectory {
+            faces: Rc::clone(&self.faces),
+            joined: Rc::clone(&self.joined_faces),
+        }
     }
 
     /// Emit the unsolicited FUTURE `DeclareSubscriber` pushes a newly-learned
@@ -8291,6 +8339,65 @@ mod tests {
     /// zid for the `GreaterZid` tie-break to compare against the right operand.
     fn autoconnect_policy(self_zid: Zid, strategy: AutoConnectStrategy) -> AutoConnect {
         AutoConnect::new(self_zid, WhatAmIMatcher::empty().router().peer(), strategy)
+    }
+
+    /// The lifecycle close query reads the peer's held sessions: a close orders
+    /// EVERY link to the peer closed -- the registered face and the link joined to
+    /// it -- once each, and leaves another peer's session alone.
+    ///
+    /// The joined link is the case the face table alone gets wrong: an aggregate is
+    /// one face and two drive loops, each tearing down its own link, so ordering
+    /// the registered face would leave the joined link up under a session the
+    /// caller was told is closing. The control is the peer `0xBB`, which a close of
+    /// `0xAA` must not touch.
+    #[cfg(feature = "session-close-ingress")]
+    #[test]
+    fn a_lifecycle_close_orders_every_link_to_the_peer_and_no_other() {
+        use wz_session_core::lifecycle_query::{CloseOrder, SessionDirectory};
+
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let (primary, _s1) = peer_face_whatami(zid(0xAA), 0b01);
+        let (joined, _s2) = peer_face_whatami(zid(0xAA), 0b01);
+        let (other, _s3) = peer_face_whatami(zid(0xBB), 0b01);
+        fwd.register(FaceId(0), &primary);
+        fwd.register(FaceId(1), &other);
+        fwd.register_joined(FaceId(2), FaceId(0), &joined);
+
+        let directory = fwd.lifecycle_directory();
+        let peer = zid(0xAA);
+        assert_eq!(
+            directory.order_close(peer.as_slice()),
+            CloseOrder {
+                newly_ordered: 2,
+                already_ordered: 0
+            },
+            "the face and the link joined to it"
+        );
+        assert!(primary.close_ordered() && joined.close_ordered());
+        assert!(!other.close_ordered(), "CONTROL: another peer's session");
+
+        // A second close finds nothing new, and says so.
+        assert_eq!(
+            directory.order_close(peer.as_slice()),
+            CloseOrder {
+                newly_ordered: 0,
+                already_ordered: 2
+            }
+        );
+        // A peer this node holds no session with.
+        assert_eq!(
+            directory.order_close(zid(0xCC).as_slice()),
+            CloseOrder::default()
+        );
+
+        // A joined link that left the aggregate is no longer a link to close.
+        let (second, _s4) = peer_face_whatami(zid(0xDD), 0b01);
+        let (second_joined, _s5) = peer_face_whatami(zid(0xDD), 0b01);
+        fwd.register(FaceId(3), &second);
+        fwd.register_joined(FaceId(4), FaceId(3), &second_joined);
+        fwd.deregister_joined(FaceId(4));
+        assert_eq!(directory.order_close(zid(0xDD).as_slice()).newly_ordered, 1);
+        assert!(!second_joined.close_ordered());
     }
 
     /// R2860 — the forwarder host's `shm` value-tracking witness, the §5.23

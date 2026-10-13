@@ -19867,8 +19867,11 @@ layer_e6_peer_mesh() {
     # queryable / adminspace legs never reach it. The one family that DOES reach it
     # is the liveliness-token pair, and both its client-leaf and mesh arms were
     # re-run under this feature set before it was added here.
+    # `session-close-ingress` joins the SAME binary so the session lifecycle queries
+    # (`--session-lifecycle`) are compiled in for the leg below. Additive: nothing
+    # hosts them unless that flag is typed, so no other E6 leg changes behaviour.
     (cd crates && cargo build -p wz-ap-demo \
-        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc --quiet) || return 1
+        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the
@@ -19892,6 +19895,15 @@ layer_e6_peer_mesh() {
     # the reconfigure actually drives), so no extra build.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_config_write -- --ignored --quiet) || return 1
+    # The session lifecycle QUERIES, over the wire between real nodes: a GET closes
+    # the session with a named peer and is answered with a verdict (and that peer's
+    # face really goes DOWN), a second GET lists the node's verbs, and a node that
+    # hosts the queries without `--session-close-permit` answers `refused` with a
+    # reason. Rides the SAME E6 binary (built above with `session-close-ingress`).
+    # Two tests, so the count guard reddens on a dropped `#[ignore]` (0 selected).
+    _runci_guarded_test "E6 session lifecycle query" 2 \
+        cargo test -p wz-integration-tests \
+        --test wz_peer_session_lifecycle_query -- --ignored --test-threads=1 --quiet || return 1
     # R311y272 — the CROSS-IMPL half of the config write, on the SAME binary, and the
     # first §5.23 leg where pico is the ENCODER (y270/y271 had pico decoding wz's admin
     # replies). A pico z_put reconfigures A's live forwarder when the write permission is
