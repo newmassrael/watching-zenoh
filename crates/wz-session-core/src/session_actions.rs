@@ -2629,6 +2629,32 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         // R2292 put both ids in one space, unambiguous on the peer.
         Self::send_undeclare_subscriber(self, subscriber_id);
     }
+    // The queryable twin of the subscriber reply above: a QUERIER's interest is
+    // answered with the queryables this session holds, each stamped with the
+    // interest's id. A key longer than the bounded codec field cannot be encoded;
+    // the chain's `DeclFinal` still terminates the interest, so a skipped reply
+    // degrades to "no matching queryable", as the subscriber reply does.
+    #[cfg(all(feature = "alloc", feature = "declare-queryable"))]
+    fn send_declare_queryable_reply(
+        &self,
+        queryable_id: u64,
+        keyexpr: &str,
+        complete: bool,
+        interest_id: u64,
+    ) {
+        let info = crate::queryable_info::QueryableInfo {
+            complete,
+            distance: 0,
+        };
+        if let Ok(declare) = crate::declare_build::build_declare_queryable_reply_with_id(
+            interest_id,
+            queryable_id,
+            keyexpr,
+            info,
+        ) {
+            self.send_declare(declare);
+        }
+    }
 }
 
 // F3/R311ka — drain target for the registry's staged get

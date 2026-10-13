@@ -1755,6 +1755,36 @@ impl ReplyOut for QueryResponder<'_> {
     }
 }
 
+/// One staged element of the interest-response chain a peer's QUERYABLE
+/// `Interest` is owed (see [`QueryableRegistry::respond_to_queryable_interest`]).
+/// Owned, unlike the id-only liveliness items, because an AGGREGATE reply names
+/// the interest's key and not a held queryable's, so the drain cannot resolve it
+/// from the registry; the heap form is the only one that answers it.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryableInterestReply {
+    /// One `Declare(DeclQueryable)` stamped with the peer's `interest_id`.
+    Declared {
+        /// The peer's `interest_id`, echoed.
+        interest_id: u64,
+        /// The `DeclQueryable.id`: a held queryable's, or the first matching
+        /// one's for an aggregate reply.
+        queryable_id: u64,
+        /// The reply key: the queryable's own, or the interest's for an
+        /// aggregate reply.
+        keyexpr: String,
+        /// The queryable's completeness, merged across the matches of an
+        /// aggregate reply.
+        complete: bool,
+    },
+    /// The terminating `Declare(DeclFinal)` of the chain, staged even when no
+    /// queryable matched, so the peer's CURRENT interest resolves.
+    Final {
+        /// The peer's `interest_id`, echoed on the terminator.
+        interest_id: u64,
+    },
+}
+
 /// Queryable table backing the inbound `Request(Query)` → callback
 /// dispatch. `!Sync` by construction; cross-task sharing goes
 /// through `Arc<Mutex<…>>`. See module-level docs for scope.
@@ -2038,6 +2068,92 @@ impl<C: QuerySink> QueryableRegistry<C> {
                 crate::keyexpr_match::keyexpr_intersect_patterns(&pattern_chunks, &query_chunks)
             }
         })
+    }
+
+    /// Stage the interest-response chain a peer's QUERYABLE `Interest` is owed:
+    /// the queryables this session already holds that the interest reaches, then
+    /// the terminating `Final`. Returns how many `Declared` items were staged.
+    ///
+    /// This is the queryable twin of the subscriber chain
+    /// ([`crate::pubsub::SubscriberRegistry::respond_to_subscriber_interest_borrowed`])
+    /// and exists for the same reason. A zenoh-pico QUERIER arms a write filter
+    /// per `z_declare_querier` (`net/filtering.c` @ `_z_write_filter_create`) and
+    /// silently drops every query it is handed until the filter observes a
+    /// matching `DeclQueryable` CARRYING THE ID OF ITS INTEREST: a declaration
+    /// that reached it unsolicited, earlier, opens the filter only if it was
+    /// processed before the filter was created, and the two are processed on
+    /// different threads. A session that never answers the interest therefore
+    /// serves a querier only when it happens to win that race, and the querier
+    /// then waits for a reply to a query that was never sent.
+    ///
+    /// Only the CURRENT half is answered here: a peer that asks for the
+    /// queryables to come (FUTURE) is told of the ones declared later by the
+    /// unsolicited push every declaration already makes.
+    ///
+    /// `pattern` is the interest's keyexpr (`None` = match-all). An AGGREGATE
+    /// interest (pico client queriers always are) gets ONE reply, carrying the
+    /// INTEREST's keyexpr, when any queryable reaches it: the peer associates an
+    /// aggregate interest's replies by key equality
+    /// (`session/interest.c:274-276`), so a wildcard queryable's own key would
+    /// match nothing. Its `complete` is the merge of the matching queryables'. A
+    /// non-aggregate interest gets one reply per matching queryable, with its own
+    /// key. Only queryables that accept a REMOTE origin are visible to a peer.
+    #[cfg(feature = "alloc")]
+    pub fn respond_to_queryable_interest(
+        &self,
+        interest_id: u64,
+        pattern: Option<&str>,
+        aggregate: bool,
+        staged: &mut Vec<QueryableInterestReply>,
+    ) -> usize {
+        let interest_key = pattern.unwrap_or("**");
+        let reaches = |queryable_pattern: &str| -> bool {
+            let mut a: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+            let mut b: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+            for c in queryable_pattern.split('/') {
+                if a.push(c).is_err() {
+                    return false;
+                }
+            }
+            for c in interest_key.split('/') {
+                if b.push(c).is_err() {
+                    return false;
+                }
+            }
+            crate::keyexpr_match::keyexpr_intersect_patterns(&a, &b)
+        };
+        let mut declared = 0usize;
+        let mut merged: Option<(u64, bool)> = None;
+        for queryable in self.queryables.iter() {
+            if !queryable.allowed_origin.allows_remote() || !reaches(queryable.pattern.as_str()) {
+                continue;
+            }
+            if aggregate {
+                merged = Some(match merged {
+                    Some((id, complete)) => (id, complete || queryable.complete),
+                    None => (queryable.id.as_u64(), queryable.complete),
+                });
+            } else {
+                staged.push(QueryableInterestReply::Declared {
+                    interest_id,
+                    queryable_id: queryable.id.as_u64(),
+                    keyexpr: String::from(queryable.pattern.as_str()),
+                    complete: queryable.complete,
+                });
+                declared += 1;
+            }
+        }
+        if let Some((queryable_id, complete)) = merged {
+            staged.push(QueryableInterestReply::Declared {
+                interest_id,
+                queryable_id,
+                keyexpr: String::from(interest_key),
+                complete,
+            });
+            declared += 1;
+        }
+        staged.push(QueryableInterestReply::Final { interest_id });
+        declared
     }
 
     /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr

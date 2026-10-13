@@ -179,6 +179,35 @@ pub trait DeclareReplySink {
     /// gated the same way), so the retraction has nothing to ride on.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     fn send_undeclare_subscriber_reply(&self, subscriber_id: u64);
+
+    /// Encode + enqueue one `Declare(DeclQueryable)` answering a remote
+    /// QUERIER's `Interest` from this session's OWN queryables, terminated by
+    /// [`send_declare_final_reply`](Self::send_declare_final_reply): the
+    /// queryable twin of
+    /// [`send_declare_subscriber_reply`](Self::send_declare_subscriber_reply).
+    ///
+    /// A zenoh-pico querier drops every query locally until a matching
+    /// `DeclQueryable` stamped with its interest's id reaches its write
+    /// filter, so a session that does not answer the interest serves it only
+    /// when an earlier unsolicited declaration happened to be processed first.
+    ///
+    /// `keyexpr` is the REPLY key: the queryable's own, or for an AGGREGATE
+    /// interest the INTEREST's (the registry owns that choice). `complete` is
+    /// the queryable's `QueryableInfo.complete`, which an `AllComplete` querier's
+    /// filter requires before it opens.
+    ///
+    /// A default body that sends nothing, so a sink that cannot answer (the
+    /// multicast reply loop) is a sink that does not, as it always was.
+    #[cfg(all(feature = "alloc", feature = "declare-queryable"))]
+    fn send_declare_queryable_reply(
+        &self,
+        queryable_id: u64,
+        keyexpr: &str,
+        complete: bool,
+        interest_id: u64,
+    ) {
+        let _ = (queryable_id, keyexpr, complete, interest_id);
+    }
 }
 
 /// Terminated liveliness-get reconnect-cache prune. NOT a wire emit — a
@@ -244,6 +273,16 @@ impl<S: DeclareReplySink + ?Sized> DeclareReplySink for &S {
     fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
         (**self).send_undeclare_subscriber_reply(subscriber_id)
     }
+    #[cfg(all(feature = "alloc", feature = "declare-queryable"))]
+    fn send_declare_queryable_reply(
+        &self,
+        queryable_id: u64,
+        keyexpr: &str,
+        complete: bool,
+        interest_id: u64,
+    ) {
+        (**self).send_declare_queryable_reply(queryable_id, keyexpr, complete, interest_id)
+    }
 }
 
 impl<S: LivelinessGetPrune + ?Sized> LivelinessGetPrune for &S {
@@ -296,6 +335,16 @@ impl<S: DeclareReplySink + ?Sized> DeclareReplySink for alloc::sync::Arc<S> {
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
         (**self).send_undeclare_subscriber_reply(subscriber_id)
+    }
+    #[cfg(all(feature = "alloc", feature = "declare-queryable"))]
+    fn send_declare_queryable_reply(
+        &self,
+        queryable_id: u64,
+        keyexpr: &str,
+        complete: bool,
+        interest_id: u64,
+    ) {
+        (**self).send_declare_queryable_reply(queryable_id, keyexpr, complete, interest_id)
     }
 }
 

@@ -342,6 +342,18 @@ pub struct ApplicationLayerObserver {
     /// Interests share the buffer up to [`caps::MAX_PENDING_DECLARES`] items.
     #[cfg(feature = "liveliness-token")]
     token_interest_chains_refused: u32,
+    /// The interest-response chains owed to peers' QUERYABLE Interests, in stage
+    /// order, drained through
+    /// [`DeclareReplySink::send_declare_queryable_reply`]. Owned (see
+    /// [`crate::query::QueryableInterestReply`]), so it exists only where the
+    /// heap does, and only where the `Final` that ends a chain can be sent.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "query-queryable",
+        feature = "declare-queryable",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    pending_queryable_replies: alloc::vec::Vec<crate::query::QueryableInterestReply>,
 }
 
 impl Default for ApplicationLayerObserver {
@@ -411,7 +423,58 @@ impl ApplicationLayerObserver {
             pending_declares: BoundedVec::new(),
             #[cfg(feature = "liveliness-token")]
             token_interest_chains_refused: 0,
+            #[cfg(all(
+                feature = "alloc",
+                feature = "query-queryable",
+                feature = "declare-queryable",
+                any(feature = "liveliness-token", feature = "declare-subscriber")
+            ))]
+            pending_queryable_replies: alloc::vec::Vec::new(),
         }
+    }
+
+    /// Stage the interest-response chain a peer's QUERYABLE `Interest` is owed.
+    ///
+    /// Only a CURRENT interest solicits a dump, only a queryables interest (the
+    /// `Q` bit) is answered here, and a keyexpr naming an undeclared peer mapping
+    /// drops silently, as every sibling registry drops one: answering a partial
+    /// key is worse than not answering. A FINAL (neither bit set) cancels an
+    /// interest and owes nothing, because nothing about a CURRENT answer is
+    /// retained.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "query-queryable",
+        feature = "declare-queryable",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    fn stage_queryable_interest(
+        queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+        staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
+        interest: &wz_codecs::interest::InterestOwned,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    ) {
+        if !interest.c() {
+            return;
+        }
+        let Some(body) = interest.body.as_ref() else {
+            return;
+        };
+        if !body.qu() {
+            return;
+        }
+        let pattern = match &body.keyexpr {
+            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_in(&w.body, peer_table) {
+                Some(p) => Some(p),
+                None => return,
+            },
+            None => None,
+        };
+        queryables.respond_to_queryable_interest(
+            interest.interest_id,
+            pattern.as_deref(),
+            body.ag(),
+            staged,
+        );
     }
 
     /// How many inbound liveliness-token Interests had their reply chain
@@ -485,6 +548,32 @@ impl ApplicationLayerObserver {
             &mut self.pending_replies,
             &mut self.pending_final_rids,
         );
+        // A peer's QUERYABLE Interest is answered from the queryables this
+        // session holds (see `QueryableRegistry::respond_to_queryable_interest`).
+        // Staged here and drained with the other interest-response chains, so no
+        // sink runs under the observer lock.
+        #[cfg(all(
+            feature = "alloc",
+            feature = "query-queryable",
+            feature = "declare-queryable",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        ))]
+        if let IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
+            messages,
+            ..
+        }) = event
+        {
+            for message in messages {
+                if let crate::network_message::NetworkMessage::Interest(interest) = message {
+                    Self::stage_queryable_interest(
+                        &self.queryables,
+                        &mut self.pending_queryable_replies,
+                        interest,
+                        peer_table,
+                    );
+                }
+            }
+        }
         // R311y788 — the remote-subscriber fan carries the SESSION-LOCAL
         // half of the matching verdict. Both halves are sibling fields of
         // this struct and the local one is read-only here, so the disjoint
@@ -893,6 +982,29 @@ impl ApplicationLayerObserver {
                     }
                 }
                 DeclResponseItem::Final { interest_id } => {
+                    sink.send_declare_final_reply(interest_id)
+                }
+            }
+        }
+        // The QUERYABLE interest-response chains, in stage order: each chain's
+        // `Declared` items precede its `Final`.
+        #[cfg(all(
+            feature = "alloc",
+            feature = "query-queryable",
+            feature = "declare-queryable",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        ))]
+        for item in core::mem::take(&mut self.pending_queryable_replies) {
+            match item {
+                crate::query::QueryableInterestReply::Declared {
+                    interest_id,
+                    queryable_id,
+                    keyexpr,
+                    complete,
+                } => {
+                    sink.send_declare_queryable_reply(queryable_id, &keyexpr, complete, interest_id)
+                }
+                crate::query::QueryableInterestReply::Final { interest_id } => {
                     sink.send_declare_final_reply(interest_id)
                 }
             }
@@ -2418,5 +2530,248 @@ mod history_replay_is_peer_scoped {
                  `history` is honoured — so the empty result above is about \
                  the token being LOCAL and nothing else"
         );
+    }
+}
+
+// A peer's QUERYABLE Interest is answered from the queryables this session
+// holds. zenoh-pico arms a write filter per `z_declare_querier` and drops every
+// query it is handed until a `DeclQueryable` stamped with ITS interest's id
+// reaches the filter, so a session that never answers the interest serves a
+// querier only when an earlier unsolicited declaration happened to be processed
+// before the filter was created. These tests drive the answer through
+// `flush_declare_replies`, the door the session tier calls.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "query-queryable",
+    feature = "declare-queryable",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+mod queryable_interest_reply_tests {
+    use super::*;
+    use crate::driver_loop::DriverLoopOutcome;
+    use crate::interest_build::{build_interest_kinds_with_aggregate, InterestKinds};
+    use crate::locality::Locality;
+    use crate::network_message::NetworkMessage;
+    use crate::query_sink::BoxedQuerySink;
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    /// What the drain emitted, in order, as text an assertion can name.
+    #[derive(Default)]
+    struct RecordingSink {
+        wire: Mutex<Vec<String>>,
+    }
+
+    impl DeclareReplySink for RecordingSink {
+        #[cfg(feature = "liveliness-token")]
+        fn send_declare_token_reply(&self, _token_id: u64, _keyexpr: &str, _interest_id: u64) {}
+
+        fn send_declare_final_reply(&self, interest_id: u64) {
+            self.wire
+                .lock()
+                .unwrap()
+                .push(alloc::format!("final {interest_id}"));
+        }
+
+        #[cfg(feature = "declare-subscriber")]
+        fn send_declare_subscriber_reply(&self, _id: u64, _keyexpr: &str, _interest_id: u64) {}
+
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+        fn send_undeclare_subscriber_reply(&self, _subscriber_id: u64) {}
+
+        fn send_declare_queryable_reply(
+            &self,
+            queryable_id: u64,
+            keyexpr: &str,
+            complete: bool,
+            interest_id: u64,
+        ) {
+            self.wire.lock().unwrap().push(alloc::format!(
+                "queryable {queryable_id} {keyexpr} complete={complete} interest={interest_id}"
+            ));
+        }
+    }
+
+    fn outcome(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
+        DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages,
+            has_ext: false,
+            extensions: Vec::new(),
+        }
+    }
+
+    /// The interest zenoh-pico's write filter sends for a client querier:
+    /// queryables, CURRENT and FUTURE, AGGREGATE, keyed `key`.
+    fn querier_interest(interest_id: u64, key: &str, aggregate: bool) -> NetworkMessage {
+        NetworkMessage::Interest(
+            build_interest_kinds_with_aggregate(
+                interest_id,
+                InterestKinds::QUERYABLES,
+                /*current=*/ true,
+                /*future=*/ true,
+                aggregate,
+                0,
+                Some(key),
+            )
+            .expect("a literal key builds"),
+        )
+    }
+
+    fn answer(observer: &mut ApplicationLayerObserver, interest: NetworkMessage) -> Vec<String> {
+        observer.dispatch_event(IterationEvent::Poll(&outcome(alloc::vec![interest])));
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+        sink.wire.into_inner().unwrap()
+    }
+
+    /// THE CASE THAT STALLED `z_get_lat`: the session holds a queryable on the
+    /// key, the peer's querier asks, and the answer is the queryable stamped with
+    /// the interest's id and then the `Final`.
+    #[test]
+    fn a_queryable_interest_is_answered_with_the_queryable_and_a_final() {
+        let mut observer = ApplicationLayerObserver::new();
+        let id = observer.queryables.register("lat", |_q, _out| {}).as_u64();
+        assert_eq!(
+            answer(&mut observer, querier_interest(7, "lat", false)),
+            [
+                alloc::format!("queryable {id} lat complete=false interest=7"),
+                "final 7".to_string()
+            ]
+        );
+    }
+
+    /// With nothing to declare the chain is the `Final` alone: "no matching
+    /// queryable" is an answer, and the peer's CURRENT interest must still end.
+    #[test]
+    fn an_interest_no_queryable_reaches_is_answered_with_a_final_alone() {
+        let mut observer = ApplicationLayerObserver::new();
+        observer.queryables.register("other/key", |_q, _out| {});
+        assert_eq!(
+            answer(&mut observer, querier_interest(3, "lat", false)),
+            ["final 3".to_string()]
+        );
+        let mut empty = ApplicationLayerObserver::new();
+        assert_eq!(
+            answer(&mut empty, querier_interest(4, "lat", true)),
+            ["final 4".to_string()]
+        );
+    }
+
+    /// An AGGREGATE interest (a pico client querier's always is) is answered
+    /// ONCE, with the INTEREST's key: the peer associates the reply with its
+    /// interest by key equality, so a wildcard queryable's own key would match
+    /// nothing. The reply is for the first queryable that reaches it.
+    #[test]
+    fn an_aggregate_interest_is_answered_once_under_the_interests_key() {
+        let mut observer = ApplicationLayerObserver::new();
+        let first = observer
+            .queryables
+            .register("demo/**", |_q, _out| {})
+            .as_u64();
+        observer.queryables.register("demo/a", |_q, _out| {});
+        observer.queryables.register("elsewhere/x", |_q, _out| {});
+        assert_eq!(
+            answer(&mut observer, querier_interest(9, "demo/a", true)),
+            [
+                alloc::format!("queryable {first} demo/a complete=false interest=9"),
+                "final 9".to_string()
+            ]
+        );
+    }
+
+    /// A non-aggregate interest gets one reply per queryable that reaches it,
+    /// each under its own key, and the completeness of an aggregate reply is
+    /// the OR of the matches'.
+    #[test]
+    fn a_plain_interest_gets_one_reply_per_match_and_an_aggregate_merges_completeness() {
+        let mut observer = ApplicationLayerObserver::new();
+        let a = observer
+            .queryables
+            .register("demo/*", |_q, _out| {})
+            .as_u64();
+        let b = observer
+            .queryables
+            .register_sink(
+                "demo/b",
+                Locality::Any,
+                /*complete=*/ true,
+                BoxedQuerySink::new(|_q, _out| {}),
+            )
+            .expect("the alloc backing never refuses")
+            .as_u64();
+        assert_eq!(
+            answer(&mut observer, querier_interest(1, "demo/**", false)),
+            [
+                alloc::format!("queryable {a} demo/* complete=false interest=1"),
+                alloc::format!("queryable {b} demo/b complete=true interest=1"),
+                "final 1".to_string()
+            ]
+        );
+        assert_eq!(
+            answer(&mut observer, querier_interest(2, "demo/**", true)),
+            [
+                alloc::format!("queryable {a} demo/** complete=true interest=2"),
+                "final 2".to_string()
+            ]
+        );
+    }
+
+    /// A queryable that accepts only LOCAL origin is not one a peer may see.
+    #[test]
+    fn a_local_only_queryable_is_not_declared_to_a_peer() {
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .queryables
+            .register_with_locality("lat", Locality::SessionLocal, |_q, _out| {});
+        assert_eq!(
+            answer(&mut observer, querier_interest(5, "lat", false)),
+            ["final 5".to_string()]
+        );
+    }
+
+    /// Only a CURRENT interest solicits a dump, and only the queryables kind is
+    /// answered here: a FUTURE-only interest, a FINAL, and a subscribers
+    /// interest owe nothing from this plane.
+    #[test]
+    fn only_a_current_queryables_interest_is_answered() {
+        let mut observer = ApplicationLayerObserver::new();
+        observer.queryables.register("lat", |_q, _out| {});
+        let future_only = NetworkMessage::Interest(
+            build_interest_kinds_with_aggregate(
+                11,
+                InterestKinds::QUERYABLES,
+                false,
+                true,
+                false,
+                0,
+                Some("lat"),
+            )
+            .expect("builds"),
+        );
+        assert!(answer(&mut observer, future_only).is_empty());
+        let subscribers = NetworkMessage::Interest(
+            build_interest_kinds_with_aggregate(
+                12,
+                InterestKinds::SUBSCRIBERS,
+                true,
+                true,
+                false,
+                0,
+                Some("lat"),
+            )
+            .expect("builds"),
+        );
+        // The subscriber chain answers a subscribers interest with its own
+        // terminator; what this plane owes it is no queryable declaration.
+        assert!(answer(&mut observer, subscribers)
+            .iter()
+            .all(|wire| !wire.starts_with("queryable")));
+        let cancel = NetworkMessage::Interest(crate::interest_build::build_interest_final(13));
+        assert!(answer(&mut observer, cancel).is_empty());
     }
 }
