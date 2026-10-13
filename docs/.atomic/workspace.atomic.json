@@ -273912,6 +273912,52 @@
         "The hosted run of the close-query commit is red in the census layer and the run of the census repair is red in the legs layer; this commit is the repayment for both."
       ]
     },
+    "Round 3329": {
+      "decision_summary": "The sending side of an end-to-end protected message is reachable from the participant library wz-capi-c. An owned sender is made for one message under one profile, keeps that message's counter and writes the profile's counter field itself: the first frame carries the value the sender is made with, and every frame that is built moves it by one. A refused frame builds nothing and consumes no value. The counter does not wrap: the frame that carries the largest value the field holds is built, and the next call is refused with a reason naming the field and the value; wrap exists only as an explicit rollover argument, refuse by default. A values text that states the counter is refused at its path. A refusal is an e2e_wrap document under Z_OK, and a profile that is not one is Z_EPARSE with the document in the refusal string. One lock per handle gives two calls two values. Frames come from the writer of wz_dissect_e2e_wrap, which stays stateless. ABI revision 5, eight symbols.",
+      "changes_bullets": [
+        "crates/wz-capture/src/e2e_sender.rs, e2e_sender_tests.rs: Sender and Rollover, the counter-keeping builder of one message, with nine tests that judge each frame against the stateless door asked for the same counter.",
+        "crates/wz-capture/src/e2e_json.rs, e2e_frame.rs: the one wrap path takes a header value the sender supplies and reports a built frame or a refusal as a Result; Values::states says whether the caller stated a field.",
+        "crates/wz-capi-c/src/e2e_sender.rs: the eight wz_capi_c_e2e_sender_* doors over an owned handle, ungated like the config verdict; Cargo.toml names wz-capture with default features off, and the lock follows.",
+        "crates/wz-capi-c/include/wz_capi_c.h, src/abi.rs, scripts/lib/capi_c_abi_pin.py: the header block, WZ_CAPI_C_ABI_REVISION 5 and the pinned symbol set.",
+        "crates/wz-capi-c/tests/e2e_sender_roundtrip.rs: seven tests that drive the doors as C does, including one handle called from four threads."
+      ],
+      "verification_bullets": [
+        "On a build host: the nine new wz-capture tests pass with default features and with dissect, and the seven wz-capi-c tests pass with and without zenoh-c-no-unstable-api; clippy is clean on both crates in both configurations, and both build with default features off.",
+        "On a build host: layers C0, C0s, C1ch (the revision pin and the header door gate), C1cf, C1bz and C1cn pass on the committed change, and the count-guard oracle over the range reaches three guards and all three pass; layer C0 passes again on the tree rebased onto the Round 3328 tip.",
+        "NOT verified here: the hosted run of this push, and a C program that links the doors; the Rust integration test calls the same extern doors."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "One sender belongs to one message; a process restarted on reconnect passes the first counter again, and set changes it at run time.",
+        "The profile's max_gap is not consulted: the sender's step is one, which every profile accepts as a forward step.",
+        "wz_dissect_e2e_wrap stays stateless; a caller that numbers its own frames keeps using it, and the two doors cannot disagree about a header because they share one writer.",
+        "No C consumer program links the new doors yet."
+      ],
+      "publishable_decision_summary": "The sending side of an end-to-end protected message is reachable from the participant library wz-capi-c. An owned sender is made for one message under one profile, keeps that message's counter and writes the profile's counter field itself: the first frame carries the value the sender is made with, and every frame that is built moves it by one. A refused frame builds nothing and consumes no value. The counter does not wrap: the frame that carries the largest value the field holds is built, and the next call is refused with a reason naming the field and the value; wrap exists only as an explicit rollover argument, refuse by default. A values text that states the counter is refused at its path. A refusal is an e2e_wrap document under Z_OK, and a profile that is not one is Z_EPARSE with the document in the refusal string. One lock per handle gives two calls two values. Frames come from the writer of wz_dissect_e2e_wrap, which stays stateless. ABI revision 5, eight symbols.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/e2e_sender.rs, e2e_sender_tests.rs: Sender and Rollover, the counter-keeping builder of one message, with nine tests that judge each frame against the stateless door asked for the same counter.",
+        "crates/wz-capture/src/e2e_json.rs, e2e_frame.rs: the one wrap path takes a header value the sender supplies and reports a built frame or a refusal as a Result; Values::states says whether the caller stated a field.",
+        "crates/wz-capi-c/src/e2e_sender.rs: the eight wz_capi_c_e2e_sender_* doors over an owned handle, ungated like the config verdict; Cargo.toml names wz-capture with default features off, and the lock follows.",
+        "crates/wz-capi-c/include/wz_capi_c.h, src/abi.rs, scripts/lib/capi_c_abi_pin.py: the header block, WZ_CAPI_C_ABI_REVISION 5 and the pinned symbol set.",
+        "crates/wz-capi-c/tests/e2e_sender_roundtrip.rs: seven tests that drive the doors as C does, including one handle called from four threads."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the nine new wz-capture tests pass with default features and with dissect, and the seven wz-capi-c tests pass with and without zenoh-c-no-unstable-api; clippy is clean on both crates in both configurations, and both build with default features off.",
+        "On a build host: layers C0, C0s, C1ch (the revision pin and the header door gate), C1cf, C1bz and C1cn pass on the committed change, and the count-guard oracle over the range reaches three guards and all three pass; layer C0 passes again on the tree rebased onto the Round 3328 tip.",
+        "NOT verified here: the hosted run of this push, and a C program that links the doors; the Rust integration test calls the same extern doors."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "One sender belongs to one message; a process restarted on reconnect passes the first counter again, and set changes it at run time.",
+        "The profile's max_gap is not consulted: the sender's step is one, which every profile accepts as a forward step.",
+        "wz_dissect_e2e_wrap stays stateless; a caller that numbers its own frames keeps using it, and the two doors cannot disagree about a header because they share one writer.",
+        "No C consumer program links the new doors yet."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
