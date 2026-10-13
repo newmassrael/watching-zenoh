@@ -270,54 +270,148 @@ pub fn wrap_document(profile_text: &str, values_text: &str, payload: &[u8]) -> S
         Ok(p) => p,
         Err(e) => return refuse_text(&head, Source::Profile, &e),
     };
+    settled(wrap_profiled(&head, &profile, values_text, payload, None))
+}
+
+/// A header value the SENDER supplies in place of the values text
+/// ([`crate::e2e_sender::Sender`] supplies the counter it keeps).
+pub(crate) struct Supplies<'a> {
+    /// The header field.
+    pub field: &'a str,
+    /// Its value.
+    pub value: u64,
+}
+
+/// The wrap of an already read profile with one header value supplied by the
+/// sender: `Ok` is the success document and `Err` a refusal, so a caller that
+/// keeps state can tell the two apart without reading the text it was handed.
+/// A values text that states the supplied field itself is refused: there is no
+/// rule for which of the two would win.
+pub(crate) fn wrap_supplied(
+    profile: &Profile,
+    values_text: &str,
+    payload: &[u8],
+    supplies: Supplies<'_>,
+) -> Result<String, String> {
+    wrap_profiled(
+        &envelope(E2E_WRAP),
+        profile,
+        values_text,
+        payload,
+        Some(supplies),
+    )
+}
+
+/// The refusal document for a profile text that is not one.
+pub(crate) fn profile_refusal(error: &DocError) -> String {
+    refuse_text(&envelope(E2E_WRAP), Source::Profile, error)
+}
+
+/// A refusal that is about no text, in the `e2e_wrap` envelope.
+pub(crate) fn plain_refusal(reason: &str) -> String {
+    refuse_plain(&envelope(E2E_WRAP), reason)
+}
+
+/// Either side of a wrap result, as the document it is.
+fn settled(result: Result<String, String>) -> String {
+    match result {
+        Ok(document) | Err(document) => document,
+    }
+}
+
+/// The body of [`wrap_document`] once the profile is read.
+fn wrap_profiled(
+    head: &str,
+    profile: &Profile,
+    values_text: &str,
+    payload: &[u8],
+    supplies: Option<Supplies<'_>>,
+) -> Result<String, String> {
     match e2e_body::scan(values_text) {
         Scan::Plain => match Values::parse(values_text) {
-            Ok(values) => wrap_frame(&head, &profile, &values, payload, None),
-            Err(e) => refuse_text(&head, Source::Values, &e),
+            Ok(values) => wrap_frame(head, profile, &values, payload, None, supplies),
+            Err(e) => Err(refuse_text(head, Source::Values, &e)),
         },
-        Scan::Refused(e) => refuse_text_at(&head, BODY_STAGE, Source::Values, &e),
-        Scan::Body(tree) => wrap_described(&head, &profile, &tree, payload),
+        Scan::Refused(e) => Err(refuse_text_at(head, BODY_STAGE, Source::Values, &e)),
+        Scan::Body(tree) => wrap_described(head, profile, &tree, payload, supplies),
     }
 }
 
 /// The wrap of a values text that carries an `@body` member: the header values
 /// are its other members, and the body is built from what the member describes.
-fn wrap_described(head: &str, profile: &Profile, tree: &Json5Value, payload: &[u8]) -> String {
+fn wrap_described(
+    head: &str,
+    profile: &Profile,
+    tree: &Json5Value,
+    payload: &[u8],
+    supplies: Option<Supplies<'_>>,
+) -> Result<String, String> {
     let values = match Values::from_tree(tree, &[BODY_KEY]) {
         Ok(v) => v,
-        Err(e) => return refuse_text(head, Source::Values, &e),
+        Err(e) => return Err(refuse_text(head, Source::Values, &e)),
     };
     let description = match Description::read(tree) {
         Ok(d) => d,
-        Err(e) => return refuse_text_at(head, BODY_STAGE, Source::Values, &e),
+        Err(e) => return Err(refuse_text_at(head, BODY_STAGE, Source::Values, &e)),
     };
     if !payload.is_empty() {
-        return refuse_text_at(head, BODY_STAGE, Source::Values, &e2e_body::given_twice());
+        return Err(refuse_text_at(
+            head,
+            BODY_STAGE,
+            Source::Values,
+            &e2e_body::given_twice(),
+        ));
     }
     // The writer's refusal ends the call: there is no path on which a frame is
     // finished around a body the writer refused.
     let body = match description.encode() {
         Ok(bytes) => bytes,
-        Err(e) => return refuse_writer(head, &e),
+        Err(e) => return Err(refuse_writer(head, &e)),
     };
-    wrap_frame(head, profile, &values, &body, Some(description.message()))
+    wrap_frame(
+        head,
+        profile,
+        &values,
+        &body,
+        Some(description.message()),
+        supplies,
+    )
 }
 
 /// Build the frame around `payload` and render the success, or the refusal of
 /// the header values. `body_message` is the schema message the body was built
-/// from, when it was built here.
+/// from, when it was built here. `supplies` is the header value the sender adds
+/// to the ones the caller wrote; it is judged HERE, with the header values and
+/// after the body, which is where the order the doors document puts them.
 fn wrap_frame(
     head: &str,
     profile: &Profile,
     values: &Values,
     payload: &[u8],
     body_message: Option<&str>,
-) -> String {
+    supplies: Option<Supplies<'_>>,
+) -> Result<String, String> {
+    let supplied;
+    let values = match supplies {
+        None => values,
+        Some(s) => {
+            if values.states(s.field) {
+                let path = crate::e2e_profile::child("", s.field);
+                let error = DocError::invalid(
+                    path,
+                    "the sender supplies this field, so the values text must not state it",
+                );
+                return Err(refuse_text(head, Source::Values, &error));
+            }
+            supplied = values.clone().whole(s.field, s.value);
+            &supplied
+        }
+    };
     let built = match e2e_frame::build(profile, values, payload) {
         Ok(b) => b,
-        Err(BuildError::Values(e)) => return refuse_text(head, Source::Values, &e),
+        Err(BuildError::Values(e)) => return Err(refuse_text(head, Source::Values, &e)),
         Err(e @ BuildError::PayloadTooLong { .. }) => {
-            return refuse_plain(head, &alloc::format!("{e}"))
+            return Err(refuse_plain(head, &alloc::format!("{e}")))
         }
     };
 
@@ -342,7 +436,7 @@ fn wrap_frame(
     out.push_str(",\"length_field\":");
     u64_into(built.length, &mut out);
     out.push('}');
-    out
+    Ok(out)
 }
 
 /// The `e2e_open` document for reading `frame` under `profile_text`.

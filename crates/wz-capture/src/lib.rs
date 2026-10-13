@@ -101,6 +101,9 @@ mod e2e_row_tests;
 pub mod e2e_rule;
 #[cfg(test)]
 mod e2e_rule_tests;
+pub mod e2e_sender;
+#[cfg(test)]
+mod e2e_sender_tests;
 #[cfg(test)]
 mod e2e_slot_tests;
 pub mod e2e_slots;

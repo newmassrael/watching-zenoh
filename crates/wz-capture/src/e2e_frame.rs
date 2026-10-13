@@ -137,6 +137,11 @@ impl Values {
             .find(|(n, _)| n == field)
             .map(|(_, s)| s)
     }
+
+    /// Whether the caller supplied `field`, whole or by its parts.
+    pub(crate) fn states(&self, field: &str) -> bool {
+        self.get(field).is_some()
+    }
 }
 
 /// Why a frame could not be built.
