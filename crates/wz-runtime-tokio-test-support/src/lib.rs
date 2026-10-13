@@ -1561,7 +1561,7 @@ mod port_tests {
     #[test]
     fn a_claimed_number_is_never_bound_by_a_draw() {
         use super::{draw_in, unbound_unautoselected, Draw};
-        letdir = std::env::temp_dir().join(format!("wz-draw-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wz-draw-test-{}", std::process::id()));
         // Bound by something else AND claimed: the draw must stop at the claim.
         let other = std::net::TcpListener::bind("127.0.0.1:0").expect("a bound number");
         let held = other.local_addr().expect("local_addr").port();
