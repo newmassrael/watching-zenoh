@@ -603,14 +603,22 @@ const FREE_PORT_ATTEMPTS: usize = 64;
 /// they ask for: when the range runs out the pick panics and says that the claim
 /// registry refused the draws, which is a different message from a number that
 /// something else holds.
+///
+/// AND NO SOCKET IS HELD for any moment while the number is chosen
+/// ([`unbound_unautoselected`]): a probe that binds and closes at once leaves the
+/// number bound in every child another thread forks while the probe is open, which
+/// kept a program started for it from binding it (see `pick_in`).
 pub fn free_port() -> u16 {
-    hand_out(bind_unautoselected)
+    let port = unbound_unautoselected();
+    HANDED_OUT_PORTS.lock().expect("port ledger").push(port);
+    port
 }
 
-/// The ledger half of [`free_port`], with the source of candidates passed in so
-/// a test can feed it a candidate that was handed out before. A candidate that
-/// is in the ledger is rejected with its listener held, and the next one is
-/// taken.
+/// The ledger half of the older, socket-holding [`free_port`], with the source of
+/// candidates passed in so a test can feed it a candidate that was handed out
+/// before. A candidate that is in the ledger is rejected with its listener held, and
+/// the next one is taken. Kept for the tests that pin that shape.
+#[cfg(test)]
 fn hand_out(mut candidate: impl FnMut() -> (std::net::TcpListener, u16)) -> u16 {
     let mut rejected = Vec::new();
     for _ in 0..FREE_PORT_ATTEMPTS {
@@ -656,48 +664,229 @@ static CLAIMS: Mutex<Vec<std::fs::File>> = Mutex::new(Vec::new());
 /// the file cannot be opened has no registry, and the pick proceeds without one
 /// -- the same as before this existed. Non-unix hosts have none either, and no
 /// leg in this tree can run a Windows implementation to test one.
-#[cfg(unix)]
+///
+/// This form claims and KEEPS the answer, which is what the tests of the claim
+/// need. The picker itself goes through [`draw_in`], which claims BEFORE it binds.
+#[cfg(all(unix, test))]
 fn claim_across_processes(port: u16) -> bool {
-    // SAFETY: `getuid` has no arguments and no memory effects.
-    let uid = unsafe { libc::getuid() };
-    claim_in(
-        &std::env::temp_dir().join(format!("wz-free-port-claims-{uid}")),
-        port,
-    )
+    claim_in(&claims_dir(), port)
 }
 
 /// [`claim_across_processes`] against the registry in `dir`. The directory is a
 /// parameter so that a test of the claim itself can use one no picker touches:
 /// a test that kills a holder and expects to claim its number is, in the shared
 /// directory, a race against every other process that is drawing numbers.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn claim_in(dir: &std::path::Path, port: u16) -> bool {
+    match claim_file_in(dir, port) {
+        Claim::Held(file) => {
+            CLAIMS.lock().expect("claim registry").push(file);
+            true
+        }
+        Claim::Unrecorded => true,
+        Claim::Taken => false,
+    }
+}
+
+/// What asking the registry about a number came to.
+#[cfg_attr(not(unix), allow(dead_code))]
+enum Claim {
+    /// The number is ours: the `flock` on its file, held for as long as the file is.
+    Held(std::fs::File),
+    /// There is no registry to ask (the directory cannot be made, the file cannot
+    /// be opened, the host has none), and the pick goes on without one.
+    Unrecorded,
+    /// A live holder has it.
+    Taken,
+}
+
+/// Ask the registry in `dir` for `port` WITHOUT keeping the answer anywhere but in
+/// the returned [`Claim`], so a caller that then fails to bind drops the file and
+/// the number is free again.
+#[cfg(unix)]
+fn claim_file_in(dir: &std::path::Path, port: u16) -> Claim {
     use std::os::unix::io::AsRawFd;
 
     if std::fs::create_dir_all(dir).is_err() {
-        return true;
+        return Claim::Unrecorded;
     }
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join(port.to_string()))
     else {
-        return true;
+        return Claim::Unrecorded;
     };
     // SAFETY: `file` owns a valid open descriptor for the whole call, and
     // `LOCK_EX | LOCK_NB` has no memory effects.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {
-        CLAIMS.lock().expect("claim registry").push(file);
-        return true;
+        return Claim::Held(file);
     }
-    std::io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock
+    if std::io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
+        Claim::Taken
+    } else {
+        Claim::Unrecorded
+    }
 }
 
 /// No registry on a host that is not unix: see the unix form.
 #[cfg(not(unix))]
-fn claim_across_processes(_port: u16) -> bool {
-    true
+fn claim_file_in(_dir: &std::path::Path, _port: u16) -> Claim {
+    Claim::Unrecorded
+}
+
+/// What one draw of a number came to.
+enum Draw {
+    /// Another claim holds the number and nothing was bound.
+    Taken,
+    /// Nobody claims it, but something is bound to it.
+    Unbindable,
+    /// The number is bound here and claimed.
+    Bound(std::net::TcpListener),
+}
+
+/// Draw `port`: CLAIM IT FIRST, and bind only a number that is ours.
+///
+/// THE ORDER MATTERS. A number is handed out BEFORE its owner binds: a foreign
+/// program is started with it, and binds a moment later. Binding a candidate first and
+/// consulting the registry after (what this did) means every draw that lands on a number
+/// somebody else has claimed and not yet bound takes that number for as long as the probe
+/// lives, in the middle of the other process's window. zenoh-pico does not retry a failed
+/// bind. A claimed number is therefore never bound by a draw, in any process that picks
+/// through this crate and in this one.
+///
+/// This is the form for a caller that WANTS the socket (a refusing port holds one on
+/// purpose). A caller that is about to hand the number to a program uses
+/// [`unbound_unautoselected`], which holds no socket at all: see [`pick_in`] for why
+/// even a probe that is closed at once is not harmless.
+fn draw_in(dir: &std::path::Path, port: u16) -> Draw {
+    let claim = claim_file_in(dir, port);
+    if matches!(claim, Claim::Taken) {
+        return Draw::Taken;
+    }
+    match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            #[cfg(unix)]
+            if let Claim::Held(file) = claim {
+                CLAIMS.lock().expect("claim registry").push(file);
+            }
+            Draw::Bound(listener)
+        }
+        // `claim` is dropped here, and with it the `flock`: a number that cannot
+        // be bound is not ours.
+        Err(_) => Draw::Unbindable,
+    }
+}
+
+/// What one look at a number came to, for a pick that holds NO socket.
+enum Pick {
+    /// Another claim holds the number.
+    Taken,
+    /// Something is bound or connected on it.
+    InUse,
+    /// Nobody holds it, and it is claimed here.
+    Free,
+}
+
+/// Whether anything at all uses `port` as its local port. On Linux this is the kernel's
+/// own socket table, read without creating a socket; elsewhere it is a bind that is
+/// dropped at once, which is the best a host without such a table can do.
+fn port_in_use(port: u16) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let wanted = format!(":{port:04X}");
+        let mut read_any = false;
+        for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            let Ok(text) = std::fs::read_to_string(table) else {
+                continue;
+            };
+            read_any = true;
+            let used = text.lines().skip(1).any(|line| {
+                line.split_whitespace()
+                    .nth(1)
+                    .is_some_and(|local| local.ends_with(&wanted))
+            });
+            if used {
+                return true;
+            }
+        }
+        if read_any {
+            return false;
+        }
+    }
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+/// Look at `port` for a pick that must leave NO SOCKET behind: claim it, then ask the
+/// kernel's table whether anything uses it.
+///
+/// WHY NOT BIND IT AND CLOSE IT, which is what a pick did for years. A socket that exists
+/// is a file descriptor, and a descriptor is inherited by every `fork` another thread of
+/// the process makes while it is open: the child holds a copy of the LISTENING socket
+/// until its `exec` closes it, and the number stays bound for as long as that takes. A test
+/// binary runs dozens of tests on threads, each starting programs, so the window between a
+/// pick's bind and its close is crossed by somebody else's `fork` often enough to matter, and
+/// on a machine short of CPUs the forked child waits milliseconds for its `exec`. The program
+/// the number was picked for then binds it inside that wait and fails. Measured on the
+/// zenoh-pico drop-in legs: the real library's `bind() failed for address 127.0.0.1: Address
+/// already in use` with no socket on the number when anyone looked, the failed bind 1.3 to
+/// 1.7 ms after the pick's own bind where a good one follows by about 5. A pick that creates
+/// no socket has nothing to inherit.
+fn pick_in(dir: &std::path::Path, port: u16) -> Pick {
+    let claim = claim_file_in(dir, port);
+    if matches!(claim, Claim::Taken) {
+        return Pick::Taken;
+    }
+    if port_in_use(port) {
+        // `claim` is dropped here, and with it the `flock`: a number in use is not ours.
+        return Pick::InUse;
+    }
+    #[cfg(unix)]
+    if let Claim::Held(file) = claim {
+        CLAIMS.lock().expect("claim registry").push(file);
+    }
+    Pick::Free
+}
+
+/// A number the kernel does not autoselect, claimed by this process and used by nothing,
+/// WITHOUT a socket held on it for any moment: see [`pick_in`]. The reservation of a number
+/// for a program that is started a moment later, and the number a test hands to a session of
+/// its own, are this.
+pub fn unbound_unautoselected() -> u16 {
+    let (first, last) = pick_range();
+    let span = u64::from(last - first) + 1;
+    let claims = claims_dir();
+    let (mut in_use, mut claimed) = (0usize, 0usize);
+    for _ in 0..FREE_PORT_ATTEMPTS {
+        let port = first + (random_draw() % span) as u16;
+        match pick_in(&claims, port) {
+            Pick::Free => return port,
+            Pick::Taken => claimed += 1,
+            Pick::InUse => in_use += 1,
+        }
+    }
+    panic!(
+        "unbound_unautoselected: {FREE_PORT_ATTEMPTS} draws from {first}..={last} found no \
+         number. {in_use} were in use (something else on this host uses the number) and \
+         {claimed} were refused by the claim registry (a live process picking through this \
+         crate holds the number: claims last until the process exits, so the {span} numbers \
+         of this range are shared by every such process at once)"
+    );
+}
+
+/// The registry every picker of this user shares.
+fn claims_dir() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        // SAFETY: `getuid` has no arguments and no memory effects.
+        let uid = unsafe { libc::getuid() };
+        std::env::temp_dir().join(format!("wz-free-port-claims-{uid}"))
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("wz-free-port-claims")
+    }
 }
 
 /// The smallest span of ports the picker will draw from. A narrower range makes
@@ -750,6 +939,29 @@ pub fn autoselect_range() -> (u16, u16) {
 /// offer to someone else, and saying so beats a pick that quietly can be stolen.
 fn pick_range() -> (u16, u16) {
     let (first, last) = autoselect_range();
+    // A host shared with other test runs can give a run a range of its own:
+    // `WZ_TEST_PORT_RANGE=20000-21999`. Pickers that bind a candidate before they
+    // claim it (every build of this crate before the claim moved ahead of the bind)
+    // take, for the moment of a probe, a number a run of this crate has claimed
+    // and not yet bound, and a range nobody else draws from is the one way to tell
+    // that cause from a cause inside the run. It must lie outside the kernel's
+    // autoselect range, for the reason the default does.
+    if let Some((low, high)) = std::env::var("WZ_TEST_PORT_RANGE").ok().and_then(|text| {
+        let (low, high) = text.split_once('-')?;
+        Some((
+            low.trim().parse::<u16>().ok()?,
+            high.trim().parse::<u16>().ok()?,
+        ))
+    }) {
+        assert!(
+            u32::from(low) >= FIRST_UNPRIVILEGED_PORT
+                && low <= high
+                && (high < first || low > last),
+            "WZ_TEST_PORT_RANGE={low}-{high} must be unprivileged, ordered, and outside the \
+             kernel's autoselect range {first}..={last}"
+        );
+        return (low, high);
+    }
     let below_end = u32::from(first).saturating_sub(1);
     let below_start = below_end
         .saturating_sub(PICK_SPAN - 1)
@@ -794,12 +1006,13 @@ pub fn bind_unautoselected() -> (std::net::TcpListener, u16) {
     let (first, last) = pick_range();
     let span = u64::from(last - first) + 1;
     let (mut unbindable, mut claimed) = (0usize, 0usize);
+    let claims = claims_dir();
     for _ in 0..FREE_PORT_ATTEMPTS {
         let port = first + (random_draw() % span) as u16;
-        match std::net::TcpListener::bind(("127.0.0.1", port)) {
-            Ok(listener) if claim_across_processes(port) => return (listener, port),
-            Ok(_) => claimed += 1,
-            Err(_) => unbindable += 1,
+        match draw_in(&claims, port) {
+            Draw::Bound(listener) => return (listener, port),
+            Draw::Taken => claimed += 1,
+            Draw::Unbindable => unbindable += 1,
         }
     }
     panic!(
@@ -1334,6 +1547,104 @@ mod port_tests {
         assert!(
             claim_in(&dir, held),
             "{held} must be claimable again once its holder is gone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A number somebody else has claimed is NEVER bound by a draw. The claim is
+    /// asked for first, so a number that is both claimed and bound elsewhere
+    /// comes back `Taken`; asked second (the order this used to have) the same
+    /// number comes back `Unbindable`, and the bind that found it out has held it
+    /// for the moment it took, which is the moment the other process's child
+    /// needed it.
+    #[cfg(unix)]
+    #[test]
+    fn a_claimed_number_is_never_bound_by_a_draw() {
+        use super::{draw_in, Draw};
+        let dir = std::env::temp_dir().join(format!("wz-draw-test-{}", std::process::id()));
+        // Bound by something else AND claimed: the draw must stop at the claim.
+        let other = std::net::TcpListener::bind("127.0.0.1:0").expect("a bound number");
+        let held = other.local_addr().expect("local_addr").port();
+        assert!(
+            claim_in(&dir, held),
+            "the number is claimed before the draw"
+        );
+        match draw_in(&dir, held) {
+            Draw::Taken => {}
+            Draw::Unbindable => panic!(
+                "{held} is claimed, yet the draw tried to bind it before looking at the claim"
+            ),
+            Draw::Bound(_) => panic!("{held} is claimed and bound elsewhere"),
+        }
+        // A number nobody holds is bound AND claimed by the draw.
+        drop(other);
+        let free = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("a free number");
+            probe.local_addr().expect("local_addr").port()
+        };
+        match draw_in(&dir, free) {
+            Draw::Bound(listener) => {
+                assert_eq!(listener.local_addr().expect("local_addr").port(), free);
+            }
+            Draw::Taken => panic!("{free} was nobody's and is reported claimed"),
+            Draw::Unbindable => panic!("{free} was nobody's and could not be bound"),
+        }
+        assert!(
+            !claim_in(&dir, free),
+            "{free} is bound by the draw and must stay claimed by this process"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pick holds NO socket, so there is nothing for a `fork` in another thread
+    /// to copy: the number it returns is claimed by this process, absent from the
+    /// kernel's table, and bindable the next moment.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unbound_pick_leaves_no_socket_and_the_number_is_claimed() {
+        let port = super::unbound_unautoselected();
+        assert!(
+            !super::port_in_use(port),
+            "{port} was picked, so nothing may use it yet"
+        );
+        assert!(
+            !claim_across_processes(port),
+            "{port} was picked and must stay claimed by this process"
+        );
+        drop(std::net::TcpListener::bind(("127.0.0.1", port)).expect("the picked number binds"));
+    }
+
+    /// A number something uses is not picked, and the claim taken to look at it is
+    /// let go, so the number is not lost to every later pick.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unbound_pick_refuses_a_number_in_use_and_lets_its_claim_go() {
+        use super::{pick_in, Pick};
+        let dir = std::env::temp_dir().join(format!("wz-pick-test-{}", std::process::id()));
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("a number in use");
+        let used = holder.local_addr().expect("local_addr").port();
+        assert!(
+            matches!(pick_in(&dir, used), Pick::InUse),
+            "{used} is bound by a listener and must not be picked"
+        );
+        assert!(
+            claim_in(&dir, used),
+            "{used} was refused as in use, so the look at it must not leave it claimed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A number another picker has claimed is not picked, whatever the table says.
+    #[cfg(unix)]
+    #[test]
+    fn an_unbound_pick_refuses_a_claimed_number() {
+        use super::{pick_in, Pick};
+        let dir = std::env::temp_dir().join(format!("wz-pick-claim-test-{}", std::process::id()));
+        const CLAIMED: u16 = 40_001;
+        assert!(claim_in(&dir, CLAIMED), "the number is claimed first");
+        assert!(
+            matches!(pick_in(&dir, CLAIMED), Pick::Taken),
+            "a claimed number must not be picked"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
