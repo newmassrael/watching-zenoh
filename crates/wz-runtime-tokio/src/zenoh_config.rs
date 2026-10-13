@@ -4579,39 +4579,124 @@ fn want_string(
     }
 }
 
-fn endpoints_of(value: &Json5Value, path: &'static str) -> Result<Vec<String>, ConfigIngestError> {
+/// What an element of an endpoint list may be.
+///
+/// `listen/endpoints` is a list of bare endpoint strings upstream
+/// (`Vec<EndPoint>`); `connect/endpoints` is a list of `EndPoints`, which is a
+/// bare endpoint string OR a locators group `{ strategy, locators: [...] }`
+/// (`commons/zenoh-config/src/lib.rs` @ `pub endpoints: ModeDependentValue<Vec<EndPoints>>`,
+/// `commons/zenoh-protocol/src/core/endpoint.rs` @ `pub enum EndPoints {`).
+#[derive(Clone, Copy)]
+enum EndpointElements {
+    /// Bare endpoint strings only (`listen/endpoints`).
+    Strings,
+    /// Strings and locators groups (`connect/endpoints`).
+    StringsOrGroups,
+}
+
+impl EndpointElements {
+    const fn expected(self) -> &'static str {
+        match self {
+            EndpointElements::Strings => "an array of endpoint strings",
+            EndpointElements::StringsOrGroups => {
+                "an array of endpoint strings or { strategy, locators } objects"
+            }
+        }
+    }
+}
+
+/// The locators of one group object, in written order.
+///
+/// Upstream's `EndPoints` visitor reads a map into a helper struct of two
+/// required members, `strategy: LocatorsStrategy` (`"allOf"` / `"oneOf"`,
+/// camelCase) and `locators: Vec<EndPoint>`; a missing member, a repeated one,
+/// another strategy spelling and a non-string locator are all deserialization
+/// errors, and an unknown member is ignored. The runtime then flattens a group
+/// to its locators (`EndPoints::flatten` / `as_vec`) and implements only
+/// `allOf`: a `oneOf` group "falls back to current allOf behavior"
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `fn warn_if_oneof`), so both
+/// strategies yield the same dial list here.
+fn group_locators(
+    fields: &[(String, Json5Value)],
+    path: &'static str,
+    expected: &'static str,
+) -> Result<Vec<String>, ConfigIngestError> {
+    let refuse = || ConfigIngestError::WrongType { path, expected };
+    let mut strategy_seen = false;
+    let mut locators: Option<Vec<String>> = None;
+    for (name, member) in fields {
+        match name.as_str() {
+            "strategy" => {
+                if strategy_seen {
+                    return Err(refuse());
+                }
+                strategy_seen = true;
+                match member {
+                    Json5Value::String(s) if s == "allOf" || s == "oneOf" => {}
+                    _ => return Err(refuse()),
+                }
+            }
+            "locators" => {
+                if locators.is_some() {
+                    return Err(refuse());
+                }
+                let Json5Value::Array(items) = member else {
+                    return Err(refuse());
+                };
+                let mut group = Vec::with_capacity(items.len());
+                for item in items {
+                    let Json5Value::String(s) = item else {
+                        return Err(refuse());
+                    };
+                    group.push(s.clone());
+                }
+                locators = Some(group);
+            }
+            _ => {}
+        }
+    }
+    match (strategy_seen, locators) {
+        (true, Some(group)) => Ok(group),
+        _ => Err(refuse()),
+    }
+}
+
+fn endpoints_of(
+    value: &Json5Value,
+    path: &'static str,
+    elements: EndpointElements,
+) -> Result<Vec<String>, ConfigIngestError> {
+    let expected = elements.expected();
     let Json5Value::Array(items) = value else {
-        return Err(ConfigIngestError::WrongType {
-            path,
-            expected: "an array of endpoint strings",
-        });
+        return Err(ConfigIngestError::WrongType { path, expected });
     };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        let Json5Value::String(s) = item else {
-            return Err(ConfigIngestError::WrongType {
-                path,
-                expected: "an array of endpoint strings",
-            });
-        };
-        out.push(s.clone());
+        match (item, elements) {
+            (Json5Value::String(s), _) => out.push(s.clone()),
+            (Json5Value::Object(fields), EndpointElements::StringsOrGroups) => {
+                out.extend(group_locators(fields, path, expected)?);
+            }
+            _ => return Err(ConfigIngestError::WrongType { path, expected }),
+        }
     }
     Ok(out)
 }
 
-/// R2075 — both endpoint lists are `ModeDependentValue<Vec<EndPoint>>`
-/// upstream, so the table spelling has to resolve here rather than be refused.
+/// R2075 — both endpoint lists are `ModeDependentValue<..>` upstream, so the
+/// table spelling has to resolve here rather than be refused.
 fn want_endpoints(
     doc: &Json5Value,
     path: &'static str,
     mode: WhatAmI,
+    elements: EndpointElements,
 ) -> Result<ModeRead<Vec<String>>, ConfigIngestError> {
     let Some(value) = honoured(doc, path) else {
         return Ok(ModeRead::Absent);
     };
     match for_this_mode(value, mode, path)? {
         None => Ok(ModeRead::ForOtherModes),
-        Some(v) => endpoints_of(v, path).map(ModeRead::Value),
+        Some(v) => endpoints_of(v, path, elements).map(ModeRead::Value),
     }
 }
 
@@ -6229,7 +6314,12 @@ impl ZenohNodeConfig {
         // R2075 — the mode-dependent keys are all read AFTER `mode` above, and
         // that ordering is load-bearing: the table is resolved with this node's
         // own mode, exactly as upstream's `.get(whatami)` does.
-        match want_endpoints(&doc, "connect/endpoints", out.mode)? {
+        match want_endpoints(
+            &doc,
+            "connect/endpoints",
+            out.mode,
+            EndpointElements::StringsOrGroups,
+        )? {
             ModeRead::Value(v) => {
                 out.connect = v;
                 named.push("connect/endpoints");
@@ -6280,7 +6370,12 @@ impl ZenohNodeConfig {
             ModeRead::ForOtherModes => other_modes.push("connect/exit_on_failure"),
             ModeRead::Absent => {}
         }
-        match want_endpoints(&doc, "listen/endpoints", out.mode)? {
+        match want_endpoints(
+            &doc,
+            "listen/endpoints",
+            out.mode,
+            EndpointElements::Strings,
+        )? {
             ModeRead::Value(v) => {
                 out.listen = v;
                 named.push("listen/endpoints");
@@ -9449,6 +9544,83 @@ mod tests {
         assert!(empty
             .named
             .contains(&"routing/router/linkstate/transport_weights"));
+    }
+
+    /// `connect/endpoints` elements are upstream's `EndPoints`: a string or a
+    /// `{ strategy, locators }` group. The file reader used to refuse the whole
+    /// document on the first object; a group now reads as its locators, in
+    /// written order, mixed with bare strings, under either strategy and inside
+    /// the per-mode table form too.
+    #[test]
+    fn a_connect_endpoint_group_reads_as_its_locators_in_written_order() {
+        let connect = |doc: &str| {
+            ZenohNodeConfig::from_json5(doc)
+                .expect("the document parses")
+                .config
+                .connect
+        };
+        assert_eq!(
+            connect(
+                r#"{ "mode": "client", "connect": { "endpoints": [
+                    "tcp/a:1",
+                    { strategy: "allOf", locators: ["tcp/b:1", "tcp/b:2"] },
+                    { locators: ["udp/c:1"], strategy: 'oneOf', note: { x: 1 } },
+                    { strategy: "allOf", locators: [] },
+                    "tcp/d:1" ] } }"#
+            ),
+            ["tcp/a:1", "tcp/b:1", "tcp/b:2", "udp/c:1", "tcp/d:1"],
+            "groups flatten in order; an empty group names nothing; an unknown member is ignored"
+        );
+        assert_eq!(
+            connect(
+                r#"{ "mode": "peer", "connect": { "endpoints": {
+                    router: ["tcp/r:1"],
+                    peer: [{ strategy: "allOf", locators: ["tcp/p:1", "tcp/p:2"] }] } } }"#
+            ),
+            ["tcp/p:1", "tcp/p:2"],
+            "a group inside this mode's entry of the per-mode table"
+        );
+    }
+
+    /// What upstream's `EndPoints` deserializer refuses stays refused, and is
+    /// refused AT the key; `listen/endpoints` is `Vec<EndPoint>` upstream and
+    /// takes no group.
+    #[test]
+    fn an_endpoint_group_upstream_refuses_is_refused_and_listen_takes_none() {
+        for doc in [
+            r#"{ "connect": { "endpoints": [{ locators: ["tcp/a:1"] }] } }"#,
+            r#"{ "connect": { "endpoints": [{ strategy: "allOf" }] } }"#,
+            r#"{ "connect": { "endpoints": [{ strategy: "allOf", strategy: "oneOf", locators: [] }] } }"#,
+            r#"{ "connect": { "endpoints": [{ strategy: "anyOf", locators: ["tcp/a:1"] }] } }"#,
+            r#"{ "connect": { "endpoints": [{ strategy: "allof", locators: [] }] } }"#,
+            r#"{ "connect": { "endpoints": [{ strategy: "allOf", locators: [1] }] } }"#,
+            r#"{ "connect": { "endpoints": [{ strategy: "allOf", locators: "tcp/a:1" }] } }"#,
+            r#"{ "connect": { "endpoints": [{ strategy: "allOf", locators: [["tcp/a:1"]] }] } }"#,
+            r#"{ "connect": { "endpoints": [["tcp/a:1"]] } }"#,
+        ] {
+            assert!(
+                matches!(
+                    ZenohNodeConfig::from_json5(doc),
+                    Err(ConfigIngestError::WrongType {
+                        path: "connect/endpoints",
+                        ..
+                    })
+                ),
+                "must be refused at connect/endpoints: {doc}"
+            );
+        }
+        assert!(
+            matches!(
+                ZenohNodeConfig::from_json5(
+                    r#"{ "listen": { "endpoints": [{ strategy: "allOf", locators: ["tcp/a:1"] }] } }"#
+                ),
+                Err(ConfigIngestError::WrongType {
+                    path: "listen/endpoints",
+                    expected: "an array of endpoint strings",
+                })
+            ),
+            "listen takes bare endpoint strings only"
+        );
     }
 
     /// A key wz DOES honour, carrying a value it cannot mean, is a hard error

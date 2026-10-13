@@ -18751,7 +18751,12 @@ layer_z_zenohd_interop() {
     # build-zenohd.sh, since a hardcoded `peer` would grade a constant against
     # itself); the daemon half is a real zenohd resolving the same bytes to
     # `router`. MEASURED on this exact command: 11 before the leg, 12 after.
-    _runci_guarded_test Z 12 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    # Raises 12 -> 13 for LEG 13: a `connect/endpoints` element that is upstream's
+    # locators group `{ strategy, locators }`, which the file reader used to refuse
+    # as a whole document, read out of a file that is the node's only source of
+    # the endpoint and dialled to a real zenohd. Counted on the file's `#[ignore]`
+    # tests: 12 before the leg, 13 after.
+    _runci_guarded_test Z 13 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_reads_a_stock_zenohd_config -- --ignored --quiet --test-threads=1 \
         || return 1
     # R2222 (open-debt items 568 + 569, and the lane hole they exposed) — the

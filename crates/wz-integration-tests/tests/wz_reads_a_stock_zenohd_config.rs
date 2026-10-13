@@ -3919,6 +3919,92 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     drop(router);
 }
 
+/// LEG 13: an element of `connect/endpoints` may be upstream's locators GROUP,
+/// `{ strategy, locators: [...] }`, and a node started on such a file dials the
+/// locators the group names.
+///
+/// Upstream types the list `Vec<EndPoints>`, a bare endpoint string OR a group
+/// (`commons/zenoh-protocol/src/core/endpoint.rs` @ `pub enum EndPoints {`), so a
+/// stock config may spell its only router that way. The file reader used to
+/// answer the first object with `WrongType` and refuse the whole document, which
+/// no unit test of the reader's own acceptance shows from the operator's side:
+/// the node does not START. This leg is that side. As in the drop-in leg above
+/// the endpoint exists in no argv and no default (the port is reserved at random
+/// per run), so reaching the zenohd means the group's locator was read out of the
+/// file.
+// wz-proves: none -- same registration gap as the legs above.
+#[test]
+#[ignore = "binary-dep e2e: needs target/zenohd/zenohd and a wz-ap-demo built \
+            with --features zenoh-config"]
+fn a_connect_endpoint_group_in_a_stock_zenohd_config_is_dialled() {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let router_file = staged_config(&operator_config(port));
+    let group_source = format!(
+        r#"{{
+  mode: "client",
+  connect: {{
+    endpoints: [
+      {{ strategy: "allOf", locators: ["tcp/127.0.0.1:{port}"] }},
+    ],
+  }},
+}}"#
+    );
+    let client_file = staged_config(&group_source);
+    drop(reservation);
+
+    let (router, mut router_capture) = spawn_on_config("zenohd (group target)", router_file.path());
+    wait_for_substring(&mut router_capture, RESOLVED_CONF_MARKER, STARTUP_BUDGET)
+        .unwrap_or_else(|e| panic!("zenohd never came up: {e}"));
+    wait_for_substring(&mut router_capture, LISTENER_UP_MARKER, STARTUP_BUDGET)
+        .unwrap_or_else(|e| panic!("zenohd printed its config but never bound a listener: {e}"));
+
+    let capture = tempfile::tempfile().expect("tempfile for demo output");
+    let out = capture.try_clone().expect("dup demo stdout handle");
+    let err = capture.try_clone().expect("dup demo stderr handle");
+    let mut command = Command::new(&demo);
+    // `--config` and the payload flags ONLY, for the reason the drop-in leg
+    // gives: an endpoint also on the command line would not tell a wz that read
+    // the group from one that ignored the file.
+    command
+        .arg("--config")
+        .arg(client_file.path())
+        .arg("--publish")
+        .arg("demo/config/group")
+        .arg("--value")
+        .arg("dialled-from-a-locators-group")
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    let demo_guard = ChildGuard::wrap(
+        "wz-ap-demo (--config, locators group)",
+        command.spawn().expect("spawn wz-ap-demo"),
+    );
+
+    let mut demo_capture = capture;
+    let seen = wait_for_substring(&mut demo_capture, DEMO_ESTABLISHED, DEMO_BUDGET);
+    if let Err(e) = &seen {
+        let so_far = wz_integration_tests::common::read_captured(&mut demo_capture);
+        assert!(
+            !so_far.contains("--config requires the `zenoh-config` feature"),
+            "this lane's wz-ap-demo was built without the feature under test; \
+             rebuild with `cargo build -p wz-ap-demo --features zenoh-config`"
+        );
+        panic!("wz-ap-demo never established a session from a locators group: {e}\n{so_far}");
+    }
+    let seen = seen.expect("checked above");
+    assert!(
+        seen.contains(&format!("tcp/127.0.0.1:{port}")),
+        "the demo's own report does not name the locator the group carried\n{seen}"
+    );
+
+    drop(demo_guard);
+    drop(router);
+}
+
 /// R311y849 — LEG 5: the schedule the file carried is the schedule the node
 /// RUNS.
 ///
