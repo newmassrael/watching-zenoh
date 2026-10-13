@@ -273878,6 +273878,40 @@
         "The hosted run of the close-query commit is red in that layer for these five tests, and the commit after it carries the same tests; this commit is the repayment for both."
       ]
     },
+    "Round 3328": {
+      "decision_summary": "The legs runner refuses a bare test name as a filter, because a name covers whatever the next test happens to be called, and the hosted run of the census repair went red in the layer that runs the legs. That repair had passed the layer that only counts the tests, which does not check a row's shape. The two forwarder unit tests of the close query are now named by their full module path, one row for each forwarder, so a lifecycle test added to either module is reported unclaimed by the census until its path is added, instead of being absorbed or dropped. Whole forwarder modules were not claimed: they hold hundreds of tests that would run in front of every push. The integration target keeps its row. A change to a legs row runs both layers, C1cn for the census and C1bn for the rows.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-tokio row that filtered on a bare test name is replaced by two rows, one per forwarder, each filtering on the full module path of its test; the comment says why."
+      ],
+      "verification_bullets": [
+        "On a build host: layer C1bn passes and its two new rows run one test each, the integration target row runs three; layer C1cn passes and reports wz-runtime-tokio at 1858 feature-only tests, 1856 run by a leg and 2 skipped by name.",
+        "On a build host: the count-guard oracle over the range reaches no guard.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "A lifecycle test added to the router or linkstate forwarder is reported unclaimed by the census until its module path gets a row of its own.",
+        "The hosted run of the close-query commit is red in the census layer and the run of the census repair is red in the legs layer; this commit is the repayment for both."
+      ],
+      "publishable_decision_summary": "The legs runner refuses a bare test name as a filter, because a name covers whatever the next test happens to be called, and the hosted run of the census repair went red in the layer that runs the legs. That repair had passed the layer that only counts the tests, which does not check a row's shape. The two forwarder unit tests of the close query are now named by their full module path, one row for each forwarder, so a lifecycle test added to either module is reported unclaimed by the census until its path is added, instead of being absorbed or dropped. Whole forwarder modules were not claimed: they hold hundreds of tests that would run in front of every push. The integration target keeps its row. A change to a legs row runs both layers, C1cn for the census and C1bn for the rows.",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-tokio row that filtered on a bare test name is replaced by two rows, one per forwarder, each filtering on the full module path of its test; the comment says why."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: layer C1bn passes and its two new rows run one test each, the integration target row runs three; layer C1cn passes and reports wz-runtime-tokio at 1858 feature-only tests, 1856 run by a leg and 2 skipped by name.",
+        "On a build host: the count-guard oracle over the range reaches no guard.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A lifecycle test added to the router or linkstate forwarder is reported unclaimed by the census until its module path gets a row of its own.",
+        "The hosted run of the close-query commit is red in the census layer and the run of the census repair is red in the legs layer; this commit is the repayment for both."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
