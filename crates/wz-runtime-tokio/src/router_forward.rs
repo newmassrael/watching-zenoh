@@ -19568,4 +19568,704 @@ mod tests {
             "so the other face is the only candidate, by the All fallback"
         );
     }
+
+    // ── R3334 — the rest of what the retired engine's tests held ──
+    //
+    // R2912 ported the seven behaviours the hat implemented and nothing
+    // witnessed. Re-sorting the 63 retired tests against the hat found nineteen
+    // whose hat counterpart asserts less than the old test did, and two that the
+    // hat implements and no test sends a message through. Each test below
+    // closes one named gap with the assertion that was missing.
+
+    /// A client face's literal subscription under `id`.
+    fn client_sub(fwd: &RouterForwarder, face: u64, id: u64, keyexpr: &str) {
+        forward_one(
+            fwd,
+            FaceId(face),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(id, 0, Some(keyexpr)).expect("declare subscriber"),
+            )),
+        );
+    }
+
+    /// A Put on `keyexpr`, spelled literally, from `face`.
+    fn put_literal(fwd: &RouterForwarder, face: u64, keyexpr: &str) {
+        let push = wz_session_core::push_build::build_push_literal(keyexpr, b"payload")
+            .expect("build push");
+        forward_one(fwd, FaceId(face), NetworkMessage::Push(Box::new(push)));
+    }
+
+    /// The (id, suffix) a wire keyexpr carries. A macro because the decoded
+    /// frames and the built messages hold the keyexpr under different buffer
+    /// parameters, which one function signature cannot name.
+    macro_rules! wire_keyexpr {
+        ($keyexpr:expr) => {
+            match &$keyexpr.body {
+                WireexprOwnedVariant::WireexprLocal(a) => {
+                    (a.id, a.suffix.as_deref().map(str::to_owned))
+                }
+                WireexprOwnedVariant::WireexprNonlocal(a) => {
+                    (a.id, a.suffix.as_deref().map(str::to_owned))
+                }
+            }
+        };
+    }
+
+    /// A subscribing client (face 0, `home/temp`) and a producing client
+    /// (face 1): the shape the aliased-Put tests share. The faces are returned
+    /// so they live as long as the test.
+    #[allow(clippy::type_complexity)]
+    fn subscriber_and_producer() -> (
+        RouterForwarder,
+        (Arc<SessionLinkActions>, Arc<SessionLinkActions>),
+        Arc<RecordingLinkDriver>,
+    ) {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (subscriber, sink_s) = face(zid(0xCC), WIRE_CLIENT);
+        let (producer, _sp) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &subscriber);
+        fwd.register(FaceId(1), &producer);
+        client_sub(&fwd, 0, 7, "home/temp");
+        sink_s.reset();
+        (fwd, (subscriber, producer), sink_s)
+    }
+
+    /// A subscription held by a CLIENT face is dumped to another client that
+    /// asks for it: one `DeclareSubscriber` under the interest id (id 0, since a
+    /// CURRENT-only dump interns nothing), then the `DeclareFinal`; the holder
+    /// hears nothing. The loop over the broker hat's client store had only a
+    /// negative test (a face's own subscription excluded).
+    #[test]
+    fn a_client_held_subscriber_is_dumped_to_another_clients_current_interest() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, sink_h) = face(zid(0xAA), WIRE_CLIENT);
+        let (asker, sink_a) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &asker);
+        client_sub(&fwd, 0, 7, "demo/route");
+        sink_h.reset();
+        sink_a.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_msg(42, "demo/route", true, false, true),
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "one DeclareSubscriber reply and the terminating DeclareFinal"
+        );
+        let reply = forwarded_declare(&sink_a.frame_bytes(0));
+        assert_eq!(reply.interest_id, Some(42));
+        match &reply.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_eq!(d.id, 0, "a CURRENT-only dump carries id 0");
+                assert_eq!(
+                    wire_keyexpr!(&d.keyexpr),
+                    (0, Some("demo/route".to_owned())),
+                    "the reply is keyed on the interest keyexpr"
+                );
+            }
+            other => panic!("expected a DeclSubscriber reply, got {other:?}"),
+        }
+        let fin = forwarded_declare(&sink_a.frame_bytes(1));
+        assert_eq!(fin.interest_id, Some(42));
+        assert!(matches!(
+            fin.body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+        assert_eq!(sink_h.frame_count(), 0, "the holder is told nothing");
+    }
+
+    /// The queryable twin: a complete queryable held by a client face is dumped
+    /// to another client with its completeness, ahead of the Final.
+    #[test]
+    fn a_client_held_queryable_is_dumped_to_another_clients_current_interest() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, sink_h) = face(zid(0xAA), WIRE_CLIENT);
+        let (asker, sink_a) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &asker);
+        client_qabl(&fwd, 0, 7, "demo/**", true);
+        sink_h.reset();
+        sink_a.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_msg(5, "demo/**", false, true, false),
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "one DeclareQueryable reply and the terminating DeclareFinal"
+        );
+        let reply = forwarded_declare(&sink_a.frame_bytes(0));
+        assert_eq!(reply.interest_id, Some(5));
+        match &reply.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => assert_eq!(
+                wire_keyexpr!(&d.keyexpr),
+                (0, Some("demo/**".to_owned())),
+                "a non-aggregate reply is keyed on the queryable's own keyexpr"
+            ),
+            other => panic!("expected a DeclQueryable reply, got {other:?}"),
+        }
+        assert!(
+            forwarded_qabl_info(&sink_a.frame_bytes(0)).complete,
+            "the reply carries the queryable's completeness"
+        );
+        let fin = forwarded_declare(&sink_a.frame_bytes(1));
+        assert_eq!(fin.interest_id, Some(5));
+        assert!(matches!(
+            fin.body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+        assert_eq!(sink_h.frame_count(), 0, "the holder is told nothing");
+    }
+
+    /// A face that subscribes its OWN key and then publishes on it is not sent
+    /// its own Put, while another subscriber of the same key is. No other test
+    /// has a publisher that also subscribes, so the inbound-face guard of the
+    /// client delivery was never the thing that kept a Put from echoing.
+    #[test]
+    fn a_publisher_that_subscribes_its_own_key_is_not_sent_its_own_put() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c0, sink_0) = face(zid(0xAA), WIRE_CLIENT);
+        let (c1, sink_1) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &c0);
+        fwd.register(FaceId(1), &c1);
+        client_sub(&fwd, 0, 7, "home/temp");
+        client_sub(&fwd, 1, 8, "home/temp");
+        sink_0.reset();
+        sink_1.reset();
+        put_literal(&fwd, 0, "home/temp");
+        assert_eq!(sink_0.frame_count(), 0, "never echoed to its own face");
+        assert_eq!(sink_1.frame_count(), 1, "the other subscriber is reached");
+    }
+
+    /// A Del routes by keyexpr exactly as a Put does and leaves as a Del.
+    #[test]
+    fn a_del_reaches_a_matching_client_subscriber_as_a_del() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (subscriber, sink_s) = face(zid(0xCC), WIRE_CLIENT);
+        let (producer, _sp) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &subscriber);
+        fwd.register(FaceId(1), &producer);
+        client_sub(&fwd, 0, 7, "home/temp");
+        sink_s.reset();
+        let del =
+            wz_session_core::push_build::build_push_del_literal("home/temp").expect("build del");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(del)));
+        assert_eq!(sink_s.frame_count(), 1, "the Del is delivered");
+        assert!(
+            matches!(
+                forwarded_push(&sink_s.frame_bytes(0)).body,
+                PushOwnedVariant::CodecZenohMsgDel(_)
+            ),
+            "and it is still a Del"
+        );
+    }
+
+    /// A subscriber face that goes down takes its route with it: the next Put
+    /// reaches nothing at the departed sink, and the route is recomputed. The
+    /// recompute matters because a `FaceId` is reusable -- a new face on the
+    /// departed id must not inherit the cached route. A second subscriber stays
+    /// so the store is not empty: an empty store has no client leg and is
+    /// answered without a route being computed at all.
+    #[test]
+    fn a_departed_subscriber_face_is_not_sent_the_next_put_and_the_route_recomputes() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (producer, _sp) = face(zid(0xAA), WIRE_CLIENT);
+        let (subscriber, sink_s) = face(zid(0xCC), WIRE_CLIENT);
+        let (stayer, sink_t) = face(zid(0xEE), WIRE_CLIENT);
+        fwd.register(FaceId(0), &producer);
+        fwd.register(FaceId(1), &subscriber);
+        fwd.register(FaceId(2), &stayer);
+        client_sub(&fwd, 1, 7, "demo/data");
+        client_sub(&fwd, 2, 8, "demo/data");
+        sink_s.reset();
+        sink_t.reset();
+        put_literal(&fwd, 0, "demo/data");
+        assert_eq!(sink_s.frame_count(), 1, "delivered while it is subscribed");
+        assert_eq!(sink_t.frame_count(), 1, "and to the one that stays");
+        let first = fwd.client_route_computes();
+        fwd.deregister(FaceId(1));
+        let (newcomer, sink_n) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(1), &newcomer);
+        put_literal(&fwd, 0, "demo/data");
+        assert_eq!(
+            sink_t.frame_count(),
+            2,
+            "the remaining subscriber is reached"
+        );
+        assert_eq!(
+            sink_s.frame_count(),
+            1,
+            "the departed face is sent nothing more"
+        );
+        assert_eq!(
+            sink_n.frame_count(),
+            0,
+            "a new face on the reused id never subscribed and gets nothing"
+        );
+        assert_eq!(
+            fwd.client_route_computes(),
+            first + 1,
+            "the departure invalidated the cached route"
+        );
+    }
+
+    /// An id-only Put on an alias the producer declared reaches a client
+    /// subscriber as the literal keyexpr: the subscriber never saw the alias.
+    #[test]
+    fn an_aliased_put_reaches_a_client_subscriber_as_a_literal() {
+        let (fwd, _faces, sink_s) = subscriber_and_producer();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(9, "home/temp")
+                    .expect("declare kexpr"),
+            )),
+        );
+        let push = wz_session_core::push_build::build_push_aliased(9, None, b"payload")
+            .expect("build aliased push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(sink_s.frame_count(), 1);
+        assert_eq!(
+            wire_keyexpr!(&forwarded_push(&sink_s.frame_bytes(0)).keyexpr),
+            (0, Some("home/temp".to_owned())),
+            "the alias is resolved, not forwarded as an id the subscriber cannot read"
+        );
+    }
+
+    /// A per-Put suffix on an alias resolves too: alias 9 is `home`, the Put
+    /// adds `/temp`.
+    #[test]
+    fn an_aliased_put_with_a_suffix_reaches_a_client_subscriber_as_a_literal() {
+        let (fwd, _faces, sink_s) = subscriber_and_producer();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(9, "home")
+                    .expect("declare kexpr"),
+            )),
+        );
+        let push = wz_session_core::push_build::build_push_aliased(9, Some("/temp"), b"payload")
+            .expect("build aliased push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(sink_s.frame_count(), 1);
+        assert_eq!(
+            wire_keyexpr!(&forwarded_push(&sink_s.frame_bytes(0)).keyexpr),
+            (0, Some("home/temp".to_owned()))
+        );
+    }
+
+    /// An alias that was undeclared stops resolving, while a subscription
+    /// recorded before that keeps routing literal Puts.
+    #[test]
+    fn an_undeclared_alias_drops_its_puts_but_existing_subscriptions_keep_routing() {
+        let (fwd, _faces, sink_s) = subscriber_and_producer();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(9, "home/temp")
+                    .expect("declare kexpr"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_undeclare_kexpr(9),
+            )),
+        );
+        let push = wz_session_core::push_build::build_push_aliased(9, None, b"payload")
+            .expect("build aliased push");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_s.frame_count(),
+            0,
+            "a Put on a removed alias resolves to nothing"
+        );
+        put_literal(&fwd, 1, "home/temp");
+        assert_eq!(
+            sink_s.frame_count(),
+            1,
+            "the earlier subscription still routes a literal Put"
+        );
+    }
+
+    /// A best-effort Put leaves on the best-effort channel.
+    #[test]
+    fn a_best_effort_put_reaches_a_client_subscriber_best_effort() {
+        let (fwd, _faces, sink_s) = subscriber_and_producer();
+        let push = wz_session_core::push_build::build_push_literal("home/temp", b"payload")
+            .expect("build push");
+        forward_one_reliability(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)), false);
+        assert_eq!(sink_s.frame_count(), 1);
+        assert_eq!(
+            sink_s.frame_reliability(0),
+            crate::Reliability::BestEffort,
+            "the channel the Put arrived on is the channel it leaves on"
+        );
+    }
+
+    /// A query whose only queryable cannot answer it (a keyexpr that does not
+    /// intersect) is not sent to that queryable, and the querier is finalized
+    /// at once with nothing left pending.
+    #[test]
+    fn a_query_is_not_sent_to_a_queryable_that_does_not_match_it() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (host, sink_h) = face(zid(0xAA), WIRE_CLIENT);
+        let (querier, sink_q) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &host);
+        fwd.register(FaceId(1), &querier);
+        client_qabl(&fwd, 0, 7, "other/**", false);
+        sink_h.reset();
+        sink_q.reset();
+        forward_one(&fwd, FaceId(1), request_best(42, "demo/example"));
+        assert_eq!(
+            recorded_request_keyexprs(&sink_h).len(),
+            0,
+            "a queryable on another keyexpr is not asked"
+        );
+        assert_eq!(sink_q.frame_count(), 1);
+        assert_eq!(forwarded_response_final_rid(&sink_q.frame_bytes(0)), 42);
+        assert_eq!(fwd.pending_len(), 0, "nothing is left pending");
+    }
+
+    /// The querier's own queryable is the only candidate: nothing is asked and
+    /// the querier is finalized under its own request id.
+    #[test]
+    fn a_query_whose_only_candidate_is_the_queriers_own_queryable_is_finalized() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (own, sink_o) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &own);
+        client_qabl(&fwd, 0, 7, "demo/**", false);
+        sink_o.reset();
+        forward_one(&fwd, FaceId(0), request_best(42, "demo/example"));
+        assert_eq!(
+            recorded_request_keyexprs(&sink_o).len(),
+            0,
+            "a query is never routed back to its source"
+        );
+        assert_eq!(sink_o.frame_count(), 1, "only the Final comes back");
+        assert_eq!(forwarded_response_final_rid(&sink_o.frame_bytes(0)), 42);
+        assert_eq!(fwd.pending_len(), 0);
+    }
+
+    /// AllComplete asks every COMPLETE queryable and no other: a filter, not a
+    /// selection of one.
+    #[test]
+    fn an_all_complete_query_asks_every_complete_queryable_and_no_other() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_CLIENT);
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT);
+        let (partial, sink_p) = face(zid(0xEE), WIRE_CLIENT);
+        let (querier, _sq) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &partial);
+        fwd.register(FaceId(3), &querier);
+        client_qabl(&fwd, 0, 7, "demo/**", true);
+        client_qabl(&fwd, 1, 8, "demo/**", true);
+        client_qabl(&fwd, 2, 9, "demo/**", false);
+        sink_a.reset();
+        sink_b.reset();
+        sink_p.reset();
+        forward_one(
+            &fwd,
+            FaceId(3),
+            request_with_target(42, "demo/example", QueryTarget::AllComplete),
+        );
+        assert_eq!(sink_a.frame_count(), 1, "the first complete queryable");
+        assert_eq!(sink_b.frame_count(), 1, "the second complete queryable");
+        assert_eq!(sink_p.frame_count(), 0, "the incomplete one is not asked");
+    }
+
+    /// AllComplete over queryables that are all incomplete asks nobody and
+    /// finalizes the querier at once.
+    #[test]
+    fn an_all_complete_query_over_incomplete_queryables_is_finalized_at_once() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_CLIENT);
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT);
+        let (querier, sink_q) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &querier);
+        client_qabl(&fwd, 0, 7, "demo/**", false);
+        client_qabl(&fwd, 1, 8, "demo/**", false);
+        sink_a.reset();
+        sink_b.reset();
+        sink_q.reset();
+        forward_one(
+            &fwd,
+            FaceId(2),
+            request_with_target(42, "demo/example", QueryTarget::AllComplete),
+        );
+        assert_eq!(sink_a.frame_count(), 0);
+        assert_eq!(sink_b.frame_count(), 0);
+        assert_eq!(sink_q.frame_count(), 1);
+        assert_eq!(forwarded_response_final_rid(&sink_q.frame_bytes(0)), 42);
+        assert_eq!(fwd.pending_len(), 0);
+    }
+
+    /// A face that was never sent the query cannot answer it: a Reply and a
+    /// Final carrying the right downstream id from the WRONG face reach the
+    /// querier as nothing, and the query stays pending for the face that was
+    /// asked.
+    #[test]
+    fn a_reply_and_a_final_from_a_face_that_was_never_asked_are_dropped() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (host, sink_h) = face(zid(0xAA), WIRE_CLIENT);
+        let (bystander, _sb) = face(zid(0xBB), WIRE_CLIENT);
+        let (querier, sink_q) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &host);
+        fwd.register(FaceId(1), &bystander);
+        fwd.register(FaceId(2), &querier);
+        client_qabl(&fwd, 0, 7, "demo/**", false);
+        sink_h.reset();
+        forward_one(&fwd, FaceId(2), request_best(42, "demo/example"));
+        let qid = forwarded_request(&sink_h.frame_bytes(0)).rid;
+        assert_eq!(fwd.pending_len(), 1, "the asked face owes an answer");
+        sink_q.reset();
+        let forged = wz_session_core::response_build::build_response_reply_literal(
+            qid,
+            "demo/example",
+            b"forged",
+        )
+        .expect("build response");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Response(Box::new(forged)));
+        let forged_final = wz_session_core::response_final_build::build_response_final(
+            qid,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
+        forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(forged_final));
+        assert_eq!(
+            sink_q.frame_count(),
+            0,
+            "nothing a face that was not asked says reaches the querier"
+        );
+        assert_eq!(fwd.pending_len(), 1, "and it does not close the query");
+    }
+
+    /// The reply relayed to the querier carries the answered keyexpr as a
+    /// literal, under the querier's own request id.
+    #[test]
+    fn a_relayed_reply_carries_the_answered_keyexpr() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (host, sink_h) = face(zid(0xAA), WIRE_CLIENT);
+        let (querier, sink_q) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &host);
+        fwd.register(FaceId(1), &querier);
+        client_qabl(&fwd, 0, 7, "demo/**", false);
+        sink_h.reset();
+        forward_one(&fwd, FaceId(1), request_best(42, "demo/example"));
+        let qid = forwarded_request(&sink_h.frame_bytes(0)).rid;
+        sink_q.reset();
+        let reply = wz_session_core::response_build::build_response_reply_literal(
+            qid,
+            "demo/example",
+            b"answer",
+        )
+        .expect("build response");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Response(Box::new(reply)));
+        assert_eq!(sink_q.frame_count(), 1);
+        let relayed = forwarded_response(&sink_q.frame_bytes(0));
+        assert_eq!(relayed.request_id, 42, "under the querier's own id");
+        assert_eq!(
+            wire_keyexpr!(&relayed.keyexpr),
+            (0, Some("demo/example".to_owned())),
+            "and carrying the answered keyexpr"
+        );
+    }
+
+    /// A token reaches a face that asked for FUTURE tokens as one unsolicited
+    /// `DeclareToken` (a literal keyexpr, a non-zero id, no interest id), and
+    /// its retraction names that id with no keyexpr extension. The id is what
+    /// the reader holds the token under: retracting by another id retracts
+    /// nothing.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_pushed_token_is_retracted_under_the_id_it_was_pushed_with() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, _sh) = face(zid(0xAA), WIRE_CLIENT);
+        let (reader, sink_r) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &reader);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(4, "group/**", false, true, false),
+        );
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "a FUTURE-only interest is silent at registration"
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            declare_client_token_msg(77, "group/member/a"),
+        );
+        assert_eq!(sink_r.frame_count(), 1, "the token is pushed once");
+        let pushed = forwarded_declare(&sink_r.frame_bytes(0));
+        assert_eq!(pushed.interest_id, None, "an unsolicited push");
+        let pushed_id = match &pushed.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
+                assert_eq!(
+                    wire_keyexpr!(&d.keyexpr),
+                    (0, Some("group/member/a".to_owned())),
+                    "the token's own literal keyexpr"
+                );
+                assert_ne!(d.id, 0, "a non-zero id, so it can be retracted by id");
+                d.id
+            }
+            other => panic!("expected a DeclToken, got {other:?}"),
+        };
+        forward_one(&fwd, FaceId(0), undeclare_client_token_msg(77));
+        assert_eq!(sink_r.frame_count(), 2, "the retraction is sent");
+        match &forwarded_declare(&sink_r.frame_bytes(1)).body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
+                assert_eq!(u.id, pushed_id, "under the id the token was pushed with");
+                assert!(
+                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
+                        .is_none(),
+                    "an id-only retraction carries no keyexpr"
+                );
+            }
+            other => panic!("expected an UndeclToken, got {other:?}"),
+        }
+    }
+
+    /// The holder's face going down retracts the token under the id it was
+    /// pushed with, too.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_departing_holder_retracts_its_token_under_the_pushed_id() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, _sh) = face(zid(0xAA), WIRE_CLIENT);
+        let (reader, sink_r) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &reader);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(4, "group/**", false, true, false),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            declare_client_token_msg(77, "group/member/a"),
+        );
+        let pushed_id = match &forwarded_declare(&sink_r.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => d.id,
+            other => panic!("expected a DeclToken, got {other:?}"),
+        };
+        fwd.deregister(FaceId(0));
+        assert_eq!(sink_r.frame_count(), 2, "the departure is told");
+        match &forwarded_declare(&sink_r.frame_bytes(1)).body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
+                assert_eq!(u.id, pushed_id, "under the id the token was pushed with");
+            }
+            other => panic!("expected an UndeclToken, got {other:?}"),
+        }
+    }
+
+    /// A CURRENT+FUTURE token interest dumps a held token as the token's own
+    /// literal under a non-zero id, stamped with the interest id, and the Final
+    /// carries the interest id too.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_current_and_future_token_interest_dumps_the_held_token_with_its_id() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, _sh) = face(zid(0xAA), WIRE_CLIENT);
+        let (reader, sink_r) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &reader);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            declare_client_token_msg(77, "group/member/a"),
+        );
+        sink_r.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(4, "group/**", true, true, false),
+        );
+        assert_eq!(sink_r.frame_count(), 2, "the token, then the Final");
+        let dumped = forwarded_declare(&sink_r.frame_bytes(0));
+        assert_eq!(dumped.interest_id, Some(4));
+        match &dumped.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
+                assert_ne!(d.id, 0, "a non-zero id, so the token can be retracted");
+                assert_eq!(
+                    wire_keyexpr!(&d.keyexpr),
+                    (0, Some("group/member/a".to_owned())),
+                    "the token's own literal, not the interest's keyexpr"
+                );
+            }
+            other => panic!("expected a DeclToken, got {other:?}"),
+        }
+        let fin = forwarded_declare(&sink_r.frame_bytes(1));
+        assert_eq!(fin.interest_id, Some(4));
+        assert!(matches!(
+            fin.body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    /// Two faces holding one token keyexpr tell the reader once; the reader is
+    /// told of the retraction only when the LAST holder goes, by either path.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_token_two_faces_hold_is_retracted_only_when_the_last_holder_departs() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (first, _sf) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xCC), WIRE_CLIENT);
+        let (reader, sink_r) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &first);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &reader);
+        forward_one(
+            &fwd,
+            FaceId(2),
+            token_interest_msg(4, "group/**", false, true, false),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            declare_client_token_msg(77, "group/member/a"),
+        );
+        forward_one(
+            &fwd,
+            FaceId(1),
+            declare_client_token_msg(88, "group/member/a"),
+        );
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the second holder of the same keyexpr is not advertised again"
+        );
+        fwd.deregister(FaceId(0));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the keyexpr is still held: nothing is retracted"
+        );
+        fwd.deregister(FaceId(1));
+        assert_eq!(
+            sink_r.frame_count(),
+            2,
+            "the last holder's departure retracts"
+        );
+        assert!(matches!(
+            forwarded_declare(&sink_r.frame_bytes(1)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+    }
 }
