@@ -273754,6 +273754,54 @@
         "The message-level selected verdict and the live handle read the same planes; nothing else in the tree builds a record view, and a plane added later must call payload_content."
       ]
     },
+    "Round 3325": {
+      "decision_summary": "The close verb of the session lifecycle is also a QUERY. A GET on @/<zid>/<whatami>/session/close/<peer-zid> orders every link of that peer's session closed and is answered with a verdict (closing with the link count, already_closed, not_found, or refused with a reason); a GET on @/<zid>/<whatami>/session/verbs answers the verbs the node has. The Push form had no reply path, so a caller could not tell a close that ran from one that was refused or aimed at nobody. Only a literal key is a close; a wildcard peer chunk is never one. The same SessionLifecycleAuthority speaks first, so an unpermitted node answers refused before it reads any session, and a last chunk that is not a zid is refused with its own reason. The session directory is the face tables, joined aggregated links included. Replies carry the application/json encoding id as the wire packs it. The demo hosts both queries behind --session-lifecycle and permits the close with --session-close-permit.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/lifecycle_query.rs: LifecycleQueries, the answerer of the two queries, over the authority and a SessionDirectory port; the verdict and refusal types and their JSON bodies; the reply helper that packs the encoding id.",
+        "crates/wz-session-core/src/session_actions.rs, lib.rs: the out-of-band state records that a close was ordered, and the module is declared behind session-close-ingress.",
+        "crates/wz-runtime-tokio: the router and linkstate forwarders hold shared views of their face tables, so the answerer reads a session's links without borrowing the forwarder that stores its handler; the sessions of a peer include its joined links.",
+        "crates/wz-ap-demo: --session-lifecycle and --session-close-permit register the queryables on a peer or router.",
+        "scripts/run-ci.sh, scripts/lib/feature_gate_diagnostic.py: the peer mesh demo build carries the feature and the lane counts the new end-to-end test; session-close-ingress now has a probe and leaves the deferred list.",
+        "crates/wz-integration-tests/tests/wz_peer_session_lifecycle_query.rs: two real demo processes and a client; the capability query, the close with its verdict and the face going down, and the refusal without the permit."
+      ],
+      "verification_bullets": [
+        "On a build host: the answerer's unit tests, the runtime directory tests and the session-level close test pass with clippy clean on wz-session-core, wz-runtime-tokio and wz-ap-demo; the feature-gate diagnostic passes with the new probe.",
+        "On a build host: layers C0, C0s, C1bo and C1bz pass on the committed change, and the count-guard oracle over the range from the Round 3324 tip reaches no guard that moved without its count.",
+        "On a build host: two wz-ap-demo peers and a client run end to end; the capability query lists the close verb, the close answers closing on one link and the peer's face goes DOWN on the node, and an unpermitted node answers refused with a reason.",
+        "NOT verified here: the hosted run of this push, and a foreign querier other than the demo client."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The verbs list is the single verb close; a later verb is added to the capability body and to the answerer together, and the consumer is told that the body grew.",
+        "A close names a peer by zid and the verdict counts links, not sessions: a peer with aggregated links is closed on every one of them by a single order.",
+        "The hosts are the router and peer forwarders that own a face table; a host without one answers neither query, and the demo flags exist only on a build that carries session-close-ingress."
+      ],
+      "publishable_decision_summary": "The close verb of the session lifecycle is also a QUERY. A GET on @/<zid>/<whatami>/session/close/<peer-zid> orders every link of that peer's session closed and is answered with a verdict (closing with the link count, already_closed, not_found, or refused with a reason); a GET on @/<zid>/<whatami>/session/verbs answers the verbs the node has. The Push form had no reply path, so a caller could not tell a close that ran from one that was refused or aimed at nobody. Only a literal key is a close; a wildcard peer chunk is never one. The same SessionLifecycleAuthority speaks first, so an unpermitted node answers refused before it reads any session, and a last chunk that is not a zid is refused with its own reason. The session directory is the face tables, joined aggregated links included. Replies carry the application/json encoding id as the wire packs it. The demo hosts both queries behind --session-lifecycle and permits the close with --session-close-permit.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/lifecycle_query.rs: LifecycleQueries, the answerer of the two queries, over the authority and a SessionDirectory port; the verdict and refusal types and their JSON bodies; the reply helper that packs the encoding id.",
+        "crates/wz-session-core/src/session_actions.rs, lib.rs: the out-of-band state records that a close was ordered, and the module is declared behind session-close-ingress.",
+        "crates/wz-runtime-tokio: the router and linkstate forwarders hold shared views of their face tables, so the answerer reads a session's links without borrowing the forwarder that stores its handler; the sessions of a peer include its joined links.",
+        "crates/wz-ap-demo: --session-lifecycle and --session-close-permit register the queryables on a peer or router.",
+        "scripts/run-ci.sh, scripts/lib/feature_gate_diagnostic.py: the peer mesh demo build carries the feature and the lane counts the new end-to-end test; session-close-ingress now has a probe and leaves the deferred list.",
+        "crates/wz-integration-tests/tests/wz_peer_session_lifecycle_query.rs: two real demo processes and a client; the capability query, the close with its verdict and the face going down, and the refusal without the permit."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the answerer's unit tests, the runtime directory tests and the session-level close test pass with clippy clean on wz-session-core, wz-runtime-tokio and wz-ap-demo; the feature-gate diagnostic passes with the new probe.",
+        "On a build host: layers C0, C0s, C1bo and C1bz pass on the committed change, and the count-guard oracle over the range from the Round 3324 tip reaches no guard that moved without its count.",
+        "On a build host: two wz-ap-demo peers and a client run end to end; the capability query lists the close verb, the close answers closing on one link and the peer's face goes DOWN on the node, and an unpermitted node answers refused with a reason.",
+        "NOT verified here: the hosted run of this push, and a foreign querier other than the demo client."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The verbs list is the single verb close; a later verb is added to the capability body and to the answerer together, and the consumer is told that the body grew.",
+        "A close names a peer by zid and the verdict counts links, not sessions: a peer with aggregated links is closed on every one of them by a single order.",
+        "The hosts are the router and peer forwarders that own a face table; a host without one answers neither query, and the demo flags exist only on a build that carries session-close-ingress."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
