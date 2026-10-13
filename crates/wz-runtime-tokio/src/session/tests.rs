@@ -8432,7 +8432,9 @@ fn declare_queryable_aliased_announces_the_alias_not_the_literal() {
 #[cfg(all(
     feature = "codec-declare",
     feature = "declare-queryable",
-    feature = "declare-final"
+    feature = "declare-final",
+    feature = "query-queryable",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
 fn wire_declares_since(driver: &RecordingLinkDriver, from: usize) -> Vec<(Option<u64>, String)> {
     use wz_codecs::declare::DeclareOwnedVariant as Body;
@@ -8481,7 +8483,8 @@ fn wire_declares_since(driver: &RecordingLinkDriver, from: usize) -> Vec<(Option
     feature = "codec-declare",
     feature = "declare-queryable",
     feature = "declare-final",
-    feature = "query-queryable"
+    feature = "query-queryable",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
 #[test]
 fn a_peers_queryable_interest_is_answered_with_the_queryable_and_a_final_on_the_wire() {
