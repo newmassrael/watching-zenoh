@@ -274098,6 +274098,52 @@
         "A dial that fails reaches WZ_CAPI_LOG as an error of type unit, without its cause."
       ]
     },
+    "Round 3333": {
+      "decision_summary": "The hosted run of the previous push was green where the work aims, the pico drop-in lane, and red in four jobs that three misses of mine explain: a note in the open-failure log named an upstream identifier this tree does not carry, the override that answers a queryable interest was gated on declare-queryable although the sender it calls exists only with liveliness-token or declare-subscriber, and the wire test's helper was gated more loosely than its test. Running layer C0 to its end on a build host then found a fourth miss that hosted C0 never reached, because that layer stops at its first refusal: the released-port gate, which still listed three pickers that no longer bind a socket and saw two tests that bound and released a probe. All four are repaired at their cause. The surfaces they escaped through are the ones the push hook defers; a push that adds or moves feature-gated code or a port picker runs them on a build host first.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: the queryable-reply override is gated on alloc, declare-queryable and either liveliness-token or declare-subscriber, the reach of send_declare.",
+        "crates/wz-runtime-tokio/src/session/tests.rs: the wire test and its helper carry the same gate, including query-queryable.",
+        "crates/wz-capi-core/src/drive.rs: the note on log_open_failure no longer names an upstream identifier.",
+        "crates/wz-integration-tests/src/lib.rs and crates/wz-runtime-tokio-test-support/src/lib.rs: two tests take their numbers from the unbound picker instead of binding a probe and releasing it.",
+        "scripts/lib/released_port_gate.py: the rows of PortReservation pick and pick_pair leave the table, since those pickers bind no socket."
+      ],
+      "verification_bullets": [
+        "On a build host: layers C1m and C1j pass on the first three repairs, and layers C1bz, C1cf and C1cn pass on the change.",
+        "On a build host: layer C0 run to its end passes with the released-port repair, 402 s, none of its guarded legs unreached.",
+        "On a build host: wz-runtime-tokio-test-support passes 20 tests and wz-integration-tests 59 of its own, and clippy with warnings denied is clean on both.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The hosted red of the previous push (validate A+C0, default-off builds C0+C1cf, isolated-crate lanes C1m, the heaviest NEG lanes C1j) and the released-port gate that its stopped layer C0 hid are repaid by this push; Layer E of that run was green.",
+        "The push hook defers the feature-subset census layers and the corpus gates, and layer C0 compiles no Rust and stops at its first refusal: before pushing code that adds or moves a feature gate or a port picker, run C0 to its end, C1m, C1j, C1bz, C1cf and C1cn, and compile every crate whose source changed, on a build host.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "The hosted run of the previous push was green where the work aims, the pico drop-in lane, and red in four jobs that three misses of mine explain: a note in the open-failure log named an upstream identifier this tree does not carry, the override that answers a queryable interest was gated on declare-queryable although the sender it calls exists only with liveliness-token or declare-subscriber, and the wire test's helper was gated more loosely than its test. Running layer C0 to its end on a build host then found a fourth miss that hosted C0 never reached, because that layer stops at its first refusal: the released-port gate, which still listed three pickers that no longer bind a socket and saw two tests that bound and released a probe. All four are repaired at their cause. The surfaces they escaped through are the ones the push hook defers; a push that adds or moves feature-gated code or a port picker runs them on a build host first.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: the queryable-reply override is gated on alloc, declare-queryable and either liveliness-token or declare-subscriber, the reach of send_declare.",
+        "crates/wz-runtime-tokio/src/session/tests.rs: the wire test and its helper carry the same gate, including query-queryable.",
+        "crates/wz-capi-core/src/drive.rs: the note on log_open_failure no longer names an upstream identifier.",
+        "crates/wz-integration-tests/src/lib.rs and crates/wz-runtime-tokio-test-support/src/lib.rs: two tests take their numbers from the unbound picker instead of binding a probe and releasing it.",
+        "scripts/lib/released_port_gate.py: the rows of PortReservation pick and pick_pair leave the table, since those pickers bind no socket."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: layers C1m and C1j pass on the first three repairs, and layers C1bz, C1cf and C1cn pass on the change.",
+        "On a build host: layer C0 run to its end passes with the released-port repair, 402 s, none of its guarded legs unreached.",
+        "On a build host: wz-runtime-tokio-test-support passes 20 tests and wz-integration-tests 59 of its own, and clippy with warnings denied is clean on both.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted red of the previous push (validate A+C0, default-off builds C0+C1cf, isolated-crate lanes C1m, the heaviest NEG lanes C1j) and the released-port gate that its stopped layer C0 hid are repaid by this push; Layer E of that run was green.",
+        "The push hook defers the feature-subset census layers and the corpus gates, and layer C0 compiles no Rust and stops at its first refusal: before pushing code that adds or moves a feature gate or a port picker, run C0 to its end, C1m, C1j, C1bz, C1cf and C1cn, and compile every crate whose source changed, on a build host.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
