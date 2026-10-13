@@ -1560,8 +1560,8 @@ mod port_tests {
     #[cfg(unix)]
     #[test]
     fn a_claimed_number_is_never_bound_by_a_draw() {
-        use super::{draw_in, Draw};
-        let dir = std::env::temp_dir().join(format!("wz-draw-test-{}", std::process::id()));
+        use super::{draw_in, unbound_unautoselected, Draw};
+        letdir = std::env::temp_dir().join(format!("wz-draw-test-{}", std::process::id()));
         // Bound by something else AND claimed: the draw must stop at the claim.
         let other = std::net::TcpListener::bind("127.0.0.1:0").expect("a bound number");
         let held = other.local_addr().expect("local_addr").port();
@@ -1578,10 +1578,7 @@ mod port_tests {
         }
         // A number nobody holds is bound AND claimed by the draw.
         drop(other);
-        let free = {
-            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("a free number");
-            probe.local_addr().expect("local_addr").port()
-        };
+        let free = unbound_unautoselected();
         match draw_in(&dir, free) {
             Draw::Bound(listener) => {
                 assert_eq!(listener.local_addr().expect("local_addr").port(), free);

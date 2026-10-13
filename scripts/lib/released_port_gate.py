@@ -115,22 +115,12 @@ CLASSES = ("listen-picker", "not-a-port", "bind-probe", "held-elsewhere")
 # and on Windows there is no loser, because a wz listener sets SO_REUSEADDR and
 # both binds succeed (hosted Platform run 38013268899).
 CLASSIFIED: dict[str, tuple[str, str]] = {
-    "crates/wz-integration-tests/src/lib.rs::pick::listener": (
-        "listen-picker",
-        "PortGuard::pick reserves a number for a CHILD to `--listen` on (zenohd, "
-        "a C example), under a process mutex and a cross-process file lock held "
-        "until the child has bound it, from outside the kernel's autoselect range",
-    ),
-    "crates/wz-integration-tests/src/lib.rs::pick_pair::l1": (
-        "listen-picker",
-        "the first of two numbers PortGuard::pick_pair reserves for one child's "
-        "two `--listen` endpoints, under the same two locks as `pick`",
-    ),
-    "crates/wz-integration-tests/src/lib.rs::pick_pair::l2": (
-        "listen-picker",
-        "the second of the pair, released beside the first and for the same "
-        "child",
-    ),
+    # `PortReservation::pick`, `pick_pair` and `pick_many` have no rows any more,
+    # for the same reason as `free_port` below: they no longer bind a socket and
+    # release it, they take a number from `unbound_unautoselected`, which never
+    # creates one. A socket that is created in a process is copied into every
+    # child another thread forks, and the number stays bound in the child until
+    # it execs (measured with a bind logger: a 1.3-1.7 ms hold per fork).
     # `free_port` has no row any more, and that is the repair rather than a gap:
     # it no longer binds `:0` and reads the number back, it binds a number it
     # chose outside the kernel's autoselect range (`bind_unautoselected`), so

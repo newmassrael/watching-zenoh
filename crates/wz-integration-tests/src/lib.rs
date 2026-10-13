@@ -7929,12 +7929,12 @@ mod tests {
         s.listen()\n\
         time.sleep(60)\n";
 
-    /// A free port number: bound and released, so the program that listens on it
-    /// next is the only holder.
+    /// A free port number that no socket was ever bound to and that the kernel
+    /// never autoselects, so the program that listens on it next is the only
+    /// holder.
     #[cfg(target_os = "linux")]
     fn released_port() -> u16 {
-        let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-        probe.local_addr().expect("local_addr").port()
+        wz_runtime_tokio_test_support::unbound_unautoselected()
     }
 
     /// The success path: once the SPAWNED PROCESS is listening on the port, the
