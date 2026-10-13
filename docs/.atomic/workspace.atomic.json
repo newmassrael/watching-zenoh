@@ -273998,6 +273998,54 @@
         "A connect list under a storage-host document is withheld, not dialled."
       ]
     },
+    "Round 3331": {
+      "decision_summary": "A program that lets a person pick a .proto message can list the messages and learn where each option is defined from the dissect library, with no second reader of the language. A new door, wz_dissect_proto_messages, takes the schema files without a root and lists every message of every file, nested ones included, in file order then declaration order: full name, file and file index, enclosing message or null, and a nested flag. All files are read, a group or an extend is no refusal without a root, a map entry and a group body are not listed, and the list carries no options. Every option of the description document gains origin: standard for a name without parentheses, extension with the declared name, the package of its file and that file when a file read declares it, and unresolved otherwise, never guessed. The parser keeps every extension field name. The description document moves to revision 4, the list is a new document at revision 1, and the ABI revision is 36.",
+      "changes_bullets": [
+        "crates/wz-capture/src/proto_parse.rs, proto_schema.rs: an extend block keeps every field name; the linker records the extensions by full name with their file and package, a message knows its enclosing message, and read_all reads every file given.",
+        "crates/wz-capture/src/proto_describe.rs, proto_describe_json.rs: each option carries origin, standard, extension or unresolved; the description document is revision 4.",
+        "crates/wz-capture/src/proto_message_list.rs, proto_message_list_json.rs, proto_message_list_tests.rs: the message list and its document at revision 1, with tests of order, nesting, refusals and the document shape.",
+        "crates/wz-capture/src/doc_revision.rs, fields_json.rs, lib.rs: the revision table, the class vocabulary walk and the new modules.",
+        "crates/wz-capi-dissect/src/lib.rs, include/wz_dissect.h, tests/c_abi_consumer.c: the door wz_dissect_proto_messages, ABI revision 36, the header blocks and markers, and a C program that lists a schema and reads an origin.",
+        "scripts/lib/capi_abi_pin.py, analysis_surface_parity.py: the pinned symbol and revision, and the deliberate command-line gap of the new door."
+      ],
+      "verification_bullets": [
+        "On a build host: the wz-capture lib tests pass with default features and with dissect, the wz-capi-dissect tests pass, and clippy is clean on both crates in both configurations.",
+        "On a build host: layers C0, C0s, C1bo, C1bz, C1cf, C1cn and C1bn pass on the change, and the count-guard oracle over the range passes.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "An extension is found by the first part of an option name in parentheses, searched from the message outwards; a name with several parenthesised parts is judged by the first.",
+        "Enums are not listed; a consumer asks for them separately the day a list needs them.",
+        "Options of a listed message come from the description door once it is picked; the list repeats none of them.",
+        "Only the root file and what it imports are read for an origin, so a file in the list that the schema does not import leaves its options unresolved."
+      ],
+      "publishable_decision_summary": "A program that lets a person pick a .proto message can list the messages and learn where each option is defined from the dissect library, with no second reader of the language. A new door, wz_dissect_proto_messages, takes the schema files without a root and lists every message of every file, nested ones included, in file order then declaration order: full name, file and file index, enclosing message or null, and a nested flag. All files are read, a group or an extend is no refusal without a root, a map entry and a group body are not listed, and the list carries no options. Every option of the description document gains origin: standard for a name without parentheses, extension with the declared name, the package of its file and that file when a file read declares it, and unresolved otherwise, never guessed. The parser keeps every extension field name. The description document moves to revision 4, the list is a new document at revision 1, and the ABI revision is 36.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/proto_parse.rs, proto_schema.rs: an extend block keeps every field name; the linker records the extensions by full name with their file and package, a message knows its enclosing message, and read_all reads every file given.",
+        "crates/wz-capture/src/proto_describe.rs, proto_describe_json.rs: each option carries origin, standard, extension or unresolved; the description document is revision 4.",
+        "crates/wz-capture/src/proto_message_list.rs, proto_message_list_json.rs, proto_message_list_tests.rs: the message list and its document at revision 1, with tests of order, nesting, refusals and the document shape.",
+        "crates/wz-capture/src/doc_revision.rs, fields_json.rs, lib.rs: the revision table, the class vocabulary walk and the new modules.",
+        "crates/wz-capi-dissect/src/lib.rs, include/wz_dissect.h, tests/c_abi_consumer.c: the door wz_dissect_proto_messages, ABI revision 36, the header blocks and markers, and a C program that lists a schema and reads an origin.",
+        "scripts/lib/capi_abi_pin.py, analysis_surface_parity.py: the pinned symbol and revision, and the deliberate command-line gap of the new door."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the wz-capture lib tests pass with default features and with dissect, the wz-capi-dissect tests pass, and clippy is clean on both crates in both configurations.",
+        "On a build host: layers C0, C0s, C1bo, C1bz, C1cf, C1cn and C1bn pass on the change, and the count-guard oracle over the range passes.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "An extension is found by the first part of an option name in parentheses, searched from the message outwards; a name with several parenthesised parts is judged by the first.",
+        "Enums are not listed; a consumer asks for them separately the day a list needs them.",
+        "Options of a listed message come from the description door once it is picked; the list repeats none of them.",
+        "Only the root file and what it imports are read for an origin, so a file in the list that the schema does not import leaves its options unresolved."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
