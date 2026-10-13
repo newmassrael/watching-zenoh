@@ -478,7 +478,7 @@ fn kill_group(pid: u32) {
 
 /// What each thread of `pid` is waiting in, from `/proc`.
 #[cfg(target_os = "linux")]
-fn threads_of(pid: u32) -> String {
+pub fn threads_of(pid: u32) -> String {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
         return "(the process's threads could not be read)".to_owned();
     };
@@ -504,7 +504,7 @@ fn threads_of(pid: u32) -> String {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn threads_of(_pid: u32) -> String {
+pub fn threads_of(_pid: u32) -> String {
     "(thread states are read from /proc, which this host does not have)".to_owned()
 }
 

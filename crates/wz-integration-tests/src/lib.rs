@@ -238,8 +238,7 @@ pub mod common {
             // Both `pick` and `pick_pair` take them in this order, so two threads
             // of one process can never hold them crosswise.
             let cross_process = CrossProcessPortLock::acquire();
-            let (listener, port) = Self::bind_ephemeral();
-            drop(listener);
+            let port = Self::unbound_port();
             Self {
                 port,
                 _guard: guard,
@@ -270,14 +269,10 @@ pub mod common {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let cross_process = CrossProcessPortLock::acquire();
-            // Bind BOTH before dropping either: holding l1 while binding l2 is
-            // what guarantees p1 != p2 (a bind-then-drop helper called twice
-            // could hand back the same port). The shared bind/extract is
-            // [`bind_ephemeral`]; the drop timing is the per-caller part.
-            let (l1, p1) = Self::bind_ephemeral();
-            let (l2, p2) = Self::bind_ephemeral();
-            drop(l1);
-            drop(l2);
+            // Distinct by construction: a number picked is claimed by this process
+            // for its life, so the second pick cannot be the first.
+            let p1 = Self::unbound_port();
+            let p2 = Self::unbound_port();
             (
                 Self {
                     port: p1,
@@ -309,10 +304,8 @@ pub mod common {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let cross_process = CrossProcessPortLock::acquire();
-            let bound: Vec<(TcpListener, u16)> =
-                (0..count).map(|_| Self::bind_ephemeral()).collect();
-            let ports: Vec<u16> = bound.iter().map(|(_, port)| *port).collect();
-            drop(bound);
+            // Distinct by construction, as in [`pick_pair`](Self::pick_pair).
+            let ports: Vec<u16> = (0..count).map(|_| Self::unbound_port()).collect();
             (
                 Self {
                     port: ports[0],
@@ -324,20 +317,27 @@ pub mod common {
             )
         }
 
-        /// Bind a fresh ephemeral loopback listener and return it WITH its
-        /// port — the bind/extract the single and dual reservations share
-        /// (R311pp). The caller owns the drop: [`pick`](Self::pick) drops at
-        /// once, [`pick_pair`](Self::pick_pair) holds both bound until two
-        /// distinct ports are read (so the OS cannot re-hand the first).
+        /// A loopback port number for a program that is started a moment later,
+        /// chosen WITHOUT a socket ever existing on it — the pick the single, dual
+        /// and many reservations share (R311pp).
         ///
-        /// The number is NOT one the kernel autoselects from: the child it is
-        /// reserved for may be bound well after the drop, and a wz session opened as
-        /// a peer by another test of the same binary binds a `bind(:0)` listener of
-        /// its own in the meantime. A number from the autoselect pool is in that
-        /// session's reach; one outside it is not
-        /// (`wz_runtime_tokio_test_support::free_port` states the measurement).
-        fn bind_ephemeral() -> (TcpListener, u16) {
-            wz_runtime_tokio_test_support::bind_unautoselected()
+        /// It used to bind a listener, read its port and drop it. That leaves the
+        /// number bound from the bind to the close, and every `fork` another thread
+        /// of this test binary makes in that time (they all start programs) copies
+        /// the listening socket into a child that keeps it until its `exec`: on a
+        /// machine short of CPUs that is milliseconds, and the program started for the
+        /// number found it still bound (zenoh-pico's `z_open` as a listener:
+        /// `bind() failed ... Address already in use`, then "Unable to open session!").
+        /// Measured, with the picker logging its binds, 18 times in 180 runs.
+        ///
+        /// The number is claimed against every other picker and checked against the
+        /// kernel's socket table
+        /// (`wz_runtime_tokio_test_support::unbound_unautoselected`), and it is NOT
+        /// one the kernel autoselects from: a wz session opened as a peer by another
+        /// test of the same binary binds a `bind(:0)` listener of its own in the
+        /// meantime, and a number from the autoselect pool is in its reach.
+        fn unbound_port() -> u16 {
+            wz_runtime_tokio_test_support::unbound_unautoselected()
         }
     }
 
@@ -2456,17 +2456,21 @@ pub mod common {
     /// a genuinely-alive-but-not-yet-listening process, never a corpse.
     pub const ZENOHD_TCP_ACCEPT_BUDGET: Duration = Duration::from_secs(30);
 
-    /// Poll `127.0.0.1:port` for TCP-accept readiness WHILE the spawned `child`
-    /// is still alive, returning `Ok(())` once a connect succeeds. The
-    /// liveness-aware, self-diagnosing successor to [`wait_for_tcp_accept`] for
-    /// a readiness gate that owns the process it is waiting on:
+    /// Poll for TCP-accept readiness of `port` WHILE the spawned `child` is
+    /// still alive, returning `Ok(())` once the CHILD (or a descendant) is
+    /// listening on it. On Linux that is read from the kernel's socket tables and
+    /// the child's file descriptors, without connecting; elsewhere a successful
+    /// connect stands in for it. The liveness-aware, self-diagnosing successor to
+    /// [`wait_for_tcp_accept`] for a readiness gate that owns the process it is
+    /// waiting on:
     ///
     /// - `Err` the instant `child` exits before accepting (a crash / bind
     ///   conflict — no point spinning out the rest of `budget` on a dead
     ///   process); the message carries the `ExitStatus`, so a zenohd that
     ///   aborts on a port clash reads as `process exited ... (status: ...)`
     ///   rather than the old blind `did not start ... within 10s`.
-    /// - `Err` on `budget` elapse, naming the port and budget.
+    /// - `Err` on `budget` elapse, naming the port and budget, and saying so when
+    ///   the port IS listening but the listener is some other process's.
     ///
     /// Because the exit path fires immediately, `budget` can be generous
     /// (load headroom) without a dead child stalling the failure. The returned
@@ -2492,17 +2496,54 @@ pub mod common {
         // 77 call sites spell out which family their endpoint resolved to.
         const LOOPBACK: [&str; 2] = ["127.0.0.1", "::1"];
         let deadline = Instant::now() + budget;
+        // What the last look said, so a timeout can name it.
+        let mut foreign_listener = false;
         loop {
-            if LOOPBACK
-                .iter()
-                .any(|host| TcpStream::connect((*host, port)).is_ok())
-            {
+            // WHERE THE HOST CAN SAY, ask the kernel and DO NOT connect.
+            //
+            // A probe that connects and drops is a peer of its own: the listener
+            // accepts it, starts a session open for it, and sees it die in the
+            // middle of that open, a moment before the real counterparty
+            // arrives. A foreign program that is still inside its own open when
+            // that happens (zenoh-pico's `z_open` binds before it finishes) has
+            // been handed a failed handshake it did not ask for.
+            //
+            // And ask WHOSE listener it is. "Something accepts on this port" is
+            // not "the process I started accepts on this port": a leftover from
+            // an earlier run, or any other process that took the number, passes
+            // the first and fails the second, and the test then talks to a
+            // stranger and reports the child's silence. The listener has to be
+            // a socket the child or one of its descendants holds.
+            //
+            // Other hosts have no table to read and keep the connect probe.
+            let listening = if cfg!(target_os = "linux") {
+                match listener_ownership(child.id(), port) {
+                    ListenerOwnership::Owned => true,
+                    ListenerOwnership::Foreign => {
+                        foreign_listener = true;
+                        false
+                    }
+                    ListenerOwnership::None => false,
+                }
+            } else {
+                LOOPBACK
+                    .iter()
+                    .any(|host| TcpStream::connect((*host, port)).is_ok())
+            };
+            if listening {
                 return Ok(());
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    // A listener that dies before it listens most often lost the
+                    // port to someone, and the child's own output rarely says so
+                    // (zenoh-pico prints "Unable to open session!" for a failed
+                    // bind and for everything else). The kernel's table, read at
+                    // the moment of the exit, says who held the number.
                     return Err(format!(
-                        "process exited before accepting on 127.0.0.1:{port} (status: {status})"
+                        "process exited before accepting on 127.0.0.1:{port} \
+                         (status: {status}); {}",
+                        port_socket_report(port)
                     ));
                 }
                 Ok(None) => {}
@@ -2514,6 +2555,14 @@ pub mod common {
                 }
             }
             if Instant::now() >= deadline {
+                if foreign_listener {
+                    return Err(format!(
+                        "port {port} is listening, but the listener is not the spawned \
+                         process or one of its descendants, and the spawned process did \
+                         not start listening within {budget:?} (process still alive — \
+                         another process holds the port)"
+                    ));
+                }
                 return Err(format!(
                     "did not start accepting tcp on either loopback family \
                      (127.0.0.1:{port} nor [::1]:{port}) within {budget:?} \
@@ -2522,6 +2571,207 @@ pub mod common {
             }
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Who holds the LISTEN socket on a port, as far as `root`'s process tree is
+    /// concerned.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[derive(Debug, PartialEq, Eq)]
+    enum ListenerOwnership {
+        /// Nothing listens on the port.
+        None,
+        /// Something listens, and no process of the tree holds the socket.
+        Foreign,
+        /// A process of the tree holds the listening socket (or the tree's file
+        /// descriptors cannot be read, so it cannot be shown to be foreign).
+        Owned,
+    }
+
+    /// Whether the kernel lists a socket in the LISTEN state on `port`, on any
+    /// address of either family, and whether `root` or a descendant holds it.
+    ///
+    /// Read from the tables of the root's own network namespace
+    /// (`/proc/<pid>/net/tcp{,6}`) and matched to the sockets in the tree's
+    /// `/proc/<pid>/fd` by inode. Nothing connects, so asking never becomes a peer
+    /// of the listener.
+    #[cfg(target_os = "linux")]
+    fn listener_ownership(root: u32, port: u16) -> ListenerOwnership {
+        let wanted = format!(":{port:04X}");
+        let mut listening: Vec<u64> = Vec::new();
+        for table in ["tcp", "tcp6"] {
+            let Ok(text) = std::fs::read_to_string(format!("/proc/{root}/net/{table}")) else {
+                continue;
+            };
+            for line in text.lines().skip(1) {
+                let mut columns = line.split_whitespace();
+                let local = columns.nth(1);
+                let state = columns.nth(1);
+                // `inode` is the tenth column; `nth` consumed up to the fourth.
+                let inode = columns.nth(5).and_then(|c| c.parse::<u64>().ok());
+                if state == Some("0A") && local.is_some_and(|l| l.ends_with(&wanted)) {
+                    if let Some(inode) = inode {
+                        listening.push(inode);
+                    }
+                }
+            }
+        }
+        if listening.is_empty() {
+            return ListenerOwnership::None;
+        }
+        let mut readable = false;
+        for pid in process_tree(root) {
+            let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+                continue;
+            };
+            readable = true;
+            for entry in entries.flatten() {
+                let Ok(target) = std::fs::read_link(entry.path()) else {
+                    continue;
+                };
+                let target = target.to_string_lossy();
+                let held = target
+                    .strip_prefix("socket:[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .and_then(|n| n.parse::<u64>().ok());
+                if held.is_some_and(|inode| listening.contains(&inode)) {
+                    return ListenerOwnership::Owned;
+                }
+            }
+        }
+        if readable {
+            ListenerOwnership::Foreign
+        } else {
+            ListenerOwnership::Owned
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn listener_ownership(_root: u32, _port: u16) -> ListenerOwnership {
+        ListenerOwnership::None
+    }
+
+    /// Every socket the kernel lists with `port` as its local port, with its state,
+    /// its remote end and the processes that hold it, as one line of text for a
+    /// failure message. "no socket holds it" is an answer too, and says the number
+    /// was free when the report was taken.
+    #[cfg(target_os = "linux")]
+    pub fn port_socket_report(port: u16) -> String {
+        let wanted = format!(":{port:04X}");
+        // Which processes hold which socket inode, read once.
+        let mut holders: Vec<(u64, u32)> = Vec::new();
+        if let Ok(procs) = std::fs::read_dir("/proc") {
+            for entry in procs.flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+                    continue;
+                };
+                for fd in fds.flatten() {
+                    let Ok(target) = std::fs::read_link(fd.path()) else {
+                        continue;
+                    };
+                    let target = target.to_string_lossy();
+                    if let Some(inode) = target
+                        .strip_prefix("socket:[")
+                        .and_then(|rest| rest.strip_suffix(']'))
+                        .and_then(|n| n.parse::<u64>().ok())
+                    {
+                        holders.push((inode, pid));
+                    }
+                }
+            }
+        }
+        let mut rows: Vec<String> = Vec::new();
+        for table in ["tcp", "tcp6"] {
+            let Ok(text) = std::fs::read_to_string(format!("/proc/net/{table}")) else {
+                continue;
+            };
+            for line in text.lines().skip(1) {
+                let mut columns = line.split_whitespace();
+                let local = columns.nth(1);
+                let remote = columns.next();
+                let state = columns.next();
+                let inode = columns.nth(5).and_then(|c| c.parse::<u64>().ok());
+                let Some(local) = local else { continue };
+                if !local.ends_with(&wanted) {
+                    continue;
+                }
+                let pids: Vec<String> = holders
+                    .iter()
+                    .filter(|(held, _)| Some(*held) == inode)
+                    .map(|(_, pid)| pid.to_string())
+                    .collect();
+                rows.push(format!(
+                    "{table} {local} -> {} state {} held by [{}]",
+                    remote.unwrap_or("?"),
+                    state.unwrap_or("?"),
+                    pids.join(",")
+                ));
+            }
+        }
+        if rows.is_empty() {
+            format!("no socket in the kernel's tables had local port {port} at the exit")
+        } else {
+            format!(
+                "sockets with local port {port} at the exit: {}",
+                rows.join("; ")
+            )
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn port_socket_report(port: u16) -> String {
+        format!("no socket table to read on this host for port {port}")
+    }
+
+    /// `root` and every process descended from it, read from `/proc/<pid>/stat`.
+    ///
+    /// A program that is started through a wrapper (`stdbuf` execs and keeps its
+    /// pid, a shell does not) may hold its listener in a child of the pid the test
+    /// spawned, so the tree is the unit.
+    #[cfg(target_os = "linux")]
+    fn process_tree(root: u32) -> Vec<u32> {
+        let mut parent_of: Vec<(u32, u32)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                    continue;
+                };
+                // `pid (comm) state ppid ...`: the name may hold spaces and
+                // parentheses, so the fields are counted from the LAST `)`.
+                let ppid = stat
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                    .and_then(|field| field.parse::<u32>().ok());
+                if let Some(ppid) = ppid {
+                    parent_of.push((pid, ppid));
+                }
+            }
+        }
+        let mut tree = vec![root];
+        let mut next = 0;
+        while next < tree.len() {
+            let parent = tree[next];
+            next += 1;
+            for (pid, ppid) in &parent_of {
+                if *ppid == parent && !tree.contains(pid) {
+                    tree.push(*pid);
+                }
+            }
+        }
+        tree
     }
 
     /// Every socket address `name:port` names, in the resolver's own order.
@@ -3005,6 +3255,24 @@ pub mod common {
             // BEFORE any explicit cleanup: kill first sends SIGKILL,
             // wait then reaps the zombie. Without `wait` the child
             // would persist as a zombie until the test runner exit.
+            //
+            // A test that is failing says what its child was doing at that
+            // moment, BEFORE the kill removes the evidence: a counterparty that
+            // never answered is told apart from one that never ran by whether
+            // its threads sit idle in the poller or are stuck somewhere else.
+            // The bounded wait states this for the child IT bounds; the
+            // listener beside it, the other half of every such failure, said
+            // nothing.
+            if std::thread::panicking() {
+                if let Ok(None) = self.child.try_wait() {
+                    eprintln!(
+                        "--- `{}` (pid {}) was still running when the test failed; its threads ---\n{}",
+                        self.label,
+                        self.child.id(),
+                        crate::bounded::threads_of(self.child.id())
+                    );
+                }
+            }
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
@@ -4836,9 +5104,13 @@ pub mod common {
             let _ = child.child_mut().wait();
             captured = read_captured(&mut reader);
             if attempt < attempts {
+                // The unanswered attempt's own output is what tells a lost
+                // race (final only) from a refused or half-open session, so it
+                // is kept rather than overwritten by the next attempt.
                 eprintln!(
                     "{label}: attempt {attempt}/{attempts} saw no {needle:?} \
-                     (the declaration may not have propagated yet); retrying"
+                     (the declaration may not have propagated yet); retrying\n\
+                     --- attempt {attempt} output ---\n{captured}\n--- end ---"
                 );
             }
         }
@@ -7615,13 +7887,109 @@ mod tests {
         );
     }
 
-    /// The success path: once a listener is accepting on the port, the wait
-    /// returns `Ok` promptly. Binding a `TcpListener` is enough — the kernel
-    /// completes the connect handshake into the accept backlog without an
-    /// explicit `accept()` call, which is exactly what a spawned router's bound
-    /// listener presents.
+    /// The report taken when a listener dies names the socket that holds the port
+    /// and the process that holds it: here a listener of THIS process.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn wait_alive_returns_ok_once_the_port_accepts() {
+    fn port_socket_report_names_the_listener_and_its_holder() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("local_addr").port();
+        let report = crate::common::port_socket_report(port);
+        assert!(
+            report.contains("state 0A"),
+            "a listening socket is state 0A: {report}"
+        );
+        assert!(
+            report.contains(&std::process::id().to_string()),
+            "the holder is this process ({}): {report}",
+            std::process::id()
+        );
+        drop(listener);
+    }
+
+    /// And a port nobody holds says so, instead of an empty list.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn port_socket_report_says_so_for_a_free_port() {
+        let port = released_port();
+        let report = crate::common::port_socket_report(port);
+        assert!(
+            report.contains("no socket in the kernel's tables"),
+            "a free port is reported as free: {report}"
+        );
+    }
+
+    /// A program that listens on the port given as its argument and then idles:
+    /// the smallest stand-in for a spawned router that owns its listener.
+    #[cfg(target_os = "linux")]
+    const LISTEN_THEN_IDLE: &str = "import socket, sys, time\n\
+        s = socket.socket()\n\
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n\
+        s.bind(('127.0.0.1', int(sys.argv[1])))\n\
+        s.listen()\n\
+        time.sleep(60)\n";
+
+    /// A free port number: bound and released, so the program that listens on it
+    /// next is the only holder.
+    #[cfg(target_os = "linux")]
+    fn released_port() -> u16 {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        probe.local_addr().expect("local_addr").port()
+    }
+
+    /// The success path: once the SPAWNED PROCESS is listening on the port, the
+    /// wait returns `Ok` promptly. Linux asks the kernel who holds the listening
+    /// socket, so the fixture is a child that really listens.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wait_alive_returns_ok_once_the_child_listens() {
+        let port = released_port();
+        let mut guard = ChildGuard::wrap(
+            "python listens-then-idles",
+            Command::new("python3")
+                .args(["-c", LISTEN_THEN_IDLE, &port.to_string()])
+                .spawn()
+                .expect("spawn python3"),
+        );
+        let start = Instant::now();
+        wait_for_tcp_accept_alive(guard.child_mut(), port, Duration::from_secs(10))
+            .expect("a child that listens must report ready");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "ready must be observed well within budget"
+        );
+    }
+
+    /// The listener may be held by a DESCENDANT of the spawned process: a shell
+    /// that starts the program as its child keeps no listener of its own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wait_alive_returns_ok_when_a_descendant_of_the_child_listens() {
+        let port = released_port();
+        let mut guard = ChildGuard::wrap(
+            "sh -> python listens-then-idles",
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "python3 -c \"$0\" \"$1\"; true",
+                    LISTEN_THEN_IDLE,
+                    &port.to_string(),
+                ])
+                .spawn()
+                .expect("spawn sh"),
+        );
+        wait_for_tcp_accept_alive(guard.child_mut(), port, Duration::from_secs(10))
+            .expect("a listener held by the child's child must report ready");
+    }
+
+    /// THE DISCRIMINATOR: a listener that is NOT the spawned process's must not
+    /// report ready. An accepting port is not the same as the child accepting
+    /// on it — the test would talk to a stranger and report the child's silence.
+    /// Here a socket of the TEST process listens and the spawned `sleep` does
+    /// not, which is exactly a port some other process holds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wait_alive_does_not_report_a_listener_the_child_does_not_hold() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let port = listener.local_addr().expect("local_addr").port();
         let mut guard = ChildGuard::wrap(
@@ -7631,13 +7999,11 @@ mod tests {
                 .spawn()
                 .expect("spawn sleep 60"),
         );
-        let start = Instant::now();
-        let result = wait_for_tcp_accept_alive(guard.child_mut(), port, Duration::from_secs(5));
-        let elapsed = start.elapsed();
-        result.expect("an accepting port must report ready");
+        let err = wait_for_tcp_accept_alive(guard.child_mut(), port, Duration::from_millis(400))
+            .expect_err("somebody else's listener must not report the child ready");
         assert!(
-            elapsed < Duration::from_secs(5),
-            "ready must be observed well within budget; elapsed {elapsed:?}"
+            err.contains("not the spawned process"),
+            "the timeout must name the foreign listener, got: {err}"
         );
         drop(listener);
     }
