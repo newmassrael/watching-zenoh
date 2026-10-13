@@ -8425,6 +8425,122 @@ fn declare_queryable_aliased_announces_the_alias_not_the_literal() {
     );
 }
 
+/// What a session put on the wire as `Declare` messages from frame `from` on, as
+/// `(interest id the declare answers, text naming its body)`, in emit order.
+///
+/// Decoded from the recorded frames, so the peer's own input is what is measured.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-queryable",
+    feature = "declare-final"
+))]
+fn wire_declares_since(driver: &RecordingLinkDriver, from: usize) -> Vec<(Option<u64>, String)> {
+    use wz_codecs::declare::DeclareOwnedVariant as Body;
+    let mut seen = Vec::new();
+    for idx in from..driver.frame_count() {
+        let bytes = driver.frame_bytes(idx);
+        let Ok(wz_session_core::inbound::InboundFrame::Frame { payload, .. }) =
+            wz_session_core::inbound::parse_inbound(&bytes)
+        else {
+            continue;
+        };
+        let Ok(messages) = wz_session_core::network_message::parse_frame_payload(&payload) else {
+            continue;
+        };
+        for message in messages {
+            let wz_session_core::network_message::NetworkMessage::Declare(declare) = message else {
+                continue;
+            };
+            let body = match &declare.body {
+                Body::CodecZenohDeclQueryable(q) => format!("queryable {}", q.id),
+                Body::CodecZenohDeclFinal(_) => "final".to_string(),
+                _ => "other".to_string(),
+            };
+            seen.push((declare.interest_id, body));
+        }
+    }
+    seen
+}
+
+/// A peer's QUERYABLE interest, arriving after the link is up, is answered on the
+/// wire with the queryable stamped with the interest's id and then the final.
+///
+/// This is the answer zenoh-pico's querier waits for: its write filter opens only
+/// on a `DeclQueryable` that carries the filter's interest id (or on an
+/// unsolicited one the library happens to process first), and until it opens the
+/// library drops the query locally and reports success. wz answered subscriber
+/// and token interests and not this one, so a pico querier whose first query went
+/// out before wz's unsolicited declaration was read was never answered at all.
+/// The test is the timing-independent form of that failure: it fixes the order,
+/// the interest after the declaration, and reads the reply back off the wire.
+///
+/// The interest is the one pico sends for a client querier: queryables, CURRENT
+/// and FUTURE, AGGREGATE, keyed by a literal. An aggregate reply is announced
+/// under the interest's own key, which pico associates by key equality.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-queryable",
+    feature = "declare-final",
+    feature = "query-queryable"
+))]
+#[test]
+fn a_peers_queryable_interest_is_answered_with_the_queryable_and_a_final_on_the_wire() {
+    use wz_session_core::interest_build::{build_interest_kinds_with_aggregate, InterestKinds};
+
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    let _queryable = session
+        .declare_queryable("lat", QueryableOptions::default(), |_, _| {})
+        .expect("a literal key declares");
+    let baseline = driver.frame_count();
+
+    let interest = build_interest_kinds_with_aggregate(
+        /*interest_id=*/ 7,
+        InterestKinds::QUERYABLES,
+        /*current=*/ true,
+        /*future=*/ true,
+        /*aggregate=*/ true,
+        /*keyexpr_mapping_id=*/ 0,
+        Some("lat"),
+    )
+    .expect("a literal key builds");
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Interest(
+            interest,
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    let idle = wz_session_core::driver_loop::DriverLoopOutcome::SideEffectOnly;
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&idle));
+
+    let answers = wire_declares_since(&driver, baseline);
+    assert_eq!(
+        answers.len(),
+        2,
+        "the answer is the queryable and then the final, and nothing else: {answers:?}"
+    );
+    assert_eq!(
+        answers[0].0,
+        Some(7),
+        "the queryable must carry the interest's id, or the peer's filter never \
+         opens on it: {answers:?}"
+    );
+    assert!(
+        answers[0].1.starts_with("queryable "),
+        "the first answer is the queryable declaration: {answers:?}"
+    );
+    assert_eq!(
+        answers[1],
+        (Some(7), "final".to_string()),
+        "the interest ends with the final carrying its id: {answers:?}"
+    );
+}
+
 /// R2959 — a token's retraction names its key only when asked, and then in the
 /// form it was declared with. Both arms are checked byte for byte against the
 /// builders, so neither can pass by the other's frame.
