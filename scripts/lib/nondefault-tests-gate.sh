@@ -194,6 +194,21 @@ LEGS=(
     # there and report a population of zero as green.
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_open::"
+    # The close verb as a QUERY: the runtime half of it, in two rows for the reason
+    # the row above gives (an integration TARGET and lib unit tests share no
+    # build filter). The census reported five of them `unclaimed` on the hosted
+    # run of the push that added them, because the local pre-push does not run it
+    # and no row named `session-close-ingress` together with the router and
+    # linkstate forwarders these tests exercise.
+    #
+    # The feature list is what the tests and their modules are gated on, copied
+    # whole: the forwarders are `routing-peer` and `routing-router-hat`
+    # (`lib.rs`), and a leg naming fewer builds a file that is not there and
+    # reports a population of zero as green. `--test=session_close_query` covers
+    # every test of that target by construction; the unit tests are two, one in
+    # each forwarder, and the filter names the pair.
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat|--test=session_close_query"
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat|a_lifecycle_close_orders_every_link_to_the_peer_and_no_other"
     # R2743 — the storage MANAGER's lib unit tests, and this row exists for a
     # reason none of the rows above had: the census DID NOT ASK FOR IT.
     #
