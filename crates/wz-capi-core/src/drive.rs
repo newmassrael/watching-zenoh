@@ -2419,8 +2419,8 @@ impl LateBinds {
 ///
 /// The C caller is told only that the open failed (`Z_ERR_GENERIC`), and a program that prints
 /// "Unable to open session!" has nothing more to say, so a failed bind, a refused dial and a
-/// handshake that timed out read the same. zenoh-pico says which in its own log
-/// (`ZENOH_LOG=DEBUG`: `bind() failed for address 127.0.0.1: Address already in use`), and a flake
+/// handshake that timed out read the same. zenoh-pico says which in its own debug log (a build
+/// that logs prints `bind() failed for address 127.0.0.1: Address already in use`), and a flake
 /// hunt on the drop-in legs found that without an equivalent here a failure on THIS side had no
 /// evidence at all. Standard library only and silent unless asked: this crate has no logging
 /// dependency, and an environment variable read once per failed open costs nothing on the path
