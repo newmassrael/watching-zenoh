@@ -274046,6 +274046,58 @@
         "Only the root file and what it imports are read for an origin, so a file in the list that the schema does not import leaves its options unresolved."
       ]
     },
+    "Round 3332": {
+      "decision_summary": "The pico drop-in legs stop failing for want of wz or of the harness. A peer's QUERYABLE interest is answered as subscriber and token interests already were: the queryable under the interest's id, then the final, so a pico querier's write filter opens on that answer and not on timing. The number a test hands to a program is picked without a socket ever existing on it, because a probe socket is copied into every child another test thread forks while it is open and the program started for the number could not bind it: 12 percent of whole-file stress copies on the shipping build, 0.6 percent after. The accept barrier asks whose listener it is without connecting. z_get and z_get_attachment lose their own condvar wakeup after the final line, z_get_lat loses a start race on pico and on wz alike, and the tests allow for both. WZ_CAPI_LOG says why a z_open failed.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/query.rs, response_sink.rs, session_actions.rs, observer.rs: QueryableRegistry::respond_to_queryable_interest, the sink's send_declare_queryable_reply, and the observer staging and draining of a queryable interest's answer; six unit tests.",
+        "crates/wz-runtime-tokio/src/session/tests.rs: the wire form of that answer, decoded from the recorded frames.",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: unbound_unautoselected, a pick that claims a number and reads the kernel table and creates no socket; free_port uses it; the claim is asked before a bind; WZ_TEST_PORT_RANGE; tests of each.",
+        "crates/wz-integration-tests/src/lib.rs, bounded.rs: the accept barrier verifies the listener is the child's, port_socket_report on an early exit, PortReservation without a socket, every unanswered attempt's output, the child threads of a panicking test.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: finish_get_example for z_get and z_get_attachment, run_get_lat_with_restarts, and the z_sub_thr floor read over its window.",
+        "crates/wz-capi-core/src/drive.rs: log_open_failure, printed only when WZ_CAPI_LOG is set."
+      ],
+      "verification_bullets": [
+        "On a build host: the six queryable-interest unit tests and the wire test pass, wz-runtime-tokio-test-support passes 20 tests and wz-integration-tests 59 of its own, and clippy with warnings denied is clean on wz-session-core, wz-runtime-tokio, wz-runtime-tokio-test-support and wz-integration-tests.",
+        "On a build host: layers C0s, C1bz, C1cn, C1bn and C1cf pass on the change.",
+        "On a build host, the whole drop-in file pinned to two CPUs on the shipping build, copies run three at a time: 21 of 177 failed with the old picker and 1 of 180 with the new one, that one a throughput assertion since changed.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "A queryable interest's FUTURE half is answered by the unsolicited declaration, not stamped with the interest's id; only the CURRENT half is.",
+        "The no-heap path does not answer a queryable interest.",
+        "wz sends its declarations five to six milliseconds after the handshake on two starved CPUs, so a z_get_lat start can still lose its race; the test restarts it.",
+        "The frozen note of Round 3331 that the pico drop-in flake was not repaid is corrected by this entry, not rewritten.",
+        "A dial that fails reaches WZ_CAPI_LOG as an error of type unit, without its cause."
+      ],
+      "publishable_decision_summary": "The pico drop-in legs stop failing for want of wz or of the harness. A peer's QUERYABLE interest is answered as subscriber and token interests already were: the queryable under the interest's id, then the final, so a pico querier's write filter opens on that answer and not on timing. The number a test hands to a program is picked without a socket ever existing on it, because a probe socket is copied into every child another test thread forks while it is open and the program started for the number could not bind it: 12 percent of whole-file stress copies on the shipping build, 0.6 percent after. The accept barrier asks whose listener it is without connecting. z_get and z_get_attachment lose their own condvar wakeup after the final line, z_get_lat loses a start race on pico and on wz alike, and the tests allow for both. WZ_CAPI_LOG says why a z_open failed.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/query.rs, response_sink.rs, session_actions.rs, observer.rs: QueryableRegistry::respond_to_queryable_interest, the sink's send_declare_queryable_reply, and the observer staging and draining of a queryable interest's answer; six unit tests.",
+        "crates/wz-runtime-tokio/src/session/tests.rs: the wire form of that answer, decoded from the recorded frames.",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: unbound_unautoselected, a pick that claims a number and reads the kernel table and creates no socket; free_port uses it; the claim is asked before a bind; WZ_TEST_PORT_RANGE; tests of each.",
+        "crates/wz-integration-tests/src/lib.rs, bounded.rs: the accept barrier verifies the listener is the child's, port_socket_report on an early exit, PortReservation without a socket, every unanswered attempt's output, the child threads of a panicking test.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: finish_get_example for z_get and z_get_attachment, run_get_lat_with_restarts, and the z_sub_thr floor read over its window.",
+        "crates/wz-capi-core/src/drive.rs: log_open_failure, printed only when WZ_CAPI_LOG is set."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the six queryable-interest unit tests and the wire test pass, wz-runtime-tokio-test-support passes 20 tests and wz-integration-tests 59 of its own, and clippy with warnings denied is clean on wz-session-core, wz-runtime-tokio, wz-runtime-tokio-test-support and wz-integration-tests.",
+        "On a build host: layers C0s, C1bz, C1cn, C1bn and C1cf pass on the change.",
+        "On a build host, the whole drop-in file pinned to two CPUs on the shipping build, copies run three at a time: 21 of 177 failed with the old picker and 1 of 180 with the new one, that one a throughput assertion since changed.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A queryable interest's FUTURE half is answered by the unsolicited declaration, not stamped with the interest's id; only the CURRENT half is.",
+        "The no-heap path does not answer a queryable interest.",
+        "wz sends its declarations five to six milliseconds after the handshake on two starved CPUs, so a z_get_lat start can still lose its race; the test restarts it.",
+        "The frozen note of Round 3331 that the pico drop-in flake was not repaid is corrected by this entry, not rewritten.",
+        "A dial that fails reaches WZ_CAPI_LOG as an error of type unit, without its cause."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
