@@ -1155,10 +1155,12 @@ async fn drive_client(
     // is empty because `endpoints` is, so a lost link ends the session as it would on the real
     // library, which scouts for no second node.
     let first = match &scouting {
-        Some((plan, zid)) => connect_first(plan, zid, &dialer).await.map_err(|_| ()),
+        Some((plan, zid)) => connect_first(plan, zid, &dialer)
+            .await
+            .map_err(|e| log_open_failure("scouted connect", &e)),
         None => drive_connect_phase(phase.policy.budget, &scheduled, &attempt)
             .await
-            .map_err(|_| ()),
+            .map_err(|e| log_open_failure(&format!("connect to {endpoints:?}"), &e)),
     };
     let mut session = match first {
         Ok(opened) => opened,
@@ -2412,6 +2414,23 @@ impl LateBinds {
     }
 }
 
+/// Say WHY an open failed, on stderr, when `WZ_CAPI_LOG` is set; return `()` so it drops into a
+/// `map_err`.
+///
+/// The C caller is told only that the open failed (`Z_ERR_GENERIC`), and a program that prints
+/// "Unable to open session!" has nothing more to say, so a failed bind, a refused dial and a
+/// handshake that timed out read the same. zenoh-pico says which in its own log
+/// (`ZENOH_LOG=DEBUG`: `bind() failed for address 127.0.0.1: Address already in use`), and a flake
+/// hunt on the drop-in legs found that without an equivalent here a failure on THIS side had no
+/// evidence at all. Standard library only and silent unless asked: this crate has no logging
+/// dependency, and an environment variable read once per failed open costs nothing on the path
+/// that works.
+fn log_open_failure(what: &str, why: &dyn core::fmt::Debug) {
+    if std::env::var_os("WZ_CAPI_LOG").is_some() {
+        std::eprintln!("[wz-capi] open failed: {what}: {why:?}");
+    }
+}
+
 /// One attempt to bind `endpoint`, as the runtime's phase drivers ask for it: the listener, or
 /// nothing.
 async fn bind_one(
@@ -2458,6 +2477,7 @@ async fn bind_listeners(
         bind_one(&endpoints[position], tls, zid, tx_queue)
     })
     .await
+    .map_err(|e| log_open_failure("bind phase", &e))
     .ok()?;
     let legs = outcome
         .bound
@@ -2516,9 +2536,12 @@ async fn bind_listener(
     // cert-absence reject). Each backend's slot is filled only when its feature
     // is compiled in; without it that scheme surfaces `Unsupported` at bind
     // regardless -- see `listen_accept_config`.
-    let accept_cfg = listen_accept_config(tls).ok()?;
+    let accept_cfg = listen_accept_config(tls)
+        .map_err(|e| log_open_failure("listen configuration", &e))
+        .ok()?;
     let listener = bind_endpoint_with_config(endpoint, &accept_cfg)
         .await
+        .map_err(|e| log_open_failure(&format!("bind {endpoint}"), &e))
         .ok()?;
     // CALLER fail-fast (mesh accept loop): pico's z_open(listen) holds N
     // concurrent inbound peers off ONE listener, so a NON-mesh-capable acceptor
@@ -2544,7 +2567,9 @@ async fn bind_listener(
     // the open succeeded, so an entropy failure could only be reported as "no
     // peer ever connects". Built before the bind is announced, it is an ordinary
     // open failure like the two above.
-    let params = init_params(WhatAmI::Peer, zid.to_vec(), tx_queue).ok()?;
+    let params = init_params(WhatAmI::Peer, zid.to_vec(), tx_queue)
+        .map_err(|e| log_open_failure(&format!("session parameters for {endpoint}"), &e))
+        .ok()?;
     Some(Listening { listener, params })
 }
 
