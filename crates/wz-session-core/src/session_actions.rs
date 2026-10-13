@@ -2634,7 +2634,16 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     // interest's id. A key longer than the bounded codec field cannot be encoded;
     // the chain's `DeclFinal` still terminates the interest, so a skipped reply
     // degrades to "no matching queryable", as the subscriber reply does.
-    #[cfg(all(feature = "alloc", feature = "declare-queryable"))]
+    //
+    // `send_declare` below exists only where a declaration can be sent at all
+    // (`liveliness-token` or `declare-subscriber`, on the heap profile), so this
+    // override has the same reach as the observer's staging of the answer; a build
+    // without either keeps the trait's default and sends nothing.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-queryable",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
     fn send_declare_queryable_reply(
         &self,
         queryable_id: u64,
