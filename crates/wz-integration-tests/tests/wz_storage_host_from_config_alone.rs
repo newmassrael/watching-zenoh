@@ -42,8 +42,8 @@ use wz_integration_tests::common::{
 /// applying the section it was started on.
 const PUBLISH_HOLD_MS: &str = "1500";
 
-// wz-proves: none -- both ends are wz's own binary, so there is no foreign
-// adjudicator; the foreign twin of this claim is
+// Both ends are wz's own binary, so this file claims no foreign proof; the
+// foreign twin of this claim is
 // wz_storage_host_plugins_section_from_a_config_file_serves_via_pico, which
 // reads the same startup with a stock pico client and still passes `--storage-host`.
 #[test]
