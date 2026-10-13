@@ -273802,6 +273802,48 @@
         "The hosts are the router and peer forwarders that own a face table; a host without one answers neither query, and the demo flags exist only on a build that carries session-close-ingress."
       ]
     },
+    "Round 3326": {
+      "decision_summary": "The config file reader takes upstream's whole connect/endpoints element. Upstream types the list as endpoint-or-group, a bare endpoint string or an object { strategy, locators: [...] }, and wz read only strings, so the first object refused the whole document and the node did not start. A group now reads as its locators in written order, mixed with bare strings and inside the per-mode table form. Both strategies dial every locator, because upstream's runtime implements allOf alone and falls back to it, with a warning, for oneOf. As upstream, a group without a strategy or without locators, a repeated member, a strategy other than allOf or oneOf (case-sensitive) and a locator that is not a string are refused at connect/endpoints, and a member it does not know is ignored. listen/endpoints stays a list of endpoint strings, as upstream types it. Layer Z gains a leg that starts the demo on a file stating its only router as a group and shows it reach a real zenohd.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/zenoh_config.rs: EndpointElements names what an endpoint list element may be, group_locators reads one group object, and endpoints_of and want_endpoints take it; connect/endpoints accepts strings or groups, listen/endpoints strings only.",
+        "crates/wz-runtime-tokio/src/zenoh_config.rs tests: a group reads as its locators in written order, in the per-mode table form too; the nine group spellings upstream refuses are refused at connect/endpoints; listen takes no group.",
+        "crates/wz-integration-tests/tests/wz_reads_a_stock_zenohd_config.rs: leg 13 starts the demo on a file whose only endpoint is a group and shows the session to a real zenohd.",
+        "scripts/run-ci.sh: Layer Z's count guard for that file moves from 12 to 13."
+      ],
+      "verification_bullets": [
+        "On a build host: the wz-runtime-tokio library tests with zenoh-config pass, the two new tests among them, with clippy clean on the crate and its tests.",
+        "On a build host: with the demo built on the lane's full feature list and a zenohd at the pin, leg 13 and the existing drop-in leg pass.",
+        "On a build host: layer C0 passes on the committed change, and the count-guard oracle over the range from the Round 3325 tip reaches four guards and all four pass, the Layer Z guard for this file at 13.",
+        "NOT verified here: the hosted run of this push, and a group that holds several live locators; the legs dial one."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The file reader flattens a group and keeps neither the group nor its strategy, so the node dials the list a plain-string file would; the admin-space write path keeps groups, and whether a group read from a file should appear as a group when the config is read back is not decided here.",
+        "When upstream implements oneOf, the flattening becomes wrong for it: the strategy must then reach the dialler, and the strategy the reader discards is the place to carry it."
+      ],
+      "publishable_decision_summary": "The config file reader takes upstream's whole connect/endpoints element. Upstream types the list as endpoint-or-group, a bare endpoint string or an object { strategy, locators: [...] }, and wz read only strings, so the first object refused the whole document and the node did not start. A group now reads as its locators in written order, mixed with bare strings and inside the per-mode table form. Both strategies dial every locator, because upstream's runtime implements allOf alone and falls back to it, with a warning, for oneOf. As upstream, a group without a strategy or without locators, a repeated member, a strategy other than allOf or oneOf (case-sensitive) and a locator that is not a string are refused at connect/endpoints, and a member it does not know is ignored. listen/endpoints stays a list of endpoint strings, as upstream types it. Layer Z gains a leg that starts the demo on a file stating its only router as a group and shows it reach a real zenohd.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/zenoh_config.rs: EndpointElements names what an endpoint list element may be, group_locators reads one group object, and endpoints_of and want_endpoints take it; connect/endpoints accepts strings or groups, listen/endpoints strings only.",
+        "crates/wz-runtime-tokio/src/zenoh_config.rs tests: a group reads as its locators in written order, in the per-mode table form too; the nine group spellings upstream refuses are refused at connect/endpoints; listen takes no group.",
+        "crates/wz-integration-tests/tests/wz_reads_a_stock_zenohd_config.rs: leg 13 starts the demo on a file whose only endpoint is a group and shows the session to a real zenohd.",
+        "scripts/run-ci.sh: Layer Z's count guard for that file moves from 12 to 13."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the wz-runtime-tokio library tests with zenoh-config pass, the two new tests among them, with clippy clean on the crate and its tests.",
+        "On a build host: with the demo built on the lane's full feature list and a zenohd at the pin, leg 13 and the existing drop-in leg pass.",
+        "On a build host: layer C0 passes on the committed change, and the count-guard oracle over the range from the Round 3325 tip reaches four guards and all four pass, the Layer Z guard for this file at 13.",
+        "NOT verified here: the hosted run of this push, and a group that holds several live locators; the legs dial one."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The file reader flattens a group and keeps neither the group nor its strategy, so the node dials the list a plain-string file would; the admin-space write path keeps groups, and whether a group read from a file should appear as a group when the config is read back is not decided here.",
+        "When upstream implements oneOf, the flattening becomes wrong for it: the strategy must then reach the dialler, and the strategy the reader discards is the place to carry it."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
