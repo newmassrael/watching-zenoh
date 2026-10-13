@@ -233,6 +233,79 @@ fn bounded_exit(
     }
 }
 
+/// The line `z_get.c` and `z_get_attachment.c` print from the reply closure's
+/// drop, which runs when the query is final and nothing more can arrive.
+const GET_FINAL_LINE: &str = "Received query final notification";
+
+/// How long an upstream `z_get`-family example gets to exit once it is running
+/// and nothing is wrong with it. A healthy one exits within a second of printing
+/// its final line; this leaves a starved machine room.
+const GET_EXIT_GRACE: Duration = Duration::from_secs(10);
+
+/// How an upstream `z_get`-family example ended.
+enum GetEnd {
+    /// It exited, with this status.
+    Exited(std::process::ExitStatus),
+    /// It printed its final line and then never exited: the program's own lost
+    /// wakeup, see [`finish_get_example`]. The exchange was complete.
+    LostWakeup,
+}
+
+/// Wait for an upstream `z_get`-family example (`z_get.c`, `z_get_attachment.c`)
+/// to end, and tell a program that FAILED from one that lost its own wakeup.
+///
+/// THE PROGRAMS RACE THEMSELVES, on zenoh-pico and on wz alike. Both do
+/// `z_mutex_lock(mutex); z_get(..., closure); z_condvar_wait(cond, mutex);`
+/// (`examples/unix/c11/z_get.c:85-103`, `z_get_attachment.c:121-161`) and end the
+/// wait from the closure's DROP, `reply_dropper`, which calls
+/// `z_condvar_signal(cond)` WITHOUT taking the mutex, tests no predicate, and
+/// then `z_drop(cond)` destroys the variable. The drop runs on the session's
+/// read thread when the query is final. When the reply and the final arrive
+/// before the main thread has reached `z_condvar_wait` — which happens when that
+/// thread is not scheduled for the few milliseconds the exchange takes, as on a
+/// machine limited to two CPUs running thirty of these at once — the signal has
+/// no waiter and is gone, and the program waits for ever. Its output is complete
+/// at that point: the reply, any encoding and attachment, and the final line.
+///
+/// wz's `z_condvar_*` are the OS's own (`wz-capi-pico/src/sync.rs`), so the
+/// semantics are the same as pico's, and a wz that "fixed" this would be
+/// diverging from the library the example was written against.
+///
+/// So a program that has not exited after [`GET_EXIT_GRACE`] is read two ways. If
+/// its capture holds the final line the exchange is COMPLETE and the hang is the
+/// example's own race: it is killed, the fact is printed, and the caller checks
+/// everything it prints (the reply, the key, the attachment) but not an exit
+/// status the program never got to produce. If the final line is absent the query
+/// never finished, which is a real failure and panics with the capture. A run that
+/// DOES exit still has its status checked by the caller, so the close path is
+/// still exercised on every run that reaches it.
+fn finish_get_example(
+    label: &str,
+    child: &mut std::process::Child,
+    capture: &mut std::fs::File,
+) -> GetEnd {
+    match wait_for_exit(child, GET_EXIT_GRACE) {
+        Ok(status) => GetEnd::Exited(status),
+        Err(why) => {
+            let captured = read_captured(capture);
+            let _ = child.kill();
+            let _ = child.wait_bounded();
+            if captured.contains(GET_FINAL_LINE) {
+                eprintln!(
+                    "{label} printed its final line and did not exit within \
+                     {GET_EXIT_GRACE:?} ({why}): the example's own lost condvar wakeup, \
+                     the exchange was complete"
+                );
+                return GetEnd::LostWakeup;
+            }
+            panic!(
+                "{label} did not exit within {GET_EXIT_GRACE:?} and never printed its final \
+                 line — {why}. The query did not finish.\n--- its captured output ---\n{captured}"
+            );
+        }
+    }
+}
+
 /// Run upstream's `z_info` against `endpoint` as a client until it has printed
 /// everything it is going to print, end it the way a user would, and return what
 /// it printed.
@@ -501,11 +574,13 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
     // The exit status still matters, and the capture is still read after the
     // process is gone: the reply line is what ends the wait, the final
     // notification comes after it.
-    let get = get_child
-        .child_mut()
-        .wait_bounded()
-        .expect("wait on the real pico z_get");
-    assert!(get.success(), "real zenoh-pico z_get exited {get:?}");
+    if let GetEnd::Exited(get) = finish_get_example(
+        "real zenoh-pico z_get",
+        get_child.child_mut(),
+        &mut get_reader,
+    ) {
+        assert!(get.success(), "real zenoh-pico z_get exited {get:?}");
+    }
 
     let foreign = read_captured(&mut get_reader);
     // Ordering note: the reply assertion comes FIRST and is the verdict. The
@@ -1157,15 +1232,17 @@ fn pico_zget_source_on_wz_capi_queries_real_pico_zqueryable() {
              payload in {GET_ATTEMPTS} attempts.\n--- z_get.c (on wz) stdout ---\n{captured}"
         )
     });
-    let get = get_child
-        .child_mut()
-        .wait_bounded()
-        .expect("wait on upstream z_get.c");
-    assert!(
-        get.success(),
-        "upstream z_get.c on wz's C ABI exited {get:?}\n--- its stdout+stderr ---\n{}",
-        read_captured(&mut get_reader)
-    );
+    if let GetEnd::Exited(get) = finish_get_example(
+        "upstream z_get.c on wz's C ABI",
+        get_child.child_mut(),
+        &mut get_reader,
+    ) {
+        assert!(
+            get.success(),
+            "upstream z_get.c on wz's C ABI exited {get:?}\n--- its stdout+stderr ---\n{}",
+            read_captured(&mut get_reader)
+        );
+    }
 
     let local = read_captured(&mut get_reader);
     // The REPLY is the verdict and is asserted FIRST. "Received query final
@@ -1877,6 +1954,52 @@ fn pico_zpubthr_source_on_wz_capi_batches_to_a_real_pico_zsub() {
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
 }
 
+/// Run upstream's `z_get_lat.c` until a start of it exits, restarting a start that
+/// never gets going.
+///
+/// THE PROGRAM LOSES A START-UP RACE BY CONSTRUCTION, on zenoh-pico and on wz
+/// alike (wz reproduces pico's write filter on purpose). It declares its querier
+/// one millisecond after `z_open` and calls `z_querier_get` in a loop that spins,
+/// in user space and for ever, on the reply it counts. A querier whose write
+/// filter is still closed sends nothing and says success (pico `z_querier_get` @
+/// `src/api/api.c`; wz `z_querier_get` @ `wz-capi-pico/src/querier.rs`), and the
+/// filter opens only once the peer's queryable declaration has been processed by
+/// the session's READ side. Under load that declaration is processed after the
+/// first query, the one query the program counts is never sent, and nothing the
+/// peer does afterwards helps. A restart is the only thing that does, so a start
+/// that has not exited within `attempt_timeout` is killed and made again, and only
+/// `attempts` starts in a row stalling is a failure. A start that EXITS is final,
+/// whatever its status: a program that ran and failed is not the race.
+///
+/// `spawn` makes one start and returns it with the capture it writes to. The
+/// result is the exit status, the capture and the number of the start that
+/// exited; `Err` carries the last start's capture.
+fn run_get_lat_with_restarts(
+    attempts: usize,
+    attempt_timeout: Duration,
+    mut spawn: impl FnMut() -> (std::process::Child, std::fs::File),
+) -> Result<(std::process::ExitStatus, String, usize), String> {
+    assert!(attempts >= 1, "a budget of zero starts runs nothing");
+    for attempt in 1..=attempts {
+        let (mut child, mut capture) = spawn();
+        match wait_for_exit(&mut child, attempt_timeout) {
+            Ok(status) => return Ok((status, read_captured(&mut capture), attempt)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait_bounded();
+                if attempt == attempts {
+                    return Err(read_captured(&mut capture));
+                }
+                eprintln!(
+                    "z_get_lat start {attempt}/{attempts} did not exit within \
+                     {attempt_timeout:?} (the start-up race above); restarting"
+                );
+            }
+        }
+    }
+    unreachable!("a budget of zero starts is refused by the callers' constants")
+}
+
 /// LEG 12 (`wz->pico`, QUERIER) — upstream's `z_get_lat.c`, running on wz,
 /// round-trips through a REAL zenoh-pico queryable.
 ///
@@ -1939,30 +2062,44 @@ fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
     }
     drop(reservation);
 
-    let mut lat_out = tempfile::tempfile().expect("z_get_lat stdout capture");
-    let lat_writer = lat_out.try_clone().expect("dup z_get_lat stdout handle");
-    let lat = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&dropin)
-        .args([
-            "-e",
-            &endpoint,
-            "-m",
-            "client",
-            "-n",
-            &rounds.to_string(),
-            "-w",
-            "200",
-        ])
-        .stdout(Stdio::from(lat_writer))
-        .stderr(Stdio::from(lat_out.try_clone().expect("dup stderr handle")))
-        .status_bounded()
-        .expect("run the compiled z_get_lat drop-in");
-    let printed = read_captured(&mut lat_out);
+    // The program can lose its own start-up race (see
+    // `run_get_lat_with_restarts`), which on wz's side leaves it spinning on a
+    // reply to a query its closed write filter never sent. The restart budget
+    // is generous because the counterparty here, `z_queryable`, does not expire.
+    let (lat, printed, start) = run_get_lat_with_restarts(5, Duration::from_secs(8), || {
+        let lat_out = tempfile::tempfile().expect("z_get_lat stdout capture");
+        let lat_writer = lat_out.try_clone().expect("dup z_get_lat stdout handle");
+        let child = Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args([
+                "-e",
+                &endpoint,
+                "-m",
+                "client",
+                "-n",
+                &rounds.to_string(),
+                "-w",
+                "200",
+            ])
+            .stdout(Stdio::from(lat_writer))
+            .stderr(Stdio::from(lat_out.try_clone().expect("dup stderr handle")))
+            .spawn()
+            .expect("spawn the compiled z_get_lat drop-in");
+        (child, lat_out)
+    })
+    .unwrap_or_else(|last| {
+        panic!(
+            "z_get_lat.c on wz did not exit in any of 5 starts of 8s — a querier \
+             that never delivered a reply BLOCKS in its load_loop.\n\
+             --- the last start's stdout+stderr ---\n{last}\n\
+             --- REAL pico z_queryable stdout ---\n{}",
+            read_captured(&mut qable_out)
+        )
+    });
     assert!(
         lat.success(),
-        "z_get_lat.c on wz exited {lat:?} — a querier that never delivered a \
-         reply BLOCKS in its load_loop, so a non-zero exit or a timeout here \
+        "z_get_lat.c on wz exited {lat:?} (start {start} of 5) — a non-zero exit \
          means the querier plane did not round-trip.\n--- its stdout+stderr ---\n\
          {printed}\n--- REAL pico z_queryable stdout ---\n{}",
         read_captured(&mut qable_out)
@@ -2229,8 +2366,10 @@ fn pico_zsub_source_on_wz_capi_receives_from_a_real_pico_declared_publisher() {
         .expect("run the real zenoh-pico z_pub");
     assert!(
         published.success(),
-        "real zenoh-pico z_pub exited {published:?}\n--- its stdout+stderr ---\n{}",
-        read_captured(&mut pub_out)
+        "real zenoh-pico z_pub exited {published:?}\n--- its stdout+stderr ---\n{}\n\
+         --- z_sub.c (on wz) stdout+stderr: the listener's side of the same attempt ---\n{}",
+        read_captured(&mut pub_out),
+        read_captured(&mut sub_out)
     );
 
     let captured =
@@ -2960,15 +3099,17 @@ fn pico_zqueryablechannel_source_on_wz_capi_answers_real_pico_zget_after_the_dis
              expected substring: {value}\n--- REAL pico z_get stdout ---\n{captured}"
         )
     });
-    let get = get_child
-        .child_mut()
-        .wait_bounded()
-        .expect("wait on the real pico z_get");
-    assert!(
-        get.success(),
-        "real zenoh-pico z_get exited {get:?}\n--- its stdout+stderr ---\n{}",
-        read_captured(&mut get_reader)
-    );
+    if let GetEnd::Exited(get) = finish_get_example(
+        "real zenoh-pico z_get",
+        get_child.child_mut(),
+        &mut get_reader,
+    ) {
+        assert!(
+            get.success(),
+            "real zenoh-pico z_get exited {get:?}\n--- its stdout+stderr ---\n{}",
+            read_captured(&mut get_reader)
+        );
+    }
 
     // The verdict comes from the FOREIGN process: it decoded the reply itself.
     let foreign = read_captured(&mut get_reader);
@@ -3463,7 +3604,9 @@ fn pico_zquerier_source_on_wz_capi_gets_a_reply_from_real_pico_zqueryable() {
             "upstream z_querier.c on wz's C-ABI never reported the reply the REAL \
              zenoh-pico z_queryable sent, in {GET_ATTEMPTS} attempts.\n\
              expected substring: {value}\n\
-             --- z_querier.c (on wz) stdout+stderr ---\n{captured}"
+             --- z_querier.c (on wz) stdout+stderr ---\n{captured}\n\
+             --- real pico z_queryable stdout+stderr ---\n{}",
+            read_captured(&mut qbl_out)
         )
     });
     // `bounded_exit` takes an owned `Child`; the guard owns this one, so the
@@ -3767,13 +3910,16 @@ fn pico_zgetattachment_source_on_wz_capi_reads_a_real_pico_reply_attachment() {
         .stderr(Stdio::from(get_err))
         .spawn()
         .expect("spawn the compiled z_get_attachment drop-in");
-    let get = bounded_exit("z_get_attachment.c on wz", get, &mut get_out);
+    let mut get = get;
+    let end = finish_get_example("z_get_attachment.c on wz", &mut get, &mut get_out);
     let captured = read_captured(&mut get_out);
-    assert!(
-        get.success(),
-        "upstream z_get_attachment.c on wz's C-ABI exited {get:?}\n\
-         --- its stdout+stderr ---\n{captured}"
-    );
+    if let GetEnd::Exited(get) = end {
+        assert!(
+            get.success(),
+            "upstream z_get_attachment.c on wz's C-ABI exited {get:?}\n\
+             --- its stdout+stderr ---\n{captured}"
+        );
+    }
     assert!(
         captured.contains(value),
         "upstream z_get_attachment.c on wz's C-ABI never reported the reply.\n\
@@ -3847,13 +3993,16 @@ fn pico_zqueryableattachment_source_on_wz_capi_is_read_by_real_pico_zgetattachme
         .stderr(Stdio::from(get_out.try_clone().expect("dup stderr handle")))
         .spawn()
         .expect("spawn the real zenoh-pico z_get_attachment");
-    let get = bounded_exit("real pico z_get_attachment", get, &mut get_out);
+    let mut get = get;
+    let end = finish_get_example("real pico z_get_attachment", &mut get, &mut get_out);
     let foreign = read_captured(&mut get_out);
     let responder = read_captured(&mut qbl_out);
-    assert!(
-        get.success(),
-        "real zenoh-pico z_get_attachment exited {get:?}\n--- its stdout+stderr ---\n{foreign}"
-    );
+    if let GetEnd::Exited(get) = end {
+        assert!(
+            get.success(),
+            "real zenoh-pico z_get_attachment exited {get:?}\n--- its stdout+stderr ---\n{foreign}"
+        );
+    }
     assert!(
         foreign.contains(value),
         "the REAL zenoh-pico z_get_attachment never reported the reply upstream's \
@@ -3927,24 +4076,75 @@ fn pico_zqueryablelat_source_on_wz_capi_answers_real_pico_zgetlat() {
     }
     drop(reservation);
 
-    let mut lat_out = tempfile::tempfile().expect("foreign z_get_lat capture");
-    let lat_writer = lat_out.try_clone().expect("dup foreign get_lat handle");
     // `-n 5` round trips after a short warmup; each prints one line.
-    let lat = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&z_get_lat)
-        .args(["-e", &endpoint, "-m", "client", "-n", "5", "-w", "500"])
-        .stdout(Stdio::from(lat_writer))
-        .stderr(Stdio::from(lat_out.try_clone().expect("dup stderr handle")))
-        .spawn()
-        .expect("spawn the real zenoh-pico z_get_lat");
-    let lat = bounded_exit("real pico z_get_lat", lat, &mut lat_out);
-    let foreign = read_captured(&mut lat_out);
+    //
+    // THE FOREIGN PROGRAM CAN START BADLY, so it is given a few starts. upstream's
+    // `z_get_lat.c` declares its querier one millisecond after `z_open` and then
+    // calls `z_querier_get` in a loop that spins, in user space and for ever, on
+    // the reply it counts. zenoh-pico drops a querier's query LOCALLY, and
+    // returns success, while its write filter is closed (`z_querier_get` @
+    // `src/api/api.c`), and the filter opens only once the library has processed
+    // the peer's queryable declaration, which its READ THREAD does. The program
+    // calls `z_querier_get` about a millisecond after it declared the querier, so
+    // the peer's declaration has to be processed inside that millisecond, either
+    // sent unsolicited right after the handshake (then the filter opens the
+    // moment it is created) or in answer to the querier's own Interest. A peer on
+    // a machine that is not starved does that; one that is does not (measured on
+    // a machine limited to two CPUs running thirty of these at once, strace of
+    // five starts in a row that all stalled: the handshake ended, the program sent
+    // its Interest 1.3 ms later, and the peer's declarations, both the unsolicited
+    // one and the answer to that Interest, arrived five to six milliseconds
+    // after it, by which time the first query had been dropped), and then the one
+    // query that is counted is never sent and the program waits for it for ever.
+    // Nothing the peer does afterwards helps, and a zenoh-pico peer would be
+    // dropped the same way: the program is racy by construction.
+    //
+    // What this test pins is that wz answers a querier's latency loop, and the
+    // peer's side of that start-up is answered (the queryable's declaration
+    // stamped with the querier's interest id, see
+    // `queryable_interest_reply_tests` in wz-session-core): a start that never
+    // gets going is killed after `LAT_ATTEMPT_TIMEOUT`, and only
+    // `LAT_ATTEMPTS` of them in a row failing is a failure. A program that ran
+    // and exited non-zero, or printed fewer round trips, fails at once.
+    //
+    // THE STARTS HAVE TO FIT IN THE LISTENER'S LIFE. upstream's
+    // `z_queryable_lat.c` stops by itself `TEST_RUN_TIME_S` (20) seconds after it
+    // starts, so a start made after that finds no listener and says "Unable to
+    // open session!". A healthy run takes well under a second with the short
+    // warmup used here, so ten starts of a second and a half (fifteen in all)
+    // leave the listener alive for the last of them, and a start that stalls costs
+    // little before the next one.
+    const LAT_ATTEMPTS: usize = 10;
+    const LAT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(1500);
+    let (lat, foreign, attempts) =
+        run_get_lat_with_restarts(LAT_ATTEMPTS, LAT_ATTEMPT_TIMEOUT, || {
+            let lat_out = tempfile::tempfile().expect("foreign z_get_lat capture");
+            let lat_writer = lat_out.try_clone().expect("dup foreign get_lat handle");
+            let child = Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(&z_get_lat)
+                .args(["-e", &endpoint, "-m", "client", "-n", "5", "-w", "100"])
+                .stdout(Stdio::from(lat_writer))
+                .stderr(Stdio::from(lat_out.try_clone().expect("dup stderr handle")))
+                .spawn()
+                .expect("spawn the real zenoh-pico z_get_lat");
+            (child, lat_out)
+        })
+        .unwrap_or_else(|last| {
+            panic!(
+                "real pico z_get_lat did not exit in any of {LAT_ATTEMPTS} starts of \
+                 {LAT_ATTEMPT_TIMEOUT:?} — a queryable that never replied stalls it, \
+                 and so does a start that loses the race above {LAT_ATTEMPTS} times \
+                 running.\n--- the last start's output ---\n{last}\n\
+                 --- z_queryable_lat.c (on wz) stdout+stderr ---\n{}",
+                read_captured(&mut qbl_out)
+            )
+        });
     let responder = read_captured(&mut qbl_out);
     assert!(
         lat.success(),
-        "real zenoh-pico z_get_lat exited {lat:?} — a queryable that never replied \
-         stalls it.\n--- its stdout+stderr ---\n{foreign}\n\
+        "real zenoh-pico z_get_lat exited {lat:?} (start {attempts} of {LAT_ATTEMPTS}) — a \
+         queryable that never replied stalls it.\n--- its stdout+stderr ---\n{foreign}\n\
          --- z_queryable_lat.c (on wz) stdout+stderr ---\n{responder}"
     );
     // One line per completed round trip. Fewer than the five asked for means a
@@ -4120,38 +4320,44 @@ fn pico_zsubthr_source_on_wz_capi_measures_a_real_pico_batched_stream() {
     );
 
     // Upstream prints one messages-per-second figure per elapsed period.
+    //
+    // THE WAIT ENDS ON A PERIOD ABOVE THE BOUND, not on the first one printed. The
+    // wait used to end on the first non-zero figure and the bound was then applied
+    // to the best of the one or two figures captured by then, which made the verdict
+    // the rate of the FIRST period: on a machine limited to two CPUs and running
+    // thirty of these at once that period was 589, 743 msg/s, the receiver and the
+    // sender starved, not the batch decoded one message at a time. The bound is a
+    // statement about BATCHING, and a receiver that drains batches exceeds it in some
+    // period of the window; one that decodes a message per frame never does, in any.
+    const BATCHING_FLOOR: f64 = 1000.0;
+    let best_of = |text: &str| {
+        text.lines()
+            .filter_map(|line| line.trim().parse::<f64>().ok())
+            .fold(0.0f64, f64::max)
+    };
     let captured = wait_for_capture_alive(
         sub.child_mut(),
         &mut sub_out,
         EXCHANGE_TIMEOUT,
-        "a non-zero message rate",
-        |text: &str| {
-            text.lines()
-                .any(|line| line.trim().parse::<f64>().map(|v| v > 0.0).unwrap_or(false))
-                .then(|| text.to_owned())
-        },
+        "a message rate above the batching floor",
+        |text: &str| (best_of(text) > BATCHING_FLOOR).then(|| text.to_owned()),
     )
     .unwrap_or_else(|captured| {
         let driver = read_captured(&mut pub_out);
+        let best = best_of(&captured);
         panic!(
-            "upstream z_sub_thr.c on wz's C-ABI never reported a NON-ZERO message \
-             rate for the REAL zenoh-pico z_pub_thr's stream.\n\
+            "upstream z_sub_thr.c on wz's C-ABI never reported a rate above \
+             {BATCHING_FLOOR} msg/s for the REAL zenoh-pico z_pub_thr's stream in \
+             {EXCHANGE_TIMEOUT:?} (best {best:.3}): a rate of that order is the shape of \
+             a receiver decoding roughly one message per FRAME rather than draining \
+             the batch, or of no stream at all.\n\
              --- z_sub_thr.c (on wz) stdout+stderr ---\n{captured}\n\
              --- REAL pico z_pub_thr stdout ---\n{driver}"
         )
     });
-    let best = captured
-        .lines()
-        .filter_map(|line| line.trim().parse::<f64>().ok())
-        .fold(0.0f64, f64::max);
-    // A receiver that decoded one message per frame would land near the frame
-    // rate, orders of magnitude below this. The bound is deliberately loose:
-    // this leg asserts BATCHING happened, not how fast the host is.
     assert!(
-        best > 1000.0,
-        "the best observed rate was {best:.3} msg/s, which is the shape of a \
-         receiver decoding roughly one message per FRAME rather than draining the \
-         batch.\n--- z_sub_thr.c (on wz) stdout+stderr ---\n{captured}"
+        best_of(&captured) > BATCHING_FLOOR,
+        "the wait returned without a period above the floor:\n{captured}"
     );
 
     graceful_terminate(publisher.child_mut(), Duration::from_secs(5));
