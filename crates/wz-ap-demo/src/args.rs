@@ -847,6 +847,34 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         // arm does; the flag is withheld when the file carries no list, so a
         // lone node gains no empty argument.
         match (cfg.mode, bind) {
+            // The STORAGE HOST: a peer-mode document whose `plugins` section
+            // declares a storage. Only this run-mode hosts a storage manager, so
+            // a file that declares one and came up as `--peer` would start a node
+            // that answers no query the storage was for -- the silence this arm
+            // exists to end. The host binds ONE endpoint, so a document naming
+            // several is REFUSED here rather than cut to its first (item 512 is
+            // that cut), and it dials nothing, so a `connect/endpoints` list is
+            // reported withheld below. A router document with storages is not
+            // taken: the host announces itself as a peer, and that mismatch is
+            // reported on `plugins` instead of being papered over.
+            (WhatAmI::Peer, eps) if !eps.is_empty() && declares_a_storage(cfg.plugins.as_ref()) => {
+                if eps.len() != 1 {
+                    return Err(format!(
+                        "--config: {path} declares storages in plugins/storage_manager, \
+                         which only the storage host runs, and the storage host binds one \
+                         listen endpoint; listen/endpoints names {}",
+                        eps.len()
+                    ));
+                }
+                exp.added.push(String::from("--storage-host"));
+                exp.added.push(eps[0].clone());
+                Some(Selected {
+                    flag: "--storage-host",
+                    role: WhatAmI::Peer,
+                    listen_carried: 1,
+                    connect_carried: 0,
+                })
+            }
             (mode @ (WhatAmI::Router | WhatAmI::Peer), eps) if !eps.is_empty() => {
                 let flag = if mode == WhatAmI::Router {
                     "--router-hat"
@@ -986,6 +1014,14 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
                 // `connect[0]` and drop the rest while this said `Expanded`.
                 (false, false, true) => {
                     list_key_effect(cfg.connect.len(), selected.map_or(0, |s| s.connect_carried))
+                }
+                // The storage host only ACCEPTS: a document that also lists
+                // `connect/endpoints` beside its storages is told so in these
+                // words, which a caller can quote.
+                (false, false, false) if selected.map(|s| s.flag) == Some("--storage-host") => {
+                    KeyEffect::WithheldFromThisRun(
+                        "the storage host dials nothing (it only accepts)",
+                    )
                 }
                 (false, false, false) => {
                     KeyEffect::WithheldFromThisRun("this run's mode dials nothing")
@@ -1959,15 +1995,19 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // This flag takes the section verbatim, so nothing is approximated: the
     // storage host reads it with the same reader a config write goes through.
     //
-    // Only `--storage-host` runs a storage manager, and a file cannot select
-    // that run-mode (`mode` never maps to it), so the run must have been TYPED;
-    // any other run is told the section was withheld from it, by name, rather
-    // than handed a flag it would reject.
+    // Only `--storage-host` runs a storage manager. The run is that mode when it
+    // was TYPED, or when the FILE selected it (a peer-mode document whose section
+    // declares a storage, above); any other run is told the section was withheld
+    // from it, by name, rather than handed a flag it would reject. A `mode:
+    // "router"` document with storages lands here: the host announces a peer.
     if named("plugins") {
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.map(|s| s.flag));
         let blocked = no_sink("plugins").or_else(|| {
-            (typed_role.map(|(flag, _)| flag) != Some("--storage-host")).then_some(
-                KeyEffect::WithheldFromThisRun("a storage manager (only --storage-host runs one)"),
-            )
+            (run_flag != Some("--storage-host")).then_some(KeyEffect::WithheldFromThisRun(
+                "a storage manager (only --storage-host runs one)",
+            ))
         });
         let section = cfg
             .plugins
@@ -2319,6 +2359,32 @@ struct Selected {
     listen_carried: usize,
     /// How many `connect/endpoints` members the emitted argv carries.
     connect_carried: usize,
+}
+
+/// Whether a `plugins` section declares at least one storage for the storage
+/// manager: `plugins.storage_manager.storages` is an object with a member.
+///
+/// The question the file's role selection asks, because the storage host is the
+/// only run-mode that hosts a storage. It reads the SECTION as parsed and not as
+/// text, and it counts a declaration, not a well-formed one: whether a storage
+/// is valid is the host's reader's judgement at startup, and a document with a
+/// broken storage should reach that reader and be told so rather than come up
+/// as a peer that hosts nothing.
+#[cfg(feature = "zenoh-config")]
+fn declares_a_storage(plugins: Option<&wz::runtime_tokio::json5::Json5Value>) -> bool {
+    use wz::runtime_tokio::json5::Json5Value;
+    let Some(Json5Value::Object(plugins)) = plugins else {
+        return false;
+    };
+    let Some((_, Json5Value::Object(manager))) =
+        plugins.iter().find(|(n, _)| n == "storage_manager")
+    else {
+        return false;
+    };
+    matches!(
+        manager.iter().find(|(n, _)| n == "storages"),
+        Some((_, Json5Value::Object(storages))) if !storages.is_empty()
+    )
 }
 
 /// R2099 (open-debt item 512) — the verdict for a LIST-valued key, derived from
@@ -3344,11 +3410,15 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     (
         "plugins",
         KIND_LEG_JUDGED,
-        "expands to `--plugins <section>` on a `--storage-host` run; \
+        "expands to `--plugins <section>` on a `--storage-host` run, typed or \
+         selected by a peer-mode file that declares a storage; \
          wz_storage_host_plugins_section_from_a_config_file_serves_via_pico, in \
          wz-integration-tests/tests/wz_storage_host_plugins_section_pico.rs, \
          starts the host on a FILE naming one storage and requires a REAL pico \
-         client to read the storage's status and then its own put back.",
+         client to read the storage's status and then its own put back, and \
+         wz_storage_host_from_a_config_file_alone_hosts_its_storage_and_applies_its_listen_endpoint, in \
+         wz_storage_host_from_config_alone.rs, starts it on the file with no run \
+         flag at all.",
     ),
     // §5.23 `adminspace-core` — `metadata`. The value travels in the REPLY to an
     // admin GET of the node's root key, and that reply is what the leg reads.
@@ -3677,6 +3747,153 @@ mod stock_config_tests {
             wz::runtime_tokio::zenoh_config::ZENOH_LINK_PROTOCOLS,
         )
         .map(|o| o.expect("--config was on the command line"))
+    }
+
+    /// A storage declared in the file's `plugins` section is only ever hosted by
+    /// `--storage-host`, so a peer-mode document that declares one SELECTS that
+    /// run-mode, with its one listen endpoint, and `plugins` goes onto it. The
+    /// same file with no storage still comes up as `--peer`, and a typed role
+    /// still wins over the file.
+    #[test]
+    fn a_peer_document_that_declares_a_storage_selects_the_storage_host() {
+        let storages = r#"plugins: { storage_manager: { storages: { demo:
+            { key_expr: "demo/**", volume: "memory" } } } }"#;
+        let with = format!(
+            r#"{{ mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:7447"] }}, {storages} }}"#
+        );
+        let ex = expand(&["--config", "z.json5"], &with).expect("a valid file");
+        assert_eq!(
+            ex.added
+                .iter()
+                .take(2)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["--storage-host", "tcp/127.0.0.1:7447"],
+            "the host, and the file's own endpoint: {:?}",
+            ex.added
+        );
+        assert!(
+            !ex.added.iter().any(|a| a == "--peer"),
+            "a peer run would host no storage: {:?}",
+            ex.added
+        );
+        for key in ["mode", "listen/endpoints"] {
+            assert_eq!(
+                ex.effect(key),
+                Some(KeyEffect::Expanded),
+                "{key} reached the node: {:?}",
+                ex.effects
+            );
+        }
+        // The section rides on the host where the build HAS a host. A build
+        // without `adminspace-config-hotreload` still selects `--storage-host`
+        // (the file declared a storage, and a peer would silently host none) and
+        // that binary then exits(2) naming the feature it wants: the section has
+        // no sink there, and is reported so rather than expanded.
+        if cfg!(feature = "adminspace-config-hotreload") {
+            assert!(
+                ex.added.iter().any(|a| a == "--plugins"),
+                "the section rides on the host: {:?}",
+                ex.added
+            );
+            assert_eq!(ex.effect("plugins"), Some(KeyEffect::Expanded));
+        } else {
+            assert_eq!(ex.effect("plugins"), Some(KeyEffect::NoSinkInThisBuild));
+        }
+
+        let without = r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:7447"] } }"#;
+        let ex = expand(&["--config", "z.json5"], without).expect("a valid file");
+        assert_eq!(ex.added.first().map(String::as_str), Some("--peer"));
+
+        let typed = expand(&["--config", "z.json5", "--peer", "tcp/127.0.0.1:1"], &with)
+            .expect("a valid file");
+        assert!(
+            !typed.added.iter().any(|a| a == "--storage-host"),
+            "a typed role is the operator's choice: {:?}",
+            typed.added
+        );
+    }
+
+    /// The storage host binds ONE endpoint. A document that declares storages
+    /// and names several is REFUSED, in words that name the count; the same
+    /// document without storages still binds all of them as a peer. Never cut to
+    /// the first: that cut is the defect `listen/endpoints` once had.
+    #[test]
+    fn a_storage_document_naming_several_listen_endpoints_is_refused_not_cut() {
+        let storages = r#"plugins: { storage_manager: { storages: { demo:
+            { key_expr: "demo/**", volume: "memory" } } } }"#;
+        let two = format!(
+            r#"{{ mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:7447", "tcp/127.0.0.1:7448"] }},
+               {storages} }}"#
+        );
+        let refusal = match expand(&["--config", "z.json5"], &two) {
+            Ok(ex) => panic!(
+                "two endpoints and a storage must be refused: {:?}",
+                ex.added
+            ),
+            Err(refusal) => refusal,
+        };
+        assert!(
+            refusal.contains("storage host binds one listen endpoint")
+                && refusal.contains("names 2"),
+            "{refusal}"
+        );
+
+        let no_storage = r#"{ mode: "peer", listen: { endpoints:
+            ["tcp/127.0.0.1:7447", "tcp/127.0.0.1:7448"] } }"#;
+        let ex = expand(&["--config", "z.json5"], no_storage).expect("a valid file");
+        assert_eq!(ex.added.first().map(String::as_str), Some("--peer"));
+        assert_eq!(
+            ex.added.get(1).map(String::as_str),
+            Some("tcp/127.0.0.1:7447,tcp/127.0.0.1:7448")
+        );
+    }
+
+    /// The host announces a peer and dials nothing. A router document with
+    /// storages keeps its run-mode and has `plugins` reported withheld, in the
+    /// words the consumer quotes; a peer document that also lists
+    /// `connect/endpoints` has THAT key reported withheld in the host's own
+    /// words.
+    #[test]
+    fn the_storage_host_reports_a_router_document_and_a_connect_list_as_withheld() {
+        let storages = r#"plugins: { storage_manager: { storages: { demo:
+            { key_expr: "demo/**", volume: "memory" } } } }"#;
+        let router = format!(
+            r#"{{ mode: "router", listen: {{ endpoints: ["tcp/127.0.0.1:7447"] }}, {storages} }}"#
+        );
+        let ex = expand(&["--config", "z.json5"], &router).expect("a valid file");
+        // Without a host in the build the section has no sink at all, which is
+        // the verdict that comes first; with one, the reason is the run-mode.
+        let withheld = if cfg!(feature = "adminspace-config-hotreload") {
+            KeyEffect::WithheldFromThisRun("a storage manager (only --storage-host runs one)")
+        } else {
+            KeyEffect::NoSinkInThisBuild
+        };
+        assert_eq!(ex.effect("plugins"), Some(withheld), "{:?}", ex.effects);
+        assert!(
+            !ex.added.iter().any(|a| a == "--storage-host"),
+            "the host is a peer: {:?}",
+            ex.added
+        );
+
+        let dialling = format!(
+            r#"{{ mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:7447"] }},
+               connect: {{ endpoints: ["tcp/127.0.0.1:7500"] }}, {storages} }}"#
+        );
+        let ex = expand(&["--config", "z.json5"], &dialling).expect("a valid file");
+        assert_eq!(
+            ex.effect("connect/endpoints"),
+            Some(KeyEffect::WithheldFromThisRun(
+                "the storage host dials nothing (it only accepts)"
+            )),
+            "{:?}",
+            ex.effects
+        );
+        assert!(
+            !ex.added.iter().any(|a| a == "--connect"),
+            "no dial reaches the host: {:?}",
+            ex.added
+        );
     }
 
     #[test]
@@ -5116,16 +5333,23 @@ mod stock_config_tests {
     /// in-scope set still fails.
     #[test]
     fn a_role_the_file_supplies_honours_every_key_a_typed_role_does() {
-        /// `variant.added` minus `control.added`, which is the key's own effect.
-        fn delta(base: &StockConfigExpansion, with: &StockConfigExpansion) -> Vec<String> {
+        let roles: Vec<&str> = RUN_MODE_ROLES.iter().map(|(flag, _)| *flag).collect();
+        // `variant.added` minus `control.added`, which is the key's own effect,
+        // less the run-mode flags themselves.
+        //
+        // The role flags are left out because one key chooses the role itself:
+        // a `plugins` section that declares a storage makes the FILE select
+        // `--storage-host`, so the role flag is part of that key's effect in the
+        // supplied invocation and cannot be in the typed one, where the operator
+        // already chose it. What this test compares is every OTHER flag the key
+        // produces, and that comparison is unchanged for every other key.
+        let delta = |base: &StockConfigExpansion, with: &StockConfigExpansion| -> Vec<String> {
             with.added
                 .iter()
-                .filter(|a| !base.added.contains(a))
+                .filter(|a| !base.added.contains(a) && !roles.contains(&a.as_str()))
                 .cloned()
                 .collect()
-        }
-
-        let roles: Vec<&str> = RUN_MODE_ROLES.iter().map(|(flag, _)| *flag).collect();
+        };
         let mut checked: Vec<&str> = Vec::new();
         let mut skipped: Vec<(&str, &str)> = Vec::new();
 

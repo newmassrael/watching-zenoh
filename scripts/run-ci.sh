@@ -6468,7 +6468,11 @@ layer_c1ay_cargo_test_router_hat() {
     # R2593 — 38 -> 39: `link_socket_buffers_expand_per_key_and_yield_to_a_typed_key`,
     # unconditional inside the module, so both legs compile it. MEASURED by
     # `guarded_count_gate.py` on this exact command: 39 passed.
-    _runci_guarded_test "C1AY stock_config_tests 39" 39 \
+    # 39 -> 42: the storage-host selection tests (a peer document that
+    # declares a storage, several listen endpoints refused, the withheld
+    # verdicts), unconditional inside the module. MEASURED by
+    # `guarded_count_gate.py` on this exact command: 42 passed.
+    _runci_guarded_test "C1AY stock_config_tests 42" 42 \
         cargo test -p wz-ap-demo --features zenoh-config stock_config_tests --quiet || return 1
     # R2139 (unregistered open-debt item 227) — THE SAME MODULE WITH THE SINKS
     # PRESENT, and it is not a duplicate of the leg above.
@@ -6519,7 +6523,10 @@ layer_c1ay_cargo_test_router_hat() {
     # filtered out.
     # R2593 — 43 -> 44, the same R2593 case seen from this feature set.
     # MEASURED by `guarded_count_gate.py` on this exact command: 44 passed.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 44" 44 \
+    # 44 -> 47: the same three storage-host selection tests seen from this
+    # feature set. MEASURED by `guarded_count_gate.py` on this exact command:
+    # 47 passed.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 47" 47 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1
@@ -20345,6 +20352,12 @@ layer_e6h_adminspace_config_hotreload() {
     (cd crates && cargo clippy -p wz-ap-demo --features adminspace-config-hotreload,zenoh-config -- -D warnings) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_storage_host_plugins_section_pico -- --ignored --quiet --test-threads=1) || return 1
+    # A `--config` file ALONE hosts the storage it declares and binds the endpoint
+    # it names (a peer-mode document that declares a storage selects the storage
+    # host). Same binary as the test above, for the same reason, and its clients
+    # are the demo itself, so it needs no pico CLI.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_storage_host_from_config_alone -- --ignored --quiet --test-threads=1) || return 1
     # §5.23 `adminspace-core` — the config's `metadata`, served by this same
     # build's storage host from a `--config` FILE and compared byte for byte with
     # what a stock zenohd serves for the same value. Same binary as the test
