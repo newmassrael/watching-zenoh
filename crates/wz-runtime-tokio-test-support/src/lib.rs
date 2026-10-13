@@ -850,7 +850,7 @@ fn pick_in(dir: &std::path::Path, port: u16) -> Pick {
 }
 
 /// A number the kernel does not autoselect, claimed by this process and used by nothing,
-/// WITHOUT a socket held on it for any moment: see [`pick_in`]. The reservation of a number
+/// WITHOUT a socket held on it for any moment: see `pick_in`. The reservation of a number
 /// for a program that is started a moment later, and the number a test hands to a session of
 /// its own, are this.
 pub fn unbound_unautoselected() -> u16 {
