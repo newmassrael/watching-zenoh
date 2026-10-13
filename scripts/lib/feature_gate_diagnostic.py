@@ -1096,12 +1096,30 @@ def build_probe(
             f"default-features = false, features = [{wanted}] }}\n\n"
             "[workspace]\n"
         )
+        # THE WORKSPACE'S OWN LOCKFILE, and no network. The probe is a fresh
+        # `[workspace]` with no lock of its own, so cargo resolved it from the
+        # registry INDEX on every run: the lane then depended on crates.io being
+        # reachable from the build host for a question that is about a feature
+        # gate, and a host whose transfer stalled (30 s without 10 bytes) failed
+        # the layer with `failed to get hashbrown as a dependency`, which this
+        # script then reported as "rustc did not say the item is gated". The
+        # probe's dependencies are a subgraph of the workspace's, which the lane
+        # has just built, so the pinned versions are already in the local cache:
+        # copy the lock so resolution takes them, and build `--offline` so a
+        # missing one is said in cargo's own words instead of being waited out.
+        shutil.copy(WORKSPACE / "Cargo.lock", crate / "Cargo.lock")
         env = dict(os.environ)
         # The workspace's own target directory, so the dependencies this probe
         # needs are the ones the lane just built. Measured: 33s cold, 1s warm.
         env["CARGO_TARGET_DIR"] = target_dir
         out = subprocess.run(
-            ["cargo", "build", "--manifest-path", str(crate / "Cargo.toml")],
+            [
+                "cargo",
+                "build",
+                "--offline",
+                "--manifest-path",
+                str(crate / "Cargo.toml"),
+            ],
             capture_output=True,
             text=True,
             check=False,
