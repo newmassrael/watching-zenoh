@@ -273844,6 +273844,40 @@
         "When upstream implements oneOf, the flattening becomes wrong for it: the strategy must then reach the dialler, and the strategy the reader discards is the place to carry it."
       ]
     },
+    "Round 3327": {
+      "decision_summary": "The hosted run of the close-query push went red in the census layer, not in any behaviour. The census lists the tests that only a non-default feature build reaches and refuses any that no leg runs; it found five of the close query's (three in the integration target session_close_query, one in each of the router and linkstate forwarders) because no leg named session-close-ingress together with routing-peer and routing-router-hat, the features those tests and their modules are gated on. Two legs rows now claim them: the integration target by construction, and the two forwarder unit tests by the shared test name. The census then reports all 1856 tests of wz-runtime-tokio as run by a leg or skipped by name, with none unclaimed. The cause was the local preflight: the layer that runs the census is not part of the push hook, and a change that adds tests gated on a non-default feature has to run it before the push.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: two LEGS rows for wz-runtime-tokio under session-close-ingress, routing-peer and routing-router-hat: the integration target session_close_query, and the forwarders' lifecycle close unit tests."
+      ],
+      "verification_bullets": [
+        "On a build host: layer C1cn passes with the two rows, and its census reports wz-runtime-tokio at 1858 feature-only tests, 1856 run by a leg and 2 skipped by name, none unclaimed.",
+        "On a build host: the count-guard oracle over the range reaches no guard that moved.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "A change that adds tests behind a non-default feature runs the census layer (C1cn) on a build host before it is pushed, because the push hook defers that layer.",
+        "The hosted run of the close-query commit is red in that layer for these five tests, and the commit after it carries the same tests; this commit is the repayment for both."
+      ],
+      "publishable_decision_summary": "The hosted run of the close-query push went red in the census layer, not in any behaviour. The census lists the tests that only a non-default feature build reaches and refuses any that no leg runs; it found five of the close query's (three in the integration target session_close_query, one in each of the router and linkstate forwarders) because no leg named session-close-ingress together with routing-peer and routing-router-hat, the features those tests and their modules are gated on. Two legs rows now claim them: the integration target by construction, and the two forwarder unit tests by the shared test name. The census then reports all 1856 tests of wz-runtime-tokio as run by a leg or skipped by name, with none unclaimed. The cause was the local preflight: the layer that runs the census is not part of the push hook, and a change that adds tests gated on a non-default feature has to run it before the push.",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: two LEGS rows for wz-runtime-tokio under session-close-ingress, routing-peer and routing-router-hat: the integration target session_close_query, and the forwarders' lifecycle close unit tests."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: layer C1cn passes with the two rows, and its census reports wz-runtime-tokio at 1858 feature-only tests, 1856 run by a leg and 2 skipped by name, none unclaimed.",
+        "On a build host: the count-guard oracle over the range reaches no guard that moved.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A change that adds tests behind a non-default feature runs the census layer (C1cn) on a build host before it is pushed, because the push hook defers that layer.",
+        "The hosted run of the close-query commit is red in that layer for these five tests, and the commit after it carries the same tests; this commit is the repayment for both."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
