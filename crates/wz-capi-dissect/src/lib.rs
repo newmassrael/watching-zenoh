@@ -370,6 +370,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // rule that covers a key, and a root message of a `.proto` schema described.
     // 35, for `wz_dissect_selector_bind`: the node names of a selector resolved
     // to the zids a caller's table gives them.
+    // 36, for `wz_dissect_proto_messages`: every message the files of a `.proto`
+    // schema declare, with no root. The describe document moved to revision 4 on
+    // the same step (an option's `origin`), which moves no symbol.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -387,7 +390,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 35;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 36;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2093,23 +2096,35 @@ pub unsafe extern "C" fn wz_dissect_declarations_match(
 /// [`WZ_DISSECT_OK`] with a document, for any arguments that are well formed:
 ///
 /// ```text
-/// {"document":{"name":"proto_message","revision":3},"ok":true,
+/// {"document":{"name":"proto_message","revision":4},"ok":true,
 ///  "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading","file":"a.proto",
 ///   "syntax":"proto3","oneofs":[],"comment":" One reading.\n","trailing_comment":null,
-///   "options":[{"name":"(ext).id","kind":"integer","value":7}],
+///   "options":[{"name":"(ext).id","kind":"integer","value":7,
+///               "origin":{"class":"extension","name":"pkg.ext","package":"pkg",
+///                         "file":"ext.proto"}}],
 ///   "max_encoded_size":6,"max_encoded_size_reason":null,
 ///   "fields":[{"name":"sensor_id","json_name":"sensorId",
 ///   "number":1,"type":"uint32","label":"singular","oneof":null,"packed":null,
 ///   "enum":null,"message_type":null,"map":null,"comment":null,
 ///   "trailing_comment":" the sensor\n",
-///   "options":[{"name":"(ext).int_size","kind":"identifier","value":"IS_16"}]}]}]}
+///   "options":[{"name":"deprecated","kind":"identifier","value":"true",
+///               "origin":{"class":"standard","name":null,"package":null,
+///                         "file":null}}]}]}]}
 /// ```
 ///
 /// A message row and a field row both carry `comment` and `trailing_comment` (the
 /// comments `protoc` itself attaches to the declaration, as it stores them, or
 /// `null`) and `options`: every option written on the field or the message, in the
-/// order written, each `{"name","kind","value"}` with `kind` one of `identifier`,
-/// `integer`, `float`, `string` and `aggregate`. The rule that decides which
+/// order written, each `{"name","kind","value","origin"}` with `kind` one of
+/// `identifier`, `integer`, `float`, `string` and `aggregate`. `origin` (revision 4)
+/// says where the option is defined, always as `{"class","name","package","file"}`:
+/// `class` is `standard` for a name written without parentheses, `extension` for a
+/// parenthesised name that a file read declares in an `extend` block (and then
+/// `name` is the extension field's full name, `package` the package of the file that
+/// declares it, empty when it declares none, and `file` that file's name as handed
+/// over) and `unresolved` for a parenthesised name no file read declares (only the
+/// root file and what it imports are read), never guessed; `name`, `package` and
+/// `file` are `null` unless `class` is `extension`. The rule that decides which
 /// comment belongs to which declaration is `protoc`'s, stated on
 /// `wz_capture::proto_describe_json`.
 ///
@@ -2170,6 +2185,80 @@ pub unsafe extern "C" fn wz_dissect_proto_describe(
     };
     write_string(
         wz_capture::proto_describe_json::proto_message_json(root, &given, root_file),
+        out,
+    )
+}
+
+/// (ABI 36) EVERY MESSAGE A SET OF `.proto` FILES DECLARES, with no root: the list a
+/// person picks a message from before [`wz_dissect_proto_describe`] describes it.
+///
+/// # Why this is a door
+///
+/// [`wz_dissect_proto_describe`] needs the full name of a root message, and a program
+/// that lets a person choose a message has to show the names first. Reading the
+/// `.proto` text for them is a second reader of the language inside the program that
+/// links this library; this lists them from the one reader the other `.proto` doors
+/// use.
+///
+/// # Arguments
+///
+/// The ones [`wz_dissect_proto_describe`] takes, less the root: `files` and
+/// `file_count` (every file of the schema, each a name and its bytes; nothing here
+/// opens a path, an import is matched by name against the list), and nothing else.
+/// EVERY file is read, so a file nothing imports is listed too.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a document, for any arguments that are well formed:
+///
+/// ```text
+/// {"document":{"name":"proto_message_list","revision":1},"ok":true,
+///  "messages":[{"full_name":"pkg.Outer","file":"a.proto","file_index":0,
+///               "parent":null,"nested":false},
+///              {"full_name":"pkg.Outer.Inner","file":"a.proto","file_index":0,
+///               "parent":"pkg.Outer","nested":true}]}
+/// ```
+///
+/// `messages` lists every message of every file given, nested ones included, in the
+/// order the files were listed and, inside a file, in declaration order. A row has
+/// five members, all always present: `full_name` (package included), `file` and
+/// `file_index` (the name as handed over and its index in the list handed over),
+/// `parent` (the full name of the message it is written inside, or `null` at the top
+/// level of its file) and `nested` (`parent` as a boolean). A row carries no fields
+/// and no options: they are read from [`wz_dissect_proto_describe`] once a message is
+/// picked. A `map` entry type and a `group` body are not listed, a message nothing
+/// reaches is, and a `group` or an `extend` is not a refusal here.
+///
+/// A schema that is refused (a syntax error, an import not among the files, a type
+/// that is not defined, a number used twice) is a successful DIAGNOSIS, with the keys
+/// [`wz_dissect_proto_describe`] gives a refusal.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for the caller's own bugs: a null pointer, a count
+/// of zero, two files with one name, a file name that is not UTF-8.
+///
+/// # Safety
+/// `files` must point to `file_count` readable [`WzDissectProtoFile`] values, each
+/// `name` a NUL-terminated C string and each `text` readable for `text_len` bytes;
+/// `out` must be a writable pointer to a `*mut c_char`. Neither `files` nor `out` may
+/// be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_proto_messages(
+    files: *const WzDissectProtoFile,
+    file_count: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if files.is_null() || out.is_null() || file_count == 0 {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let given = match unsafe { proto_files(files, file_count) } {
+        Ok(given) => given,
+        Err(rc) => return rc,
+    };
+    write_string(
+        wz_capture::proto_message_list_json::proto_message_list_json(&given),
         out,
     )
 }
@@ -7770,7 +7859,10 @@ mod tests {
         // 35, for `wz_dissect_selector_bind`: one symbol, a `char*` released by
         // `wz_dissect_string_free`; the selector and the name table cross as C
         // strings the caller already holds, and no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 35);
+        // 36, for `wz_dissect_proto_messages`: one symbol, a `char*` released by
+        // `wz_dissect_string_free`; the schema files cross as the struct the
+        // describe door takes, and no struct is new.
+        assert_eq!(wz_dissect_abi_version(), 36);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -8525,6 +8617,8 @@ mod tests {
             (rev::KEYEXPR_RELATE, keyexpr_relate_documents()),
             (rev::DECLARATIONS_MATCH, declarations_match_documents()),
             (rev::PROTO_MESSAGE, proto_message_documents()),
+            // The message list of ABI 36, over a list and each refusal it writes.
+            (rev::PROTO_MESSAGE_LIST, proto_message_list_documents()),
             // Every shape the two protected-frame doors write, for the same
             // reason: the refusal names its text by whichever position key
             // applies, so each branch has keys the others lack.
@@ -8712,6 +8806,13 @@ mod tests {
             (
                 rev::PROTO_MESSAGE,
                 proto_message_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
+            (
+                rev::PROTO_MESSAGE_LIST,
+                proto_message_list_documents()
                     .into_iter()
                     .next()
                     .expect("a document"),
@@ -8914,6 +9015,9 @@ mod tests {
             (rev::KEYEXPR_RELATE, keyexpr_relate_documents()),
             (rev::DECLARATIONS_MATCH, declarations_match_documents()),
             (rev::PROTO_MESSAGE, proto_message_documents()),
+            // The message list's success and its refusals: the position keys are
+            // absent where they do not apply, never `null`.
+            (rev::PROTO_MESSAGE_LIST, proto_message_list_documents()),
             // Every refusal shape of the protected-frame doors, for the same
             // reason: no position key is ever written as `null`.
             (rev::E2E_WRAP, e2e_wrap_documents()),
@@ -11000,6 +11104,176 @@ mod tests {
             Err(WZ_DISSECT_ERR_INVALID_ARG),
             "two files of one name"
         );
+    }
+
+    /// Drive the message list the way C does: the files as a list and nothing
+    /// else. `Err` carries the status of a refused argument.
+    fn call_proto_messages(files: &[(&str, &[u8])]) -> Result<String, c_int> {
+        let names: Vec<CString> = files
+            .iter()
+            .map(|(name, _)| CString::new(*name).expect("no interior NUL"))
+            .collect();
+        let entries: Vec<WzDissectProtoFile> = files
+            .iter()
+            .zip(&names)
+            .map(|((_, text), name)| WzDissectProtoFile {
+                name: name.as_ptr(),
+                text: if text.is_empty() {
+                    core::ptr::null()
+                } else {
+                    text.as_ptr()
+                },
+                text_len: text.len(),
+            })
+            .collect();
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_proto_messages(entries.as_ptr(), entries.len(), &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// Every shape the message-list door writes: a list over two files with a
+    /// nested message, a refusal at a place in a file, and a refusal of a file as
+    /// a whole. The refusal keys differ from the success keys, so a pin over one
+    /// would leave the others' keys unwatched.
+    fn proto_message_list_documents() -> Vec<String> {
+        let one = |files: &[(&str, &[u8])]| call_proto_messages(files).expect("the door answers");
+        vec![
+            one(&[
+                (
+                    "a.proto",
+                    b"syntax = \"proto3\"; package p; message Outer { message Inner { int32 a = 1; } }",
+                ),
+                ("b.proto", b"syntax = \"proto3\"; message Other { int32 b = 1; }"),
+            ]),
+            one(&[("a.proto", b"syntax = \"proto3\"; message M { Nope n = 1; }")]),
+            one(&[("a.proto", b"syntax = \"proto3\"; import \"missing.proto\";")]),
+        ]
+    }
+
+    /// THE LIST DOOR LISTS, through the C ABI, the messages the description door
+    /// can be asked about: every listed full name is a root the description door
+    /// accepts, with the file index the list gives.
+    #[test]
+    fn the_list_door_names_the_roots_the_description_door_takes() {
+        let files: [(&str, &[u8]); 2] = [
+            ("a.proto", DESCRIBED.as_bytes()),
+            (
+                "b.proto",
+                b"syntax = \"proto3\"; package other; message Lone { int32 a = 1; }",
+            ),
+        ];
+        let doc = call_proto_messages(&files).expect("the door answers");
+        assert!(
+            doc.starts_with(&format!(
+                "{{{},\"ok\":true,\"messages\":[",
+                wz_capture::doc_revision::envelope(wz_capture::doc_revision::PROTO_MESSAGE_LIST)
+            )),
+            "{doc}"
+        );
+        let names: Vec<&str> = doc
+            .match_indices("\"full_name\":\"")
+            .map(|(at, _)| &doc[at + 13..])
+            .map(|rest| rest.split('"').next().expect("a name"))
+            .collect();
+        assert!(
+            names.contains(&"demo.Shape") && names.contains(&"other.Lone"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("\"full_name\":\"other.Lone\",\"file\":\"b.proto\",\"file_index\":1,\"parent\":null,\"nested\":false"),
+            "{doc}"
+        );
+        for name in names {
+            let index = if name.starts_with("other.") { 1 } else { 0 };
+            let described = call_proto_describe(name, &files, index).expect("the door answers");
+            assert!(
+                described.contains("\"ok\":true"),
+                "{name} is listed but not describable: {described}"
+            );
+        }
+    }
+
+    /// A SCHEMA THE LIST DOOR REFUSES is a successful diagnosis with the place keys
+    /// of the description door, and the caller's own bugs are a status.
+    #[test]
+    fn the_list_door_refuses_a_schema_by_document_and_a_bug_by_status() {
+        let bad =
+            call_proto_messages(&[("a.proto", b"syntax = \"proto3\"; message M { Nope n = 1; }")])
+                .expect("a refusal is a document");
+        assert!(
+            bad.contains("\"ok\":false,\"file\":\"a.proto\",\"line\":1,\"column\":"),
+            "{bad}"
+        );
+        assert_eq!(
+            call_proto_messages(&[]),
+            Err(WZ_DISSECT_ERR_INVALID_ARG),
+            "no file at all"
+        );
+        let twice = [
+            ("a.proto", b"message M { int32 a = 1; }".as_slice()),
+            ("a.proto", b"message N { int32 a = 1; }".as_slice()),
+        ];
+        assert_eq!(
+            call_proto_messages(&twice),
+            Err(WZ_DISSECT_ERR_INVALID_ARG),
+            "two files of one name"
+        );
+        let mut out: *mut c_char = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { wz_dissect_proto_messages(core::ptr::null(), 1, &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        let entry = WzDissectProtoFile {
+            name: c"a.proto".as_ptr(),
+            text: core::ptr::null(),
+            text_len: 0,
+        };
+        assert_eq!(
+            unsafe { wz_dissect_proto_messages(&entry, 1, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert!(out.is_null());
+    }
+
+    /// AN OPTION SAYS WHERE IT IS DEFINED, through the C ABI: a plain name is
+    /// standard, a parenthesised one is told by the extension a file the schema
+    /// imports declares, and one nobody declares is unresolved.
+    #[test]
+    fn a_described_option_carries_its_origin() {
+        let files: [(&str, &[u8]); 3] = [
+            (
+                "m.proto",
+                b"syntax = \"proto2\"; package m; import \"ext.proto\";\n\
+                  message R { optional int32 a = 1 [(vendor.width) = 3, deprecated = true, (gone).x = 1]; }",
+            ),
+            (
+                "ext.proto",
+                b"syntax = \"proto2\"; package vendor; import \"google/protobuf/descriptor.proto\";\n\
+                  extend google.protobuf.FieldOptions { optional int32 width = 60000; }",
+            ),
+            (
+                "google/protobuf/descriptor.proto",
+                b"syntax = \"proto2\"; package google.protobuf; message FieldOptions { optional bool deprecated = 3; }",
+            ),
+        ];
+        let doc = call_proto_describe("m.R", &files, 0).expect("the door answers");
+        for want in [
+            "\"origin\":{\"class\":\"extension\",\"name\":\"vendor.width\",\"package\":\"vendor\",\"file\":\"ext.proto\"}",
+            "\"origin\":{\"class\":\"standard\",\"name\":null,\"package\":null,\"file\":null}",
+            "\"origin\":{\"class\":\"unresolved\",\"name\":null,\"package\":null,\"file\":null}",
+        ] {
+            assert!(doc.contains(want), "{want}\n{doc}");
+        }
     }
 
     /// Drive the declaration diagnostic the way C does.

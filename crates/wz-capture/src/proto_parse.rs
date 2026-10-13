@@ -366,20 +366,30 @@ pub(crate) struct MessageDecl {
 
 /// One `extend X { ... }` block, as far as the linker needs it.
 ///
-/// The block's fields are not kept: they are extension fields, declared in the
-/// scope the block is written in and not in the message it extends, so the tree
-/// the declarations come from never holds them. What matters is only WHICH
-/// message the block extends and WHERE the block is.
+/// The block's fields are not kept as fields: they are extension fields,
+/// declared in the scope the block is written in and not in the message it
+/// extends, so the tree the declarations come from never holds them. What
+/// matters is WHICH message the block extends, WHERE the block is, and the
+/// NAMES of the extension fields it declares (an option written as `(name)`
+/// is looked up among them).
 #[derive(Clone, Debug)]
 pub(crate) struct ExtendDecl {
     /// The `extend` keyword, where a block that turns out to matter is blamed.
     pub pos: Pos,
     /// The extended message as written.
     pub extendee: TypeName,
-    /// The name of the block's first field. `protoc` looks the extendee up from
-    /// the full name of the extension field that carries it, so this is the
-    /// name the scope search starts from.
-    pub first_field: String,
+    /// The names of the block's fields, in the order written; never empty (the
+    /// grammar refuses an empty block). `protoc` looks the extendee up from the
+    /// full name of the extension field that carries it, so the FIRST name is
+    /// the one the scope search starts from.
+    pub fields: Vec<String>,
+}
+
+impl ExtendDecl {
+    /// The name of the block's first field.
+    pub fn first_field(&self) -> &str {
+        self.fields.first().map_or("", String::as_str)
+    }
 }
 
 /// One parsed file.
@@ -1405,7 +1415,7 @@ impl<'a> Parser<'a> {
     /// `extend X {}` is a syntax error at the `}`. Labels follow the file's
     /// syntax as they do in a message. A `group` in the block pushes its message
     /// onto `groups`, the scope the BLOCK is written in. The fields themselves
-    /// are dropped (see [`ExtendDecl`]); only the first one's name is kept.
+    /// are dropped (see [`ExtendDecl`]); their names are kept, in order.
     fn extend_block(
         &mut self,
         body_depth: usize,
@@ -1424,7 +1434,7 @@ impl<'a> Parser<'a> {
         }
         self.expect_sym('{', "to open the extend block")?;
         self.end_decl()?;
-        let mut first_field = String::new();
+        let mut fields = Vec::new();
         loop {
             let at = self.peek()?.clone();
             if at.tok == Tok::Eof {
@@ -1434,16 +1444,14 @@ impl<'a> Parser<'a> {
                 ));
             }
             let field = self.field(Scope::Extend, body_depth, groups)?;
-            if first_field.is_empty() {
-                first_field = field.name.name;
-            }
+            fields.push(field.name.name);
             if self.is_sym('}') {
                 self.bump()?;
                 self.end_decl()?;
                 return Ok(ExtendDecl {
                     pos: keyword.pos,
                     extendee,
-                    first_field,
+                    fields,
                 });
             }
         }
@@ -1764,12 +1772,17 @@ mod tests {
             (2, 8),
             "the extendee, where an unresolved one is blamed"
         );
-        assert_eq!(top.first_field, "x");
+        assert_eq!(
+            top.fields,
+            ["x", "y"],
+            "every field name, in the order written"
+        );
+        assert_eq!(top.first_field(), "x");
         let m = &ast.messages[0];
         assert_eq!(m.extends.len(), 1);
         assert_eq!((m.extends[0].pos.line, m.extends[0].pos.col), (7, 3));
         assert_eq!(m.extends[0].extendee.text, "C");
-        assert_eq!(m.extends[0].first_field, "z");
+        assert_eq!(m.extends[0].fields, ["z"]);
         assert_eq!(
             names(&m.fields),
             [("w", 1)],
@@ -1784,12 +1797,12 @@ mod tests {
         );
         let top: Vec<&str> = ast.messages.iter().map(|m| m.name.name.as_str()).collect();
         assert_eq!(top, ["G", "M"], "the file-level block's group is top level");
-        assert_eq!(ast.extends[0].first_field, "g");
+        assert_eq!(ast.extends[0].fields, ["g"]);
         let m = &ast.messages[1];
         assert!(m.fields.is_empty());
         assert_eq!(m.nested.len(), 1);
         assert_eq!(m.nested[0].name.name, "H");
-        assert_eq!(m.extends[0].first_field, "h");
+        assert_eq!(m.extends[0].fields, ["h"]);
     }
 
     #[test]
@@ -1872,7 +1885,7 @@ mod tests {
         let ast = parse(
             "syntax = \"proto3\";\nextend B { string a = 1; optional int32 b = 2; repeated int32 c = 3; }",
         );
-        assert_eq!(ast.extends[0].first_field, "a");
+        assert_eq!(ast.extends[0].fields, ["a", "b", "c"]);
     }
 
     #[test]

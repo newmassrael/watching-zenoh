@@ -395,6 +395,9 @@ struct Symbol {
 pub(crate) struct Msg {
     pub(crate) full_name: String,
     pub(crate) file: usize,
+    /// The index in [`Linker::msgs`] of the message this one is written inside,
+    /// or `None` for a message at the top level of its file.
+    pub(crate) parent: Option<usize>,
     /// The syntax of the file the message is written in: it decides whether a
     /// singular field has presence and whether a repeated one is packed.
     pub(crate) syntax: Syntax,
@@ -408,6 +411,17 @@ pub(crate) struct Msg {
     /// What in the text keeps this message from being declared, should the
     /// expansion visit it, in the order the linker met them.
     blockers: Vec<Blocker>,
+}
+
+/// An extension field an `extend` block declares, as an option's name finds it.
+///
+/// Only what says WHERE it is declared is kept: nothing about the field's own
+/// type or number, because an option's value is not judged here.
+pub(crate) struct Extension {
+    /// The index of the file whose `extend` block declares it.
+    pub(crate) file: usize,
+    /// The package of that file, empty when it declares none.
+    pub(crate) package: String,
 }
 
 /// An enum, with the numbers its names stand for.
@@ -498,6 +512,8 @@ pub(crate) struct Linker<'f, 'a> {
     /// Per file, the syntax it declared; read when a message or an enum is
     /// registered.
     syntaxes: Vec<Syntax>,
+    /// Per file, the package it declares, empty for none.
+    packages: Vec<String>,
     /// Per file, each import's path and position, kept for the error that
     /// names an import after the file's tree is gone.
     import_sites: Vec<Vec<(String, Pos)>>,
@@ -510,6 +526,10 @@ pub(crate) struct Linker<'f, 'a> {
     symbols: BTreeMap<String, Symbol>,
     pub(crate) msgs: Vec<Msg>,
     pub(crate) enums: Vec<EnumInfo>,
+    /// Every extension field of every file read, by full name. Kept beside
+    /// `symbols` and not in it: a clash between an extension and another symbol
+    /// is not diagnosed by this reader, which never needed the extension.
+    extensions: BTreeMap<String, Extension>,
     /// Per file, its own `option` statements, in the order written.
     pub(crate) file_options: Vec<Vec<FieldOption>>,
 }
@@ -527,6 +547,25 @@ impl<'f, 'a> Linker<'f, 'a> {
                 files.len()
             )));
         }
+        let mut linker = Self::new(files)?;
+        linker.load(root_file, &mut Vec::new())?;
+        Ok(linker)
+    }
+
+    /// Check the arguments and read EVERY file given, each with what it imports,
+    /// in the order the files are listed: the first problem found is the one
+    /// returned. For a question that has no root message (which messages the
+    /// files declare), so that a file nothing imports is read too.
+    pub(crate) fn read_all(files: &'f [ProtoFile<'a>]) -> Result<Self, ProtoDiagnostic> {
+        let mut linker = Self::new(files)?;
+        for file in 0..files.len() {
+            linker.load(file, &mut Vec::new())?;
+        }
+        Ok(linker)
+    }
+
+    /// An empty linker over `files`, once the names are known to be distinct.
+    fn new(files: &'f [ProtoFile<'a>]) -> Result<Self, ProtoDiagnostic> {
         let mut by_name = BTreeMap::new();
         for (i, f) in files.iter().enumerate() {
             if by_name.insert(f.name, i).is_some() {
@@ -538,21 +577,21 @@ impl<'f, 'a> Linker<'f, 'a> {
             }
         }
 
-        let mut linker = Linker {
+        Ok(Linker {
             files,
             by_name,
             state: alloc::vec![State::Unvisited; files.len()],
             syntaxes: alloc::vec![Syntax::Proto2; files.len()],
+            packages: alloc::vec![String::new(); files.len()],
             import_sites: alloc::vec![Vec::new(); files.len()],
             exports: alloc::vec![BTreeSet::new(); files.len()],
             visible: alloc::vec![BTreeSet::new(); files.len()],
             symbols: BTreeMap::new(),
             msgs: Vec::new(),
             enums: Vec::new(),
+            extensions: BTreeMap::new(),
             file_options: alloc::vec![Vec::new(); files.len()],
-        };
-        linker.load(root_file, &mut Vec::new())?;
-        Ok(linker)
+        })
     }
 }
 
@@ -705,6 +744,7 @@ impl<'a> Linker<'_, 'a> {
     fn declare_message(
         &mut self,
         scope: &str,
+        parent: Option<usize>,
         m: &MessageDecl,
         file: usize,
     ) -> Result<(), ProtoDiagnostic> {
@@ -713,6 +753,7 @@ impl<'a> Linker<'_, 'a> {
         self.msgs.push(Msg {
             full_name: full.clone(),
             file,
+            parent,
             syntax: self.syntaxes[file],
             fields: Vec::new(),
             oneofs: m.oneofs.iter().map(|o| o.name.clone()).collect(),
@@ -728,7 +769,7 @@ impl<'a> Linker<'_, 'a> {
             self.declare(join(&full, &f.name.name), Kind::Field, file, f.name.pos)?;
         }
         for n in &m.nested {
-            self.declare_message(&full, n, file)?;
+            self.declare_message(&full, Some(idx), n, file)?;
         }
         for e in &m.enums {
             self.declare_enum(&full, e, file)?;
@@ -764,8 +805,9 @@ impl<'a> Linker<'_, 'a> {
                 self.declare(package.clone(), Kind::Package, file, p.pos)?;
             }
         }
+        self.packages[file] = package.clone();
         for m in &ast.messages {
-            self.declare_message(&package, m, file)?;
+            self.declare_message(&package, None, m, file)?;
         }
         for e in &ast.enums {
             self.declare_enum(&package, e, file)?;
@@ -922,13 +964,64 @@ impl<'a> Linker<'_, 'a> {
         e: &ExtendDecl,
         file: usize,
     ) -> Result<(), ProtoDiagnostic> {
-        let target = self.resolve_extendee(file, &join(scope, &e.first_field), &e.extendee)?;
+        let target = self.resolve_extendee(file, &join(scope, e.first_field()), &e.extendee)?;
         self.msgs[target].blockers.push(Blocker {
             file,
             pos: e.pos,
             kind: BlockerKind::Extend,
         });
+        // The block's fields are extensions declared in `scope`; an option that
+        // names one is told where it is declared by this record. The package is
+        // the one the file declares, which `scope` starts with when the block is
+        // at the top level and is not when it is inside a message.
+        let package = self.packages[file].clone();
+        for name in &e.fields {
+            self.extensions
+                .entry(join(scope, name))
+                .or_insert_with(|| Extension {
+                    file,
+                    package: package.clone(),
+                });
+        }
         Ok(())
+    }
+
+    /// The extension field an option written inside the message `msg` names, if
+    /// a file read declares one of that name.
+    ///
+    /// `written` is the name as the file spelled it; only a name whose FIRST part
+    /// is parenthesised is an extension's (`(ext)`, `(.pkg.ext).field`), and the
+    /// answer is the declaration of that first part. The name inside the
+    /// parentheses is searched the way `protoc` searches a relative name: from
+    /// the message outwards, each enclosing scope in turn, then the package, then
+    /// the top; a leading `.` names the full name directly. Nothing is guessed: a
+    /// name no read file declares has no answer, and that is the caller's
+    /// "unresolved".
+    pub(crate) fn extension_named(
+        &self,
+        msg: usize,
+        written: &str,
+    ) -> Option<(String, &Extension)> {
+        let inner = written.strip_prefix('(')?;
+        let inner = &inner[..inner.find(')')?];
+        if let Some(absolute) = inner.strip_prefix('.') {
+            return self
+                .extensions
+                .get(absolute)
+                .map(|ext| (String::from(absolute), ext));
+        }
+        let mut scope = self.msgs[msg].full_name.as_str();
+        loop {
+            let candidate = join(scope, inner);
+            if let Some(ext) = self.extensions.get(&candidate) {
+                return Some((candidate, ext));
+            }
+            match scope.rfind('.') {
+                Some(cut) => scope = &scope[..cut],
+                None if scope.is_empty() => return None,
+                None => scope = "",
+            }
+        }
     }
 
     fn link_message(

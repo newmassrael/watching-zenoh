@@ -327,6 +327,10 @@ mod proto_encode_tests;
 /// The `.proto` tokenizer behind [`proto_schema`], private for the reason
 /// [`payload_builtin`] is.
 mod proto_lex;
+pub mod proto_message_list;
+pub mod proto_message_list_json;
+#[cfg(test)]
+mod proto_message_list_tests;
 pub mod proto_nanopb;
 #[cfg(test)]
 mod proto_nanopb_tests;

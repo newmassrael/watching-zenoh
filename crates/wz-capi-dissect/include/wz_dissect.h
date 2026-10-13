@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose", "selector_bind",
- * "declarations_diagnose", "keyexpr_diagnose", "keyexpr_relate", "declarations_match", "declarations_from_proto", "proto_message", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "session_table", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "keyexpr_diagnose", "keyexpr_relate", "declarations_match", "declarations_from_proto", "proto_message", "proto_message_list", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "transport_layout", "session_table", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -1557,7 +1557,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 35
+#define WZ_DISSECT_ABI_REVISION 36
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -3131,18 +3131,21 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  *
  * Always returns WZ_DISSECT_OK for well formed arguments and writes a document:
  *
- *     {"document":{"name":"proto_message","revision":3},"ok":true,
+ *     {"document":{"name":"proto_message","revision":4},"ok":true,
  *      "root":"pkg.Reading","messages":[{"full_name":"pkg.Reading",
  *       "file":"a.proto","syntax":"proto3","oneofs":[],
  *       "comment":" One reading.\n","trailing_comment":null,
- *       "options":[{"name":"(ext).id","kind":"integer","value":7}],
+ *       "options":[{"name":"(ext).id","kind":"integer","value":7,
+ *                   "origin":{"class":"extension","name":"pkg.ext",
+ *                             "package":"pkg","file":"ext.proto"}}],
  *       "max_encoded_size":6,"max_encoded_size_reason":null,
  *       "fields":[{"name":"sensor_id","json_name":"sensorId","number":1,
  *        "type":"uint32","label":"singular","oneof":null,"packed":null,
  *        "enum":null,"message_type":null,"map":null,
  *        "comment":null,"trailing_comment":" the sensor\n",
- *        "options":[{"name":"(ext).int_size","kind":"identifier",
- *                    "value":"IS_16"}]}]}]}
+ *        "options":[{"name":"deprecated","kind":"identifier","value":"true",
+ *                    "origin":{"class":"standard","name":null,
+ *                              "package":null,"file":null}}]}]}]}
  *
  * `messages` is the root message first, then every message it reaches, each ONCE;
  * a field of type `message` names its message by full name in `message_type`,
@@ -3218,6 +3221,31 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  * read), `too_large` and `too_deep`. Exactly one of the two keys is null. Only the
  * options written in the .proto are read; nanopb's separate .options file is not.
  *
+ * WHERE AN OPTION IS DEFINED (revision 4). Every option row also carries
+ * `origin`, so a consumer can tell the general columns from a customer's own
+ * without reading the .proto: always {"class":C,"name":N,"package":P,"file":F}.
+ *
+ *     `class`   `standard` for a name written without parentheses (the language
+ *               reserves those for the options descriptor.proto defines, so
+ *               this is read from the spelling and needs no descriptor.proto
+ *               among the files); `extension` for a parenthesised name that a
+ *               file read declares in an `extend` block; `unresolved` for a
+ *               parenthesised name no file read declares
+ *     `name`    for an extension, the extension field's full name, package
+ *               included (`nanopb`, or `vendor.tags.label`); null otherwise
+ *     `package` for an extension, the package of the file that declares it, the
+ *               empty string when that file declares none (nanopb.proto
+ *               declares none); null otherwise
+ *     `file`    for an extension, that file's name as handed over; null
+ *               otherwise
+ *
+ * An unresolved origin is never guessed from the spelling: it says no file the
+ * schema reads declares the option (only the root file and what it imports are
+ * read; a file that is in the list but not imported is not). A relative
+ * extension name is searched from the message that carries the option
+ * outwards, the way protoc searches a relative name, and a leading dot names the
+ * full name.
+ *
  * A schema that is refused is a successful DIAGNOSIS, with the keys
  * wz_dissect_declarations_from_proto gives (`file`, `line` and `column` together
  * for a place in a file, `file` alone for a whole file, none for an argument,
@@ -3228,12 +3256,14 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
  * zero, a root index outside the list, two files with one name, a name that is
  * not UTF-8.
  *
+ * @values proto_message class
  * @values proto_message key
  * @values proto_message kind
  * @values proto_message label
  * @values proto_message max_encoded_size_reason
  * @values proto_message syntax
  * @values proto_message type
+ * @carries proto_message class passenger
  * @carries proto_message key passenger
  * @carries proto_message kind passenger
  * @carries proto_message label passenger
@@ -3243,6 +3273,60 @@ int wz_dissect_declarations_match(const char *declarations, const char *keyexpr,
 int wz_dissect_proto_describe(const char *root_message,
                               const wz_dissect_proto_file *files,
                               size_t file_count, size_t root_file, char **out);
+
+/* (ABI 36) -- EVERY MESSAGE A SET OF .proto FILES DECLARES, with no root: the
+ * list a person picks a message from before wz_dissect_proto_describe describes
+ * it.
+ *
+ * wz_dissect_proto_describe needs the full name of a root message, and a program
+ * that lets a person choose a message has to show the names first. Reading the
+ * .proto text for them is a second reader of the language inside the program
+ * that links this library; this lists them from the one reader the other .proto
+ * doors use.
+ *
+ * Takes what wz_dissect_proto_describe takes, less the root: `files` and
+ * `file_count` (every file of the schema, each a name and its bytes; nothing here
+ * opens a path, no callback runs, and an import is matched by name against the
+ * list). EVERY file is read, so a file nothing imports is listed too.
+ *
+ * Always returns WZ_DISSECT_OK for well formed arguments and writes a document:
+ *
+ *     {"document":{"name":"proto_message_list","revision":1},"ok":true,
+ *      "messages":[{"full_name":"pkg.Outer","file":"a.proto","file_index":0,
+ *                   "parent":null,"nested":false},
+ *                  {"full_name":"pkg.Outer.Inner","file":"a.proto",
+ *                   "file_index":0,"parent":"pkg.Outer","nested":true}]}
+ *
+ * `messages` lists every message of every file given, nested ones included, in
+ * the order the files were listed and, inside a file, in declaration order (a
+ * message, the messages written inside it, then the next one). A row has five
+ * members, all always present:
+ *
+ *     `full_name`  the message's full name, package included; this is the
+ *                  `root_message` wz_dissect_proto_describe takes
+ *     `file`, `file_index`  the file it is written in: the name as handed over
+ *                  and its index in the list handed over (the `root_file`
+ *                  wz_dissect_proto_describe takes)
+ *     `parent`     the full name of the message it is written inside, or null
+ *                  for a message at the top level of its file
+ *     `nested`     `parent` as a boolean, true exactly when it is not null
+ *
+ * A row carries no fields and no options: they are read from
+ * wz_dissect_proto_describe once a message is picked, where they are written
+ * once. A map's entry type and a group's body are not listed; a message nothing
+ * reaches is; a group or an extend is not a refusal here, since it is only one
+ * when a root reaches it.
+ *
+ * A schema that is refused (a syntax error, an import that is not among the
+ * files, a type that is not defined, a number used twice) is a successful
+ * DIAGNOSIS with the keys wz_dissect_proto_describe gives a refusal (`file`,
+ * `line` and `column` together for a place in a file, `file` alone for a whole
+ * file, then `reason` and `message`; a key that does not apply is ABSENT and
+ * never null). OK means a string you own, an error means none.
+ * WZ_DISSECT_ERR_INVALID_ARG is the caller's bug: a null pointer, a count of
+ * zero, two files with one name, a name that is not UTF-8. */
+int wz_dissect_proto_messages(const wz_dissect_proto_file *files,
+                              size_t file_count, char **out);
 
 /* (ABI 29) -- FIELD VALUES, AS JSON, TURNED INTO PROTOBUF WIRE BYTES by the
  * types a .proto schema gives them: the sending half of

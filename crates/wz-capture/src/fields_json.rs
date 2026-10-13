@@ -6748,7 +6748,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 59] = [
+        let live: [(&str, &str, Vec<&'static str>); 60] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6977,6 +6977,12 @@ mod tests {
                 "syntax",
                 crate::proto_describe::SYNTAX_WORDS.to_vec(),
             ),
+            // Where an option is defined, held to the reader's own list.
+            (rev::PROTO_MESSAGE, "class", {
+                let mut words = crate::proto_describe::ORIGIN_CLASS_WORDS.to_vec();
+                words.sort_unstable();
+                words
+            }),
             // The reasons a message has no nanopb size, one per refusal the
             // arithmetic can give.
             (rev::PROTO_MESSAGE, "max_encoded_size_reason", {

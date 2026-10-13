@@ -1281,9 +1281,13 @@ static int check_relate_match_describe_doors(void) {
                       "\"message_type\":null,\"map\":null,"
                       "\"comment\":\" The sensor.\\n\",\"trailing_comment\":null,"
                       "\"options\":[{\"name\":\"(ext).int_size\","
-                      "\"kind\":\"identifier\",\"value\":\"IS_16\"},"
+                      "\"kind\":\"identifier\",\"value\":\"IS_16\","
+                      "\"origin\":{\"class\":\"unresolved\",\"name\":null,"
+                      "\"package\":null,\"file\":null}},"
                       "{\"name\":\"(ext).max\",\"kind\":\"integer\","
-                      "\"value\":8}]}") != NULL,
+                      "\"value\":8,"
+                      "\"origin\":{\"class\":\"unresolved\",\"name\":null,"
+                      "\"package\":null,\"file\":null}}]}") != NULL,
           "a scalar row must carry every key: %s", doc);
     CHECK(strstr(doc, "\"comment\":\" One reading.\\n\"") != NULL,
           "a message row must carry the comment protoc attaches: %s", doc);
@@ -2864,7 +2868,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[17];
+    } revisioned[18];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -3298,7 +3302,7 @@ int main(void) {
                                        &revisioned[14].doc);
     CHECK(rc == WZ_DISSECT_OK, "declarations_match document rc=%d", rc);
     revisioned[15].name = "proto_message";
-    revisioned[15].revision = 3;
+    revisioned[15].revision = 4;
     revisioned[15].doc = NULL;
     {
         static const char one_text[] =
@@ -3318,6 +3322,21 @@ int main(void) {
     revisioned[16].doc = NULL;
     rc = wz_dissect_selector_bind("kind == put", NULL, &revisioned[16].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_bind document rc=%d", rc);
+    /* (ABI 36) -- the message list, at 1: the cheapest input it answers is one
+     * file with one message. */
+    revisioned[17].name = "proto_message_list";
+    revisioned[17].revision = 1;
+    revisioned[17].doc = NULL;
+    {
+        static const char one_text[] =
+            "syntax = \"proto3\"; message M { int32 a = 1; }";
+        wz_dissect_proto_file one;
+        one.name = "a.proto";
+        one.text = (const unsigned char *)one_text;
+        one.text_len = sizeof one_text - 1;
+        rc = wz_dissect_proto_messages(&one, 1, &revisioned[17].doc);
+    }
+    CHECK(rc == WZ_DISSECT_OK, "proto_message_list document rc=%d", rc);
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -3389,6 +3408,75 @@ int main(void) {
         CHECK(rc == WZ_DISSECT_ERR_SELECTOR && doc == NULL,
               "a door must refuse a selector that still holds a node name, "
               "not read it as a miss (rc=%d)", rc);
+    }
+
+    /* (ABI 36) -- THE MESSAGES OF A SCHEMA LISTED AND AN OPTION'S ORIGIN, driven
+     * from C the way a consumer that lets a person pick a message does it: the
+     * list needs no root, every full name it gives is a root the description
+     * door takes, and an option says where it is defined. */
+    {
+        static const char main_text[] =
+            "syntax = \"proto2\"; package m; import \"ext.proto\";\n"
+            "message R { optional int32 a = 1 [(vendor.width) = 3, "
+            "deprecated = true, (gone).x = 1]; message In { optional int32 b = 1; } }";
+        static const char ext_text[] =
+            "syntax = \"proto2\"; package vendor;\n"
+            "import \"google/protobuf/descriptor.proto\";\n"
+            "extend google.protobuf.FieldOptions { optional int32 width = 60000; }";
+        static const char desc_text[] =
+            "syntax = \"proto2\"; package google.protobuf;\n"
+            "message FieldOptions { optional bool deprecated = 3; }";
+        wz_dissect_proto_file schema[3];
+        char *listed = NULL;
+        char *described = NULL;
+        schema[0].name = "m.proto";
+        schema[0].text = (const unsigned char *)main_text;
+        schema[0].text_len = sizeof main_text - 1;
+        schema[1].name = "ext.proto";
+        schema[1].text = (const unsigned char *)ext_text;
+        schema[1].text_len = sizeof ext_text - 1;
+        schema[2].name = "google/protobuf/descriptor.proto";
+        schema[2].text = (const unsigned char *)desc_text;
+        schema[2].text_len = sizeof desc_text - 1;
+
+        rc = wz_dissect_proto_messages(schema, 3, &listed);
+        CHECK(rc == WZ_DISSECT_OK, "proto_messages rc=%d", rc);
+        CHECK(listed != NULL &&
+                  strstr(listed, "\"full_name\":\"m.R.In\",\"file\":\"m.proto\","
+                                 "\"file_index\":0,\"parent\":\"m.R\","
+                                 "\"nested\":true") != NULL &&
+                  strstr(listed, "\"full_name\":\"google.protobuf.FieldOptions\","
+                                 "\"file\":\"google/protobuf/descriptor.proto\","
+                                 "\"file_index\":2,\"parent\":null,"
+                                 "\"nested\":false") != NULL,
+              "the list must name a nested message with its parent and a "
+              "message of a later file with its index: %s",
+              listed ? listed : "(null)");
+        wz_dissect_string_free(listed);
+
+        rc = wz_dissect_proto_messages(NULL, 3, &listed);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+              "a null file list is the caller's bug (rc=%d)", rc);
+        rc = wz_dissect_proto_messages(schema, 0, &listed);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+              "a count of zero is the caller's bug (rc=%d)", rc);
+
+        rc = wz_dissect_proto_describe("m.R", schema, 3, 0, &described);
+        CHECK(rc == WZ_DISSECT_OK, "describe for the origin rc=%d", rc);
+        CHECK(described != NULL &&
+                  strstr(described,
+                         "\"origin\":{\"class\":\"extension\","
+                         "\"name\":\"vendor.width\",\"package\":\"vendor\","
+                         "\"file\":\"ext.proto\"}") != NULL &&
+                  strstr(described,
+                         "\"origin\":{\"class\":\"standard\",\"name\":null,"
+                         "\"package\":null,\"file\":null}") != NULL &&
+                  strstr(described,
+                         "\"origin\":{\"class\":\"unresolved\",\"name\":null,"
+                         "\"package\":null,\"file\":null}") != NULL,
+              "an option must say where it is defined: %s",
+              described ? described : "(null)");
+        wz_dissect_string_free(described);
     }
 
     /* R2114 (open-debt item 237) -- A FORMAT THIS LIBRARY DOES NOT SHIP,

@@ -522,6 +522,17 @@ ONLY_CAPI = {
         "operator reads a schema with the tools that ship with it.",
         (),
     ),
+    "every message the files of a .proto schema declare": (
+        "wz_dissect_proto_messages",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and lets a person pick a message to fill in must show the names first, "
+        "and reading the .proto for them is a second reader of the language. It "
+        "is the list in front of `wz_dissect_proto_describe`, which needs a root, "
+        "over the same reader. The command line analyses captures and asks no "
+        "person to pick a message; a flag that printed the list would be a "
+        "convenience over the tools that ship with the schema.",
+        (),
+    ),
     "protobuf bytes written from field values under a .proto schema": (
         "wz_dissect_proto_encode",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "

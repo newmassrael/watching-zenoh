@@ -120,15 +120,60 @@ impl OptionValueDescription {
     }
 }
 
+/// The words of an option's `origin` class: where the option is defined.
+pub const ORIGIN_CLASS_WORDS: [&str; 3] = ["standard", "extension", "unresolved"];
+
+/// Where an option is defined.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptionOrigin {
+    /// A name written without parentheses. The language reserves those for the
+    /// options `descriptor.proto` defines for that kind of declaration; a
+    /// user-defined option has to be parenthesised, so this is told from the
+    /// spelling and needs no `descriptor.proto` among the files.
+    Standard,
+    /// A parenthesised name that a file read declares as an extension field.
+    Extension {
+        /// The declared extension's full name, package included (`nanopb`, or
+        /// `vendor.pkg.max_size`).
+        name: String,
+        /// The package of the file that declares it, empty when it declares none.
+        package: String,
+        /// The name of that file, as it was handed over.
+        file: String,
+    },
+    /// A parenthesised name no file read declares, so where it is defined is not
+    /// known. It is never guessed from the spelling.
+    Unresolved,
+}
+
+impl OptionOrigin {
+    /// The word of [`ORIGIN_CLASS_WORDS`] for this origin.
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::Standard => ORIGIN_CLASS_WORDS[0],
+            Self::Extension { .. } => ORIGIN_CLASS_WORDS[1],
+            Self::Unresolved => ORIGIN_CLASS_WORDS[2],
+        }
+    }
+}
+
 /// One option of a field or a message, as written: the name the way the file
-/// spelled it (`packed`, `(ext).field`) and the value, not judged.
+/// spelled it (`packed`, `(ext).field`), the value, not judged, and where the
+/// option is defined.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OptionDescription {
     pub name: String,
     pub value: OptionValueDescription,
+    pub origin: OptionOrigin,
 }
 
-fn describe_options(options: &[FieldOption]) -> Vec<OptionDescription> {
+/// The options written in message `msg` (on it, or on one of its fields), each
+/// with where it is defined.
+fn describe_options(
+    linker: &Linker<'_, '_>,
+    msg: usize,
+    options: &[FieldOption],
+) -> Vec<OptionDescription> {
     options
         .iter()
         .map(|o| OptionDescription {
@@ -139,6 +184,18 @@ fn describe_options(options: &[FieldOption]) -> Vec<OptionDescription> {
                 OptionValue::Float(text) => OptionValueDescription::Float(text.clone()),
                 OptionValue::Str(s) => OptionValueDescription::String(s.clone()),
                 OptionValue::Aggregate(text) => OptionValueDescription::Aggregate(text.clone()),
+            },
+            origin: if o.name.starts_with('(') {
+                match linker.extension_named(msg, &o.name) {
+                    Some((name, ext)) => OptionOrigin::Extension {
+                        name,
+                        package: ext.package.clone(),
+                        file: String::from(linker.name_of(ext.file)),
+                    },
+                    None => OptionOrigin::Unresolved,
+                }
+            } else {
+                OptionOrigin::Standard
             },
         })
         .collect()
@@ -357,7 +414,7 @@ pub fn describe_proto(
                 map,
                 comment: f.docs.leading.clone(),
                 trailing_comment: f.docs.trailing.clone(),
-                options: describe_options(&f.options),
+                options: describe_options(&linker, idx, &f.options),
             });
         }
         messages.push(MessageDescription {
@@ -368,7 +425,7 @@ pub fn describe_proto(
             fields,
             comment: msg.docs.leading.clone(),
             trailing_comment: msg.docs.trailing.clone(),
-            options: describe_options(&msg.options),
+            options: describe_options(&linker, idx, &msg.options),
             max_encoded_size: sizes
                 .remove(&idx)
                 .unwrap_or(Err(SizeRefusal::UnmodelledOption)),

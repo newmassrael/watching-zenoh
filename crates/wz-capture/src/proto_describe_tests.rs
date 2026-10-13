@@ -9,8 +9,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::proto_describe::{
-    describe_proto, type_words, FieldDescription, OptionDescription, OptionValueDescription,
-    ProtoDescription, Target, LABEL_WORDS, OPTION_KIND_WORDS, SYNTAX_WORDS,
+    describe_proto, type_words, FieldDescription, OptionDescription, OptionOrigin,
+    OptionValueDescription, ProtoDescription, Target, LABEL_WORDS, OPTION_KIND_WORDS,
+    ORIGIN_CLASS_WORDS, SYNTAX_WORDS,
 };
 use crate::proto_describe_json::proto_message_json;
 use crate::proto_schema::{ProtoDiagnostic, ProtoFile};
@@ -307,7 +308,7 @@ fn the_document_has_one_shape_for_every_row_and_closed_words() {
         0,
     );
     assert!(
-        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":3},\"ok\":true,"),
+        doc.starts_with("{\"document\":{\"name\":\"proto_message\",\"revision\":4},\"ok\":true,"),
         "{doc}"
     );
     // A field row with nothing to point at writes every key, `null` where it
@@ -388,6 +389,9 @@ fn the_declared_vocabularies_are_the_walks() {
     let mut kinds = OPTION_KIND_WORDS.to_vec();
     kinds.sort_unstable();
     assert_eq!(family("kind"), kinds);
+    let mut classes = ORIGIN_CLASS_WORDS.to_vec();
+    classes.sort_unstable();
+    assert_eq!(family("class"), classes);
     // A map key is any scalar a map may be keyed by: the fifteen less the three
     // (`double`, `float`, `bytes`) the language guide refuses.
     let keys = family("key");
@@ -614,17 +618,228 @@ fn every_option_is_kept_as_written() {
 #[test]
 fn the_options_document_row_says_the_kind_beside_the_value() {
     let doc = proto_message_json("Opt", &files(&[("a.proto", OPTIONED)]), 0);
-    for row in [
-        "{\"name\":\"(ext.msg).id\",\"kind\":\"integer\",\"value\":7}",
-        "{\"name\":\"deprecated\",\"kind\":\"identifier\",\"value\":\"true\"}",
-        "{\"name\":\"default\",\"kind\":\"integer\",\"value\":-5}",
-        "{\"name\":\"(ext)\",\"kind\":\"aggregate\",\"value\":\"max: 3, tag: \\\"x\\\"\"}",
-        "{\"name\":\"json_name\",\"kind\":\"string\",\"value\":\"bee\"}",
-        "{\"name\":\"default\",\"kind\":\"float\",\"value\":\"-1.5e3\"}",
-        "{\"name\":\"default\",\"kind\":\"identifier\",\"value\":\"-inf\"}",
+    // No file declares `ext`, so every parenthesised option reads `unresolved`.
+    let unresolved =
+        ",\"origin\":{\"class\":\"unresolved\",\"name\":null,\"package\":null,\"file\":null}}";
+    let standard =
+        ",\"origin\":{\"class\":\"standard\",\"name\":null,\"package\":null,\"file\":null}}";
+    for (row, origin) in [
+        (
+            "{\"name\":\"(ext.msg).id\",\"kind\":\"integer\",\"value\":7",
+            unresolved,
+        ),
+        (
+            "{\"name\":\"deprecated\",\"kind\":\"identifier\",\"value\":\"true\"",
+            standard,
+        ),
+        (
+            "{\"name\":\"default\",\"kind\":\"integer\",\"value\":-5",
+            standard,
+        ),
+        (
+            "{\"name\":\"(ext)\",\"kind\":\"aggregate\",\"value\":\"max: 3, tag: \\\"x\\\"\"",
+            unresolved,
+        ),
+        (
+            "{\"name\":\"json_name\",\"kind\":\"string\",\"value\":\"bee\"",
+            standard,
+        ),
+        (
+            "{\"name\":\"default\",\"kind\":\"float\",\"value\":\"-1.5e3\"",
+            standard,
+        ),
+        (
+            "{\"name\":\"default\",\"kind\":\"identifier\",\"value\":\"-inf\"",
+            standard,
+        ),
     ] {
-        assert!(doc.contains(row), "{row}\n{doc}");
+        let want = format!("{row}{origin}");
+        assert!(doc.contains(&want), "{want}\n{doc}");
     }
+}
+
+/// A file that declares extensions of the options messages, the way nanopb's
+/// `nanopb.proto` does (no package) and a vendor's does (a package), beside the
+/// stand-in `descriptor.proto` they extend.
+const DESCRIPTOR: (&str, &str) = (
+    "google/protobuf/descriptor.proto",
+    "syntax = \"proto2\";\npackage google.protobuf;\n\
+     message MessageOptions { optional bool deprecated = 3; }\n\
+     message FieldOptions { optional bool deprecated = 3; }\n",
+);
+const NANOPB: (&str, &str) = (
+    "nanopb.proto",
+    "syntax = \"proto2\";\nimport \"google/protobuf/descriptor.proto\";\n\
+     message NanoPBOptions { optional int32 max_size = 1; optional int32 max_count = 2; }\n\
+     extend google.protobuf.FieldOptions { optional NanoPBOptions nanopb = 1010; }\n\
+     extend google.protobuf.MessageOptions { optional NanoPBOptions nanopb_msgopt = 1010; }\n",
+);
+const VENDOR: (&str, &str) = (
+    "vendor/tags.proto",
+    "syntax = \"proto3\";\npackage vendor.tags;\n\
+     import \"google/protobuf/descriptor.proto\";\n\
+     message Holder {\n\
+       extend google.protobuf.FieldOptions { optional string column = 51234; }\n\
+     }\n\
+     extend google.protobuf.FieldOptions { optional string label = 51235; }\n",
+);
+/// The schema whose options come from those files.
+const ORIGINATED: (&str, &str) = (
+    "m.proto",
+    "syntax = \"proto2\";\npackage m;\n\
+     import \"nanopb.proto\";\nimport \"vendor/tags.proto\";\n\
+     message Reading {\n\
+       option (nanopb_msgopt).max_count = 4;\n\
+       option deprecated = true;\n\
+       optional string name = 1 [(nanopb).max_size = 16, (vendor.tags.label) = \"x\", deprecated = true];\n\
+       optional string note = 2 [(vendor.tags.Holder.column) = \"c\", (.vendor.tags.label) = \"y\"];\n\
+       optional string lost = 3 [(never.declared).x = 1];\n\
+     }\n",
+);
+
+fn origins(d: &ProtoDescription, message: &str, field: Option<&str>) -> Vec<(String, String)> {
+    let options = match field {
+        Some(name) => &self::field(d, message, name).options,
+        None => {
+            &d.messages
+                .iter()
+                .find(|m| m.full_name == message)
+                .expect("message")
+                .options
+        }
+    };
+    options
+        .iter()
+        .map(|o| {
+            let origin = match &o.origin {
+                OptionOrigin::Standard => String::from("standard"),
+                OptionOrigin::Unresolved => String::from("unresolved"),
+                OptionOrigin::Extension {
+                    name,
+                    package,
+                    file,
+                } => {
+                    format!("extension {name} | {package} | {file}")
+                }
+            };
+            (o.name.clone(), origin)
+        })
+        .collect()
+}
+
+/// EACH OPTION SAYS WHERE IT IS DEFINED: a name without parentheses is a standard
+/// option, a parenthesised one is told apart by the extension a file read
+/// declares, with that extension's full name, the package of its file (empty when
+/// the file has none) and the file, and one no file read declares is unresolved
+/// and never guessed.
+#[test]
+fn an_option_says_where_it_is_defined() {
+    // The schema is file 0, the root file.
+    let given = [ORIGINATED, DESCRIPTOR, NANOPB, VENDOR];
+    let d = describe("m.Reading", &given).expect("described");
+    let s = |a: &str, b: &str| (String::from(a), String::from(b));
+    assert_eq!(
+        origins(&d, "m.Reading", None),
+        [
+            s(
+                "(nanopb_msgopt).max_count",
+                "extension nanopb_msgopt |  | nanopb.proto"
+            ),
+            s("deprecated", "standard"),
+        ],
+        "an extension in a file with no package has the empty package"
+    );
+    assert_eq!(
+        origins(&d, "m.Reading", Some("name")),
+        [
+            s("(nanopb).max_size", "extension nanopb |  | nanopb.proto"),
+            s(
+                "(vendor.tags.label)",
+                "extension vendor.tags.label | vendor.tags | vendor/tags.proto"
+            ),
+            s("deprecated", "standard"),
+        ]
+    );
+    assert_eq!(
+        origins(&d, "m.Reading", Some("note")),
+        [
+            s(
+                "(vendor.tags.Holder.column)",
+                "extension vendor.tags.Holder.column | vendor.tags | vendor/tags.proto"
+            ),
+            s(
+                "(.vendor.tags.label)",
+                "extension vendor.tags.label | vendor.tags | vendor/tags.proto"
+            ),
+        ],
+        "an extension declared inside a message is named through it, and a leading dot is absolute"
+    );
+    assert_eq!(
+        origins(&d, "m.Reading", Some("lost")),
+        [s("(never.declared).x", "unresolved")]
+    );
+}
+
+/// An option whose declaring file is not among the files is unresolved and not
+/// guessed from its spelling: the same options as above, with `nanopb.proto`
+/// not imported by the schema.
+#[test]
+fn an_extension_no_file_read_declares_is_unresolved_not_guessed() {
+    let given = [
+        (
+            "m.proto",
+            "syntax = \"proto2\";\nmessage M { optional string a = 1 [(nanopb).max_size = 16, deprecated = true]; }\n",
+        ),
+        NANOPB,
+        DESCRIPTOR,
+    ];
+    let d = describe("M", &given).expect("described");
+    assert_eq!(
+        origins(&d, "M", Some("a")),
+        [
+            (
+                String::from("(nanopb).max_size"),
+                String::from("unresolved")
+            ),
+            (String::from("deprecated"), String::from("standard")),
+        ],
+        "nanopb.proto is among the files but the schema does not import it, so it is not read"
+    );
+}
+
+/// An extension is looked up from the message outwards, as a relative name is:
+/// the message's own scope first, then each enclosing scope and the package.
+#[test]
+fn a_relative_extension_name_is_searched_from_the_message_outwards() {
+    let given = [
+        (
+            "use.proto",
+            "syntax = \"proto2\";\npackage a.b;\nimport \"ext.proto\";\n\
+             import \"google/protobuf/descriptor.proto\";\n\
+             message Outer { message Inner { optional int32 x = 1 [(width) = 3, (a.b.Outer.local) = 1]; }\n\
+               extend google.protobuf.FieldOptions { optional int32 local = 60001; } }\n",
+        ),
+        (
+            "ext.proto",
+            "syntax = \"proto2\";\npackage a.b;\nimport \"google/protobuf/descriptor.proto\";\n\
+             extend google.protobuf.FieldOptions { optional int32 width = 60000; }\n",
+        ),
+        DESCRIPTOR,
+    ];
+    let d = describe("a.b.Outer.Inner", &given).expect("described");
+    assert_eq!(
+        origins(&d, "a.b.Outer.Inner", Some("x")),
+        [
+            (
+                String::from("(width)"),
+                String::from("extension a.b.width | a.b | ext.proto")
+            ),
+            (
+                String::from("(a.b.Outer.local)"),
+                String::from("extension a.b.Outer.local | a.b | use.proto")
+            ),
+        ]
+    );
 }
 
 /// The documents a family gate measures `type`, `key`, `label`, `syntax` and
@@ -635,6 +850,13 @@ pub(crate) fn documents_for_the_carries_gate() -> Vec<String> {
     alloc::vec![
         proto_message_json("demo.Rich", &both, 0),
         proto_message_json("Opt", &files(&[("a.proto", OPTIONED)]), 0),
+        // Options of all three origins on one message: a standard one, extensions
+        // that files read declare, and one nobody declares.
+        proto_message_json(
+            "m.Reading",
+            &files(&[ORIGINATED, DESCRIPTOR, NANOPB, VENDOR]),
+            0,
+        ),
         proto_message_json("Point", &files(&[("a.proto", COMMENTED)]), 0),
         // Messages with no nanopb size, for two of the reasons: a string with no
         // bound, and a message that holds itself.
@@ -701,5 +923,11 @@ fn the_carries_gate_documents_reach_every_word_of_every_family() {
     }
     for word in OPTION_KIND_WORDS {
         assert!(all.contains(&format!("\"kind\":\"{word}\"")), "kind {word}");
+    }
+    for word in ORIGIN_CLASS_WORDS {
+        assert!(
+            all.contains(&format!("\"class\":\"{word}\"")),
+            "origin class {word}"
+        );
     }
 }

@@ -2414,6 +2414,49 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: PROTO_MESSAGE_R3_CARRIES,
     },
+    // WHERE EACH OPTION OF A DESCRIBED SCHEMA IS DEFINED.
+    //
+    // A consumer that lists the options of a message to separate the general
+    // ones from a customer's own (a nanopb `max_size`, a vendor's tag) had only
+    // the name as the file spelled it. Revision 4 adds to every option row
+    // `origin`: `{"class","name","package","file"}`, `class` one of `standard`
+    // (a name written without parentheses), `extension` (a parenthesised name a
+    // file read declares, with the extension's full name, the package of the file
+    // that declares it and that file) and `unresolved` (a parenthesised name no
+    // file read declares, never guessed). Nothing retires and nothing moves.
+    //
+    // `class` is a PASSENGER: the origin has four members whichever word it
+    // carries, `name`, `package` and `file` being `null` unless it is an
+    // extension.
+    DocumentShape {
+        document: PROTO_MESSAGE,
+        revision: 4,
+        keys: PROTO_MESSAGE_R4_KEYS,
+        retiring: &[],
+        families: PROTO_MESSAGE_R4_FAMILIES,
+        planes: &[],
+        carries: PROTO_MESSAGE_R4_CARRIES,
+    },
+    // EVERY MESSAGE A SET OF `.proto` FILES DECLARES, or the place the schema was
+    // refused.
+    //
+    // The output of `wz_dissect_proto_messages`: the list a person picks a root
+    // message from before `proto_message` describes it. A row has five members
+    // that are always present (`full_name`, `file`, `file_index`, `parent` and
+    // `nested`), `parent` being `null` for a message at the top level of its
+    // file. The refusal branch OMITS the position keys that do not apply, as the
+    // `proto_message` document does, because a top-level `null` is reserved for a
+    // plane. No value family: every string is free text. No integer cell: the only
+    // number is a file's index in the list handed over.
+    DocumentShape {
+        document: PROTO_MESSAGE_LIST,
+        revision: 1,
+        keys: PROTO_MESSAGE_LIST_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     // What building a protected frame under a caller-supplied profile did, or
     // why it refused.
     //
@@ -2975,6 +3018,9 @@ pub const DECLARATIONS_MATCH: &str = "declarations_match";
 /// A root message of a `.proto` schema described field by field, or why the
 /// schema was refused (`wz_dissect_proto_describe`).
 pub const PROTO_MESSAGE: &str = "proto_message";
+/// Every message the files of a `.proto` schema declare, or why the schema was
+/// refused (`wz_dissect_proto_messages`).
+pub const PROTO_MESSAGE_LIST: &str = "proto_message_list";
 /// A protected frame built under a profile, or why it was refused
 /// (`wz_dissect_e2e_wrap`).
 pub const E2E_WRAP: &str = "e2e_wrap";
@@ -9953,6 +9999,139 @@ pub const PROTO_MESSAGE_R3_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The description document's key set at revision 4: revision 3's PLUS, inside an
+/// option, `origin` and its members `class` and `package` (`name` and `file` were
+/// already keys, and the origin reuses them). Nothing retires.
+pub const PROTO_MESSAGE_R4_KEYS: &[&str] = &[
+    "class",
+    "column",
+    "comment",
+    "document",
+    "enum",
+    "fields",
+    "file",
+    "full_name",
+    "json_name",
+    "key",
+    "kind",
+    "label",
+    "line",
+    "map",
+    "max_encoded_size",
+    "max_encoded_size_reason",
+    "message",
+    "message_type",
+    "messages",
+    "name",
+    "number",
+    "ok",
+    "oneof",
+    "oneofs",
+    "options",
+    "origin",
+    "package",
+    "packed",
+    "reason",
+    "revision",
+    "root",
+    "syntax",
+    "trailing_comment",
+    "type",
+    "value",
+    "values",
+];
+
+/// Where an option is defined: the words of `class`, in the order the reader
+/// lists them sorted.
+pub const PROTO_ORIGIN_CLASS_R4: &[&str] = &["extension", "standard", "unresolved"];
+
+/// The description document's value families at revision 4: revision 3's and the
+/// `class` of an option's origin.
+pub const PROTO_MESSAGE_R4_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "class",
+        values: PROTO_ORIGIN_CLASS_R4,
+    },
+    ValueFamily {
+        key: "key",
+        values: PROTO_MAP_KEY_R1,
+    },
+    ValueFamily {
+        key: "kind",
+        values: PROTO_OPTION_KIND_R2,
+    },
+    ValueFamily {
+        key: "label",
+        values: PROTO_LABEL_R1,
+    },
+    ValueFamily {
+        key: "max_encoded_size_reason",
+        values: PROTO_SIZE_REASON_R3,
+    },
+    ValueFamily {
+        key: "syntax",
+        values: PROTO_SYNTAX_R1,
+    },
+    ValueFamily {
+        key: "type",
+        values: PROTO_TYPE_R1,
+    },
+];
+
+/// All seven are PASSENGERS. `class` says where an option is defined, and the
+/// origin has the same four members whichever word it is, the three that only an
+/// extension fills being `null` for the others.
+pub const PROTO_MESSAGE_R4_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "class",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "key",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "label",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "max_encoded_size_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "syntax",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "type",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The message-list document's key set at revision 1, over both branches: the
+/// success (`messages`, per row `full_name`, `file`, `file_index`, `parent`,
+/// `nested`) and the refusal (`file`, `line`, `column`, `reason`, `message`).
+pub const PROTO_MESSAGE_LIST_R1_KEYS: &[&str] = &[
+    "column",
+    "document",
+    "file",
+    "file_index",
+    "full_name",
+    "line",
+    "message",
+    "messages",
+    "name",
+    "nested",
+    "ok",
+    "parent",
+    "reason",
+    "revision",
+];
+
 /// The `e2e_wrap` document's key set at revision 1, over BOTH branches: the
 /// built frame with every step it took, and the refusal with whichever
 /// position keys apply.
@@ -15045,7 +15224,10 @@ mod tests {
             // `trailing_comment`, `options` and, inside an option, `kind`.
             // To 3 when a message gained its nanopb size: `max_encoded_size`
             // and `max_encoded_size_reason`.
-            (PROTO_MESSAGE, 3),
+            // To 4 when every option gained `origin`: where it is defined.
+            (PROTO_MESSAGE, 4),
+            // Every message a set of `.proto` files declares.
+            (PROTO_MESSAGE_LIST, 1),
             // A protected frame built and read under a caller's profile.
             // To 2 when the body could be described: `body_message`, `stage`
             // and the writer's position keys.

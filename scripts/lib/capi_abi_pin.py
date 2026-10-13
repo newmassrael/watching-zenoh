@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 35
+EXPECTED_VERSION = 36
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -348,6 +348,15 @@ EXPECTED_SYMBOLS = {
     # `wz_dissect_string_free`, the selector and the table cross as C strings the
     # CALLER holds, nothing is retained between calls, and no callback runs.
     "wz_dissect_selector_bind",
+    # (ABI 36) -- EVERY MESSAGE a set of `.proto` files declares, with no root:
+    # the list a person picks a message from before `wz_dissect_proto_describe`
+    # describes it. One symbol and one document. The memory rule does not move:
+    # the document is a `char*` released by `wz_dissect_string_free`, the schema
+    # files cross as the struct the describe door already takes, nothing is
+    # retained between calls, and no callback runs. The describe document moved
+    # to revision 4 on the same step (an option's `origin`), which moves no
+    # symbol.
+    "wz_dissect_proto_messages",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

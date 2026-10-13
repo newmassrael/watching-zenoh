@@ -10,18 +10,21 @@
 //! # `proto_message`
 //!
 //! ```text
-//! {"document":{"name":"proto_message","revision":3},"ok":true,
+//! {"document":{"name":"proto_message","revision":4},"ok":true,
 //!  "root":"pkg.Reading",
 //!  "messages":[{"full_name":"pkg.Reading","file":"reading.proto","syntax":"proto3",
 //!    "oneofs":[],"comment":" One reading.\n","trailing_comment":null,
-//!    "options":[{"name":"(ext).id","kind":"integer","value":7}],
+//!    "options":[{"name":"(ext).id","kind":"integer","value":7,
+//!                "origin":{"class":"extension","name":"pkg.ext",
+//!                          "package":"pkg","file":"ext.proto"}}],
 //!    "max_encoded_size":6,"max_encoded_size_reason":null,
 //!    "fields":[{"name":"sensor_id","json_name":"sensorId","number":1,
 //!      "type":"uint32","label":"singular","oneof":null,"packed":null,
 //!      "enum":null,"message_type":null,"map":null,
 //!      "comment":null,"trailing_comment":" the sensor\n",
-//!      "options":[{"name":"(ext).int_size","kind":"identifier",
-//!                  "value":"IS_16"}]}]}]}
+//!      "options":[{"name":"deprecated","kind":"identifier","value":"true",
+//!                  "origin":{"class":"standard","name":null,
+//!                            "package":null,"file":null}}]}]}]}
 //! ```
 //!
 //! `messages` is the root message first, then every message it reaches, each
@@ -52,7 +55,19 @@
 //!   included, as a string), `string` (`value` the decoded text) and
 //!   `aggregate` (`value` the text between the braces of a `{ ... }` value, as
 //!   written). An option is not judged: a value no consumer of that option could
-//!   read is still listed;
+//!   read is still listed. Each option also carries `origin` (revision 4), where
+//!   the option is defined, always `{"class":C,"name":N,"package":P,"file":F}`:
+//!   `class` is `standard` for a name written without parentheses (the language
+//!   reserves those for the options `descriptor.proto` defines, so this is read
+//!   from the spelling and needs no `descriptor.proto` among the files),
+//!   `extension` for a parenthesised name that a file read declares in an `extend`
+//!   block, and then `name` is the extension field's full name, `package` the
+//!   package of the file that declares it (the empty string when it declares
+//!   none) and `file` that file's name as handed over, or `unresolved` for a
+//!   parenthesised name no file read declares. `name`, `package` and `file` are
+//!   `null` unless `class` is `extension`. An unresolved origin is never guessed
+//!   from the spelling: it says the file declaring the option was not among the
+//!   files read (only the root file and what it imports are read);
 //! * `max_encoded_size` and `max_encoded_size_reason`, on a message row only: the
 //!   most bytes the message takes encoded, in nanopb's own arithmetic from the
 //!   nanopb options written in the schema (the number the generated `Message_size`
@@ -99,7 +114,7 @@ use crate::doc_revision::{envelope, PROTO_MESSAGE};
 use crate::proto_decode_json::push_integer;
 use crate::proto_describe::{
     describe_proto, FieldDescription, MapDescription, MessageDescription, OptionDescription,
-    OptionValueDescription, Target,
+    OptionOrigin, OptionValueDescription, Target,
 };
 use crate::proto_schema::{ProtoDiagnostic, ProtoFile};
 
@@ -246,9 +261,33 @@ fn push_options(options: &[OptionDescription], out: &mut String) {
             | OptionValueDescription::String(text)
             | OptionValueDescription::Aggregate(text) => escape_into(text, out),
         }
+        push_origin(&option.origin, out);
         out.push('}');
     }
     out.push(']');
+}
+
+/// The `origin` key of an option row: where the option is defined, always four
+/// members, with `name`, `package` and `file` `null` unless the option is an
+/// extension a file read declares.
+fn push_origin(origin: &OptionOrigin, out: &mut String) {
+    out.push_str(&format!(",\"origin\":{{\"class\":\"{}\"", origin.class()));
+    match origin {
+        OptionOrigin::Extension {
+            name,
+            package,
+            file,
+        } => {
+            for (key, text) in [("name", name), ("package", package), ("file", file)] {
+                out.push_str(&format!(",\"{key}\":"));
+                escape_into(text, out);
+            }
+        }
+        OptionOrigin::Standard | OptionOrigin::Unresolved => {
+            out.push_str(",\"name\":null,\"package\":null,\"file\":null");
+        }
+    }
+    out.push('}');
 }
 
 /// The `enum` and `message_type` keys of a row, in that order, each `null` where
