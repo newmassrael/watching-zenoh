@@ -181,6 +181,14 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "transport-lowlatency",
     "session-extcompression",
 ] }
+# The frame writer behind `e2e_sender`, the sending side of an end-to-end
+# protected message. `default-features = false` and nothing named, for the rule
+# `wz-runtime-tokio`'s own `wz-capture` line states: Cargo unifies features across
+# the whole graph, so this crate's defaults would become `wz-session-core`'s
+# defaults here, and a build that never asked for a codec would get it. The
+# writer needs none (`e2e_json` has no feature gate), and a build with the
+# defaults off compiles it.
+wz-capture = { path = "../wz-capture", default-features = false }
 
 [dev-dependencies]
 # R311y867 — for `free_port()`, which three test files here used to carry a

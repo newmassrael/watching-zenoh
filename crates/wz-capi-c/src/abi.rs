@@ -1476,7 +1476,10 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 ///
 /// It moves to 4 for the config verdict as rows
 /// (`crate::config_verdict_rows`), fifteen new symbols.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 4;
+///
+/// It moves to 5 for the sender of an end-to-end protected message
+/// (`crate::e2e_sender`), eight new symbols.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 5;
 
 /// Report this build's footprints — the drop-in's half of the layout gate.
 ///

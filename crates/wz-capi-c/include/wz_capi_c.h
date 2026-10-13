@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 4
+#define WZ_CAPI_C_ABI_REVISION 5
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -444,6 +444,110 @@ size_t wz_capi_c_config_zenoh_link_scheme_count(void);
 /* The name of stock zenoh's link scheme `index`, or NULL past the
  * end. */
 const char *wz_capi_c_config_zenoh_link_scheme(size_t index);
+
+/* ------------------------------------------------------------------ *
+ * The sending side of an end-to-end protected message (revision 5).
+ * Present in every build: it is wz's own surface, with no upstream
+ * zenoh-c counterpart to be a drop-in for.
+ *
+ * WHAT IT IS FOR. A process that stays up and repeats a message must
+ * advance the message's counter on every send. wz_dissect_e2e_wrap (in
+ * the dissect library) builds one frame from values you write, the
+ * counter among them, and a caller that numbers its own frames keeps
+ * using it. This sender keeps the counter instead, so the rule for when
+ * it advances is in one place. The frame comes out of the same writer,
+ * so the two libraries cannot disagree about a header.
+ *
+ * ONE SENDER PER MESSAGE. Two messages that share a profile keep two
+ * senders and so two counters; a periodic message is one sender called
+ * again and again. One handle may be used from several threads: the
+ * counter and the frame are taken under one lock, so two calls get two
+ * values.
+ *
+ * THE COUNTER.
+ *  - wz_capi_c_e2e_sender_new takes the value the FIRST frame carries.
+ *    A process restarted on reconnect passes it again.
+ *  - A frame that is built carries the next value, and the next value
+ *    moves by one. A frame that is refused builds nothing and consumes
+ *    no value.
+ *  - The counter does NOT wrap by default. The frame that carries the
+ *    largest value the counter field holds is built, and the next call
+ *    is refused, with a reason that names the field and the value.
+ *    WZ_CAPI_C_E2E_ROLLOVER_WRAP counts on from zero instead, and is
+ *    chosen by name.
+ *  - A start value that does not fit the field is refused by the first
+ *    frame, like any value that does not fit, and consumes nothing.
+ *  - The values text must NOT state the counter field; a text that does
+ *    is refused, because there is no rule for which would win.
+ *
+ * REFUSALS ARE DOCUMENTS. As for every document door in the dissect
+ * library, a text this library was handed and refused is a successful
+ * diagnosis: wz_capi_c_e2e_sender_wrap returns Z_OK and writes the
+ * e2e_wrap document, with "ok":false, the reason and the place. The
+ * return value says whether the call was well formed; the document
+ * says whether a frame was built, and its "frame" is the frame as
+ * lowercase hex. The constructor is the exception: a sender that does
+ * not exist cannot be handed back, so a profile that is not one is
+ * Z_EPARSE with the same kind of document in `refusal`.
+ *
+ * The profile and the values text are those of wz_dissect_e2e_wrap,
+ * described in wz_dissect.h, with one difference: the sender writes the
+ * counter field the profile names.
+ * ------------------------------------------------------------------ */
+
+/* What the counter does after the frame that carried its largest value. */
+typedef int32_t wz_capi_c_e2e_rollover_t;
+#define WZ_CAPI_C_E2E_ROLLOVER_REFUSE 0
+#define WZ_CAPI_C_E2E_ROLLOVER_WRAP 1
+
+typedef struct wz_capi_c_owned_e2e_sender_t { void *_handle; } wz_capi_c_owned_e2e_sender_t;
+typedef struct wz_capi_c_loaned_e2e_sender_t { void *_handle; } wz_capi_c_loaned_e2e_sender_t;
+typedef struct wz_capi_c_moved_e2e_sender_t { wz_capi_c_owned_e2e_sender_t _this; } wz_capi_c_moved_e2e_sender_t;
+
+/* A sender for the message `profile_json` describes, whose first frame
+ * carries `first_counter`. `this_` holds a gravestone on every error.
+ * `refusal` may be NULL; when it is not, it is empty on success and on
+ * Z_EPARSE holds the document that says why the profile was refused.
+ * Z_ENULL for a null `this_` or `profile_json`, Z_EINVAL for text that
+ * is not UTF-8 or a `rollover` this library does not know, Z_EPARSE for
+ * a profile that is not one. */
+z_result_t wz_capi_c_e2e_sender_new(wz_capi_c_owned_e2e_sender_t *this_,
+                                    const char *profile_json,
+                                    uint64_t first_counter,
+                                    wz_capi_c_e2e_rollover_t rollover,
+                                    z_owned_string_t *refusal);
+
+/* Build the next frame of the message. `values_json` holds every header
+ * field the sender and the mechanism do not supply, and may carry the
+ * body as an "@body" member; `payload` is the body already serialized
+ * (NULL only when `payload_len` is 0), and giving a body both ways is a
+ * refusal. Z_OK for any call that was well formed, whether or not a
+ * frame was built: read "ok" in the document. A frame that is not built
+ * consumes no counter value. `out` holds a gravestone on every error
+ * return. Z_ENULL for a null argument, Z_EINVAL for text that is not
+ * UTF-8. */
+z_result_t wz_capi_c_e2e_sender_wrap(
+    const wz_capi_c_loaned_e2e_sender_t *this_, const char *values_json,
+    const uint8_t *payload, size_t payload_len, z_owned_string_t *out);
+
+/* The value the next frame carries. false, and nothing written, when
+ * the largest value was sent and the sender does not wrap, or when an
+ * argument is null. */
+bool wz_capi_c_e2e_sender_next(const wz_capi_c_loaned_e2e_sender_t *this_,
+                               uint64_t *out);
+
+/* Make `value` the one the next frame carries. A value past the counter
+ * field's width is accepted here and refused by the frame, as a start
+ * value is. Z_ENULL for a null or empty handle. */
+z_result_t wz_capi_c_e2e_sender_set(
+    const wz_capi_c_loaned_e2e_sender_t *this_, uint64_t value);
+
+const wz_capi_c_loaned_e2e_sender_t *wz_capi_c_e2e_sender_loan(
+    const wz_capi_c_owned_e2e_sender_t *this_);
+void wz_capi_c_e2e_sender_drop(wz_capi_c_moved_e2e_sender_t *this_);
+void wz_capi_c_internal_e2e_sender_null(wz_capi_c_owned_e2e_sender_t *this_);
+bool wz_capi_c_internal_e2e_sender_check(
+    const wz_capi_c_owned_e2e_sender_t *this_);
 
 /* ------------------------------------------------------------------ *
  * Group membership: zenoh-ext's Group / Member / GroupEvent (R2932).

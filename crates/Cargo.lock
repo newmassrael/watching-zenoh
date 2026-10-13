@@ -2780,6 +2780,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wz-capi-core",
+ "wz-capture",
  "wz-cdylib-build",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",

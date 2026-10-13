@@ -97,6 +97,11 @@ pub mod config_verdict;
 // the config field it is about. Ungated for the reason `config_verdict` is.
 pub mod config_verdict_rows;
 pub mod encoding;
+// The SENDING side of an end-to-end protected message: an owned sender that
+// keeps the message's counter and writes it into every frame it builds. A wz-own
+// surface like `config_verdict`, so ungated for the same reason: upstream has
+// nothing of the kind to be a drop-in for.
+pub mod e2e_sender;
 // R2259 (open-debt item 593) — the LINK and TRANSPORT event planes. Gated for
 // the reason `cancellation` above is, and measured the same way: upstream's
 // `nounstable` and `nounstable-shm` oracles define ZERO of these ninety-two
