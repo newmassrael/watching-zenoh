@@ -273958,6 +273958,46 @@
         "No C consumer program links the new doors yet."
       ]
     },
+    "Round 3330": {
+      "decision_summary": "A peer-mode configuration document that declares a storage in plugins/storage_manager now selects the storage host with the file's one listen endpoint, so the host starts from the file alone with no role flag. The storage host binds one endpoint, so a document naming several listen endpoints is refused with the file, the key and the count, and is never cut to its first. A router document keeps its own run mode and reports the plugins key as withheld. A connect list is reported withheld with the reason that the storage host dials nothing, it only accepts. The plugins key now chooses the role, so the invariant test that compares what each flag adds ignores role flags. An end-to-end test starts the host from the file alone, checks the listening line and the applied keys, stores a value through a publisher and reads it back through bounded readers; it runs in the storage-host lane.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/args.rs: a peer-mode document declaring a storage selects the storage host with its one listen endpoint; several listen endpoints are refused by count; router and connect verdicts follow the selected role; three tests, and the invariant test ignores role flags.",
+        "crates/wz-integration-tests/tests/wz_storage_host_from_config_alone.rs: starts wz-ap-demo with --config only and reads a stored value back.",
+        "scripts/run-ci.sh: the storage-host lane runs the new test."
+      ],
+      "verification_bullets": [
+        "On a build host: the wz-ap-demo unit tests pass with two feature sets, the new end-to-end test passes, and clippy is clean on both crates.",
+        "On a build host: layers C0, C0s, C1bz, C1cn and C1bn pass on the committed change, and the count-guard oracle over the range passes.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "The host binds one listen endpoint and serves one session at a time; a storage host over several endpoints is a separate claim.",
+        "A router document that declares storages keeps the router run mode; hosting storages in a router is a separate claim.",
+        "A connect list under a storage-host document is withheld, not dialled."
+      ],
+      "publishable_decision_summary": "A peer-mode configuration document that declares a storage in plugins/storage_manager now selects the storage host with the file's one listen endpoint, so the host starts from the file alone with no role flag. The storage host binds one endpoint, so a document naming several listen endpoints is refused with the file, the key and the count, and is never cut to its first. A router document keeps its own run mode and reports the plugins key as withheld. A connect list is reported withheld with the reason that the storage host dials nothing, it only accepts. The plugins key now chooses the role, so the invariant test that compares what each flag adds ignores role flags. An end-to-end test starts the host from the file alone, checks the listening line and the applied keys, stores a value through a publisher and reads it back through bounded readers; it runs in the storage-host lane.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/args.rs: a peer-mode document declaring a storage selects the storage host with its one listen endpoint; several listen endpoints are refused by count; router and connect verdicts follow the selected role; three tests, and the invariant test ignores role flags.",
+        "crates/wz-integration-tests/tests/wz_storage_host_from_config_alone.rs: starts wz-ap-demo with --config only and reads a stored value back.",
+        "scripts/run-ci.sh: the storage-host lane runs the new test."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the wz-ap-demo unit tests pass with two feature sets, the new end-to-end test passes, and clippy is clean on both crates.",
+        "On a build host: layers C0, C0s, C1bz, C1cn and C1bn pass on the committed change, and the count-guard oracle over the range passes.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The host binds one listen endpoint and serves one session at a time; a storage host over several endpoints is a separate claim.",
+        "A router document that declares storages keeps the router run mode; hosting storages in a router is a separate claim.",
+        "A connect list under a storage-host document is withheld, not dialled."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
