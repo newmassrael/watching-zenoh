@@ -725,8 +725,13 @@ fn the_first_problem_is_the_profile_then_the_body_then_the_schema_then_the_frame
 
 // ------------------------------------------------------------ the registry
 
+// The documents the BODY door writes use exactly the keys revision 2 added, and
+// the number on them is the document's current one: revision 3 added `expectation`
+// and its position keys, which belong to the door that takes expected values and
+// not to this one, so this population's key set is revision 2's and its envelope
+// says 3. The test for the keys of the expecting door is in `e2e_tests`.
 #[test]
-fn the_open_documents_use_exactly_the_keys_revision_two_pins() {
+fn the_body_door_documents_use_exactly_the_keys_revision_two_added() {
     let frame = wrapped(AROUND, AROUND_HEADER, POSE, "demo.Pose", POSE_VALUES);
     let mut unknown = alloc::vec![0u8; 8];
     unknown.extend_from_slice(&[0x48, 0x07]);
@@ -748,7 +753,7 @@ fn the_open_documents_use_exactly_the_keys_revision_two_pins() {
     let mut keys: Vec<&str> = Vec::new();
     for doc in &docs {
         assert!(
-            doc.starts_with(r#"{"document":{"name":"e2e_open","revision":2}"#),
+            doc.starts_with(r#"{"document":{"name":"e2e_open","revision":3}"#),
             "{doc}"
         );
         // A key that does not apply is absent, on every branch and at every
