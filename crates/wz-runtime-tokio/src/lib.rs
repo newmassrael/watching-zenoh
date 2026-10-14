@@ -3031,7 +3031,7 @@ impl UdpDriver {
     ) -> io::Result<Self> {
         let group: std::net::IpAddr = group.into();
         let read = Self::bind_multicast(group, port, cfg).await?;
-        let write = Self::bind_multicast_tx(group, port, cfg).await?;
+        let write = Self::bind_multicast_tx_at(group, port, cfg, true).await?;
         Ok(Self {
             socket: read.socket,
             send_socket: write.socket,
@@ -3185,6 +3185,17 @@ impl UdpDriver {
         // third of four groups must not leave two memberships installed and the
         // caller believing it has four.
         let plan = McastPlan::resolve(group, &cfg, JoinsRead::Yes)?;
+        // R3335 -- a multicast LINK (the wildcard-bound socket) with no `#iface=`
+        // joins and sends on upstream's chosen interface rather than leaving it to
+        // the kernel. A scouting socket does not: upstream joins those per
+        // interface (see `McastRxBind::skips_a_refused_v4_join`).
+        let plan = match rx_bind {
+            McastRxBind::Wildcard => plan.with_link_default_iface(
+                crate::link_interfaces::unicast_addresses_of_multicast_interfaces(),
+            ),
+            #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
+            McastRxBind::Group => plan,
+        };
 
         // Step 1: REUSEADDR + REUSEPORT must be set before bind, and
         // tokio's UdpSocket exposes no pre-bind setsockopt hook, so the
@@ -3269,11 +3280,37 @@ impl UdpDriver {
         port: u16,
         cfg: McastSocketConfig<'_>,
     ) -> io::Result<Self> {
+        Self::bind_multicast_tx_at(group.into(), port, cfg, false).await
+    }
+
+    /// [`Self::bind_multicast_tx`], with `link` saying the socket is the send half
+    /// of a multicast LINK. R3335 -- only a link pins its unpinned egress to
+    /// upstream's chosen interface (the `ucast_sock` of upstream's link calls
+    /// `set_multicast_if_v4` on its filled local address); the scouting senders
+    /// that share this constructor are not links and keep the kernel's choice.
+    #[cfg(any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    ))]
+    async fn bind_multicast_tx_at(
+        group: std::net::IpAddr,
+        port: u16,
+        cfg: McastSocketConfig<'_>,
+        link: bool,
+    ) -> io::Result<Self> {
         use socket2::{Protocol, Socket, Type};
 
         // R311y832 — `extra_joins` is deliberately not read: a sender installs no
         // membership, so a `#join=` it would never use must not refuse it either.
-        let plan = McastPlan::resolve(group.into(), &cfg, JoinsRead::No)?;
+        let plan = McastPlan::resolve(group, &cfg, JoinsRead::No)?;
+        let plan = if link {
+            plan.with_link_default_iface(
+                crate::link_interfaces::unicast_addresses_of_multicast_interfaces(),
+            )
+        } else {
+            plan
+        };
         // Without an iface this is exactly the `UdpSocket::bind((UNSPECIFIED, 0))`
         // the senders did before, so the un-narrowed path is unchanged.
         let raw = Socket::new(plan.domain(), Type::DGRAM, Some(Protocol::UDP))?;
@@ -4139,6 +4176,44 @@ impl McastPlan {
         })
     }
 
+    /// R3335 -- the interface an UNPINNED IPv4 multicast LINK joins and sends on:
+    /// the first non-loopback IPv4 address `candidates` offers, which is what
+    /// upstream's UDP multicast link does when no `#iface=` is given (it fills its
+    /// local address from `get_unicast_addresses_of_multicast_interfaces()`, then
+    /// `join_multicast_v4(&group, &src_ip4)` and `set_multicast_if_v4(src_ip4)` on
+    /// that address: `io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+    /// `.join_multicast_v4(&dst_ip4, &src_ip4)`). Until R3335 wz filled the BIND
+    /// address from the same list (R2859) but joined on `INADDR_ANY` and pinned
+    /// nothing, so on a host with several interfaces the kernel chose the
+    /// membership and the egress, and the link's reported address and its
+    /// membership could name different interfaces.
+    ///
+    /// `candidates` is an INPUT so a one-NIC host can prove the choice over a
+    /// several-NIC list; the caller passes the live
+    /// `unicast_addresses_of_multicast_interfaces()`. A `#iface=` the plan already
+    /// resolved is kept as it is, an IPv6 plan is unchanged (upstream joins a v6
+    /// group on index 0 whatever the address), and a host with no such address
+    /// stays on `INADDR_ANY`, which is the address upstream falls through to.
+    fn with_link_default_iface(self, candidates: Option<Vec<std::net::IpAddr>>) -> Self {
+        match self {
+            Self::V4 {
+                group,
+                iface: None,
+                joins,
+            } => Self::V4 {
+                group,
+                iface: candidates.and_then(|ips| {
+                    ips.into_iter().find_map(|ip| match ip {
+                        std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4),
+                        _ => None,
+                    })
+                }),
+                joins,
+            },
+            other => other,
+        }
+    }
+
     fn domain(&self) -> socket2::Domain {
         match self {
             Self::V4 { .. } => socket2::Domain::IPV4,
@@ -4331,7 +4406,10 @@ impl McastPlan {
     /// socket and the SAME membership interface. R311y832 — one bound port
     /// serving several groups is the point of `join` (zenoh `multicast.rs:316-347`),
     /// and zenoh passes one source interface to every join in that loop. Unpinned,
-    /// the interface is the kernel's choice: `INADDR_ANY` for v4 and index 0 for v6.
+    /// the interface is the kernel's choice: `INADDR_ANY` for v4 and index 0 for v6
+    /// -- except a multicast LINK's v4 plan, which
+    /// [`Self::with_link_default_iface`] has already pointed at upstream's chosen
+    /// interface (R3335), so `iface` is `Some` by the time it gets here.
     ///
     /// `skip_refused_v4` turns a refused IPv4 membership into a warning and a move on to
     /// the next group, which is what a scouting socket does (see
@@ -4439,6 +4517,130 @@ mod udp_multicast_config_tests {
     /// A group and port nothing else on this host is expected to use, so two
     /// cases in one test binary do not collide on the membership.
     const GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(239, 255, 91, 32);
+
+    fn plan(iface: Option<std::net::Ipv4Addr>) -> McastPlan {
+        McastPlan::V4 {
+            group: GROUP,
+            iface,
+            joins: Vec::new(),
+        }
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> std::net::IpAddr {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// R3335 -- the choice, proved over a several-interface list on a host that
+    /// has one: the loopback address and an IPv6 address that precede it are
+    /// skipped, the FIRST non-loopback IPv4 address wins (not the last, not the
+    /// lowest), and a host with no such address stays on the wildcard.
+    #[test]
+    fn an_unpinned_link_takes_the_first_non_loopback_ipv4_interface() {
+        let list = vec![
+            v4(127, 0, 0, 1),
+            std::net::IpAddr::V6("fe80::1".parse().unwrap()),
+            v4(198, 51, 100, 7),
+            v4(192, 0, 2, 5),
+        ];
+        match plan(None).with_link_default_iface(Some(list)) {
+            McastPlan::V4 { iface, .. } => {
+                assert_eq!(iface, Some(std::net::Ipv4Addr::new(198, 51, 100, 7)))
+            }
+            McastPlan::V6 { .. } => panic!("a v4 plan stays v4"),
+        }
+        for none in [None, Some(Vec::new()), Some(vec![v4(127, 0, 0, 1)])] {
+            match plan(None).with_link_default_iface(none) {
+                McastPlan::V4 { iface, .. } => {
+                    assert_eq!(iface, None, "nothing to choose: the wildcard, as upstream")
+                }
+                McastPlan::V6 { .. } => panic!("a v4 plan stays v4"),
+            }
+        }
+    }
+
+    /// An `#iface=` the plan already resolved is never overridden, and an IPv6
+    /// plan is not touched (upstream joins a v6 group on index 0 whatever the
+    /// address is).
+    #[test]
+    fn a_pinned_or_ipv6_plan_keeps_what_it_resolved() {
+        let pinned = std::net::Ipv4Addr::new(203, 0, 113, 9);
+        match plan(Some(pinned)).with_link_default_iface(Some(vec![v4(192, 0, 2, 5)])) {
+            McastPlan::V4 { iface, .. } => assert_eq!(iface, Some(pinned)),
+            McastPlan::V6 { .. } => panic!("a v4 plan stays v4"),
+        }
+        let six = McastPlan::V6 {
+            group: "ff02::1".parse().unwrap(),
+            iface: None,
+            joins: Vec::new(),
+        };
+        match six.with_link_default_iface(Some(vec![v4(192, 0, 2, 5)])) {
+            McastPlan::V6 { iface, .. } => assert_eq!(iface, None),
+            McastPlan::V4 { .. } => panic!("a v6 plan stays v6"),
+        }
+    }
+
+    /// On the wire: a link socket with no `#iface=` leaves by the interface the
+    /// choice names, read back from the kernel -- the egress half. The
+    /// expectation is derived the way the product derives it, from the live
+    /// list, so a host whose first interface is anything at all passes only when
+    /// the socket really took it.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn an_unpinned_link_socket_leaves_by_the_chosen_interface() {
+        let d = UdpDriver::bind_multicast(GROUP, 0, McastSocketConfig::default())
+            .await
+            .expect("bind the group");
+        let sock = d.socket.as_ref().expect("bound");
+        let egress = socket2::SockRef::from(&**sock)
+            .multicast_if_v4()
+            .expect("read IP_MULTICAST_IF");
+        let expected = crate::link_interfaces::unicast_addresses_of_multicast_interfaces()
+            .and_then(|ips| {
+                ips.into_iter().find_map(|ip| match ip {
+                    std::net::IpAddr::V4(a) if !a.is_loopback() => Some(a),
+                    _ => None,
+                })
+            })
+            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+        assert_eq!(egress, expected);
+    }
+
+    /// The same for the other half of a LINK: its send socket (upstream's
+    /// `ucast_sock`) is the one every datagram leaves from, so it is the egress
+    /// that matters. A plain scouting-style sender is not a link and keeps the
+    /// kernel's choice.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn an_unpinned_links_send_socket_leaves_by_the_chosen_interface() {
+        let link = UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::default())
+            .await
+            .expect("bind the link");
+        let send = link.send_socket.as_ref().expect("a link has a send half");
+        let egress = socket2::SockRef::from(&**send)
+            .multicast_if_v4()
+            .expect("read IP_MULTICAST_IF");
+        let expected = crate::link_interfaces::unicast_addresses_of_multicast_interfaces()
+            .and_then(|ips| {
+                ips.into_iter().find_map(|ip| match ip {
+                    std::net::IpAddr::V4(a) if !a.is_loopback() => Some(a),
+                    _ => None,
+                })
+            })
+            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+        assert_eq!(egress, expected);
+
+        let scout_like = UdpDriver::bind_multicast_tx(GROUP, 0, McastSocketConfig::default())
+            .await
+            .expect("bind a plain sender");
+        let plain = socket2::SockRef::from(&**scout_like.socket.as_ref().expect("bound"))
+            .multicast_if_v4()
+            .expect("read IP_MULTICAST_IF");
+        assert_eq!(
+            plain,
+            std::net::Ipv4Addr::UNSPECIFIED,
+            "a sender that is not a link is left to the kernel"
+        );
+    }
 
     #[tokio::test]
     async fn a_multicast_socket_leaves_the_local_subnet_only_when_asked() {
