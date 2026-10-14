@@ -274274,6 +274274,48 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3337": {
+      "decision_summary": "A consumer asked for a test of the wz_capi_c_e2e_sender_* doors written in C. The Rust test links the rlib and would pass against a header that said something else; a C program compiled against wz_capi_c.h and linked against the library shows the header compiles, the symbols export under the names it declares, and a string the library wrote is released by the consumer's own z_string_drop. tests/c_e2e_sender_consumer.c drives new, wrap, next, set, loan and drop, the refusal as a document, the end of a one-byte counter and the chosen wrap. Its expected frames were computed independently of the library by a bitwise CRC checked against the standard check values, so the sender is not agreeing with itself, and a copy with one golden digit changed fails. It runs in the C1cc cluster, which needs upstream's zenoh.h and skips without it. The deploy refusal of heap_budget_bytes now says why a per-session byte cap cannot exist on a shared heap and names buffer_pools and session_pool.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/c_e2e_sender_consumer.c (new): a C program driving the e2e sender doors against wz_capi_c.h, with frames computed independently of the library.",
+        "scripts/run-ci.sh: Layer C1cc builds libwz_capi_c, compiles and runs that program after the zenoh-c oracle check, and requires its verdict line.",
+        "scripts/lib/deploy_sessions.py, deploy/README.md: the refusal of heap_budget_bytes and its notes say why a per-session cap cannot exist on a shared heap and name buffer_pools and session_pool."
+      ],
+      "verification_bullets": [
+        "On a build host: the C program compiles with -Wall -Wextra -Werror against the real zenoh.h and wz_capi_c.h, links the debug library and prints its verdict line, exit 0; a copy with one golden digit changed exits 1 with a FAIL line naming the frame.",
+        "On a build host: deploy_sessions.py --selftest passes and validate-deploy.sh passes after the new text; layers C0 run to its end and C1bz pass.",
+        "NOT verified here: the C1cc step as it runs inside the cluster (the program was run by the same commands directly, not through the layer), and the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push, and whether the C1cc cluster ran the new step or skipped for want of the zenoh-c headers.",
+        "The program covers the doors a participant process uses; the document-door text itself is judged in the dissect library's own C program.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "A consumer asked for a test of the wz_capi_c_e2e_sender_* doors written in C. The Rust test links the rlib and would pass against a header that said something else; a C program compiled against wz_capi_c.h and linked against the library shows the header compiles, the symbols export under the names it declares, and a string the library wrote is released by the consumer's own z_string_drop. tests/c_e2e_sender_consumer.c drives new, wrap, next, set, loan and drop, the refusal as a document, the end of a one-byte counter and the chosen wrap. Its expected frames were computed independently of the library by a bitwise CRC checked against the standard check values, so the sender is not agreeing with itself, and a copy with one golden digit changed fails. It runs in the C1cc cluster, which needs upstream's zenoh.h and skips without it. The deploy refusal of heap_budget_bytes now says why a per-session byte cap cannot exist on a shared heap and names buffer_pools and session_pool.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/c_e2e_sender_consumer.c (new): a C program driving the e2e sender doors against wz_capi_c.h, with frames computed independently of the library.",
+        "scripts/run-ci.sh: Layer C1cc builds libwz_capi_c, compiles and runs that program after the zenoh-c oracle check, and requires its verdict line.",
+        "scripts/lib/deploy_sessions.py, deploy/README.md: the refusal of heap_budget_bytes and its notes say why a per-session cap cannot exist on a shared heap and name buffer_pools and session_pool."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the C program compiles with -Wall -Wextra -Werror against the real zenoh.h and wz_capi_c.h, links the debug library and prints its verdict line, exit 0; a copy with one golden digit changed exits 1 with a FAIL line naming the frame.",
+        "On a build host: deploy_sessions.py --selftest passes and validate-deploy.sh passes after the new text; layers C0 run to its end and C1bz pass.",
+        "NOT verified here: the C1cc step as it runs inside the cluster (the program was run by the same commands directly, not through the layer), and the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push, and whether the C1cc cluster ran the new step or skipped for want of the zenoh-c headers.",
+        "The program covers the doors a participant process uses; the document-door text itself is judged in the dissect library's own C program.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
