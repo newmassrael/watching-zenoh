@@ -10495,6 +10495,9 @@ layer_c1cn_nondefault_features() {
     # table does -- so this line is now the thing that keeps it closed, not a
     # report on how open it is.
     bash scripts/lib/nondefault-tests-gate.sh --census || return 1
+    # R3335 -- the BUILD half of the domain bundles: the census reads their
+    # names, and nothing built one until this line.
+    bash scripts/lib/domain-bundles-gate.sh || return 1
 }
 
 layer_c1i_cargo_test_scouting() {
