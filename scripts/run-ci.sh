@@ -10954,7 +10954,10 @@ layer_c1q_multicast_glue() {
     # host -- which is every lane that runs it -- and would read 8 elsewhere.
     # R2859 — 9 -> 10: `an_iface_pinned_sender_binds_the_interfaces_address`,
     # Linux and `locator-iface` too. PRINTED.
-    _runci_guarded_test C1q 10 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # R3335 -- 10 -> 14: the unpinned multicast LINK's interface choice, two
+    # pure cases and two that read `IP_MULTICAST_IF` back from the kernel
+    # (Linux). PRINTED by the command, not a diff count.
+    _runci_guarded_test C1q 14 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
     # Debt 873 side finding -- a scouting socket goes on past a refused IPv4 membership and
     # a multicast link does not. Its own leg because the one above builds no scouting
