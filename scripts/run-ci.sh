@@ -21260,6 +21260,34 @@ layer_c1cc_api_compat_c() {
         echo "  Layer C1cc SKIP (zenoh-c oracle absent: headers + examples clone)"
         return 0
     fi
+    # R3337 (a consumer asked for a C-side test) -- the SENDER of an end-to-end protected
+    # message, driven from a REAL C translation unit. The Rust test of the same
+    # doors (`tests/e2e_sender_roundtrip.rs`) calls the exported symbols, but
+    # it links the rlib and would pass against a header that said something
+    # else; only C shows that the header compiles, that the symbols export
+    # under the names it declares, and that a string the library wrote is
+    # released by the consumer's own `z_string_drop`. It sits HERE because
+    # `wz_capi_c.h` includes upstream's `zenoh.h` for its string and result
+    # types, and the oracle check above is what establishes that header exists.
+    # The frames it expects were computed independently of the library (see the
+    # file's header), so it is not the library agreeing with itself.
+    (cd crates && cargo build -p wz-capi-c --quiet) || return 1
+    local c_e2e_bin c_e2e_out
+    c_e2e_bin="$(mktemp -d)/c_e2e_sender_consumer"
+    c_e2e_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -I crates/wz-capi-c/include \
+        -I "${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include" \
+        crates/wz-capi-c/tests/c_e2e_sender_consumer.c \
+        -L crates/target/debug -lwz_capi_c -o "$c_e2e_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the e2e sender C consumer did not compile or link"
+        echo "$c_e2e_out"; return 1; }
+    c_e2e_out="$(LD_LIBRARY_PATH=crates/target/debug "$c_e2e_bin" 2>&1)" || {
+        echo "  C1cc FAIL: the e2e sender C consumer failed"
+        echo "$c_e2e_out"; rm -rf "$(dirname "$c_e2e_bin")"; return 1; }
+    rm -rf "$(dirname "$c_e2e_bin")"
+    grep -q '^c_e2e_sender_consumer: ok$' <<<"$c_e2e_out" || {
+        echo "  C1cc FAIL: the e2e sender C consumer printed no verdict"
+        echo "$c_e2e_out"; return 1; }
     # R2278 (open-debt item 612) — RE-DERIVE which build upstream publishes,
     # now that this lane has established an oracle is present. `--require`
     # rather than the bare form on purpose: past this point the checkout and
