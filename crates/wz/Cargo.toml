@@ -1206,7 +1206,7 @@ transport-multilink = ["wz-runtime-tokio?/transport-multilink"]
 transport-stats = ["wz-runtime-tokio?/transport-stats"]
 
 # ============================================================
-# Domain aggregates (19 entries, each = union of domain's atomic set)
+# Domain aggregates (one per atom namespace, each = union of its atomic set)
 #
 # Use a domain-aggregate when you want every capability in a domain
 # without enumerating each atomic. Granular control: hand-pick atomic
@@ -1221,6 +1221,23 @@ domain-access = [
     "access-extauth-usrpwd",
     "access-quota",
 ]
+# R3335 -- the seven atom namespaces that had no bundle (adminspace, api,
+# config, ext, plugin, rest, switchboard), written the way `domain-router` was
+# at R2387: every atom of the namespace, derived from the store, markers
+# included. `adminspace-fixed` is a facade feature of the fixed-memory profile
+# and not a store atom, so it is not listed (the census refuses a name the store
+# does not have).
+domain-adminspace = [
+    "adminspace-config-hotreload",
+    "adminspace-core",
+    "adminspace-introspection-handlers",
+    "adminspace-metrics",
+    "adminspace-plugins-handlers",
+    "adminspace-read",
+    "adminspace-router-linkstate",
+    "adminspace-write",
+]
+domain-api = ["api-compat-c", "api-compat-pico"]
 domain-attachment = ["attachment-bytes", "attachment-encoding-aware"]
 domain-codec = [
     "codec-close",
@@ -1237,6 +1254,12 @@ domain-codec = [
     "codec-response",
     "codec-response-final",
     "codec-scout",
+]
+domain-config = [
+    "config-change-notifier",
+    "config-json-pointer-access",
+    "config-mutate-runtime",
+    "config-plugin-validator",
 ]
 domain-declare = [
     "declare-final",
@@ -1255,6 +1278,18 @@ domain-encoding = [
     "encoding-mime",
     "encoding-protobuf",
     "encoding-utf8",
+]
+domain-ext = [
+    "ext-pubsub-advanced-cache",
+    "ext-pubsub-advanced-history",
+    "ext-pubsub-advanced-publisher",
+    "ext-pubsub-advanced-recovery",
+    "ext-pubsub-advanced-subscriber",
+    "ext-pubsub-fetching-subscriber",
+    "ext-pubsub-group-membership",
+    "ext-pubsub-querying-subscriber",
+    "ext-pubsub-sample-miss-detection",
+    "ext-pubsub-serde-codec",
 ]
 domain-keyexpr = [
     "keyexpr-canon",
@@ -1300,6 +1335,14 @@ domain-platform = [
     "platform-windows",
     "platform-zephyr",
 ]
+domain-plugin = [
+    "plugin-abi-compat",
+    "plugin-dynamic-loading",
+    "plugin-host-trait",
+    "plugin-lifecycle",
+    "plugin-manager",
+    "plugin-static-registration",
+]
 domain-pubsub = [
     "pubsub-allow-loop",
     "pubsub-attachment",
@@ -1336,6 +1379,7 @@ domain-query = [
     # hand-maintained censuses. The store has 11 query atoms, not 10.
     "query-value",
 ]
+domain-rest = ["rest-http-bridge", "rest-sse-subscribe"]
 # R2387 (open-debt item 672) — the `router-*` namespace had NO domain bundle,
 # and that is not a small omission: `domain_census.py` iterates the BUNDLES and
 # derives each one's prefix from its own name, so a namespace nobody wrote a
@@ -1357,13 +1401,27 @@ domain-router = [
     "router-multicast-faces",
     "router-orchestration",
 ]
+# R3335 -- the nine atoms this list omitted were carried by `domain_census.py`
+# since R311y315 and audited at R2363: all nine have a facade feature, none is
+# the `query-value` accident, and four forward to real crate features, so the
+# bundle under-delivered its own domain. Markers are listed as in every other
+# domain (`routing-client` forwards to nothing).
 domain-routing = [
     "routing-client",
+    "routing-data-route-compute",
     "routing-failover",
+    "routing-interceptor-framework",
+    "routing-interceptor-hotreload",
+    "routing-interest-broker",
+    "routing-interest-pending-gc",
+    "routing-namespace",
     "routing-peer",
+    "routing-query-route-compute",
+    "routing-route-cache",
     "routing-router",
     "routing-routes",
     "routing-static-routes",
+    "routing-token-tables",
 ]
 domain-runtime = [
     "runtime-async-std",
@@ -1396,34 +1454,67 @@ domain-session = [
     "session-unicast-accept",
     "session-unicast-open",
 ]
+# R3335 -- the thirteen `storage-backend-*` / `storage-mgr-*` atoms. The
+# sub-namespace reading ("those are the backends, not the domain") was audited
+# at R2363 and refused: `storage-backend` forwards only to the runtime crate, so
+# the bundle's closure reached none of the thirteen, and no mutual-exclusion
+# guard makes them pick-one. Markers (six forward to nothing) are listed as in
+# every other domain.
 domain-storage = [
     "storage-aligner",
     "storage-backend",
+    "storage-backend-capability",
+    "storage-backend-external-db",
+    "storage-backend-filesystem",
+    "storage-backend-memory-volume",
+    "storage-backend-rocksdb",
+    "storage-backend-volume-trait",
     "storage-history",
+    "storage-mgr-complete-flag",
+    "storage-mgr-config",
+    "storage-mgr-dynamic-volume-loading",
+    "storage-mgr-garbage-collection",
+    "storage-mgr-multi-storage-host",
+    "storage-mgr-strip-prefix",
+    "storage-mgr-wildcard-updates",
     "storage-replication",
 ]
+# R3335 -- the one `switchboard` atom has no dash, so it answers to the
+# namespace by name; the census's subset arm has no prefix to grade it by and
+# its presence here is what takes `switchboard` off the unbundled set.
+domain-switchboard = ["switchboard"]
 domain-time = [
     "time-hlc",
     "time-ntp64",
     "time-system-clock",
     "time-timestamp-source",
 ]
+# R3335 -- `transport-link-quic-datagram`, `-unixpipe`, `transport-multilink`,
+# `-qos` and `-stats`, which the audit at R2363 found no policy to withhold: the
+# bundle listed the `transport-link-*` schemes and omitted two of the same
+# shape, and R2363 had closed the `unixpipe` atom while the bundle still did not
+# turn it on.
 domain-transport = [
     "transport-batching",
     "transport-compression",
     "transport-fragmentation",
     "transport-keepalive",
     "transport-link-quic",
+    "transport-link-quic-datagram",
     "transport-link-serial",
     "transport-link-tcp",
     "transport-link-tls",
     "transport-link-udp",
+    "transport-link-unixpipe",
     "transport-link-unixsock",
     "transport-link-vsock",
     "transport-link-ws",
     "transport-lowlatency",
     "transport-multicast",
+    "transport-multilink",
+    "transport-qos",
     "transport-shm",
+    "transport-stats",
     "transport-unicast",
 ]
 

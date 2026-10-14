@@ -58,70 +58,11 @@ import sys
 # rename an atom in the store, touch no Cargo.toml, and the count stays equal so
 # a brand-new omission passes green — the gate built to stop census rot, rotting
 # by the very mechanism it exists to catch. A COUNT IS A CITATION. Pin the set.
-CARRY = {
-    "domain-routing": (
-        {
-            "routing-data-route-compute",
-            "routing-interceptor-framework",
-            "routing-interceptor-hotreload",
-            "routing-interest-broker",
-            "routing-interest-pending-gc",
-            "routing-namespace",
-            "routing-query-route-compute",
-            "routing-route-cache",
-            "routing-token-tables",
-        },
-        "AUDITED R2363, no policy explains the split: all 9 have a facade "
-        "feature (so none is the `query-value` cause), and the only candidate "
-        "rule -- exclude empty-forward markers -- is refuted by `routing-client`, "
-        "which IS listed and forwards to nothing. 4 of the 9 forward to real "
-        "crate features, so the bundle under-delivers its domain. Repair is a "
-        "product change; the row stays until the bundle does",
-    ),
-    "domain-storage": (
-        {
-            "storage-backend-capability",
-            "storage-backend-external-db",
-            "storage-backend-filesystem",
-            "storage-backend-memory-volume",
-            "storage-backend-rocksdb",
-            "storage-backend-volume-trait",
-            "storage-mgr-complete-flag",
-            "storage-mgr-config",
-            "storage-mgr-dynamic-volume-loading",
-            "storage-mgr-garbage-collection",
-            "storage-mgr-multi-storage-host",
-            "storage-mgr-strip-prefix",
-            "storage-mgr-wildcard-updates",
-        },
-        "AUDITED R2363: the sub-namespace DESCRIPTION is exact in both "
-        "directions (13/13 omitted are in those prefixes, no listed member is, "
-        "no non-sub-namespaced storage atom is omitted) but it does NOT justify "
-        "-- `storage-backend` forwards only to the runtime crate, so the "
-        "bundle's closure reaches 0 of the 13. The pick-one defence is refuted "
-        "too: only 7 of the 13 have an implementation behind them (filesystem + "
-        "6 manager atoms), the other 6 forward to nothing, and no mutual-"
-        "exclusion guard exists. Repair must add the implemented 7 and decide "
-        "the 6 markers separately",
-    ),
-    "domain-transport": (
-        {
-            "transport-link-quic-datagram",
-            "transport-link-unixpipe",
-            "transport-multilink",
-            "transport-qos",
-            "transport-stats",
-        },
-        "AUDITED R2363, the clearest of the three: the bundle lists EIGHT "
-        "`transport-link-*` schemes and omits two of the same shape, so no "
-        "naming rule applies, and its closure reaches 0 of the 5. Only "
-        "`quic-datagram` has a defence (it forwards to `transport-link-quic` "
-        "and upstream gives both links one locator scheme); `unixpipe`, "
-        "`multilink`, `qos` and `stats` have none -- and R2363 closed the "
-        "`transport-link-unixpipe` ATOM while this bundle still does not turn "
-        "it on, which is this gate's own subject landing on its own tree",
-    ),
-}
+#
+# R3335 -- the three rows (routing 9, storage 13, transport 5) are repaid: each
+# bundle now names every atom of its namespace, so the dict is empty. It stays
+# as the place a future deferral is recorded, with the reason it is deferred.
+CARRY: dict = {}
 
 # R2387 (open-debt item 672) — the atom NAMESPACES that no `domain-<X>` bundle
 # covers, pinned as a SET for the same reason CARRY is: a count would let a
@@ -154,15 +95,10 @@ CARRY = {
 # one, that is an owner's decision and it belongs in prose next to the entry
 # that records it -- but the entry stays, because the point of this set is that
 # the absence is VISIBLE.
-UNBUNDLED_NAMESPACES = {
-    "adminspace",
-    "api",
-    "config",
-    "ext",
-    "plugin",
-    "rest",
-    "switchboard",
-}
+#
+# R3335 -- the seven namespaces that were here (adminspace, api, config, ext,
+# plugin, rest, switchboard) each have their bundle now, so the set is empty.
+UNBUNDLED_NAMESPACES: set = set()
 
 
 def facade_features(manifest_dir):
