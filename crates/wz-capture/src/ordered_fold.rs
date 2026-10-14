@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! A FOLD OVER A CAPTURE THAT REMEMBERS WHERE IT STOPPED.
+//!
+//! # What this is for
+//!
+//! Every census plane is one fold over the messages of a capture in capture
+//! order: a table, the keyexpr id spaces, and a selector read against the zids the
+//! capture names. Asked again after a few more packets, a plane that starts over
+//! pays for the whole capture each time, so the cost of drawing a census grows with
+//! the capture and a consumer that draws it every step saturates a core. Measured
+//! by that consumer: 0.8 ms at 8,000 records, 57 ms at 40,000, 131 ms at 87,000,
+//! for a document that stayed 31 KB.
+//!
+//! A [`Resumable`] keeps the fold between calls and feeds it only the messages
+//! that arrived since, which is the same fold over the same messages in the same
+//! order and therefore the same table.
+//!
+//! # When it may continue, and what it does when it may not
+//!
+//! The fold continues only when the capture it stopped in is still a PREFIX of the
+//! capture now: the same lists, nothing trimmed from a list's front, every new
+//! message sorting after the last one folded
+//! ([`Dissection::capture_order_since`](crate::Dissection) says all three), the
+//! session grouping equal to the one the fold was made against, and the capture's
+//! origin unchanged. Any other state starts the fold again from the first
+//! message, which is what every plane always did, so the fallback is the old cost
+//! and cannot be a wrong answer.
+//!
+//! The grouping is compared because it is an INPUT of every message the fold
+//! took: which session owns a list, which zids a direction announced, and which
+//! zids a selector's prefix is read against. A handshake that arrives after the
+//! messages it names changes all of them for messages already folded, and a fold
+//! that kept going would hold the old reading.
+//!
+//! # What proves it
+//!
+//! Not a timing. [`FoldStats`] counts the messages a memory folded and the times
+//! it had to start over, so a test states the contract in work: after a step that
+//! adds `n` messages the memory has folded `n` more, and after a step that
+//! violates a condition above it has started over once. The other half is
+//! equality: at every step of a growing capture the resumed document is the
+//! document a fresh fold writes, byte for byte, and that is held across
+//! captures built to violate each condition.
+
+use crate::link::FlowKey;
+use crate::node::SessionGrouping;
+use crate::{Dissection, OrderMarks};
+use wz_session_core::passive::PassiveFrame;
+
+/// What a plane keeps while it folds a capture in capture order.
+pub(crate) trait OrderedFold: Clone {
+    /// Take one message. `list` is its position in
+    /// [`Dissection::message_lists_with_origin`] and `packet` the capture packet
+    /// it resolves to; `grouping` is the capture's session grouping.
+    fn feed(
+        &mut self,
+        flow: &FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &PassiveFrame,
+        grouping: &SessionGrouping,
+    );
+}
+
+/// Work a memory has done: the numbers a test reads instead of a clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FoldStats {
+    /// Messages fed to a fold, summed over every plane that has run.
+    pub messages_folded: u64,
+    /// Times a fold began from the first message because it could not continue.
+    pub restarts: u64,
+    /// Times a fold continued from where it stopped.
+    pub resumes: u64,
+}
+
+/// What a fold stopped at, so the next call can tell whether it may continue.
+#[derive(Debug, Clone)]
+struct Saved<F> {
+    fold: F,
+    grouping: SessionGrouping,
+    origin_ms: Option<u64>,
+    marks: OrderMarks,
+}
+
+/// A fold of one plane, kept between calls.
+#[derive(Debug, Clone)]
+pub(crate) struct Resumable<F> {
+    saved: Option<Saved<F>>,
+}
+
+impl<F> Default for Resumable<F> {
+    fn default() -> Self {
+        Self { saved: None }
+    }
+}
+
+impl<F: OrderedFold> Resumable<F> {
+    /// Bring the fold up to `dissection`, continuing when it may and starting over
+    /// when it may not, and hand it back.
+    ///
+    /// `begin` makes an empty fold against the grouping, and is called only for a
+    /// start. The fold is returned by reference: a plane's reading of it is a
+    /// copy, so continuing it afterwards is not disturbed.
+    pub(crate) fn advance(
+        &mut self,
+        dissection: &Dissection,
+        grouping: &SessionGrouping,
+        stats: &mut FoldStats,
+        begin: impl FnOnce() -> F,
+    ) -> &F {
+        let origin_ms = dissection.capture_origin_ms();
+        let resumed = match &self.saved {
+            Some(s) if s.grouping == *grouping && s.origin_ms == origin_ms => {
+                dissection.capture_order_since(Some(&s.marks))
+            }
+            _ => None,
+        };
+        match resumed {
+            Some((frames, marks)) => {
+                let saved = self.saved.as_mut().expect("a resumed fold has a saved one");
+                for (flow, list, packet, frame) in frames {
+                    saved.fold.feed(&flow, list, packet, frame, grouping);
+                    stats.messages_folded += 1;
+                }
+                saved.marks = marks;
+                stats.resumes += 1;
+            }
+            None => {
+                let (frames, marks) = dissection
+                    .capture_order_since(None)
+                    .expect("a walk with nothing remembered has nothing to disagree with");
+                let mut fold = begin();
+                for (flow, list, packet, frame) in frames {
+                    fold.feed(&flow, list, packet, frame, grouping);
+                    stats.messages_folded += 1;
+                }
+                self.saved = Some(Saved {
+                    fold,
+                    grouping: grouping.clone(),
+                    origin_ms,
+                    marks,
+                });
+                stats.restarts += 1;
+            }
+        }
+        &self.saved.as_ref().expect("saved above").fold
+    }
+}
+
+/// The planes of a census document, kept between calls for ONE selector.
+///
+/// The selector is part of every fold's state (each judged its records against
+/// it), so a different selector is a different memory: asking under another one
+/// starts every plane again, and asking under the same one continues them.
+#[derive(Debug, Default)]
+pub struct CensusMemory {
+    filter: Option<crate::filter::Filter>,
+    /// The node census, which no selector narrows and so outlives a change of
+    /// selector.
+    nodes: crate::node::NodeMemory,
+    keyexprs: Resumable<crate::agg::AggFold>,
+    #[cfg(feature = "network-codecs")]
+    exchanges: Resumable<crate::exchange::ExchangeFold>,
+    #[cfg(feature = "network-codecs")]
+    payloads: Resumable<crate::payload::PayloadFold>,
+    #[cfg(feature = "network-codecs")]
+    interests: Resumable<crate::interest::InterestFold>,
+    stats: FoldStats,
+}
+
+impl CensusMemory {
+    /// A memory that has folded nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The work this memory has done since it was made.
+    pub fn stats(&self) -> FoldStats {
+        self.stats
+    }
+
+    /// The work the node census inside this memory has done.
+    pub fn node_stats(&self) -> crate::node::NodeStats {
+        self.nodes.stats()
+    }
+
+    /// The node census, brought up to `dissection`.
+    pub(crate) fn node_census(&mut self, dissection: &Dissection) -> crate::node::NodeCensus {
+        self.nodes.nodes(dissection)
+    }
+
+    /// Make the memory the one for `filter`: the same selector keeps it, another
+    /// one empties it. The node census is kept, since no selector narrows it.
+    pub(crate) fn for_filter(&mut self, filter: &crate::filter::Filter) {
+        if self.filter.as_ref() != Some(filter) {
+            let stats = self.stats;
+            let nodes = core::mem::take(&mut self.nodes);
+            *self = Self::default();
+            self.stats = stats;
+            self.nodes = nodes;
+            self.filter = Some(filter.clone());
+        }
+    }
+
+    /// The keyexpr plane, brought up to `dissection`.
+    pub(crate) fn keyexprs(
+        &mut self,
+        dissection: &Dissection,
+        grouping: &SessionGrouping,
+    ) -> crate::agg::ThroughputTable {
+        let filter = self
+            .filter
+            .clone()
+            .unwrap_or_else(crate::filter::Filter::any);
+        self.keyexprs
+            .advance(dissection, grouping, &mut self.stats, || {
+                crate::agg::AggFold::begin(dissection, &filter, grouping)
+            })
+            .table()
+    }
+
+    /// The exchange plane, brought up to `dissection`.
+    #[cfg(feature = "network-codecs")]
+    pub(crate) fn exchanges(
+        &mut self,
+        dissection: &Dissection,
+        grouping: &SessionGrouping,
+    ) -> crate::exchange::ExchangeTable {
+        let filter = self
+            .filter
+            .clone()
+            .unwrap_or_else(crate::filter::Filter::any);
+        self.exchanges
+            .advance(dissection, grouping, &mut self.stats, || {
+                crate::exchange::ExchangeFold::begin(dissection, &filter, grouping)
+            })
+            .table()
+    }
+
+    /// The payload plane, brought up to `dissection`.
+    #[cfg(feature = "network-codecs")]
+    pub(crate) fn payloads(
+        &mut self,
+        dissection: &Dissection,
+        grouping: &SessionGrouping,
+    ) -> crate::payload::PayloadCensus {
+        let filter = self
+            .filter
+            .clone()
+            .unwrap_or_else(crate::filter::Filter::any);
+        self.payloads
+            .advance(dissection, grouping, &mut self.stats, || {
+                crate::payload::PayloadFold::begin(dissection, &filter, grouping)
+            })
+            .census()
+    }
+
+    /// The interest plane, brought up to `dissection`.
+    #[cfg(feature = "network-codecs")]
+    pub(crate) fn interests(
+        &mut self,
+        dissection: &Dissection,
+        grouping: &SessionGrouping,
+    ) -> crate::interest::InterestCensus {
+        self.interests
+            .advance(
+                dissection,
+                grouping,
+                &mut self.stats,
+                crate::interest::InterestFold::begin,
+            )
+            .census()
+    }
+}

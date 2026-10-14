@@ -149,6 +149,92 @@ pub fn census_json(d: &crate::Dissection) -> String {
 /// byte span in the selector, the prefix typed and the candidate zids in the
 /// spelling `nodes` prints. The key is ABSENT for a selector that was judged.
 pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) -> String {
+    // Round 2016 (item 268) — built ONCE and lent to every plane that reads it.
+    // The interest plane names the zid that declared each row, and a second
+    // census built for that would be a second answer to "who is in this
+    // capture". The session grouping is derived from it once as well: every
+    // plane below is a fold against it, and each used to rebuild the census to
+    // get it.
+    let nodes = crate::node::nodes(d);
+    let grouping = crate::node::SessionGrouping::of(&nodes);
+    let throughput = crate::agg::aggregate_grouped(d, filter, &grouping);
+    census_document(
+        d,
+        filter,
+        CensusPlanes {
+            #[cfg(feature = "network-codecs")]
+            exchanges: crate::exchange::exchanges_grouped(d, filter, &grouping),
+            #[cfg(feature = "network-codecs")]
+            payloads: crate::payload::payloads_grouped(d, filter, &grouping),
+            #[cfg(feature = "network-codecs")]
+            interests: crate::interest::interests_grouped(d, &grouping),
+            throughput,
+            nodes,
+        },
+    )
+}
+
+/// [`census_json_where`], with the planes that are folds over the messages kept
+/// in `memory` between calls, so a census drawn again after a few more packets
+/// folds the packets that arrived and not the whole capture.
+///
+/// THE DOCUMENT IS THE SAME ONE. Each plane is the fold `census_json_where`
+/// runs, continued instead of restarted (see [`crate::CensusMemory`] for when it
+/// may continue and what it does when it may not), and the document is
+/// assembled by the same function from the same planes, so for any capture and
+/// any selector the two return the same bytes; a test holds that at every step
+/// of a growing capture. `memory` is for ONE selector: asked under another it
+/// starts again.
+///
+/// The node census is kept the same way ([`crate::node::NodeMemory`]): it is
+/// what the grouping, and so the validity of every other plane's fold, is derived
+/// from, so it has to be current before any of them, and it continues unless a
+/// message that arrived names a node. The scouting lists are folded over a copy
+/// on every call.
+pub fn census_json_where_resumable(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    memory: &mut crate::CensusMemory,
+) -> String {
+    memory.for_filter(filter);
+    let nodes = memory.node_census(d);
+    let grouping = crate::node::SessionGrouping::of(&nodes);
+    let throughput = memory.keyexprs(d, &grouping);
+    census_document(
+        d,
+        filter,
+        CensusPlanes {
+            #[cfg(feature = "network-codecs")]
+            exchanges: memory.exchanges(d, &grouping),
+            #[cfg(feature = "network-codecs")]
+            payloads: memory.payloads(d, &grouping),
+            #[cfg(feature = "network-codecs")]
+            interests: memory.interests(d, &grouping),
+            throughput,
+            nodes,
+        },
+    )
+}
+
+/// The planes of a census document, however they were made.
+struct CensusPlanes {
+    throughput: ThroughputTable,
+    nodes: NodeCensus,
+    #[cfg(feature = "network-codecs")]
+    exchanges: crate::exchange::ExchangeTable,
+    #[cfg(feature = "network-codecs")]
+    payloads: crate::payload::PayloadCensus,
+    #[cfg(feature = "network-codecs")]
+    interests: crate::interest::InterestCensus,
+}
+
+/// The census document over planes already computed: the one assembler both
+/// entry points above call, so they cannot write two documents.
+fn census_document(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    planes: CensusPlanes,
+) -> String {
     // R2100 (open-debt item 509) — the document's OWN revision, first key, so
     // a consumer reads it without walking the body. Until this round a key
     // rename here was a break that nothing in the document could express: the
@@ -157,25 +243,19 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::CENSUS, &mut out);
     out.push_str(",\"keyexprs\":");
-    out.push_str(&keyexprs_json(&crate::agg::aggregate_where(d, filter)));
-    // Round 2016 (item 268) — built ONCE and lent to both planes that read it.
-    // The interest plane names the zid that declared each row, and a second
-    // census built for that would be a second answer to "who is in this
-    // capture".
-    let nodes = crate::node::nodes(d);
+    out.push_str(&keyexprs_json(&planes.throughput));
+    let nodes = &planes.nodes;
     out.push_str(",\"nodes\":");
-    out.push_str(&nodes_json(&nodes));
+    out.push_str(&nodes_json(nodes));
     out.push_str(",\"exchanges\":");
     #[cfg(feature = "network-codecs")]
-    out.push_str(&exchanges_json(&crate::exchange::exchanges_where(
-        d, filter,
-    )));
+    out.push_str(&exchanges_json(&planes.exchanges));
     // A plane that cannot be fed is absent, not empty — see the module doc.
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
     out.push_str(",\"payloads\":");
     #[cfg(feature = "network-codecs")]
-    out.push_str(&payloads_json(&crate::payload::payloads_where(d, filter)));
+    out.push_str(&payloads_json(&planes.payloads));
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
     // R311y869 — the INTEREST plane, and the SECOND one the selector does not
@@ -186,9 +266,9 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     out.push_str(",\"interests\":");
     #[cfg(feature = "network-codecs")]
     out.push_str(&interests_json(
-        &crate::interest::interests(d),
-        &crate::agg::aggregate_where(d, filter),
-        &nodes,
+        &planes.interests,
+        &planes.throughput,
+        nodes,
     ));
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
@@ -197,7 +277,7 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     // capture names. Read against the same node census the planes took their
     // grouping from, so the report and the planes cannot disagree about which
     // zids the capture holds. The key is absent for a selector that was judged.
-    push_selector_ambiguities(filter, &nodes, &mut out);
+    push_selector_ambiguities(filter, nodes, &mut out);
     // R311y885 — WHAT THE WALK UNDER THESE PLANES LOST, so a bounded census is
     // not silent about its bound.
     //

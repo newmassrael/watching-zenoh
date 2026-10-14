@@ -1199,7 +1199,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":35,"key":"kind","values":[...],
+ *     {"name":"fields","revision":36,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1557,7 +1557,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 38
+#define WZ_DISSECT_ABI_REVISION 39
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -4366,7 +4366,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":35,"key":"state",
+ *     "value_families":[{"name":"fields","revision":36,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -4732,6 +4732,35 @@ int wz_dissect_live_push(wz_dissect_live *h, unsigned int link_type,
 int wz_dissect_live_follow(wz_dissect_live *h, const unsigned char *bytes,
                            size_t len);
 
+/* (ABI 39) -- HOW MANY BYTES OF THE CONTAINER wz_dissect_live_follow HAS
+ * CONSUMED, written to `*out`.
+ *
+ * WHAT THE RETURN CODE CANNOT SAY. wz_dissect_live_follow takes a prefix that
+ * ends mid-block as legal and reads every block that completed, which is the
+ * right answer for a container still being written and the same answer for one
+ * that was cut: both are WZ_DISSECT_OK. The difference is a number. Hand over
+ * `len` bytes and read this back: if it is below `len`, the handle holds a tail
+ * it did not read. For a container still growing that is a block half present,
+ * and the next call with more bytes picks it up. For a file that will not grow it
+ * is a TRUNCATION, and the number is the offset where it begins. A cut capture is
+ * read by the loop you already have, every intact block drained, plus this figure
+ * to report where it was cut, and wz_dissect_live_end after the last call if the
+ * file has ended. Nothing here is a second reader of the format.
+ *
+ *     wz_dissect_live *h;
+ *     wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+ *     wz_dissect_live_follow(h, file, file_len);
+ *     size_t read;
+ *     wz_dissect_live_followed(h, &read);
+ *     if (read < file_len) { ... file_len - read bytes were not read ... }
+ *
+ * The figure is the handle's own, counted from offset zero across every call, so
+ * it is also where a caller resumes after a refusal. It never exceeds the largest
+ * `len` passed.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null handle or a null `out`. */
+int wz_dissect_live_followed(const wz_dissect_live *h, size_t *out);
+
 /* Take the messages decoded since the last drain into `out`, which holds
  * `cap` records; `*written` receives how many were filled.
  *
@@ -5020,6 +5049,21 @@ int wz_dissect_pcap_frame_bytes(const unsigned char *bytes, size_t len,
  * It is a READ, and `h` is const to say so. Drawing a window must not change
  * what the tap decodes; the one act that would is wz_dissect_live_end below.
  *
+ * WHAT A CALL COSTS. The planes that are folds over the messages are kept
+ * between calls, for the selector of the last call, so a census drawn again
+ * after a few more packets folds those packets and not the capture. The
+ * document is the one a call that starts over writes, byte for byte. A call
+ * starts over when the capture is not the last one plus messages that sort
+ * after it (a list trimmed at its front, a flow that appeared in front of the
+ * datagram flows, a message decoded after a packet that followed it), when the
+ * session grouping changes (a message that names a node), or when the selector
+ * is another one. Two costs remain: the scouting lists are folded on every
+ * call, and every exchange still open is judged on every call, so a capture
+ * whose queries never close pays for each. Measured on this library's own test
+ * population and not on a consumer's capture, with 40,000 messages held: 1.5 ms
+ * for a call that continues, 76 ms for one that starts over. The two numbers
+ * were taken on a loaded build host and differ by their ratio, not their size.
+ *
  * The document is the one the census doors emit, so a consumer keeps one
  * reader and one schema across both halves. A selector that does not compile
  * returns WZ_DISSECT_ERR_SELECTOR and no string; for the position, call
@@ -5238,6 +5282,57 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  * completed the chain, and never as a change to an earlier fragment's row.
  * wz_dissect_live_end releases held messages as new rows and changes no row
  * already written. The flow object around the rows is not covered.
+ *
+ * WHICH HELD ROWS MOVED IS SAID, UNDER `revised` (field-document revision 36).
+ * The cells above can read differently at a later state, and a consumer holding
+ * the row it was given had no way to know; it re-read the whole document when
+ * the capture ended. The document now carries
+ *
+ *     "revised":[<row>, <row>, ...]
+ *
+ * after the flows: each row whose sequence number is AT OR BELOW the cursor,
+ * which this handle wrote before and whose text has since changed, written again
+ * WHOLE as it reads now, in sequence order. Replace the row you hold by its
+ * `seq`; append `messages` as before. The key is on every since-document and
+ * the list is empty unless a held row moved.
+ *
+ * What the handle remembers is a digest of every row it writes, for ONE
+ * declaration text. A different `declarations` text empties it, so ask from 0
+ * after changing it. The comparison is of whole rows, and it is made only when
+ * it could find something: a capture that only grew (the same message lists,
+ * nothing trimmed from a list's front, every new message after the last one seen,
+ * the same session grouping and capture origin) cannot have moved a row held,
+ * because a row is a function of its own frame and of the capture's PREFIX up to
+ * it, and the list is empty without a comparison. Any other state compares every
+ * row once, which costs a walk of the whole capture.
+ *
+ * NOT CLAIMED. A row this handle never wrote has no digest and is never listed
+ * (a first call with a cursor above 0 holds nothing to compare against). A row
+ * whose message bytes a ceiling has since discarded reads `declined` when asked
+ * again, and that is not a correction -- the row you hold stays true -- so it is
+ * never listed.
+ *
+ * WHAT A CALL COSTS. After a capture has only GROWN, a call walks the messages
+ * that arrived and writes the rows after the cursor: the cost follows what is
+ * new and not the capture. The walk continues from where the last one stopped
+ * when all of these hold, and is otherwise the whole capture's, exactly as it
+ * was before:
+ *   - the capture is the last one plus messages that sort after it: no list
+ *     trimmed at its front, no list that appeared in front of another (a stream
+ *     flow in front of the datagram flows), no message decoded after a packet
+ *     that followed it (a stream segment held behind a gap);
+ *   - the session grouping and the capture's origin are unchanged;
+ *   - the cursor is not below the one the last document gave
+ *     (`window.through_seq`);
+ *   - every row has a sequence number;
+ *   - no declaration rule binds a key to an end-to-end profile;
+ *   - no QUIC list holds a message;
+ *   - the container you pass is the one the last call read.
+ * The node census the grouping comes from is kept the same way and begins again
+ * only when a message that arrived names a node (an INIT or a JOIN). Measured on
+ * this library's own test population and not on a consumer's capture, with
+ * 40,000 messages held: 0.6 ms for a call that continues, 15.7 ms for the walk
+ * that starts over.
  *
  * TAKE IT AT THE STATE THE DRAIN WAS TAKEN AT. wz_dissect_live_end releases what
  * a reassembly gap was holding, so a document taken before it and records

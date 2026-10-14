@@ -534,6 +534,16 @@ ONLY_CAPI = {
         "no handle to keep it in.",
         (),
     ),
+    "how many bytes of a followed container were consumed": (
+        "wz_dissect_live_followed",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and feeds a container through `wz_dissect_live_follow` cannot tell a cut "
+        "capture from one still growing by the return code, and the figure is "
+        "state the handle alone holds. The command line reads a whole file once "
+        "and reports a truncation as an error with its offset, so it has no "
+        "second call to ask the question in.",
+        (),
+    ),
     "a protected frame's header compared with the values a caller expects": (
         "wz_dissect_e2e_open_expecting",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

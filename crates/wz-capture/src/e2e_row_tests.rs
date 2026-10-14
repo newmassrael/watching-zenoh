@@ -943,6 +943,66 @@ fn a_row_the_cursor_passes_over_still_moves_the_counter_of_the_rows_after_it() {
     }
 }
 
+/// A RUN WITH A PROFILE RULE IS WALKED WHOLE BY THE SINCE DOOR THAT REMEMBERS.
+///
+/// A walk that continued from where the last one stopped would not visit the rows
+/// the cursor passes, and a counter is a fact about the frames before a row, so the
+/// row after the cursor would be judged as the first frame its slot ever received.
+/// The memory therefore does not resume when a rule binds a key to a profile: the
+/// document is the plain since document, with the repetition judged as one, and
+/// the memory says it walked whole.
+#[test]
+fn a_run_with_a_profile_rule_is_walked_whole_by_the_door_that_remembers() {
+    use crate::fields_json::{fields_json_since_remembering, FieldsMemory};
+    for link in LINKS {
+        let mut wire = Wire::new(link, true);
+        wire.put(true, None, "demo/e2e/a", &frame(10, b"body"));
+        wire.put(true, None, "demo/e2e/a", &frame(11, b"body"));
+        let text = rules("demo/e2e/**=prof\n");
+        let mut map = FormatMap::new();
+        map.declare_all(&text).expect("installs");
+        let mut memory = FieldsMemory::new();
+        let _ = fields_json_since_remembering(
+            &wire.d,
+            &wire.file(),
+            Some(&map),
+            &text,
+            &Numbered,
+            Since {
+                after_seq: 0,
+                through_seq: 4,
+            },
+            &mut memory,
+        );
+        // The third frame repeats the second.
+        wire.put(true, None, "demo/e2e/a", &frame(11, b"body"));
+        let file = wire.file();
+        let since = Since {
+            after_seq: 4,
+            through_seq: 5,
+        };
+        let doc = fields_json_since_remembering(
+            &wire.d,
+            &file,
+            Some(&map),
+            &text,
+            &Numbered,
+            since,
+            &mut memory,
+        );
+        let plain_run = Declarations::new(&map);
+        let plain =
+            fields_json_since_coordinated(&wire.d, &file, Some(&plain_run), &Numbered, since);
+        assert_eq!(doc, plain, "{link:?}");
+        assert_eq!(verdicts(&doc), expect(&[REPEAT]), "{link:?}: {doc}");
+        assert_eq!(
+            memory.stats().resumed,
+            0,
+            "{link:?}: a run with a profile rule must not be resumed"
+        );
+    }
+}
+
 #[test]
 fn a_cursor_with_no_profile_rule_does_not_walk_the_rows_it_passes_over() {
     for link in LINKS {

@@ -488,6 +488,27 @@ impl NodeCensus {
         // one number.
         list: usize,
     ) {
+        self.observe_flow_from(flow, frames, list, 0, &mut [None, None]);
+    }
+
+    /// [`Self::observe_flow`] from message `start` of the list, with the two ends
+    /// the earlier messages settled handed in and handed back.
+    ///
+    /// With `start` 0 and no ends this IS `observe_flow`. With the ends a first
+    /// call left and a `start` past the messages it took, it folds only what
+    /// arrived since, and is the same fold as one call over the whole list WHEN
+    /// the new messages name no node: the first pass then settles nothing new, so
+    /// the ends the second pass attributes bytes by are the ones the earlier bytes
+    /// were attributed by. A caller that cannot promise that (a new message that
+    /// names a zid) calls from 0.
+    pub(crate) fn observe_flow_from(
+        &mut self,
+        flow: &FlowKey,
+        frames: &[PassiveFrame],
+        list: usize,
+        start: usize,
+        ends: &mut [Option<usize>; 2],
+    ) {
         // R2206 (open-debt item 561) — the space is read off the frames rather
         // than handed in. It arrived as an argument decided one layer up by a
         // match over the message lists, and that second opinion was item 561.
@@ -503,8 +524,7 @@ impl NodeCensus {
         // flow that is genuinely reused by a different node names the new one —
         // taking the latest is what keeps the link current rather than
         // remembering a node that has gone.
-        let mut ends: [Option<usize>; 2] = [None, None];
-        for frame in frames {
+        for frame in &frames[start..] {
             let Some((zid, whatami, kind)) = named_zid(frame) else {
                 continue;
             };
@@ -548,7 +568,7 @@ impl NodeCensus {
         // owns a direction is settled by the handshake, and a fold that
         // attributed bytes as it walked would credit everything before the
         // INIT to nobody even on a flow whose INIT arrives one message later.
-        for frame in frames {
+        for frame in &frames[start..] {
             // Once per unit. See `ObservedNode::wire_bytes`.
             if frame.batch_index != 0 {
                 continue;
@@ -844,6 +864,196 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
     census
 }
 
+/// Does this message NAME a node? An INIT or a JOIN: the two messages
+/// [`named_zid`] reads a zid from, asked without building the zid.
+fn names_a_zid(frame: &PassiveFrame) -> bool {
+    matches!(
+        &frame.frame,
+        Ok(InboundFrame::Init { .. } | InboundFrame::Join { .. })
+    )
+}
+
+/// What a [`NodeMemory`] has done: messages it took, folds it continued and folds
+/// it began again. What a test reads instead of a clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeStats {
+    /// Messages fed to the census, over every list.
+    pub messages_folded: u64,
+    /// Calls that began from the first message.
+    pub restarts: u64,
+    /// Calls that continued from where the last one stopped.
+    pub resumes: u64,
+}
+
+/// The lists a node census stopped at, and the two ends each had settled.
+#[derive(Debug)]
+struct NodeSaved {
+    /// The census of the message lists alone: scouting is folded over a COPY, so
+    /// it never has to be undone.
+    census: NodeCensus,
+    lists: Vec<crate::ListMark>,
+    ends: Vec<[Option<usize>; 2]>,
+}
+
+/// The node census of a capture, kept between calls so that a call after a few
+/// more packets folds those packets and not the capture.
+///
+/// # When it continues
+///
+/// When the capture it stopped in is still a PREFIX of the capture now (the same
+/// lists, nothing trimmed from a list's front: see
+/// `Dissection::capture_order_since`) AND no message that arrived names a
+/// zid. The second half is this plane's own condition. Which node owns a
+/// direction is settled by the handshake, and bytes are credited to it after the
+/// list's messages have all been read, so a handshake that arrives after the
+/// bytes it would own changes who they were credited to. A message that names a
+/// node therefore starts the census again; a capture after its handshake, which is
+/// nearly all of one, does not.
+///
+/// The scouting lists are folded into a copy on every call: they are not message
+/// lists, they are small, and a node first named by a HELLO is interned after
+/// every node the transport named, an order a continuation could not keep.
+///
+/// The result is the census [`nodes`] builds for the same capture, and a test
+/// holds the two equal at every step of a growing one.
+#[derive(Debug, Default)]
+pub struct NodeMemory {
+    saved: Option<NodeSaved>,
+    stats: NodeStats,
+}
+
+impl NodeMemory {
+    /// A memory that has folded nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The work this memory has done since it was made.
+    pub fn stats(&self) -> NodeStats {
+        self.stats
+    }
+
+    /// The node census of `dissection`, continuing the last one when it may.
+    pub fn nodes(&mut self, dissection: &crate::Dissection) -> NodeCensus {
+        let current: Vec<(
+            FlowKey,
+            crate::MessageListOrigin,
+            &wz_session_core::passive_messages::MessageList,
+        )> = dissection.message_lists_with_origin().collect();
+        if !self.resume(&current) {
+            self.restart(&current);
+        }
+        let mut census = self
+            .saved
+            .as_ref()
+            .expect("a census was kept above")
+            .census
+            .clone();
+        for flow in dissection.datagram_flows() {
+            census.observe_scouting(&flow.flow, &flow.scouting);
+        }
+        census
+    }
+
+    fn restart(
+        &mut self,
+        current: &[(
+            FlowKey,
+            crate::MessageListOrigin,
+            &wz_session_core::passive_messages::MessageList,
+        )],
+    ) {
+        let mut census = NodeCensus::new();
+        let mut lists = Vec::with_capacity(current.len());
+        let mut all_ends = Vec::with_capacity(current.len());
+        for (list, (flow, origin, frames)) in current.iter().enumerate() {
+            let mut ends = [None, None];
+            census.observe_flow_from(flow, frames, list, 0, &mut ends);
+            self.stats.messages_folded += frames.len() as u64;
+            lists.push(crate::ListMark {
+                flow: *flow,
+                origin: *origin,
+                first_produced: frames.produced() - frames.len() as u64,
+                produced: frames.produced(),
+                last_packet: 0,
+            });
+            all_ends.push(ends);
+        }
+        self.saved = Some(NodeSaved {
+            census,
+            lists,
+            ends: all_ends,
+        });
+        self.stats.restarts += 1;
+    }
+
+    /// Continue from the last call if the capture still allows it. Nothing is
+    /// touched until every condition has held, so a `false` leaves the memory as
+    /// it was for [`Self::restart`] to replace.
+    fn resume(
+        &mut self,
+        current: &[(
+            FlowKey,
+            crate::MessageListOrigin,
+            &wz_session_core::passive_messages::MessageList,
+        )],
+    ) -> bool {
+        let Some(saved) = self.saved.as_mut() else {
+            return false;
+        };
+        let Some(continues) = crate::list_continuations(current, Some(&saved.lists)) else {
+            return false;
+        };
+        for (list, (flow, origin, frames)) in current.iter().enumerate() {
+            let Some(at) = continues[list] else {
+                continue;
+            };
+            let mark = &saved.lists[at];
+            let first = frames.produced() - frames.len() as u64;
+            if mark.flow != *flow
+                || mark.origin != *origin
+                || mark.first_produced != first
+                || mark.produced > frames.produced()
+            {
+                return false;
+            }
+            let start = (mark.produced - mark.first_produced) as usize;
+            if frames[start..].iter().any(names_a_zid) {
+                return false;
+            }
+        }
+        let mut lists = Vec::with_capacity(current.len());
+        let mut all_ends = Vec::with_capacity(current.len());
+        for (list, (flow, origin, frames)) in current.iter().enumerate() {
+            let (start, mut ends) = match continues[list] {
+                Some(at) => (
+                    (saved.lists[at].produced - saved.lists[at].first_produced) as usize,
+                    saved.ends[at],
+                ),
+                None => (0, [None, None]),
+            };
+            if start < frames.len() {
+                saved
+                    .census
+                    .observe_flow_from(flow, frames, list, start, &mut ends);
+                self.stats.messages_folded += (frames.len() - start) as u64;
+            }
+            lists.push(crate::ListMark {
+                flow: *flow,
+                origin: *origin,
+                first_produced: frames.produced() - frames.len() as u64,
+                produced: frames.produced(),
+                last_packet: 0,
+            });
+            all_ends.push(ends);
+        }
+        saved.lists = lists;
+        saved.ends = all_ends;
+        self.stats.resumes += 1;
+        true
+    }
+}
+
 /// R2457 (open-debt item 702) — which SESSION each message list belongs to, and
 /// which side of it each direction is.
 ///
@@ -889,7 +1099,7 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
 /// it is REPORTED as such: a reference missed under a `Flow` owner is
 /// [`crate::agg::UnresolvedCause::NoSession`], which tells a consumer the
 /// declaration may be one flow over rather than absent.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionGrouping {
     /// Per list index, the owner of each direction. Absent for a list this
     /// capture could not attribute to a session.

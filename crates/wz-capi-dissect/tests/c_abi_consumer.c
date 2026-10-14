@@ -1040,6 +1040,7 @@ static int check_follow_door(void) {
     size_t whole_written;
     size_t cut;
     size_t i;
+    size_t read = 0;
     size_t resumed_after_a_partial_record = 0;
     int rc;
 
@@ -1072,6 +1073,16 @@ static int check_follow_door(void) {
          * which is pcap format knowledge outside this library again. */
         rc = wz_dissect_live_follow(h, file, cut);
         CHECK(rc == WZ_DISSECT_OK, "follow of a %zu-byte prefix rc=%d", cut, rc);
+        /* (ABI 39) -- and the figure that tells a cut from a boundary: what was
+         * read never exceeds what was handed over, falls short of the whole
+         * container for every prefix of it, and equals it for the whole one. */
+        read = 999;
+        rc = wz_dissect_live_followed(h, &read);
+        CHECK(rc == WZ_DISSECT_OK, "followed at cut %zu rc=%d", cut, rc);
+        CHECK(read <= cut, "followed says %zu read of a %zu-byte prefix", read, cut);
+        CHECK((cut == file_len) == (read == file_len),
+              "followed=%zu of %zu at cut %zu: the whole container is read "
+              "exactly when all of it was handed over", read, file_len, cut);
         written = 999;
         rc = wz_dissect_live_drain(h, part, 8, &written);
         CHECK(rc == WZ_DISSECT_OK, "drain at cut %zu rc=%d", cut, rc);
@@ -1145,6 +1156,16 @@ static int check_follow_door(void) {
     CHECK(rc == WZ_DISSECT_OK, "null-arg live_open rc=%d", rc);
     rc = wz_dissect_live_follow(h, NULL, 0);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes follow rc=%d", rc);
+    /* (ABI 39) -- the figure's own nulls, and 0 for a handle that has read
+     * nothing, which is not an error. */
+    read = 999;
+    rc = wz_dissect_live_followed(h, &read);
+    CHECK(rc == WZ_DISSECT_OK && read == 0, "followed on a fresh handle rc=%d read=%zu",
+          rc, read);
+    rc = wz_dissect_live_followed(NULL, &read);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle followed rc=%d", rc);
+    rc = wz_dissect_live_followed(h, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out followed rc=%d", rc);
     wz_dissect_live_close(h);
     return 0;
 }
@@ -3299,8 +3320,11 @@ int main(void) {
      * and `unopened_reason`, a closed word beside `why` on a block that is not
      * a frame, declared as a discriminant family (the word
      * `payload_shorter_than_header` brings `payload_bytes`). Keys arrive and
-     * a family is declared; nothing retires. */
-    revisioned[2].revision = 35;
+     * a family is declared; nothing retires.
+     * 36: the `since` document gains `revised`, the rows at or below the cursor
+     * whose digest moved since the last call, written again whole; it is
+     * empty when the capture only grew. A key arrives; nothing retires. */
+    revisioned[2].revision = 36;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

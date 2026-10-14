@@ -379,6 +379,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 38, for `wz_dissect_live_selection_since`: the selector's verdict over the
     // rows after a cursor, and the earlier rows whose word has moved. A new
     // document, `selection_since`, at revision 1.
+    // 39, for `wz_dissect_live_followed`: how many bytes of the container
+    // `wz_dissect_live_follow` has consumed, so a cut capture can be told from
+    // one still growing.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -396,7 +399,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 38;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 39;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3262,6 +3265,48 @@ pub unsafe extern "C" fn wz_dissect_live_follow(
     }
 }
 
+/// (ABI 39) — HOW MANY BYTES OF THE CONTAINER [`wz_dissect_live_follow`] HAS
+/// CONSUMED, written to `out`.
+///
+/// # What it answers that nothing else could
+///
+/// `wz_dissect_live_follow` takes a prefix that ends mid-block as legal and reads
+/// every block that completed, which is the right answer for a container still
+/// being written and the same answer for one that was cut. From the return code
+/// the two cannot be told apart: both are `WZ_DISSECT_OK`. The difference is a
+/// number. A caller that handed over `len` bytes and gets back fewer holds a tail
+/// the handle did not read: a block half present, which the next call with more
+/// bytes picks up, or, for a file that will not grow, a truncation, and the number
+/// is where it begins. Reading a cut capture is therefore one loop the consumer
+/// already has plus this figure, and not a second reader of the format.
+///
+/// The figure is the handle's own, counted from offset zero across every call, so
+/// it is also what a caller resuming after a refusal restarts from. It never
+/// exceeds the `len` of the largest prefix passed.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null handle or a null `out`.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed, and `out` a writable
+/// `size_t`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_followed(
+    handle: *const live::LiveDissection,
+    out: *mut usize,
+) -> c_int {
+    if handle.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let consumed = unsafe { (*handle).followed() };
+    // SAFETY: caller contract above.
+    unsafe { *out = consumed };
+    WZ_DISSECT_OK
+}
+
 /// R2102 — take the messages decoded since the last drain, into a buffer YOU
 /// own.
 ///
@@ -3975,9 +4020,8 @@ pub unsafe extern "C" fn wz_dissect_live_fields_since(
         // SAFETY: caller contract above; non-null whenever `len` is non-zero.
         unsafe { core::slice::from_raw_parts(bytes, len) }
     };
-    let declared = wz_capture::payload_decode::Declarations::new(&map);
     // SAFETY: caller contract above.
-    let doc = unsafe { (*handle).fields_since(capture, Some(&declared), after_seq) };
+    let doc = unsafe { (*handle).fields_since(capture, Some(&map), text, after_seq) };
     write_string(doc, out)
 }
 
@@ -8029,7 +8073,9 @@ mod tests {
         // released by `wz_dissect_string_free`; the handle and the selector are
         // what `wz_dissect_live_selection` takes, the cursor a `uint64_t`, and no
         // struct is new. The handle gains state of its own, the words it said.
-        assert_eq!(wz_dissect_abi_version(), 38);
+        // 39, for `wz_dissect_live_followed`: one symbol, a `size_t` written
+        // through a pointer the caller owns; no string, no struct, no state.
+        assert_eq!(wz_dissect_abi_version(), 39);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -16393,6 +16439,121 @@ mod tests {
             unsafe { wz_dissect_live_follow(h, core::ptr::null(), 0) },
             WZ_DISSECT_ERR_INVALID_ARG
         );
+        unsafe { wz_dissect_live_close(h) };
+    }
+
+    /// `wz_dissect_live_followed` the way C calls it, with the code.
+    fn followed_door(handle: *const live::LiveDissection) -> (c_int, usize) {
+        let mut out = usize::MAX;
+        let rc = unsafe { wz_dissect_live_followed(handle, &mut out) };
+        (rc, out)
+    }
+
+    /// (ABI 39) THE FIGURE NAMES THE PREFIX THAT WAS READ, EXACTLY.
+    ///
+    /// For a cut of a pcapng and of a classic pcap, at every byte offset: the
+    /// door reports what the handle consumed (the same number the Rust accessor
+    /// gives), never more than was handed over, never less than an earlier cut
+    /// reported, and the records drained at a cut are the records of the prefix
+    /// the figure names, read by a fresh handle that was given no byte beyond it.
+    /// That last equality is what makes the figure the answer to "where was it
+    /// cut" and not a number that merely grows: a tail the handle claimed to have
+    /// read but had not would put records in one list and not the other.
+    ///
+    /// ANTI-VACUITY: each format has offsets the figure is below the cut (a
+    /// truncation) and offsets it equals the cut (a block boundary), or the
+    /// equality is over one kind of cut only.
+    #[test]
+    fn followed_names_the_prefix_that_was_read_where_a_capture_was_cut() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let packets = vec![packet.clone(), packet.clone(), packet];
+        let pcapng = wz_capture::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000, &packets[0]),
+                (0, 2_000, &packets[1]),
+                (0, 3_000, &packets[2]),
+            ],
+        );
+        let pcap = pcap_prefix(&packets, 3);
+        for (format, container) in [("pcapng", pcapng), ("pcap", pcap)] {
+            let mut below = 0usize;
+            let mut on_boundary = 0usize;
+            let mut previous = 0usize;
+            for cut in 0..=container.len() {
+                let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+                assert_eq!(
+                    follow(h, &container[..cut]),
+                    WZ_DISSECT_OK,
+                    "{format} {cut}"
+                );
+                let (rc, read) = followed_door(h);
+                assert_eq!(rc, WZ_DISSECT_OK);
+                assert_eq!(
+                    read,
+                    unsafe { &*h }.followed(),
+                    "{format}: the door and the accessor"
+                );
+                assert!(read <= cut, "{format}: read {read} of {cut} handed over");
+                assert!(
+                    read >= previous,
+                    "{format}: the figure went down at cut {cut}"
+                );
+                previous = read;
+                let got = drain_all(h).len();
+                unsafe { wz_dissect_live_close(h) };
+
+                let fresh = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+                assert_eq!(follow(fresh, &container[..read]), WZ_DISSECT_OK);
+                assert_eq!(
+                    followed_door(fresh).1,
+                    read,
+                    "{format}: the prefix the figure names reads to itself at cut {cut}"
+                );
+                let of_prefix = drain_all(fresh).len();
+                unsafe { wz_dissect_live_close(fresh) };
+                assert_eq!(
+                    got, of_prefix,
+                    "{format}: cut {cut} drained {got} record(s) and the {read}-byte prefix \
+                     the figure names drains {of_prefix}"
+                );
+                if read < cut {
+                    below += 1;
+                } else {
+                    on_boundary += 1;
+                }
+            }
+            assert!(
+                below > 0,
+                "{format}: no cut fell mid-block, so a truncation was never named"
+            );
+            assert!(on_boundary > 0, "{format}: no cut fell on a boundary");
+            // The whole file reads to its own length.
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(follow(h, &container), WZ_DISSECT_OK);
+            assert_eq!(
+                followed_door(h),
+                (WZ_DISSECT_OK, container.len()),
+                "{format}"
+            );
+            unsafe { wz_dissect_live_close(h) };
+        }
+    }
+
+    /// (ABI 39) A null handle or a null out is refused, and `out` is not written.
+    #[test]
+    fn followed_refuses_null_arguments_and_writes_nothing() {
+        assert_eq!(
+            followed_door(core::ptr::null()),
+            (WZ_DISSECT_ERR_INVALID_ARG, usize::MAX)
+        );
+        let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        assert_eq!(
+            unsafe { wz_dissect_live_followed(h, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        // A handle that has followed nothing says 0, not an error.
+        assert_eq!(followed_door(h), (WZ_DISSECT_OK, 0));
         unsafe { wz_dissect_live_close(h) };
     }
 

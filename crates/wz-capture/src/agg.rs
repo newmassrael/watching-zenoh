@@ -2565,19 +2565,6 @@ pub fn aggregate_grouped(
     filter: &Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> ThroughputTable {
-    // A `zid` prefix in the selector is read against THIS capture's zids before
-    // any record is judged: the grouping already holds the node census, and the
-    // same selector can be a unique prefix here and an ambiguous one in the
-    // next capture. See `Filter::resolved_against`.
-    let resolved = filter.resolved_against(grouping.named_zids());
-    let filter = resolved.filter();
-    let mut table = ThroughputTable::new();
-    // R311y638 (§1.1r) — the origin comes from the DISSECTION, which is the
-    // only thing that has seen every packet. Set before the first fold, so no
-    // record is judged against a half-known capture.
-    table.capture_origin_ms = dissection.capture_origin_ms();
-    // R2457 — ONE instance for the capture. Per-list it was the defect.
-    let mut spaces = KeyexprSpaces::new();
     // R311y721 — EVERY list this capture holds, through the dissection's own
     // enumeration. Naming the two flow tables here is what left this plane
     // blind to a serial line, which is in neither: see
@@ -2591,23 +2578,90 @@ pub fn aggregate_grouped(
     // `UnresolvedCause::NoDeclaration` — a statement about the SESSION, made
     // because of where the bytes were rather than when.
     //
-    // `enter_flow` moves inside the loop with the frame, since consecutive
-    // frames need no longer belong to one list. It sets two slots; it is not a
-    // per-list setup step that this is now repeating.
-    //
     // The rule the heading protects is untouched: the order is the capture's, so
     // a declaration still cannot name a reference that preceded it. What changes
     // is only that "preceded" is now measured on the capture and not on the walk.
-    for (_flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        spaces.enter_flow(grouping.owners(list));
+    //
+    // The fold itself is [`AggFold`], one value that a caller may also keep and
+    // continue (see `crate::ordered_fold`), so this walk and a resumed one run the
+    // SAME code over the same messages.
+    use crate::ordered_fold::OrderedFold;
+    let mut fold = AggFold::begin(dissection, filter, grouping);
+    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
+        fold.feed(&flow, list, packet, frame, grouping);
+    }
+    fold.table
+}
+
+/// The keyexpr plane's fold over the messages of a capture, in capture order, as
+/// a value that can be kept and continued.
+///
+/// Everything [`aggregate_grouped`] used to hold in locals is a field here: the
+/// table, the id spaces ONE instance for the capture (per list it was the defect
+/// R2457 fixed), and the selector with its `zid` terms already read against THIS
+/// capture's zids. That last is why a fold is made against a grouping and is only
+/// continued against an equal one: the same selector can be a unique prefix in one
+/// capture and an ambiguous one in the next (see `Filter::resolved_against`).
+#[derive(Debug, Clone)]
+pub(crate) struct AggFold {
+    table: ThroughputTable,
+    spaces: KeyexprSpaces,
+    filter: Filter,
+}
+
+impl AggFold {
+    /// A fold that has taken no message.
+    pub(crate) fn begin(
+        dissection: &crate::Dissection,
+        filter: &Filter,
+        grouping: &crate::node::SessionGrouping,
+    ) -> Self {
+        // A `zid` prefix in the selector is read against THIS capture's zids before
+        // any record is judged: the grouping already holds the node census.
+        let resolved = filter.resolved_against(grouping.named_zids());
+        let mut table = ThroughputTable::new();
+        // R311y638 (§1.1r) — the origin comes from the DISSECTION, which is the
+        // only thing that has seen every packet. Set before the first fold, so no
+        // record is judged against a half-known capture.
+        table.capture_origin_ms = dissection.capture_origin_ms();
+        Self {
+            table,
+            spaces: KeyexprSpaces::new(),
+            filter: resolved.filter().clone(),
+        }
+    }
+
+    /// The table as it stands, for a caller that keeps folding.
+    pub(crate) fn table(&self) -> ThroughputTable {
+        self.table.clone()
+    }
+}
+
+impl crate::ordered_fold::OrderedFold for AggFold {
+    fn feed(
+        &mut self,
+        _flow: &crate::link::FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &wz_session_core::passive::PassiveFrame,
+        grouping: &crate::node::SessionGrouping,
+    ) {
+        // `enter_flow` moves with the frame, since consecutive frames need no
+        // longer belong to one list. It sets two slots; it is not a per-list
+        // setup step.
+        self.spaces.enter_flow(grouping.owners(list));
         // R2513 — see `KeyexprSpaces::at_packet`. A capture-ordered walk does
         // not NEED the anchor; setting it keeps this plane's answer identical to
         // the readers that do need it, rather than leaving two rules in one
         // resolver.
-        spaces.at_packet(packet);
-        table.observe_frame_where(frame, filter, grouping.context(list), &mut spaces);
+        self.spaces.at_packet(packet);
+        self.table.observe_frame_where(
+            frame,
+            &self.filter,
+            grouping.context(list),
+            &mut self.spaces,
+        );
     }
-    table
 }
 
 /// R311y621 (§1.1k) — what this plane can still do when the DECODER cannot

@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 38
+EXPECTED_VERSION = 39
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -373,6 +373,12 @@ EXPECTED_SYMBOLS = {
     # no callback runs. The handle gains state of its own (the words it said, for
     # one selector), which it frees with itself in `wz_dissect_live_close`.
     "wz_dissect_live_selection_since",
+    # (ABI 39) -- how many bytes of the container `wz_dissect_live_follow` has
+    # consumed. One symbol and no document: a `size_t` the CALLER owns, written
+    # through a pointer, so no string is returned and nothing is allocated or
+    # retained. It tells a capture that was cut from one still growing, which the
+    # follow door's return code cannot.
+    "wz_dissect_live_followed",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

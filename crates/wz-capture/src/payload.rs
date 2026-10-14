@@ -1135,7 +1135,7 @@ pub struct PayloadCensus {
     /// it are one exchange, judged once by [`crate::exchange::ExchangeTable`],
     /// which holds the rows of both. A document that wants every row reads the two
     /// together (`crate::fields_json::RowJudgement`).
-    row_verdicts: alloc::collections::BTreeMap<RowKey, RowVerdict>,
+    row_verdicts: crate::overlay_map::OverlayMap<RowKey, RowVerdict>,
     rows: alloc::collections::BTreeMap<String, EncodingRow>,
     contradictions: Vec<Contradiction>,
     payloads: usize,
@@ -1387,8 +1387,7 @@ impl PayloadCensus {
         // `unjudged` word is for a row that carries no record at all.
         if judges_row {
             self.row_verdicts
-                .entry(RowKey::of(ctx.list(), frame))
-                .or_default()
+                .entry_or_default(RowKey::of(ctx.list(), frame))
                 .record(truth);
         }
         // The tally below counts PAYLOADS, as it always has: a record with no
@@ -1599,13 +1598,7 @@ pub fn payloads_grouped(
     filter: &crate::filter::Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> PayloadCensus {
-    // The selector's `zid` terms are read against THIS capture's zids first;
-    // see `crate::agg::aggregate_grouped`.
-    let resolved = filter.resolved_against(grouping.named_zids());
-    let filter = resolved.filter();
-    let mut census = PayloadCensus::new();
-    census.capture_origin_ms = dissection.capture_origin_ms();
-    let mut spaces = crate::agg::KeyexprSpaces::new();
+    use crate::ordered_fold::OrderedFold;
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration.
     // R2457 — `.enumerate()`, because the grouping is keyed by list index.
     // R2510 (open-debt item 713) — and in CAPTURE order, which is the same
@@ -1613,13 +1606,69 @@ pub fn payloads_grouped(
     // heading states it. List order left a publisher's topic blank on a finding
     // against that publisher whenever the id was declared on the session's other
     // link; `crate::agg::aggregate_grouped` carries the whole argument.
-    for (_flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        spaces.enter_flow(grouping.owners(list));
-        // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
-        spaces.at_packet(packet);
-        census.observe_frame_where(frame, filter, grouping.context(list), &mut spaces);
+    let mut fold = PayloadFold::begin(dissection, filter, grouping);
+    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
+        fold.feed(&flow, list, packet, frame, grouping);
     }
-    census
+    fold.census()
+}
+
+/// The payload plane's fold over a capture in capture order, as a value that can
+/// be kept and continued. See `crate::agg::AggFold`.
+#[cfg(feature = "network-codecs")]
+#[derive(Debug, Clone)]
+pub(crate) struct PayloadFold {
+    census: PayloadCensus,
+    spaces: crate::agg::KeyexprSpaces,
+    filter: crate::filter::Filter,
+}
+
+#[cfg(feature = "network-codecs")]
+impl PayloadFold {
+    /// A fold that has taken no message.
+    pub(crate) fn begin(
+        dissection: &crate::Dissection,
+        filter: &crate::filter::Filter,
+        grouping: &crate::node::SessionGrouping,
+    ) -> Self {
+        // The selector's `zid` terms are read against THIS capture's zids first;
+        // see `crate::agg::aggregate_grouped`.
+        let resolved = filter.resolved_against(grouping.named_zids());
+        let mut census = PayloadCensus::new();
+        census.capture_origin_ms = dissection.capture_origin_ms();
+        Self {
+            census,
+            spaces: crate::agg::KeyexprSpaces::new(),
+            filter: resolved.filter().clone(),
+        }
+    }
+
+    /// The census as it stands, for a caller that keeps folding.
+    pub(crate) fn census(&self) -> PayloadCensus {
+        self.census.clone()
+    }
+}
+
+#[cfg(feature = "network-codecs")]
+impl crate::ordered_fold::OrderedFold for PayloadFold {
+    fn feed(
+        &mut self,
+        _flow: &crate::link::FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &wz_session_core::passive::PassiveFrame,
+        grouping: &crate::node::SessionGrouping,
+    ) {
+        self.spaces.enter_flow(grouping.owners(list));
+        // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
+        self.spaces.at_packet(packet);
+        self.census.observe_frame_where(
+            frame,
+            &self.filter,
+            grouping.context(list),
+            &mut self.spaces,
+        );
+    }
 }
 
 // R311y617 -- the census half needs the network codecs to have a record to

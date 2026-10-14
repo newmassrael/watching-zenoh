@@ -146,7 +146,11 @@ DOORS = {
 # test says.
 EMITTERS = {
     CAPTURE_REPORT: ("health_json", "the summary document's health object"),
-    CAPTURE_CENSUS: ("census_json_where", "the census document"),
+    # The census renders through `census_document`, which `census_json_where`
+    # and the resumable door both call, so the two doors cannot drift apart.
+    # `census_json_where` is a wrapper that supplies fresh folds; this is the
+    # same rename the field document's entry below records twice.
+    CAPTURE_CENSUS: ("census_document", "the census document"),
     # R2458 (open-debt item 703) — the name moved to `fields_json_grouped`.
     # `fields_json` is now a two-line wrapper that supplies a session grouping
     # and delegates, so the body that RENDERS is the grouped one; pointing this

@@ -336,6 +336,18 @@ pub struct LiveDissection {
     /// said, as `cursor` is for what it has read.
     selection_said: wz_capture::selection_json::SelectionMemory,
     selection_selector: Option<String>,
+    /// The census planes' folds, kept between calls of [`Self::census`] for the
+    /// selector it was last asked under, so a census drawn again folds the
+    /// messages that arrived and not the whole capture.
+    ///
+    /// Behind a lock because `census` takes `&self` and a const handle may be
+    /// read from more than one thread: two callers serialise on the memory and
+    /// each gets the document for the state it saw, where a bare cell would make
+    /// the second a data race across the C boundary.
+    census_memory: std::sync::Mutex<wz_capture::CensusMemory>,
+    /// The digests of the rows [`Self::fields_since`] wrote, and the state of the
+    /// capture it wrote them in: what lets it say which rows moved.
+    fields_memory: wz_capture::fields_json::FieldsMemory,
     lost: u64,
     /// R2373 (open-debt item 661) — how far into a capture CONTAINER this
     /// handle has read, for [`Self::follow`].
@@ -466,6 +478,8 @@ impl LiveDissection {
             next_seq: 1,
             selection_said: wz_capture::selection_json::SelectionMemory::default(),
             selection_selector: None,
+            census_memory: std::sync::Mutex::new(wz_capture::CensusMemory::new()),
+            fields_memory: wz_capture::fields_json::FieldsMemory::new(),
             lost: 0,
             cursor: CaptureCursor::new(),
         }
@@ -799,8 +813,36 @@ impl LiveDissection {
     /// act would, and it is not here: giving up on an unfilled reassembly gap.
     /// That is [`Self::end`], and it is a separate call so that a consumer
     /// drawing a window cannot spend it by accident.
+    ///
+    /// # What it costs, and what it does not claim
+    ///
+    /// The planes that are folds over the messages are kept between calls (see
+    /// [`wz_capture::CensusMemory`]), so a census drawn again after a few more
+    /// packets folds those packets. The document is the one the whole-capture
+    /// door writes for the same state, byte for byte. A state the folds cannot
+    /// continue across (a list trimmed at its front, a flow that appeared among
+    /// the stream flows, a handshake that changes who owns an earlier message, a
+    /// message that sorts before one already folded) is folded again from the
+    /// start, which costs what this door always cost. The node census is kept
+    /// the same way and begins again only when a message that arrived names a
+    /// node; the scouting lists are folded over a copy on every call, and a
+    /// capture that holds many exchanges that never close pays for each of them
+    /// on every call, because a call judges the exchanges still open.
     pub fn census(&self, filter: &wz_capture::filter::Filter) -> String {
-        wz_capture::census_json::census_json_where(&self.dissection, filter)
+        let mut memory = self
+            .census_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        wz_capture::census_json::census_json_where_resumable(&self.dissection, filter, &mut memory)
+    }
+
+    /// The work this handle's census memory has done: messages folded, folds
+    /// continued and folds started again. What a test reads instead of a clock.
+    pub fn census_work(&self) -> wz_capture::FoldStats {
+        self.census_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stats()
     }
 
     /// WHAT THIS HANDLE STILL HOLDS, beside the ceilings that bound it.
@@ -935,10 +977,22 @@ impl LiveDissection {
     /// exactly those messages. The rows themselves are not changed by `end`; the
     /// join fails only because the document and the records are two states.
     /// Call this and [`Self::drain`] on the same side of it.
+    ///
+    /// # `revised`: the rows that moved after they were written
+    ///
+    /// The handle remembers a digest of every row it writes, for the declaration
+    /// text it was asked under (`declarations_text`, which `map` was declared
+    /// from), and the document's `revised` lists the rows at or below the cursor
+    /// whose text has since changed, each written again whole (see
+    /// [`wz_capture::fields_json::FieldsMemory`]). A different declaration text
+    /// empties the memory, so a caller asks from `0` after changing it. A capture
+    /// that only grew cannot have moved a held row, and the list is empty without
+    /// the handle comparing anything.
     pub fn fields_since(
         &mut self,
         capture: &[u8],
-        declarations: Option<&wz_capture::payload_decode::Declarations<'_>>,
+        map: Option<&wz_capture::payload::formats::FormatMap<'_>>,
+        declarations_text: &str,
         after_seq: u64,
     ) -> String {
         self.drain(&mut []);
@@ -947,16 +1001,25 @@ impl LiveDissection {
         // was written: a datagram row whose second read was declined has a
         // number and no row, and the cursor has to pass it.
         let through_seq = self.next_seq - 1;
-        wz_capture::fields_json::fields_json_since_coordinated(
+        wz_capture::fields_json::fields_json_since_remembering(
             &self.dissection,
             capture,
-            declarations,
+            map,
+            declarations_text,
             &ids,
             wz_capture::fields_json::Since {
                 after_seq,
                 through_seq,
             },
+            &mut self.fields_memory,
         )
+    }
+
+    /// What the handle's field memory has done: documents written without
+    /// comparing, documents written after comparing every row, and rows written
+    /// again. What a test reads instead of a clock.
+    pub fn fields_work(&self) -> wz_capture::fields_json::FieldsStats {
+        self.fields_memory.stats()
     }
 
     /// THE SELECTOR'S VERDICT OVER THE ROWS OF THE FIELD DOCUMENT, and

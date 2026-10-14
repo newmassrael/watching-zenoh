@@ -427,7 +427,8 @@ pub struct ExchangeTable {
     ///
     /// Not merged by [`Self::merge`]: a row key names a row of ONE capture's
     /// lists, and the same key in another capture is another row.
-    row_verdicts: BTreeMap<crate::payload::RowKey, crate::payload::RowVerdict>,
+    row_verdicts:
+        crate::overlay_map::OverlayMap<crate::payload::RowKey, crate::payload::RowVerdict>,
     /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term. Set
     /// only by [`exchanges_where`], the entry point that has the whole capture.
     capture_origin_ms: Option<u64>,
@@ -808,12 +809,9 @@ impl ExchangeTable {
         //
         // The close's row exists only for an exchange that was closed, and a
         // close the capture never saw leaves the request's row the only one.
-        self.row_verdicts
-            .entry(entry.row)
-            .or_default()
-            .record(truth);
+        self.row_verdicts.entry_or_default(entry.row).record(truth);
         if let Ending::Closed { row, .. } = ending {
-            self.row_verdicts.entry(row).or_default().record(truth);
+            self.row_verdicts.entry_or_default(row).record(truth);
         }
         if truth != Truth::Yes {
             return;
@@ -1050,13 +1048,7 @@ pub fn exchanges_grouped(
     filter: &Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> ExchangeTable {
-    // The selector's `zid` terms are read against THIS capture's zids first;
-    // see `crate::agg::aggregate_grouped`.
-    let resolved = filter.resolved_against(grouping.named_zids());
-    let filter = resolved.filter();
-    let mut table = ExchangeTable::new();
-    table.capture_origin_ms = dissection.capture_origin_ms();
-    let mut spaces = KeyexprSpaces::new();
+    use crate::ordered_fold::OrderedFold;
     // R311y721 — see `agg::aggregate_where`: the dissection's enumeration, so
     // a producer that is not a flow at all still reaches this plane.
     // R2457 — `.enumerate()`, because the grouping is keyed by list index and
@@ -1065,25 +1057,77 @@ pub fn exchanges_grouped(
     // `crate::agg`'s module heading always stated it. List order made this plane
     // file a query as unattributed — with no row, so no latency either —
     // whenever its `DeclKexpr` had gone out on the session's other link.
-    //
-    // The open exchanges are hoisted with the walk and drained once at the end,
-    // which is the same set of verdicts in the same sequence: the key leads with
-    // the list, so `pop_first` still walks list by list.
-    let mut open: OpenExchanges = BTreeMap::new();
-    for (_flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        spaces.enter_flow(grouping.owners(list));
+    let mut fold = ExchangeFold::begin(dissection, filter, grouping);
+    for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
+        fold.feed(&flow, list, packet, frame, grouping);
+    }
+    fold.table()
+}
+
+/// The exchange plane's fold over a capture in capture order, as a value that
+/// can be kept and continued. See `crate::agg::AggFold`.
+///
+/// The open exchanges are hoisted with the walk and drained once at the end,
+/// which is the same set of verdicts in the same sequence: the key leads with the
+/// list, so `pop_first` still walks list by list. [`Self::table`] drains a COPY,
+/// so the fold itself can take more messages after it has been read.
+#[derive(Debug, Clone)]
+pub(crate) struct ExchangeFold {
+    table: ExchangeTable,
+    open: OpenExchanges,
+    spaces: KeyexprSpaces,
+    filter: Filter,
+}
+
+impl ExchangeFold {
+    /// A fold that has taken no message.
+    pub(crate) fn begin(
+        dissection: &crate::Dissection,
+        filter: &Filter,
+        grouping: &crate::node::SessionGrouping,
+    ) -> Self {
+        // The selector's `zid` terms are read against THIS capture's zids first;
+        // see `crate::agg::aggregate_grouped`.
+        let resolved = filter.resolved_against(grouping.named_zids());
+        let mut table = ExchangeTable::new();
+        table.capture_origin_ms = dissection.capture_origin_ms();
+        Self {
+            table,
+            open: BTreeMap::new(),
+            spaces: KeyexprSpaces::new(),
+            filter: resolved.filter().clone(),
+        }
+    }
+
+    /// The table with every exchange still open given its verdict, over a copy.
+    pub(crate) fn table(&self) -> ExchangeTable {
+        let mut table = self.table.clone();
+        let mut open = self.open.clone();
+        table.drain_open(&mut open, &self.filter);
+        table
+    }
+}
+
+impl crate::ordered_fold::OrderedFold for ExchangeFold {
+    fn feed(
+        &mut self,
+        _flow: &crate::link::FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &wz_session_core::passive::PassiveFrame,
+        grouping: &crate::node::SessionGrouping,
+    ) {
+        self.spaces.enter_flow(grouping.owners(list));
         // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
-        spaces.at_packet(packet);
-        table.observe_frame_where(
+        self.spaces.at_packet(packet);
+        self.table.observe_frame_where(
             frame,
-            filter,
+            &self.filter,
             grouping.context(list),
-            &mut open,
-            &mut spaces,
+            &mut self.open,
+            &mut self.spaces,
         );
     }
-    table.drain_open(&mut open, filter);
-    table
 }
 
 // R311y615 — `pub(crate)`, on the precedent R311y613 set for `ws::tests` and

@@ -162,6 +162,13 @@ impl<'a> Declarations<'a> {
         *self.unwalked.borrow_mut() += 1;
     }
 
+    /// [`Self::note_unwalked`] for `n` messages at once: what a walk that does
+    /// not visit rows it knows the cursor passes records for them, so the tally
+    /// is the one a walk that visited each would have written.
+    pub fn note_unwalked_n(&self, n: usize) {
+        *self.unwalked.borrow_mut() += n;
+    }
+
     /// How many messages a cap kept this run from walking.
     pub fn unwalked(&self) -> usize {
         *self.unwalked.borrow()

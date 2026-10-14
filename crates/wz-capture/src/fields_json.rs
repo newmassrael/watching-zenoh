@@ -211,6 +211,8 @@ pub fn fields_json_where_coordinated(
             verdicts: verdicts.as_ref(),
             coordinates: Some(coordinates),
             since: None,
+            sink: None,
+            walk: None,
         },
     )
 }
@@ -274,8 +276,340 @@ pub fn fields_json_since_coordinated(
             verdicts: None,
             coordinates: Some(coordinates),
             since: Some(since),
+            sink: None,
+            walk: None,
         },
     )
+}
+
+/// What the since-door remembers between calls, for ONE declaration text: the
+/// digest of every row it wrote, and the state of the capture it wrote them in.
+///
+/// # What it is for
+///
+/// A row written by the since-door is held by the consumer from then on, and the
+/// cells [`REVISABLE_ROW_CELLS`] names can read differently at a later state: a
+/// declaration decoded after the packets that followed it resolves a reference
+/// that was written unresolved. Without this a consumer that wants to be right
+/// reads the whole document again when the capture ends, which is the cost the
+/// door was meant to remove. With it the document says which rows moved, under
+/// `revised`, and writes each whole.
+///
+/// # When nothing can have moved, and what that costs
+///
+/// A held row is written from the frame it stands for (fixed once decoded) and
+/// from state that is a function of the capture's PREFIX up to it: the keyexpr
+/// table at the row's packet, the end-to-end counters of its slot before it, the
+/// chain numbering from the first message the list holds. So when the capture
+/// is a prefix-extension of the one the last call saw (see
+/// [`crate::Dissection`]'s ordering condition, held by the same check the census
+/// folds use), with the same session grouping and the same declaration text, no
+/// held row can read differently and the document says so without looking: there
+/// is nothing to compare. Any other state is compared, by writing every row once
+/// into a scratch and holding each digest against the one remembered.
+///
+/// # What it does not claim
+///
+/// Rows it never wrote (a first call with a cursor above zero) have no digest and
+/// cannot be reported. A different declaration text empties the memory, so ask
+/// from zero after changing it. The comparison is of whole rows, so a row whose
+/// bytes a ceiling has since discarded (it reads `declined` when asked again) is
+/// NOT reported: the row the consumer holds stays true.
+#[derive(Debug, Default)]
+pub struct FieldsMemory {
+    key: Option<String>,
+    /// The node census the session grouping is derived from, kept so that the
+    /// grouping is not rebuilt from every message at each call.
+    nodes: crate::node::NodeMemory,
+    saved: Option<FieldsSaved>,
+    /// What the walker left: the keyexpr table, and for each list where it
+    /// stopped and the folds it held. Meaningful only beside `saved`.
+    walk: WalkState,
+    digests: alloc::collections::BTreeMap<u64, Option<u64>>,
+    stats: FieldsStats,
+}
+
+#[derive(Debug)]
+struct FieldsSaved {
+    marks: crate::OrderMarks,
+    grouping: crate::node::SessionGrouping,
+    origin_ms: Option<u64>,
+    /// The cursor's ceiling of the last document: every row numbered at or below
+    /// it had been passed to the consumer, which is what lets a walk skip them.
+    through_seq: u64,
+}
+
+/// What a [`FieldsMemory`] has done, for a test to read instead of a clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FieldsStats {
+    /// Calls that found the capture a prefix-extension of the last one and
+    /// compared nothing.
+    pub unchanged: u64,
+    /// Calls that wrote every row into a scratch to compare digests.
+    pub compared: u64,
+    /// Rows written again under `revised`, summed over every call.
+    pub revised_rows: u64,
+    /// Calls whose walk continued from where the last one stopped.
+    pub resumed: u64,
+    /// Calls whose walk began at the first message.
+    pub restarted: u64,
+    /// Messages the walk visited (a message passed over by a cursor without being
+    /// visited is not counted), summed over every call.
+    pub messages_walked: u64,
+}
+
+impl FieldsMemory {
+    /// A memory that has written nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What this memory has done since it was made.
+    pub fn stats(&self) -> FieldsStats {
+        self.stats
+    }
+}
+
+/// [`fields_json_since_coordinated`], and the rows the cursor passes whose text
+/// has moved since `memory` last wrote them, written again under `revised`.
+///
+/// `key` is the text `map` was declared from: the memory is for one text, and
+/// another empties it. `map` is borrowed rather than built here because the
+/// caller owns the declaration text and its parse.
+///
+/// For a capture the memory has not seen change, the document is exactly
+/// [`fields_json_since_coordinated`]'s with `"revised":[]`; the difference is
+/// only ever the rows listed there, so a consumer applies them by `seq` over the
+/// rows it holds and appends `messages` as it always did.
+pub fn fields_json_since_remembering(
+    d: &crate::Dissection,
+    capture: &[u8],
+    map: Option<&crate::payload::formats::FormatMap<'_>>,
+    key: &str,
+    coordinates: &dyn RowCoordinates,
+    since: Since,
+    memory: &mut FieldsMemory,
+) -> String {
+    if memory.key.as_deref() != Some(key) {
+        let nodes = core::mem::take(&mut memory.nodes);
+        *memory = FieldsMemory {
+            key: Some(String::from(key)),
+            nodes,
+            ..FieldsMemory::default()
+        };
+    }
+    let grouping = crate::node::SessionGrouping::of(&memory.nodes.nodes(d));
+    let origin_ms = d.capture_origin_ms();
+    // The capture is a prefix-extension of the one the last call saw, and the
+    // messages that arrived since, when it is.
+    let advance = memory
+        .saved
+        .as_ref()
+        .filter(|saved| saved.grouping == grouping && saved.origin_ms == origin_ms)
+        .and_then(|saved| d.capture_order_since(Some(&saved.marks)));
+    let continues = advance.is_some();
+
+    let mut revised = alloc::collections::BTreeSet::new();
+    if memory.saved.is_some() && !memory.digests.is_empty() {
+        if continues {
+            memory.stats.unchanged += 1;
+        } else {
+            // Every row written once into a scratch, so each current digest can
+            // be held against the one remembered. A SEPARATE ledger of the
+            // caller's declarations: this walk judges every row, and the
+            // document's own ledger must judge only the rows it writes.
+            let declared = map.map(Declarations::new);
+            let probe = RowSink::new(alloc::collections::BTreeSet::new());
+            let _ = fields_json_selected(
+                d,
+                capture,
+                None,
+                declared.as_ref(),
+                &grouping,
+                RowAttachments {
+                    verdicts: None,
+                    coordinates: Some(coordinates),
+                    since: None,
+                    sink: Some(&probe),
+                    walk: None,
+                },
+            );
+            let (now, _) = probe.into_parts();
+            for (seq, was) in &memory.digests {
+                if *seq > since.after_seq {
+                    continue;
+                }
+                if let (Some(was), Some(Some(is))) = (was, now.get(seq)) {
+                    if was != is {
+                        revised.insert(*seq);
+                    }
+                }
+            }
+            // The rows still held are the ones the probe saw: a row a ceiling
+            // trimmed has no digest to keep.
+            memory.digests = now;
+            memory.stats.compared += 1;
+        }
+    }
+
+    let sink = RowSink::new(revised);
+    let declared = map.map(Declarations::new);
+
+    // WHETHER THE WALK MAY CONTINUE from where the last one stopped. Every
+    // condition is one the walk's own result depends on:
+    //
+    // * the capture is a prefix-extension (`advance`), so the keyexpr table, the
+    //   chain fold and the order the rows are written in are the ones the last
+    //   walk left, plus what arrived;
+    // * the cursor is at or above the last document's ceiling, so every message
+    //   the walk would skip is a row the cursor passes;
+    // * no skipped row had no sequence number (one is written by every
+    //   since-document) and none is a scouting row the list was trimmed under;
+    // * no end-to-end rule binds a key to a profile, because a counter is a fact
+    //   about the frames before a row and a row not visited would not move it;
+    // * no QUIC list holds a message, because the datagram walk folds those into
+    //   the table after each flow and that fold is not repeatable;
+    // * the container is the one the saved cursor was walking.
+    let resume_plans = (|| {
+        let saved = memory.saved.as_ref()?;
+        let (_, _) = advance.as_ref()?;
+        if since.after_seq < saved.through_seq
+            || declared.as_ref().is_some_and(|d| d.has_e2e_rules())
+            || memory
+                .walk
+                .stream
+                .iter()
+                .chain(memory.walk.datagram.iter())
+                .any(|w| w.unnumbered)
+            || d.message_lists_with_origin().any(|(_, origin, list)| {
+                matches!(
+                    origin,
+                    crate::MessageListOrigin::QuicStream(_)
+                        | crate::MessageListOrigin::QuicDatagram
+                ) && list.produced() > 0
+            })
+            || memory.walk.stream.len() > d.flows().len()
+            || memory.walk.datagram.len() > d.datagram_flows().len()
+        {
+            return None;
+        }
+        let kept = memory.walk.reread.as_ref()?;
+        if capture.len() < kept.cursor.consumed()
+            || container_fingerprint(capture, kept.cursor.consumed()) != kept.fingerprint
+        {
+            return None;
+        }
+        for (walk, flow) in memory.walk.datagram.iter().zip(d.datagram_flows()) {
+            let first = flow.scouting.produced() - flow.scouting.len() as u64;
+            if walk.scouting_first_produced != first
+                || walk.scouting_produced > flow.scouting.produced()
+            {
+                return None;
+            }
+        }
+        let mut plans = Vec::with_capacity(d.flows().len());
+        for (i, flow) in d.flows().iter().enumerate() {
+            plans.push(match memory.walk.stream.get(i) {
+                // A flow the last walk did not see: nothing walked of it yet.
+                None => flow.capture_order_from(0, 0, None),
+                Some(walk) => {
+                    flow.capture_order_from(walk.walked, walk.order_packet, walk.order_last)
+                }
+            });
+            plans.last()?.as_ref()?;
+        }
+        Some(plans)
+    })();
+    let resume = resume_plans.is_some();
+    let walked_before: usize = if resume {
+        memory
+            .walk
+            .stream
+            .iter()
+            .chain(memory.walk.datagram.iter())
+            .map(|w| w.walked)
+            .sum()
+    } else {
+        0
+    };
+    // The marks a prefix-extension handed back are the marks of the capture as it
+    // stands, so the walk that follows does not make them again from the first
+    // message (which is a sort of every message and would put the cost back).
+    let (new_frames, advance_marks) = match advance {
+        Some((frames, marks)) => (if resume { frames } else { Vec::new() }, Some(marks)),
+        None => (Vec::new(), None),
+    };
+    let document = fields_json_selected(
+        d,
+        capture,
+        None,
+        declared.as_ref(),
+        &grouping,
+        RowAttachments {
+            verdicts: None,
+            coordinates: Some(coordinates),
+            since: Some(since),
+            sink: Some(&sink),
+            walk: Some(WalkRun {
+                state: &mut memory.walk,
+                resume,
+                plans: resume_plans.unwrap_or_default(),
+                new_frames,
+            }),
+        },
+    );
+    let walked_after: usize = memory
+        .walk
+        .stream
+        .iter()
+        .chain(memory.walk.datagram.iter())
+        .map(|w| w.walked)
+        .sum();
+    memory.stats.messages_walked += (walked_after - walked_before) as u64;
+    if resume {
+        memory.stats.resumed += 1;
+    } else {
+        memory.stats.restarted += 1;
+    }
+    let (written, kept) = sink.into_parts();
+    memory.stats.revised_rows += kept.len() as u64;
+    memory.digests.extend(written);
+    let marks = match advance_marks {
+        Some(marks) => marks,
+        None => {
+            d.capture_order_since(None)
+                .expect("a walk with nothing remembered has nothing to disagree with")
+                .1
+        }
+    };
+    memory.saved = Some(FieldsSaved {
+        marks,
+        grouping,
+        origin_ms,
+        through_seq: since.through_seq,
+    });
+    document
+}
+
+/// A digest of the first bytes of a capture container and of the bytes just before
+/// `consumed`: what says the bytes handed over now are the container a saved walk
+/// was reading, and not another that happens to be as long.
+fn container_fingerprint(capture: &[u8], consumed: usize) -> u64 {
+    let end = consumed.min(capture.len());
+    let mut hash = fnv1a(0xcbf2_9ce4_8422_2325, &capture[..capture.len().min(32)]);
+    hash = fnv1a(hash, &capture[end.saturating_sub(16)..end]);
+    hash
+}
+
+/// FNV-1a over `bytes`, from `seed`: a change detector and not a security digest,
+/// the same on every build.
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    let mut hash = seed;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
 }
 
 /// The cursor a since-document is made against.
@@ -462,6 +796,90 @@ struct RowAttachments<'a> {
     verdicts: Option<&'a RowJudgement>,
     coordinates: Option<&'a dyn RowCoordinates>,
     since: Option<Since>,
+    /// What a since-document remembers of the rows it writes and which earlier
+    /// rows it writes again. Absent for every document that remembers nothing.
+    sink: Option<&'a RowSink>,
+    /// The walker's own state, kept between calls, and whether this call
+    /// continues it. Absent for every document that keeps none.
+    walk: Option<WalkRun<'a>>,
+}
+
+/// What the field walker keeps of ONE message list between calls: where it
+/// stopped and the folds it left, so a walk that continues visits only the
+/// messages that arrived.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ListWalk {
+    /// Messages of the list walked (the positions below this are old rows).
+    walked: usize,
+    /// The oldest produced-index held when the walk stopped, and how many were
+    /// ever produced: a list whose front was trimmed is not continued.
+    first_produced: u64,
+    produced: u64,
+    /// Pass one's running packet, which a message with no packet of its own
+    /// inherits.
+    last_packet: usize,
+    /// The capture-order key's running packet and its largest key so far, which
+    /// the next messages must sort after (see
+    /// [`crate::FlowDissection::capture_order_from`]).
+    order_packet: usize,
+    order_last: Option<(usize, usize)>,
+    /// The chain fold, which numbers a completing row by the identity its begun
+    /// row opened.
+    chains: ChainIds,
+    /// Some row of the list had no sequence number. Such a row is written by
+    /// every since-document (dropping one is not recoverable), so a walk that
+    /// skipped the old rows would not write what a whole one does.
+    unnumbered: bool,
+    /// The scouting list's own marks, for the same purpose.
+    scouting_walked: usize,
+    scouting_first_produced: u64,
+    scouting_produced: u64,
+}
+
+/// Where the capture container's own walk stopped, so that a walk that continues
+/// reads the packets after it and not the whole container again.
+#[derive(Clone, Debug)]
+pub(crate) struct RereadResume {
+    cursor: crate::CaptureCursor,
+    /// A digest of the first bytes of the container and of the bytes just
+    /// before the cursor: what says the bytes handed over now are the container
+    /// the cursor was walking.
+    fingerprint: u64,
+}
+
+/// What the field walker keeps of the capture between calls.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WalkState {
+    /// The keyexpr table with every declaration of the capture absorbed.
+    spaces: crate::agg::KeyexprSpaces,
+    stream: Vec<ListWalk>,
+    datagram: Vec<ListWalk>,
+    reread: Option<RereadResume>,
+}
+
+/// How a call uses a [`WalkState`].
+pub(crate) struct WalkRun<'a> {
+    state: &'a mut WalkState,
+    /// `true`: continue the state. `false`: begin it afresh and leave it holding
+    /// where this walk stopped.
+    resume: bool,
+    /// For a continuing walk, each stream flow's capture-order plan from where
+    /// it stopped.
+    plans: Vec<Option<CaptureOrderPlan>>,
+    /// The messages that arrived since, in capture order, whose declarations are
+    /// absorbed into the kept table.
+    new_frames: Vec<(crate::link::FlowKey, usize, usize, &'a PassiveFrame)>,
+}
+
+/// The order in which a stream flow's new messages are written, the running
+/// packet at its end, and its largest key.
+pub(crate) type CaptureOrderPlan = (Vec<usize>, usize, Option<(usize, usize)>);
+
+/// One list's share of a [`WalkRun`].
+pub(crate) struct FlowRun<'a> {
+    walk: &'a mut ListWalk,
+    resume: bool,
+    plan: Option<CaptureOrderPlan>,
 }
 
 /// R2765 (open debt 788) — ONE implementation under both doors.
@@ -482,6 +900,8 @@ fn fields_json_selected(
         verdicts,
         coordinates,
         since,
+        sink,
+        walk,
     } = attach;
     // A map with no rules answers `NoRules` for every message, so it renders
     // nothing either way -- folded here so the row renderers ask one question
@@ -490,15 +910,50 @@ fn fields_json_selected(
     // R2458 (open-debt item 703) — which lists this document renders, DERIVED.
     // See `RenderedLists`.
     let lists = RenderedLists::of(d);
+    // The walker's state, when the caller keeps it between calls. A caller that
+    // does not gets a throwaway one and every producer is told to keep nothing,
+    // so the document it writes is the document it always wrote.
+    let tracking = walk.is_some();
+    let (resume, mut plans, new_frames, kept) = match walk {
+        Some(w) => (w.resume, w.plans, w.new_frames, Some(w.state)),
+        None => (false, Vec::new(), Vec::new(), None),
+    };
+    let mut throwaway = WalkState::default();
+    let state: &mut WalkState = match kept {
+        Some(state) => state,
+        None => &mut throwaway,
+    };
+    if !resume {
+        *state = WalkState::default();
+    }
+    let WalkState {
+        spaces,
+        stream: stream_walks,
+        datagram: datagram_walks,
+        reread: reread_slot,
+    } = state;
+    stream_walks.resize_with(d.flows().len(), ListWalk::default);
+    datagram_walks.resize_with(d.datagram_flows().len(), ListWalk::default);
     // R2458 — ONE instance for the capture, exactly as the census planes hold
     // one. Per-folder it was the defect: two flows of one session each built
     // their own tables, so a `DeclKexpr` that went out on the first link left
     // every reference on the second unresolved.
-    let mut spaces = crate::agg::KeyexprSpaces::new();
+    //
     // R2513 (open-debt item 713) — EVERY declaration of the capture, absorbed
     // in capture order and stamped with the packet it went past at, before any
-    // row is rendered. See `absorb_every_declaration`.
-    absorb_every_declaration(d, grouping, &mut spaces);
+    // row is rendered. See `absorb_every_declaration`. A walk that continues
+    // holds the table the last one left and absorbs only the messages that
+    // arrived since, which is the same table because every one of them sorts after
+    // what was absorbed (the caller holds that before it resumes).
+    if resume {
+        for (_flow, list, packet, frame) in &new_frames {
+            spaces.enter_flow(grouping.owners(*list));
+            spaces.at_packet(*packet);
+            spaces.absorb_frame(frame);
+        }
+    } else {
+        absorb_every_declaration(d, grouping, spaces);
+    }
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
@@ -520,18 +975,39 @@ fn fields_json_selected(
     // Re-read ONCE, ahead of both flow tables: a stream row now
     // names the packet holding its first byte and that packet's link
     // addresses, which only the capture's own bytes can say.
-    let reread = Reread::of(capture);
+    //
+    // A walk that keeps its state also keeps where the container's own walk
+    // stopped, and reads only the packets after it.
+    let reread = if tracking {
+        let mut cursor = match (resume, reread_slot.take()) {
+            (true, Some(kept)) => kept.cursor,
+            _ => crate::CaptureCursor::new(),
+        };
+        let reread = Reread::extend(capture, &mut cursor);
+        *reread_slot = reread.as_ref().map(|_| RereadResume {
+            fingerprint: container_fingerprint(capture, cursor.consumed()),
+            cursor,
+        });
+        reread
+    } else {
+        Reread::of(capture)
+    };
     for (i, flow) in d.flows().iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
         let mut own = None;
         let spaces = enter(
-            &mut spaces,
+            &mut *spaces,
             &mut own,
             grouping,
             lists.stream.get(i).copied(),
         );
+        let run = tracking.then(|| FlowRun {
+            walk: &mut stream_walks[i],
+            resume,
+            plan: plans.get_mut(i).and_then(Option::take),
+        });
         push_stream_flow(
             flow,
             spaces,
@@ -555,7 +1031,9 @@ fn fields_json_selected(
                 }),
                 after_seq: since.map(|s| s.after_seq),
                 zids: lists.stream.get(i).and_then(|&list| grouping.zids(list)),
+                sink,
             },
+            run,
             &mut out,
         );
     }
@@ -566,11 +1044,16 @@ fn fields_json_selected(
         }
         let mut own = None;
         let spaces = enter(
-            &mut spaces,
+            &mut *spaces,
             &mut own,
             grouping,
             lists.datagram.get(i).copied(),
         );
+        let run = tracking.then(|| FlowRun {
+            walk: &mut datagram_walks[i],
+            resume,
+            plan: None,
+        });
         push_datagram_flow(
             flow,
             spaces,
@@ -591,7 +1074,9 @@ fn fields_json_selected(
                 }),
                 after_seq: since.map(|s| s.after_seq),
                 zids: lists.datagram.get(i).and_then(|&list| grouping.zids(list)),
+                sink,
             },
+            run,
             &mut out,
         );
         // R2460 (open-debt item 705) — the flow's QUIC sub-lists, folded after
@@ -623,6 +1108,22 @@ fn fields_json_selected(
     // every counter is zero for a dissection built without caps, and a
     // consumer that can only see the group when it is non-zero cannot tell
     // "no caps" from "caps that did not bite".
+    // The since-door's second list: rows the cursor PASSES whose text has moved
+    // since this handle wrote them, written again whole, in sequence order. The
+    // list is always there for a since-document and empty unless the handle
+    // remembered a row whose digest has changed; see `RowSink`.
+    if since.is_some() {
+        out.push_str("\"revised\":[");
+        if let Some(sink) = sink {
+            for (i, row) in sink.kept.borrow().values().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(row);
+            }
+        }
+        out.push_str("],");
+    }
     out.push_str("\"dropped_by_limits\":");
     out.push_str(&crate::report::dropped_by_limits_json(d));
     // THE CHAINS NO ROW ENDED, beside the rows that begin them.
@@ -761,6 +1262,9 @@ fn enter<'a>(
     }
 }
 
+// Eight: the seven a flow producer always took and the walk it resumes.
+// Folding `run` into `RowTags` would put a `&mut` in a `Copy` struct.
+#[allow(clippy::too_many_arguments)]
 fn push_stream_flow(
     flow: &crate::FlowDissection,
     spaces: &mut crate::agg::KeyexprSpaces,
@@ -768,6 +1272,7 @@ fn push_stream_flow(
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
     tags: RowTags<'_>,
+    mut run: Option<FlowRun<'_>>,
     out: &mut String,
 ) {
     out.push_str("{\"flow\":");
@@ -776,7 +1281,25 @@ fn push_stream_flow(
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
-    let mut chains = ChainIds::default();
+    // A resumed walk starts where the last one stopped and takes the folds it
+    // left; every message before `start` is a row the cursor passes (the caller
+    // holds that to be true before it asks), so none of them is visited and the
+    // tally says so once. Any other walk starts at the first message.
+    let resumed = run.as_ref().is_some_and(|r| r.resume);
+    let start = match run.as_ref() {
+        Some(r) if r.resume => r.walk.walked,
+        _ => 0,
+    };
+    let mut chains = match run.as_mut() {
+        Some(r) if r.resume => core::mem::take(&mut r.walk.chains),
+        _ => ChainIds::default(),
+    };
+    if resumed {
+        if let Some(d) = declarations {
+            d.note_unwalked_n(start);
+        }
+    }
+    let mut unnumbered = false;
     // R311y856 — folded in FRAME ORDER and before the cap bites, which is the
     // rule R311y701 settled for the same table: a keyexpr id resolves through
     // the bindings that were live when the message travelled, and a listing
@@ -791,7 +1314,10 @@ fn push_stream_flow(
     // one that went out LATER than this frame is still not applied to it. That
     // is the half a renderer could not have by walking, because its rows have to
     // come out grouped by flow.
-    let mut last_packet = 0usize;
+    let mut last_packet = match run.as_ref() {
+        Some(r) if r.resume => r.walk.last_packet,
+        _ => 0usize,
+    };
     // The produced-index of the OLDEST message still held, so a row's
     // sequence number is looked up by an index a front trim does not move.
     let first_produced = flow.frames.produced() - flow.frames.len() as u64;
@@ -812,33 +1338,54 @@ fn push_stream_flow(
     // is numbered as if its chain had never begun. The keyexpr table needs no
     // such care -- it is filled up front from every list, and the packet a row
     // resolves AT is set per row. Only the WRITING is skipped.
-    let mut folded: Vec<FoldedRow> = Vec::with_capacity(flow.frames.len());
-    for (position, frame) in flow.frames.iter().enumerate() {
+    let mut folded: Vec<FoldedRow> = Vec::with_capacity(flow.frames.len() - start);
+    for (position, frame) in flow.frames.iter().enumerate().skip(start) {
         last_packet = flow
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
+        let seq = tags.frame_seq(first_produced + position as u64);
+        unnumbered |= seq.is_none();
         folded.push(FoldedRow {
             packet: last_packet,
             // Folded ahead of the cap, for the reason `ChainIds` gives.
             session: chains.observe(frame),
-            seq: tags.frame_seq(first_produced + position as u64),
+            seq,
         });
     }
     // PASS TWO, in CAPTURE order: the order of the packets that carried each
     // message's first byte. See `FlowDissection::capture_order` for the rule and
     // its tiebreak. The cap counts rows from the FRONT of this order, so the rows
     // a ceiling holds back are the last ones the capture took.
-    for position in flow.capture_order() {
+    //
+    // A walk that keeps its state takes the order from the caller when it is
+    // resuming (the caller computed it, from where the last one stopped, to know
+    // the walk may resume at all), and makes it whole otherwise, so that it
+    // can say where it stopped.
+    let (order, order_packet, order_last) = match run.as_mut().and_then(|r| r.plan.take()) {
+        Some(plan) => plan,
+        None => match run.as_ref() {
+            Some(_) => flow
+                .capture_order_from(0, 0, None)
+                .expect("an order from the first message has nothing before it"),
+            None => (flow.capture_order(), 0, None),
+        },
+    };
+    for position in order {
         let frame = &flow.frames[position];
         let FoldedRow {
             packet,
             session: session_row,
             seq,
-        } = &folded[position];
+        } = &folded[position - start];
         let seq = *seq;
         spaces.at_packet(*packet);
         let e2e = tags.e2e_source(frame.direction, frame.observed_at_ns);
-        if tags.passed_by_cursor(seq) {
+        // A row the cursor passes is skipped, unless its text has moved since the
+        // consumer was handed it: then it is written again, into the document's
+        // `revised` list and not into this flow's messages.
+        let passed = tags.passed_by_cursor(seq);
+        let revising = passed && tags.is_revised(seq);
+        if passed && !revising {
             if let Some(d) = declarations {
                 d.note_unwalked();
             }
@@ -858,7 +1405,7 @@ fn push_stream_flow(
             }
             continue;
         }
-        if cap.is_some_and(|c| shown >= c) {
+        if !revising && cap.is_some_and(|c| shown >= c) {
             omitted += 1;
             // Round 2029 (item 298) — TELL THE RULE RUN. The misbinding verdict
             // is reached inside `push_walk` below, so a message held back here
@@ -870,14 +1417,22 @@ fn push_stream_flow(
             }
             continue;
         }
-        shown += 1;
-        if emitted > 0 {
-            out.push(',');
-        }
-        emitted += 1;
+        let mut again = String::new();
+        let w: &mut String = if revising {
+            &mut again
+        } else {
+            shown += 1;
+            if emitted > 0 {
+                out.push(',');
+            }
+            emitted += 1;
+            &mut *out
+        };
+        let row_start = w.len();
+        let mut declined = false;
         let at = message_at(frame);
         let _ = write!(
-            out,
+            w,
             // R311y919 — the word comes from `AnchorSpace` now, so this row and
             // the census planes cannot drift into two vocabularies for one fact.
             // R2206 (open-debt item 561) — and it comes off the FRAME, not from
@@ -894,11 +1449,14 @@ fn push_stream_flow(
             frame.stream_offset as u64,
             frame.batch_index as u64,
             seq,
-            out,
+            w,
         );
-        push_selected(tags.selection, frame, out);
+        push_selected(tags.selection, frame, w);
         match flow.message_bytes(frame) {
-            Err(why) => push_declined(&why, out),
+            Err(why) => {
+                declined = true;
+                push_declined(&why, w)
+            }
             Ok(bytes) => push_walk(
                 RowWalk {
                     bytes,
@@ -910,10 +1468,10 @@ fn push_stream_flow(
                     carried: Some(&frame.carried),
                     e2e,
                 },
-                out,
+                w,
             ),
         }
-        push_session_row(session_row, out);
+        push_session_row(session_row, w);
         push_first_byte(
             // A decompressed message's coordinate indexes the reader's own
             // buffer, not the stream, so it names no packet byte.
@@ -924,13 +1482,32 @@ fn push_stream_flow(
                     payload_offset,
                 }),
             reread,
-            out,
+            w,
         );
-        out.push('}');
+        w.push('}');
+        tags.record_row(seq, &w[row_start..], declined);
+        if revising {
+            // A row that now reads `declined` is not a correction: the row the
+            // consumer holds stays true. It was never put in the set.
+            tags.keep_revised(seq, again);
+        }
+    }
+    if let Some(r) = run.as_mut() {
+        // Where this walk stopped, for the next one to start from.
+        r.walk.walked = flow.frames.len();
+        r.walk.first_produced = first_produced;
+        r.walk.produced = flow.frames.produced();
+        r.walk.last_packet = last_packet;
+        r.walk.order_packet = order_packet;
+        r.walk.order_last = order_last;
+        r.walk.chains = chains;
+        r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
     }
     let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
 }
 
+// Eight: see `push_stream_flow`.
+#[allow(clippy::too_many_arguments)]
 fn push_datagram_flow(
     flow: &crate::DatagramDissection,
     spaces: &mut crate::agg::KeyexprSpaces,
@@ -938,6 +1515,7 @@ fn push_datagram_flow(
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
     tags: RowTags<'_>,
+    mut run: Option<FlowRun<'_>>,
     out: &mut String,
 ) {
     out.push_str("{\"flow\":");
@@ -946,7 +1524,22 @@ fn push_datagram_flow(
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
-    let mut chains = ChainIds::default();
+    // See the stream producer: a resumed walk starts where the last stopped.
+    let resumed = run.as_ref().is_some_and(|r| r.resume);
+    let (start, scouting_start) = match run.as_ref() {
+        Some(r) if r.resume => (r.walk.walked, r.walk.scouting_walked),
+        _ => (0, 0),
+    };
+    let mut chains = match run.as_mut() {
+        Some(r) if r.resume => core::mem::take(&mut r.walk.chains),
+        _ => ChainIds::default(),
+    };
+    if resumed {
+        if let Some(d) = declarations {
+            d.note_unwalked_n(start);
+        }
+    }
+    let mut unnumbered = false;
     let mut disagreed = 0usize;
     let mut named: Vec<(usize, &'static str)> = Vec::new();
     // The stream half's rule, unchanged: anchored for every frame, ahead of
@@ -955,7 +1548,7 @@ fn push_datagram_flow(
     // half; see `absorb_every_declaration`.
     // The stream half's index, for the stream half's reason.
     let first_produced = flow.frames.produced() - flow.frames.len() as u64;
-    for (position, frame) in flow.frames.iter().enumerate() {
+    for (position, frame) in flow.frames.iter().enumerate().skip(start) {
         // `stream_offset` names the PACKET here: a datagram link has no stream
         // for an offset to be into, so the field carries the only anchor there
         // is.
@@ -969,8 +1562,13 @@ fn push_datagram_flow(
         // cursor passes over is not re-read from the container, which is most of
         // what a datagram row costs.
         let seq = tags.frame_seq(first_produced + position as u64);
+        unnumbered |= seq.is_none();
         let e2e = tags.e2e_source(frame.direction, frame.observed_at_ns);
-        if tags.passed_by_cursor(seq) {
+        // See the stream producer: a passed row is skipped unless its text has
+        // moved, and then it is written again into `revised`.
+        let passed = tags.passed_by_cursor(seq);
+        let revising = passed && tags.is_revised(seq);
+        if passed && !revising {
             if let Some(d) = declarations {
                 d.note_unwalked();
             }
@@ -1012,7 +1610,7 @@ fn push_datagram_flow(
             note(&mut named, &mut disagreed, cap, index, "short_payload");
             continue;
         };
-        if cap.is_some_and(|c| shown >= c) {
+        if !revising && cap.is_some_and(|c| shown >= c) {
             omitted += 1;
             // Item 298 — the datagram half of the same join. Both listings cap,
             // so a fix on one of them would leave a capture of a UDP
@@ -1022,27 +1620,28 @@ fn push_datagram_flow(
             }
             continue;
         }
-        shown += 1;
-        if emitted > 0 {
-            out.push(',');
-        }
-        emitted += 1;
+        let mut again = String::new();
+        let w: &mut String = if revising {
+            &mut again
+        } else {
+            shown += 1;
+            if emitted > 0 {
+                out.push(',');
+            }
+            emitted += 1;
+            &mut *out
+        };
+        let row_start = w.len();
         let _ = write!(
-            out,
+            w,
             // R2206 (open-debt item 561) — off the FRAME, on the argument the
             // stream producer above makes.
             "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"packet\":{index},",
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
-        push_coordinates(
-            tags.list_id,
-            index as u64,
-            frame.batch_index as u64,
-            seq,
-            out,
-        );
-        push_selected(tags.selection, frame, out);
+        push_coordinates(tags.list_id, index as u64, frame.batch_index as u64, seq, w);
+        push_selected(tags.selection, frame, w);
         push_walk(
             RowWalk {
                 bytes: message,
@@ -1054,9 +1653,9 @@ fn push_datagram_flow(
                 carried: Some(&frame.carried),
                 e2e,
             },
-            out,
+            w,
         );
-        push_session_row(&session_row, out);
+        push_session_row(&session_row, w);
         push_first_byte(
             // A decompressed message has no byte in the packet to point at.
             frame.decompressed.is_none().then_some(FirstByte {
@@ -1064,9 +1663,13 @@ fn push_datagram_flow(
                 payload_offset: frame.unit_offset,
             }),
             reread,
-            out,
+            w,
         );
-        out.push('}');
+        w.push('}');
+        tags.record_row(seq, &w[row_start..], false);
+        if revising {
+            tags.keep_revised(seq, again);
+        }
     }
     // R2629 (open-debt item 744) — AND THE SCOUTING LIST, which this document
     // never read.
@@ -1085,9 +1688,10 @@ fn push_datagram_flow(
     // The scouting list's own produced-index base: `ScoutingList` is
     // trimmed from the front by the same ceiling and counts what it ever held.
     let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
-    for (position, datagram) in flow.scouting.iter().enumerate() {
+    for (position, datagram) in flow.scouting.iter().enumerate().skip(scouting_start) {
         let index = datagram.packet_index;
         let seq = tags.scouting_seq(&flow.flow, scouting_first + position as u64);
+        unnumbered |= seq.is_none();
         if tags.passed_by_cursor(seq) {
             continue;
         }
@@ -1179,6 +1783,17 @@ fn push_datagram_flow(
             out.push(',');
         }
         let _ = write!(out, "{{\"at\":{at},\"why\":\"{why}\"}}");
+    }
+    if let Some(r) = run.as_mut() {
+        // Where this walk stopped, for the next one to start from.
+        r.walk.walked = flow.frames.len();
+        r.walk.first_produced = first_produced;
+        r.walk.produced = flow.frames.produced();
+        r.walk.chains = chains;
+        r.walk.scouting_walked = flow.scouting.len();
+        r.walk.scouting_first_produced = scouting_first;
+        r.walk.scouting_produced = flow.scouting.produced();
+        r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
     }
     out.push_str("]}}");
 }
@@ -2391,7 +3006,7 @@ impl ChainReason {
 /// reason the keyexpr anchor is: an identity assigned only to printed rows
 /// would renumber when the cap moved.
 #[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct ChainIds {
     next: u64,
     open: Vec<((Direction, bool, wz_session_core::qos::Priority), u64)>,
@@ -2948,6 +3563,60 @@ struct RowTags<'a> {
     /// `None` for a list whose handshake the capture never saw. What the
     /// end-to-end judge keys a sender by; see [`E2eSource`].
     zids: Option<&'a [alloc::vec::Vec<u8>; 2]>,
+    /// What a since-document remembers of the rows it writes, and the earlier
+    /// rows it writes again. `None` for a document that remembers nothing.
+    sink: Option<&'a RowSink>,
+}
+
+/// What a since-document keeps of its rows, and which rows it writes AGAIN.
+///
+/// A row is written once, when the cursor first lets it through, and from then on
+/// the consumer holds it. A few kinds of cell in it can read differently at a
+/// later state (see [`REVISABLE_ROW_CELLS`]), and a consumer holding the old text
+/// has no way to know. So the sink records a digest of every row it writes, and a
+/// later document compares: a row at or below the cursor whose digest has moved is
+/// written again, whole, under `revised`.
+///
+/// The digest is of the WHOLE ROW TEXT and not of the cells the list names. That
+/// is deliberate and conservative: it cannot miss a cell the list forgot, and a
+/// row it reports because of a cell the list does not name is a finding about the
+/// list.
+///
+/// A row whose message bytes a ceiling has since discarded reads `declined` when
+/// asked again, and that is not a correction (the row the consumer holds stays
+/// true), so such a row has NO digest and is never reported.
+pub(crate) struct RowSink {
+    /// `seq` to the row's digest, `None` for a row that read `declined`.
+    digests: core::cell::RefCell<alloc::collections::BTreeMap<u64, Option<u64>>>,
+    /// The earlier rows to write again.
+    revised: alloc::collections::BTreeSet<u64>,
+    /// Those rows as they read now, by `seq`.
+    kept: core::cell::RefCell<alloc::collections::BTreeMap<u64, String>>,
+}
+
+impl RowSink {
+    pub(crate) fn new(revised: alloc::collections::BTreeSet<u64>) -> Self {
+        Self {
+            digests: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
+            revised,
+            kept: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
+        }
+    }
+
+    /// FNV-1a over the row's bytes: not a security digest, a change detector, and
+    /// the same on every build.
+    fn digest(text: &str) -> u64 {
+        fnv1a(0xcbf2_9ce4_8422_2325, text.as_bytes())
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        alloc::collections::BTreeMap<u64, Option<u64>>,
+        alloc::collections::BTreeMap<u64, String>,
+    ) {
+        (self.digests.into_inner(), self.kept.into_inner())
+    }
 }
 
 /// What a row producer hands the entries it writes so they can judge their
@@ -3005,6 +3674,31 @@ impl RowTags<'_> {
     /// dropping one is not.
     fn passed_by_cursor(&self, seq: Option<u64>) -> bool {
         matches!((self.after_seq, seq), (Some(after), Some(s)) if s <= after)
+    }
+
+    /// Is this a row the cursor passes that the document writes again, because
+    /// its text has moved since the consumer was handed it?
+    fn is_revised(&self, seq: Option<u64>) -> bool {
+        match (self.sink, seq) {
+            (Some(sink), Some(seq)) => sink.revised.contains(&seq),
+            _ => false,
+        }
+    }
+
+    /// Remember a row the document wrote (or wrote again): its digest, or none
+    /// when it read `declined`.
+    fn record_row(&self, seq: Option<u64>, text: &str, declined: bool) {
+        if let (Some(sink), Some(seq)) = (self.sink, seq) {
+            let digest = (!declined).then(|| RowSink::digest(text));
+            sink.digests.borrow_mut().insert(seq, digest);
+        }
+    }
+
+    /// Keep the text of an earlier row the document writes again.
+    fn keep_revised(&self, seq: Option<u64>, text: String) {
+        if let (Some(sink), Some(seq)) = (self.sink, seq) {
+            sink.kept.borrow_mut().insert(seq, text);
+        }
     }
 
     /// Who sent a frame that travelled `direction`, and when its packet was
@@ -3435,7 +4129,14 @@ struct RereadPacket<'a> {
 
 impl<'a> Reread<'a> {
     fn of(capture: &'a [u8]) -> Option<Self> {
-        let mut cursor = crate::CaptureCursor::new();
+        Self::extend(capture, &mut crate::CaptureCursor::new())
+    }
+
+    /// The packets of `capture` from where `cursor` stopped, and the cursor moved
+    /// past them. From a new cursor this is the whole container, which is
+    /// [`Self::of`]; from a cursor a walk left, it is only the packets that
+    /// arrived since, and [`Self::packet`] answers for those and no others.
+    fn extend(capture: &'a [u8], cursor: &mut crate::CaptureCursor) -> Option<Self> {
         let mut frames = Vec::new();
         let walk = cursor.walk(capture, |event| {
             if let crate::CaptureEvent::Frame(frame) = event {

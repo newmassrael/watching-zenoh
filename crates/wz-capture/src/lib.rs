@@ -184,6 +184,20 @@ pub mod message_context;
 /// links where both ends named themselves. The one plane whose unit is not a
 /// flow.
 pub mod node;
+// A fold over a capture that remembers where it stopped, and the census planes
+// built on it. Documented by its own `//!` text and carrying no outer `///`
+// here, for the reason the transport build modules give.
+pub(crate) mod ordered_fold;
+pub use ordered_fold::{CensusMemory, FoldStats};
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod fields_revised_tests;
+#[cfg(all(test, feature = "network-codecs"))]
+mod ordered_fold_tests;
+// A map that is cheap to copy while it is being grown, which is what lets a plane
+// that is kept between calls be read without copying every verdict it holds. Its
+// only users are the exchange and payload planes, so it is built with them.
+#[cfg(feature = "network-codecs")]
+pub(crate) mod overlay_map;
 /// A selector's VERDICT over the rows of [`fields_json`], and nothing
 /// beside it: five values per row and the ceilings, where the field document
 /// renders every row's whole tree.
@@ -1035,6 +1049,90 @@ pub enum MessageListOrigin {
     /// The declared serial line. There is at most one per capture, so it needs
     /// nothing to distinguish it — see [`link::FlowKey::serial_line`].
     Serial,
+}
+
+/// For each list of the enumeration `current`, the mark of `prev` it CONTINUES,
+/// or `None` for a list that is new; or `None` altogether when `prev` is not a
+/// prefix of the enumeration: a list the mark held is gone, or a list appeared in
+/// front of one (a stream flow in front of the datagram lists), which moves the
+/// position a list is known by.
+///
+/// The serial list is the last of the enumeration whatever else appears, so the
+/// lists in front of it are what a position means; it continues in place when no
+/// list appeared, and is otherwise compared by being empty on both sides.
+///
+/// The structure half of [`Dissection::capture_order_since`], shared with the
+/// node census's memory, which has no use for the order half.
+pub(crate) fn list_continuations(
+    current: &[(FlowKey, MessageListOrigin, &messages::MessageList)],
+    prev: Option<&[ListMark]>,
+) -> Option<alloc::vec::Vec<Option<usize>>> {
+    let body = |lists: usize, serial_last: bool| lists - usize::from(serial_last);
+    let current_body = body(
+        current.len(),
+        current
+            .last()
+            .is_some_and(|(_, o, _)| *o == MessageListOrigin::Serial),
+    );
+    let mut continues: alloc::vec::Vec<Option<usize>> = alloc::vec![None; current.len()];
+    if let Some(p) = prev {
+        let prev_serial = p
+            .last()
+            .is_some_and(|m| m.origin == MessageListOrigin::Serial);
+        let prev_body = body(p.len(), prev_serial);
+        if prev_body > current_body {
+            return None;
+        }
+        for (i, slot) in continues.iter_mut().enumerate().take(prev_body) {
+            *slot = Some(i);
+        }
+        if prev_serial {
+            let serial_at = current.len() - 1;
+            if prev_body == current_body {
+                // Same position: the serial list continues like any other.
+                continues[serial_at] = Some(p.len() - 1);
+            } else if p[p.len() - 1].produced != 0 || current[serial_at].2.produced() != 0 {
+                // A list appeared in front of a serial list that holds messages,
+                // which moved its position.
+                return None;
+            }
+        }
+    }
+    Some(continues)
+}
+
+/// Where a fold over the messages of one list stopped: what
+/// [`Dissection::capture_order_since`] needs to say which messages are new and
+/// whether the list it stopped in is still the same list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListMark {
+    pub(crate) flow: link::FlowKey,
+    pub(crate) origin: MessageListOrigin,
+    /// The produced-index of the oldest message held when the fold stopped. A
+    /// list whose oldest message moved had its front trimmed, and a trim is the
+    /// one event a fold cannot continue across.
+    pub(crate) first_produced: u64,
+    /// Messages ever appended when the fold stopped.
+    pub(crate) produced: u64,
+    /// The packet of the last message of this list that named one, the value a
+    /// message with no packet of its own inherits.
+    pub(crate) last_packet: usize,
+}
+
+/// What `FlowDissection::capture_order_from` returns: the positions in capture
+/// order, the running packet at the end, and the largest key.
+pub(crate) type OrderRun = (Vec<usize>, usize, Option<(usize, usize)>);
+
+/// The messages `Dissection::capture_order_since` returns, each with its flow,
+/// its list and the packet it resolves to.
+pub(crate) type OrderedFrames<'a> = alloc::vec::Vec<(FlowKey, usize, usize, &'a PassiveFrame)>;
+
+/// Where a fold over a whole capture stopped, list by list, and the sort key of
+/// the last message it took. See [`Dissection::capture_order_since`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OrderMarks {
+    pub(crate) lists: alloc::vec::Vec<ListMark>,
+    pub(crate) last_key: Option<(usize, usize, usize)>,
 }
 
 /// R2205 (open-debt item 560) — WHY a decoded message's own bytes cannot be
@@ -2102,9 +2200,29 @@ impl FlowDissection {
     /// The positions are indexes into [`Self::frames`] as it stands, which move
     /// when a ceiling trims the list.
     pub fn capture_order(&self) -> Vec<usize> {
-        let mut keyed: Vec<(usize, usize)> = Vec::with_capacity(self.frames.len());
-        let mut last = 0usize;
-        for (position, frame) in self.frames.iter().enumerate() {
+        self.capture_order_from(0, 0, None)
+            .map(|(order, _, _)| order)
+            .expect("an order from the first message has nothing before it to disagree with")
+    }
+
+    /// [`Self::capture_order`] for the messages from position `start` on, given
+    /// the running packet `last` the messages before `start` left and the key
+    /// `after` of the last of them, or `None` when the first message from `start`
+    /// does not sort after `after`.
+    ///
+    /// Returns the positions from `start` in capture order, the running packet
+    /// at the end, and the largest key. From `start` 0 with nothing before it this
+    /// IS [`Self::capture_order`], which is defined by it, so a caller that
+    /// continues an order and one that makes it whole use one rule.
+    pub(crate) fn capture_order_from(
+        &self,
+        start: usize,
+        mut last: usize,
+        after: Option<(usize, usize)>,
+    ) -> Option<OrderRun> {
+        let mut keyed: Vec<(usize, usize)> =
+            Vec::with_capacity(self.frames.len().saturating_sub(start));
+        for (position, frame) in self.frames.iter().enumerate().skip(start) {
             let first_byte = if frame.decompressed.is_some() {
                 frame.stream_offset + frame.prefix_width
             } else {
@@ -2116,7 +2234,17 @@ impl FlowDissection {
         // Total, so unstable is deterministic. Already sorted is the common
         // case and costs one pass.
         keyed.sort_unstable();
-        keyed.into_iter().map(|(_, position)| position).collect()
+        if let (Some(before), Some(first)) = (after, keyed.first()) {
+            if *first <= before {
+                return None;
+            }
+        }
+        let largest = keyed.last().copied().or(after);
+        Some((
+            keyed.into_iter().map(|(_, position)| position).collect(),
+            last,
+            largest,
+        ))
     }
 
     /// The bytes ONE message of this flow was decoded from, sliced out of the
@@ -4937,6 +5065,118 @@ impl Dissection {
         walk.into_iter()
             .map(|(packet, list, _, flow, frame)| (flow, list, packet, frame))
             .collect()
+    }
+
+    /// THE MESSAGES A FOLD HAS NOT SEEN, in capture order, or `None` when the
+    /// fold it remembers is no longer a prefix of this walk.
+    ///
+    /// # What it is for
+    ///
+    /// Every census plane is a fold over [`Self::message_frames_in_capture_order`],
+    /// and that walk builds and sorts every message of the capture, so a plane
+    /// asked again after a few packets pays for the whole capture. A fold that
+    /// remembers where it stopped needs exactly the messages after that point, and
+    /// this is the one place that says which they are and whether the point still
+    /// stands. `prev` is the [`OrderMarks`] the last call returned, or `None` for a
+    /// first walk, which hands back every message in the order
+    /// [`Self::message_frames_in_capture_order`] does (a test holds the two equal).
+    ///
+    /// # When the point still stands
+    ///
+    /// All four, or the answer is `None` and the caller folds from the start. That
+    /// is the checked fallback: it costs what the walk always cost, and it can only
+    /// be wrong by being slow.
+    ///
+    /// * **The lists are the same lists.** Each list the mark names is at the same
+    ///   position, under the same flow and origin. A flow that appeared among the
+    ///   stream flows moves every datagram list's position, and a position is half
+    ///   of a keyexpr space's name, so it ends the point; a datagram flow that
+    ///   appeared after the others does not, and neither does the serial list while
+    ///   it is empty.
+    /// * **Nothing was trimmed from a list's front.** A trim renumbers the
+    ///   positions behind it, and a fold that already counted the trimmed message
+    ///   is a fold over a list that no longer exists.
+    /// * **Nothing is held that was not produced.** `produced` only grows.
+    /// * **Every new message sorts AFTER the last one folded**, by the key the walk
+    ///   sorts on (packet, list, position). A message that sorts before it is one
+    ///   the fold would have met earlier, for instance a declaration decoded after
+    ///   a packet that followed it, and the fold's state has no place for it.
+    ///
+    /// The packet a message resolves to is a function of the message and of its
+    /// flow's run map, and a run map only extends over bytes that have arrived in
+    /// order, so a message already folded does not change its key.
+    pub(crate) fn capture_order_since(
+        &self,
+        prev: Option<&OrderMarks>,
+    ) -> Option<(OrderedFrames<'_>, OrderMarks)> {
+        let current: alloc::vec::Vec<(FlowKey, MessageListOrigin, &messages::MessageList)> =
+            self.message_lists_with_origin().collect();
+        let continues = list_continuations(&current, prev.map(|p| p.lists.as_slice()))?;
+        let mut marks: alloc::vec::Vec<ListMark> = alloc::vec::Vec::new();
+        let mut walk: alloc::vec::Vec<(usize, usize, usize, FlowKey, &PassiveFrame)> =
+            alloc::vec::Vec::new();
+        for (list, (flow, origin, frames)) in current.iter().copied().enumerate() {
+            let first_produced = frames.produced() - frames.len() as u64;
+            let (start, mut last) = match (prev, continues[list]) {
+                (Some(p), Some(at)) => {
+                    let m = &p.lists[at];
+                    if m.flow != flow
+                        || m.origin != origin
+                        || m.first_produced != first_produced
+                        || m.produced > frames.produced()
+                    {
+                        return None;
+                    }
+                    ((m.produced - m.first_produced) as usize, m.last_packet)
+                }
+                // A list the mark never saw: all of it is new.
+                _ => (0, 0usize),
+            };
+            let run_map = self
+                .flows
+                .get(list)
+                .filter(|f| f.flow == flow)
+                .or_else(|| self.flows.iter().find(|f| f.flow == flow));
+            for (position, frame) in frames.iter().enumerate().skip(start) {
+                let packet = match frame.offset_space {
+                    wz_session_core::passive::OffsetSpace::PacketIndex => Some(frame.stream_offset),
+                    wz_session_core::passive::OffsetSpace::StreamBytes => {
+                        run_map.and_then(|f| f.packet_for(frame.direction, frame.stream_offset))
+                    }
+                };
+                last = packet.unwrap_or(last);
+                walk.push((last, list, position, flow, frame));
+            }
+            marks.push(ListMark {
+                flow,
+                origin,
+                first_produced,
+                produced: frames.produced(),
+                last_packet: last,
+            });
+        }
+        walk.sort_by_key(|(packet, list, position, _, _)| (*packet, *list, *position));
+        let prev_last = prev.and_then(|p| p.last_key);
+        if let (Some(before), Some((packet, list, position, _, _))) = (prev_last, walk.first()) {
+            if (*packet, *list, *position) <= before {
+                return None;
+            }
+        }
+        let last_key = walk
+            .last()
+            .map(|(packet, list, position, _, _)| (*packet, *list, *position))
+            .or(prev_last);
+        let frames = walk
+            .into_iter()
+            .map(|(packet, list, _, flow, frame)| (flow, list, packet, frame))
+            .collect();
+        Some((
+            frames,
+            OrderMarks {
+                lists: marks,
+                last_key,
+            },
+        ))
     }
 
     /// R2205 (open-debt item 560) — THE BYTES of one message of one list,

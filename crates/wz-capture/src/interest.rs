@@ -1348,8 +1348,7 @@ pub fn interests_grouped(
     dissection: &crate::Dissection,
     grouping: &crate::node::SessionGrouping,
 ) -> InterestCensus {
-    let mut census = InterestCensus::new();
-    let mut spaces = KeyexprSpaces::new();
+    use crate::ordered_fold::OrderedFold;
     // Round 2019 (item 270) — `.enumerate()`, exactly as `agg::aggregate_where`
     // does. The two walks must agree on the list index or their space tokens
     // are not comparable, and they agree by walking the same enumeration of the
@@ -1362,14 +1361,54 @@ pub fn interests_grouped(
     // out on the session's OTHER link -- a finding whose own doc calls it "a
     // capture that began after the `DeclKexpr`", said about a capture that read
     // the binding two packets earlier.
-    let mut correlation = InterestCorrelation::default();
+    let mut fold = InterestFold::begin();
     for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        spaces.enter_flow(grouping.owners(list));
-        // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
-        spaces.at_packet(packet);
-        census.observe_frame(&flow, frame, list, &mut correlation, &mut spaces);
+        fold.feed(&flow, list, packet, frame, grouping);
     }
-    census
+    fold.census()
+}
+
+/// The interest plane's fold over a capture in capture order, as a value that can
+/// be kept and continued. See `crate::agg::AggFold`. It takes no selector, so
+/// nothing of the grouping is read at `begin`.
+#[derive(Debug, Clone)]
+pub(crate) struct InterestFold {
+    census: InterestCensus,
+    correlation: InterestCorrelation,
+    spaces: KeyexprSpaces,
+}
+
+impl InterestFold {
+    /// A fold that has taken no message.
+    pub(crate) fn begin() -> Self {
+        Self {
+            census: InterestCensus::new(),
+            correlation: InterestCorrelation::default(),
+            spaces: KeyexprSpaces::new(),
+        }
+    }
+
+    /// The census as it stands, for a caller that keeps folding.
+    pub(crate) fn census(&self) -> InterestCensus {
+        self.census.clone()
+    }
+}
+
+impl crate::ordered_fold::OrderedFold for InterestFold {
+    fn feed(
+        &mut self,
+        flow: &crate::link::FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &wz_session_core::passive::PassiveFrame,
+        grouping: &crate::node::SessionGrouping,
+    ) {
+        self.spaces.enter_flow(grouping.owners(list));
+        // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
+        self.spaces.at_packet(packet);
+        self.census
+            .observe_frame(flow, frame, list, &mut self.correlation, &mut self.spaces);
+    }
 }
 
 #[cfg(test)]
