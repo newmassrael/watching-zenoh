@@ -3578,6 +3578,11 @@ mod tests {
             .map(|_| {
                 std::thread::spawn(|| {
                     let (mut empty, mut foreign) = (0usize, 0usize);
+                    // What a face that is neither empty nor ours looked like: the round's
+                    // endpoint, the listener's id and the id each face reported, so a
+                    // hosted failure says which of "to another listener" and "ours, but
+                    // not yet identified" it was.
+                    let mut sightings: Vec<String> = Vec::new();
                     for _ in 0..ROUNDS_PER_THREAD {
                         // A port the listener's own bind chooses would need the listen role to
                         // report it. This one no other caller in the process was given; a process
@@ -3592,7 +3597,7 @@ mod tests {
                             }
                         };
                         let dialler =
-                            open_peer(vec![endpoint], Vec::new()).expect("the dial opens");
+                            open_peer(vec![endpoint.clone()], Vec::new()).expect("the dial opens");
                         let faces = dialler.shared.face_sessions_with_wake();
                         let ours = listener.zid();
                         if faces.is_empty() {
@@ -3603,18 +3608,33 @@ mod tests {
                             is_expected_peer(session.actions().peer_zid().as_deref(), &ours[..])
                         }) {
                             foreign += 1;
+                            if sightings.len() < 3 {
+                                let seen: Vec<String> = faces
+                                    .iter()
+                                    .map(|(session, _)| {
+                                        format!("{:02x?}", session.actions().peer_zid())
+                                    })
+                                    .collect();
+                                sightings.push(format!(
+                                    "{endpoint}: listener {:02x?}, faces {seen:?}",
+                                    &ours[..]
+                                ));
+                            }
                         }
                         drop(dialler);
                         drop(listener);
                     }
-                    (empty, foreign)
+                    (empty, foreign, sightings)
                 })
             })
             .collect();
-        let (empty, foreign) = workers
+        let (empty, foreign, sightings) = workers
             .into_iter()
             .map(|worker| worker.join().expect("a worker panicked"))
-            .fold((0, 0), |(e, f), (we, wf)| (e + we, f + wf));
+            .fold((0, 0, Vec::new()), |(e, f, mut seen), (we, wf, ws)| {
+                seen.extend(ws);
+                (e + we, f + wf, seen)
+            });
         let opens = THREADS * ROUNDS_PER_THREAD;
         assert_eq!(
             empty, 0,
@@ -3622,7 +3642,7 @@ mod tests {
         );
         assert_eq!(
             foreign, 0,
-            "{foreign} of {opens} dials were accepted by another round's listener on the same port"
+            "{foreign} of {opens} dials were accepted by another round's listener on the same port; first sightings: {sightings:#?}"
         );
     }
 }
