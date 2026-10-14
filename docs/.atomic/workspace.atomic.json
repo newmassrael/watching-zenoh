@@ -274626,6 +274626,46 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3345": {
+      "decision_summary": "The hosted run of the Round 3344 push was red in one job and one test: ordered_fold_tests::another_selector_begins_again_and_the_same_one_continues, in Layer C1bt (wz-capture without default features). The test selected with key == demo/**, and a selector carrying a wildcard is a parse error (WildcardUnsupported) in a build without the wildcard feature. The code under test was not at fault; the test was written and run only with default features. The test now selects an exact key and still proves what it was written for: a memory is for one selector, the same one continues, another begins again. The skipped layers of that job (C1bw, C1bx, C1by, C1bz) had graded nothing, so they were run on a build host with C1bt. NOT claimed: the hosted run of this repair; the earlier NOT-claimed list of Round 3344 stands.",
+      "changes_bullets": [
+        "crates/wz-capture/src/ordered_fold_tests.rs: the selector test names the exact key demo/temp where it named demo/**, with the reason in a comment.",
+        "docs/hosted-red-acks.md: the row for the red run, with the failing job, step and test."
+      ],
+      "verification_bullets": [
+        "On a build host: layers C1bt (wz-capture without default features, clippy and the whole test run), C1bw, C1bx, C1by and C1bz pass on the repaired tree.",
+        "The hosted run that failed was read job by job: one job red, every other job green, and the failing step's log names the test and the parse error.",
+        "NOT verified here: the hosted run of this repair. Why it was missed: the feature-reduced census layers are deferred by the push hook and the Round 3344 batch ran the lib only with default features and with dissect."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumer the repair sha and the failing job name.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3344 push was red in one job and one test: ordered_fold_tests::another_selector_begins_again_and_the_same_one_continues, in Layer C1bt (wz-capture without default features). The test selected with key == demo/**, and a selector carrying a wildcard is a parse error (WildcardUnsupported) in a build without the wildcard feature. The code under test was not at fault; the test was written and run only with default features. The test now selects an exact key and still proves what it was written for: a memory is for one selector, the same one continues, another begins again. The skipped layers of that job (C1bw, C1bx, C1by, C1bz) had graded nothing, so they were run on a build host with C1bt. NOT claimed: the hosted run of this repair; the earlier NOT-claimed list of Round 3344 stands.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/ordered_fold_tests.rs: the selector test names the exact key demo/temp where it named demo/**, with the reason in a comment.",
+        "docs/hosted-red-acks.md: the row for the red run, with the failing job, step and test."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: layers C1bt (wz-capture without default features, clippy and the whole test run), C1bw, C1bx, C1by and C1bz pass on the repaired tree.",
+        "The hosted run that failed was read job by job: one job red, every other job green, and the failing step's log names the test and the parse error.",
+        "NOT verified here: the hosted run of this repair. Why it was missed: the feature-reduced census layers are deferred by the push hook and the Round 3344 batch ran the lib only with default features and with dissect."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumer the repair sha and the failing job name.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
