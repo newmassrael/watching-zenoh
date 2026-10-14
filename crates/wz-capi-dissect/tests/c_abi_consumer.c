@@ -1533,6 +1533,65 @@ static int check_e2e_doors(void) {
           "damage must be a CRC fact only: %s", doc);
     wz_dissect_string_free(doc);
 
+    /* (ABI 37) -- the header compared with the values a caller expects. The
+     * frame above carries ident hi=1, lo=2 (the header is intact, the damage is
+     * in the body), so an expectation of the right part is ok and one of the
+     * wrong value is a DIFFERENCE, not a refusal: the call still answers OK and
+     * the document is the open document with `expectation` last. */
+    doc = NULL;
+    rc = wz_dissect_e2e_open_expecting(e2e_profile, "{\"ident\":{\"lo\":2}}",
+                                       frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "e2e_open_expecting rc=%d", rc);
+    CHECK(doc != NULL, "OK came back with no string");
+    CHECK(strstr(doc, "\"revision\":3") != NULL, "e2e_open is at 3: %s", doc);
+    CHECK(strstr(doc, "\"expectation\":{\"ok\":true,\"checked\":1,"
+                      "\"differences\":[]}}") != NULL,
+          "a matching part must be counted and not listed: %s", doc);
+    wz_dissect_string_free(doc);
+
+    doc = NULL;
+    rc = wz_dissect_e2e_open_expecting(e2e_profile, "{\"ident\":{\"lo\":3}}",
+                                       frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "different value rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":true,\"profile\"") != NULL,
+          "a difference is not a refusal of the frame: %s", doc);
+    CHECK(strstr(doc, "\"expectation\":{\"ok\":false,\"checked\":1,"
+                      "\"differences\":[{\"field\":\"ident\",\"part\":\"lo\","
+                      "\"expected\":3,\"found\":2}]}}") != NULL,
+          "the difference must name the part, the value expected and found: %s",
+          doc);
+    CHECK(strstr(doc, "null") == NULL, "no key is ever null: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* The CRC has nothing to expect: crc_ok judges it. Refused, with the place
+     * in the EXPECTED text. */
+    doc = NULL;
+    rc = wz_dissect_e2e_open_expecting(e2e_profile, "{\"crc\":1}", frame,
+                                       frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "expected crc rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false") != NULL &&
+              strstr(doc, "\"expected_path\":\"/crc\"") != NULL &&
+              strstr(doc, "\"expectation\"") == NULL,
+          "the CRC must be blamed at its path in the expected text: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A caller bug is an error and no string. */
+    doc = NULL;
+    rc = wz_dissect_e2e_open_expecting(e2e_profile, NULL, frame, frame_len,
+                                       &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null expectation must be INVALID_ARG, rc=%d", rc);
+    rc = wz_dissect_e2e_open_expecting(NULL, "{}", frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null profile must be INVALID_ARG, rc=%d", rc);
+    rc = wz_dissect_e2e_open_expecting(e2e_profile, "{}", NULL, 3, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null frame with a length must be INVALID_ARG, rc=%d", rc);
+    rc = wz_dissect_e2e_open_expecting(e2e_profile, "{}", frame, frame_len,
+                                       NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+          "a null out must be INVALID_ARG, rc=%d", rc);
+
     /* A profile with no fields is refused at its root, by a path. */
     doc = NULL;
     rc = wz_dissect_e2e_open("{\"name\":\"x\"}", frame, frame_len, &doc);
@@ -3218,9 +3277,10 @@ int main(void) {
      * consumer could read. Each is built from the smallest profile there is,
      * which is the cheapest way to hold the document's opening to the revision
      * this consumer was written against. e2e_wrap is at 2 since its body could
-     * be described (an `@body` member of the values text); e2e_open is at 2
-     * since its body could be read by its schema (wz_dissect_e2e_open_body),
-     * and the first open door writes that revision too. */
+     * be described (an `@body` member of the values text); e2e_open is at 3
+     * since its header could be compared with expected values
+     * (wz_dissect_e2e_open_expecting; at 2 its body could be read by its
+     * schema), and the first open door writes that revision too. */
     revisioned[7].name = "e2e_wrap";
     revisioned[7].revision = 2;
     revisioned[7].doc = NULL;
@@ -3229,7 +3289,7 @@ int main(void) {
                              NULL, 0, &revisioned[7].doc);
     CHECK(rc == WZ_DISSECT_OK, "e2e_wrap document rc=%d", rc);
     revisioned[8].name = "e2e_open";
-    revisioned[8].revision = 2;
+    revisioned[8].revision = 3;
     revisioned[8].doc = NULL;
     {
         static const unsigned char header_only[6] = {0, 0, 6, 1, 0, 255};

@@ -1557,7 +1557,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 36
+#define WZ_DISSECT_ABI_REVISION 37
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -3663,7 +3663,7 @@ int wz_dissect_proto_encode(const char *root_message,
  *
  * wz_dissect_e2e_open -- what a received frame says.
  *
- *     {"document":{"name":"e2e_open","revision":2},"ok":true,"profile":"demo",
+ *     {"document":{"name":"e2e_open","revision":3},"ok":true,"profile":"demo",
  *      "payload_offset":12,"payload_bytes":4,
  *      "fields":[ ...as above... ],
  *      "crc_ok":true,"crc_computed":1990398553,"crc_fed":[ ...as above... ],
@@ -3747,10 +3747,11 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  * its body schema (demo/pose=demo-a@demo.Pose). The text nests at most 8
  * levels, like a profile.
  *
- * THE VERDICT is an e2e_open document (revision 2): every key
+ * THE VERDICT is an e2e_open document (revision 3 since the header could be
+ * compared with expected values, which adds nothing to this door's reading): every key
  * wz_dissect_e2e_open writes, `body_message` after `profile`, and `body` last.
  *
- *     {"document":{"name":"e2e_open","revision":2},"ok":true,"profile":"demo",
+ *     {"document":{"name":"e2e_open","revision":3},"ok":true,"profile":"demo",
  *      "body_message":"demo.Pose","payload_offset":12,"payload_bytes":6,
  *      "fields":[ ... ],"crc_ok":true, ... ,"length_matches_frame":true,
  *      "body":{"decoded":true,"fields":[
@@ -3836,6 +3837,75 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
 int wz_dissect_e2e_open_body(const char *profile_json, const char *body_json,
                              const unsigned char *frame, size_t frame_len,
                              char **out);
+
+/* (ABI 37) -- A PROTECTED FRAME OPENED AND ITS HEADER COMPARED WITH THE VALUES
+ * YOU EXPECT: the wz_dissect_e2e_open document, and an `expectation`.
+ *
+ * WHY IT IS HERE AND NOT IN YOUR PROGRAM. A frame whose CRC verifies, whose
+ * length agrees and whose counter follows can still carry the wrong Data ID: a
+ * sender that stamps 6721 where the declaration says 0x1A40 is well formed in
+ * every way wz_dissect_e2e_open judges, so a program showing that verdict shows a
+ * frame that looks fine. The Data ID is in the opened header already (`fields`,
+ * with the parts a field splits into); what it could not do was be compared, and
+ * a comparison written beside the document is a second reader of the profile
+ * beside this library's one.
+ *
+ * It is its own symbol and not a key of wz_dissect_e2e_open's input: the profile
+ * is one description per PROTOCOL and the expected value is one per DECLARATION
+ * (per topic). Folded into the profile it would make the profile a second thing.
+ *
+ * THE EXPECTATION. `expected_json` is the text wz_dissect_e2e_wrap takes for its
+ * values: an object whose keys are header field names, each a number or, for a
+ * split field, an object of numbers keyed by part name.
+ *
+ *     {"ident":{"msg":6721}}
+ *
+ * It may state a SUBSET of the fields and of a split field's parts: a Data ID is
+ * one part of a field, and a caller that knows only that part says only that
+ * part. What is compared is the LOGICAL value, with the `xor` undone: the value
+ * wz_dissect_e2e_wrap builds a frame from, and the `value` of `fields`. The CRC
+ * and the length have nothing to expect (`crc_ok` and `length_matches_frame`
+ * judge them), and naming either is refused. So are a name that is no field, a
+ * number for a split field, an object for a plain one, a part the field does not
+ * have, a value stated twice, and a value that does not fit its field or part:
+ * that last one can never match, so it is a mistake in the text and not a
+ * finding.
+ *
+ * THE VERDICT is an e2e_open document (revision 3): every key
+ * wz_dissect_e2e_open writes, and `expectation` last.
+ *
+ *     {"document":{"name":"e2e_open","revision":3},"ok":true,"profile":"demo",
+ *      "payload_offset":12,"payload_bytes":4,"fields":[ ... ],"crc_ok":true,
+ *      ... ,"length_matches_frame":true,
+ *      "expectation":{"ok":false,"checked":2,
+ *                     "differences":[{"field":"ident","part":"msg",
+ *                                     "expected":6721,"found":6720}]}}
+ *
+ * `ok` is that there is no difference. `checked` is how many values were
+ * compared: a plain field is one, and each part named is one. A difference names
+ * the `field`, the `part` when the field is split and the expectation named one
+ * (the key is ABSENT otherwise, never null), the value `expected` and the value
+ * the frame carries, `found`; both are integers under the rule above (a string
+ * past 2^53 - 1). A difference is a fact about the frame like a failed CRC, and
+ * the call still answers WZ_DISSECT_OK. An empty object is an expectation of
+ * nothing: ok, with `checked` 0.
+ *
+ * A text this library was handed and refused is a successful DIAGNOSIS, as for
+ * every document door here: `ok` false with `expected_path` (an RFC 6901 pointer)
+ * or `expected_offset` (a byte offset, when the text is not JSON) naming the
+ * place, and `profile_path` or `profile_offset` for the profile. The first
+ * problem found is the one reported, in this order: the profile, the expected
+ * text, a frame shorter than the header, then the expected values against the
+ * profile.
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a null `profile_json`,
+ * `expected_json` or `out`, a null `frame` with a non-zero length, or text that is
+ * not UTF-8. The memory rule does not move: the verdict is a `char*` released by
+ * wz_dissect_string_free. */
+int wz_dissect_e2e_open_expecting(const char *profile_json,
+                                  const char *expected_json,
+                                  const unsigned char *frame, size_t frame_len,
+                                  char **out);
 
 /* (ABI 30) -- A TRANSPORT MESSAGE BUILT FROM THE FIELDS YOU SET, in the framing
  * the link wants, with a report of where each field sits in the bytes.

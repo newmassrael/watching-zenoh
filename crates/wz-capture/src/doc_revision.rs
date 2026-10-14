@@ -2547,6 +2547,35 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
             shape: CarriesShape::Passenger,
         }],
     },
+    // THE HEADER MAY BE COMPARED WITH WHAT A CALLER EXPECTS: a third door
+    // (`wz_dissect_e2e_open_expecting`) takes the header values a caller expects
+    // (a Data ID it declared, a version it speaks) and the document gains
+    // `expectation`, last. See [`E2E_OPEN_R3_KEYS`].
+    //
+    // Keys arrive and none retires; a frame opened by an earlier door reads as it
+    // did but for the revision number. The refusals of the expected text name the
+    // place by `expected_path` or `expected_offset`, the keys every other text
+    // here uses under its own word. No family arrives: a field's and a part's
+    // name are free text. Two integer cells arrive under the rule: the `expected`
+    // and the `found` value of a difference, which are the logical value of a
+    // header field or of one of its parts and can be 64 bits wide.
+    DocumentShape {
+        document: E2E_OPEN,
+        revision: 3,
+        keys: E2E_OPEN_R3_KEYS,
+        retiring: &[],
+        // Cumulative, as every revision's are: the family and the carry the body
+        // read added at revision 2 are this revision's too.
+        families: &[ValueFamily {
+            key: "wire_type",
+            values: &["i32", "i64", "len", "varint"],
+        }],
+        planes: &[],
+        carries: &[KeyCarries {
+            key: "wire_type",
+            shape: CarriesShape::Passenger,
+        }],
+    },
     // The protobuf bytes a set of field values comes to under a `.proto`
     // schema, or why they could not be built.
     //
@@ -10311,6 +10340,64 @@ pub const E2E_OPEN_R2_KEYS: &[&str] = &[
     "wire_type",
 ];
 
+/// The `e2e_open` document's key set at revision 3: revision 2's, and the keys
+/// the comparison with expected header values adds.
+///
+/// `expectation` is on the success branch of the door that takes the values, last,
+/// and holds `ok`, `checked` and `differences`; each difference has `field`,
+/// `part` (only when the field is split and the expectation named a part),
+/// `expected` and `found`. `expected_path` and `expected_offset` are on the
+/// refusals that are about the expected text. A key that does not apply is ABSENT
+/// and never `null`.
+pub const E2E_OPEN_R3_KEYS: &[&str] = &[
+    "body",
+    "body_message",
+    "body_offset",
+    "body_path",
+    "bytes",
+    "checked",
+    "column",
+    "crc_computed",
+    "crc_fed",
+    "crc_ok",
+    "decoded",
+    "differences",
+    "document",
+    "expectation",
+    "expected",
+    "expected_offset",
+    "expected_path",
+    "field",
+    "fields",
+    "file",
+    "found",
+    "hex",
+    "item",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "line",
+    "message",
+    "name",
+    "number",
+    "offset",
+    "ok",
+    "part",
+    "parts",
+    "payload_bytes",
+    "payload_offset",
+    "profile",
+    "profile_offset",
+    "profile_path",
+    "raw",
+    "reason",
+    "revision",
+    "stage",
+    "type",
+    "value",
+    "wire_type",
+];
+
 /// The `transport_build` document's key set at revision 1, over BOTH branches:
 /// the built unit with its report, and the refusal with whichever position key
 /// applies.
@@ -15234,7 +15321,10 @@ mod tests {
             (E2E_WRAP, 2),
             // To 2 when the body could be read by its schema: `body_message`,
             // `body` and its listing, `stage` and the position keys.
-            (E2E_OPEN, 2),
+            // To 3 when the header could be compared with the values a caller
+            // expects: `expectation`, its `checked` and `differences`, and the
+            // position keys of the expected text.
+            (E2E_OPEN, 3),
             // The bytes a set of field values comes to under a `.proto` schema.
             (PROTO_ENCODE, 1),
             // A transport message built from a description, with the report

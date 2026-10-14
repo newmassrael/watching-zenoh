@@ -373,6 +373,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 36, for `wz_dissect_proto_messages`: every message the files of a `.proto`
     // schema declare, with no root. The describe document moved to revision 4 on
     // the same step (an option's `origin`), which moves no symbol.
+    // 37, for `wz_dissect_e2e_open_expecting`: a protected frame opened and its
+    // header compared with the values a caller expects. The e2e_open document
+    // moved to revision 3 on the same step (`expectation`).
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -390,7 +393,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 36;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 37;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2488,6 +2491,86 @@ pub unsafe extern "C" fn wz_dissect_e2e_open_body(
     };
     write_string(
         wz_capture::e2e_json::open_body_document(profile, body, frame),
+        out,
+    )
+}
+
+/// (ABI 37) — A PROTECTED FRAME OPENED AND ITS HEADER COMPARED WITH THE VALUES THE
+/// CALLER EXPECTS: the [`wz_dissect_e2e_open`] document, and an `expectation`.
+///
+/// # Why it is a door
+///
+/// A frame whose CRC verifies, whose length agrees and whose counter follows can
+/// still carry the wrong Data ID: a sender that stamps `6721` where the
+/// declaration says `0x1A40` is well formed in every way the open door judges, so
+/// a consumer showing that verdict shows a frame that looks fine. The Data ID is
+/// in the opened header already (`fields`, with the parts it splits into); what it
+/// could not do was be compared, and a comparison written next to the document is
+/// a second reader of the profile beside this library's one.
+///
+/// It is a new symbol and not a key of [`wz_dissect_e2e_open`]'s input, because the
+/// profile is one description per PROTOCOL and the expected value is one per
+/// DECLARATION (per topic): folded into the profile it would make the profile a
+/// second thing, as folding a schema into it would have.
+///
+/// # The expectation
+///
+/// `expected_json` is the text the wrap door takes for its values: an object whose
+/// keys are header field names, each a number or, for a split field, an object of
+/// numbers keyed by part name (`{"ident":{"msg":6721}}`). It may state a subset of
+/// the fields and of a split field's parts. What is compared is the LOGICAL value,
+/// with the `xor` undone, the value the wrap door builds a frame from. The CRC and
+/// the length have nothing to expect: `crc_ok` and `length_matches_frame` judge
+/// them, and naming either is refused.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with an `e2e_open` document (revision 3): every key
+/// [`wz_dissect_e2e_open`] writes, and `expectation` last:
+/// `{"ok":false,"checked":2,"differences":[{"field":"ident","part":"msg",
+/// "expected":6721,"found":6720}]}`. A difference is a fact about the frame like a
+/// failed CRC, not a refusal of the call. Text that is refused is a successful
+/// DIAGNOSIS with `expected_path` or `expected_offset` naming the place.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `profile_json`, `expected_json` or
+/// `out`, a null `frame` with a non-zero length, or text that is not UTF-8.
+///
+/// # Safety
+/// `profile_json` and `expected_json` must be NUL-terminated C strings; `frame`
+/// must be readable for `frame_len` bytes; `out` must be a writable pointer to a
+/// `*mut c_char`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_e2e_open_expecting(
+    profile_json: *const c_char,
+    expected_json: *const c_char,
+    frame: *const u8,
+    frame_len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if profile_json.is_null()
+        || expected_json.is_null()
+        || out.is_null()
+        || (frame.is_null() && frame_len != 0)
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(profile), Ok(expected)) = (
+        unsafe { std::ffi::CStr::from_ptr(profile_json) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(expected_json) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let frame: &[u8] = if frame_len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null was checked just now.
+        unsafe { core::slice::from_raw_parts(frame, frame_len) }
+    };
+    write_string(
+        wz_capture::e2e_json::open_expecting_document(profile, expected, frame),
         out,
     )
 }
@@ -7862,7 +7945,11 @@ mod tests {
         // 36, for `wz_dissect_proto_messages`: one symbol, a `char*` released by
         // `wz_dissect_string_free`; the schema files cross as the struct the
         // describe door takes, and no struct is new.
-        assert_eq!(wz_dissect_abi_version(), 36);
+        // 37, for `wz_dissect_e2e_open_expecting`: one symbol, a `char*` released
+        // by `wz_dissect_string_free`; the profile and the expected values cross
+        // as C strings and the frame as the bytes the open door takes, and no
+        // struct is new.
+        assert_eq!(wz_dissect_abi_version(), 37);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -10341,6 +10428,31 @@ mod tests {
         take_document(rc, out)
     }
 
+    /// Drive `wz_dissect_e2e_open_expecting` the way C does.
+    fn call_e2e_open_expecting(
+        profile: &str,
+        expected: &str,
+        frame: &[u8],
+    ) -> Result<String, c_int> {
+        let profile = CString::new(profile).expect("no interior NUL");
+        let expected = CString::new(expected).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_e2e_open_expecting(
+                profile.as_ptr(),
+                expected.as_ptr(),
+                if frame.is_empty() {
+                    core::ptr::null()
+                } else {
+                    frame.as_ptr()
+                },
+                frame.len(),
+                &mut out,
+            )
+        };
+        take_document(rc, out)
+    }
+
     /// The open door's body description over a schema text of the caller's.
     fn e2e_body_description(schema_text: &str, message: &str) -> String {
         let mut schema = String::new();
@@ -10392,6 +10504,23 @@ mod tests {
                 &unknown,
             )
             .expect("answers"),
+            // From the door that compares the header with expected values: a
+            // match, a difference on a part, a difference on a plain field, the
+            // expected text refused by path and by byte, and a frame too short.
+            call_e2e_open_expecting(E2E_PROFILE, "{}", &e2e_frame_of(&wrapped)).expect("answers"),
+            call_e2e_open_expecting(
+                E2E_PROFILE,
+                r#"{"counter": 7, "ident": {"lo": 9}}"#,
+                &e2e_frame_of(&wrapped),
+            )
+            .expect("answers"),
+            call_e2e_open_expecting(E2E_PROFILE, r#"{"counter": 1}"#, &e2e_frame_of(&wrapped))
+                .expect("answers"),
+            call_e2e_open_expecting(E2E_PROFILE, r#"{"crc": 1}"#, &e2e_frame_of(&wrapped))
+                .expect("answers"),
+            call_e2e_open_expecting(E2E_PROFILE, "{\"counter\":", &e2e_frame_of(&wrapped))
+                .expect("answers"),
+            call_e2e_open_expecting(E2E_PROFILE, "{}", b"\x01\x02").expect("answers"),
         ]
     }
 

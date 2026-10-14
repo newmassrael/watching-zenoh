@@ -522,6 +522,18 @@ ONLY_CAPI = {
         "operator reads a schema with the tools that ship with it.",
         (),
     ),
+    "a protected frame's header compared with the values a caller expects": (
+        "wz_dissect_e2e_open_expecting",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and shows a protected frame's verdict must be able to say that the Data "
+        "ID is not the declared one, and comparing the opened header's `value` "
+        "beside the document is a second reader of the profile. It is the half "
+        "after `wz_dissect_e2e_open`, which judges the CRC, the length and the "
+        "counter and holds the header against no declaration. The command line "
+        "judges captures through the rule a declaration carries; a flag that took "
+        "an expected value and printed the difference is a convenience.",
+        (),
+    ),
     "every message the files of a .proto schema declare": (
         "wz_dissect_proto_messages",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

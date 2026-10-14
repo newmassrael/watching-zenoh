@@ -1359,7 +1359,7 @@ const WRAP_E: &str = concat!(
 );
 
 const OPEN_E: &str = concat!(
-    r#"{"document":{"name":"e2e_open","revision":2},"ok":true,"profile":"demo-e","#,
+    r#"{"document":{"name":"e2e_open","revision":3},"ok":true,"profile":"demo-e","#,
     r#""payload_offset":8,"payload_bytes":3,"#,
     r#""fields":[{"name":"hdr","offset":0,"bytes":1,"raw":1,"value":1},"#,
     r#"{"name":"crc","offset":1,"bytes":3,"raw":63501,"value":63501},"#,
@@ -1466,7 +1466,7 @@ fn a_profile_refusal_names_the_place_and_the_input_by_the_key_it_carries() {
     let doc = open_document(&bad, &[0u8; 16]);
     assert!(
         doc.starts_with(
-            r#"{"document":{"name":"e2e_open","revision":2},"ok":false,"profile_path":"/crc/field""#
+            r#"{"document":{"name":"e2e_open","revision":3},"ok":false,"profile_path":"/crc/field""#
         ),
         "{doc}"
     );
@@ -1511,7 +1511,7 @@ fn no_document_ever_writes_a_null_and_every_one_opens_with_its_own_revision() {
         assert!(!doc.contains("null"), "{doc}");
         assert!(
             doc.starts_with(r#"{"document":{"name":"e2e_wrap","revision":2}"#)
-                || doc.starts_with(r#"{"document":{"name":"e2e_open","revision":2}"#),
+                || doc.starts_with(r#"{"document":{"name":"e2e_open","revision":3}"#),
             "{doc}"
         );
     }
@@ -1583,4 +1583,168 @@ fn the_fed_list_is_the_cover_in_its_own_order() {
         number_after(&doc, "crc_computed"),
         (0xc2bf_56b4u64).to_string()
     );
+}
+
+// ----------------------------------------------- the header against what is expected
+
+mod expectation {
+    use super::*;
+    use crate::e2e_json::open_expecting_document;
+
+    fn gold_frame(at: usize) -> (&'static str, Vec<u8>) {
+        (GOLDS[at].profile, unhex(GOLDS[at].frame))
+    }
+
+    fn opened_under(expected: &str) -> String {
+        let (profile, frame) = gold_frame(0);
+        open_expecting_document(profile, expected, &frame)
+    }
+
+    /// What the consumer asked about: a frame whose CRC, length and counter all
+    /// verify, sent with a Data ID other than the declared one.
+    #[test]
+    fn a_wrong_data_id_is_a_difference_in_a_frame_that_is_otherwise_sound() {
+        // The golden frame carries msg 4660; the declaration says 4661.
+        let doc = opened_under(r#"{"ident": {"msg": 4661}}"#);
+        assert!(
+            doc.contains("\"ok\":true"),
+            "the frame itself is a success: {doc}"
+        );
+        assert!(doc.contains("\"crc_ok\":true"), "{doc}");
+        assert!(doc.contains("\"length_matches_frame\":true"), "{doc}");
+        assert!(
+            doc.ends_with(
+                "\"expectation\":{\"ok\":false,\"checked\":1,\"differences\":[\
+                 {\"field\":\"ident\",\"part\":\"msg\",\"expected\":4661,\"found\":4660}]}}"
+            ),
+            "{doc}"
+        );
+        assert!(doc.contains("\"revision\":3"), "{doc}");
+    }
+
+    #[test]
+    fn what_matches_is_counted_and_not_listed() {
+        let doc = opened_under(r#"{"ident": {"msg": 4660, "domain": 3}, "counter": 258}"#);
+        assert!(
+            doc.ends_with("\"expectation\":{\"ok\":true,\"checked\":3,\"differences\":[]}}"),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn a_plain_field_difference_has_no_part_key() {
+        let doc = opened_under(r#"{"counter": 259}"#);
+        assert!(
+            doc.ends_with(
+                "\"expectation\":{\"ok\":false,\"checked\":1,\"differences\":[\
+                 {\"field\":\"counter\",\"expected\":259,\"found\":258}]}}"
+            ),
+            "{doc}"
+        );
+    }
+
+    /// An expectation may state a subset, and the empty one expects nothing.
+    #[test]
+    fn an_empty_expectation_is_ok_with_nothing_checked() {
+        let doc = opened_under("{}");
+        assert!(
+            doc.ends_with("\"expectation\":{\"ok\":true,\"checked\":0,\"differences\":[]}}"),
+            "{doc}"
+        );
+    }
+
+    /// What is compared is the LOGICAL value, with the `xor` undone: the value a
+    /// frame is built from. `cell` of the second profile is 2_774_882_891 on the
+    /// wire and 0x00C0FFEE once the mask is off.
+    #[test]
+    fn the_value_compared_is_the_logical_one_not_the_wire_one() {
+        let (profile, frame) = gold_frame(1);
+        let right = open_expecting_document(profile, r#"{"cell": "0x00C0FFEE"}"#, &frame);
+        assert!(
+            right.contains("\"expectation\":{\"ok\":true,\"checked\":1"),
+            "{right}"
+        );
+        let wire = open_expecting_document(profile, r#"{"cell": 2774882891}"#, &frame);
+        assert!(
+            wire.contains("\"expected\":2774882891,\"found\":12648430"),
+            "the wire value is not the one a build takes: {wire}"
+        );
+    }
+
+    /// The text is judged by the rules the wrap door judges its values by, and a
+    /// refusal names the place in the EXPECTED text.
+    #[test]
+    fn what_cannot_be_expected_is_refused_at_its_place() {
+        let refused = |expected: &str, path: &str, why: &str| {
+            let doc = opened_under(expected);
+            assert!(doc.contains("\"ok\":false"), "{doc}");
+            assert!(
+                doc.contains(&format!("\"expected_path\":\"{path}\"")),
+                "{doc}"
+            );
+            assert!(doc.contains(why), "{why} in {doc}");
+            assert!(!doc.contains("\"expectation\""), "{doc}");
+        };
+        refused(r#"{"nope": 1}"#, "/nope", "no field is called `nope`");
+        refused(r#"{"crc": 1}"#, "/crc", "judged by `crc_ok`");
+        refused(
+            r#"{"length": 20}"#,
+            "/length",
+            "judged by `length_matches_frame`",
+        );
+        refused(r#"{"ident": 5}"#, "/ident", "is split into parts");
+        refused(r#"{"counter": {"a": 1}}"#, "/counter", "is not split");
+        refused(
+            r#"{"ident": {"nope": 1}}"#,
+            "/ident/nope",
+            "has no part called `nope`",
+        );
+        refused(
+            r#"{"ident": {"domain": 256}}"#,
+            "/ident/domain",
+            "does not fit the 8-bit part",
+        );
+        refused(
+            r#"{"counter": 65536}"#,
+            "/counter",
+            "does not fit the 2-byte field",
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_json_is_named_by_its_byte() {
+        let doc = opened_under("{\"ident\":");
+        assert!(doc.contains("\"ok\":false"), "{doc}");
+        assert!(doc.contains("\"expected_offset\":"), "{doc}");
+        assert!(!doc.contains("\"expected_path\""), "{doc}");
+    }
+
+    /// The first problem found is the one reported: the profile, the expected
+    /// text, a short frame, then the expected values against the profile.
+    #[test]
+    fn the_order_the_problems_are_reported_in_is_the_documented_one() {
+        let (profile, frame) = gold_frame(0);
+        let bad_profile = open_expecting_document("{", "{", &frame);
+        assert!(bad_profile.contains("\"profile_offset\""), "{bad_profile}");
+        let bad_text = open_expecting_document(profile, "{", &[]);
+        assert!(bad_text.contains("\"expected_offset\""), "{bad_text}");
+        let short = open_expecting_document(profile, r#"{"nope": 1}"#, &frame[..4]);
+        assert!(
+            short.contains("the frame is 4 bytes") && !short.contains("expected_path"),
+            "{short}"
+        );
+        let names = open_expecting_document(profile, r#"{"nope": 1}"#, &frame);
+        assert!(names.contains("\"expected_path\":\"/nope\""), "{names}");
+    }
+
+    /// An expectation changes nothing the open door says: the document is that
+    /// door's, with `expectation` added last.
+    #[test]
+    fn the_document_is_the_open_documents_with_the_expectation_added() {
+        let (profile, frame) = gold_frame(0);
+        let plain = open_document(profile, &frame);
+        let expecting = open_expecting_document(profile, "{}", &frame);
+        let body = plain.strip_suffix('}').expect("a closed object");
+        assert!(expecting.starts_with(body), "{expecting}\n{plain}");
+    }
 }

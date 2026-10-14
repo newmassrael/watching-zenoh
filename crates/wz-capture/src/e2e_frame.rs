@@ -467,6 +467,161 @@ pub fn build(profile: &Profile, values: &Values, payload: &[u8]) -> Result<Built
     })
 }
 
+/// One header value a caller expected and the frame does not carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Difference {
+    /// The header field.
+    pub field: String,
+    /// The part of it, when the field is split and the expectation named parts.
+    pub part: Option<String>,
+    /// What the caller expected.
+    pub expected: u64,
+    /// What the frame carries: the logical value, with the `xor` undone, as the
+    /// values a frame is built from are.
+    pub found: u64,
+}
+
+/// What [`expect`] found: how many values it compared and which of them differ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expectation {
+    /// The values compared: a plain field is one, each part named is one.
+    pub checked: usize,
+    /// The ones that differ, in the order the expectation states them.
+    pub differences: Vec<Difference>,
+}
+
+/// Compare the header values `expected` states with the ones an opened frame
+/// carries.
+///
+/// The expectation is read as the values a frame is built from are
+/// ([`Values`]): a plain field is a number, a split field an object of numbers
+/// keyed by part name, and what is compared is the LOGICAL value, with the `xor`
+/// undone. Unlike a build, it may state a SUBSET: a Data ID is one part of a
+/// split field, and a caller that knows only that part says only that part.
+///
+/// It is the same text the wrap door takes and is judged by the same rules where
+/// they apply: a name that is no field, the CRC and the length (which are
+/// judged by `crc_ok` and `length_matches_frame` and have nothing to expect), a
+/// number for a split field, an object for a plain one, a part the field does
+/// not have, a value stated twice, and a value that does not fit its field or
+/// part, are refused with the path into the expected text. A value that cannot
+/// fit can never match, so it is a mistake in the text and not a finding.
+pub fn expect(
+    profile: &Profile,
+    expected: &Values,
+    opened: &OpenedFrame,
+) -> Result<Expectation, DocError> {
+    let (crc_at, length_at) = (profile.crc().field, profile.length().field);
+    let mut checked = 0;
+    let mut differences = Vec::new();
+    for (i, (name, supplied)) in expected.entries.iter().enumerate() {
+        let path = child("", name);
+        let refuse = |at: String, reason: String| DocError::invalid(at, reason);
+        let Some(index) = profile.field_index(name) else {
+            return Err(refuse(path, format!("no field is called `{name}`")));
+        };
+        if index == crc_at || index == length_at {
+            let (role, judged_by) = if index == crc_at {
+                ("crc", "crc_ok")
+            } else {
+                ("length", "length_matches_frame")
+            };
+            return Err(refuse(
+                path,
+                format!("the {role} field `{name}` is judged by `{judged_by}`: leave it out"),
+            ));
+        }
+        if expected.entries[..i]
+            .iter()
+            .any(|(earlier, _)| earlier == name)
+        {
+            return Err(refuse(path, format!("the field `{name}` is stated twice")));
+        }
+        let field = &profile.fields()[index];
+        let report = &opened.fields[index];
+        match supplied {
+            Supplied::Whole(value) => {
+                if !field.parts.is_empty() {
+                    let names: Vec<&str> = field.parts.iter().map(|p| p.name.as_str()).collect();
+                    return Err(refuse(
+                        path,
+                        format!(
+                            "the field `{name}` is split into parts: state an object with some of {}",
+                            names.join(", ")
+                        ),
+                    ));
+                }
+                if *value > field.max_value() {
+                    return Err(refuse(
+                        path,
+                        format!(
+                            "{value} does not fit the {}-byte field `{name}`",
+                            field.bytes
+                        ),
+                    ));
+                }
+                checked += 1;
+                if *value != report.value {
+                    differences.push(Difference {
+                        field: name.clone(),
+                        part: None,
+                        expected: *value,
+                        found: report.value,
+                    });
+                }
+            }
+            Supplied::Parts(given) => {
+                if field.parts.is_empty() {
+                    return Err(refuse(
+                        path,
+                        format!("the field `{name}` is not split: state a number"),
+                    ));
+                }
+                for (j, (part_name, value)) in given.iter().enumerate() {
+                    let at = child(&path, part_name);
+                    let Some(position) = field.parts.iter().position(|p| &p.name == part_name)
+                    else {
+                        return Err(refuse(
+                            at,
+                            format!("the field `{name}` has no part called `{part_name}`"),
+                        ));
+                    };
+                    if given[..j].iter().any(|(earlier, _)| earlier == part_name) {
+                        return Err(refuse(
+                            at,
+                            format!("the part `{part_name}` is stated twice"),
+                        ));
+                    }
+                    let part = &field.parts[position];
+                    if *value > part.max_value() {
+                        return Err(refuse(
+                            at,
+                            format!(
+                                "{value} does not fit the {}-bit part `{part_name}` of `{name}`",
+                                part.width
+                            ),
+                        ));
+                    }
+                    checked += 1;
+                    let found = report.parts[position];
+                    if *value != found {
+                        differences.push(Difference {
+                            field: name.clone(),
+                            part: Some(part_name.clone()),
+                            expected: *value,
+                            found,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(Expectation {
+        checked,
+        differences,
+    })
+}
+
 /// Read `frame` under `profile`.
 pub fn open(profile: &Profile, frame: &[u8]) -> Result<OpenedFrame, OpenError> {
     let header = profile.header_bytes();

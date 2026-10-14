@@ -50,12 +50,21 @@
 //! body is not a message of that schema. A frame opened without a schema reads
 //! exactly as it did at revision 1 but for the revision number.
 //!
+//! From revision 3 the header may also be compared with the values a caller
+//! EXPECTS ([`open_expecting_document`]): the document then has `expectation`,
+//! last, with `ok`, `checked` and the `differences`, each naming the field, the
+//! part when there is one, the value expected and the value the frame carries.
+//! The expected text is the one the wrap door takes for its values, and may state
+//! a subset of the fields and of a split field's parts. A frame opened by either
+//! earlier door reads as it did but for the revision number.
+//!
 //! # A refusal
 //!
 //! `{"document":{...},"ok":false,"profile_path":"/fields/0/bytes","reason":"...",
 //! "message":"profile /fields/0/bytes: ..."}`. The input that was refused is
 //! named by the key that locates the place: `profile_path` or `profile_offset`
-//! for the profile text, `values_path` or `values_offset` for the values text
+//! for the profile text, `values_path` or `values_offset` for the values text and
+//! `expected_path` or `expected_offset` for the expected text
 //! (`_offset` when the text is not JSON, `_path` otherwise), and neither for a
 //! refusal that is about no text (a body too long for the length field, a frame
 //! shorter than the header). The key is ABSENT where it does not apply and never
@@ -107,6 +116,8 @@ enum Source {
     Values,
     /// The open door's body description.
     Body,
+    /// The expectation the open-expecting door compares the header with.
+    Expected,
 }
 
 impl Source {
@@ -115,6 +126,7 @@ impl Source {
             Self::Profile => "profile",
             Self::Values => "values",
             Self::Body => "body",
+            Self::Expected => "expected",
         }
     }
 }
@@ -523,6 +535,75 @@ pub fn open_body_document(profile_text: &str, body_text: &str, frame: &[u8]) -> 
         }
     }
     out.push_str("}}");
+    out
+}
+
+/// The `e2e_open` document for reading `frame` under `profile_text`, with the
+/// header values `expected_text` states compared against what the frame carries
+/// ([`e2e_frame::expect`]).
+///
+/// The document is [`open_document`]'s and adds `expectation`, last:
+///
+/// ```text
+/// "expectation":{"ok":false,"checked":2,
+///                "differences":[{"field":"ident","part":"msg","expected":6721,"found":6720}]}
+/// ```
+///
+/// `ok` is that there is no difference, `checked` how many values were compared
+/// (a plain field is one, each part named is one), and each difference names the
+/// field, the part when the field is split and the expectation named one (the key
+/// is ABSENT otherwise, never `null`), what was expected and what the frame
+/// carries, both as the logical value. It is a fact about the frame like
+/// `crc_ok`: a frame that differs is still a successful answer.
+///
+/// The first problem refused is the one reported, in this order: the profile, the
+/// expected text (`expected_offset` when it is not JSON, `expected_path` when it
+/// is JSON and not a set of values), a frame shorter than the header, then the
+/// expected values against the profile (`expected_path`).
+pub fn open_expecting_document(profile_text: &str, expected_text: &str, frame: &[u8]) -> String {
+    let head = envelope(E2E_OPEN);
+    let profile = match Profile::parse(profile_text) {
+        Ok(p) => p,
+        Err(e) => return refuse_text(&head, Source::Profile, &e),
+    };
+    let expected = match Values::parse(expected_text) {
+        Ok(v) => v,
+        Err(e) => return refuse_text(&head, Source::Expected, &e),
+    };
+    let opened = match e2e_frame::open(&profile, frame) {
+        Ok(o) => o,
+        Err(e @ OpenError::ShortFrame { .. }) => {
+            return refuse_plain(&head, &alloc::format!("{e}"))
+        }
+    };
+    let found = match e2e_frame::expect(&profile, &expected, &opened) {
+        Ok(found) => found,
+        Err(e) => return refuse_text(&head, Source::Expected, &e),
+    };
+    let mut out = opened_head(&head, &profile, frame, &opened, None);
+    let _ = write!(
+        out,
+        ",\"expectation\":{{\"ok\":{},\"checked\":{},\"differences\":[",
+        found.differences.is_empty(),
+        found.checked
+    );
+    for (i, difference) in found.differences.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"field\":");
+        escape_into(&difference.field, &mut out);
+        if let Some(part) = &difference.part {
+            out.push_str(",\"part\":");
+            escape_into(part, &mut out);
+        }
+        out.push_str(",\"expected\":");
+        u64_into(difference.expected, &mut out);
+        out.push_str(",\"found\":");
+        u64_into(difference.found, &mut out);
+        out.push('}');
+    }
+    out.push_str("]}}");
     out
 }
 
