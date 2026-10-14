@@ -272,6 +272,12 @@ pub mod session_runtime;
 #[cfg(feature = "session-unicast")]
 pub mod session_drive;
 
+// The multicast group session's seam to the network stack, the twin of
+// `session_drive::SessionDatagramLink`. The trait carries no dependency and no
+// allocator, so it is not feature-gated: a stack's crate names it to supply a
+// group transport, and `wz-session-mcu`'s group drive loop is generic over it.
+pub mod group_transport;
+
 // R311ih — re-export the runtime-agnostic static-scouting synth so the
 // MCU profile reaches it through its runtime crate, mirroring how the AP
 // profile reaches wz-session-core items through wz-runtime-tokio. The

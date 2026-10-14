@@ -103,14 +103,21 @@ still calls `pvPortMalloc` after the scheduler starts is not gated; the link
 gate already classes the kernel's allocator as reported, and this decision makes
 it judged for an image that claims the whole thing.
 
-**D5. The group pump is generic over a group transport, and both live in
-`wz-runtime-coop`, as the unicast pump and its `SessionDatagramLink` already do.**
-The Zephyr tier depends on `wz-runtime-coop` and not on the lwIP crates, so a
-pump that stays in `wz-session-lwip` is unreachable from it; the move is the
-price, and the lwIP crate keeps its names by re-exporting. The pump asks its
-transport for: one round of housekeeping (the lwIP loopback poll and timer
-check; nothing on a kernel socket stack), whether a carrier is up, sending one
-datagram to the group, and taking at most one received datagram with its source.
+**D5. The group pump is generic over a group transport. The trait is in
+`wz-runtime-coop`, next to `SessionDatagramLink`, and the pump is in
+`wz-session-mcu`.** The first draft of this note put both in `wz-runtime-coop`;
+reading the crates corrected it. The unicast pump is in `wz-runtime-coop` because
+it needs nothing above the runtime, but the group pump needs the multicast
+dispatcher, the JOIN wire and the reply sink of `wz-session-core`, and
+`wz-session-mcu` is the crate that is written once for every network stack and
+already carries those features. The trait carries nothing and needs no feature, so
+it sits where a stack's own crate can name it without taking the pump: the Zephyr
+tier names `wz-runtime-coop` and not `wz-session-mcu`. A pump that stays in
+`wz-session-lwip` is unreachable from Zephyr; the move is the price, and the lwIP
+crate keeps its names by thin delegates. The pump asks its transport for: one
+round of housekeeping (the lwIP loopback poll and timer check; nothing on a kernel
+socket stack), whether a carrier is up, sending one datagram to the group, and
+taking at most one received datagram with its source.
 Rejected: a second pump for Zephyr (two copies of the JOIN cadence, the lease
 sweep and the TX drain would drift, as the two forwarders of the router did).
 Rejected: wrapping Zephyr in the lwIP types (the Zephyr tier has no lwIP).
@@ -119,11 +126,12 @@ its tests unchanged; a Zephyr socket implements it next.
 
 ## 5. Steps
 
-0. Extract the group-transport trait (D5) and move the pump (`multicast_drive.rs`,
-   about 2800 lines with its tests) to `wz-runtime-coop` over it; the lwIP
-   implementation of the trait stays in `wz-session-lwip` with re-exports of the
-   old names, and every existing two-session and multicast test is unchanged and
-   green. A refactor with no new behaviour.
+0. Extract the group-transport trait (D5) into `wz-runtime-coop` and move the
+   pump (`multicast_drive.rs`, about 1400 lines of loop, queue and table; its
+   tests stay) to `wz-session-mcu` over it; the lwIP implementation of the trait
+   stays in `wz-session-lwip` with thin delegates under the old names, and every
+   existing two-session and multicast test is unchanged and green. A refactor
+   with no new behaviour. Done.
 
 1. Cell kinds and the claim-by-kind table (D1), with a host test that fills it
    with both kinds and refuses at `N+1`, and the measurement of `slot_bytes` for
@@ -143,9 +151,9 @@ its tests unchanged; a Zephyr socket implements it next.
   step 1 puts both cells in one table; it must be measured on the thumbv7m
   target before the deploy file is allowed to promise a RAM figure.
 - A Zephyr image has no group link, so the same shape on Zephyr waits for one.
-  Two things are missing, not one: the pump is not yet generic over a group
-  transport (D5), and the Zephyr socket layer (`zephyr-sys`,
-  `wz-runtime-zephyr`) has no multicast membership call. The second can be
+  What was missing was two things, and the first is done: the pump is generic
+  over a group transport (D5, step 0). The second remains: the Zephyr socket layer
+  (`zephyr-sys`, `wz-runtime-zephyr`) has no multicast membership call. It can be
   compiled against the stand-in build but only run on a board.
 - Whether the table may be split by class (D1) is decided by the measurement in
   step 1.

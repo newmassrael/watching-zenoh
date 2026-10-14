@@ -60,6 +60,11 @@ extern crate std;
 
 // R2827 — the application layer attached to the session drive.
 pub mod app_layer;
+// R311lt — the multicast group session's drive loop, pump and slot table, over
+// whichever stack carries the group (`GroupTransport`). It was
+// `wz-session-lwip`'s and named lwIP's types for what it needs of a stack.
+#[cfg(feature = "transport-multicast")]
+pub mod group_drive;
 // R2828 (§5.23 `adminspace-write`) — the node hosts upstream's
 // `connect/endpoints` config write on that application layer.
 #[cfg(feature = "adminspace-write")]

@@ -3301,8 +3301,10 @@ name = "wz-session-mcu"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "heapless",
  "wz-codecs",
  "wz-runtime-coop",
+ "wz-runtime-core",
  "wz-session-core",
 ]
 

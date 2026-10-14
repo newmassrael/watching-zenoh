@@ -488,8 +488,18 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 # Round 3301 -- `adminspace-fixed` joins (see the lwip row above).
                 "adminspace-fixed",
                 "adminspace-write",
+                # Round 3338 -- the group drive loop moves here from
+                # `wz-session-lwip` (`pub mod group_drive`, behind
+                # `transport-multicast`), and brings the three reply features that
+                # gate its reply queue. They are the features the lwip row above
+                # names for the same items, chosen by an MCU final binary through
+                # the lwip crate's forwards.
+                "codec-response",
+                "codec-response-final",
+                "liveliness-token",
                 "session-slot",
                 "test-support",
+                "transport-multicast",
             }
         ),
     ),
@@ -922,8 +932,12 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "adminspace-core",
             "adminspace-fixed",
             "adminspace-write",
+            "codec-response",
+            "codec-response-final",
+            "liveliness-token",
             "session-slot",
             "test-support",
+            "transport-multicast",
         }
     ),
     "wz-runtime-core": frozenset({"alloc"}),

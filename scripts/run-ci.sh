@@ -12849,6 +12849,13 @@ layer_c1bz_docs_resolve() {
     # The links in the heap form's items that the fixed form lacks are code spans now, so
     # the fixed form's own docs add none. wz-mcu-multicast-e2e and wz-runtime-zephyr stay at zero
     # for the same reason. COUNTED on this lane's command, not diffed.
+    # Round 3338 -- wz-session-lwip 3 -> 0, by removal, COUNTED on this lane's
+    # command (`cargo doc --no-deps --all-features`) and not diffed: the multicast
+    # drive loop and its slot table moved to `wz-session-mcu`'s `group_drive`, and
+    # the module docs that held the three findings went with them; the two links
+    # the moved text kept that would not resolve (a redundant explicit target, and
+    # `CoopLocalSet` under the slot profile) are a bare link and a code span, so
+    # `wz-session-mcu` stays at its budget of zero.
     # Fixed-memory step S9a -- wz-session-core 510 -> 505, by removal, diffed
     # rather than counted: the sorted `error` lines of this lane's command at
     # `df9f2466` (510) and on the tree (505) differ by five removals and no
@@ -12871,7 +12878,6 @@ layer_c1bz_docs_resolve() {
         wz-runtime-coop:7
         wz-runtime-tokio:478
         wz-session-core:505
-        wz-session-lwip:3
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "

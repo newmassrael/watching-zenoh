@@ -104,6 +104,7 @@ rx-in-place = ["wz-runtime-coop/rx-in-place", "wz-link-lwip/rx-hold"]
 reassembly = [
     "wz-runtime-coop/reassembly",
     "wz-session-core/reassembly",
+    "wz-session-mcu/reassembly",
 ]
 
 # R311mf — transport fragmentation (Tier B TX) on the MCU multicast loop.
@@ -199,6 +200,7 @@ transport-multicast = [
     "wz-session-core/codec-join",
     "wz-session-core/codec-frame",
     "wz-session-core/codec-close",
+    "wz-session-mcu/transport-multicast",
 ]
 # R311ly — the multicast pub/sub TX body codec: forwards wz-session-core's
 # codec-push so the multicast drive loop's TX seam frames an app z_put as a

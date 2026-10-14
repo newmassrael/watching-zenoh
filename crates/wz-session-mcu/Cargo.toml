@@ -65,6 +65,22 @@ transport-keepalive = [
     "wz-session-core/transport-keepalive",
     "wz-runtime-coop/transport-keepalive",
 ]
+# The multicast group session, written once for every network stack
+# (`group_drive`): the drive loop, its pump and the table the slot profile keeps it
+# in. Forwards what `wz-session-lwip`'s `transport-multicast` always named: the
+# multicast dispatcher and FSM, the JOIN wire, and the Frame and Close codecs.
+transport-multicast = [
+    "wz-session-core/session-multicast",
+    "wz-session-core/codec-join",
+    "wz-session-core/codec-frame",
+    "wz-session-core/codec-close",
+]
+# Transport reassembly on the group loop: the router that stages a fragment chain
+# per member (`wz-runtime-coop`'s), and the shared ingest that feeds it.
+reassembly = [
+    "wz-runtime-coop/reassembly",
+    "wz-session-core/reassembly",
+]
 codec-push = ["wz-session-core/codec-push"]
 codec-response = ["wz-session-core/codec-response"]
 codec-response-final = ["wz-session-core/codec-response-final"]
@@ -118,6 +134,11 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # the cooperative runtime uses. No impl feature here: the firmware (or the std
 # impl in dev-dependencies, for host tests) supplies it at link time.
 critical-section = "1"
+# The group loop reads its clock through `TimeSource`, as the unicast loop does.
+wz-runtime-core = { path = "../wz-runtime-core", default-features = false }
+# The slot profile's reply queue: a fixed-capacity deque in a `static`, the same
+# crate and version `wz-session-core`'s bounded backing is made of.
+heapless = { version = "0.8", default-features = false }
 
 [dev-dependencies]
 # critical-section's std impl backs CoopRuntime's critical_section::Mutex and the
