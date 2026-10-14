@@ -274368,6 +274368,50 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3339": {
+      "decision_summary": "A consumer measured that when a process running several sessions is stopped, a session that dials a sibling in the same process reports `ended (Terminated)` in 6 of 60 runs and `closed` otherwise. The sibling closes and sends a Close, so for the dialling session both \"the process is stopping\" and \"the peer ended\" are ready, and the unbiased select in serve_unicast picked one at random. The stop is the older fact and the one the process asked for, as in the MCU group loop, so it now wins: ended_or_stopped is a biased select with the stop first, held by two cases that need no peer; without the bias the first fails by assertion. Separately, the Windows hosted failure of the registry test counted a face as not the listener's, and the earlier repair did not close it. The code alone does not explain it, so the test now records the endpoint, the listener's id and each face's id for the first three: a measurement, not a repair.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/sessions_run.rs: ended_or_stopped (biased, stop first) replaces the select in serve_unicast; module stop_order_tests (two cases).",
+        "scripts/run-ci.sh: the C1AX sessions_run guard moves from 3 to 5, the number the command prints.",
+        "crates/wz-capi-core/src/drive.rs: the registry test collects up to three sightings of a face that is not the listener's and prints them in its failure message."
+      ],
+      "verification_bullets": [
+        "On a build host: the five cases of the demo's sessions_run filter pass (the two new ones among them), clippy with and without transport-multicast and fmt pass; with the bias removed from a copy of the tree, the first new case fails by assertion (one panic, no compile error), and the copy was restored.",
+        "On a build host: wz-capi-core clippy and fmt pass with the diagnostic. The registry test itself could not be run there: with and WITHOUT this change it fails on that host with refused dials and a port range that is nearly all in use, so that host is not an oracle for it now; the Windows failure was not reproduced and this round does not claim it repaired.",
+        "NOT verified here: the hosted run of this push, and the report of a real process stopped with a sibling-dialling session (the cases hold the choice, not the whole process)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the first hosted failure of the registry test after this push: its sightings say whether a face was to another listener or to the right one not yet identified, and the repair follows that.",
+        "Tell the consumer the sha; its test may then require `closed` for every session.",
+        "A Zephyr group transport (the previous round's carry) is still open.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "A consumer measured that when a process running several sessions is stopped, a session that dials a sibling in the same process reports `ended (Terminated)` in 6 of 60 runs and `closed` otherwise. The sibling closes and sends a Close, so for the dialling session both \"the process is stopping\" and \"the peer ended\" are ready, and the unbiased select in serve_unicast picked one at random. The stop is the older fact and the one the process asked for, as in the MCU group loop, so it now wins: ended_or_stopped is a biased select with the stop first, held by two cases that need no peer; without the bias the first fails by assertion. Separately, the Windows hosted failure of the registry test counted a face as not the listener's, and the earlier repair did not close it. The code alone does not explain it, so the test now records the endpoint, the listener's id and each face's id for the first three: a measurement, not a repair.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/sessions_run.rs: ended_or_stopped (biased, stop first) replaces the select in serve_unicast; module stop_order_tests (two cases).",
+        "scripts/run-ci.sh: the C1AX sessions_run guard moves from 3 to 5, the number the command prints.",
+        "crates/wz-capi-core/src/drive.rs: the registry test collects up to three sightings of a face that is not the listener's and prints them in its failure message."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the five cases of the demo's sessions_run filter pass (the two new ones among them), clippy with and without transport-multicast and fmt pass; with the bias removed from a copy of the tree, the first new case fails by assertion (one panic, no compile error), and the copy was restored.",
+        "On a build host: wz-capi-core clippy and fmt pass with the diagnostic. The registry test itself could not be run there: with and WITHOUT this change it fails on that host with refused dials and a port range that is nearly all in use, so that host is not an oracle for it now; the Windows failure was not reproduced and this round does not claim it repaired.",
+        "NOT verified here: the hosted run of this push, and the report of a real process stopped with a sibling-dialling session (the cases hold the choice, not the whole process)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first hosted failure of the registry test after this push: its sightings say whether a face was to another listener or to the right one not yet identified, and the repair follows that.",
+        "Tell the consumer the sha; its test may then require `closed` for every session.",
+        "A Zephyr group transport (the previous round's carry) is still open.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
