@@ -274144,6 +274144,52 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3334": {
+      "decision_summary": "Register item 829 asked that the router hat witness what the retired RouteTable engine's tests held. Re-sorting the 63 retired tests against the hat found 19 whose hat counterpart asserts less than the old test did and two the hat implements and no test sends a message through; 19 witnesses now close them, each guarded line mutated and its test red (five controls). One was a hat defect, not a missing test: upstream's maybe_unpropagate_token has a second arm, a one-shot id-0 UndeclareToken with the keyexpr to a face that asked for tokens and was never declared this one, and the hat's comment called it unreachable; a token older than a FUTURE-only interest reaches it, because no current dump answers that interest. The hat now sends it, only once nothing backs the keyexpr, and only for tokens (subscribers and queryables have no such arm upstream). The retired test of a sourced undeclare for a token never declared is not ported: unverified against upstream.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: 19 witnesses of the router hat (client-held subscriber and queryable dumped to another client, an own-key publisher not echoed, a Del, a departed subscriber face and its route recompute, aliased Puts, best-effort channel, six query-plane cases, four token cases) and one for the token retraction below; undeclare_push_token sends a never-declared reader a one-shot id-0 UndeclareToken with the keyexpr.",
+        "crates/wz-runtime-tokio/src/future_interest.rs: FutureInterestStore::unannounced_withdrawals, the faces holding a matching FUTURE interest that no retraction by id reached.",
+        "scripts/run-ci.sh: the eight C1ay router_forward guards 185 187 208 190 193 227 185 187 move to 200 202 223 205 208 247 200 202."
+      ],
+      "verification_bullets": [
+        "On a build host: the router-hat tests pass, 288 under all features and 200 under the hat alone, clippy with warnings denied is clean on wz-runtime-tokio, and rustfmt is clean.",
+        "On a build host: layers C0 run to its end, C1ay, C1x and C1bz pass on the witnesses, and C1ay, C0 and C1bz pass again on the final tree with the token fix.",
+        "Seven mutations of the hat each turn their witness red by assertion, not by a compile error: the two client dump loops, the own-face guard, the token retraction id, the client leg's channel, and the two gates of the new token arm.",
+        "The count-guard oracle over the push range judges the eight router_forward guards at what their commands print.",
+        "NOT verified: the hosted run of this push; the witnesses listed in the carry as having no mutation control."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push.",
+        "Witnesses with NO mutation control (no clean one-line mutation): the Del body, the route recompute on a departed face, aliased Put with and without suffix and the undeclared alias, the query-plane cases (own queryable only, non-matching queryable, two AllComplete, forged reply and final, relayed reply keyexpr), the token CURRENT+FUTURE dump id, the two-holder token.",
+        "Register item 829 row 13 (a sourced undeclare of a token the table never held) is not ported and not verified against upstream.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "Register item 829 asked that the router hat witness what the retired RouteTable engine's tests held. Re-sorting the 63 retired tests against the hat found 19 whose hat counterpart asserts less than the old test did and two the hat implements and no test sends a message through; 19 witnesses now close them, each guarded line mutated and its test red (five controls). One was a hat defect, not a missing test: upstream's maybe_unpropagate_token has a second arm, a one-shot id-0 UndeclareToken with the keyexpr to a face that asked for tokens and was never declared this one, and the hat's comment called it unreachable; a token older than a FUTURE-only interest reaches it, because no current dump answers that interest. The hat now sends it, only once nothing backs the keyexpr, and only for tokens (subscribers and queryables have no such arm upstream). The retired test of a sourced undeclare for a token never declared is not ported: unverified against upstream.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: 19 witnesses of the router hat (client-held subscriber and queryable dumped to another client, an own-key publisher not echoed, a Del, a departed subscriber face and its route recompute, aliased Puts, best-effort channel, six query-plane cases, four token cases) and one for the token retraction below; undeclare_push_token sends a never-declared reader a one-shot id-0 UndeclareToken with the keyexpr.",
+        "crates/wz-runtime-tokio/src/future_interest.rs: FutureInterestStore::unannounced_withdrawals, the faces holding a matching FUTURE interest that no retraction by id reached.",
+        "scripts/run-ci.sh: the eight C1ay router_forward guards 185 187 208 190 193 227 185 187 move to 200 202 223 205 208 247 200 202."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the router-hat tests pass, 288 under all features and 200 under the hat alone, clippy with warnings denied is clean on wz-runtime-tokio, and rustfmt is clean.",
+        "On a build host: layers C0 run to its end, C1ay, C1x and C1bz pass on the witnesses, and C1ay, C0 and C1bz pass again on the final tree with the token fix.",
+        "Seven mutations of the hat each turn their witness red by assertion, not by a compile error: the two client dump loops, the own-face guard, the token retraction id, the client leg's channel, and the two gates of the new token arm.",
+        "The count-guard oracle over the push range judges the eight router_forward guards at what their commands print.",
+        "NOT verified: the hosted run of this push; the witnesses listed in the carry as having no mutation control."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push.",
+        "Witnesses with NO mutation control (no clean one-line mutation): the Del body, the route recompute on a departed face, aliased Put with and without suffix and the undeclared alias, the query-plane cases (own queryable only, non-matching queryable, two AllComplete, forged reply and final, relayed reply keyexpr), the token CURRENT+FUTURE dump id, the two-holder token.",
+        "Register item 829 row 13 (a sourced undeclare of a token the table never held) is not ported and not verified against upstream.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
