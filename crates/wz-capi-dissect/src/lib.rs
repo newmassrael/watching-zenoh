@@ -376,6 +376,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 37, for `wz_dissect_e2e_open_expecting`: a protected frame opened and its
     // header compared with the values a caller expects. The e2e_open document
     // moved to revision 3 on the same step (`expectation`).
+    // 38, for `wz_dissect_live_selection_since`: the selector's verdict over the
+    // rows after a cursor, and the earlier rows whose word has moved. A new
+    // document, `selection_since`, at revision 1.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -393,7 +396,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 37;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 38;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4049,6 +4052,79 @@ pub unsafe extern "C" fn wz_dissect_live_selection(
     };
     // SAFETY: caller contract above.
     let doc = unsafe { (*handle).selection(&filter) };
+    write_string(doc, out)
+}
+
+/// (ABI 38) — THE SELECTOR'S VERDICT OVER THE ROWS AFTER A CURSOR, and the earlier
+/// rows whose word has changed since the handle last said one.
+///
+/// # What a narrowed list that grows was paying for
+///
+/// [`wz_dissect_live_selection`] writes a word for every row of the handle, so a
+/// consumer keeping a narrowed Packets list current as rows arrive received and
+/// parsed every row again at every step, and the list it held was only as fresh as
+/// its last full read. This door writes the rows numbered above `after_seq` and
+/// the rows whose word moved, so the DOCUMENT follows what is new. The walk that
+/// decides the words is still the whole capture's: a verdict is a fact about the
+/// capture and not about a row, and judging only the new rows would be a guess.
+///
+/// # The cursor
+///
+/// The row numbers are [`wz_dissect_live_fields_since`]'s: every row carries
+/// `seq`, the handle's count of rows it has issued, unique and increasing and
+/// untouched by a ceiling trimming a list. `0` asks for every row. The document's
+/// `window` says the cursor asked at (`after_seq`) and the one to ask next
+/// (`through_seq`), the highest number the handle had issued.
+///
+/// # A verdict can change after it is given, and `revised` says which
+///
+/// Yes: an earlier row's word can change. The cases the selector language and the
+/// capture produce are named in the header; the door does not enumerate them, it
+/// compares. The handle remembers the words it said last time, and a row numbered
+/// at or below the cursor whose word now differs is written under `revised` with
+/// the new word in `selected` and the old in `was`. A consumer applies `revised`
+/// to the words it holds and appends `rows`, and never has to ask for the whole
+/// walk to be sure.
+///
+/// # The selector
+///
+/// The memory is for ONE selector, named by its text. A different text starts it
+/// again: nothing is revised and every row after the cursor is new, so ask from `0`
+/// after changing the selector. An empty selector is the identity, as it is for
+/// every door: rows carry their coordinates and no `selected`, and nothing is
+/// revised. A selector that does not parse is [`WZ_DISSECT_ERR_SELECTOR`].
+///
+/// # `handle` is not `const`
+///
+/// For [`wz_dissect_live_selection`]'s reason, and because the handle keeps the
+/// words it said.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `selector` must be a
+/// NUL-terminated C string and `out` a writable pointer to a `*mut c_char`;
+/// none of the three may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_selection_since(
+    handle: *mut live::LiveDissection,
+    selector: *const c_char,
+    after_seq: u64,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    let doc = unsafe { (*handle).selection_since(expr, &filter, after_seq) };
     write_string(doc, out)
 }
 
@@ -7949,7 +8025,11 @@ mod tests {
         // by `wz_dissect_string_free`; the profile and the expected values cross
         // as C strings and the frame as the bytes the open door takes, and no
         // struct is new.
-        assert_eq!(wz_dissect_abi_version(), 37);
+        // 38, for `wz_dissect_live_selection_since`: one symbol, a `char*`
+        // released by `wz_dissect_string_free`; the handle and the selector are
+        // what `wz_dissect_live_selection` takes, the cursor a `uint64_t`, and no
+        // struct is new. The handle gains state of its own, the words it said.
+        assert_eq!(wz_dissect_abi_version(), 38);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -8728,6 +8808,9 @@ mod tests {
             (rev::SESSION_TABLE, session_table::documents()),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
+            // And its since twin, from a handle at two states, so a revised row
+            // and its `was` are in the population.
+            (rev::SELECTION_SINCE, selection_since_documents()),
             (rev::RETENTION, retention_documents()),
             (rev::HEALTH, health_documents()),
         ];
@@ -8958,6 +9041,14 @@ mod tests {
             ),
             // Declares no plane either, for the same reason.
             (
+                rev::SELECTION_SINCE,
+                selection_since_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
+            // Declares no plane either, for the same reason.
+            (
                 rev::RETENTION,
                 retention_documents()
                     .into_iter()
@@ -9125,6 +9216,8 @@ mod tests {
             (rev::SESSION_TABLE, session_table::documents()),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
+            // The since document, in every shape it writes.
+            (rev::SELECTION_SINCE, selection_since_documents()),
             // With a clock and without, for the reason `retention_documents` gives.
             (rev::RETENTION, retention_documents()),
             // A stream flow and datagram flows in one handle, and a lone
@@ -12562,6 +12655,222 @@ mod tests {
         Ok(doc)
     }
 
+    /// `wz_dissect_live_selection_since` under `selector` after `after_seq`, the
+    /// way C calls it, with the refusal code when it refuses.
+    fn live_selection_since(
+        handle: *mut live::LiveDissection,
+        selector: &str,
+        after_seq: u64,
+    ) -> Result<String, c_int> {
+        let expr = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc =
+            unsafe { wz_dissect_live_selection_since(handle, expr.as_ptr(), after_seq, &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// The text of the array under `key`, brackets included, in a since document.
+    fn since_array<'a>(doc: &'a str, key: &str) -> &'a str {
+        let marker = format!("\"{key}\":[");
+        let at = doc
+            .find(&marker)
+            .unwrap_or_else(|| panic!("no {key} in {doc}"))
+            + marker.len()
+            - 1;
+        let mut depth = 0usize;
+        for (i, c) in doc[at..].char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &doc[at..at + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{key} is not closed in {doc}");
+    }
+
+    /// The `through_seq` of a since document: the cursor to ask next.
+    fn through_seq_of(doc: &str) -> u64 {
+        let marker = "\"through_seq\":";
+        let at = doc.find(marker).expect("a window") + marker.len();
+        doc[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .expect("a number")
+    }
+
+    /// The since documents this ABI writes, for the gates that hold every
+    /// document it emits to a table: rows with no selector, rows under one, an
+    /// ambiguous `zid` prefix, and a handle at two states, so the second document
+    /// carries a revised row and `was`.
+    fn selection_since_documents() -> Vec<String> {
+        let capture = verdict_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let mut docs = vec![
+            live_selection_since(handle, "", 0).expect("an empty selector"),
+            live_selection_since(handle, "bytes >= 0", 0).expect("a selector that asks"),
+        ];
+        unsafe { wz_dissect_live_close(handle) };
+        let capture = zid_prefix_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        docs.push(live_selection_since(handle, "zid == cbf383be", 0).expect("an ambiguous one"));
+        unsafe { wz_dissect_live_close(handle) };
+        // The two states: the stream with the requests alone, then with the
+        // replies and the closes.
+        let (low, high) = selector_packets();
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        push_live(handle, 1_000, &low);
+        let first = live_selection_since(handle, "closed == no", 0).expect("the first state");
+        push_live(handle, 9_000, &high);
+        let second = live_selection_since(handle, "closed == no", through_seq_of(&first))
+            .expect("the second state");
+        unsafe { wz_dissect_live_close(handle) };
+        docs.push(first);
+        docs.push(second);
+        docs
+    }
+
+    /// THE CLOSE OF AN EXCHANGE REVISES THE REQUEST ROW THE CURSOR HAS PASSED, end
+    /// to end through the ABI.
+    ///
+    /// A live handle is fed the low side's stream: the handshake, a keepalive, a
+    /// declaration, a put, a del, three requests and an interest, and nothing has
+    /// closed any request. `closed == no` is `yes` on the three requests. Then the
+    /// high side's stream arrives with the replies and the closes, the cursor is
+    /// the first document's `through_seq`, and the second document writes the new
+    /// rows as `rows` and the three requests as `revised`, each `no` where it was
+    /// `yes`. A third call at the new cursor says nothing; a different selector
+    /// starts the memory again.
+    #[test]
+    fn the_close_of_an_exchange_revises_the_request_rows_through_the_abi() {
+        let (low, high) = selector_packets();
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        push_live(handle, 1_000, &low);
+        let first = live_selection_since(handle, "closed == no", 0).expect("the first call");
+        assert_eq!(since_array(&first, "revised"), "[]", "{first}");
+        assert_eq!(
+            since_array(&first, "rows")
+                .matches("\"selected\":\"yes\"")
+                .count(),
+            3,
+            "the three requests are open: {first}"
+        );
+        assert!(first.contains("\"revision\":1"), "{first}");
+        let cursor = through_seq_of(&first);
+        assert!(cursor > 3, "{first}");
+
+        push_live(handle, 9_000, &high);
+        let second = live_selection_since(handle, "closed == no", cursor).expect("the second call");
+        let revised = since_array(&second, "revised");
+        assert_eq!(
+            revised
+                .matches("\"selected\":\"no\",\"was\":\"yes\"")
+                .count(),
+            3,
+            "the three requests close: {second}"
+        );
+        assert!(!revised.contains("\"seq\":0"), "{second}");
+        let rows = since_array(&second, "rows");
+        assert!(
+            rows.matches("\"seq\":").count() >= 6,
+            "the replies and the closes are new rows: {second}"
+        );
+        // Every revised row has a number at or below the first document's cursor,
+        // which is what makes it a revision and not a new row.
+        for piece in revised.split("\"seq\":").skip(1) {
+            let seq: u64 = piece
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .expect("a number");
+            assert!(seq <= cursor, "{seq} is past {cursor}: {second}");
+        }
+
+        let next = through_seq_of(&second);
+        let quiet = live_selection_since(handle, "closed == no", next).expect("the third call");
+        assert_eq!(since_array(&quiet, "rows"), "[]", "{quiet}");
+        assert_eq!(since_array(&quiet, "revised"), "[]", "{quiet}");
+
+        // A different selector starts the memory again: every row from 0 is new
+        // and nothing is revised.
+        let other = live_selection_since(handle, "closed == yes", 0).expect("another selector");
+        assert_eq!(since_array(&other, "revised"), "[]", "{other}");
+        assert_eq!(
+            since_array(&other, "rows").matches("\"seq\":").count() as u64,
+            next,
+            "{other}"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// FROM ZERO THE SINCE DOCUMENT'S ROWS ARE THE VERDICT DOCUMENT'S, through the
+    /// ABI, word for word and coordinate for coordinate, and a bad selector or a
+    /// null argument is refused as the other door refuses it.
+    #[test]
+    fn the_since_door_agrees_with_the_verdict_door_and_refuses_what_it_refuses() {
+        let capture = selector_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        for selector in [
+            "kind == query",
+            "replies == 0",
+            "closed == no",
+            "bytes >= 0",
+        ] {
+            let verdict = live_selection(handle, selector).expect("the verdict door answers");
+            let since = live_selection_since(handle, selector, 0).expect("the since door answers");
+            assert_eq!(
+                coordinate_rows(since_array(&since, "rows")),
+                coordinate_rows(&verdict),
+                "{selector}: {since}"
+            );
+        }
+        assert_eq!(
+            live_selection_since(handle, "kind ==", 0),
+            Err(WZ_DISSECT_ERR_SELECTOR),
+            "a selector that does not parse"
+        );
+        assert_eq!(
+            live_selection_since(handle, "", 0).map(|doc| doc.contains("\"selected\"")),
+            Ok(false),
+            "an empty selector is the identity"
+        );
+        let good = std::ffi::CString::new("kind == put").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                wz_dissect_live_selection_since(core::ptr::null_mut(), good.as_ptr(), 0, &mut out),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection_since(handle, core::ptr::null(), 0, &mut out),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection_since(handle, good.as_ptr(), 0, core::ptr::null_mut()),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+        }
+        assert!(out.is_null());
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
     /// The capture the three verdict tests share: a TCP stream carrying two
     /// framed messages, two UDP conversations and a scout — the shape
     /// `every_drained_record_joins_exactly_one_row_of_the_live_field_document`
@@ -13243,6 +13552,15 @@ mod tests {
     ///
     /// Each network record sits in a frame of its own, so a row is one record.
     fn selector_capture() -> Vec<u8> {
+        let (a, b) = selector_packets();
+        wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())])
+    }
+
+    /// The two packets of [`selector_capture`]: the low side's stream (the
+    /// handshake, the records and the requests) and the high side's (the replies
+    /// and the closes), for a test that feeds them to a live handle one at a
+    /// time.
+    fn selector_packets() -> (Vec<u8>, Vec<u8>) {
         let request = |rid: u64| {
             wz_codecs::request::Request {
                 header: wz_codecs::request::Request::default().header
@@ -13358,9 +13676,10 @@ mod tests {
         {
             high_to_low.extend_from_slice(&framed_frame(sn as u8, record));
         }
-        let a = tcp_packet(1000, &low_to_high);
-        let b = tcp_packet_reverse(2000, &high_to_low);
-        wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())])
+        (
+            tcp_packet(1000, &low_to_high),
+            tcp_packet_reverse(2000, &high_to_low),
+        )
     }
 
     /// THE ROWS AND THE CENSUS COUNT THE SAME QUERIES, through the doors a C

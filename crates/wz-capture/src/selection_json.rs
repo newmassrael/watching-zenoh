@@ -123,42 +123,142 @@
 //! is ABSENT rather than unmatched, and a consumer counting "three matched"
 //! needs to be told the list it counted in was made short.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::census_json::dir_name;
-use crate::fields_json::{judged_by, row_verdict_of, RenderedLists, RowCoordinates, RowVerdict};
+use crate::fields_json::{
+    judged_by, row_verdict_of, RenderedLists, RowCoordinates, RowJudgement, RowVerdict,
+};
 
-/// One row: the coordinates a record joins on, and the selector's word when a
-/// selector was asked.
+/// One row of the selection, before it is written: the coordinates a record
+/// joins on, the number the handle gave the row when it numbers rows, and the
+/// selector's word when a selector was asked.
 ///
 /// `list_id` is `None` for a list the caller does not number, and then the row
 /// carries no coordinate keys at all, on the field document's own rule that a
-/// key is never invented. `verdict` is `None` when no selector was asked.
-fn push_row(
-    direction: &str,
+/// key is never invented. `verdict` is `None` when no selector was asked. `seq`
+/// is `None` for a row the caller numbers no rows of.
+struct Row {
+    seq: Option<u64>,
+    direction: &'static str,
     list_id: Option<u64>,
     anchor: u64,
     batch_index: u64,
     verdict: Option<RowVerdict>,
-    first: &mut bool,
-    out: &mut String,
-) {
+}
+
+/// The coordinate keys of a row, without its braces and without its verdict.
+fn push_coordinates(row: &Row, out: &mut String) {
+    let _ = write!(out, "\"direction\":\"{}\"", row.direction);
+    if let Some(list_id) = row.list_id {
+        let _ = write!(
+            out,
+            ",\"list_id\":{list_id},\"anchor\":{},\"batch_index\":{}",
+            row.anchor, row.batch_index
+        );
+    }
+}
+
+/// One row of the selection document.
+fn push_row(row: &Row, first: &mut bool, out: &mut String) {
     if !*first {
         out.push(',');
     }
     *first = false;
-    let _ = write!(out, "{{\"direction\":\"{direction}\"");
-    if let Some(list_id) = list_id {
-        let _ = write!(
-            out,
-            ",\"list_id\":{list_id},\"anchor\":{anchor},\"batch_index\":{batch_index}"
-        );
-    }
-    if let Some(verdict) = verdict {
+    out.push('{');
+    push_coordinates(row, out);
+    if let Some(verdict) = row.verdict {
         let _ = write!(out, ",\"selected\":\"{}\"", verdict.word());
     }
     out.push('}');
+}
+
+/// Every row of the field document, in its order, each with the word the selector
+/// said of it.
+///
+/// ONE enumeration behind both documents this file writes, so that "the same rows
+/// in the same order, with the same numbers" is a property of the code and not of
+/// two walks agreeing.
+fn for_each_row(
+    d: &crate::Dissection,
+    verdicts: Option<&RowJudgement>,
+    coordinates: &dyn RowCoordinates,
+    each: &mut dyn FnMut(Row),
+) {
+    let lists = RenderedLists::of(d);
+
+    for (i, flow) in d.flows().iter().enumerate() {
+        let list = lists.stream.get(i).copied();
+        let list_id = list.and_then(|l| coordinates.list_id(l));
+        // The produced-index of the OLDEST message still held, so a row's number
+        // is looked up by an index a front trim does not move: the field
+        // document's own.
+        let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+        // CAPTURE order, the field document's own: see
+        // `FlowDissection::capture_order`. One function orders the rows of both
+        // documents, so "the same rows in the same order" is a property of the
+        // code and not of two walks agreeing.
+        for position in flow.capture_order() {
+            let frame = &flow.frames[position];
+            let verdict = match (verdicts, list) {
+                (Some(census), Some(list)) => Some(row_verdict_of(census, list, frame)),
+                _ => None,
+            };
+            each(Row {
+                seq: list.and_then(|l| coordinates.row_seq(l, first_produced + position as u64)),
+                direction: dir_name(frame.direction),
+                list_id,
+                anchor: frame.stream_offset as u64,
+                batch_index: frame.batch_index as u64,
+                verdict,
+            });
+        }
+    }
+
+    for (i, flow) in d.datagram_flows().iter().enumerate() {
+        let list = lists.datagram.get(i).copied();
+        let list_id = list.and_then(|l| coordinates.list_id(l));
+        let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+        for (position, frame) in flow.frames.iter().enumerate() {
+            let verdict = match (verdicts, list) {
+                (Some(census), Some(list)) => Some(row_verdict_of(census, list, frame)),
+                _ => None,
+            };
+            // `stream_offset` names the PACKET on a datagram link, the only anchor
+            // there is, as the field document's own row says.
+            each(Row {
+                seq: list.and_then(|l| coordinates.row_seq(l, first_produced + position as u64)),
+                direction: dir_name(frame.direction),
+                list_id,
+                anchor: frame.stream_offset as u64,
+                batch_index: frame.batch_index as u64,
+                verdict,
+            });
+        }
+        // The scouting list, after the transport rows exactly as the field
+        // document orders them. A scouting message carries no payload for the
+        // record plane to judge, so under a selector it is unjudged BY
+        // CONSTRUCTION and says so directly, on the field document's argument.
+        let scouting_id = coordinates.scouting_list_id(&flow.flow);
+        let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
+        for (position, datagram) in flow.scouting.iter().enumerate() {
+            let verdict = match (verdicts, list) {
+                (Some(_), Some(_)) => Some(RowVerdict::Unjudged),
+                _ => None,
+            };
+            each(Row {
+                seq: coordinates.scouting_row_seq(&flow.flow, scouting_first + position as u64),
+                direction: dir_name(datagram.direction),
+                list_id: scouting_id,
+                anchor: datagram.packet_index as u64,
+                batch_index: 0,
+                verdict,
+            });
+        }
+    }
 }
 
 /// The selector's verdict over every row of the field document, with each row
@@ -177,78 +277,13 @@ pub fn selection_json_where_coordinated(
     // so it pays nothing either. The rule lives in `judged_by`, which the field
     // document asks too.
     let verdicts = judged_by(d, filter, &grouping);
-    let lists = RenderedLists::of(d);
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTION, &mut out);
     out.push_str(",\"rows\":[");
     let mut first = true;
-
-    for (i, flow) in d.flows().iter().enumerate() {
-        let list = lists.stream.get(i).copied();
-        let list_id = list.and_then(|l| coordinates.list_id(l));
-        // CAPTURE order, the field document's own: see
-        // `FlowDissection::capture_order`. One function orders the rows of both
-        // documents, so "the same rows in the same order" is a property of the
-        // code and not of two walks agreeing.
-        for position in flow.capture_order() {
-            let frame = &flow.frames[position];
-            let verdict = match (verdicts.as_ref(), list) {
-                (Some(census), Some(list)) => Some(row_verdict_of(census, list, frame)),
-                _ => None,
-            };
-            push_row(
-                dir_name(frame.direction),
-                list_id,
-                frame.stream_offset as u64,
-                frame.batch_index as u64,
-                verdict,
-                &mut first,
-                &mut out,
-            );
-        }
-    }
-
-    for (i, flow) in d.datagram_flows().iter().enumerate() {
-        let list = lists.datagram.get(i).copied();
-        let list_id = list.and_then(|l| coordinates.list_id(l));
-        for frame in &flow.frames {
-            let verdict = match (verdicts.as_ref(), list) {
-                (Some(census), Some(list)) => Some(row_verdict_of(census, list, frame)),
-                _ => None,
-            };
-            // `stream_offset` names the PACKET on a datagram link, the only anchor
-            // there is, as the field document's own row says.
-            push_row(
-                dir_name(frame.direction),
-                list_id,
-                frame.stream_offset as u64,
-                frame.batch_index as u64,
-                verdict,
-                &mut first,
-                &mut out,
-            );
-        }
-        // The scouting list, after the transport rows exactly as the field
-        // document orders them. A scouting message carries no payload for the
-        // record plane to judge, so under a selector it is unjudged BY
-        // CONSTRUCTION and says so directly, on the field document's argument.
-        let scouting_id = coordinates.scouting_list_id(&flow.flow);
-        for datagram in &flow.scouting {
-            let verdict = match (verdicts.as_ref(), list) {
-                (Some(_), Some(_)) => Some(RowVerdict::Unjudged),
-                _ => None,
-            };
-            push_row(
-                dir_name(datagram.direction),
-                scouting_id,
-                datagram.packet_index as u64,
-                0,
-                verdict,
-                &mut first,
-                &mut out,
-            );
-        }
-    }
+    for_each_row(d, verdicts.as_ref(), coordinates, &mut |row| {
+        push_row(&row, &mut first, &mut out);
+    });
 
     out.push(']');
     // WHY every row above reads `unjudged`, when it does: a `zid` prefix of the
@@ -262,6 +297,175 @@ pub fn selection_json_where_coordinated(
     out.push_str(&crate::report::dropped_by_limits_json(d));
     out.push('}');
     out
+}
+
+/// The word a selector said of each row the LAST call of
+/// [`selection_since_json_coordinated`] judged, by the row's number.
+///
+/// The memory that makes a revision reportable. A verdict is not final when it
+/// is given: it is the capture's reading of the row at that state, and it moves
+/// when the state does (see the document's own paragraph), so a door that judged
+/// only the new rows would hold every earlier row at the word it was first given.
+/// Remembering what was said is what lets the next call say what changed, and it
+/// costs a word per row the handle still holds, not a copy of any row.
+#[derive(Debug, Default, Clone)]
+pub struct SelectionMemory {
+    said: BTreeMap<u64, RowVerdict>,
+}
+
+impl SelectionMemory {
+    /// How many rows' words are remembered.
+    pub fn len(&self) -> usize {
+        self.said.len()
+    }
+
+    /// Whether nothing is remembered.
+    pub fn is_empty(&self) -> bool {
+        self.said.is_empty()
+    }
+}
+
+/// The cursor window of a since document: the number the caller gave, and the
+/// highest number the handle had issued when the document was made.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionWindow {
+    /// The cursor the caller gave: rows numbered above it are NEW.
+    pub after_seq: u64,
+    /// The highest row number issued, and the cursor to give next.
+    pub through_seq: u64,
+}
+
+/// A revised row also says what it read before.
+fn push_revised_row(row: &Row, was: RowVerdict, first: &mut bool, out: &mut String) {
+    if !*first {
+        out.push(',');
+    }
+    *first = false;
+    out.push('{');
+    if let Some(seq) = row.seq {
+        let _ = write!(out, "\"seq\":{seq},");
+    }
+    push_coordinates(row, out);
+    if let Some(verdict) = row.verdict {
+        let _ = write!(out, ",\"selected\":\"{}\"", verdict.word());
+    }
+    let _ = write!(out, ",\"was\":\"{}\"}}", was.word());
+}
+
+/// The selector's verdict over the rows issued AFTER a cursor, and the rows
+/// BEFORE it whose word has changed since the last time it was asked.
+///
+/// # What a consumer narrowing a list that grows was paying for
+///
+/// [`selection_json_where_coordinated`] writes a word for every row, so a list
+/// refreshed once per feed step received and parsed every row again at every step.
+/// This writes the rows numbered above `since.after_seq` and nothing else, so the
+/// cost of the DOCUMENT follows what is new. The cost of the WALK does not move:
+/// the verdict is decided over the whole capture, as it is for the other door,
+/// because a verdict is a fact about the capture and not about a row.
+///
+/// # A verdict can change after it is given, and this says which
+///
+/// It can, and a cursor alone would have missed it. TESTED here: a request and
+/// its final are judged as ONE exchange at its close, so under `closed == no` the
+/// request reads `yes` while nothing has closed it and `no` once the close is in
+/// the capture, and the request row is one the cursor has already passed. NAMED by
+/// the verdict document: a selector's `zid` prefix that began one zid and now
+/// begins two makes the selector ambiguous, and every row reads `unjudged`. TESTED
+/// NOT to move a row, in the construction a datagram link gives: a keyexpr
+/// declaration that arrives after the reference to it is not applied to the
+/// reference (the anchor rule), so that row's word stays; whether a decode that
+/// happens later than its packet can move one is not claimed.
+///
+/// `revised` does not depend on the reason, which is why it is the answer: the rows
+/// numbered at or below the cursor that this handle said a word about the last
+/// time, and now says another. Each carries the new word in `selected` and the old
+/// one in `was`. A consumer applies `revised` to the words it holds and appends
+/// `rows`; it never has to ask for the whole walk, and a verdict it holds is as
+/// true as the last document it read.
+///
+/// # What it remembers, and what a changed selector does
+///
+/// The words said last time, per row ([`SelectionMemory`]), for ONE selector. A
+/// call under a different selector starts the memory again, so nothing is
+/// reported revised and every row from the cursor on is new: ask from 0 after a
+/// selector change, as the rows before the cursor are never written again. With
+/// no selector there are no words, the memory is emptied, and nothing is revised.
+pub fn selection_since_json_coordinated(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    coordinates: &dyn RowCoordinates,
+    since: SelectionWindow,
+    memory: &mut SelectionMemory,
+) -> String {
+    let grouping = crate::node::session_grouping(d);
+    let verdicts = judged_by(d, filter, &grouping);
+    let mut said_now: BTreeMap<u64, RowVerdict> = BTreeMap::new();
+    let mut fresh: Vec<Row> = Vec::new();
+    let mut revised: Vec<(Row, RowVerdict)> = Vec::new();
+    for_each_row(d, verdicts.as_ref(), coordinates, &mut |row| {
+        let Some(seq) = row.seq else {
+            // A row with NO number is never passed over: with a cursor set it
+            // cannot be compared, and writing a row twice is a recoverable
+            // answer where dropping one is not. The field document's rule.
+            fresh.push(row);
+            return;
+        };
+        if let Some(verdict) = row.verdict {
+            said_now.insert(seq, verdict);
+        }
+        if seq > since.after_seq {
+            fresh.push(row);
+        } else if let (Some(now), Some(&was)) = (row.verdict, memory.said.get(&seq)) {
+            if now != was {
+                revised.push((row, was));
+            }
+        }
+    });
+    memory.said = said_now;
+
+    let mut out = String::from("{");
+    crate::doc_revision::envelope_into(crate::doc_revision::SELECTION_SINCE, &mut out);
+    let _ = write!(
+        out,
+        ",\"window\":{{\"after_seq\":{},\"through_seq\":{}}},\"rows\":[",
+        since.after_seq, since.through_seq
+    );
+    let mut first = true;
+    for row in &fresh {
+        push_seq_row(row, &mut first, &mut out);
+    }
+    out.push_str("],\"revised\":[");
+    let mut first = true;
+    for (row, was) in &revised {
+        push_revised_row(row, *was, &mut first, &mut out);
+    }
+    out.push(']');
+    crate::filter::push_ambiguous_zid_prefixes(
+        verdicts.as_ref().map_or(&[], |v| v.ambiguities()),
+        &mut out,
+    );
+    out.push_str(",\"dropped_by_limits\":");
+    out.push_str(&crate::report::dropped_by_limits_json(d));
+    out.push('}');
+    out
+}
+
+/// One row of the since document: the selection row, with its number first.
+fn push_seq_row(row: &Row, first: &mut bool, out: &mut String) {
+    if !*first {
+        out.push(',');
+    }
+    *first = false;
+    out.push('{');
+    if let Some(seq) = row.seq {
+        let _ = write!(out, "\"seq\":{seq},");
+    }
+    push_coordinates(row, out);
+    if let Some(verdict) = row.verdict {
+        let _ = write!(out, ",\"selected\":\"{}\"", verdict.word());
+    }
+    out.push('}');
 }
 
 /// The captures and the reading of them that the rows below are held to.
@@ -440,6 +644,342 @@ pub(crate) mod tests {
         let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
         let d = Dissection::from_capture(&file).expect("the capture reads");
         (d, file)
+    }
+
+    /// A numbering that numbers every list AND every row, as a handle's does: a
+    /// row's number is its produced-index plus one, so a capture and any prefix of
+    /// it number the rows they share the same way, which is what lets one memory
+    /// follow a capture as it grows.
+    struct EveryRowNumbered;
+
+    impl RowCoordinates for EveryRowNumbered {
+        fn list_id(&self, list: usize) -> Option<u64> {
+            Some(list as u64)
+        }
+
+        fn scouting_list_id(&self, _flow: &crate::link::FlowKey) -> Option<u64> {
+            None
+        }
+
+        fn row_seq(&self, _list: usize, produced: u64) -> Option<u64> {
+            Some(produced + 1)
+        }
+    }
+
+    /// The first `n` packets of the contract capture, read as the capture of a
+    /// tap that has seen no more of them yet.
+    fn contract_capture_prefix(n: usize) -> Dissection {
+        let wires: Vec<Vec<u8>> = packets()
+            .into_iter()
+            .take(n)
+            .map(|(_, from_low, wire)| {
+                if from_low {
+                    udp_packet(LOW, 43210, HIGH, 7447, &wire)
+                } else {
+                    udp_packet(HIGH, 7447, LOW, 43210, &wire)
+                }
+            })
+            .collect();
+        let rows: Vec<(u32, u32, &[u8])> = wires
+            .iter()
+            .enumerate()
+            .map(|(i, wire)| (1, i as u32 * 10_000, wire.as_slice()))
+            .collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
+        Dissection::from_capture(&file).expect("the capture reads")
+    }
+
+    /// The since document for `d` under `selector` after `after`, with `n` rows
+    /// issued (each packet of the contract capture is one row, numbered from 1).
+    fn since(
+        d: &Dissection,
+        n: u64,
+        selector: &str,
+        after: u64,
+        memory: &mut SelectionMemory,
+    ) -> String {
+        let filter = crate::filter::Filter::parse(selector).expect("the selector parses");
+        selection_since_json_coordinated(
+            d,
+            &filter,
+            &EveryRowNumbered,
+            SelectionWindow {
+                after_seq: after,
+                through_seq: n,
+            },
+            memory,
+        )
+    }
+
+    /// The text of the array under `key` in a since document, brackets included.
+    fn array_of<'a>(doc: &'a str, key: &str) -> &'a str {
+        let at = doc
+            .find(&alloc::format!("\"{key}\":["))
+            .unwrap_or_else(|| panic!("no {key} in {doc}"))
+            + key.len()
+            + 3;
+        // `at` is the opening bracket itself, so the walk starts one level in.
+        let mut depth = 0usize;
+        for (i, c) in doc[at..].char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &doc[at..at + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{key} is not closed in {doc}");
+    }
+
+    /// The since documents the registry gates are held to: every word and every
+    /// shape the document writes without an ambiguous prefix (the handle-level
+    /// gates add that one, which needs a capture with two zids that share eight
+    /// digits).
+    ///
+    /// One asked nothing, one that keeps every row, and the two states of one
+    /// capture asked twice under `closed == no` and again under `closed == yes`,
+    /// so each second document carries a revised row with its own `was`.
+    pub(crate) fn since_documents_for_the_gates() -> Vec<String> {
+        let (whole, _) = mixed_session_with_file();
+        let n = labels().len() as u64;
+        let mut docs = Vec::new();
+        for selector in ["", "kind == query"] {
+            docs.push(since(
+                &whole,
+                n,
+                selector,
+                0,
+                &mut SelectionMemory::default(),
+            ));
+        }
+        // Both directions of the move, so `was` arrives as two different words:
+        // an exchange still open reads `yes` under `closed == no` and `no` under
+        // `closed == yes`, and its close turns each into the other.
+        for selector in ["closed == no", "closed == yes"] {
+            let mut memory = SelectionMemory::default();
+            docs.push(since(
+                &contract_capture_prefix(7),
+                7,
+                selector,
+                0,
+                &mut memory,
+            ));
+            docs.push(since(
+                &contract_capture_prefix(9),
+                9,
+                selector,
+                7,
+                &mut memory,
+            ));
+        }
+        docs
+    }
+
+    /// FROM CURSOR ZERO IT IS THE VERDICT DOCUMENT'S ROWS, each with its number,
+    /// the same words in the same order.
+    #[test]
+    fn from_zero_the_since_document_holds_every_row_the_verdict_document_does() {
+        let (d, _) = mixed_session_with_file();
+        let n = labels().len() as u64;
+        for selector in ["kind == query", "replies == 0", "closed == no"] {
+            let mut memory = SelectionMemory::default();
+            let doc = since(&d, n, selector, 0, &mut memory);
+            let said: String = array_of(&doc, "rows")
+                .split("\"selected\":\"")
+                .skip(1)
+                .map(|rest| match rest.split('"').next() {
+                    Some("yes") => 'Y',
+                    Some("no") => 'N',
+                    Some("undecided") => '?',
+                    Some("unjudged") => 'U',
+                    other => panic!("an unknown word {other:?} in {doc}"),
+                })
+                .collect();
+            assert_eq!(said, letters(&d, selector), "{selector}: {doc}");
+            assert_eq!(
+                array_of(&doc, "revised"),
+                "[]",
+                "{selector}: nothing was said before"
+            );
+            assert!(
+                array_of(&doc, "rows").starts_with("[{\"seq\":1,\"direction\":\"a\""),
+                "{doc}"
+            );
+            assert!(
+                doc.contains(&alloc::format!(
+                    "\"window\":{{\"after_seq\":0,\"through_seq\":{n}}}"
+                )),
+                "{doc}"
+            );
+        }
+    }
+
+    /// A CURSOR LEAVES OUT THE ROWS IT PASSES, and only those.
+    #[test]
+    fn a_cursor_leaves_out_the_rows_it_passes() {
+        let (d, _) = mixed_session_with_file();
+        let n = labels().len() as u64;
+        let mut memory = SelectionMemory::default();
+        let doc = since(&d, n, "kind == query", 20, &mut memory);
+        let rows = array_of(&doc, "rows");
+        assert_eq!(rows.matches("\"seq\":").count() as u64, n - 20, "{doc}");
+        assert!(rows.starts_with("[{\"seq\":21,"), "{doc}");
+        assert!(!rows.contains("\"seq\":20,"), "{doc}");
+        // The rows it passed were still judged, and remembered.
+        assert_eq!(memory.len() as u64, n);
+        // Past the end there is nothing, and that is not an error.
+        let past = since(&d, n, "kind == query", n + 5, &mut memory);
+        assert_eq!(array_of(&past, "rows"), "[]", "{past}");
+    }
+
+    /// AN EXCHANGE IS JUDGED AT ITS CLOSE, so the request row a cursor has passed
+    /// reads a different word once the close is in the capture, and the since
+    /// document says so.
+    ///
+    /// `closed == no` is `yes` on a request nothing has closed and `no` on one
+    /// something has. The first document is taken when the capture ends at the
+    /// request; the second when it also holds the reply and the close. The
+    /// request row is numbered 7 in both; the second document writes the two
+    /// rows after it as new, and the request again as REVISED, with the word it
+    /// read before beside the one it reads now.
+    #[test]
+    fn the_close_of_an_exchange_revises_the_request_row_the_cursor_passed() {
+        let mut memory = SelectionMemory::default();
+        let before = contract_capture_prefix(7);
+        let first = since(&before, 7, "closed == no", 0, &mut memory);
+        assert!(
+            array_of(&first, "rows").contains(
+                "{\"seq\":7,\"direction\":\"a\",\"list_id\":0,\"anchor\":6,\"batch_index\":0,\
+                 \"selected\":\"yes\"}"
+            ),
+            "the request is unclosed, so it is open: {first}"
+        );
+        assert_eq!(array_of(&first, "revised"), "[]", "{first}");
+
+        let after = contract_capture_prefix(9);
+        let second = since(&after, 9, "closed == no", 7, &mut memory);
+        assert_eq!(
+            array_of(&second, "rows"),
+            "[{\"seq\":8,\"direction\":\"b\",\"list_id\":0,\"anchor\":7,\"batch_index\":0,\
+             \"selected\":\"undecided\"},\
+             {\"seq\":9,\"direction\":\"b\",\"list_id\":0,\"anchor\":8,\"batch_index\":0,\
+             \"selected\":\"no\"}]",
+            "{second}"
+        );
+        assert_eq!(
+            array_of(&second, "revised"),
+            "[{\"seq\":7,\"direction\":\"a\",\"list_id\":0,\"anchor\":6,\"batch_index\":0,\
+             \"selected\":\"no\",\"was\":\"yes\"}]",
+            "{second}"
+        );
+    }
+
+    /// NOTHING IS REVISED THAT DID NOT CHANGE: the same capture asked twice says
+    /// the same words, and the second answer names no row.
+    #[test]
+    fn a_row_whose_word_did_not_move_is_not_revised() {
+        let (d, _) = mixed_session_with_file();
+        let n = labels().len() as u64;
+        let mut memory = SelectionMemory::default();
+        let _ = since(&d, n, "closed == no", 0, &mut memory);
+        let again = since(&d, n, "closed == no", n, &mut memory);
+        assert_eq!(array_of(&again, "rows"), "[]", "{again}");
+        assert_eq!(array_of(&again, "revised"), "[]", "{again}");
+        // And a cursor BEHIND the memory is no revision either: the rows it lists
+        // are new to the caller and are written with their words.
+        let behind = since(&d, n, "closed == no", 20, &mut memory);
+        assert_eq!(array_of(&behind, "revised"), "[]", "{behind}");
+    }
+
+    /// A DECLARATION THAT ARRIVES AFTER THE REFERENCE TO IT DOES NOT MOVE THE
+    /// REFERENCE'S ROW, in the construction a datagram link gives.
+    ///
+    /// The question a consumer asked: can a verdict already given change when a
+    /// keyexpr declaration is resolved late? Here a `Push` names key id 1, which
+    /// nothing has declared, and the declaration of id 1 follows in a later packet.
+    /// The row reads `undecided` under a key term in the first document and the
+    /// same in the second, and nothing is revised: a declaration is applied to the
+    /// frames at or after the packet it went past at, and not to the ones before
+    /// it (`crate::fields_json`'s anchor rule). That is a fact of THIS
+    /// construction; the cases where a decode happens later than its packet (a
+    /// held stream segment) are not claimed, and `revised` reports whatever moved
+    /// whichever way it did.
+    #[test]
+    fn a_declaration_after_the_reference_does_not_move_the_reference_row() {
+        let capture_of = |with_declaration: bool| {
+            let mut wires: Vec<(bool, Vec<u8>)> = alloc::vec![
+                (true, init_datagram(false, &[])),
+                (false, init_datagram(true, &[])),
+                (true, open_datagram(false)),
+                (false, open_datagram(true)),
+                (
+                    true,
+                    frame_carrying(&crate::datagram_tests::push(sender_space(1, None), b"v")),
+                ),
+            ];
+            if with_declaration {
+                wires.push((true, frame_carrying(&declare_kexpr(1, "demo/declared"))));
+            }
+            let packets: Vec<Vec<u8>> = wires
+                .into_iter()
+                .map(|(from_low, wire)| {
+                    if from_low {
+                        udp_packet(LOW, 43210, HIGH, 7447, &wire)
+                    } else {
+                        udp_packet(HIGH, 7447, LOW, 43210, &wire)
+                    }
+                })
+                .collect();
+            let rows: Vec<(u32, u32, &[u8])> = packets
+                .iter()
+                .enumerate()
+                .map(|(i, wire)| (1, i as u32 * 10_000, wire.as_slice()))
+                .collect();
+            let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
+            Dissection::from_capture(&file).expect("the capture reads")
+        };
+        let mut memory = SelectionMemory::default();
+        let before = since(
+            &capture_of(false),
+            5,
+            "key == demo/declared",
+            0,
+            &mut memory,
+        );
+        let word_of_the_push = |doc: &str| {
+            array_of(doc, "rows")
+                .split("{\"seq\":5,")
+                .nth(1)
+                .and_then(|rest| rest.split("\"selected\":\"").nth(1))
+                .and_then(|rest| rest.split('"').next())
+                .map(String::from)
+        };
+        let first = word_of_the_push(&before).expect("the push is row 5");
+        let after = since(&capture_of(true), 6, "key == demo/declared", 5, &mut memory);
+        assert_eq!(
+            array_of(&after, "revised"),
+            "[]",
+            "the reference row was \"{first}\" and a later declaration moved it: {after}"
+        );
+    }
+
+    /// With no selector there are no words: the rows carry their coordinates and
+    /// no `selected`, nothing is revised and nothing is remembered.
+    #[test]
+    fn an_empty_selector_says_no_word_and_remembers_none() {
+        let (d, _) = mixed_session_with_file();
+        let n = labels().len() as u64;
+        let mut memory = SelectionMemory::default();
+        let _ = since(&d, n, "closed == no", 0, &mut memory);
+        assert!(!memory.is_empty());
+        let doc = since(&d, n, "", 0, &mut memory);
+        assert!(!doc.contains("\"selected\""), "{doc}");
+        assert!(!doc.contains("\"was\""), "{doc}");
+        assert!(memory.is_empty(), "no selector, no words to remember");
     }
 
     /// The selection document's word for every row of `d`, one letter each:

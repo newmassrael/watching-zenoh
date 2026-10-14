@@ -522,6 +522,18 @@ ONLY_CAPI = {
         "operator reads a schema with the tools that ship with it.",
         (),
     ),
+    "a selector's verdict over the rows after a cursor, and the rows that moved": (
+        "wz_dissect_live_selection_since",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and keeps a narrowed list current as rows arrive must not read the whole "
+        "verdict document at every step, and judging only the new rows itself "
+        "would be a second opinion about a verdict that can move after it is "
+        "given. It is the half after `wz_dissect_live_selection`, over the same "
+        "verdict, with the handle remembering what it said. The command line "
+        "analyses a capture once, and a flag that kept a cursor between runs has "
+        "no handle to keep it in.",
+        (),
+    ),
     "a protected frame's header compared with the values a caller expects": (
         "wz_dissect_e2e_open_expecting",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

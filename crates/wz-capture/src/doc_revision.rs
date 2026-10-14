@@ -2945,6 +2945,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTION_R1_CARRIES,
     },
+    // THE VERDICTS OF THE ROWS AFTER A CURSOR, AND THE EARLIER ROWS THAT MOVED.
+    //
+    // A document of its own and not a mode of `selection`, for that document's
+    // reason: its rows carry a number and its top level carries a window and a
+    // second array, and a `selection` that sometimes had them would make every
+    // reader of the verdicts reason about a document that sometimes did not. The
+    // row keys are `selection`'s with `seq` in front; `revised` holds rows in the
+    // same shape plus `was`, the word the row read when this handle last said a
+    // word about it. `window` holds the cursor given and the one to give next.
+    // `selected` and `was` draw from the same four words as `selection`'s and are
+    // PASSENGERS, as `direction` is.
+    DocumentShape {
+        document: SELECTION_SINCE,
+        revision: 1,
+        keys: SELECTION_SINCE_R1_KEYS,
+        retiring: &[],
+        families: SELECTION_SINCE_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_SINCE_R1_CARRIES,
+    },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
     //
@@ -3071,6 +3091,10 @@ pub const SESSION_TABLE: &str = "session_table";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
+/// A selector's verdict over the rows issued after a cursor, and the earlier rows
+/// whose word has changed since it was last asked
+/// (`wz_dissect_live_selection_since`).
+pub const SELECTION_SINCE: &str = "selection_since";
 /// What a live handle still holds and the ceilings that bound it
 /// (`wz_dissect_live_retention`).
 pub const RETENTION: &str = "retention";
@@ -10826,6 +10850,89 @@ pub const SELECTION_R4_KEYS: &[&str] = &[
     "stream_bytes_per_direction",
 ];
 
+/// The `selection_since` document's key set at revision 1: the verdict
+/// document's, with `seq` on a row, the `window` group (`after_seq`,
+/// `through_seq`), the `revised` array and `was` on its rows.
+///
+/// The ambiguity report is the verdict document's (`ambiguous_zid_prefixes`
+/// and its four inner keys), present only under the same condition, and the
+/// ceilings group is the same one every document carries. Spelled out rather
+/// than built from a sibling table, for the reason [`SELECTION_R1_KEYS`] gives.
+pub const SELECTION_SINCE_R1_KEYS: &[&str] = &[
+    "after_seq",
+    "ambiguous_zid_prefixes",
+    "anchor",
+    "batch_index",
+    "candidates",
+    "caps",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "list_id",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "name",
+    "prefix",
+    "revised",
+    "revision",
+    "rows",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "through_seq",
+    "was",
+    "window",
+];
+
+/// The words a row can read at `selection_since` revision 1: the verdict
+/// document's four, written out again so that widening one vocabulary moves its
+/// own document's revision and not the other's.
+pub const SELECTION_SINCE_WORDS_R1: &[&str] = &["no", "undecided", "unjudged", "yes"];
+
+/// The `selection_since` document's value families at revision 1.
+pub const SELECTION_SINCE_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: SELECTION_DIRECTION_R1,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTION_SINCE_WORDS_R1,
+    },
+    ValueFamily {
+        key: "was",
+        values: SELECTION_SINCE_WORDS_R1,
+    },
+];
+
+/// All three are PASSENGERS: every row is `direction` plus the coordinates its
+/// list allows plus `selected` when a selector was asked, and every revised row
+/// adds `was`, whichever word either of them is.
+pub const SELECTION_SINCE_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "was",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The retention document's key set at revision 1.
 ///
 /// The envelope, the `held` group with its nested `fullest_window`, and the
@@ -15344,6 +15451,9 @@ mod tests {
             // unless a selector's `zid` prefix began two or more of the
             // capture's zids, and then every row reads `unjudged`).
             (SELECTION, 4),
+            // The same verdicts for the rows after a cursor, and the earlier
+            // rows whose word moved.
+            (SELECTION_SINCE, 1),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.

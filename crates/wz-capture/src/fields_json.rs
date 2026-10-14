@@ -6748,7 +6748,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 60] = [
+        let live: [(&str, &str, Vec<&'static str>); 63] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -7079,6 +7079,24 @@ mod tests {
             ),
             (
                 rev::SELECTION,
+                "direction",
+                crate::census_json::direction_names(),
+            ),
+            // The since document draws from the same walks: its two word keys
+            // are the verdict's four words, and `was` is the word a row read
+            // before, so it is the same vocabulary.
+            (
+                rev::SELECTION_SINCE,
+                "selected",
+                crate::fields_json::RowVerdict::names(),
+            ),
+            (
+                rev::SELECTION_SINCE,
+                "was",
+                crate::fields_json::RowVerdict::names(),
+            ),
+            (
+                rev::SELECTION_SINCE,
                 "direction",
                 crate::census_json::direction_names(),
             ),
@@ -7753,7 +7771,8 @@ mod tests {
         // The description document, over a schema with every type word, label
         // and syntax, and one of each shape of refusal.
         let describe_docs = crate::proto_describe_tests::documents_for_the_carries_gate();
-        let docs: [(&str, Vec<&String>); 14] = [
+        let since_docs = crate::selection_json::tests::since_documents_for_the_gates();
+        let docs: [(&str, Vec<&String>); 15] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -7762,6 +7781,7 @@ mod tests {
             (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
             (rev::SELECTOR_BIND, bind_verdicts.iter().collect()),
             (rev::SELECTION, verdict_docs.iter().collect()),
+            (rev::SELECTION_SINCE, since_docs.iter().collect()),
             (
                 rev::DECLARATIONS_DIAGNOSE,
                 declaration_verdicts.iter().collect(),

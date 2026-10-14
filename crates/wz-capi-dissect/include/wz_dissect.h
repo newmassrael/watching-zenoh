@@ -1557,7 +1557,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 37
+#define WZ_DISSECT_ABI_REVISION 38
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5330,6 +5330,94 @@ int wz_dissect_live_fields_since(wz_dissect_live *h,
  * @carries selection selected passenger */
 int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
                               char **out);
+
+/* (ABI 38) -- THE SELECTOR'S VERDICT OVER THE ROWS AFTER A CURSOR, and the
+ * earlier rows whose word has changed since this handle last said one.
+ *
+ * WHAT A NARROWED LIST THAT GROWS WAS PAYING FOR. wz_dissect_live_selection
+ * writes a word for every row of the handle, so a consumer keeping a narrowed
+ * list current as rows arrive received and parsed every row again at every step,
+ * and the list it held was only as fresh as its last full read. This door writes
+ * the rows numbered above `after_seq` and the rows whose word moved, so the
+ * DOCUMENT follows what is new. The WALK that decides the words is still the whole
+ * capture's, as it is for wz_dissect_live_selection: a verdict is a fact about the
+ * capture and not about a row, and judging only the new rows would be a guess. A
+ * call costs about what that door costs and writes far less.
+ *
+ * THE CURSOR is wz_dissect_live_fields_since's: every row carries `seq`, the
+ * handle's count of rows it has issued, unique and increasing and untouched by a
+ * ceiling trimming a list. 0 asks for every row. The document's
+ *
+ *     "window":{"after_seq":A,"through_seq":T}
+ *
+ * says the cursor you gave and the one to give next, the highest number the
+ * handle had issued.
+ *
+ *     {"document":{"name":"selection_since","revision":1},
+ *      "window":{"after_seq":7,"through_seq":9},
+ *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
+ *               "selected":"undecided"}, ...],
+ *      "revised":[{"seq":7,"direction":"a","list_id":3,"anchor":6,
+ *                  "batch_index":0,"selected":"no","was":"yes"}],
+ *      "dropped_by_limits":{...}}
+ *
+ * A row is the row wz_dissect_live_selection writes with its `seq` in front. A
+ * row of a list the handle did not number carries no coordinate keys, and a row
+ * with no `seq` is never passed over by a cursor: it is written every time,
+ * because dropping one is not recoverable and writing one twice is.
+ *
+ * A VERDICT CAN CHANGE AFTER IT IS GIVEN, AND `revised` SAYS WHICH. An earlier
+ * row's word can move, and a cursor alone would have left it where it was first
+ * given. TESTED: a request and its final are judged as one exchange at its close,
+ * so under `closed == no` the request reads `yes` while nothing has closed it and
+ * `no` once the close is in the capture, and the request is a row the cursor has
+ * already passed. NAMED by the selector language (see THE SELECTOR LANGUAGE): a
+ * `zid` prefix that began one zid and now begins two makes the selector ambiguous
+ * and every row reads `unjudged`. TESTED NOT to move a row, in the construction a
+ * datagram link gives: a keyexpr declaration that arrives after the reference to
+ * it is not applied to the reference, so that row's word stays. Whether a decode
+ * that happens later than its packet (a stream segment held until a gap fills) can
+ * move a row is not claimed.
+ *
+ * `revised` does not depend on the reason, which is why it is the answer: it holds
+ * the rows numbered AT OR BELOW the cursor that this handle said a word about the
+ * last time and now says another, each with the new word in `selected` and the old
+ * one in `was`. Apply `revised` to the words you hold and append `rows`; you never
+ * need to ask for the whole walk to be sure, and a word you hold is as true as the
+ * last document you read. A row it does not name has the word you hold.
+ *
+ * WHAT THE HANDLE REMEMBERS. The words it said last time, one per row it still
+ * holds, for ONE selector, named by the text you pass. A different text starts the
+ * memory again: nothing is revised and every row after your cursor is new, so ask
+ * from 0 after changing the selector, because the rows before the cursor are never
+ * written again. The text is compared as given, so a selector that means the same
+ * thing in other words starts the memory again too, which costs a full answer and
+ * never a wrong one. A cursor BEHIND the last call's is allowed: the rows it lists
+ * are written with their words and are not reported as revised.
+ *
+ * AN EMPTY SELECTOR IS THE IDENTITY, as for every door here: rows carry their
+ * coordinates and no "selected", nothing is revised, and nothing is remembered.
+ * UNDER A `zid` PREFIX THAT IS AMBIGUOUS in what the handle holds, every row reads
+ * `unjudged` and the document carries `ambiguous_zid_prefixes` as the selection
+ * document does, so the rows that read something else a call before appear under
+ * `revised`.
+ *
+ * `selector` is the language wz_dissect_live_selection takes and is refused the
+ * same way: WZ_DISSECT_ERR_SELECTOR, with wz_dissect_selector_diagnose available
+ * to say where. There is no `declarations` argument, for that door's reason.
+ *
+ * `h` is not const, for that door's reason and because the handle keeps the words
+ * it said. Call it and wz_dissect_live_drain on the same side of
+ * wz_dissect_live_end, as for wz_dissect_live_fields_since.
+ *
+ * @values selection_since direction
+ * @values selection_since selected
+ * @values selection_since was
+ * @carries selection_since direction passenger
+ * @carries selection_since selected passenger
+ * @carries selection_since was passenger */
+int wz_dissect_live_selection_since(wz_dissect_live *h, const char *selector,
+                                    uint64_t after_seq, char **out);
 
 /* ── (ABI 23) — WHAT AN OPEN HANDLE STILL HOLDS ──────────────────────────
  *

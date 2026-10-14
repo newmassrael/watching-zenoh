@@ -19,6 +19,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CHECK(cond, ...)                                                       \
@@ -545,6 +546,99 @@ static int check_live_door(void) {
      * be reading the list at the wrong place entirely. */
     CHECK(records[0].anchor == 2, "expected the third packet, got %llu",
           (unsigned long long)records[0].anchor);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
+/* (ABI 38) -- THE SELECTOR'S VERDICT OVER THE ROWS AFTER A CURSOR, driven from C.
+ *
+ * What only C can say: the cursor is a `uint64_t` this translation unit passes by
+ * value and reads back out of a document it owns, the selector crosses as a C
+ * string, and the document is released by the consumer's own free. The arms are
+ * the ones a consumer keeping a list current goes through: every row from 0, the
+ * rows after the cursor and no more, a quiet call, a selector that does not parse,
+ * and the caller bugs. The revised rows need an exchange to close, and that is
+ * held where records can be built (the Rust tests). */
+static unsigned long long since_through(const char *doc) {
+    const char *at = strstr(doc, "\"through_seq\":");
+    return at ? strtoull(at + strlen("\"through_seq\":"), NULL, 10) : 0;
+}
+
+static int check_selection_since_door(void) {
+    wz_dissect_live *h = NULL;
+    unsigned char frame[64];
+    size_t frame_len = udp_keepalive_frame(frame);
+    char *doc = NULL;
+    unsigned long long cursor;
+    int rc;
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "since live_open rc=%d", rc);
+    rc = wz_dissect_live_push(h, 1, 1000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "since push rc=%d", rc);
+    rc = wz_dissect_live_push(h, 1, 2000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "since second push rc=%d", rc);
+
+    /* From zero: every row, numbered, with the window to ask next. */
+    rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since from 0 rc=%d", rc);
+    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":1") !=
+              NULL,
+          "the since document must open with its name and revision: %s", doc);
+    CHECK(strstr(doc, "\"seq\":1,") != NULL && strstr(doc, "\"seq\":2,") != NULL,
+          "both rows are numbered: %s", doc);
+    CHECK(strstr(doc, "\"revised\":[]") != NULL,
+          "nothing was said before, so nothing is revised: %s", doc);
+    CHECK(strstr(doc, "\"selected\":\"unjudged\"") != NULL,
+          "a KeepAlive carries no record a selector can speak of: %s", doc);
+    cursor = since_through(doc);
+    CHECK(cursor == 2, "through_seq=%llu after two rows", cursor);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+
+    /* A third row arrives; asked at the cursor, only it is written. */
+    rc = wz_dissect_live_push(h, 1, 3000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "since third push rc=%d", rc);
+    rc = wz_dissect_live_selection_since(h, "bytes >= 0", cursor, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since at the cursor rc=%d", rc);
+    CHECK(strstr(doc, "\"seq\":3,") != NULL && strstr(doc, "\"seq\":2,") == NULL &&
+              strstr(doc, "\"seq\":1,") == NULL,
+          "only the row after the cursor is written: %s", doc);
+    CHECK(strstr(doc, "\"revised\":[]") != NULL,
+          "a KeepAlive's word does not move: %s", doc);
+    cursor = since_through(doc);
+    CHECK(cursor == 3, "through_seq=%llu after three rows", cursor);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+
+    /* Quiet: nothing is new and nothing moved. */
+    rc = wz_dissect_live_selection_since(h, "bytes >= 0", cursor, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "quiet since rc=%d", rc);
+    CHECK(strstr(doc, "\"rows\":[]") != NULL && strstr(doc, "\"revised\":[]") != NULL,
+          "a quiet call writes nothing: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+
+    /* An empty selector is the identity: coordinates and no verdict. */
+    rc = wz_dissect_live_selection_since(h, "", 0, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "empty selector since rc=%d", rc);
+    CHECK(strstr(doc, "\"selected\"") == NULL,
+          "an empty selector asks nothing and says no word: %s", doc);
+    wz_dissect_string_free(doc);
+    doc = NULL;
+
+    /* A selector that does not parse is a SELECTOR error, and no string. */
+    rc = wz_dissect_live_selection_since(h, "kind ==", 0, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_SELECTOR && doc == NULL,
+          "a bad selector must be ERR_SELECTOR and no string, rc=%d", rc);
+
+    /* Caller bugs. */
+    rc = wz_dissect_live_selection_since(NULL, "bytes >= 0", 0, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle rc=%d", rc);
+    rc = wz_dissect_live_selection_since(h, NULL, 0, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null selector rc=%d", rc);
+    rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
     wz_dissect_live_close(h);
     return 0;
 }
@@ -2927,7 +3021,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[18];
+    } revisioned[19];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -3397,6 +3491,21 @@ int main(void) {
         rc = wz_dissect_proto_messages(&one, 1, &revisioned[17].doc);
     }
     CHECK(rc == WZ_DISSECT_OK, "proto_message_list document rc=%d", rc);
+    /* (ABI 38) -- the since document, at 1: an empty handle still answers, the
+     * cheapest way to hold the document's opening to the revision this
+     * consumer was written against. */
+    revisioned[18].name = "selection_since";
+    revisioned[18].revision = 1;
+    revisioned[18].doc = NULL;
+    {
+        wz_dissect_live *quiet = NULL;
+        rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &quiet);
+        CHECK(rc == WZ_DISSECT_OK, "since handle rc=%d", rc);
+        rc = wz_dissect_live_selection_since(quiet, "bytes >= 0", 0,
+                                             &revisioned[18].doc);
+        CHECK(rc == WZ_DISSECT_OK, "selection_since document rc=%d", rc);
+        wz_dissect_live_close(quiet);
+    }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -3652,6 +3761,11 @@ int main(void) {
     /* R2205 (ABI 14) -- and the BYTES under the description, which is the one
      * output of this library that is neither a document nor a scalar. */
     if (check_message_bytes_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 38) -- and the verdict over the rows AFTER A CURSOR. */
+    if (check_selection_since_door() != 0) {
         return 1;
     }
 

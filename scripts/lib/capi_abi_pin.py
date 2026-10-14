@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 37
+EXPECTED_VERSION = 38
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -365,6 +365,14 @@ EXPECTED_SYMBOLS = {
     # strings the CALLER holds, the frame as the bytes the open door takes,
     # nothing is retained between calls, and no callback runs.
     "wz_dissect_e2e_open_expecting",
+    # (ABI 38) -- the selector's verdict over the rows AFTER A CURSOR, and the
+    # earlier rows whose word has moved since the handle last said one. One symbol
+    # and one new document, `selection_since` at revision 1. The memory rule does
+    # not move: the document is a `char*` released by `wz_dissect_string_free`, the
+    # selector crosses as a C string the CALLER holds and the cursor as an integer,
+    # no callback runs. The handle gains state of its own (the words it said, for
+    # one selector), which it frees with itself in `wz_dissect_live_close`.
+    "wz_dissect_live_selection_since",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

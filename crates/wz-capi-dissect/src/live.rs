@@ -330,6 +330,12 @@ pub struct LiveDissection {
     /// consumer must not confuse with each other, and a row number is a count of
     /// rows issued, which no other id is.
     next_seq: u64,
+    /// The words [`Self::selection_since`] said last time, and the selector they
+    /// were said under: what lets it report an earlier row whose word has moved.
+    /// On the handle because the handle is the only thing that knows what it has
+    /// said, as `cursor` is for what it has read.
+    selection_said: wz_capture::selection_json::SelectionMemory,
+    selection_selector: Option<String>,
     lost: u64,
     /// R2373 (open-debt item 661) — how far into a capture CONTAINER this
     /// handle has read, for [`Self::follow`].
@@ -458,6 +464,8 @@ impl LiveDissection {
             flow_ids: BTreeMap::new(),
             next_id: 0,
             next_seq: 1,
+            selection_said: wz_capture::selection_json::SelectionMemory::default(),
+            selection_selector: None,
             lost: 0,
             cursor: CaptureCursor::new(),
         }
@@ -980,6 +988,61 @@ impl LiveDissection {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
         wz_capture::selection_json::selection_json_where_coordinated(&self.dissection, filter, &ids)
+    }
+
+    /// THE SELECTOR'S VERDICT OVER THE ROWS AFTER A CURSOR, and the earlier rows
+    /// whose word has changed since this handle last said one.
+    ///
+    /// # Why the handle remembers
+    ///
+    /// A verdict is the capture's reading of a row at a state, and the state
+    /// moves: a selector's `zid` prefix can become ambiguous, a request's outcome
+    /// is decided when its final arrives, a keyexpr resolves when its declaration
+    /// is decoded. A door that wrote only the new rows would leave every earlier
+    /// row at the word it was first given, so the handle keeps the words it said
+    /// ([`wz_capture::selection_json::SelectionMemory`]) and writes the rows whose
+    /// word differs now as `revised`, with the old word beside the new.
+    ///
+    /// # The selector
+    ///
+    /// The memory is for ONE selector, named by its text. A different text starts
+    /// it again: nothing is revised, and every row after the cursor is new, so the
+    /// caller asks from 0 after changing the selector. The text is compared as
+    /// given, so a selector that means the same thing in other words starts the
+    /// memory again too, which costs a full answer and never a wrong one.
+    ///
+    /// # Cost
+    ///
+    /// The document follows what is new and what moved. The WALK that decides the
+    /// words is the whole capture's, as for [`Self::selection`], so a call costs
+    /// about what that one does and writes far less.
+    ///
+    /// `&mut`, for [`Self::selection`]'s reason.
+    pub fn selection_since(
+        &mut self,
+        selector: &str,
+        filter: &wz_capture::filter::Filter,
+        after_seq: u64,
+    ) -> String {
+        self.drain(&mut []);
+        if self.selection_selector.as_deref() != Some(selector) {
+            self.selection_said = wz_capture::selection_json::SelectionMemory::default();
+            self.selection_selector = Some(String::from(selector));
+        }
+        let ids = HandleIds::of(self);
+        // The highest number the handle has issued: the cursor to give next, as
+        // for `fields_since`.
+        let through_seq = self.next_seq - 1;
+        wz_capture::selection_json::selection_since_json_coordinated(
+            &self.dissection,
+            filter,
+            &ids,
+            wz_capture::selection_json::SelectionWindow {
+                after_seq,
+                through_seq,
+            },
+            &mut self.selection_said,
+        )
     }
 
     /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience that a
