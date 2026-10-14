@@ -253,6 +253,26 @@ fn whatami_name(whatami: WhatAmI) -> &'static str {
     }
 }
 
+/// `Some(outcome)` when `drive` ends first, `None` when the process is told to stop.
+///
+/// When both are ready at once the STOP wins. A session that dials a sibling in the
+/// same process sees both on a SIGTERM: the sibling closes and sends a Close on the
+/// wire, so "the process is stopping" and "the peer ended" are ready together, and an
+/// unbiased `select!` picks one at random (6 of 60 runs reported `ended (Terminated)`
+/// where `closed` was true). The stop is the older fact and the one the process
+/// asked for, the order the MCU group loop already keeps for a caller's stop, so the
+/// report is `closed`.
+async fn ended_or_stopped<D: std::future::Future>(
+    drive: D,
+    stop: &mut watch::Receiver<bool>,
+) -> Option<D::Output> {
+    tokio::select! {
+        biased;
+        () = stopped(stop) => None,
+        outcome = drive => Some(outcome),
+    }
+}
+
 /// Drive one Established unicast session until its peer ends it (`Some`, why)
 /// or the process stops (`None`); on a stop, close it on the wire first.
 async fn serve_unicast(
@@ -275,10 +295,7 @@ async fn serve_unicast(
             &timeouts,
             |event| session.dispatch_iteration_event(event),
         );
-        tokio::select! {
-            outcome = drive => Some(outcome),
-            () = stopped(&mut stop) => None,
-        }
+        ended_or_stopped(drive, &mut stop).await
     };
     drop(session);
     if outcome.is_none() {
@@ -620,6 +637,34 @@ fn group_address(endpoint: &str) -> Option<(std::net::IpAddr, u16, Option<String
             .map(str::to_string)
     });
     Some((host.parse().ok()?, port.parse().ok()?, iface))
+}
+
+/// The report of a session whose peer ended while the process was stopping.
+#[cfg(test)]
+mod stop_order_tests {
+    use tokio::sync::watch;
+
+    use super::ended_or_stopped;
+
+    /// Both the stop and the end are ready: the stop wins, every time. An unbiased
+    /// `select!` picks at random, which this loop would catch within a few turns.
+    #[tokio::test]
+    async fn a_stop_wins_over_an_end_that_is_ready_with_it() {
+        let (stop_tx, mut stop) = watch::channel(false);
+        stop_tx.send(true).expect("a receiver is held");
+        for turn in 0..1000 {
+            let ended = ended_or_stopped(std::future::ready(7_u8), &mut stop).await;
+            assert_eq!(ended, None, "turn {turn} reported the end over the stop");
+        }
+    }
+
+    /// Without a stop the end is what is reported, with what it carried.
+    #[tokio::test]
+    async fn an_end_with_no_stop_is_reported_with_its_outcome() {
+        let (_stop_tx, mut stop) = watch::channel(false);
+        let ended = ended_or_stopped(std::future::ready(7_u8), &mut stop).await;
+        assert_eq!(ended, Some(7));
+    }
 }
 
 #[cfg(all(test, feature = "transport-multicast"))]

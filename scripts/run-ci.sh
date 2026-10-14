@@ -6032,7 +6032,10 @@ layer_c1ax_cargo_test_routing_namespace() {
     # with: a group lost three times re-joins on the 1000 / 2000 / 4000 ms
     # schedule and re-admits its member, a stop while down closes at the
     # signal, and the endpoint split. 3 = the command's own printed total.
-    _runci_guarded_test "C1AX sessions_run group 3" 3 \
+    # Round 3339: 3 -> 5, the two cases of `stop_order_tests` (ungated): a stop
+    # wins over an end that is ready with it, and an end with no stop is reported
+    # with its outcome. Printed number; the label moves with the value.
+    _runci_guarded_test "C1AX sessions_run group 5" 5 \
         cargo test -p wz-ap-demo --features transport-multicast --bin wz-ap-demo sessions_run --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
