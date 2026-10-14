@@ -274412,6 +274412,46 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3340": {
+      "decision_summary": "The Zephyr profile had no group link: the shared group drive loop (round 3338) is generic over a transport, but nothing on Zephyr's sockets implemented it, and the socket layer had no multicast membership call. zephyr-sys now declares setsockopt and the membership options with Zephyr's own numbers and its 12-byte net_ip_mreqn, read from the Zephyr tree, and host tests hold the numbers and the layout. wz-runtime-zephyr gains join_group and leave_group on its UDP socket and ZephyrGroupTransport, the GroupTransport over a wildcard-bound socket joined to the group, with the receive buffer inside the value so a datagram costs no heap. Two facts from that source shaped it: the handler refuses any option length but the struct's own, and the membership belongs to the interface and not the socket, so the transport leaves the group when it drops, which a re-join after a lost link relies on. It is compiled and layout-tested only; it has not run against a real IGMP exchange, which needs a board.",
+      "changes_bullets": [
+        "crates/zephyr-sys/src/lib.rs: setsockopt, IPPROTO_IP, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP and IpMreqn; membership_layout_tests (two cases).",
+        "crates/wz-runtime-zephyr/src/net.rs: ZephyrNetError::Membership, ZephyrUdpSocket::join_group and leave_group, ZephyrGroupTransport implementing GroupTransport."
+      ],
+      "verification_bullets": [
+        "On a build host: the two layout cases and the runtime crate's lib tests pass; clippy and fmt pass for both crates; both crates build for thumbv6m, thumbv7m and thumbv7em, the runtime crate on the heap profile and on the slot profile's feature set.",
+        "Read directly in the Zephyr tree: the option numbers (35 and 36), the 12-byte payload and the length check, the refusal of a zero group, the interface-owned membership, the setsockopt symbol in the POSIX layer, and that a build without IGMP answers the join with ENOSYS.",
+        "NOT verified: any run on a board or against a real IGMP exchange; the Zephyr tier's use of the transport in an image (none builds it yet); the carrier read, which is the board's address hook and not an interface event."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "A Zephyr image that runs the group loop over this transport, with CONFIG_NET_IPV4_IGMP on, and the run on a board: the first thing that would show a wrong receive filter or a membership that does not take.",
+        "The transport sits in the heap profile's net module; the slot profile does not build it, and it needs the socket split from that module's heap-using driver first.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "The Zephyr profile had no group link: the shared group drive loop (round 3338) is generic over a transport, but nothing on Zephyr's sockets implemented it, and the socket layer had no multicast membership call. zephyr-sys now declares setsockopt and the membership options with Zephyr's own numbers and its 12-byte net_ip_mreqn, read from the Zephyr tree, and host tests hold the numbers and the layout. wz-runtime-zephyr gains join_group and leave_group on its UDP socket and ZephyrGroupTransport, the GroupTransport over a wildcard-bound socket joined to the group, with the receive buffer inside the value so a datagram costs no heap. Two facts from that source shaped it: the handler refuses any option length but the struct's own, and the membership belongs to the interface and not the socket, so the transport leaves the group when it drops, which a re-join after a lost link relies on. It is compiled and layout-tested only; it has not run against a real IGMP exchange, which needs a board.",
+      "publishable_changes_bullets": [
+        "crates/zephyr-sys/src/lib.rs: setsockopt, IPPROTO_IP, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP and IpMreqn; membership_layout_tests (two cases).",
+        "crates/wz-runtime-zephyr/src/net.rs: ZephyrNetError::Membership, ZephyrUdpSocket::join_group and leave_group, ZephyrGroupTransport implementing GroupTransport."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the two layout cases and the runtime crate's lib tests pass; clippy and fmt pass for both crates; both crates build for thumbv6m, thumbv7m and thumbv7em, the runtime crate on the heap profile and on the slot profile's feature set.",
+        "Read directly in the Zephyr tree: the option numbers (35 and 36), the 12-byte payload and the length check, the refusal of a zero group, the interface-owned membership, the setsockopt symbol in the POSIX layer, and that a build without IGMP answers the join with ENOSYS.",
+        "NOT verified: any run on a board or against a real IGMP exchange; the Zephyr tier's use of the transport in an image (none builds it yet); the carrier read, which is the board's address hook and not an interface event."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A Zephyr image that runs the group loop over this transport, with CONFIG_NET_IPV4_IGMP on, and the run on a board: the first thing that would show a wrong receive filter or a membership that does not take.",
+        "The transport sits in the heap profile's net module; the slot profile does not build it, and it needs the socket split from that module's heap-using driver first.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
