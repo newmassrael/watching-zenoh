@@ -27,14 +27,18 @@ use core::cell::{Cell, OnceCell, RefCell};
 use core::ffi::{c_int, c_void};
 use core::mem::size_of;
 
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use wz_runtime_coop::group_transport::GroupTransport;
 use wz_runtime_coop::session_drive::SessionDatagramLink;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, RxFrame,
 };
 use wz_session_core::reliability::Reliability;
 use zephyr_sys::socket::{
-    bind, close, getsockname, poll, recvfrom, sendto, socket, PollFd, SockLen, SockaddrIn, AF_INET,
-    IPPROTO_UDP, POLLIN, SOCK_DGRAM,
+    bind, close, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
+    SockaddrIn, AF_INET, IPPROTO_IP, IPPROTO_UDP, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP, POLLIN,
+    SOCK_DGRAM,
 };
 
 extern "C" {
@@ -130,6 +134,10 @@ pub enum ZephyrNetError {
     Poll(c_int),
     /// `recvfrom` returned this although `poll` reported the socket readable.
     Recv(isize),
+    /// `setsockopt` returned this joining or leaving a multicast group. A stack
+    /// built without IGMP refuses the join, and so does an interface address no
+    /// interface holds.
+    Membership(c_int),
 }
 
 /// One IPv4 UDP socket on Zephyr's net stack, bound to an explicit local
@@ -196,6 +204,50 @@ impl ZephyrUdpSocket {
     /// The `(address, port)` this socket is bound to.
     pub fn local(&self) -> ([u8; 4], u16) {
         self.local
+    }
+
+    /// Join the IPv4 multicast `group` on the interface that holds `interface`.
+    ///
+    /// The membership belongs to the INTERFACE, not to this socket: Zephyr's
+    /// handler calls `net_ipv4_igmp_join` on the interface it resolves, so closing
+    /// the socket does not leave the group (see [`Self::leave_group`], which
+    /// [`ZephyrGroupTransport`] calls when it drops).
+    pub fn join_group(&self, group: [u8; 4], interface: [u8; 4]) -> Result<(), ZephyrNetError> {
+        self.membership(IP_ADD_MEMBERSHIP, group, interface)
+    }
+
+    /// Leave a group [`Self::join_group`] joined.
+    pub fn leave_group(&self, group: [u8; 4], interface: [u8; 4]) -> Result<(), ZephyrNetError> {
+        self.membership(IP_DROP_MEMBERSHIP, group, interface)
+    }
+
+    fn membership(
+        &self,
+        option: c_int,
+        group: [u8; 4],
+        interface: [u8; 4],
+    ) -> Result<(), ZephyrNetError> {
+        let mreqn = IpMreqn {
+            imr_multiaddr: u32::from_ne_bytes(group),
+            imr_address: u32::from_ne_bytes(interface),
+            imr_ifindex: 0,
+        };
+        // SAFETY: `mreqn` is a live `net_ip_mreqn` and the length passed is its
+        // size, the one length the stack accepts.
+        let rc = unsafe {
+            setsockopt(
+                self.fd,
+                IPPROTO_IP,
+                option,
+                &mreqn as *const IpMreqn as *const c_void,
+                size_of::<IpMreqn>() as SockLen,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(ZephyrNetError::Membership(rc))
+        }
     }
 
     /// Send one datagram to `addr:port`. A short or refused send is an error:
@@ -433,5 +485,105 @@ impl SessionDatagramLink for ZephyrUdpDriver {
                 false
             }
         }
+    }
+}
+
+/// A multicast group session's I/O over Zephyr's own sockets: the
+/// [`GroupTransport`] the shared group drive loop (`wz-session-mcu`'s
+/// `group_drive`) runs on, the Zephyr counterpart of lwIP's.
+///
+/// One UDP socket bound to the wildcard address on the group's port, joined to
+/// the group on the interface that holds `interface`, sending to the same
+/// `(group, port)`: the shape of the lwIP group socket, so a peer sees the same
+/// source port from either. The receive buffer is an array of `RX` bytes inside
+/// the value, so a datagram costs no heap; size it to the batch the group
+/// advertises. A datagram longer than `RX` is truncated by the stack, which the
+/// loop reads as a bad frame.
+///
+/// UNVERIFIED ON A BOARD. Written against the Zephyr tree's own definitions
+/// (the option numbers, the 12-byte payload and the interface-owned membership
+/// are read from `include/zephyr/net/socket.h`, `net_ip.h` and
+/// `subsys/net/lib/sockets/sockets_inet.c`), and it compiles for the target; it
+/// has not run against a real IGMP exchange, which needs a board and a switch
+/// that forwards the group. The firmware turns on `CONFIG_NET_IPV4_IGMP`.
+pub struct ZephyrGroupTransport<const RX: usize> {
+    socket: ZephyrUdpSocket,
+    group: ([u8; 4], u16),
+    interface: [u8; 4],
+    rx: [u8; RX],
+    rx_error: Option<ZephyrNetError>,
+}
+
+impl<const RX: usize> ZephyrGroupTransport<RX> {
+    /// Bind the wildcard address on `port` and join `group` on the interface
+    /// holding `interface` (the board's own address, see [`board_ipv4`]).
+    pub fn join(group: [u8; 4], port: u16, interface: [u8; 4]) -> Result<Self, ZephyrNetError> {
+        let socket = ZephyrUdpSocket::bind([0; 4], port)?;
+        socket.join_group(group, interface)?;
+        Ok(Self {
+            socket,
+            group: (group, port),
+            interface,
+            rx: [0; RX],
+            rx_error: None,
+        })
+    }
+
+    /// The most recent receive failure, if the socket has failed: the seam the
+    /// loop reads returns a datagram or nothing, and a failed socket must not
+    /// read as a quiet group.
+    pub fn rx_error(&self) -> Option<ZephyrNetError> {
+        self.rx_error
+    }
+}
+
+impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
+    fn service(&self) {
+        // Zephyr's net stack runs its own threads: all this thread owes it is
+        // the CPU, as for the unicast link.
+        // SAFETY: the board's `k_msleep` seam; blocks this thread one tick.
+        unsafe { wz_yield_ms(1) };
+    }
+
+    /// The interface has a carrier while it holds an address: the board's
+    /// answer is 0 for a link that is down or has no lease, which is the
+    /// condition the loop must read as a lost link. Zephyr reports an interface
+    /// going down through events this thread does not wait on, and the address
+    /// hook is the one read the profile already has.
+    fn carrier_up(&self) -> bool {
+        board_ipv4().is_some()
+    }
+
+    fn send_to_group(&mut self, datagram: &[u8]) {
+        // Best-effort, as the trait says: multicast UDP has no acknowledgement
+        // and the next cadence retries.
+        let _ = self.socket.send_to(self.group.0, self.group.1, datagram);
+    }
+
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        match self.socket.try_recv(&mut self.rx) {
+            Ok(Some((len, addr, port))) => {
+                f(
+                    &self.rx[..len],
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr)), port),
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                self.rx_error = Some(e);
+                false
+            }
+        }
+    }
+}
+
+impl<const RX: usize> Drop for ZephyrGroupTransport<RX> {
+    fn drop(&mut self) {
+        // The membership is the interface's, not the socket's: closing the
+        // socket alone would leave the interface in the group, and a re-join
+        // after a lost link would join a second time. Best-effort: a failed
+        // leave leaves nothing to do.
+        let _ = self.socket.leave_group(self.group.0, self.interface);
     }
 }

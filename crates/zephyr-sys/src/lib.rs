@@ -29,9 +29,12 @@
 /// The same rule as the kernel symbols above: these are REAL functions, not
 /// the `zsock_*` names, which are `__syscall` wrappers whose link symbol
 /// depends on `CONFIG_USERSPACE`. `socket` / `bind` / `getsockname` / `sendto`
-/// / `recvfrom` are defined in `subsys/portability/posix/options/net.c`
-/// (`CONFIG_POSIX_NETWORKING`); `poll` / `close` in `device_io.c`
-/// (`CONFIG_POSIX_DEVICE_IO`).
+/// / `recvfrom` / `setsockopt` are defined in
+/// `subsys/portability/posix/options/net.c` (`CONFIG_POSIX_NETWORKING`); `poll` /
+/// `close` in `device_io.c` (`CONFIG_POSIX_DEVICE_IO`). The group-membership
+/// options below need the stack's IGMP (`CONFIG_NET_IPV4_IGMP`): a firmware that
+/// joins a group turns it on, and a join without it fails at run time rather than
+/// at link time.
 ///
 /// ⚠ The CONSTANTS are Zephyr's, not Linux's: `AF_INET` is 1 there
 /// (`NET_PF_INET`), and a value copied from a host `libc` would open the
@@ -48,6 +51,35 @@ pub mod socket {
     pub const IPPROTO_UDP: c_int = 17;
     /// `ZSOCK_POLLIN` (`include/zephyr/net/socket.h`).
     pub const POLLIN: c_short = 1;
+    /// `NET_IPPROTO_IP`, the `level` of the IPv4 socket options below
+    /// (`include/zephyr/net/net_ip.h`).
+    pub const IPPROTO_IP: c_int = 0;
+    /// `ZSOCK_IP_ADD_MEMBERSHIP` (`include/zephyr/net/socket.h`): join an IPv4
+    /// multicast group. Its payload is an [`IpMreqn`].
+    pub const IP_ADD_MEMBERSHIP: c_int = 35;
+    /// `ZSOCK_IP_DROP_MEMBERSHIP` (`include/zephyr/net/socket.h`): leave one.
+    pub const IP_DROP_MEMBERSHIP: c_int = 36;
+
+    /// `struct net_ip_mreqn` (`include/zephyr/net/net_ip.h`): the group, the
+    /// local interface's address, and the interface index. 12 bytes.
+    ///
+    /// ⚠ The handler of both membership options refuses any `optlen` but this
+    /// struct's own size (`subsys/net/lib/sockets/sockets_inet.c`,
+    /// `ipv4_multicast_group`), so the shorter `struct net_ip_mreq` a Linux
+    /// caller passes is an `EINVAL` here. A zero `imr_multiaddr` is refused too.
+    /// With `imr_ifindex` 0 the interface is the one holding `imr_address`; and
+    /// the membership belongs to that INTERFACE (`net_ipv4_igmp_join`), not to
+    /// the socket, so closing the socket does not leave the group.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct IpMreqn {
+        /// The group, network order.
+        pub imr_multiaddr: u32,
+        /// An address of the local interface, network order.
+        pub imr_address: u32,
+        /// The interface index, 0 to name it by `imr_address` instead.
+        pub imr_ifindex: c_int,
+    }
 
     /// `struct net_sockaddr_in`: family, port (network order), IPv4 address
     /// (network order). 8 bytes, 2-aligned.
@@ -94,6 +126,16 @@ pub mod socket {
             src: *mut SockaddrIn,
             addrlen: *mut SockLen,
         ) -> isize;
+        /// Set a socket option; defined in `subsys/portability/posix/options/net.c`
+        /// beside the rest of the group. Here it carries [`IpMreqn`] at level
+        /// [`IPPROTO_IP`] to join or leave a multicast group.
+        pub fn setsockopt(
+            sock: c_int,
+            level: c_int,
+            optname: c_int,
+            optval: *const c_void,
+            optlen: SockLen,
+        ) -> c_int;
         pub fn poll(fds: *mut PollFd, nfds: c_int, timeout_ms: c_int) -> c_int;
         pub fn close(fd: c_int) -> c_int;
     }
@@ -113,4 +155,36 @@ extern "C" {
 
     /// Free a block previously returned by [`k_malloc`].
     pub fn k_free(ptr: *mut c_void);
+}
+
+// Host witnesses of what the declarations say about Zephyr's own definitions: they
+// call no symbol, so they link without a kernel. They hold the numbers and the layout
+// read from `include/zephyr/net/socket.h` (`ZSOCK_IP_ADD_MEMBERSHIP`,
+// `ZSOCK_IP_DROP_MEMBERSHIP`) and `include/zephyr/net/net_ip.h` (`NET_IPPROTO_IP`,
+// `struct net_ip_mreqn`), the only value the group-membership handler accepts being
+// that struct's own size.
+#[cfg(test)]
+mod membership_layout_tests {
+    use super::socket::{IpMreqn, IPPROTO_IP, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP};
+    use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn the_membership_payload_is_zephyrs_twelve_byte_mreqn() {
+        assert_eq!(
+            size_of::<IpMreqn>(),
+            12,
+            "the handler refuses any other length"
+        );
+        assert_eq!(align_of::<IpMreqn>(), 4);
+        assert_eq!(offset_of!(IpMreqn, imr_multiaddr), 0);
+        assert_eq!(offset_of!(IpMreqn, imr_address), 4);
+        assert_eq!(offset_of!(IpMreqn, imr_ifindex), 8);
+    }
+
+    #[test]
+    fn the_membership_options_carry_zephyrs_numbers() {
+        assert_eq!(IPPROTO_IP, 0);
+        assert_eq!(IP_ADD_MEMBERSHIP, 35);
+        assert_eq!(IP_DROP_MEMBERSHIP, 36);
+    }
 }
