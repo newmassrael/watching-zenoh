@@ -370,7 +370,10 @@ fn a_trimmed_list_begins_again_and_still_equals() {
 /// and each answer equals a fresh fold under its own selector.
 #[test]
 fn another_selector_begins_again_and_the_same_one_continues() {
-    let mut g = Growing::new(Dissection::new(), "key == demo/**");
+    // An exact key and not `demo/**`: a selector carrying a wildcard is a parse
+    // error in a build without the wildcard feature, and this lib is also run
+    // with default features off.
+    let mut g = Growing::new(Dissection::new(), "key == demo/temp");
     g.udp_wire(true, 40000, 7447, &init_wire(ZID_A));
     g.udp_wire(false, 40000, 7447, &init_wire(ZID_B));
     for (i, record) in session_records().iter().take(8).enumerate() {
@@ -387,7 +390,7 @@ fn another_selector_begins_again_and_the_same_one_continues() {
         PLANES,
         "another selector is another memory"
     );
-    g.filter = Filter::parse("key == demo/**").expect("the selector parses");
+    g.filter = Filter::parse("key == demo/temp").expect("the selector parses");
     let (before, after) = g.ask("back to the first selector");
     assert_eq!(delta(before, after).restarts, PLANES);
 }
