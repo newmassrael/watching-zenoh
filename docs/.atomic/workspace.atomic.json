@@ -274496,6 +274496,42 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3342": {
+      "decision_summary": "The hosted run of fbe653dc failed in wz-capi-c, in the control leg that says a client with no connect budget makes one attempt: the open returned Z_OK where the network error was expected. The leg inferred \"no retry\" from a listener started a fixed time after the dial, and read an open that succeeded as a retry. An open also succeeds with no retry at all when the client's one attempt comes later than the listener's delay, which a loaded runner does; the same shape had failed on Windows before and a longer delay was the repair. The cause is the premise, that the attempt precedes the listener, which a delay only moves. The leg now counts. Nobody listening is refused as the network error. A port that accepts every connection and drops it is counted, and the open must not succeed and must make exactly one connection, with none more while the test watches 1.5 s. Given a budget and a schedule, that client fails the leg by its count (7 against 1).",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/connect_retry_open.rs: a_client_without_a_connect_budget_fails_on_its_one_attempt refuses a dead port as the network error and counts the connections to a port that accepts and drops; host_refusal_time is removed with the premise it served, and LISTENER_LATE_BY keeps only the budget leg."
+      ],
+      "verification_bullets": [
+        "On a build host: the connect_retry_open tests pass, and the control leg alone six more times; clippy and fmt pass.",
+        "On a build host: with a budget and a retry schedule given to the counted client in a copy of the tree, the leg fails by assertion (one panic, no compile error), reporting 7 connections where 1 is expected, and the copy was restored.",
+        "NOT verified: the hosted failure was not reproduced here, so that a loaded runner delays the one attempt past the listener is the reading its own value supports (the open returned Z_OK with no retry configured) and not a measurement; the Windows runner's behaviour with the accept-and-drop port."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this leg on Linux, macOS and Windows; a count above one on any host would be a retry that the old leg could not tell from a slow start.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "The hosted run of fbe653dc failed in wz-capi-c, in the control leg that says a client with no connect budget makes one attempt: the open returned Z_OK where the network error was expected. The leg inferred \"no retry\" from a listener started a fixed time after the dial, and read an open that succeeded as a retry. An open also succeeds with no retry at all when the client's one attempt comes later than the listener's delay, which a loaded runner does; the same shape had failed on Windows before and a longer delay was the repair. The cause is the premise, that the attempt precedes the listener, which a delay only moves. The leg now counts. Nobody listening is refused as the network error. A port that accepts every connection and drops it is counted, and the open must not succeed and must make exactly one connection, with none more while the test watches 1.5 s. Given a budget and a schedule, that client fails the leg by its count (7 against 1).",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/connect_retry_open.rs: a_client_without_a_connect_budget_fails_on_its_one_attempt refuses a dead port as the network error and counts the connections to a port that accepts and drops; host_refusal_time is removed with the premise it served, and LISTENER_LATE_BY keeps only the budget leg."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the connect_retry_open tests pass, and the control leg alone six more times; clippy and fmt pass.",
+        "On a build host: with a budget and a retry schedule given to the counted client in a copy of the tree, the leg fails by assertion (one panic, no compile error), reporting 7 connections where 1 is expected, and the copy was restored.",
+        "NOT verified: the hosted failure was not reproduced here, so that a loaded runner delays the one attempt past the listener is the reading its own value supports (the open returned Z_OK with no retry configured) and not a measurement; the Windows runner's behaviour with the accept-and-drop port."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this leg on Linux, macOS and Windows; a count above one on any host would be a retry that the old leg could not tell from a slow start.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
