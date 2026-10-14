@@ -274532,6 +274532,50 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3343": {
+      "decision_summary": "A consumer keeping a narrowed list current as rows arrive received a word for every row at every step. wz_dissect_live_selection_since (ABI 38) writes the rows numbered above a cursor and the earlier rows whose word moved, with the old word as was, in a new document selection_since (revision 1). The walk that decides the words stays the whole capture's, because a verdict is a fact about the capture; only the document is narrowed. The handle keeps the words it last said for one selector, named by its text, and a different text starts the memory again. This differs from what the consumer was told: there is no epoch and no reset, because a verdict can change after it is given and revised answers that without a stale-cursor protocol. TESTED: a close moves a request's word; a declaration after its reference does not. NOT claimed: a decode held until a stream gap fills.",
+      "changes_bullets": [
+        "crates/wz-capture/src/selection_json.rs: SelectionWindow, SelectionMemory and selection_since_json_coordinated, writing the rows above a cursor and the rows whose word moved, with the tests of each arm.",
+        "crates/wz-capture/src/doc_revision.rs: selection_since revision 1 and its key set; fields_json.rs: the registry gates draw the since document's word and direction keys.",
+        "crates/wz-capi-dissect: wz_dissect_live_selection_since, the header, the ABI revision 38 and the C consumer; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py name the symbol."
+      ],
+      "verification_bullets": [
+        "On a build host: the wz-capture lib tests under the dissect feature (twelve of them the since cases), the wz-capi-dissect tests, clippy and fmt pass; layers C0 (to its end), C1bo and C1bz pass.",
+        "On a build host: with the word comparison, the memory update and the cursor comparison each changed in a copy of the tree, the twelve since cases fail by assertion (three panics each, no compile error), and the copy was restored.",
+        "Found late and repaired in this round: the since cases only compile under the dissect feature, so the earlier passes that ran the lib without it ran none of them; once run, five failed on a bracket walk in their own helper, and the registry's population showed one word for was until a second selector was added.",
+        "NOT verified here: the hosted run of this push; the consumer's use of the door; a decode held until a stream gap fills moving a row; the cost of a call on a large capture, which is the whole walk's."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Tell the consumer the symbol, the sha, the document and that the design has no epoch: a different selector text starts the memory and is asked from 0.",
+        "Read the hosted result of this push; a red is its own round.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "A consumer keeping a narrowed list current as rows arrive received a word for every row at every step. wz_dissect_live_selection_since (ABI 38) writes the rows numbered above a cursor and the earlier rows whose word moved, with the old word as was, in a new document selection_since (revision 1). The walk that decides the words stays the whole capture's, because a verdict is a fact about the capture; only the document is narrowed. The handle keeps the words it last said for one selector, named by its text, and a different text starts the memory again. This differs from what the consumer was told: there is no epoch and no reset, because a verdict can change after it is given and revised answers that without a stale-cursor protocol. TESTED: a close moves a request's word; a declaration after its reference does not. NOT claimed: a decode held until a stream gap fills.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/selection_json.rs: SelectionWindow, SelectionMemory and selection_since_json_coordinated, writing the rows above a cursor and the rows whose word moved, with the tests of each arm.",
+        "crates/wz-capture/src/doc_revision.rs: selection_since revision 1 and its key set; fields_json.rs: the registry gates draw the since document's word and direction keys.",
+        "crates/wz-capi-dissect: wz_dissect_live_selection_since, the header, the ABI revision 38 and the C consumer; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py name the symbol."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the wz-capture lib tests under the dissect feature (twelve of them the since cases), the wz-capi-dissect tests, clippy and fmt pass; layers C0 (to its end), C1bo and C1bz pass.",
+        "On a build host: with the word comparison, the memory update and the cursor comparison each changed in a copy of the tree, the twelve since cases fail by assertion (three panics each, no compile error), and the copy was restored.",
+        "Found late and repaired in this round: the since cases only compile under the dissect feature, so the earlier passes that ran the lib without it ran none of them; once run, five failed on a bracket walk in their own helper, and the registry's population showed one word for was until a second selector was added.",
+        "NOT verified here: the hosted run of this push; the consumer's use of the door; a decode held until a stream gap fills moving a row; the cost of a call on a large capture, which is the whole walk's."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Tell the consumer the symbol, the sha, the document and that the design has no epoch: a different selector text starts the memory and is asked from 0.",
+        "Read the hosted result of this push; a red is its own round.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
