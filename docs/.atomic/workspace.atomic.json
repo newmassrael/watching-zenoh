@@ -274316,6 +274316,58 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3338": {
+      "decision_summary": "The multicast group drive loop, its pump, its reply queue and its slot table were written against lwIP's types, so no other network stack could use them and the Zephyr tier, which has no lwIP, had no group link to build on. They are now written once for every stack. The seam is a four-method trait in wz-runtime-coop, GroupTransport (pump the stack, read the carrier, multicast one datagram, lend one received datagram with its source), beside the unicast SessionDatagramLink; the loop, pump, queue and slot table are wz-session-mcu's group_drive, generic over it. wz-session-lwip keeps every name and signature: LwipGroupTransport implements the trait over its link and driver and the entry points are thin delegates. The design note's first draft put the pump in wz-runtime-coop; reading the crates corrected that, because the pump needs the multicast features of wz-session-core that wz-session-mcu already carries, and a stack's crate needs only the trait. No behaviour changed.",
+      "changes_bullets": [
+        "crates/wz-runtime-coop/src/group_transport.rs (new), lib.rs: the GroupTransport trait, ungated, beside the unicast seam.",
+        "crates/wz-session-mcu/src/group_drive.rs (new), lib.rs, Cargo.toml: the group loop, pump, reply queue, session and slot table, generic over the trait; features transport-multicast and reassembly, dependencies wz-runtime-core and heapless.",
+        "crates/wz-session-lwip/src/multicast_drive.rs, Cargo.toml: LwipMulticastDriver, LwipGroupTransport and thin lwIP-typed delegates under the old names; the tests module differs only by imports; the features forward to wz-session-mcu.",
+        "scripts/lib/feature_public_surface_census.py: the four new public features of wz-session-mcu join its OFF_AXIS and AXIS_REACHABLE rows.",
+        "docs/no-heap-multi-session.md: D5, step 0 and the open item say where the trait and the pump live."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-session-mcu compiles with transport-multicast on the heap profile, with the reply codecs and reassembly, and on the slot profile with and without a reply variant; wz-session-lwip compiles its tests on four feature sets including the slot profile with the pooled sockets.",
+        "On a build host: Layer C1m passes with every one of its guarded legs reached (count guards, clippy and the shell crate's tests included), twice, the second time after the trait moved to wz-runtime-coop; C1r, Q (the no-allocator link gate on the multicast fixed image among it), C1cf, C1h, C1bz and C1cn pass; C0 runs to its end.",
+        "The tests module of the lwIP file differs from the previous tree only by import lines (diffed); rustfmt applied.",
+        "NOT verified here: the hosted run of this push, and a Zephyr implementation of the trait (none exists yet)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A Zephyr group transport: the socket layer has no multicast membership call, so zephyr-sys needs the setsockopt for joining a group and wz-runtime-zephyr an implementation of GroupTransport; it compiles against the stand-in build and can only run on a board.",
+        "Steps 1 to 5 of the design note stand: cell kinds and the claim-by-kind table, then the two-session fixed image, its gate and the containment scenarios.",
+        "Read the hosted run of this push.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "The multicast group drive loop, its pump, its reply queue and its slot table were written against lwIP's types, so no other network stack could use them and the Zephyr tier, which has no lwIP, had no group link to build on. They are now written once for every stack. The seam is a four-method trait in wz-runtime-coop, GroupTransport (pump the stack, read the carrier, multicast one datagram, lend one received datagram with its source), beside the unicast SessionDatagramLink; the loop, pump, queue and slot table are wz-session-mcu's group_drive, generic over it. wz-session-lwip keeps every name and signature: LwipGroupTransport implements the trait over its link and driver and the entry points are thin delegates. The design note's first draft put the pump in wz-runtime-coop; reading the crates corrected that, because the pump needs the multicast features of wz-session-core that wz-session-mcu already carries, and a stack's crate needs only the trait. No behaviour changed.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-coop/src/group_transport.rs (new), lib.rs: the GroupTransport trait, ungated, beside the unicast seam.",
+        "crates/wz-session-mcu/src/group_drive.rs (new), lib.rs, Cargo.toml: the group loop, pump, reply queue, session and slot table, generic over the trait; features transport-multicast and reassembly, dependencies wz-runtime-core and heapless.",
+        "crates/wz-session-lwip/src/multicast_drive.rs, Cargo.toml: LwipMulticastDriver, LwipGroupTransport and thin lwIP-typed delegates under the old names; the tests module differs only by imports; the features forward to wz-session-mcu.",
+        "scripts/lib/feature_public_surface_census.py: the four new public features of wz-session-mcu join its OFF_AXIS and AXIS_REACHABLE rows.",
+        "docs/no-heap-multi-session.md: D5, step 0 and the open item say where the trait and the pump live."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-session-mcu compiles with transport-multicast on the heap profile, with the reply codecs and reassembly, and on the slot profile with and without a reply variant; wz-session-lwip compiles its tests on four feature sets including the slot profile with the pooled sockets.",
+        "On a build host: Layer C1m passes with every one of its guarded legs reached (count guards, clippy and the shell crate's tests included), twice, the second time after the trait moved to wz-runtime-coop; C1r, Q (the no-allocator link gate on the multicast fixed image among it), C1cf, C1h, C1bz and C1cn pass; C0 runs to its end.",
+        "The tests module of the lwIP file differs from the previous tree only by import lines (diffed); rustfmt applied.",
+        "NOT verified here: the hosted run of this push, and a Zephyr implementation of the trait (none exists yet)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A Zephyr group transport: the socket layer has no multicast membership call, so zephyr-sys needs the setsockopt for joining a group and wz-runtime-zephyr an implementation of GroupTransport; it compiles against the stand-in build and can only run on a board.",
+        "Steps 1 to 5 of the design note stand: cell kinds and the claim-by-kind table, then the two-session fixed image, its gate and the containment scenarios.",
+        "Read the hosted run of this push.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
