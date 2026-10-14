@@ -274190,6 +274190,48 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3335": {
+      "decision_summary": "The domain-routing, domain-storage and domain-transport bundles omitted 27 atoms of their own namespaces and seven namespaces had no bundle; domain_census.py carried it since R311y315, audited but unrepaired. Every omitted atom already had a facade feature and a forward, so the repair is the lists: each bundle now names every atom of its namespace and the census carries are empty. Nothing built a bundle, so the census, which reads names, could not say whether one compiles. Measured on a build host, 24 of 27 do; domain-api, domain-platform and domain-runtime do not, each by the facade's own compile_error! (two C ABIs, two RTOS kernels, two runtimes). A new gate in Layer C1cn builds every bundle, pins those three as exclusions, and refuses a failing bundle, an exclusion that now compiles, an exclusion naming no bundle, and zero bundles. I first took the domain-api failure for a unification defect in wz-capture and edited wz-capi-c; that was wrong and the edit was reverted unpushed.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: domain-transport gains five atoms, domain-routing nine, domain-storage thirteen; new bundles domain-adminspace, -api, -config, -ext, -plugin, -rest and -switchboard.",
+        "scripts/lib/domain_census.py: CARRY and UNBUNDLED_NAMESPACES are empty.",
+        "scripts/lib/domain-bundles-gate.sh (new) and scripts/run-ci.sh: Layer C1cn builds every domain bundle; domain-api, domain-platform and domain-runtime are the pinned exclusions."
+      ],
+      "verification_bullets": [
+        "On a build host: cargo check -p wz --features <bundle> for all 27 bundles gives 24 passes and the three named compile_error! refusals; the catalog audit passes.",
+        "On a build host: layers C1cn (with the new gate: 27 bundles, 3 named exclusions), C0 run to its end and C1bz pass; the domain census prints 0 carried and 0 new.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push.",
+        "The three excluded bundles list atoms the facade refuses to link together; they are census lists of a namespace that holds alternatives, not buildable selections.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "The domain-routing, domain-storage and domain-transport bundles omitted 27 atoms of their own namespaces and seven namespaces had no bundle; domain_census.py carried it since R311y315, audited but unrepaired. Every omitted atom already had a facade feature and a forward, so the repair is the lists: each bundle now names every atom of its namespace and the census carries are empty. Nothing built a bundle, so the census, which reads names, could not say whether one compiles. Measured on a build host, 24 of 27 do; domain-api, domain-platform and domain-runtime do not, each by the facade's own compile_error! (two C ABIs, two RTOS kernels, two runtimes). A new gate in Layer C1cn builds every bundle, pins those three as exclusions, and refuses a failing bundle, an exclusion that now compiles, an exclusion naming no bundle, and zero bundles. I first took the domain-api failure for a unification defect in wz-capture and edited wz-capi-c; that was wrong and the edit was reverted unpushed.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: domain-transport gains five atoms, domain-routing nine, domain-storage thirteen; new bundles domain-adminspace, -api, -config, -ext, -plugin, -rest and -switchboard.",
+        "scripts/lib/domain_census.py: CARRY and UNBUNDLED_NAMESPACES are empty.",
+        "scripts/lib/domain-bundles-gate.sh (new) and scripts/run-ci.sh: Layer C1cn builds every domain bundle; domain-api, domain-platform and domain-runtime are the pinned exclusions."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: cargo check -p wz --features <bundle> for all 27 bundles gives 24 passes and the three named compile_error! refusals; the catalog audit passes.",
+        "On a build host: layers C1cn (with the new gate: 27 bundles, 3 named exclusions), C0 run to its end and C1bz pass; the domain census prints 0 carried and 0 new.",
+        "NOT verified here: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push.",
+        "The three excluded bundles list atoms the facade refuses to link together; they are census lists of a namespace that holds alternatives, not buildable selections.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
