@@ -274576,6 +274576,56 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3344": {
+      "decision_summary": "A consumer drawing the census or the field list every step paid for the whole capture each time, could not tell how far a truncated container was read, and was not told of rows whose reading changed after they were reported. wz_dissect_live_followed (ABI 39) names the bytes a follow consumed. The fields since document (revision 36) gains revised: rows at or below the cursor whose digest moved, written again whole. The census planes and the field walk keep their fold between calls and take only the messages after the last one, when the capture is still a prefix of the one before; any other state starts again, so the fallback is the old cost and not a wrong answer. TESTED: the resumed document equals a fresh one at every step; seven mutations of the conditions each fail by assertion. NOT claimed: the consumer's own spool or figures; see the changes.",
+      "changes_bullets": [
+        "crates/wz-capture/src/lib.rs: capture_order_since, ListMark and OrderMarks, which say whether a capture is still a prefix of the one a fold stopped in, and FlowDissection::capture_order_from.",
+        "crates/wz-capture/src/ordered_fold.rs, overlay_map.rs, agg.rs, exchange.rs, payload.rs, interest.rs, node.rs, census_json.rs: the OrderedFold driver, one fold per census plane, the node memory, a map that is cheap to copy, and one document assembler shared by the whole and the resumed census.",
+        "crates/wz-capture/src/fields_json.rs, payload_decode.rs, doc_revision.rs: the row sink, the resumable walk, the revised key and the fields document revision 36.",
+        "crates/wz-capi-dissect: wz_dissect_live_followed, the header, the ABI revision 39, the census and fields memories in the handle, and the C consumer; scripts/lib/capi_abi_pin.py, analysis_surface_parity.py and bounded_output_parity.py name the symbol and the renderer that moved."
+      ],
+      "verification_bullets": [
+        "On a build host: fmt, clippy with warnings denied (default, dissect, the C ABI crate), the wz-capture lib tests (1183 default, 1449 under dissect), the wz-capi-dissect tests (199), and layers C0, C1bo, C1bz and C1bn pass.",
+        "On a build host: with each of seven conditions changed in a copy of the tree (the order key, the grouping, the front trim, a named zid, the digest comparison, the cursor bound, an end-to-end rule), the differential and contract tests fail by assertion, and the copy was restored.",
+        "Measured on one population made by this author, 40000 messages, a loaded host: the field list after a cursor 0.59 ms flat against 15.7 ms from the start; the census 1.5 ms resumed against 76 ms whole.",
+        "Found late and repaired in this round: a first full batch failed on two clippy complexity lints, a gate that still named the census renderer before it moved, a private doc link, an overlay map built without the feature that uses it, and the C consumer's pinned fields revision; each was fixed at its source. A filtered test run that executes none is not a verdict, so every count here is read from the run.",
+        "NOT verified here: the hosted run of this push; the consumer's own capture and its figures; the census cost still grows slowly when resumed (0.2 ms to 1.5 ms over 4000 to 40000 messages) and its source is not found.",
+        "NOT claimed: a plane whose exchanges never close stops costing per call; scouting lists are folded again on each call; a capture with an end-to-end rule or a QUIC list is walked whole; a row never written has no digest and a declined row is never reported as revised; the three items are one commit and not split."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Tell the consumer the sha, the symbol, the revised key and the conditions under which a call continues, with the figures labelled as one author-made population.",
+        "Read the hosted result of this push; a red is its own round.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "A consumer drawing the census or the field list every step paid for the whole capture each time, could not tell how far a truncated container was read, and was not told of rows whose reading changed after they were reported. wz_dissect_live_followed (ABI 39) names the bytes a follow consumed. The fields since document (revision 36) gains revised: rows at or below the cursor whose digest moved, written again whole. The census planes and the field walk keep their fold between calls and take only the messages after the last one, when the capture is still a prefix of the one before; any other state starts again, so the fallback is the old cost and not a wrong answer. TESTED: the resumed document equals a fresh one at every step; seven mutations of the conditions each fail by assertion. NOT claimed: the consumer's own spool or figures; see the changes.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/lib.rs: capture_order_since, ListMark and OrderMarks, which say whether a capture is still a prefix of the one a fold stopped in, and FlowDissection::capture_order_from.",
+        "crates/wz-capture/src/ordered_fold.rs, overlay_map.rs, agg.rs, exchange.rs, payload.rs, interest.rs, node.rs, census_json.rs: the OrderedFold driver, one fold per census plane, the node memory, a map that is cheap to copy, and one document assembler shared by the whole and the resumed census.",
+        "crates/wz-capture/src/fields_json.rs, payload_decode.rs, doc_revision.rs: the row sink, the resumable walk, the revised key and the fields document revision 36.",
+        "crates/wz-capi-dissect: wz_dissect_live_followed, the header, the ABI revision 39, the census and fields memories in the handle, and the C consumer; scripts/lib/capi_abi_pin.py, analysis_surface_parity.py and bounded_output_parity.py name the symbol and the renderer that moved."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: fmt, clippy with warnings denied (default, dissect, the C ABI crate), the wz-capture lib tests (1183 default, 1449 under dissect), the wz-capi-dissect tests (199), and layers C0, C1bo, C1bz and C1bn pass.",
+        "On a build host: with each of seven conditions changed in a copy of the tree (the order key, the grouping, the front trim, a named zid, the digest comparison, the cursor bound, an end-to-end rule), the differential and contract tests fail by assertion, and the copy was restored.",
+        "Measured on one population made by this author, 40000 messages, a loaded host: the field list after a cursor 0.59 ms flat against 15.7 ms from the start; the census 1.5 ms resumed against 76 ms whole.",
+        "Found late and repaired in this round: a first full batch failed on two clippy complexity lints, a gate that still named the census renderer before it moved, a private doc link, an overlay map built without the feature that uses it, and the C consumer's pinned fields revision; each was fixed at its source. A filtered test run that executes none is not a verdict, so every count here is read from the run.",
+        "NOT verified here: the hosted run of this push; the consumer's own capture and its figures; the census cost still grows slowly when resumed (0.2 ms to 1.5 ms over 4000 to 40000 messages) and its source is not found.",
+        "NOT claimed: a plane whose exchanges never close stops costing per call; scouting lists are folded again on each call; a capture with an end-to-end rule or a QUIC list is walked whole; a row never written has no digest and a declined row is never reported as revised; the three items are one commit and not split."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Tell the consumer the sha, the symbol, the revised key and the conditions under which a call continues, with the figures labelled as one author-made population.",
+        "Read the hosted result of this push; a red is its own round.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
