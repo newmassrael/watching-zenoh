@@ -430,6 +430,40 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         out
     }
 
+    /// The faces a withdrawal of `withdrawn_ke` must still be TOLD about although
+    /// nothing was ever declared to them for it: a push-reachable face, not in
+    /// `announced` (the faces [`forgets_for_withdrawn`](Self::forgets_for_withdrawn)
+    /// already retracted by id), holding a FUTURE interest whose target
+    /// INTERSECTS `withdrawn_ke`.
+    ///
+    /// Upstream's `maybe_unpropagate_token` has two arms: the id the face was
+    /// declared the token under, else, for a face with a matching token interest
+    /// and no such id, a one-shot `UndeclareToken` carrying the keyexpr
+    /// (`zenoh/src/net/routing/hat/broker/token.rs` @ `fn maybe_unpropagate_token`,
+    /// the `Token has never been declared on this face` branch). The second arm is
+    /// reachable: a FUTURE-only interest is answered by no current dump, so a token
+    /// that predates it was never interned into `pushed`. Only the token plane has
+    /// the arm upstream; the caller is the token withdrawal.
+    ///
+    /// Read-only, and it walks the same `Client` role the push paths do.
+    pub fn unannounced_withdrawals(&self, withdrawn_ke: &str, announced: &[FaceId]) -> Vec<FaceId> {
+        let mut faces: Vec<FaceId> = self
+            .by_face
+            .iter()
+            .filter(|(face, state)| {
+                state.origin == InterestOrigin::Client
+                    && !announced.contains(face)
+                    && state.interests.values().any(|interest| {
+                        let target: Vec<&str> = interest.target.split('/').collect();
+                        keyexpr_intersects_target(withdrawn_ke, &target)
+                    })
+            })
+            .map(|(face, _)| *face)
+            .collect();
+        faces.sort_unstable();
+        faces
+    }
+
     /// After a withdrawal, RE-PUSH the value-aware DOWNGRADE — the value-aware twin of
     /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) (case c, R311y153). For
     /// each STILL-PRESENT pushed reply ke that INTERSECTS `withdrawn_ke`, re-fold via

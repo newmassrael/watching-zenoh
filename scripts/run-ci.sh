@@ -6309,7 +6309,9 @@ layer_c1ay_cargo_test_router_hat() {
     # added three token-plane filter witnesses, all cfg(routing-token-tables).
     # Read off `guarded_count_gate.py --range 515c085f..09b18118`, which reported
     # this arm red and the other twenty-seven it reached OK.
-    _runci_guarded_test "C1AY router_forward 246" 246 \
+    # R3334 — 246 -> 247, and ONLY this arm: the token-arm witness of a token
+    # older than a FUTURE-only interest is cfg(routing-token-tables).
+    _runci_guarded_test "C1AY router_forward 247" 247 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six

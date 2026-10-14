@@ -6366,10 +6366,13 @@ impl RouterForwarder {
 
     /// Emit the withdraw->reader UNDECLARE pushes a withdrawn TOKEN `withdrawn_ke`
     /// triggers — the token twin of [`undeclare_push_subs`](Self::undeclare_push_subs)
-    /// (slice-5, the withdraw half of zenoh `propagate_forget_simple_token` — its ARM 1,
-    /// the `pushed`/`local_tokens` faces; the interested-but-never-declared arm 2 is
-    /// omitted, symmetric with `undeclare_push_subs`, and unreachable in wz's flow — a
-    /// face interested in a ke wz holds is always interned into `pushed` first): for each
+    /// (slice-5, the withdraw half of zenoh `maybe_unpropagate_token`: ARM 1, the
+    /// `pushed`/`local_tokens` faces, then — R3334 — ARM 2, the interested-but-never-
+    /// declared faces. Arm 2 was once called unreachable here, on the ground that a face
+    /// interested in a ke wz holds is always interned into `pushed` first; a FUTURE-only
+    /// interest is answered by no current dump, so a token that predates it is never
+    /// interned and the arm IS reached. Subscribers and queryables have no such arm
+    /// upstream, which is why `undeclare_push_subs` still has none): for each
     /// CLIENT face whose pushed reply ke is now UN-backed
     /// ([`any_token_matches`](Self::any_token_matches) false), an unsolicited id-keyed
     /// `UndeclareToken(id)` (interest_id None) that retracts the earlier FUTURE-push and
@@ -6386,11 +6389,29 @@ impl RouterForwarder {
             .future_tokens
             .borrow_mut()
             .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_token_matches(rk));
+        let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
         for (face, _reply_ke, id) in forgets {
             self.send_one_to_face(
                 face,
                 NetworkMessage::Declare(Box::new(build_undeclare_token(id))),
             );
+        }
+        // R3334 — the second arm of upstream's `maybe_unpropagate_token`: a face
+        // that asked for tokens and was never declared this one (it predates a
+        // FUTURE-only interest, which no current dump answers) is still told it
+        // is gone, by a one-shot id-0 `UndeclareToken` carrying the keyexpr. Only
+        // when nothing backs the keyexpr any more, as the first arm requires.
+        if self.any_token_matches(withdrawn_ke) {
+            return;
+        }
+        let told = self
+            .future_tokens
+            .borrow()
+            .unannounced_withdrawals(withdrawn_ke, &announced);
+        for face in told {
+            if let Ok(undeclare) = build_undeclare_token_with_keyexpr(withdrawn_ke) {
+                self.send_one_to_face(face, NetworkMessage::Declare(Box::new(undeclare)));
+            }
         }
     }
 
@@ -20217,6 +20238,74 @@ mod tests {
             fin.body,
             DeclareOwnedVariant::CodecZenohDeclFinal(_)
         ));
+    }
+
+    /// A token that predates a FUTURE-only token interest was never declared to
+    /// the asker (no current dump answers a FUTURE-only interest), yet its
+    /// withdrawal reaches the asker as a one-shot `UndeclareToken`: id 0, the
+    /// keyexpr in the extension, as upstream's `maybe_unpropagate_token` sends
+    /// to a face with a matching token interest and no id for the token. A face
+    /// that asked for nothing hears nothing, and a keyexpr another holder still
+    /// backs is not retracted.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_token_older_than_a_future_interest_is_retracted_by_its_keyexpr() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, _sh) = face(zid(0xAA), WIRE_CLIENT);
+        let (second, _ss) = face(zid(0xCC), WIRE_CLIENT);
+        let (reader, sink_r) = face(zid(0xBB), WIRE_CLIENT);
+        let (quiet, sink_q) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &second);
+        fwd.register(FaceId(2), &reader);
+        fwd.register(FaceId(3), &quiet);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            declare_client_token_msg(77, "group/member/a"),
+        );
+        forward_one(
+            &fwd,
+            FaceId(1),
+            declare_client_token_msg(88, "group/member/a"),
+        );
+        forward_one(
+            &fwd,
+            FaceId(2),
+            token_interest_msg(4, "group/**", false, true, false),
+        );
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "a FUTURE-only interest is answered by nothing"
+        );
+        sink_r.reset();
+        sink_q.reset();
+        forward_one(&fwd, FaceId(0), undeclare_client_token_msg(77));
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "the keyexpr is still backed by the second holder"
+        );
+        forward_one(&fwd, FaceId(1), undeclare_client_token_msg(88));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the last holder's withdrawal is told"
+        );
+        match &forwarded_declare(&sink_r.frame_bytes(0)).body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => {
+                assert_eq!(u.id, 0, "a one-shot id");
+                assert_eq!(
+                    wz_session_core::declare_ext_keyexpr::read_ext_keyexpr(u.extensions.as_ref())
+                        .map(|k| k.to_string()),
+                    Some("group/member/a".to_owned()),
+                    "the keyexpr rides in the extension"
+                );
+            }
+            other => panic!("expected an UndeclToken, got {other:?}"),
+        }
+        assert_eq!(sink_q.frame_count(), 0, "a face that asked for nothing");
     }
 
     /// Two faces holding one token keyexpr tell the reader once; the reader is
