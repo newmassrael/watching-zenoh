@@ -36,47 +36,12 @@ use wz_runtime_tokio_test_support::free_port;
 
 const KEYEXPR: &str = "wz/connect-retry/demo";
 
-/// How long each leg lets the dial fail before a listener appears. Long
-/// enough that a single immediate attempt has certainly been refused, on a host
-/// whose kernel refuses at once. A host that does not refuse at once needs the
-/// time its kernel takes added to this: see [`host_refusal_time`].
+/// How long the budget leg lets its dial fail before a listener appears. The leg
+/// only needs the first attempt to have been made and refused by then: it asserts
+/// that the open did not return before this (`waited`), and a retry reaching the
+/// listener afterwards is the thing it measures. The control leg does not use a
+/// delay at all: it counts attempts.
 const LISTENER_LATE_BY: Duration = Duration::from_millis(400);
-
-/// How long this host's kernel takes to REFUSE one connect to `port` on the
-/// loopback, a port nobody listens on, measured with a bare socket and no wz code.
-///
-/// Linux answers a connect to a dead loopback port with a reset at once, so one
-/// attempt fails within a millisecond. A hosted Windows runner measured 2.0 s for
-/// the same connect: its TCP stack keeps the attempt outstanding across SYN
-/// retransmits before it reports the refusal. A listener that comes up inside that
-/// window is reached by the stack's own retransmit, and the "one attempt" then
-/// succeeds without wz having retried anything, which is the failure hosted
-/// Windows run 37123941999 reported for
-/// [`a_client_without_a_connect_budget_fails_on_its_one_attempt`] (the open
-/// returned `Z_OK` where a refusal was expected). The mechanism is the stack's and
-/// is not read here; the duration is what was measured.
-///
-/// The control leg is only a control when its listener appears AFTER the one
-/// attempt has failed, so the leg derives its delay from this measurement instead
-/// of assuming the kernel refuses at once. The number is printed, because it is
-/// what a reader needs to tell a host whose kernel is slow from a wz that retried.
-///
-/// The probe dials THE PORT THE LEG WILL DIAL, not a stand-in. A first version
-/// measured a held socket that was bound and never listening, which is a different
-/// state from a released port, and a hosted macOS runner reported 7.8 s for it; the
-/// leg's own target is what its client attempt will meet, so that is what is timed.
-fn host_refusal_time(port: u16) -> Duration {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let started = Instant::now();
-    let outcome = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(30));
-    let took = started.elapsed();
-    assert!(
-        outcome.is_err(),
-        "a connect to a loopback port nobody listens on must be refused"
-    );
-    println!("refusal-probe: this host refuses one loopback connect in {took:?}");
-    took
-}
 
 /// Open with `entries` inserted as json5 values, returning the result code and
 /// the session (in its gravestone state when the code is not `Z_OK`).
@@ -175,16 +140,66 @@ fn a_client_with_a_connect_budget_waits_for_a_late_listener() {
     }
 }
 
+/// How long the control watches a port after its open has returned, for a
+/// second attempt. Longer than upstream's default retry period (one second), so a
+/// client that retried at all would have been seen by then.
+const RETRY_WATCH: Duration = Duration::from_millis(1500);
+
 /// The control: a client that states no budget keeps upstream's client
 /// default, `timeout_ms: 0`, and fails on its one attempt.
+///
+/// The attempts are COUNTED, not inferred from timing. The first version of this
+/// leg started a listener a fixed time after the dial and read an open that
+/// returned `Z_OK` as a retry; hosted runs showed the other reading, twice: a
+/// Windows stack that keeps one connect outstanding across SYN retransmits for two
+/// seconds, and, on a loaded Linux runner (hosted CI run 38523826786, Layer C1,
+/// `0` where `-4` was expected), a client whose one attempt simply came later than
+/// the listener's delay. Both are an open that succeeded without wz retrying
+/// anything, and a leg that decides by "did the listener exist yet" cannot tell
+/// them from a retry. Here the port accepts every connection and hangs up, and
+/// the listener counts: one connection is one attempt, however slow the host is
+/// to start it, and a second one is a retry.
+///
+/// Two ports, two questions. Nobody listening is a refusal, and the open reports
+/// it as the network error. A port that accepts and hangs up is an attempt that
+/// reached something, and the open must not try again.
 #[test]
 fn a_client_without_a_connect_budget_fails_on_its_one_attempt() {
-    // The listener must appear after the one attempt has FAILED, which on a host
-    // whose kernel refuses slowly is later than a fixed 400 ms.
-    let port = free_port();
-    let late_by = host_refusal_time(port) + LISTENER_LATE_BY;
-    let listener = listen_later(port, late_by);
-    let started = Instant::now();
+    // 1. Nothing listens: the one attempt is refused and the open says so.
+    let dead = free_port();
+    // SAFETY: fresh config and session.
+    let (rc, session) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("connect/endpoints", endpoint(dead)),
+        ])
+    };
+    assert_eq!(rc, Z_ENETWORK, "a client's default is one attempt");
+    // SAFETY: the failed open left a gravestone, which drops as a no-op.
+    unsafe { close_session(session) };
+
+    // 2. A port that takes a connection and drops it, counting them.
+    let acceptor = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a loopback port");
+    let port = acceptor.local_addr().expect("its address").port();
+    acceptor
+        .set_nonblocking(true)
+        .expect("a non-blocking acceptor");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let counter = {
+        let (attempts, done) = (Arc::clone(&attempts), Arc::clone(&done));
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                match acceptor.accept() {
+                    Ok((stream, _)) => {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        drop(stream);
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(2)),
+                }
+            }
+        })
+    };
     // SAFETY: fresh config and session.
     let (rc, session) = unsafe {
         open_with(&[
@@ -192,19 +207,20 @@ fn a_client_without_a_connect_budget_fails_on_its_one_attempt() {
             ("connect/endpoints", endpoint(port)),
         ])
     };
-    let waited = started.elapsed();
-    let SendSession(listen) = listener.join().expect("listener thread");
-    assert_eq!(rc, Z_ENETWORK, "a client's default is one attempt");
-    assert!(
-        waited < late_by,
-        "the one attempt took {waited:?}; it must not have waited for the listener, \
-         which came up after {late_by:?}"
+    assert_ne!(rc, Z_OK, "a connection that is hung up on is not an open");
+    let at_return = attempts.load(Ordering::SeqCst);
+    std::thread::sleep(RETRY_WATCH);
+    done.store(true, Ordering::SeqCst);
+    counter.join().expect("the counting thread");
+    let total = attempts.load(Ordering::SeqCst);
+    assert_eq!(
+        (at_return, total),
+        (1, 1),
+        "a client without a budget makes ONE attempt: {at_return} when the open returned, \
+         {total} after watching {RETRY_WATCH:?} more"
     );
     // SAFETY: the failed open left a gravestone, which drops as a no-op.
-    unsafe {
-        close_session(session);
-        close_session(listen);
-    }
+    unsafe { close_session(session) };
 }
 
 /// A stated budget is a bound: with nothing ever listening, the open gives
