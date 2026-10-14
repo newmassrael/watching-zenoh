@@ -274232,6 +274232,48 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3336": {
+      "decision_summary": "An unpinned IPv4 multicast link now joins and sends on upstream's chosen interface. Without #iface= upstream fills its local address from the first non-loopback IPv4 address of an interface that can carry multicast, joins the group on that address and sets it as the multicast interface of its send socket; wz filled the bind address the same way but joined on INADDR_ANY and pinned nothing, so membership and egress were the kernel's choice and could name another interface than the link reports. The choice is a pure function over an injected address list, so a one-NIC host proves it over a several-NIC list; the live list feeds it at the two link sockets only, the wildcard-bound joined socket and the send half of bind_multicast_link. Scouting senders and listeners are not links and keep the kernel's choice, since upstream joins those per interface. A pinned #iface= and every IPv6 plan are unchanged. A consumer asked whether the tail decides it; it did, and now the default matches too.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: McastPlan::with_link_default_iface picks the first non-loopback IPv4 address of a candidate list for an unpinned IPv4 plan; bind_multicast_at applies it to the wildcard-bound link socket, and the new bind_multicast_tx_at applies it when bind_multicast_link builds the send half; join_groups' note says so.",
+        "Four tests in udp_multicast_config_tests: the choice over a several-interface list, a pinned or IPv6 plan left alone, and the kernel's IP_MULTICAST_IF read back on the link's joined socket and on its send socket (a plain sender stays on the wildcard)."
+      ],
+      "verification_bullets": [
+        "On a build host: the multicast config tests pass, 14 under transport-multicast with locator-iface and 12 without it, the 24 scouting tests pass, clippy with warnings denied is clean in three feature sets over wz-runtime-tokio, and rustfmt is clean.",
+        "On a build host: three mutations each turn a test red by assertion, not by a compile error: the choice switched off (three tests), the send half no longer told it is a link, and loopback no longer skipped.",
+        "On a build host: layers C0 run to its end, C1bz and C1cn pass on the change; the count-guard oracle judged 69 guards and named one, C1q, which moved from 10 to 14 and is moved in this push.",
+        "NOT verified here: the hosted run of this push; a host with several real interfaces (the choice is proved over an injected list and read back from the kernel on a one-interface host)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push.",
+        "The IPv6 link still joins on index 0 and pins nothing unpinned, as upstream's v6 arm does; only IPv4 changed.",
+        "Tell the consumer that asked that the default now matches upstream, correcting the earlier answer that it did not.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "An unpinned IPv4 multicast link now joins and sends on upstream's chosen interface. Without #iface= upstream fills its local address from the first non-loopback IPv4 address of an interface that can carry multicast, joins the group on that address and sets it as the multicast interface of its send socket; wz filled the bind address the same way but joined on INADDR_ANY and pinned nothing, so membership and egress were the kernel's choice and could name another interface than the link reports. The choice is a pure function over an injected address list, so a one-NIC host proves it over a several-NIC list; the live list feeds it at the two link sockets only, the wildcard-bound joined socket and the send half of bind_multicast_link. Scouting senders and listeners are not links and keep the kernel's choice, since upstream joins those per interface. A pinned #iface= and every IPv6 plan are unchanged. A consumer asked whether the tail decides it; it did, and now the default matches too.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: McastPlan::with_link_default_iface picks the first non-loopback IPv4 address of a candidate list for an unpinned IPv4 plan; bind_multicast_at applies it to the wildcard-bound link socket, and the new bind_multicast_tx_at applies it when bind_multicast_link builds the send half; join_groups' note says so.",
+        "Four tests in udp_multicast_config_tests: the choice over a several-interface list, a pinned or IPv6 plan left alone, and the kernel's IP_MULTICAST_IF read back on the link's joined socket and on its send socket (a plain sender stays on the wildcard)."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the multicast config tests pass, 14 under transport-multicast with locator-iface and 12 without it, the 24 scouting tests pass, clippy with warnings denied is clean in three feature sets over wz-runtime-tokio, and rustfmt is clean.",
+        "On a build host: three mutations each turn a test red by assertion, not by a compile error: the choice switched off (three tests), the send half no longer told it is a link, and loopback no longer skipped.",
+        "On a build host: layers C0 run to its end, C1bz and C1cn pass on the change; the count-guard oracle judged 69 guards and named one, C1q, which moved from 10 to 14 and is moved in this push.",
+        "NOT verified here: the hosted run of this push; a host with several real interfaces (the choice is proved over an injected list and read back from the kernel on a one-interface host)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push.",
+        "The IPv6 link still joins on index 0 and pins nothing unpinned, as upstream's v6 arm does; only IPv4 changed.",
+        "Tell the consumer that asked that the default now matches upstream, correcting the earlier answer that it did not.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
