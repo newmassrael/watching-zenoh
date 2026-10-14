@@ -106,4 +106,5 @@ if [ "$fail" -ne 0 ]; then
     echo "domain-bundles: FAIL" >&2
     exit 1
 fi
-echo "domain-bundles: OK -- $n bundle(s), $(printf '%s\n' $excluded | wc -l | tr -d ' ') named exclusion(s) (compile_error! by design), the rest compile"
+read -r -a excluded_names <<<"$excluded"
+echo "domain-bundles: OK -- $n bundle(s), ${#excluded_names[@]} named exclusion(s) (compile_error! by design), the rest compile"

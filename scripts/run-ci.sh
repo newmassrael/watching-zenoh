@@ -21277,7 +21277,11 @@ layer_c1cc_api_compat_c() {
     # types, and the oracle check above is what establishes that header exists.
     # The frames it expects were computed independently of the library (see the
     # file's header), so it is not the library agreeing with itself.
-    (cd crates && cargo build -p wz-capi-c --quiet) || return 1
+    # The build the oracle selected, not the default one: this step used to build
+    # with default features and so replaced the cdylib the footprint test reads
+    # with one of a different layout (84 entries against 98 on an oracle without
+    # the unstable API).
+    _runci_build_capi_c_for_oracle C1cc || return 1
     local c_e2e_bin c_e2e_out
     c_e2e_bin="$(mktemp -d)/c_e2e_sender_consumer"
     c_e2e_out="$("${CC:-cc}" -std=c11 -Wall -Wextra -Werror \

@@ -1368,7 +1368,7 @@ jobs:
   session-planes:
     name: session-core feature planes (Layers C1c, C1d, C1e, C1f, C1g, C1own, C1h)
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Budget stamp — start this job's own clock
         run: date +%s > "$RUNNER_TEMP/wz_job_start"
@@ -1499,8 +1499,12 @@ jobs:
         # The same guard as `ci`'s, with the floor of 20 its siblings use: a job
         # peeled down this far should be told to give its budget back, not to
         # grow.
+        #
+        # MEASURED on the first hosted run of this job: 335s of 1800s (18%, under
+        # the floor), against the 700-900s predicted above, so the budget is 1200s:
+        # 28% warm, and the predicted cold range still fits under it.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1200 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R2163 — the NON-DEFAULT job. Layer C1cn peeled off `ci`.
