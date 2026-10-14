@@ -4143,12 +4143,17 @@ pub struct Dissection {
     /// will never see completed, and a dissection that drops it without saying
     /// so reports its own bound as if it were the wire's.
     expired_chains: usize,
-    /// R311y607 — packets the CAPTURE TOOL reported dropping, summed over every
-    /// interface. `None` when the file stated nothing.
+    /// R311y607 — what the CAPTURE TOOL reported dropping. `None` when the
+    /// container is of a format that cannot state it (a classic pcap); a pcapng
+    /// that stated nothing holds an empty ledger, which totals zero.
+    ///
+    /// A ledger and not a number: the file states running totals per
+    /// interface, and a total that was added to once per block would count
+    /// every loss once for each block written after it.
     ///
     /// Distinct from every other counter on this struct, all of which are what
     /// THIS reader did. See [`Self::capture_reported_drops`].
-    capture_reported_drops: Option<u64>,
+    capture_reported_drops: Option<pcapng::DropLedger>,
     /// R311y608 — which endpoints have been observed SCOUTING, so the unicast
     /// HELLOs answering them are read as answers and not as `Open`s.
     ///
@@ -4674,8 +4679,19 @@ impl Dissection {
     /// `None` and `Some(0)` are deliberately different: no ISB at all is not a
     /// claim that nothing was dropped. A classic pcap always answers `None` —
     /// the format has nowhere to put the figure.
+    ///
+    /// HOW IT IS COUNTED: an Interface Statistics Block states `isb_ifdrop` as
+    /// a running total since the capture began, so the figure is, for each
+    /// interface of each section, the HIGHEST total any block of it states,
+    /// added over interfaces and sections. A tool that writes a block every
+    /// time the count changes (`dumpcap`) states 10 and then 17 for one
+    /// interface; that is 17 lost packets. The count is a floor: it holds the
+    /// losses the tool noticed and wrote down. The obsolete Packet Block's
+    /// per-block count is an increment and is added.
     pub fn capture_reported_drops(&self) -> Option<u64> {
         self.capture_reported_drops
+            .as_ref()
+            .and_then(pcapng::DropLedger::total)
     }
 
     /// R311y607/y608 — which of zenoh's two message namespaces this datagram
@@ -6874,11 +6890,7 @@ impl Dissection {
         out.decryption_secrets = file.decryption_secrets.clone();
         // R311y607 — carried BEFORE the packets, so a caller that stops early
         // still learns the capture was incomplete.
-        out.capture_reported_drops = file
-            .interface_stats
-            .iter()
-            .filter_map(|s| s.dropped)
-            .try_fold(0u64, |acc, d| acc.checked_add(d));
+        out.capture_reported_drops = Some(file.reported_drops.clone());
         for packet in &file.packets {
             // R311y720 — the INTERFACE travels with the packet. Only the serial
             // path reads it, and it is the one fact in the file that stands in
@@ -7051,14 +7063,14 @@ impl Dissection {
         }
         let before = cursor.packets_produced();
         // R311y607 — a pcapng that reports no drops reports ZERO, not
-        // "unstated"; `from_pcapng_declaring_bounded` folds an empty list to
-        // `Some(0)` and this is the same claim, made as soon as the format is
-        // known rather than after the last block. A classic pcap states nothing
-        // here and `capture_reported_drops` stays UNSTATED for it, exactly as it
-        // does for a file read whole: the format has nowhere to state it.
+        // "unstated"; `from_pcapng_declaring_bounded` holds an empty ledger and
+        // this is the same claim, made as soon as the format is known rather
+        // than after the last block. A classic pcap states nothing here and
+        // `capture_reported_drops` stays UNSTATED for it, exactly as it does for
+        // a file read whole: the format has nowhere to state it.
         if cursor.decide(bytes) == Some(Container::Pcapng) && self.capture_reported_drops.is_none()
         {
-            self.capture_reported_drops = Some(0);
+            self.capture_reported_drops = Some(pcapng::DropLedger::new());
         }
         let dissection = &mut *self;
         // The walk is `CaptureCursor::walk`, the same function
@@ -7089,28 +7101,19 @@ impl Dissection {
                         );
                     }
                     CaptureEvent::Secrets(s) => dissection.decryption_secrets.push(s),
-                    CaptureEvent::Stats(s) => dissection.add_reported_drops(s.dropped),
-                    CaptureEvent::Drops(dropped) => dissection.add_reported_drops(Some(dropped)),
+                    CaptureEvent::Stats(s) => dissection
+                        .capture_reported_drops
+                        .get_or_insert_with(pcapng::DropLedger::new)
+                        .note_interface_total(&s),
+                    CaptureEvent::Drops(dropped) => dissection
+                        .capture_reported_drops
+                        .get_or_insert_with(pcapng::DropLedger::new)
+                        .note_block_increment(dropped),
                 }
                 core::ops::ControlFlow::Continue(())
             })
             .map_err(FollowError::Capture)?;
         Ok(cursor.packets_produced() - before)
-    }
-
-    /// Fold one more reported-drop figure into [`Self::capture_reported_drops`].
-    ///
-    /// `None` is UNSTATED and adds nothing — an ISB that omits `isb_ifdrop`
-    /// says nothing about drops, and reading it as zero would turn silence into
-    /// a measurement. An overflow poisons the total to `None` for the same
-    /// reason `from_pcapng_declaring_bounded`'s `checked_add` does: a wrapped
-    /// count is a smaller number than the truth, and this figure exists to stop
-    /// a floor being read as a total.
-    fn add_reported_drops(&mut self, dropped: Option<u64>) {
-        let Some(d) = dropped else { return };
-        self.capture_reported_drops = self
-            .capture_reported_drops
-            .and_then(|acc| acc.checked_add(d));
     }
 }
 
@@ -10782,6 +10785,48 @@ mod datagram_tests {
         // classic pcap has nowhere to put the figure at all.
         let plain = Dissection::from_capture(&pcap::write(LINKTYPE_ETHERNET, &[])).expect("parse");
         assert_eq!(plain.capture_reported_drops(), None);
+    }
+
+    /// A tool that writes a statistics block each time its count changes states
+    /// the SAME running total again, and the dissection must not add them.
+    /// Totals 10 and then 17 for one interface are 17 lost packets, and a second
+    /// interface adds.
+    #[test]
+    fn a_running_total_stated_again_is_not_added_again() {
+        let mut file = pcapng::write(&[(1, 6), (1, 6)], &[(0, 1_000_000, &[0u8; 4])]);
+        file.extend_from_slice(&isb_block(0, Some(10)));
+        file.extend_from_slice(&isb_block(1, Some(2)));
+        file.extend_from_slice(&isb_block(0, Some(17)));
+
+        let d = Dissection::from_capture(&file).expect("the capture parses");
+        assert_eq!(d.capture_reported_drops(), Some(17 + 2));
+    }
+
+    /// A container followed in windows states the same figure as the same
+    /// bytes read whole, for a capture whose blocks state a total twice. The
+    /// first window ends between the two statements, so the figure the
+    /// follower holds then is the first total and not a sum waiting for the
+    /// second.
+    #[test]
+    fn a_followed_container_states_the_figure_a_whole_file_does() {
+        let mut file = pcapng::write(&[(1, 6)], &[(0, 1_000_000, &[0u8; 4])]);
+        file.extend_from_slice(&isb_block(0, Some(10)));
+        let first_window = file.len();
+        file.extend_from_slice(&isb_block(0, Some(17)));
+
+        let whole = Dissection::from_capture(&file).expect("the capture parses");
+        assert_eq!(whole.capture_reported_drops(), Some(17));
+
+        let mut cursor = CaptureCursor::new();
+        let mut followed = Dissection::new();
+        followed
+            .follow_container(&mut cursor, &file[..first_window])
+            .expect("the first window follows");
+        assert_eq!(followed.capture_reported_drops(), Some(10));
+        followed
+            .follow_container(&mut cursor, &file)
+            .expect("the second window follows");
+        assert_eq!(followed.capture_reported_drops(), Some(17));
     }
 
     /// One ISB carrying only `isb_ifdrop`. Kept beside its user rather than

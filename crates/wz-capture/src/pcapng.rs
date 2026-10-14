@@ -401,6 +401,11 @@ pub struct PcapngFile {
     /// the writer emitted none, which is ordinary: an ISB is optional and its
     /// absence says nothing either way about whether packets were lost.
     pub interface_stats: Vec<InterfaceStats>,
+    /// What the capture tool admitted losing, over every Interface Statistics
+    /// Block AND every obsolete Packet Block's drop count. This, and not a sum
+    /// over [`Self::interface_stats`], is the file's figure: the blocks state
+    /// running totals, and see [`DropLedger`] for why adding them is wrong.
+    pub reported_drops: DropLedger,
     /// R311y625 (§1.4d) — block types this reader walked past, with a count
     /// each, in first-seen order.
     ///
@@ -608,15 +613,97 @@ fn scan_u64_option(body: &[u8], swapped: bool, want: u16) -> Option<u64> {
 /// only available explanation was "the dissector is broken".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterfaceStats {
-    /// Which interface these counters describe, indexing
-    /// [`PcapngFile::interfaces`].
+    /// Which section's interface list `interface_id` indexes, counted from 0.
+    /// An interface is named by the pair: ids restart at each Section Header
+    /// Block, so the id alone would give two sections' interfaces one name.
+    pub section: usize,
+    /// Which interface these counters describe, indexing the interface list
+    /// of [`Self::section`].
     pub interface_id: u32,
     /// `isb_ifrecv`: packets the interface saw. `None` when unstated — which
     /// is different from zero, and a reader that conflated them would report a
     /// dead interface for a writer that simply omits the option.
     pub received: Option<u64>,
-    /// `isb_ifdrop`: packets the capture tool dropped. `None` when unstated.
+    /// `isb_ifdrop`: packets the capture tool dropped, counted from the START
+    /// OF THE CAPTURE to the time of this block. `None` when unstated.
+    ///
+    /// A running total and not an increment, so two blocks of one interface
+    /// state one count twice and do not add. [`DropLedger`] is the place that
+    /// knows that.
     pub dropped: Option<u64>,
+}
+
+/// What the capture tool admitted losing, as a function of what the file SAYS
+/// and not of how often it said it.
+///
+/// An Interface Statistics Block states `isb_ifdrop` as a total since the start
+/// of the capture, and a tool that writes statistics when a count changes
+/// (`dumpcap` does) writes the same interface's running total again and again.
+/// Summing the blocks counts every packet lost before the last block once for
+/// each block written after it: totals 10 and then 17 are 17 lost packets, not
+/// 27. So the figure kept per interface is the HIGHEST total stated for it in
+/// its section. A loss cannot be undone, so the highest is the floor every
+/// block agrees on, and for a file whose totals only grow it is the last.
+///
+/// Interfaces are told apart by section and id. A new section is a new capture
+/// as far as the counters go, so its interfaces start from nothing and add.
+///
+/// The obsolete Packet Block states an INCREMENT (packets missed since the
+/// previous packet on that interface), and increments add. The two kinds land
+/// in one total because a consumer asking whether the tool lost anything must
+/// not have to know which block type the writer chose. A file that stated one
+/// loss both ways would count it twice; no writer is known to, and the obsolete
+/// block is not written by anything current.
+///
+/// Like every figure of its kind this one is a floor: it holds the losses the
+/// tool noticed and wrote down.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DropLedger {
+    /// The highest `isb_ifdrop` stated for each (section, interface).
+    interface_totals: alloc::collections::BTreeMap<(usize, u32), u64>,
+    /// The obsolete Packet Block counts, added.
+    block_increments: u64,
+    /// A sum overflowed, so no number is a floor any more.
+    overflowed: bool,
+}
+
+impl DropLedger {
+    /// An empty ledger: nothing stated, which totals zero.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take one Interface Statistics Block. A block that states no `isb_ifdrop`
+    /// says nothing about drops, and reading it as zero would turn silence into
+    /// a measurement, so it adds nothing.
+    pub fn note_interface_total(&mut self, stats: &InterfaceStats) {
+        let Some(total) = stats.dropped else { return };
+        let slot = self
+            .interface_totals
+            .entry((stats.section, stats.interface_id))
+            .or_insert(0);
+        *slot = (*slot).max(total);
+    }
+
+    /// Take one obsolete Packet Block's drop count, an increment.
+    pub fn note_block_increment(&mut self, dropped: u64) {
+        match self.block_increments.checked_add(dropped) {
+            Some(sum) => self.block_increments = sum,
+            None => self.overflowed = true,
+        }
+    }
+
+    /// The packets the capture tool reported losing, or `None` when the sum
+    /// does not fit: a wrapped count is a smaller number than the truth, and
+    /// this figure exists to stop a floor being read as a total.
+    pub fn total(&self) -> Option<u64> {
+        if self.overflowed {
+            return None;
+        }
+        self.interface_totals
+            .values()
+            .try_fold(self.block_increments, |acc, &d| acc.checked_add(d))
+    }
 }
 
 /// R2373 (open-debt item 661) — one thing a walk over a pcapng container
@@ -1135,6 +1222,9 @@ impl PcapngCursor {
                     let interface_id = u32_at(body, 0, swapped);
                     let opts = &body[12..];
                     stop |= on(PcapngYieldRef::Stats(InterfaceStats {
+                        // The section being read: `sections` counts those begun,
+                        // and an ISB is only read after the SHB that began its.
+                        section: self.sections.saturating_sub(1),
                         interface_id,
                         received: scan_u64_option(opts, swapped, OPT_ISB_IFRECV),
                         dropped: scan_u64_option(opts, swapped, OPT_ISB_IFDROP),
@@ -1240,25 +1330,20 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
     let mut packets: Vec<Packet> = Vec::new();
     let mut interface_stats: Vec<InterfaceStats> = Vec::new();
     let mut dsb: Vec<DecryptionSecrets> = Vec::new();
-    // R311y607 — obsolete-Packet-Block drop counters, summed per interface.
-    // A map rather than a Vec because the interface list is rebuilt at each
-    // section boundary while these are accumulated across the whole file, and
-    // an index into a list that is cleared underneath would attribute one
-    // section's losses to another's interface.
-    let mut pb_drops: alloc::collections::BTreeMap<u32, u64> = alloc::collections::BTreeMap::new();
+    // R311y607 — what the tool admitted losing, from both block types that can
+    // say it. One ledger, because the two state it differently (a running total
+    // and an increment) and only the ledger knows how each adds up.
+    let mut reported_drops = DropLedger::new();
 
     let halt = cursor.advance(bytes, |y| match y {
         PcapngYield::Packet(p) => packets.push(p),
         PcapngYield::Secrets(s) => dsb.push(s),
-        PcapngYield::Stats(s) => interface_stats.push(s),
-        PcapngYield::PacketBlockDrops {
-            interface_id,
-            dropped,
-        } => {
-            pb_drops
-                .entry(interface_id)
-                .and_modify(|d| *d += dropped)
-                .or_insert(dropped);
+        PcapngYield::Stats(s) => {
+            reported_drops.note_interface_total(&s);
+            interface_stats.push(s);
+        }
+        PcapngYield::PacketBlockDrops { dropped, .. } => {
+            reported_drops.note_block_increment(dropped);
         }
     })?;
     // A FILE does not grow, so the tail a follower would wait for is this
@@ -1267,32 +1352,12 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
         return Err(e);
     }
 
-    // A Packet Block's per-block drop count is folded in as if it had been an
-    // ISB, so `interface_stats` is the ONE place a consumer asks the question
-    // regardless of which block type the writer chose. `received` stays `None`
-    // because a PB carries no such figure — reporting 0 would be a claim the
-    // file never made.
-    for (interface_id, dropped) in pb_drops {
-        match interface_stats
-            .iter_mut()
-            .find(|s| s.interface_id == interface_id)
-        {
-            Some(existing) => {
-                existing.dropped = Some(existing.dropped.unwrap_or(0) + dropped);
-            }
-            None => interface_stats.push(InterfaceStats {
-                interface_id,
-                received: None,
-                dropped: Some(dropped),
-            }),
-        }
-    }
-
     Ok(PcapngFile {
         interfaces: cursor.interfaces,
         packets,
         sections: cursor.sections,
         interface_stats,
+        reported_drops,
         skipped_blocks: cursor.skipped,
         decryption_secrets: dsb,
     })
@@ -2079,16 +2144,131 @@ mod tests {
         }
         let parsed = parse(&file).expect("parse");
         assert_eq!(parsed.packets.len(), 2, "both packets still read");
-        assert_eq!(parsed.interface_stats.len(), 1);
+        assert!(
+            parsed.interface_stats.is_empty(),
+            "a PB states no interface statistics, and inventing a row would claim a received count"
+        );
         assert_eq!(
-            parsed.interface_stats[0].dropped,
+            parsed.reported_drops.total(),
             Some(7),
             "3 + 4, summed across the blocks rather than last-write-wins"
         );
+    }
+
+    /// A statistics block with `isb_ifdrop` for one interface of a section.
+    fn isb_stats(interface_id: u32, dropped: Option<u64>) -> Vec<u8> {
+        isb(interface_id, None, dropped)
+    }
+
+    /// A running total written again is the same loss, not a new one. This is
+    /// the shape `dumpcap` writes: a block each time the count changes, each
+    /// stating the total so far, so 10 and then 17 are 17 packets.
+    #[test]
+    fn a_running_total_written_twice_is_counted_once() {
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&isb_stats(0, Some(10)));
+        file.extend_from_slice(&isb_stats(0, Some(17)));
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.interface_stats.len(), 2, "both blocks are kept");
+        assert_eq!(parsed.reported_drops.total(), Some(17));
+    }
+
+    /// Interfaces are separate losses and add; the same interface does not.
+    #[test]
+    fn interfaces_add_and_one_interface_does_not() {
+        let mut file = write(&[(1, 6), (1, 6)], &[]);
+        file.extend_from_slice(&isb_stats(0, Some(9)));
+        file.extend_from_slice(&isb_stats(1, Some(3)));
+        file.extend_from_slice(&isb_stats(0, Some(12)));
+        file.extend_from_slice(&isb_stats(1, Some(3)));
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.reported_drops.total(), Some(12 + 3));
+    }
+
+    /// The highest stated total wins and not the last block: a loss cannot be
+    /// undone, so a later, smaller figure is a writer's mistake and must not
+    /// lower what an earlier block already admitted.
+    #[test]
+    fn the_highest_total_stands_when_a_later_block_states_less() {
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&isb_stats(0, Some(17)));
+        file.extend_from_slice(&isb_stats(0, Some(5)));
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.reported_drops.total(), Some(17));
+    }
+
+    /// A block that states no `isb_ifdrop` neither adds nor resets: between two
+    /// blocks that do state it, it says nothing.
+    #[test]
+    fn a_block_without_the_option_changes_nothing() {
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&isb_stats(0, Some(10)));
+        file.extend_from_slice(&isb_stats(0, None));
+        file.extend_from_slice(&isb_stats(0, Some(11)));
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.reported_drops.total(), Some(11));
+    }
+
+    /// A new section is a new capture as far as the counters go: its interface
+    /// 0 is not the first section's interface 0, and the two add.
+    #[test]
+    fn a_new_section_starts_its_interfaces_counters_again() {
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&isb_stats(0, Some(10)));
+        file.extend_from_slice(&write(&[(1, 6)], &[]));
+        file.extend_from_slice(&isb_stats(0, Some(4)));
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.sections, 2);
         assert_eq!(
-            parsed.interface_stats[0].received, None,
-            "a PB states no received count, and inventing 0 would be a claim"
+            parsed
+                .interface_stats
+                .iter()
+                .map(|s| s.section)
+                .collect::<Vec<_>>(),
+            [0, 1]
         );
+        assert_eq!(parsed.reported_drops.total(), Some(10 + 4));
+    }
+
+    /// Increments from an obsolete block add to the totals of the current ones.
+    #[test]
+    fn block_increments_and_interface_totals_share_one_figure() {
+        let mut ledger = DropLedger::new();
+        ledger.note_block_increment(3);
+        ledger.note_interface_total(&InterfaceStats {
+            section: 0,
+            interface_id: 0,
+            received: None,
+            dropped: Some(10),
+        });
+        ledger.note_interface_total(&InterfaceStats {
+            section: 0,
+            interface_id: 0,
+            received: None,
+            dropped: Some(17),
+        });
+        assert_eq!(ledger.total(), Some(20));
+    }
+
+    /// A sum that does not fit is not a number, rather than a wrapped smaller
+    /// one: the figure exists to stop a floor being read as a total.
+    #[test]
+    fn a_sum_that_overflows_is_none() {
+        let mut ledger = DropLedger::new();
+        for interface_id in 0..2 {
+            ledger.note_interface_total(&InterfaceStats {
+                section: 0,
+                interface_id,
+                received: None,
+                dropped: Some(u64::MAX),
+            });
+        }
+        assert_eq!(ledger.total(), None);
+
+        let mut ledger = DropLedger::new();
+        ledger.note_block_increment(u64::MAX);
+        ledger.note_block_increment(1);
+        assert_eq!(ledger.total(), None);
     }
 
     /// A block length that is not a multiple of 4, or smaller than a block can
