@@ -274666,6 +274666,44 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3346": {
+      "decision_summary": "A consumer reported that the dropped-packet figure of a capture was summed over every interface statistics block, so a file with two such blocks for one interface counted that interface's drops twice. The figure in the option is a running total since capture start, not an increment, so the sum over-stated it. The figure is now kept in one ledger: per interface of a section, the highest total stated stands; the interfaces of one section add; a new section starts its interfaces again; the obsolete packet-block option still adds, as an increment. A whole file and a followed container share the ledger and state the same figure, and a sum that overflows is not stated. The keys of the fields document are unchanged, so no revision bump; only the value changes, for a file with two or more statistics blocks per interface. NOT claimed: the hosted run of this commit.",
+      "changes_bullets": [
+        "crates/wz-capture/src/pcapng.rs: DropLedger (highest total per section and interface, block increments added), InterfaceStats.section, PcapngFile.reported_drops, with nine tests.",
+        "crates/wz-capture/src/lib.rs: Dissection.capture_reported_drops reads the ledger; whole-file and follow paths share it."
+      ],
+      "verification_bullets": [
+        "On a build host: fmt, clippy (default, dissect, no default features), lib tests 1192 / 1458 / 961 passed, capi tests 199 passed, layers C0, C1bo, C1bt, C1bz, C1bn all rc 0.",
+        "NOT verified here: the hosted run of this commit."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumer the sha: the value of the drop figure changes for files with two or more statistics blocks per interface, and zero still means not stated.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "A consumer reported that the dropped-packet figure of a capture was summed over every interface statistics block, so a file with two such blocks for one interface counted that interface's drops twice. The figure in the option is a running total since capture start, not an increment, so the sum over-stated it. The figure is now kept in one ledger: per interface of a section, the highest total stated stands; the interfaces of one section add; a new section starts its interfaces again; the obsolete packet-block option still adds, as an increment. A whole file and a followed container share the ledger and state the same figure, and a sum that overflows is not stated. The keys of the fields document are unchanged, so no revision bump; only the value changes, for a file with two or more statistics blocks per interface. NOT claimed: the hosted run of this commit.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/pcapng.rs: DropLedger (highest total per section and interface, block increments added), InterfaceStats.section, PcapngFile.reported_drops, with nine tests.",
+        "crates/wz-capture/src/lib.rs: Dissection.capture_reported_drops reads the ledger; whole-file and follow paths share it."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: fmt, clippy (default, dissect, no default features), lib tests 1192 / 1458 / 961 passed, capi tests 199 passed, layers C0, C1bo, C1bt, C1bz, C1bn all rc 0.",
+        "NOT verified here: the hosted run of this commit."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumer the sha: the value of the drop figure changes for files with two or more statistics blocks per interface, and zero still means not stated.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
