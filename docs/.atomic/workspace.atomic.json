@@ -274452,6 +274452,50 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3341": {
+      "decision_summary": "A consumer showing the end-to-end verdict of a protected frame said Length agrees, Counter follows, CRC matches for a sample sent with a Data ID other than the declared one, because nothing compared the opened header with anything: the Data ID was in the open document's fields and the comparison was left to the program. wz_dissect_e2e_open_expecting (ABI 37) takes the profile, the frame and the header values expected, in the text the wrap door takes for its values, and the e2e_open document (now revision 3) gains expectation, last: ok, how many values were checked, and each difference with its field, part, the value expected and the one found. The expectation is per declaration, not per profile, so it is a new symbol. It may state a subset and compares the logical value with the xor undone; the CRC and the length, which crc_ok and length_matches_frame judge, are refused, as is a value that cannot fit. A difference is a fact like a failed CRC, not a refusal.",
+      "changes_bullets": [
+        "crates/wz-capture/src/e2e_frame.rs: expect, Expectation and Difference, comparing an opened frame's header with expected Values.",
+        "crates/wz-capture/src/e2e_json.rs: open_expecting_document and the expected_path and expected_offset refusals; doc_revision.rs: e2e_open revision 3 and its key set.",
+        "crates/wz-capi-dissect: wz_dissect_e2e_open_expecting, the header, the ABI revision 37 and the C consumer; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py name the symbol.",
+        "crates/wz-capture/src/e2e_tests.rs: the expectation cases, among them the declared-versus-sent Data ID with every other check sound."
+      ],
+      "verification_bullets": [
+        "On a build host: the expectation cases, the registry and the wz-capi-dissect tests pass; clippy and fmt pass for both crates; layers C0 (to its end), C1bo (the C consumer compiled against the header and linked against the library) and C1bz pass.",
+        "On a build host: with the comparison of a whole field, of a part, and the logical-versus-wire choice each changed in a copy of the tree, the expectation cases fail by assertion (one to three panics, no compile error), and the copy was restored.",
+        "NOT verified here: the hosted run of this push; the consumer's use of the door; a 64-bit header value beyond 2^53 through this door (the cases use values below it)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Tell the consumer the symbol and the sha; whether its Decode tree needs the expectation for a counter or a version as well is theirs to say.",
+        "The selection door that judges only the rows after a cursor, which the same consumer asked for, is the next round: its cursor carries an epoch, and a stale one answers with the whole walk; whether a keyexpr binding that arrives late can change a verdict already given is to be verified by a test and written in the header.",
+        "Everything in the carry of the previous round stands."
+      ],
+      "publishable_decision_summary": "A consumer showing the end-to-end verdict of a protected frame said Length agrees, Counter follows, CRC matches for a sample sent with a Data ID other than the declared one, because nothing compared the opened header with anything: the Data ID was in the open document's fields and the comparison was left to the program. wz_dissect_e2e_open_expecting (ABI 37) takes the profile, the frame and the header values expected, in the text the wrap door takes for its values, and the e2e_open document (now revision 3) gains expectation, last: ok, how many values were checked, and each difference with its field, part, the value expected and the one found. The expectation is per declaration, not per profile, so it is a new symbol. It may state a subset and compares the logical value with the xor undone; the CRC and the length, which crc_ok and length_matches_frame judge, are refused, as is a value that cannot fit. A difference is a fact like a failed CRC, not a refusal.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/e2e_frame.rs: expect, Expectation and Difference, comparing an opened frame's header with expected Values.",
+        "crates/wz-capture/src/e2e_json.rs: open_expecting_document and the expected_path and expected_offset refusals; doc_revision.rs: e2e_open revision 3 and its key set.",
+        "crates/wz-capi-dissect: wz_dissect_e2e_open_expecting, the header, the ABI revision 37 and the C consumer; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py name the symbol.",
+        "crates/wz-capture/src/e2e_tests.rs: the expectation cases, among them the declared-versus-sent Data ID with every other check sound."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the expectation cases, the registry and the wz-capi-dissect tests pass; clippy and fmt pass for both crates; layers C0 (to its end), C1bo (the C consumer compiled against the header and linked against the library) and C1bz pass.",
+        "On a build host: with the comparison of a whole field, of a part, and the logical-versus-wire choice each changed in a copy of the tree, the expectation cases fail by assertion (one to three panics, no compile error), and the copy was restored.",
+        "NOT verified here: the hosted run of this push; the consumer's use of the door; a 64-bit header value beyond 2^53 through this door (the cases use values below it)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Tell the consumer the symbol and the sha; whether its Decode tree needs the expectation for a counter or a version as well is theirs to say.",
+        "The selection door that judges only the rows after a cursor, which the same consumer asked for, is the next round: its cursor carries an epoch, and a stale one answers with the whole walk; whether a keyexpr binding that arrives late can change a verdict already given is to be verified by a test and written in the header.",
+        "Everything in the carry of the previous round stands."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
