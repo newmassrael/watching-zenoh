@@ -62,8 +62,11 @@ validates it; a refusal names the key, as a dotted path. In short:
   sessions double that SRAM, and the multicast receive pool alone
   is 32 x 1536 bytes.
 - The heap profiles have no per-session heap budget: every session
-  allocates from the one image heap. `heap_budget_bytes` is
-  reserved and refused.
+  allocates from the one image heap, and a byte cap per session cannot
+  be enforced on a shared allocator. `heap_budget_bytes` is reserved
+  and refused; the bound a session has is its `buffer_pools` and, on an
+  image with a session table, the `session_pool` (`max_sessions` x
+  `slot_bytes`).
 
 ## Editing
 

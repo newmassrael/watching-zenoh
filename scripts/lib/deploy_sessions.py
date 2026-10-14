@@ -73,7 +73,11 @@ machines.<m>.sessions[i]
                 per-session heap budget: every session allocates from the one
                 image heap. The per-session budget's shape is the session's
                 static pools above, which is what the fixed-memory profiles
-                keep; the allocator is not split.
+                keep, and on an image with a session table the `session_pool`
+                (`max_sessions` x `slot_bytes`) that bounds every session by
+                construction. The allocator is not split: a byte cap on a
+                shared `#[global_allocator]` cannot be enforced per session
+                without a per-session arena, so the key is not built as a cap.
 
 Any other key in a session is refused by name.
 
@@ -435,8 +439,10 @@ def _validate_zid_and_sessions(
         if "heap_budget_bytes" in s:
             errors.append(
                 f"{path}.heap_budget_bytes: reserved and not implemented -- the heap "
-                "profiles have no per-session heap budget; a session's budget is its "
-                "static `buffer_pools`"
+                "profiles share one image heap and a byte cap per session cannot be "
+                "enforced on it. A session's memory is bounded by construction: its "
+                "static `buffer_pools`, and on an image with a session table the "
+                "`session_pool` (`max_sessions` x `slot_bytes`)"
             )
 
         name = s.get("name")
