@@ -229,7 +229,7 @@ fn a_refused_driver_starts_nothing_and_names_its_key() {
             { name: "out", mode: "client", transport: "unicast",
               connect: { endpoints: ["tcp/127.0.0.1:7447"] },
               driver: [
-                { role: "liveliness_token", key: "demo/t" },
+                { role: "teleport", key: "demo/t" },
                 { role: "publish", key: "demo/p", payload: "x" },
                 { role: "delete", key: "demo/u", payload: "x" },
               ] } ] }"#,
@@ -238,7 +238,9 @@ fn a_refused_driver_starts_nothing_and_names_its_key() {
     let (code, transcript) = node.finish();
     assert_eq!(code, Some(2), "{transcript}");
     for key in [
-        "sessions[0].driver[0].role: required: publish, put, delete, subscribe, get or answer",
+        "sessions[0].driver[0].role: required: publish, put, delete, subscribe, get, answer, \
+         query, scout, advanced_publish, advanced_subscribe, liveliness_token, \
+         liveliness_subscribe, liveliness_get, pull, group_member, group_view or forward",
         "sessions[0].driver[1].period_ms: required, a positive integer of milliseconds",
         "sessions[0].driver[2].payload: not a key of the `delete` role",
     ] {
