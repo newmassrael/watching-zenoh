@@ -54,10 +54,15 @@ impl Node {
     /// The first line, already read or read now, that contains `needle`; or a
     /// panic with everything read so far.
     fn expect_line(&mut self, needle: &str) -> String {
+        self.expect_line_within(needle, DEADLINE)
+    }
+
+    /// [`Node::expect_line`] with a deadline of its own.
+    fn expect_line_within(&mut self, needle: &str, within: Duration) -> String {
         if let Some(line) = self.seen.iter().find(|l| l.contains(needle)) {
             return line.clone();
         }
-        let until = Instant::now() + DEADLINE;
+        let until = Instant::now() + within;
         loop {
             let left = until.saturating_duration_since(Instant::now());
             match self.lines.recv_timeout(left) {
@@ -274,4 +279,54 @@ fn a_well_formed_driver_is_accepted_by_the_check() {
         !transcript.contains("DRIVER"),
         "the check ran a role\n{transcript}"
     );
+}
+
+/// Suspend or resume a process by signal.
+fn signal(pid: u32, which: &str) {
+    let status = Command::new("kill")
+        .args([&format!("-{which}"), &pid.to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(status.success(), "kill -{which} {pid}");
+}
+
+/// A question to a peer that never answers ends at its own deadline: the session
+/// sweeps what has timed out, as the one-shot run modes do. The peer is suspended,
+/// so its session stays open and says nothing; without the sweep the question
+/// would wait for ever, and the lease (ten seconds) is far past the five this
+/// waits.
+#[test]
+fn a_question_to_a_silent_peer_ends_at_its_deadline() {
+    let dir = Dir::new("silent");
+    let listener_doc = dir.write(
+        "listener.json5",
+        r#"{ sessions: [
+            { name: "inbound", mode: "peer", transport: "unicast", zid: "dd03",
+              listen: { endpoints: ["tcp/127.0.0.1:0"] } } ] }"#,
+    );
+    let mut listener = Node::spawn(&["--sessions", &listener_doc]);
+    let ready = listener.expect_line("READY peer unicast listening on");
+    let addr = listening_on(&ready);
+    let client_doc = dir.write(
+        "client.json5",
+        &format!(
+            r#"{{ sessions: [
+                {{ name: "out", mode: "client", transport: "unicast", zid: "dd04",
+                  connect: {{ endpoints: ["{addr}"] }},
+                  driver: [ {{ role: "get", key: "demo/q", timeout_ms: 600, after_ms: 1000 }} ] }} ] }}"#
+        ),
+    );
+    let mut client = Node::spawn(&["--sessions", &client_doc]);
+    listener.expect_line("accepted ");
+    signal(listener.child.id(), "STOP");
+
+    client.expect_line("DRIVER get asked key=demo/q");
+    client.expect_line_within("DRIVER get final", Duration::from_secs(5));
+    assert_eq!(
+        client.count("DRIVER get reply"),
+        0,
+        "a suspended peer answered\n{}",
+        client.seen.join("\n")
+    );
+    signal(listener.child.id(), "CONT");
 }

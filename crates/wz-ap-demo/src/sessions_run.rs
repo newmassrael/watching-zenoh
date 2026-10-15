@@ -38,6 +38,7 @@ use std::sync::Arc;
 use tokio::sync::{watch, Semaphore};
 use tokio::task::LocalSet;
 
+use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::TokioSession;
@@ -55,6 +56,10 @@ use crate::args::{resolve_node_zid, session_init_params_for, ScoutSocketArgs, Tr
 use crate::sessions::{Mode, SessionLink, SessionSpec, SessionsPlan};
 use crate::sessions_driver::DriverEntry;
 use crate::shutdown::shutdown_signal;
+
+/// How often a session looks for questions whose deadline has passed: the
+/// one-shot run modes' default `--sweep-cadence-ms`.
+const SWEEP_CADENCE_MS: u64 = 100;
 
 /// How a session task finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,12 +351,47 @@ async fn serve_unicast(
     driver: &[DriverEntry],
     mut stop: watch::Receiver<bool>,
 ) -> Option<DriverOutcome> {
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        observer.clone(),
         Arc::new(opened.clock),
     );
-    let roles = crate::sessions_driver::start(name, &session, driver);
+    let mut roles = crate::sessions_driver::start(name, &session, driver);
+    // A question asked with a timeout (`get`, `query`, `liveliness_get`) is
+    // answered with its final when the deadline passes, but only if something
+    // sweeps the pending table: the drive loop does not. The one-shot run modes
+    // run this ticker beside their loop (`run_demo`'s sweep task); a session of
+    // this process needs the same, or a question to a silent peer never ends.
+    // It holds a clone of the session, so it ends with the roles.
+    roles.push({
+        let (session, observer, actions, clock) = (
+            session.clone(),
+            observer,
+            opened.actions.clone(),
+            opened.clock,
+        );
+        tokio::task::spawn_local(async move {
+            loop {
+                clock.sleep(SWEEP_CADENCE_MS).await;
+                {
+                    let mut obs = match observer.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let now_ms = clock.now_monotonic_ms();
+                    let _ = obs.replies.sweep_timed_out(now_ms);
+                    let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
+                    for interest_id in obs.liveliness_gets.take_finalized() {
+                        actions.prune_liveliness_get_interest(interest_id);
+                    }
+                }
+                // The timed-out finals are staged by the deferred reply sinks and
+                // run here, with the observer released.
+                session.drain_deferred_fires();
+            }
+        })
+    });
     let timeouts = SessionTimeouts::spec_defaults();
     let outcome = {
         let drive = drive_session_until_terminal(
