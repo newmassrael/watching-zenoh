@@ -764,7 +764,8 @@ impl ConfiguredZid {
 /// (`emit_frame_or_fragments`). It was a constant here, so a config that stated
 /// `transport/link/tx/batch_size` was read and then not put on the wire, and a session could not
 /// be made to negotiate anything below 65535. Travelling WITH the queue model because both are
-/// read at the same place, [`init_params`], by every role that mints parameters.
+/// read at the same place, `init_params` (not linked: it is private), by every role that mints
+/// parameters.
 #[derive(Clone, Copy, Debug)]
 pub struct LinkTx {
     /// The transmit model: see [`OpenStance::tx_queue`].
