@@ -6015,7 +6015,7 @@ mod tests {
         );
         let text = health_run(&pcap, true, Format::Text);
         assert!(
-            text.contains("not reported (this capture format has nowhere to say)"),
+            text.contains("not reported (this capture states no count)"),
             "and the terminal rendering must not print a zero either: {text}"
         );
     }

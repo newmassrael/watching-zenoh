@@ -6357,15 +6357,11 @@ fn a_bsd_loopback_capture_is_read_through_the_binary() {
     //
     // The interface's `if_tsresol` is 6 — microseconds, the pcapng default —
     // so the only thing that differs from the leg above is the container.
-    // MEASURED while writing this leg, and it is why the comparison is not a
-    // plain equality: the two containers differ in EXACTLY one line, and that
-    // line is the one the container itself decides. pcapng has somewhere to
-    // record what the capture tool dropped and classic pcap has not, so the
-    // former says `0 packet(s) dropped` and the latter `not reported (this
-    // capture format has nowhere to say)` — the distinction R311y892 landed
-    // deliberately, because a zero there would read as a clean bill of health
-    // on a format that cannot give one. Asserting whole-report equality across
-    // containers would therefore have demanded a defect.
+    // The two reports are now equal line for line. They were not, once: a pcapng
+    // that stated no drop count was reported as `0 packet(s) dropped`, which is a
+    // claim ("the tool lost nothing") the file never made, while the classic pcap
+    // said `not reported`. A capture that states no count is silent whichever
+    // container it is in, so both say so, and the comparison is a plain equality.
     //
     // The interface's `if_tsresol` is 6 — microseconds, the pcapng default.
     let on_null_ng = scratch.write(
@@ -6375,32 +6371,19 @@ fn a_bsd_loopback_capture_is_read_through_the_binary() {
             &[(0, 1_000_000, &loopback[..])],
         ),
     );
-    let without_capture_tool = |report: &str| {
-        report
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("capture tool:"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     let ng = run(&on_null_ng);
     assert_eq!(
-        without_capture_tool(&ng),
-        without_capture_tool(&baseline),
+        ng, baseline,
         "LINKTYPE_NULL in a pcapng container must dissect to the same report \
-         as in a classic pcap, and as Ethernet — everything except the one \
-         figure the CONTAINER decides"
+         as in a classic pcap, and as Ethernet"
     );
-    // And that one figure, asserted rather than merely excused: each container
-    // says the thing only it can say. Without this pair the filter above would
-    // be a hole rather than a distinction.
+    // And the line the two used to differ in, asserted rather than left to the
+    // equality: neither container states a drop count here, so neither reports a
+    // zero, which would read as a clean bill of health nobody gave.
     assert!(
-        ng.contains("capture tool: 0 packet(s) dropped by the capture tool"),
-        "pcapng has an ISB to record the figure in, so it is reported: {ng}"
-    );
-    assert!(
-        baseline.contains("capture tool: not reported"),
-        "classic pcap has nowhere to record it, and a 0 there would be a \
-         claim the format cannot support: {baseline}"
+        ng.contains("capture tool: not reported")
+            && baseline.contains("capture tool: not reported"),
+        "a capture that states no count is silent, not zero: {ng}"
     );
 
     // THE CONTROL. A family this build does not carry is still refused, and

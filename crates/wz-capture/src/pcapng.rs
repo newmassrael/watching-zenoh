@@ -665,19 +665,40 @@ pub struct DropLedger {
     block_increments: u64,
     /// A sum overflowed, so no number is a floor any more.
     overflowed: bool,
+    /// Some block stated a drop count, zero included. Without it the ledger
+    /// holds nothing, and a total of nothing is not a total of zero.
+    stated: bool,
+}
+
+/// What a capture says about the packets its tool dropped. Three answers, because
+/// a figure that is a number or `None` made two of them one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropStatement {
+    /// No block stated a count: a classic pcap, which has nowhere to put one, or
+    /// a pcapng none of whose blocks carries one (no Interface Statistics Block,
+    /// or none with `isb_ifdrop`, and no obsolete Packet Block with a count). The
+    /// capture does not say whether anything was dropped.
+    Unstated,
+    /// A block stated a count: the sum, which is zero when every block that spoke
+    /// said zero. A capture that was written to its end and lost nothing is this.
+    Stated(u64),
+    /// Blocks stated counts and the sum does not fit in a `u64`, so no number is
+    /// a floor any more.
+    Overflowed,
 }
 
 impl DropLedger {
-    /// An empty ledger: nothing stated, which totals zero.
+    /// An empty ledger: nothing stated, which totals nothing.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Take one Interface Statistics Block. A block that states no `isb_ifdrop`
     /// says nothing about drops, and reading it as zero would turn silence into
-    /// a measurement, so it adds nothing.
+    /// a measurement, so it adds nothing and does not make the ledger "stated".
     pub fn note_interface_total(&mut self, stats: &InterfaceStats) {
         let Some(total) = stats.dropped else { return };
+        self.stated = true;
         let slot = self
             .interface_totals
             .entry((stats.section, stats.interface_id))
@@ -685,24 +706,44 @@ impl DropLedger {
         *slot = (*slot).max(total);
     }
 
-    /// Take one obsolete Packet Block's drop count, an increment.
+    /// Take one obsolete Packet Block's drop count, an increment. A count of zero
+    /// is a statement (nothing was lost since the previous packet) and makes the
+    /// ledger "stated"; a block whose count is unavailable is not noted at all.
     pub fn note_block_increment(&mut self, dropped: u64) {
+        self.stated = true;
         match self.block_increments.checked_add(dropped) {
             Some(sum) => self.block_increments = sum,
             None => self.overflowed = true,
         }
     }
 
-    /// The packets the capture tool reported losing, or `None` when the sum
-    /// does not fit: a wrapped count is a smaller number than the truth, and
-    /// this figure exists to stop a floor being read as a total.
-    pub fn total(&self) -> Option<u64> {
-        if self.overflowed {
-            return None;
+    /// What the capture says, in three answers: see [`DropStatement`].
+    pub fn statement(&self) -> DropStatement {
+        if !self.stated {
+            return DropStatement::Unstated;
         }
-        self.interface_totals
-            .values()
-            .try_fold(self.block_increments, |acc, &d| acc.checked_add(d))
+        let sum = if self.overflowed {
+            None
+        } else {
+            self.interface_totals
+                .values()
+                .try_fold(self.block_increments, |acc, &d| acc.checked_add(d))
+        };
+        match sum {
+            Some(n) => DropStatement::Stated(n),
+            None => DropStatement::Overflowed,
+        }
+    }
+
+    /// The packets the capture tool reported losing, or `None` when it did not
+    /// say (nothing was stated) or the sum does not fit: a wrapped count is a
+    /// smaller number than the truth, and this figure exists to stop a floor
+    /// being read as a total. [`Self::statement`] tells the two `None`s apart.
+    pub fn total(&self) -> Option<u64> {
+        match self.statement() {
+            DropStatement::Stated(n) => Some(n),
+            DropStatement::Unstated | DropStatement::Overflowed => None,
+        }
     }
 }
 
@@ -725,8 +766,10 @@ pub enum PcapngYield {
     /// An Interface Statistics Block's counters.
     Stats(InterfaceStats),
     /// The obsolete Packet Block's per-block drop count, which is an INCREMENT
-    /// rather than a total. Yielded only when non-zero, because a zero must not
-    /// manufacture an [`InterfaceStats`] row the file never carried.
+    /// rather than a total. Yielded whenever the block STATES a count, a zero
+    /// included (it says nothing was lost since the previous packet), and not for
+    /// the reserved 0xFFFF that means "unavailable". It manufactures no
+    /// [`InterfaceStats`] row the file never carried: it is its own yield.
     PacketBlockDrops {
         /// Which interface lost them.
         interface_id: u32,
@@ -786,7 +829,7 @@ pub enum PcapngYieldRef<'a> {
     /// An Interface Statistics Block's counters.
     Stats(InterfaceStats),
     /// The obsolete Packet Block's per-block drop count, an INCREMENT, yielded
-    /// only when non-zero.
+    /// whenever the block states one (zero included, 0xFFFF excluded).
     PacketBlockDrops {
         /// Which interface lost them.
         interface_id: u32,
@@ -1169,7 +1212,13 @@ impl PcapngCursor {
                     // place an ISB's `isb_ifdrop` lands, because a consumer asking
                     // "did the capture tool lose anything" must not have to know
                     // which block type the writer chose.
-                    let block_drops = u64::from(u16_at(body, 2, swapped));
+                    //
+                    // The format reserves 0xFFFF for "this information is not
+                    // available" (pcapng, Obsolete Packet Block, Drops Count), so
+                    // that value is silence and not 65535 lost packets: it is not
+                    // yielded. A count of ZERO is a statement and is.
+                    let raw_drops = u16_at(body, 2, swapped);
+                    let block_drops = u64::from(raw_drops);
                     let ts_high = u64::from(u32_at(body, 4, swapped));
                     let ts_low = u64::from(u32_at(body, 8, swapped));
                     let captured = u32_at(body, 12, swapped);
@@ -1190,10 +1239,11 @@ impl PcapngCursor {
                             interface_id,
                         });
                     };
-                    // Yielded BEFORE the packet, and only when non-zero: the
-                    // count is what was lost leading UP to this block, so a
-                    // consumer that stops on the packet has already been told.
-                    if block_drops > 0 {
+                    // Yielded BEFORE the packet, and whenever the block states a
+                    // count (zero included, 0xFFFF excluded): the count is what
+                    // was lost leading UP to this block, so a consumer that stops
+                    // on the packet has already been told.
+                    if raw_drops != 0xFFFF {
                         stop |= on(PcapngYieldRef::PacketBlockDrops {
                             interface_id,
                             dropped: block_drops,
@@ -2269,6 +2319,88 @@ mod tests {
         ledger.note_block_increment(u64::MAX);
         ledger.note_block_increment(1);
         assert_eq!(ledger.total(), None);
+        assert_eq!(
+            ledger.statement(),
+            DropStatement::Overflowed,
+            "an overflow is told apart from silence"
+        );
+    }
+
+    /// A ledger nothing was ever noted in says nothing, and that is not zero: a
+    /// capture none of whose blocks states a count does not say it lost nothing.
+    /// Every way of stating a count, zero included, is a statement; every way of
+    /// being silent is not.
+    #[test]
+    fn a_ledger_told_nothing_says_nothing_and_a_stated_zero_says_zero() {
+        let silent = DropLedger::new();
+        assert_eq!(silent.statement(), DropStatement::Unstated);
+        assert_eq!(
+            silent.total(),
+            None,
+            "no block spoke, so there is no figure"
+        );
+
+        // An ISB without `isb_ifdrop` is silence, whatever else it states.
+        let mut ledger = DropLedger::new();
+        ledger.note_interface_total(&InterfaceStats {
+            section: 0,
+            interface_id: 0,
+            received: Some(40),
+            dropped: None,
+        });
+        assert_eq!(ledger.statement(), DropStatement::Unstated);
+
+        // An `isb_ifdrop` of zero is a claim that nothing was dropped.
+        ledger.note_interface_total(&InterfaceStats {
+            section: 0,
+            interface_id: 0,
+            received: Some(40),
+            dropped: Some(0),
+        });
+        assert_eq!(ledger.statement(), DropStatement::Stated(0));
+        assert_eq!(ledger.total(), Some(0));
+
+        // So is an obsolete Packet Block's count of zero.
+        let mut ledger = DropLedger::new();
+        ledger.note_block_increment(0);
+        assert_eq!(ledger.statement(), DropStatement::Stated(0));
+    }
+
+    /// The same distinction read out of bytes: a pcapng whose blocks state no
+    /// count, whose statistics block omits the option, whose Packet Block marks
+    /// the count unavailable (0xFFFF, which is not 65535 lost packets), and one
+    /// that states zero.
+    #[test]
+    fn a_file_that_states_no_count_has_no_total_and_one_that_states_zero_has_zero() {
+        // No statistics block and no obsolete block at all.
+        let parsed = parse(&write(&[(1, 6)], &[(0, 1_000, &[0u8; 4])])).expect("parse");
+        assert_eq!(parsed.reported_drops.total(), None);
+
+        // A statistics block that does not state `isb_ifdrop`.
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&isb_stats(0, None));
+        assert_eq!(parse(&file).expect("parse").reported_drops.total(), None);
+
+        // The same block stating zero.
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&isb_stats(0, Some(0)));
+        assert_eq!(parse(&file).expect("parse").reported_drops.total(), Some(0));
+
+        // An obsolete Packet Block whose count is the reserved "unavailable".
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&pb(0, 0xFFFF, &[0xAA, 0xBB]));
+        let parsed = parse(&file).expect("parse");
+        assert_eq!(parsed.packets.len(), 1, "the packet still reads");
+        assert_eq!(
+            parsed.reported_drops.total(),
+            None,
+            "0xFFFF is silence, not 65535 packets"
+        );
+
+        // An obsolete Packet Block that states zero.
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&pb(0, 0, &[0xAA, 0xBB]));
+        assert_eq!(parse(&file).expect("parse").reported_drops.total(), Some(0));
     }
 
     /// A block length that is not a multiple of 4, or smaller than a block can

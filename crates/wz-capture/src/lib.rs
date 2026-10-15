@@ -4688,9 +4688,16 @@ impl Dissection {
     /// figure the only available reading of that outcome is "the dissector is
     /// broken"; with it, the capture indicts itself.
     ///
-    /// `None` and `Some(0)` are deliberately different: no ISB at all is not a
-    /// claim that nothing was dropped. A classic pcap always answers `None` —
-    /// the format has nowhere to put the figure.
+    /// `None` and `Some(0)` are deliberately different: a capture that states no
+    /// count is not a claim that nothing was dropped. `None` is every capture
+    /// that stays silent: a classic pcap (the format has nowhere to put the
+    /// figure), a pcapng with no Interface Statistics Block, one whose blocks
+    /// omit `isb_ifdrop`, and one whose only counts are the obsolete Packet
+    /// Block's reserved "unavailable". `Some(0)` is a capture where at least one
+    /// block stated a count and every count was zero, which is what a capture
+    /// written to its end without loss looks like; a capture cut off before its
+    /// last statistics block is `None`. A sum that does not fit is `None` too,
+    /// and [`Self::capture_drop_statement`] tells that apart from silence.
     ///
     /// HOW IT IS COUNTED: an Interface Statistics Block states `isb_ifdrop` as
     /// a running total since the capture began, so the figure is, for each
@@ -4704,6 +4711,16 @@ impl Dissection {
         self.capture_reported_drops
             .as_ref()
             .and_then(pcapng::DropLedger::total)
+    }
+
+    /// What the capture says about the packets its tool dropped, in the three
+    /// answers [`Self::capture_reported_drops`] folds into two: silence, a stated
+    /// count (zero included), and a sum too large to be a floor.
+    pub fn capture_drop_statement(&self) -> pcapng::DropStatement {
+        self.capture_reported_drops.as_ref().map_or(
+            pcapng::DropStatement::Unstated,
+            pcapng::DropLedger::statement,
+        )
     }
 
     /// R311y607/y608 — which of zenoh's two message namespaces this datagram
@@ -7074,12 +7091,12 @@ impl Dissection {
             });
         }
         let before = cursor.packets_produced();
-        // R311y607 — a pcapng that reports no drops reports ZERO, not
-        // "unstated"; `from_pcapng_declaring_bounded` holds an empty ledger and
-        // this is the same claim, made as soon as the format is known rather
-        // than after the last block. A classic pcap states nothing here and
-        // `capture_reported_drops` stays UNSTATED for it, exactly as it does for
-        // a file read whole: the format has nowhere to state it.
+        // R311y607 — a pcapng gets its ledger as soon as the format is known, as
+        // `from_pcapng_declaring_bounded` holds one. The ledger is EMPTY, and an
+        // empty ledger states nothing (`DropLedger::statement` is `Unstated`), so
+        // `capture_reported_drops` stays `None` until a block states a count, and
+        // a pcapng that never does is silent, as a file read whole is. A classic
+        // pcap gets no ledger: the format has nowhere to state a count.
         if cursor.decide(bytes) == Some(Container::Pcapng) && self.capture_reported_drops.is_none()
         {
             self.capture_reported_drops = Some(pcapng::DropLedger::new());
@@ -10812,6 +10829,55 @@ mod datagram_tests {
 
         let d = Dissection::from_capture(&file).expect("the capture parses");
         assert_eq!(d.capture_reported_drops(), Some(17 + 2));
+    }
+
+    /// A pcapng that states no count says nothing, and a pcapng that states a
+    /// count of zero says zero: the two are not one answer. Read whole and
+    /// followed, because the two readers took their ledger at different moments
+    /// and both answered zero for silence.
+    #[test]
+    fn a_capture_that_states_no_count_is_silent_and_one_that_states_zero_is_zero() {
+        use crate::pcapng::DropStatement;
+
+        let silent_files = [
+            // No statistics block at all.
+            pcapng::write(&[(1, 6)], &[(0, 1_000_000, &[0u8; 4])]),
+            // A statistics block without `isb_ifdrop`.
+            {
+                let mut f = pcapng::write(&[(1, 6)], &[(0, 1_000_000, &[0u8; 4])]);
+                f.extend_from_slice(&isb_block(0, None));
+                f
+            },
+        ];
+        for file in &silent_files {
+            let whole = Dissection::from_capture(file).expect("the capture parses");
+            assert_eq!(whole.capture_reported_drops(), None, "read whole");
+            assert_eq!(whole.capture_drop_statement(), DropStatement::Unstated);
+
+            let mut followed = Dissection::new();
+            followed
+                .follow_container(&mut CaptureCursor::new(), file)
+                .expect("the capture follows");
+            assert_eq!(followed.capture_reported_drops(), None, "followed");
+            assert_eq!(followed.capture_drop_statement(), DropStatement::Unstated);
+        }
+
+        let mut said_zero = pcapng::write(&[(1, 6)], &[(0, 1_000_000, &[0u8; 4])]);
+        said_zero.extend_from_slice(&isb_block(0, Some(0)));
+        let whole = Dissection::from_capture(&said_zero).expect("the capture parses");
+        assert_eq!(whole.capture_reported_drops(), Some(0), "read whole");
+        assert_eq!(whole.capture_drop_statement(), DropStatement::Stated(0));
+        let mut followed = Dissection::new();
+        followed
+            .follow_container(&mut CaptureCursor::new(), &said_zero)
+            .expect("the capture follows");
+        assert_eq!(followed.capture_reported_drops(), Some(0), "followed");
+
+        // A classic pcap is silent too, and is not told apart from a pcapng that
+        // stays silent: both are "the capture does not say".
+        let classic =
+            Dissection::from_capture(&pcap::write(LINKTYPE_ETHERNET, &[])).expect("parse");
+        assert_eq!(classic.capture_drop_statement(), DropStatement::Unstated);
     }
 
     /// A container followed in windows states the same figure as the same

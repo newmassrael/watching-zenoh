@@ -3776,11 +3776,19 @@ pub fn health_text(d: &crate::Dissection) -> String {
     let mut s = String::from("health:\n");
     s.push_str(&format!(
         "  capture tool: {}\n",
-        match d.capture_reported_drops() {
-            // Never "0": a classic pcap cannot record the figure, and a reader
-            // shown a zero would read silence as a clean bill of health.
-            None => String::from("not reported (this capture format has nowhere to say)"),
-            Some(n) => format!("{n} packet(s) dropped by the capture tool"),
+        match d.capture_drop_statement() {
+            // Never "0": a capture that states no count (a classic pcap, which
+            // has nowhere to put one, or a pcapng none of whose blocks carries
+            // one) has not said it lost nothing, and a reader shown a zero would
+            // read silence as a clean bill of health.
+            crate::pcapng::DropStatement::Unstated => {
+                String::from("not reported (this capture states no count)")
+            }
+            crate::pcapng::DropStatement::Stated(n) => {
+                format!("{n} packet(s) dropped by the capture tool")
+            }
+            crate::pcapng::DropStatement::Overflowed =>
+                String::from("reported, but the counts sum past what a number holds (no floor)",),
         }
     ));
     s.push_str(&dropped_by_limits_text(d));
