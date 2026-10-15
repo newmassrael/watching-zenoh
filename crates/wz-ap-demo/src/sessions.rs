@@ -194,11 +194,24 @@ impl BuildCapabilities {
 /// Refusing the combination, rather than applying a flag to every session or to
 /// none, is what keeps each existing flag meaning exactly what it meant.
 pub(crate) fn sessions_flag(argv: &[String]) -> Option<Result<String, String>> {
-    let at = argv.iter().position(|a| a == "--sessions")?;
+    document_flag(argv, "--sessions")
+}
+
+/// The `--check-sessions <file>` command line, or `None` when the flag is absent.
+///
+/// The same document and the same rules as `--sessions`, judged and not started:
+/// it takes a file and nothing beside it, for the reason [`sessions_flag`] gives.
+pub(crate) fn check_sessions_flag(argv: &[String]) -> Option<Result<String, String>> {
+    document_flag(argv, "--check-sessions")
+}
+
+/// A flag that names the one sessions document and stands alone.
+fn document_flag(argv: &[String], flag: &str) -> Option<Result<String, String>> {
+    let at = argv.iter().position(|a| a == flag)?;
     Some(match (argv.len(), argv.get(at + 1)) {
         (2, Some(path)) if at == 0 && !path.starts_with("--") => Ok(path.clone()),
-        (_, None) => Err("--sessions needs a file".to_string()),
-        (_, Some(path)) if path.starts_with("--") => Err("--sessions needs a file".to_string()),
+        (_, None) => Err(format!("{flag} needs a file")),
+        (_, Some(path)) if path.starts_with("--") => Err(format!("{flag} needs a file")),
         _ => {
             let others: Vec<&str> = argv
                 .iter()
@@ -207,12 +220,27 @@ pub(crate) fn sessions_flag(argv: &[String]) -> Option<Result<String, String>> {
                 .map(|(_, a)| a.as_str())
                 .collect();
             Err(format!(
-                "--sessions describes every session of this process and takes no other \
+                "{flag} describes every session of this process and takes no other \
                  argument (also given: {})",
                 others.join(" ")
             ))
         }
     })
+}
+
+/// A sessions document judged for this build: the rules, then what this build
+/// cannot run. Every refusal is returned, by key path. Nothing is opened.
+pub(crate) fn judge_sessions_document(
+    text: &str,
+    caps: &BuildCapabilities,
+) -> Result<SessionsPlan, Vec<Refusal>> {
+    let plan = read_sessions_document(text)?;
+    let refusals = plan.build_refusals(caps);
+    if refusals.is_empty() {
+        Ok(plan)
+    } else {
+        Err(refusals)
+    }
 }
 
 /// Read a `--sessions` document: its syntax, its own keys, then the shared
@@ -1076,5 +1104,64 @@ mod reader_tests {
                 "sessions[1].listen.endpoints[0]",
             ]
         );
+    }
+
+    /// Each document flag finds only its own name, takes one file, and stands
+    /// alone; neither is mistaken for the other.
+    #[test]
+    fn the_two_document_flags_read_only_their_own_name() {
+        assert_eq!(
+            sessions_flag(&argv(&["--sessions", "a.json5"])),
+            Some(Ok("a.json5".to_string()))
+        );
+        assert_eq!(
+            check_sessions_flag(&argv(&["--check-sessions", "a.json5"])),
+            Some(Ok("a.json5".to_string()))
+        );
+        assert_eq!(sessions_flag(&argv(&["--check-sessions", "a.json5"])), None);
+        assert_eq!(check_sessions_flag(&argv(&["--sessions", "a.json5"])), None);
+        assert_eq!(check_sessions_flag(&argv(&["--key", "demo/**"])), None);
+    }
+
+    /// A missing file, a flag where the file should be, and any other argument
+    /// are refused, each naming the flag that was given.
+    #[test]
+    fn a_document_flag_without_a_file_or_with_company_is_refused_by_name() {
+        assert_eq!(
+            check_sessions_flag(&argv(&["--check-sessions"])),
+            Some(Err("--check-sessions needs a file".to_string()))
+        );
+        assert_eq!(
+            check_sessions_flag(&argv(&["--check-sessions", "--key"])),
+            Some(Err("--check-sessions needs a file".to_string()))
+        );
+        let Some(Err(message)) =
+            check_sessions_flag(&argv(&["--check-sessions", "a.json5", "--key", "k"]))
+        else {
+            panic!("a flag with company must be refused");
+        };
+        assert!(
+            message.starts_with("--check-sessions ") && message.contains("(also given: --key k)"),
+            "{message}"
+        );
+    }
+
+    /// The judgement `--sessions` and `--check-sessions` share: accepted
+    /// documents come back as the plan, refused ones with every refusal, and a
+    /// build that cannot run a session refuses it by key path.
+    #[test]
+    fn the_shared_judgement_returns_the_plan_or_every_refusal() {
+        let everything = caps(true, true);
+        let plan = judge_sessions_document(TWO, &everything).expect("this build runs it all");
+        assert_eq!(plan.sessions.len(), 3);
+        let refusals = judge_sessions_document(TWO, &caps(false, true))
+            .expect_err("a build without multicast refuses the group session");
+        assert!(
+            refusals
+                .iter()
+                .any(|r| r.to_string().starts_with("sessions[1]")),
+            "{refusals:?}"
+        );
+        assert!(judge_sessions_document("not json5 {", &everything).is_err());
     }
 }

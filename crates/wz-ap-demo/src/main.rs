@@ -176,6 +176,17 @@ fn demo_main() -> ExitCode {
         }
         Some(Ok(path)) => return run_sessions_mode(&path),
     }
+    // `--check-sessions <file>`: the same document judged for this build and not
+    // started. Read after `--sessions`, so a command line carrying both is refused
+    // there, with this flag named among the extras.
+    match crate::sessions::check_sessions_flag(rest) {
+        None => {}
+        Some(Err(message)) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+        Some(Ok(path)) => return check_sessions_mode(&path),
+    }
 
     // R2072 (open-debt item 496) — `--check-topology <file>` once per node: the
     // SET verdict over a whole deployment, before any of it is started. Handled
@@ -2831,39 +2842,69 @@ fn run_sessions_mode(path: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let refusals = match crate::sessions::read_sessions_document(&text) {
+    let caps = crate::sessions::BuildCapabilities::of_this_build();
+    match crate::sessions::judge_sessions_document(&text, &caps) {
         Ok(plan) => {
-            let caps = crate::sessions::BuildCapabilities::of_this_build();
-            let refusals = plan.build_refusals(&caps);
-            if refusals.is_empty() {
-                env_logger::Builder::from_env(
-                    env_logger::Env::default().filter_or("RUST_LOG", "info"),
-                )
+            env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info"))
                 .init();
-                let runtime = match build_demo_runtime() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
-                        return ExitCode::from(1);
-                    }
-                };
-                return match runtime.block_on(crate::sessions_run::run_sessions(plan)) {
-                    Ok(true) => ExitCode::SUCCESS,
-                    Ok(false) => ExitCode::from(1),
-                    Err(e) => {
-                        eprintln!("wz-ap-demo: --sessions {path}: {e}");
-                        ExitCode::from(1)
-                    }
-                };
+            let runtime = match build_demo_runtime() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            match runtime.block_on(crate::sessions_run::run_sessions(plan)) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::from(1),
+                Err(e) => {
+                    eprintln!("wz-ap-demo: --sessions {path}: {e}");
+                    ExitCode::from(1)
+                }
             }
-            refusals
         }
-        Err(refusals) => refusals,
-    };
-    for refusal in &refusals {
-        eprintln!("wz-ap-demo: --sessions {path}: {refusal}");
+        Err(refusals) => {
+            for refusal in &refusals {
+                eprintln!("wz-ap-demo: --sessions {path}: {refusal}");
+            }
+            ExitCode::from(2)
+        }
     }
-    ExitCode::from(2)
+}
+
+/// `--check-sessions <file>`: the verdict of `--sessions` on the same document
+/// for THIS build, and nothing started. Exit 0 when the document is accepted, 2
+/// when the rules or this build refuse it (every refusal on stderr, each by its
+/// key path, as `--sessions` prints them), 3 when the file cannot be read.
+///
+/// Nothing is opened: no socket, no runtime, no logger. The verdict is a
+/// property of the document and of the features this binary was built with, so a
+/// caller that asks the binary it is about to start gets the answer that start
+/// would give.
+fn check_sessions_mode(path: &str) -> ExitCode {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("wz-ap-demo: --check-sessions: cannot read {path}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let caps = crate::sessions::BuildCapabilities::of_this_build();
+    match crate::sessions::judge_sessions_document(&text, &caps) {
+        Ok(plan) => {
+            eprintln!(
+                "wz-ap-demo: --check-sessions {path}: accepted, {} session(s)",
+                plan.sessions.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(refusals) => {
+            for refusal in &refusals {
+                eprintln!("wz-ap-demo: --check-sessions {path}: {refusal}");
+            }
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// R2159 (open-debt item 229) — the exit status a MESH run-mode reports.

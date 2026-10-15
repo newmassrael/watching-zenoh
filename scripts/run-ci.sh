@@ -6551,6 +6551,14 @@ layer_c1ay_cargo_test_router_hat() {
     # stops being compiled leaves a green run behind it.
     _runci_guarded_test "C1AY check_topology_binary 4" 4 \
         cargo test -p wz-ap-demo --features zenoh-config --test check_topology_binary --quiet || return 1
+    # `--check-sessions`: the verdict `--sessions` would give on a document, for
+    # this build, with nothing started. The same argv -> exit status seam as the
+    # topology check above, and its own test target for the same reason. Four
+    # cases (accepted 0, refused 2 with `--sessions`' own sentences, unreadable
+    # 3, stands alone), pinned so a test that stops being compiled leaves no
+    # green run behind it.
+    _runci_guarded_test "C1AY check_sessions_binary 4" 4 \
+        cargo test -p wz-ap-demo --test check_sessions_binary --quiet || return 1
     # R2087 (open-debt item 506) — the same argv -> exit status seam, for the qos
     # x lowlatency exclusivity that wiring `--qos` into `initiator_offer` made
     # this binary responsible for. Run at the feature set where BOTH modes are

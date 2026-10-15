@@ -81,6 +81,7 @@ pub(crate) fn print_usage() {
     eprintln!("               [--query-timeout-ms <ms>]");
     eprintln!("               [--sweep-cadence-ms <ms>]");
     eprintln!("    wz-ap-demo --sessions <file>");
+    eprintln!("    wz-ap-demo --check-sessions <file>");
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --sessions <file>        start SEVERAL local sessions in this one process, one");
@@ -100,6 +101,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             SIGTERM; nothing is routed between sessions. Takes no");
     eprintln!("                             other flag. A multicast session needs the");
     eprintln!("                             `transport-multicast` build feature.");
+    eprintln!("    --check-sessions <file>  judge the same document and start nothing: no socket");
+    eprintln!("                             is opened. Exit 0 accepted, 2 refused (every refusal");
+    eprintln!("                             by its key path, as --sessions prints them), 3 the");
+    eprintln!("                             file cannot be read. The verdict is for THIS binary's");
+    eprintln!("                             build features. Takes no other flag.");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447); announces the");
     eprintln!("                             zenoh peer role on the wire");
     eprintln!("    --connect <a[,b..]>      initiator mode (HOST:PORT or tcp/|ws/HOST:PORT);");
