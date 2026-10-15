@@ -51,9 +51,9 @@ use wz::runtime_tokio::session_open::{
 use wz::runtime_tokio::sync::Mutex;
 use wz::runtime_tokio::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 
-use crate::args::{resolve_node_zid, session_init_params_for, TransportTuning};
+use crate::args::{resolve_node_zid, session_init_params_for, ScoutSocketArgs, TransportTuning};
 use crate::sessions::{Mode, SessionLink, SessionSpec, SessionsPlan};
-use crate::sessions_driver::DriverRole;
+use crate::sessions_driver::DriverEntry;
 use crate::shutdown::shutdown_signal;
 
 /// How a session task finished.
@@ -146,19 +146,60 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
     }
 }
 
+/// What the document asks of a unicast session beside its link.
+struct Asked<'a> {
+    /// The traffic it generates once it serves.
+    driver: &'a [DriverEntry],
+    /// The scouting group it answers Scouts on, when it is to be found.
+    scouting: Option<&'a ScoutSocketArgs>,
+}
+
+/// Answer Scouts as this session when its document asks for it, advertising
+/// `locators`. The responder runs for the life of the process; a bind that fails is
+/// the session's failure, as a first group join that fails is.
+#[cfg(feature = "scouting-responder")]
+async fn answer_scouts(
+    name: &str,
+    whatami: WhatAmI,
+    zid: &[u8],
+    scouting: Option<&ScoutSocketArgs>,
+    locators: Vec<String>,
+) -> Result<(), String> {
+    let Some(socket) = scouting else {
+        return Ok(());
+    };
+    crate::runner::spawn_scouting_responder(socket, whatami, zid, locators.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    eprintln!(
+        "wz-ap-demo session {name}: SCOUT RESPONDER answering as {} advertising {locators:?}",
+        whatami_name(whatami)
+    );
+    Ok(())
+}
+
+/// Without the responder compiled in the document is refused before it gets here
+/// (`BuildCapabilities::scouting_responder`), so there is nothing to answer.
+#[cfg(not(feature = "scouting-responder"))]
+async fn answer_scouts(
+    _name: &str,
+    _whatami: WhatAmI,
+    _zid: &[u8],
+    _scouting: Option<&ScoutSocketArgs>,
+    _locators: Vec<String>,
+) -> Result<(), String> {
+    Ok(())
+}
+
 async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool>) -> SessionEnd {
     let name = spec.name.clone();
-    let end = match spec.link {
+    let asked = Asked {
+        driver: &spec.driver,
+        scouting: spec.scouting.as_ref(),
+    };
+    let end = match &spec.link {
         SessionLink::Connect { endpoints } => {
-            run_connect(
-                &name,
-                whatami(spec.mode),
-                zid,
-                &endpoints,
-                &spec.driver,
-                stop,
-            )
-            .await
+            run_connect(&name, whatami(spec.mode), zid, endpoints, &asked, stop).await
         }
         SessionLink::Listen {
             endpoint,
@@ -168,9 +209,9 @@ async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool
                 &name,
                 whatami(spec.mode),
                 zid,
-                &endpoint,
-                max_sessions,
-                &spec.driver,
+                endpoint,
+                *max_sessions,
+                &asked,
                 stop,
             )
             .await
@@ -179,7 +220,7 @@ async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool
             endpoint,
             join_interval_ms,
             lease_ms,
-        } => run_group(&name, zid, &endpoint, join_interval_ms, lease_ms, stop).await,
+        } => run_group(&name, zid, endpoint, *join_interval_ms, *lease_ms, stop).await,
     };
     if end == SessionEnd::Closed {
         eprintln!("wz-ap-demo session {name}: closed");
@@ -206,7 +247,7 @@ async fn run_connect(
     whatami: WhatAmI,
     zid: Vec<u8>,
     endpoints: &[String],
-    driver: &[DriverRole],
+    asked: &Asked<'_>,
     mut stop: watch::Receiver<bool>,
 ) -> SessionEnd {
     let mut why = Vec::new();
@@ -238,7 +279,16 @@ async fn run_connect(
                         .map(|z| zid_to_zenoh_hex(&z))
                         .unwrap_or_else(|| "unknown".to_string())
                 );
-                return match serve_unicast(name, opened, driver, stop).await {
+                // A client answers Scouts as upstream's does: a Hello that names it
+                // a client with no locator, started once its session is open.
+                if let Err(e) = answer_scouts(name, whatami, &zid, asked.scouting, Vec::new()).await
+                {
+                    eprintln!("wz-ap-demo session {name}: failed: {e}");
+                    opened.actions.send_close_with_reason(CloseReason::Generic);
+                    opened.drain_to_close().await;
+                    return SessionEnd::Failed;
+                }
+                return match serve_unicast(name, opened, asked.driver, stop).await {
                     None => SessionEnd::Closed,
                     Some(outcome) => {
                         eprintln!("wz-ap-demo session {name}: ended ({outcome:?})");
@@ -293,7 +343,7 @@ async fn ended_or_stopped<D: std::future::Future>(
 async fn serve_unicast(
     name: &str,
     mut opened: OpenedSession,
-    driver: &[DriverRole],
+    driver: &[DriverEntry],
     mut stop: watch::Receiver<bool>,
 ) -> Option<DriverOutcome> {
     let session = TokioSession::new(
@@ -338,7 +388,7 @@ async fn run_listen(
     zid: Vec<u8>,
     endpoint: &str,
     max_sessions: usize,
-    driver: &[DriverRole],
+    asked: &Asked<'_>,
     mut stop: watch::Receiver<bool>,
 ) -> SessionEnd {
     let mut listener = match bind_endpoint(endpoint).await {
@@ -355,6 +405,25 @@ async fn run_listen(
         "wz-ap-demo session {name}: READY {} unicast listening on {bound}",
         whatami_name(whatami)
     );
+    // The Hello carries the address this session bound, as its own neighbours are
+    // told it (`advertised_locator`); a bind-all address names nothing a scouter
+    // could dial, so it advertises none.
+    let locators: Vec<String> = match listener.local_addr() {
+        Ok(addr) if !addr.ip().is_unspecified() => {
+            vec![listener.advertised_locator(&addr.to_string())]
+        }
+        Ok(_) => Vec::new(),
+        Err(_) => listener
+            .local_addr_display()
+            .ok()
+            .map(|display| listener.advertised_locator(&display))
+            .into_iter()
+            .collect(),
+    };
+    if let Err(e) = answer_scouts(name, whatami, &zid, asked.scouting, locators).await {
+        eprintln!("wz-ap-demo session {name}: failed: {e}");
+        return SessionEnd::Failed;
+    }
     let slots = Arc::new(Semaphore::new(max_sessions));
     let mut failed = false;
     let mut accepted = Vec::new();
@@ -376,7 +445,7 @@ async fn run_listen(
                 };
                 let name = name.to_string();
                 let stop = stop.clone();
-                let driver = driver.to_vec();
+                let driver = asked.driver.to_vec();
                 accepted.push(tokio::task::spawn_local(async move {
                     let opened = match accept_and_open_session(
                         link,

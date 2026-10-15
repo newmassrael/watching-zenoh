@@ -22,6 +22,7 @@
 //!       { role: "put",       key: "demo/one", payload: "x" },
 //!       { role: "delete",    key: "demo/one" },
 //!       { role: "get",       key: "demo/q",   timeout_ms: 2000, after_ms: 500 },
+//!       // `after_ms`, on any role: hold it that long once the session is up.
 //!     ] },
 //! ]
 //! ```
@@ -35,7 +36,7 @@
 //!
 //! `scripts/lib/deploy_sessions.py` describes a deploy machine, and a driver is
 //! not part of one: it is what a test harness asks this process to do. The key is
-//! therefore stripped before the shared rules run (see [`without_drivers`]), so
+//! therefore stripped before the shared rules run (see [`without_local_keys`]), so
 //! the rule set and its parity with the validator are exactly what they were, and
 //! the validator keeps refusing a deploy document that carries one.
 //!
@@ -96,23 +97,25 @@ pub(crate) enum DriverRole {
     Delete { key: String },
     /// Hold a subscriber on `key`, printing each sample.
     Subscribe { key: String },
-    /// Ask `key` once and print each reply, waiting at most `timeout_ms`, and
-    /// holding the question `after_ms` after the session is Established (0 asks
-    /// at once).
-    ///
-    /// The hold is the document's form of `--query-after-ms`, and it is there for
-    /// the same reason: the declarations a peer made are still arriving when the
-    /// session opens, so a question asked at that instant can be answered with a
-    /// final and no reply by a queryable that was declared a moment before. A
-    /// harness that asks a node it has just connected to says how long it lets the
-    /// link settle.
-    Get {
-        key: String,
-        timeout_ms: u64,
-        after_ms: u64,
-    },
+    /// Ask `key` once and print each reply, waiting at most `timeout_ms`.
+    Get { key: String, timeout_ms: u64 },
     /// Hold a queryable on `key` that answers every query with `reply`.
     Answer { key: String, reply: String },
+}
+
+/// One entry of a session's `driver`: a role and when it starts.
+///
+/// `after_ms` holds the role that long after the session is Established (0 starts
+/// it at once), and it is common to every role. The declarations a peer makes are
+/// still arriving when the session opens, so a put, a delete or a question issued
+/// at that instant goes to a peer whose subscriber or queryable it has not yet
+/// heard of, and is lost without anyone being told: the hold is the document's
+/// form of `--query-after-ms`. A harness that drives a node it has just connected
+/// to says how long it lets the link settle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DriverEntry {
+    pub(crate) role: DriverRole,
+    pub(crate) after_ms: u64,
 }
 
 impl DriverRole {
@@ -129,24 +132,29 @@ impl DriverRole {
     }
 }
 
-/// The keys each role takes beside `role` and `key`.
+/// The keys each role takes beside `role` and `key`, and `after_ms`, which every
+/// role takes (see [`DriverEntry`]).
 fn role_keys(role: &str) -> Option<&'static [&'static str]> {
     Some(match role {
-        "publish" => &["payload", "period_ms", "count"],
-        "put" => &["payload"],
-        "delete" => &[],
-        "subscribe" => &[],
+        "publish" => &["payload", "period_ms", "count", "after_ms"],
+        "put" => &["payload", "after_ms"],
+        "delete" => &["after_ms"],
+        "subscribe" => &["after_ms"],
         "get" => &["timeout_ms", "after_ms"],
-        "answer" => &["reply"],
+        "answer" => &["reply", "after_ms"],
         _ => return None,
     })
 }
 
-/// The document with every session's `driver` removed: what the shared rules read.
+/// The session keys only this process knows: the validator has neither.
+const LOCAL_KEYS: &[&str] = &["driver", "scouting"];
+
+/// The document with every session's local keys (`driver`, and `scouting` of
+/// [`crate::sessions_scouting`]) removed: what the shared rules read.
 ///
 /// The rules are the validator's and the two are held to one case file, so a key
 /// only this process knows is taken out before they run and judged here instead.
-pub(crate) fn without_drivers(doc: &Json5Value) -> Json5Value {
+pub(crate) fn without_local_keys(doc: &Json5Value) -> Json5Value {
     let Json5Value::Object(top) = doc else {
         return doc.clone();
     };
@@ -162,7 +170,7 @@ pub(crate) fn without_drivers(doc: &Json5Value) -> Json5Value {
                                 Json5Value::Object(entries) => Json5Value::Object(
                                     entries
                                         .iter()
-                                        .filter(|(k, _)| k != "driver")
+                                        .filter(|(k, _)| !LOCAL_KEYS.contains(&k.as_str()))
                                         .cloned()
                                         .collect(),
                                 ),
@@ -274,17 +282,15 @@ fn role_refusals(path: &str, role: &Json5Value, out: &mut Vec<Refusal>) {
         }
         "put" => needs_text("payload", out),
         "answer" => needs_text("reply", out),
-        "get" => {
-            optional_int("timeout_ms", out);
-            optional_int("after_ms", out);
-        }
+        "get" => optional_int("timeout_ms", out),
         _ => {}
     }
+    optional_int("after_ms", out);
 }
 
 /// The roles a session's `driver` names. Only called for a document the rules and
 /// [`driver_refusals`] passed, so a malformed entry is skipped and never reached.
-pub(crate) fn roles_of(session: &[(String, Json5Value)]) -> Vec<DriverRole> {
+pub(crate) fn roles_of(session: &[(String, Json5Value)]) -> Vec<DriverEntry> {
     let Some(Json5Value::Array(items)) = field(session, "driver") else {
         return Vec::new();
     };
@@ -301,7 +307,7 @@ pub(crate) fn roles_of(session: &[(String, Json5Value)]) -> Vec<DriverRole> {
         };
         let int = |name: &str| field(entry, name).and_then(positive_int);
         let key = text("key");
-        roles.push(match field(entry, "role").and_then(as_str) {
+        let role = match field(entry, "role").and_then(as_str) {
             Some("publish") => DriverRole::Publish {
                 key,
                 payload: text("payload"),
@@ -317,13 +323,16 @@ pub(crate) fn roles_of(session: &[(String, Json5Value)]) -> Vec<DriverRole> {
             Some("get") => DriverRole::Get {
                 key,
                 timeout_ms: int("timeout_ms").unwrap_or(DEFAULT_GET_TIMEOUT_MS),
-                after_ms: int("after_ms").unwrap_or(0),
             },
             Some("answer") => DriverRole::Answer {
                 key,
                 reply: text("reply"),
             },
             _ => continue,
+        };
+        roles.push(DriverEntry {
+            role,
+            after_ms: int("after_ms").unwrap_or(0),
         });
     }
     roles
@@ -338,14 +347,14 @@ pub(crate) fn roles_of(session: &[(String, Json5Value)]) -> Vec<DriverRole> {
 pub(crate) fn start(
     name: &str,
     session: &TokioSession,
-    roles: &[DriverRole],
+    roles: &[DriverEntry],
 ) -> Vec<tokio::task::JoinHandle<()>> {
     roles
         .iter()
         .cloned()
-        .map(|role| {
+        .map(|entry| {
             let (name, session) = (name.to_string(), session.clone());
-            tokio::task::spawn_local(async move { play(&name, &session, role).await })
+            tokio::task::spawn_local(async move { play(&name, &session, entry).await })
         })
         .collect()
 }
@@ -388,10 +397,15 @@ fn emit(name: &str, session: &TokioSession, role: &str, key: &str, kind: SampleK
 
 /// Play one role to its end. A role that holds something (a subscriber, a
 /// queryable) holds it until the task is aborted at the session's end.
-async fn play(name: &str, session: &TokioSession, role: DriverRole) {
+async fn play(name: &str, session: &TokioSession, entry: DriverEntry) {
+    let DriverEntry { role, after_ms } = entry;
     let word = role.word();
     if !established(name, word, session).await {
         return;
+    }
+    // The hold the entry asked for, after the session is up: see [`DriverEntry`].
+    if after_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(after_ms)).await;
     }
     match role {
         DriverRole::Publish {
@@ -476,14 +490,7 @@ async fn play(name: &str, session: &TokioSession, role: DriverRole) {
                 Err(e) => say(name, word, &format!("refused key={key}: {e}")),
             }
         }
-        DriverRole::Get {
-            key,
-            timeout_ms,
-            after_ms,
-        } => {
-            if after_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(after_ms)).await;
-            }
+        DriverRole::Get { key, timeout_ms } => {
             let (replies, finals) = (name.to_string(), name.to_string());
             let timeout = u32::try_from(timeout_ms).unwrap_or(u32::MAX);
             let asked = session.query(
@@ -548,7 +555,7 @@ mod tests {
     fn every_role_is_accepted_and_read_into_itself() {
         let doc = json5::parse(&with_role(
             r#"{ role: "publish", key: "d/p", payload: "x", period_ms: 5, count: 3 },
-               { role: "put", key: "d/u", payload: "y" },
+               { role: "put", key: "d/u", payload: "y", after_ms: 7 },
                { role: "delete", key: "d/u" },
                { role: "subscribe", key: "d/**" },
                { role: "get", key: "d/q", timeout_ms: 9, after_ms: 4 },
@@ -566,23 +573,34 @@ mod tests {
             panic!("a session");
         };
         let roles = roles_of(session);
-        let words: BTreeSet<&str> = roles.iter().map(DriverRole::word).collect();
+        let words: BTreeSet<&str> = roles.iter().map(|e| e.role.word()).collect();
         assert_eq!(words, role_words());
         assert_eq!(
             roles[0],
-            DriverRole::Publish {
-                key: "d/p".into(),
-                payload: "x".into(),
-                period_ms: 5,
-                count: Some(3),
+            DriverEntry {
+                role: DriverRole::Publish {
+                    key: "d/p".into(),
+                    payload: "x".into(),
+                    period_ms: 5,
+                    count: Some(3),
+                },
+                after_ms: 0,
             }
+        );
+        // The hold is common to every role, and absent means none.
+        assert_eq!(roles[1].after_ms, 7, "a put takes it");
+        assert_eq!(
+            roles[2].after_ms, 0,
+            "and a role that names none starts at once"
         );
         assert_eq!(
             roles[4],
-            DriverRole::Get {
-                key: "d/q".into(),
-                timeout_ms: 9,
-                after_ms: 4
+            DriverEntry {
+                role: DriverRole::Get {
+                    key: "d/q".into(),
+                    timeout_ms: 9,
+                },
+                after_ms: 4,
             }
         );
     }
@@ -657,7 +675,7 @@ mod tests {
         );
     }
 
-    /// `without_drivers` leaves everything else of the document alone, which is
+    /// `without_local_keys` leaves everything else of the document alone, which is
     /// what keeps the shared rules and the validator's case file the same.
     #[test]
     fn removing_the_drivers_changes_nothing_else() {
@@ -667,6 +685,6 @@ mod tests {
                 connect: { endpoints: ["tcp/127.0.0.1:7447"] } } ] }"#,
         )
         .expect("parses");
-        assert_eq!(without_drivers(&with), without);
+        assert_eq!(without_local_keys(&with), without);
     }
 }

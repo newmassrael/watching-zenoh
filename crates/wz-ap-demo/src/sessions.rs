@@ -24,6 +24,11 @@
 //! }
 //! ```
 //!
+//! A unicast session may also carry `driver` ([`crate::sessions_driver`], the
+//! traffic it generates) and `scouting` ([`crate::sessions_scouting`], the
+//! Scouts it answers). Neither is a deploy key: both are taken out before the
+//! shared rules read the document and judged on their own.
+//!
 //! # One rule set
 //!
 //! The rules are `deploy_sessions.py`'s, read in its AP column (an AP session's
@@ -159,7 +164,10 @@ pub(crate) struct SessionSpec {
     pub(crate) link: SessionLink,
     /// The traffic this session generates once it serves (see
     /// [`crate::sessions_driver`]); empty for a session that only holds its link.
-    pub(crate) driver: Vec<crate::sessions_driver::DriverRole>,
+    pub(crate) driver: Vec<crate::sessions_driver::DriverEntry>,
+    /// The scouting group this session answers Scouts on (see
+    /// [`crate::sessions_scouting`]); `None` for a session that is not to be found.
+    pub(crate) scouting: Option<crate::args::ScoutSocketArgs>,
 }
 
 /// Every session of a document that passed the rules, in start order.
@@ -175,6 +183,8 @@ pub(crate) struct BuildCapabilities {
     pub(crate) multicast: bool,
     /// An `#iface=` tail on a group endpoint (`locator-iface`).
     pub(crate) iface: bool,
+    /// A session that answers Scouts (`scouting-responder`).
+    pub(crate) scouting_responder: bool,
     /// The unicast link schemes compiled in.
     pub(crate) schemes: Vec<&'static str>,
 }
@@ -184,6 +194,7 @@ impl BuildCapabilities {
         BuildCapabilities {
             multicast: cfg!(feature = "transport-multicast"),
             iface: cfg!(feature = "locator-iface"),
+            scouting_responder: cfg!(feature = "scouting-responder"),
             schemes: wz::runtime_tokio::compiled_in_link_schemes().to_vec(),
         }
     }
@@ -276,12 +287,14 @@ pub(crate) fn read_sessions_document(text: &str) -> Result<SessionsPlan, Vec<Ref
             "required, a list of the sessions to start",
         ));
     }
-    // The shared rules are the validator's, which has no `driver`: they read the
-    // document with it taken out, and the driver is judged on its own.
-    refusals.extend(rule_refusals(&crate::sessions_driver::without_drivers(
+    // The shared rules are the validator's, which has neither `driver` nor
+    // `scouting`: they read the document with both taken out, and each is judged
+    // on its own.
+    refusals.extend(rule_refusals(&crate::sessions_driver::without_local_keys(
         &doc,
     )));
     refusals.extend(crate::sessions_driver::driver_refusals(&doc));
+    refusals.extend(crate::sessions_scouting::scouting_refusals(&doc));
     if refusals.is_empty() {
         Ok(plan_of(&doc))
     } else {
@@ -295,6 +308,13 @@ impl SessionsPlan {
         let mut out = Vec::new();
         for s in &self.sessions {
             let path = format!("sessions[{}]", s.index);
+            if s.scouting.is_some() && !caps.scouting_responder {
+                out.push(Refusal::new(
+                    format!("{path}.scouting.multicast.listen"),
+                    "answering Scouts needs the `scouting-responder` build feature (build: \
+                     cargo build -p wz-ap-demo --features scouting-responder)",
+                ));
+            }
             match &s.link {
                 SessionLink::Group { endpoint, .. } => {
                     if !caps.multicast {
@@ -834,6 +854,7 @@ fn plan_of(doc: &Json5Value) -> SessionsPlan {
                 zid,
                 link,
                 driver: crate::sessions_driver::roles_of(s),
+                scouting: crate::sessions_scouting::scouting_of(s),
             }
         })
         .collect();
@@ -955,6 +976,7 @@ mod reader_tests {
                         endpoints: vec!["tcp/127.0.0.1:7447".into(), "tcp/127.0.0.1:7448".into()],
                     },
                     driver: Vec::new(),
+                    scouting: None,
                 },
                 SessionSpec {
                     index: 1,
@@ -967,6 +989,7 @@ mod reader_tests {
                         lease_ms: DEFAULT_GROUP_LEASE_MS,
                     },
                     driver: Vec::new(),
+                    scouting: None,
                 },
                 SessionSpec {
                     index: 2,
@@ -978,6 +1001,7 @@ mod reader_tests {
                         max_sessions: 3,
                     },
                     driver: Vec::new(),
+                    scouting: None,
                 },
             ]
         );
@@ -1074,6 +1098,7 @@ mod reader_tests {
         BuildCapabilities {
             multicast,
             iface,
+            scouting_responder: true,
             schemes: vec!["tcp", "udp", "tls"],
         }
     }

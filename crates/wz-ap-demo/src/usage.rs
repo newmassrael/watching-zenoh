@@ -105,8 +105,19 @@ pub(crate) fn print_usage() {
     eprintln!("                             traffic it generates once it serves: roles publish");
     eprintln!("                             (key, payload, period_ms, count), put (key,");
     eprintln!("                             payload), delete (key), subscribe (key), get (key,");
-    eprintln!("                             timeout_ms) and answer (key, reply). Each prints");
-    eprintln!("                             `DRIVER <role> ...` lines. Not a deploy key.");
+    eprintln!("                             timeout_ms) and answer (key, reply); any role takes");
+    eprintln!("                             after_ms, how long to hold it once the session is up.");
+    eprintln!("                             Each prints `DRIVER <role> ...` lines. Not a deploy");
+    eprintln!("                             key.");
+    eprintln!("                             A unicast session may carry `scouting: {{ multicast:");
+    eprintln!(
+        "                             {{ listen: true, address, interface, ttl }} }}`, zenoh's"
+    );
+    eprintln!("                             own keys, to answer Scouts on the group: a dialling");
+    eprintln!("                             session answers as a client with no locator, a");
+    eprintln!("                             listening one advertises the address it bound. Needs");
+    eprintln!("                             the `scouting-responder` build feature. Not a deploy");
+    eprintln!("                             key.");
     eprintln!("    --check-sessions <file>  judge the same document and start nothing: no socket");
     eprintln!("                             is opened. Exit 0 accepted, 2 refused (every refusal");
     eprintln!("                             by its key path, as --sessions prints them), 3 the");

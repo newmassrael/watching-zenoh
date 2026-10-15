@@ -163,10 +163,12 @@ fn the_roles_of_two_sessions_meet_over_a_real_link() {
     let ready = listener.expect_line("READY peer unicast listening on");
     let addr = listening_on(&ready);
 
-    // The `get` is held (`after_ms`) after the link opens: the listener's queryable was
-    // declared a moment before, and a question asked at that instant is answered with a
-    // final and no reply on a slow host. The hosted run that showed it printed `get asked`
-    // and `get final` and no `get reply`.
+    // Every client role is held (`after_ms`) after the link opens. The listener declares its
+    // subscriber and queryable only once the client is accepted, so a put, a delete or a
+    // question issued at that instant reaches a peer whose declaration the client has not heard
+    // yet and is lost, with no error. The hosted run that showed it printed `get asked` and
+    // `get final` and no `get reply`; the next run, with only the get held, lost the put and the
+    // delete. The delete is held longest so it follows the put it deletes.
     let client_doc = dir.write(
         "client.json5",
         &format!(
@@ -174,9 +176,9 @@ fn the_roles_of_two_sessions_meet_over_a_real_link() {
                 {{ name: "out", mode: "client", transport: "unicast", zid: "dd02",
                   connect: {{ endpoints: ["{addr}"] }},
                   driver: [
-                    {{ role: "publish", key: "demo/in/tick", payload: "hi", period_ms: 20, count: 3 }},
-                    {{ role: "put", key: "demo/in/once", payload: "abc" }},
-                    {{ role: "delete", key: "demo/in/once" }},
+                    {{ role: "publish", key: "demo/in/tick", payload: "hi", period_ms: 20, count: 3, after_ms: 1000 }},
+                    {{ role: "put", key: "demo/in/once", payload: "abc", after_ms: 1000 }},
+                    {{ role: "delete", key: "demo/in/once", after_ms: 1300 }},
                     {{ role: "get", key: "demo/q", timeout_ms: 5000, after_ms: 1000 }},
                   ] }} ] }}"#
         ),
