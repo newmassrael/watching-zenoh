@@ -21,7 +21,7 @@
 //!       { role: "publish",   key: "demo/out", payload: "tick", period_ms: 1000, count: 5 },
 //!       { role: "put",       key: "demo/one", payload: "x" },
 //!       { role: "delete",    key: "demo/one" },
-//!       { role: "get",       key: "demo/q",   timeout_ms: 2000 },
+//!       { role: "get",       key: "demo/q",   timeout_ms: 2000, after_ms: 500 },
 //!     ] },
 //! ]
 //! ```
@@ -73,6 +73,7 @@ const DRIVER_KEYS: &[&str] = &[
     "count",
     "reply",
     "timeout_ms",
+    "after_ms",
 ];
 
 /// How long a `get` waits for its replies when the document names no timeout.
@@ -95,8 +96,21 @@ pub(crate) enum DriverRole {
     Delete { key: String },
     /// Hold a subscriber on `key`, printing each sample.
     Subscribe { key: String },
-    /// Ask `key` once and print each reply, waiting at most `timeout_ms`.
-    Get { key: String, timeout_ms: u64 },
+    /// Ask `key` once and print each reply, waiting at most `timeout_ms`, and
+    /// holding the question `after_ms` after the session is Established (0 asks
+    /// at once).
+    ///
+    /// The hold is the document's form of `--query-after-ms`, and it is there for
+    /// the same reason: the declarations a peer made are still arriving when the
+    /// session opens, so a question asked at that instant can be answered with a
+    /// final and no reply by a queryable that was declared a moment before. A
+    /// harness that asks a node it has just connected to says how long it lets the
+    /// link settle.
+    Get {
+        key: String,
+        timeout_ms: u64,
+        after_ms: u64,
+    },
     /// Hold a queryable on `key` that answers every query with `reply`.
     Answer { key: String, reply: String },
 }
@@ -122,7 +136,7 @@ fn role_keys(role: &str) -> Option<&'static [&'static str]> {
         "put" => &["payload"],
         "delete" => &[],
         "subscribe" => &[],
-        "get" => &["timeout_ms"],
+        "get" => &["timeout_ms", "after_ms"],
         "answer" => &["reply"],
         _ => return None,
     })
@@ -260,7 +274,10 @@ fn role_refusals(path: &str, role: &Json5Value, out: &mut Vec<Refusal>) {
         }
         "put" => needs_text("payload", out),
         "answer" => needs_text("reply", out),
-        "get" => optional_int("timeout_ms", out),
+        "get" => {
+            optional_int("timeout_ms", out);
+            optional_int("after_ms", out);
+        }
         _ => {}
     }
 }
@@ -300,6 +317,7 @@ pub(crate) fn roles_of(session: &[(String, Json5Value)]) -> Vec<DriverRole> {
             Some("get") => DriverRole::Get {
                 key,
                 timeout_ms: int("timeout_ms").unwrap_or(DEFAULT_GET_TIMEOUT_MS),
+                after_ms: int("after_ms").unwrap_or(0),
             },
             Some("answer") => DriverRole::Answer {
                 key,
@@ -458,7 +476,14 @@ async fn play(name: &str, session: &TokioSession, role: DriverRole) {
                 Err(e) => say(name, word, &format!("refused key={key}: {e}")),
             }
         }
-        DriverRole::Get { key, timeout_ms } => {
+        DriverRole::Get {
+            key,
+            timeout_ms,
+            after_ms,
+        } => {
+            if after_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(after_ms)).await;
+            }
             let (replies, finals) = (name.to_string(), name.to_string());
             let timeout = u32::try_from(timeout_ms).unwrap_or(u32::MAX);
             let asked = session.query(
@@ -526,7 +551,7 @@ mod tests {
                { role: "put", key: "d/u", payload: "y" },
                { role: "delete", key: "d/u" },
                { role: "subscribe", key: "d/**" },
-               { role: "get", key: "d/q", timeout_ms: 9 },
+               { role: "get", key: "d/q", timeout_ms: 9, after_ms: 4 },
                { role: "answer", key: "d/q", reply: "z" }"#,
         ))
         .expect("parses");
@@ -556,7 +581,8 @@ mod tests {
             roles[4],
             DriverRole::Get {
                 key: "d/q".into(),
-                timeout_ms: 9
+                timeout_ms: 9,
+                after_ms: 4
             }
         );
     }
@@ -598,6 +624,13 @@ mod tests {
             refused(&with_role(r#"{ role: "get", key: "d/q", timeout_ms: 0 }"#)),
             vec!["sessions[0].driver[0].timeout_ms: must be a positive integer"]
         );
+        // The hold before a question is optional, and a zero is spelled by leaving
+        // it out.
+        assert_eq!(
+            refused(&with_role(r#"{ role: "get", key: "d/q", after_ms: 0 }"#)),
+            vec!["sessions[0].driver[0].after_ms: must be a positive integer"]
+        );
+        assert!(refused(&with_role(r#"{ role: "get", key: "d/q", after_ms: 5 }"#)).is_empty());
     }
 
     /// A multicast session takes no driver, and a `driver` that is not a list is

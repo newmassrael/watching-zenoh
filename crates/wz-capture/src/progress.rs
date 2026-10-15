@@ -21,8 +21,9 @@
 //!
 //! # What a stopped walk leaves behind
 //!
-//! The memory a walk keeps between calls (see [`crate::CensusMemory`] and
-//! [`crate::fields_json::FieldsMemory`]) is dropped, so the next call begins that
+//! The memory a walk keeps between calls (see [`crate::CensusMemory`] and the
+//! field document's own `FieldsMemory`, which is not linked: its module exists only
+//! where the field document is built) is dropped, so the next call begins that
 //! memory again. That costs what a first call costs and is never a wrong answer;
 //! the alternative, a fold that kept the messages it had taken and forgot where it
 //! stopped, would fold them twice.

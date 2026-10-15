@@ -387,10 +387,21 @@ def is_test_support(crate):
         or crate.endswith("-tests")
 
 
+# An attribute that makes its item exist ONLY in a test build: `cfg(test)`, and
+# `cfg(all(test, <anything>))`, which is how a test module that also needs a feature
+# is declared (`wz-capture`'s `window_tests`). `all` with `test` first is the one
+# conjunction this tree writes; `any(test, ..)` and `not(test)` are NOT test-only and
+# are not matched. Read as `cfg(test)` alone, a feature-gated test file was a
+# PRODUCER: a window test's `"{link:?} size {size}: ..."` format covered the needle
+# "view size of" across its placeholders, and a barrier declaration that explained
+# that needle went stale (hosted run 38716450481, Layer C0s).
+CFG_TEST = (r"#\[\s*cfg\s*\(\s*(?:test|all\s*\(\s*test\s*(?:,[^\]]*?)?\))\s*\)\s*\]")
+
+
 def test_spans(code):
     """Spans of items under `#[cfg(test)]` (a `mod`, a fn, an impl)."""
     spans = []
-    for m in re.finditer(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]", code):
+    for m in re.finditer(CFG_TEST, code):
         i, paren = m.end(), 0
         while i < len(code):
             c = code[i]
@@ -415,8 +426,7 @@ def test_module_files(path, code):
     """Files a `#[cfg(test)] mod name;` declaration points at."""
     out = set()
     p = ROOT / path
-    for m in re.finditer(
-            r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub\s+)?mod\s+(\w+)\s*;", code):
+    for m in re.finditer(CFG_TEST + r"\s*(?:pub\s+)?mod\s+(\w+)\s*;", code):
         name = m.group(1)
         out.add(p.parent / (name + ".rs"))
         out.add(p.parent / name / "mod.rs")
@@ -1170,6 +1180,17 @@ def selftest():
     spans = test_spans(code)
     expect("a #[cfg(test)] mod is a span that excludes its literals",
            len(spans) == 1 and "only in a test" not in code[:spans[0][0]])
+
+    # A test module that also needs a feature is still a test module, and a module
+    # that merely MIGHT be a test build's is not.
+    gated = rust_comments.strip_comments(
+        '#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]\n'
+        'mod window_tests;\n#[cfg(any(test, feature = "x"))]\nmod shared;\n'
+        '#[cfg(not(test))]\nmod other;\n', blank_literals=True)
+    named = {p.name for p in test_module_files("crates/fx/src/lib.rs", gated)}
+    expect("a cfg(all(test, ..)) module file is a test file, any/not(test) are not",
+           "window_tests.rs" in named and "shared.rs" not in named
+           and "other.rs" not in named)
 
     # The wrapper derivation reaches a forwarding fn and its callers, and it does
     # not mistake an unrelated `wait` for one.
