@@ -274704,6 +274704,46 @@
         "Everything in the carry of the previous round stands."
       ]
     },
+    "Round 3347": {
+      "decision_summary": "Six consumer asks of one wave land together on the dissect and demo surfaces, verified once at the end and not item by item. A handle keeps a memory per selector up to a count, default one (ABI 40). The sessions demo has a check that judges a file and starts nothing, exit 0, 2 or 3. A ResponseFinal entry names the request it closed, by kind, row and place in the row, and an orphan says so (fields document revision 37). The since document takes a window of sequence numbers (ABI 41). Long calls report progress and can be stopped, and a stop drops the memory it was advancing (ABI 42). A sessions file may give a session a traffic driver with six roles. CORRECTION to Round 3346: a drop figure of 0 means a stated zero OR a pcapng with no statistics block; null is a classic pcap. NOT claimed: the hosted run, the memory a window or a selector memory costs, and that any device reassembles fragments.",
+      "changes_bullets": [
+        "crates/wz-capture: bounded_slots, progress, closes and window tests; ordered_fold, census_json and fields_json take selector memories, a window, a pairing and progress.",
+        "crates/wz-capi-dissect: wz_dissect_live_set_selector_memories, fields_since_window and set_progress (ABI 40 to 42), ERR_CANCELLED.",
+        "crates/wz-ap-demo: --check-sessions and the sessions driver key; scripts/run-ci.sh pins two new test targets."
+      ],
+      "verification_bullets": [
+        "On a build host, once for the whole wave: fmt, clippy in six shapes, lib tests 1199 / 1477 / 965, capi 207, sessions and driver binaries, layers C0 C1bo C1bt C1bz C1bn C1ay, all rc 0.",
+        "NOT verified here: the hosted run of these commits; an earlier hosted run of Round 3345 was green."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumers the shas and the one meaning that changed: an orphan final is an object of nulls, not null.",
+        "Open: the client role does not answer Scout, and a put larger than the negotiated batch is not fragmented in wz-capi-c."
+      ],
+      "publishable_decision_summary": "Six consumer asks of one wave land together on the dissect and demo surfaces, verified once at the end and not item by item. A handle keeps a memory per selector up to a count, default one (ABI 40). The sessions demo has a check that judges a file and starts nothing, exit 0, 2 or 3. A ResponseFinal entry names the request it closed, by kind, row and place in the row, and an orphan says so (fields document revision 37). The since document takes a window of sequence numbers (ABI 41). Long calls report progress and can be stopped, and a stop drops the memory it was advancing (ABI 42). A sessions file may give a session a traffic driver with six roles. CORRECTION to Round 3346: a drop figure of 0 means a stated zero OR a pcapng with no statistics block; null is a classic pcap. NOT claimed: the hosted run, the memory a window or a selector memory costs, and that any device reassembles fragments.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture: bounded_slots, progress, closes and window tests; ordered_fold, census_json and fields_json take selector memories, a window, a pairing and progress.",
+        "crates/wz-capi-dissect: wz_dissect_live_set_selector_memories, fields_since_window and set_progress (ABI 40 to 42), ERR_CANCELLED.",
+        "crates/wz-ap-demo: --check-sessions and the sessions driver key; scripts/run-ci.sh pins two new test targets."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, once for the whole wave: fmt, clippy in six shapes, lib tests 1199 / 1477 / 965, capi 207, sessions and driver binaries, layers C0 C1bo C1bt C1bz C1bn C1ay, all rc 0.",
+        "NOT verified here: the hosted run of these commits; an earlier hosted run of Round 3345 was green."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumers the shas and the one meaning that changed: an orphan final is an object of nulls, not null.",
+        "Open: the client role does not answer Scout, and a put larger than the negotiated batch is not fragmented in wz-capi-c."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
