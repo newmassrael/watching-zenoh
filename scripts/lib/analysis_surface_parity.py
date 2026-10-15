@@ -544,6 +544,16 @@ ONLY_CAPI = {
         "second call to ask the question in.",
         (),
     ),
+    "how many selectors a handle keeps a continuing memory for": (
+        "wz_dissect_live_set_selector_memories",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and alternates between selectors on one open handle would otherwise find "
+        "the memory of the census and of `selection_since` emptied by every change "
+        "of selector. The count is state the handle alone holds. The command line "
+        "analyses a capture once with one selector, so it has no second call and "
+        "no selector to alternate with.",
+        (),
+    ),
     "a protected frame's header compared with the values a caller expects": (
         "wz_dissect_e2e_open_expecting",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

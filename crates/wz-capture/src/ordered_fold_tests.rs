@@ -395,6 +395,82 @@ fn another_selector_begins_again_and_the_same_one_continues() {
     assert_eq!(delta(before, after).restarts, PLANES);
 }
 
+/// With two memories, two selectors asked in turn each CONTINUE their own folds:
+/// only the first ask of each begins, every later ask folds just the messages that
+/// arrived since that selector was last asked, and every answer equals a fresh fold.
+#[test]
+fn two_memories_let_two_selectors_alternate_without_beginning_again() {
+    let mut g = Growing::new(Dissection::new(), "key == demo/temp");
+    assert_eq!(g.memory.set_selector_memories(2), 2);
+    let first = Filter::parse("key == demo/temp").expect("the selector parses");
+    let second = Filter::parse("kind == query").expect("the selector parses");
+    g.udp_wire(true, 40000, 7447, &init_wire(ZID_A));
+    g.udp_wire(false, 40000, 7447, &init_wire(ZID_B));
+    let mut restarts = 0;
+    for (i, record) in session_records().iter().take(8).enumerate() {
+        g.udp(i % 2 == 0, 40000, 7447, record);
+        for (name, filter) in [("first", &first), ("second", &second)] {
+            g.filter = filter.clone();
+            let (before, after) = g.ask(&alloc::format!("{name} selector, step {i}"));
+            restarts += delta(before, after).restarts;
+        }
+    }
+    assert_eq!(
+        restarts,
+        2 * PLANES,
+        "each selector begins its planes once and continues them after"
+    );
+}
+
+/// A third selector takes the place of the least recently used one, and that one
+/// begins again when it is next asked; the one asked more recently is kept.
+#[test]
+fn the_least_recently_used_selector_gives_up_its_memory() {
+    let mut g = Growing::new(Dissection::new(), "key == demo/temp");
+    g.memory.set_selector_memories(2);
+    let a = Filter::parse("key == demo/temp").expect("the selector parses");
+    let b = Filter::parse("kind == query").expect("the selector parses");
+    let c = Filter::parse("kind == reply").expect("the selector parses");
+    g.udp_wire(true, 40000, 7447, &init_wire(ZID_A));
+    g.udp_wire(false, 40000, 7447, &init_wire(ZID_B));
+    for filter in [&a, &b, &a, &c] {
+        g.filter = filter.clone();
+        g.ask("filling the memories");
+    }
+    // `a` was used after `b`, so `c` took `b`'s place.
+    assert_eq!(g.memory.selector_evictions(), 1, "c took b's place");
+    assert_eq!(g.memory.selectors_in_use(), 2, "two memories, both in use");
+    g.filter = a.clone();
+    let (before, after) = g.ask("a is still kept");
+    assert_eq!(delta(before, after).restarts, 0);
+    g.filter = c.clone();
+    let (before, after) = g.ask("c is still kept");
+    assert_eq!(delta(before, after).restarts, 0);
+    g.filter = b.clone();
+    let (before, after) = g.ask("b was given up");
+    assert_eq!(delta(before, after).restarts, PLANES);
+    assert_eq!(
+        g.memory.selector_evictions(),
+        2,
+        "b came back and took the place of the one asked longest ago"
+    );
+}
+
+/// The count is held to what a handle may keep, and lowering it gives up the
+/// least recently used first.
+#[test]
+fn the_count_of_memories_is_held_to_its_bounds() {
+    let mut memory = CensusMemory::new();
+    assert_eq!(memory.selector_memories(), 1, "one is the default");
+    assert_eq!(memory.set_selector_memories(0), 1, "none is held to one");
+    assert_eq!(
+        memory.set_selector_memories(usize::MAX),
+        crate::MAX_SELECTOR_MEMORIES
+    );
+    assert_eq!(memory.set_selector_memories(3), 3);
+    assert_eq!(memory.selector_memories(), 3);
+}
+
 /// A capture with traffic in both directions of a stream flow and a datagram
 /// flow, asked after every packet with a selector that reads a `zid` prefix: the
 /// grouping the selector is read against changes as nodes are named, and the

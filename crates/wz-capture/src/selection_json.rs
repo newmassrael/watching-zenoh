@@ -325,6 +325,55 @@ impl SelectionMemory {
     }
 }
 
+/// The [`SelectionMemory`] of each selector a handle has been asked under, up to
+/// a count, the most recently used kept.
+///
+/// A selection memory is for ONE selector: it holds the words that selector said.
+/// A caller that alternates between selectors therefore needs one per selector,
+/// or every change of selector empties the memory and the next call writes every
+/// row as new. With one memory, which is the default, a change of selector does
+/// exactly that. A selector is told apart by its text, as it always was.
+#[derive(Debug, Clone, Default)]
+pub struct SelectionMemories {
+    slots: crate::bounded_slots::BoundedSlots<String, SelectionMemory>,
+}
+
+impl SelectionMemories {
+    /// How many selectors' memories are kept at once.
+    pub fn capacity(&self) -> usize {
+        self.slots.capacity()
+    }
+
+    /// Keep up to `n` selectors' memories, `n` held to
+    /// `1..=`[`crate::MAX_SELECTOR_MEMORIES`], and return the number in effect.
+    /// Lowering it gives up the least recently used first.
+    pub fn set_capacity(&mut self, n: usize) -> usize {
+        self.slots.set_capacity(n)
+    }
+
+    /// The memory of `selector`, made empty if it has none, and marked the most
+    /// recently used.
+    pub fn for_selector(&mut self, selector: &str) -> &mut SelectionMemory {
+        self.slots
+            .touch(&String::from(selector), SelectionMemory::default)
+    }
+
+    /// How many selectors have a memory now.
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether no selector has a memory.
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// How many selectors' memories have been given up to make room.
+    pub fn evictions(&self) -> u64 {
+        self.slots.evicted()
+    }
+}
+
 /// The cursor window of a since document: the number the caller gave, and the
 /// highest number the handle had issued when the document was made.
 #[derive(Debug, Clone, Copy)]
@@ -1381,5 +1430,75 @@ pub(crate) mod tests {
         ] {
             assert_eq!(letters(&d, selector), expected, "{selector}");
         }
+    }
+}
+
+/// What the per-selector memories keep and give up.
+#[cfg(test)]
+mod memories_tests {
+    use super::*;
+    use crate::fields_json::RowVerdict;
+
+    fn said(memories: &mut SelectionMemories, selector: &str, row: u64) {
+        memories
+            .for_selector(selector)
+            .said
+            .insert(row, RowVerdict::Yes);
+    }
+
+    fn held(memories: &mut SelectionMemories, selector: &str) -> usize {
+        memories.for_selector(selector).len()
+    }
+
+    /// One memory is the default and a second selector empties it, which is how a
+    /// handle behaved before there were several.
+    #[test]
+    fn one_memory_is_emptied_by_another_selector() {
+        let mut m = SelectionMemories::default();
+        assert_eq!(m.capacity(), 1);
+        said(&mut m, "key == demo/a", 1);
+        assert_eq!(held(&mut m, "key == demo/a"), 1);
+        assert_eq!(held(&mut m, "key == demo/b"), 0);
+        assert_eq!(held(&mut m, "key == demo/a"), 0, "a was given up");
+        assert_eq!(m.len(), 1);
+    }
+
+    /// With two, each selector keeps what it said, and a third gives up the least
+    /// recently used one.
+    #[test]
+    fn two_memories_each_keep_their_words_and_the_oldest_goes() {
+        let mut m = SelectionMemories::default();
+        assert_eq!(m.set_capacity(2), 2);
+        said(&mut m, "a", 1);
+        said(&mut m, "b", 2);
+        said(&mut m, "a", 3);
+        assert_eq!(held(&mut m, "a"), 2);
+        assert_eq!(held(&mut m, "b"), 1);
+        // `b` was asked last, so `a` is the oldest and `c` takes its place.
+        assert_eq!(held(&mut m, "c"), 0);
+        assert_eq!(m.len(), 2);
+        assert_eq!(held(&mut m, "b"), 1, "b was kept");
+        assert_eq!(held(&mut m, "a"), 0, "a was given up");
+    }
+
+    /// The count is held to its bounds, and lowering it drops the oldest.
+    #[test]
+    fn the_capacity_is_bounded_and_lowering_drops_the_oldest() {
+        let mut m = SelectionMemories::default();
+        assert_eq!(m.set_capacity(0), 1);
+        assert_eq!(m.set_capacity(usize::MAX), crate::MAX_SELECTOR_MEMORIES);
+        m.set_capacity(3);
+        said(&mut m, "a", 1);
+        said(&mut m, "b", 2);
+        said(&mut m, "c", 3);
+        assert_eq!(
+            m.evictions(),
+            0,
+            "nothing was given up while there was room"
+        );
+        assert_eq!(m.set_capacity(1), 1);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.evictions(), 2, "lowering the count gave up two");
+        assert_eq!(held(&mut m, "c"), 1, "the newest is the one kept");
     }
 }

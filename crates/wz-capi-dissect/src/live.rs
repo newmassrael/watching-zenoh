@@ -330,15 +330,16 @@ pub struct LiveDissection {
     /// consumer must not confuse with each other, and a row number is a count of
     /// rows issued, which no other id is.
     next_seq: u64,
-    /// The words [`Self::selection_since`] said last time, and the selector they
-    /// were said under: what lets it report an earlier row whose word has moved.
-    /// On the handle because the handle is the only thing that knows what it has
-    /// said, as `cursor` is for what it has read.
-    selection_said: wz_capture::selection_json::SelectionMemory,
-    selection_selector: Option<String>,
+    /// The words [`Self::selection_since`] said last time, per selector: what lets
+    /// it report an earlier row whose word has moved. On the handle because the
+    /// handle is the only thing that knows what it has said, as `cursor` is for
+    /// what it has read. One selector's memory is the default; see
+    /// [`Self::set_selector_memories`].
+    selection_said: wz_capture::selection_json::SelectionMemories,
     /// The census planes' folds, kept between calls of [`Self::census`] for the
-    /// selector it was last asked under, so a census drawn again folds the
-    /// messages that arrived and not the whole capture.
+    /// selectors it was asked under (one unless [`Self::set_selector_memories`]
+    /// says more), so a census drawn again folds the messages that arrived and not
+    /// the whole capture.
     ///
     /// Behind a lock because `census` takes `&self` and a const handle may be
     /// read from more than one thread: two callers serialise on the memory and
@@ -476,8 +477,7 @@ impl LiveDissection {
             flow_ids: BTreeMap::new(),
             next_id: 0,
             next_seq: 1,
-            selection_said: wz_capture::selection_json::SelectionMemory::default(),
-            selection_selector: None,
+            selection_said: wz_capture::selection_json::SelectionMemories::default(),
             census_memory: std::sync::Mutex::new(wz_capture::CensusMemory::new()),
             fields_memory: wz_capture::fields_json::FieldsMemory::new(),
             lost: 0,
@@ -1068,11 +1068,14 @@ impl LiveDissection {
     ///
     /// # The selector
     ///
-    /// The memory is for ONE selector, named by its text. A different text starts
-    /// it again: nothing is revised, and every row after the cursor is new, so the
-    /// caller asks from 0 after changing the selector. The text is compared as
-    /// given, so a selector that means the same thing in other words starts the
-    /// memory again too, which costs a full answer and never a wrong one.
+    /// A memory is for ONE selector, named by its text, and the handle keeps one
+    /// memory unless [`Self::set_selector_memories`] says more. A text with no
+    /// memory starts one: nothing is revised, and every row after the cursor is
+    /// new, so the caller asks from 0 after changing the selector. With one memory
+    /// that also empties the previous selector's; with several it does not, and
+    /// asking under the earlier selector again continues its words. The text is
+    /// compared as given, so a selector that means the same thing in other words
+    /// starts a memory too, which costs a full answer and never a wrong one.
     ///
     /// # Cost
     ///
@@ -1088,10 +1091,6 @@ impl LiveDissection {
         after_seq: u64,
     ) -> String {
         self.drain(&mut []);
-        if self.selection_selector.as_deref() != Some(selector) {
-            self.selection_said = wz_capture::selection_json::SelectionMemory::default();
-            self.selection_selector = Some(String::from(selector));
-        }
         let ids = HandleIds::of(self);
         // The highest number the handle has issued: the cursor to give next, as
         // for `fields_since`.
@@ -1104,8 +1103,45 @@ impl LiveDissection {
                 after_seq,
                 through_seq,
             },
-            &mut self.selection_said,
+            self.selection_said.for_selector(selector),
         )
+    }
+
+    /// KEEP THE MEMORIES OF UP TO `n` SELECTORS AT ONCE, for the census and for
+    /// [`Self::selection_since`], and return the number in effect: `n` held to
+    /// `1..=`[`wz_capture::MAX_SELECTOR_MEMORIES`].
+    ///
+    /// # Why
+    ///
+    /// A fold is a fact about ONE selector, so a handle that kept one memory threw
+    /// it away every time the caller changed selector, and a caller that
+    /// alternates between two paid the whole walk on every call. With `n`
+    /// memories each selector continues its own folds, and the selector asked
+    /// least recently gives its place up when more than `n` are in use.
+    ///
+    /// # The default is one, and nothing else changes
+    ///
+    /// A handle keeps one memory until this is called, which is what it did before
+    /// it existed: another selector starts the memory again. The documents are the
+    /// same bytes at any `n`; a memory only decides how much of the walk is done
+    /// again.
+    ///
+    /// # Cost
+    ///
+    /// A memory is the folded tables of its selector, not a copy of the capture.
+    /// How large that is depends on the capture and has not been measured here.
+    ///
+    /// Lowering `n` gives up the least recently used memories at once. `&mut`,
+    /// for [`Self::selection_since`]'s reason.
+    pub fn set_selector_memories(&mut self, n: usize) -> usize {
+        let census = self
+            .census_memory
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_selector_memories(n);
+        let selection = self.selection_said.set_capacity(n);
+        debug_assert_eq!(census, selection, "both memories hold to the same bounds");
+        census
     }
 
     /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience that a

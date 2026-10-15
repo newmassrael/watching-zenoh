@@ -1166,6 +1166,25 @@ static int check_follow_door(void) {
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle followed rc=%d", rc);
     rc = wz_dissect_live_followed(h, NULL);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out followed rc=%d", rc);
+    /* (ABI 40) -- the selector memories: nulls refused, `*out` untouched on a
+     * refusal, the count held to 1..=64 and the number in effect written. */
+    {
+        size_t in_effect = 999;
+        rc = wz_dissect_live_set_selector_memories(NULL, 2, &in_effect);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && in_effect == 999,
+              "null handle selector memories rc=%d out=%zu", rc, in_effect);
+        rc = wz_dissect_live_set_selector_memories(h, 2, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out selector memories rc=%d", rc);
+        rc = wz_dissect_live_set_selector_memories(h, 0, &in_effect);
+        CHECK(rc == WZ_DISSECT_OK && in_effect == 1,
+              "0 selector memories rc=%d in effect %zu", rc, in_effect);
+        rc = wz_dissect_live_set_selector_memories(h, 3, &in_effect);
+        CHECK(rc == WZ_DISSECT_OK && in_effect == 3,
+              "3 selector memories rc=%d in effect %zu", rc, in_effect);
+        rc = wz_dissect_live_set_selector_memories(h, 1000, &in_effect);
+        CHECK(rc == WZ_DISSECT_OK && in_effect == 64,
+              "1000 selector memories rc=%d in effect %zu", rc, in_effect);
+    }
     wz_dissect_live_close(h);
     return 0;
 }

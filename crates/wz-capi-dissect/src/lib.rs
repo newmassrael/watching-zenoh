@@ -382,6 +382,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 39, for `wz_dissect_live_followed`: how many bytes of the container
     // `wz_dissect_live_follow` has consumed, so a cut capture can be told from
     // one still growing.
+    // 40, for `wz_dissect_live_set_selector_memories`: how many selectors the
+    // census and `selection_since` keep a memory for at once, so a caller that
+    // alternates between selectors does not start the walk again on each call.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -399,7 +402,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 39;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 40;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4132,9 +4135,12 @@ pub unsafe extern "C" fn wz_dissect_live_selection(
 ///
 /// # The selector
 ///
-/// The memory is for ONE selector, named by its text. A different text starts it
-/// again: nothing is revised and every row after the cursor is new, so ask from `0`
-/// after changing the selector. An empty selector is the identity, as it is for
+/// A memory is for ONE selector, named by its text, and the handle keeps one
+/// unless [`wz_dissect_live_set_selector_memories`] says more. A text with no
+/// memory starts one: nothing is revised and every row after the cursor is new, so
+/// ask from `0` after changing the selector. With one memory that also empties
+/// the previous selector's; with several it does not. An empty selector is the
+/// identity, as it is for
 /// every door: rows carry their coordinates and no `selected`, and nothing is
 /// revised. A selector that does not parse is [`WZ_DISSECT_ERR_SELECTOR`].
 ///
@@ -4170,6 +4176,53 @@ pub unsafe extern "C" fn wz_dissect_live_selection_since(
     // SAFETY: caller contract above.
     let doc = unsafe { (*handle).selection_since(expr, &filter, after_seq) };
     write_string(doc, out)
+}
+
+/// (ABI 40) — HOW MANY SELECTORS THE HANDLE KEEPS A MEMORY FOR AT ONCE, for
+/// [`wz_dissect_live_census`] and [`wz_dissect_live_selection_since`].
+///
+/// # What it is for
+///
+/// Both doors continue where their last call stopped, and that memory is for ONE
+/// selector, because a fold is a fact about the selector it judged under. A
+/// caller that alternates between two selectors therefore found the memory empty
+/// on every call and paid for the whole walk each time. With `n` memories each
+/// selector continues its own, and the selector asked least recently gives its
+/// place up when more than `n` are in use.
+///
+/// # The default is one
+///
+/// A handle keeps one memory until this is called, which is what it did before
+/// this door existed. The documents are byte for byte the same at any `n`: a
+/// memory decides how much of the walk is done again, not what it says.
+///
+/// # What `n` costs
+///
+/// A memory is the folded tables of one selector, not a copy of the capture. How
+/// large that is depends on the capture, and no figure is claimed here.
+///
+/// `n` is held to `1..=64`, and the number in effect is written to `*out`, so a
+/// caller that asked for 0 or 1000 reads what it got. Lowering it gives up the
+/// least recently used memories at once. It changes no document and no record.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed, and `out` a writable
+/// pointer to a `size_t`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_set_selector_memories(
+    handle: *mut live::LiveDissection,
+    n: usize,
+    out: *mut usize,
+) -> c_int {
+    if handle.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let in_effect = unsafe { (*handle).set_selector_memories(n) };
+    // SAFETY: caller contract above.
+    unsafe { *out = in_effect };
+    WZ_DISSECT_OK
 }
 
 /// (ABI 23) — WHAT AN OPEN HANDLE STILL HOLDS, beside the ceilings that bound
@@ -8075,7 +8128,7 @@ mod tests {
         // struct is new. The handle gains state of its own, the words it said.
         // 39, for `wz_dissect_live_followed`: one symbol, a `size_t` written
         // through a pointer the caller owns; no string, no struct, no state.
-        assert_eq!(wz_dissect_abi_version(), 39);
+        assert_eq!(wz_dissect_abi_version(), 40);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -16555,6 +16608,78 @@ mod tests {
         // A handle that has followed nothing says 0, not an error.
         assert_eq!(followed_door(h), (WZ_DISSECT_OK, 0));
         unsafe { wz_dissect_live_close(h) };
+    }
+
+    fn selector_memories_door(handle: *mut live::LiveDissection, n: usize) -> (c_int, usize) {
+        let mut out = usize::MAX;
+        let rc = unsafe { wz_dissect_live_set_selector_memories(handle, n, &mut out) };
+        (rc, out)
+    }
+
+    /// (ABI 40) A null handle or a null out is refused and `out` is not written;
+    /// the count is held to `1..=64` and the number in effect is what is written.
+    #[test]
+    fn set_selector_memories_refuses_nulls_and_holds_the_count_to_its_bounds() {
+        assert_eq!(
+            selector_memories_door(core::ptr::null_mut(), 2),
+            (WZ_DISSECT_ERR_INVALID_ARG, usize::MAX)
+        );
+        let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        assert_eq!(
+            unsafe { wz_dissect_live_set_selector_memories(h, 2, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(selector_memories_door(h, 0), (WZ_DISSECT_OK, 1));
+        assert_eq!(selector_memories_door(h, 3), (WZ_DISSECT_OK, 3));
+        assert_eq!(selector_memories_door(h, 1000), (WZ_DISSECT_OK, 64));
+        unsafe { wz_dissect_live_close(h) };
+    }
+
+    /// (ABI 40) TWO SELECTORS ASKED IN TURN OVER AN UNCHANGED CAPTURE.
+    ///
+    /// With one memory (the default) every ask after the first begins the walk
+    /// again, because the selector before it took the memory. With two, the second
+    /// round continues both and folds nothing. The documents are the same bytes at
+    /// either count, which is the claim that makes the count only a cost.
+    #[test]
+    fn two_selector_memories_stop_alternating_selectors_from_beginning_again() {
+        let file = census_capture();
+        let selectors = ["key == demo/temp", "kind == query"];
+        // `(documents, restarts after one round, restarts after two)`.
+        let run = |n: usize| {
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(selector_memories_door(h, n).0, WZ_DISSECT_OK);
+            assert_eq!(
+                unsafe { wz_dissect_live_follow(h, file.as_ptr(), file.len()) },
+                WZ_DISSECT_OK
+            );
+            unsafe { wz_dissect_live_end(h) };
+            let mut docs = Vec::new();
+            let mut restarts = Vec::new();
+            for _round in 0..2 {
+                for selector in selectors {
+                    docs.push(call_live_census(h, selector).expect("the planes render"));
+                }
+                restarts.push(unsafe { &*h }.census_work().restarts);
+            }
+            unsafe { wz_dissect_live_close(h) };
+            (docs, restarts[0], restarts[1])
+        };
+        let (one_docs, one_first, one_second) = run(1);
+        let (two_docs, two_first, two_second) = run(2);
+        assert_eq!(
+            one_docs, two_docs,
+            "the count changes cost, not the documents"
+        );
+        assert!(one_first > 0, "the first round begins the planes");
+        assert_eq!(
+            two_second, two_first,
+            "with two memories the second round begins nothing"
+        );
+        assert!(
+            one_second > one_first,
+            "with one memory the second round begins the planes again"
+        );
     }
 
     /// `wz_dissect_pcap_frame_bytes` the way C calls it. The buffer is filled

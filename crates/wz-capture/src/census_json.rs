@@ -183,8 +183,10 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
 /// may continue and what it does when it may not), and the document is
 /// assembled by the same function from the same planes, so for any capture and
 /// any selector the two return the same bytes; a test holds that at every step
-/// of a growing capture. `memory` is for ONE selector: asked under another it
-/// starts again.
+/// of a growing capture. `memory` keeps the planes of each selector it has been
+/// asked under, up to [`crate::CensusMemory::selector_memories`], one by default:
+/// asked under a selector it has no planes for, it begins that selector's, and
+/// with one memory that gives up the previous selector's.
 ///
 /// The node census is kept the same way ([`crate::node::NodeMemory`]): it is
 /// what the grouping, and so the validity of every other plane's fold, is derived

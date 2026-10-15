@@ -1557,7 +1557,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 39
+#define WZ_DISSECT_ABI_REVISION 40
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5482,11 +5482,13 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * last document you read. A row it does not name has the word you hold.
  *
  * WHAT THE HANDLE REMEMBERS. The words it said last time, one per row it still
- * holds, for ONE selector, named by the text you pass. A different text starts the
- * memory again: nothing is revised and every row after your cursor is new, so ask
- * from 0 after changing the selector, because the rows before the cursor are never
- * written again. The text is compared as given, so a selector that means the same
- * thing in other words starts the memory again too, which costs a full answer and
+ * holds, for ONE selector, named by the text you pass; the handle keeps one such
+ * memory unless wz_dissect_live_set_selector_memories says more. A text with no
+ * memory starts one: nothing is revised and every row after your cursor is new, so
+ * ask from 0 after changing the selector, because the rows before the cursor are
+ * never written again. With one memory that also empties the previous selector's;
+ * with several it does not. The text is compared as given, so a selector that means
+ * the same thing in other words starts a memory too, which costs a full answer and
  * never a wrong one. A cursor BEHIND the last call's is allowed: the rows it lists
  * are written with their words and are not reported as revised.
  *
@@ -5513,6 +5515,38 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * @carries selection_since was passenger */
 int wz_dissect_live_selection_since(wz_dissect_live *h, const char *selector,
                                     uint64_t after_seq, char **out);
+
+/* (ABI 40) -- HOW MANY SELECTORS THE HANDLE KEEPS A MEMORY FOR AT ONCE, for
+ * wz_dissect_live_census and wz_dissect_live_selection_since.
+ *
+ * WHAT IT IS FOR. Both doors continue where their last call stopped, and that
+ * memory is for ONE selector, because a fold is a fact about the selector it
+ * judged under. A caller that alternates between two selectors found the memory
+ * empty on every call and paid for the whole walk each time. With `n` memories
+ * each selector continues its own, and the selector asked least recently gives
+ * its place up when more than `n` are in use.
+ *
+ *     size_t in_effect;
+ *     wz_dissect_live_set_selector_memories(h, 3, &in_effect);
+ *     wz_dissect_live_census(h, "key == demo/a", &a);   // begins a
+ *     wz_dissect_live_census(h, "kind == query", &b);   // begins b, keeps a
+ *     wz_dissect_live_census(h, "key == demo/a", &a);   // continues a
+ *
+ * THE DEFAULT IS ONE, which is what a handle did before this door existed. The
+ * documents are byte for byte the same at any `n`: a memory decides how much of
+ * the walk is done again, not what it says.
+ *
+ * WHAT `n` COSTS. A memory is the folded tables of one selector, not a copy of
+ * the capture. How large that is depends on the capture, and no figure is
+ * claimed here.
+ *
+ * `n` is held to 1..=64 and the number in effect is written to `*out`, so a
+ * caller that asked for 0 or 1000 reads what it got. Lowering it gives up the
+ * least recently used memories at once. It changes no document and no record.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG for a null handle or a null `out`. */
+int wz_dissect_live_set_selector_memories(wz_dissect_live *h, size_t n,
+                                          size_t *out);
 
 /* ── (ABI 23) — WHAT AN OPEN HANDLE STILL HOLDS ──────────────────────────
  *

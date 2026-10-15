@@ -44,6 +44,7 @@
 //! document a fresh fold writes, byte for byte, and that is held across
 //! captures built to violate each condition.
 
+use crate::bounded_slots::BoundedSlots;
 use crate::link::FlowKey;
 use crate::node::SessionGrouping;
 use crate::{Dissection, OrderMarks};
@@ -149,17 +150,12 @@ impl<F: OrderedFold> Resumable<F> {
     }
 }
 
-/// The planes of a census document, kept between calls for ONE selector.
+/// The planes of a census document folded under ONE selector.
 ///
 /// The selector is part of every fold's state (each judged its records against
-/// it), so a different selector is a different memory: asking under another one
-/// starts every plane again, and asking under the same one continues them.
+/// it), so planes made under one selector are of no use under another.
 #[derive(Debug, Default)]
-pub struct CensusMemory {
-    filter: Option<crate::filter::Filter>,
-    /// The node census, which no selector narrows and so outlives a change of
-    /// selector.
-    nodes: crate::node::NodeMemory,
+struct SelectorPlanes {
     keyexprs: Resumable<crate::agg::AggFold>,
     #[cfg(feature = "network-codecs")]
     exchanges: Resumable<crate::exchange::ExchangeFold>,
@@ -167,6 +163,27 @@ pub struct CensusMemory {
     payloads: Resumable<crate::payload::PayloadFold>,
     #[cfg(feature = "network-codecs")]
     interests: Resumable<crate::interest::InterestFold>,
+}
+
+/// The planes of a census document, kept between calls for up to
+/// [`Self::selector_memories`] selectors.
+///
+/// The selector is part of every fold's state, so each selector has its own
+/// planes: asking under the same one continues them, and asking under another
+/// one continues THAT one's. Only when more selectors are in use than there are
+/// memories does the least recently used selector's planes go, and that selector
+/// begins again the next time it is asked, which costs what it always cost.
+/// One memory is the default, which is the behaviour before there were several:
+/// asking under another selector starts every plane again.
+///
+/// The node census is shared by every selector, since no selector narrows it.
+#[derive(Debug, Default)]
+pub struct CensusMemory {
+    /// The node census, which no selector narrows and so outlives a change of
+    /// selector.
+    nodes: crate::node::NodeMemory,
+    /// The planes per selector, one slot unless raised.
+    planes: BoundedSlots<crate::filter::Filter, SelectorPlanes>,
     stats: FoldStats,
 }
 
@@ -174,6 +191,28 @@ impl CensusMemory {
     /// A memory that has folded nothing.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many selectors' planes this memory keeps at once.
+    pub fn selector_memories(&self) -> usize {
+        self.planes.capacity()
+    }
+
+    /// Keep the planes of up to `n` selectors at once, and return the number in
+    /// effect: `n` held to `1..=`[`crate::MAX_SELECTOR_MEMORIES`]. Lowering it
+    /// gives up the least recently used selectors' planes at once.
+    pub fn set_selector_memories(&mut self, n: usize) -> usize {
+        self.planes.set_capacity(n)
+    }
+
+    /// How many selectors hold planes now.
+    pub fn selectors_in_use(&self) -> usize {
+        self.planes.len()
+    }
+
+    /// How many selectors' planes have been given up to make room.
+    pub fn selector_evictions(&self) -> u64 {
+        self.planes.evicted()
     }
 
     /// The work this memory has done since it was made.
@@ -191,17 +230,26 @@ impl CensusMemory {
         self.nodes.nodes(dissection)
     }
 
-    /// Make the memory the one for `filter`: the same selector keeps it, another
-    /// one empties it. The node census is kept, since no selector narrows it.
+    /// Make the memory the one for `filter`: the planes this selector already has
+    /// are continued, and a selector with none gets empty ones, taking the place of
+    /// the least recently used selector's when every memory is in use. The node
+    /// census is kept, since no selector narrows it.
     pub(crate) fn for_filter(&mut self, filter: &crate::filter::Filter) {
-        if self.filter.as_ref() != Some(filter) {
-            let stats = self.stats;
-            let nodes = core::mem::take(&mut self.nodes);
-            *self = Self::default();
-            self.stats = stats;
-            self.nodes = nodes;
-            self.filter = Some(filter.clone());
+        self.planes.touch(filter, SelectorPlanes::default);
+    }
+
+    /// The selector last asked under, its planes, and the work counter. The
+    /// identity selector's planes are made when nothing has been asked yet.
+    fn current(&mut self) -> (crate::filter::Filter, &mut SelectorPlanes, &mut FoldStats) {
+        if self.planes.is_empty() {
+            self.planes
+                .touch(&crate::filter::Filter::any(), SelectorPlanes::default);
         }
+        let Self { planes, stats, .. } = self;
+        let (filter, planes) = planes
+            .newest_mut()
+            .expect("a plane was made above when there was none");
+        (filter.clone(), planes, stats)
     }
 
     /// The keyexpr plane, brought up to `dissection`.
@@ -210,12 +258,10 @@ impl CensusMemory {
         dissection: &Dissection,
         grouping: &SessionGrouping,
     ) -> crate::agg::ThroughputTable {
-        let filter = self
-            .filter
-            .clone()
-            .unwrap_or_else(crate::filter::Filter::any);
-        self.keyexprs
-            .advance(dissection, grouping, &mut self.stats, || {
+        let (filter, planes, stats) = self.current();
+        planes
+            .keyexprs
+            .advance(dissection, grouping, stats, || {
                 crate::agg::AggFold::begin(dissection, &filter, grouping)
             })
             .table()
@@ -228,12 +274,10 @@ impl CensusMemory {
         dissection: &Dissection,
         grouping: &SessionGrouping,
     ) -> crate::exchange::ExchangeTable {
-        let filter = self
-            .filter
-            .clone()
-            .unwrap_or_else(crate::filter::Filter::any);
-        self.exchanges
-            .advance(dissection, grouping, &mut self.stats, || {
+        let (filter, planes, stats) = self.current();
+        planes
+            .exchanges
+            .advance(dissection, grouping, stats, || {
                 crate::exchange::ExchangeFold::begin(dissection, &filter, grouping)
             })
             .table()
@@ -246,12 +290,10 @@ impl CensusMemory {
         dissection: &Dissection,
         grouping: &SessionGrouping,
     ) -> crate::payload::PayloadCensus {
-        let filter = self
-            .filter
-            .clone()
-            .unwrap_or_else(crate::filter::Filter::any);
-        self.payloads
-            .advance(dissection, grouping, &mut self.stats, || {
+        let (filter, planes, stats) = self.current();
+        planes
+            .payloads
+            .advance(dissection, grouping, stats, || {
                 crate::payload::PayloadFold::begin(dissection, &filter, grouping)
             })
             .census()
@@ -264,11 +306,13 @@ impl CensusMemory {
         dissection: &Dissection,
         grouping: &SessionGrouping,
     ) -> crate::interest::InterestCensus {
-        self.interests
+        let (_filter, planes, stats) = self.current();
+        planes
+            .interests
             .advance(
                 dissection,
                 grouping,
-                &mut self.stats,
+                stats,
                 crate::interest::InterestFold::begin,
             )
             .census()

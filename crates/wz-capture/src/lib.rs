@@ -189,6 +189,11 @@ pub mod node;
 // here, for the reason the transport build modules give.
 pub(crate) mod ordered_fold;
 pub use ordered_fold::{CensusMemory, FoldStats};
+// The few-values-by-key store both selector memories sit on. `pub(crate)` for the
+// reason the module above gives; only the bound is public, so a caller can read
+// what a count is held to.
+mod bounded_slots;
+pub use bounded_slots::MAX_SELECTOR_MEMORIES;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod fields_revised_tests;
 #[cfg(all(test, feature = "network-codecs"))]
