@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 40
+EXPECTED_VERSION = 41
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -384,6 +384,11 @@ EXPECTED_SYMBOLS = {
     # effect written through a pointer the CALLER owns. Default one, which is the
     # behaviour before the door; no document changes at any count.
     "wz_dissect_live_set_selector_memories",
+    # (ABI 41) -- the since document for at most `max_rows` sequence numbers. The
+    # same document and the same cursor as `wz_dissect_live_fields_since` with one
+    # more integer in; the window's last number is `window.through_seq`, the cursor
+    # for the next window. `0` is no limit.
+    "wz_dissect_live_fields_since_window",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

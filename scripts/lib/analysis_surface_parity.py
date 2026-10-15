@@ -830,6 +830,18 @@ ONLY_CAPI = {
         "would parse, every row it already has.",
         (),
     ),
+    # The same rows, bounded to a window of sequence numbers. Filed in the round
+    # that added the symbol.
+    "a WINDOW of the rows of an OPEN handle's field document": (
+        "wz_dissect_live_fields_since_window",
+        "DELIBERATE, for the reasons the row above gives. It is the same "
+        "document with one more integer in, a count of sequence numbers, so a "
+        "consumer that links this library can bound the document and the string "
+        "that builds it to a window. The command line writes the listing as a "
+        "stream and prints it once, so there is no document to bound and no "
+        "cursor to continue from.",
+        (),
+    ),
     # What an open handle holds now, beside its ceilings. Filed in the round
     # that added the symbol.
     "what an OPEN handle still HOLDS, beside its ceilings": (

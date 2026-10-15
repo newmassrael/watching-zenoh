@@ -385,6 +385,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 40, for `wz_dissect_live_set_selector_memories`: how many selectors the
     // census and `selection_since` keep a memory for at once, so a caller that
     // alternates between selectors does not start the walk again on each call.
+    // 41, for `wz_dissect_live_fields_since_window`: the since document for at most
+    // `max_rows` sequence numbers, so the document and the string that builds it
+    // are as large as a window and not as large as the capture.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -402,7 +405,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 40;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 41;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4004,6 +4007,79 @@ pub unsafe extern "C" fn wz_dissect_live_fields_since(
     after_seq: u64,
     out: *mut *mut c_char,
 ) -> c_int {
+    // SAFETY: the caller contract above is the helper's.
+    unsafe { fields_since_door(handle, bytes, len, declarations, after_seq, 0, out) }
+}
+
+/// (ABI 41) — [`wz_dissect_live_fields_since`] FOR AT MOST `max_rows` SEQUENCE
+/// NUMBERS, so the document and the string that holds it while it is built are as
+/// large as a window and not as large as the capture.
+///
+/// # What a consumer paid for
+///
+/// Measured by the reporting consumer on a 100 MB capture: the field document is
+/// about 14 times the capture in JSON, and building it peaked at 3.6 GB, 1.4 GB of
+/// which was this library's string. A finished capture has no later call to spread
+/// that over: the one document is all of it.
+///
+/// # The window
+///
+/// It covers the numbers `after_seq + 1 ..= after_seq + max_rows`. The rows in it
+/// are written, the rows past it are neither written nor walked, and
+/// `window.through_seq` is the last number covered: pass it as the next `after_seq`
+/// and the next window starts where this one ended. `max_rows` of `0` is no limit
+/// and is [`wz_dissect_live_fields_since`] exactly. The windows of a finished
+/// capture, taken in order, write each row once, and `revised` is empty throughout
+/// because a capture that does not grow moves no held row.
+///
+/// It bounds NUMBERS and not rows written: a number can name a row this document
+/// does not write (a datagram row whose second read was declined has a number and no
+/// row), so a window holds at most `max_rows` rows and may hold fewer. The cursor
+/// passes the numbers, so no row is missed and none is repeated. Give a window a
+/// `max_rows` of at least the count of rows you want per window.
+///
+/// # What a window costs
+///
+/// A window that ends inside a list leaves that list to be walked again from its
+/// first message at the next call, so a call costs the light fold of the messages
+/// up to the window's end plus the writing of the window's rows; the cost of the
+/// string is the window's. Peak memory is a figure this library has not measured on
+/// the reporter's capture, and none is claimed here.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `bytes` must be valid for
+/// `len` bytes (it may be null only when `len` is 0), `declarations` a
+/// NUL-terminated C string and `out` a writable pointer to a `*mut c_char`;
+/// neither of the last two may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_fields_since_window(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    declarations: *const c_char,
+    after_seq: u64,
+    max_rows: u64,
+    out: *mut *mut c_char,
+) -> c_int {
+    // SAFETY: the caller contract above is the helper's.
+    unsafe { fields_since_door(handle, bytes, len, declarations, after_seq, max_rows, out) }
+}
+
+/// The body both `fields_since` doors share, so a window of `0` cannot differ from
+/// the door that has none.
+///
+/// # Safety
+/// The contract of [`wz_dissect_live_fields_since_window`].
+unsafe fn fields_since_door(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    declarations: *const c_char,
+    after_seq: u64,
+    max_rows: u64,
+    out: *mut *mut c_char,
+) -> c_int {
     if handle.is_null() || (bytes.is_null() && len != 0) || declarations.is_null() || out.is_null()
     {
         return WZ_DISSECT_ERR_INVALID_ARG;
@@ -4024,7 +4100,8 @@ pub unsafe extern "C" fn wz_dissect_live_fields_since(
         unsafe { core::slice::from_raw_parts(bytes, len) }
     };
     // SAFETY: caller contract above.
-    let doc = unsafe { (*handle).fields_since(capture, Some(&map), text, after_seq) };
+    let doc =
+        unsafe { (*handle).fields_since_windowed(capture, Some(&map), text, after_seq, max_rows) };
     write_string(doc, out)
 }
 
@@ -8128,7 +8205,7 @@ mod tests {
         // struct is new. The handle gains state of its own, the words it said.
         // 39, for `wz_dissect_live_followed`: one symbol, a `size_t` written
         // through a pointer the caller owns; no string, no struct, no state.
-        assert_eq!(wz_dissect_abi_version(), 40);
+        assert_eq!(wz_dissect_abi_version(), 41);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -13997,6 +14074,169 @@ mod tests {
             .to_owned();
         unsafe { wz_dissect_string_free(out) };
         doc
+    }
+
+    /// `wz_dissect_live_fields_since_window` with no declarations.
+    fn live_fields_window(
+        handle: *mut live::LiveDissection,
+        capture: &[u8],
+        after: u64,
+        max_rows: u64,
+    ) -> String {
+        let declarations = std::ffi::CString::new("").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_fields_since_window(
+                handle,
+                capture.as_ptr(),
+                capture.len(),
+                declarations.as_ptr(),
+                after,
+                max_rows,
+                &mut out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "live fields since window rc");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf-8")
+            .to_owned();
+        unsafe { wz_dissect_string_free(out) };
+        doc
+    }
+
+    /// (ABI 41) A window of `0` is the door that has none, byte for byte, and the
+    /// door refuses what the door it widens refuses.
+    #[test]
+    fn a_window_of_zero_is_fields_since_and_the_arguments_are_refused_alike() {
+        let packets = interleaved_packets();
+        let file = pcap_prefix(&packets, packets.len());
+        let (plain, windowed) = (
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+        );
+        for h in [plain, windowed] {
+            assert_eq!(
+                unsafe { wz_dissect_live_follow(h, file.as_ptr(), file.len()) },
+                WZ_DISSECT_OK
+            );
+        }
+        assert_eq!(
+            live_fields_window(windowed, &file, 0, 0),
+            live_fields_since(plain, &file, 0),
+            "max_rows 0 must be the unwindowed door"
+        );
+
+        let declarations = std::ffi::CString::new("").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        for (name, rc) in [
+            ("null handle", unsafe {
+                wz_dissect_live_fields_since_window(
+                    core::ptr::null_mut(),
+                    file.as_ptr(),
+                    file.len(),
+                    declarations.as_ptr(),
+                    0,
+                    3,
+                    &mut out,
+                )
+            }),
+            ("null declarations", unsafe {
+                wz_dissect_live_fields_since_window(
+                    windowed,
+                    file.as_ptr(),
+                    file.len(),
+                    core::ptr::null(),
+                    0,
+                    3,
+                    &mut out,
+                )
+            }),
+            ("null out", unsafe {
+                wz_dissect_live_fields_since_window(
+                    windowed,
+                    file.as_ptr(),
+                    file.len(),
+                    declarations.as_ptr(),
+                    0,
+                    3,
+                    core::ptr::null_mut(),
+                )
+            }),
+        ] {
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG, "{name}");
+            assert!(
+                out.is_null(),
+                "{name}: a refusal must not hand back a string"
+            );
+        }
+        unsafe {
+            wz_dissect_live_close(plain);
+            wz_dissect_live_close(windowed);
+        }
+    }
+
+    /// (ABI 41) THE WINDOWS OF A HANDLE, taken in order from the cursor each hands
+    /// back, are the rows of the one document: each row once, none missing, no window
+    /// longer than it was asked to be, and the last window ends at the highest number
+    /// the handle issued.
+    #[test]
+    fn the_windows_of_a_handle_are_the_whole_documents_rows_each_once() {
+        let packets = interleaved_packets();
+        let file = pcap_prefix(&packets, packets.len());
+        let whole = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+        assert_eq!(
+            unsafe { wz_dissect_live_follow(whole, file.as_ptr(), file.len()) },
+            WZ_DISSECT_OK
+        );
+        let all = parsed(&live_fields_since(whole, &file, 0));
+        let issued = number(member(
+            member(&all, "window").expect("window"),
+            "through_seq",
+        ))
+        .expect("through_seq");
+        let mut want: Vec<(u64, String)> = rows_of(&all)
+            .into_iter()
+            .map(|r| (seq_of(r), format!("{r:?}")))
+            .collect();
+        want.sort();
+        assert!(
+            want.len() > 8,
+            "a fixture with only {} rows proves little",
+            want.len()
+        );
+
+        for size in [1u64, 4, 7] {
+            let h = open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens");
+            assert_eq!(
+                unsafe { wz_dissect_live_follow(h, file.as_ptr(), file.len()) },
+                WZ_DISSECT_OK
+            );
+            let mut cursor = 0u64;
+            let mut got: Vec<(u64, String)> = Vec::new();
+            let mut calls = 0u64;
+            while cursor < issued {
+                let doc = parsed(&live_fields_window(h, &file, cursor, size));
+                let window = member(&doc, "window").expect("window");
+                assert_eq!(number(member(window, "after_seq")), Some(cursor));
+                let through = number(member(window, "through_seq")).expect("through_seq");
+                assert_eq!(through, issued.min(cursor + size), "size {size}");
+                let rows = rows_of(&doc);
+                assert!(
+                    rows.len() as u64 <= size,
+                    "size {size}: {} rows",
+                    rows.len()
+                );
+                got.extend(rows.into_iter().map(|r| (seq_of(r), format!("{r:?}"))));
+                cursor = through;
+                calls += 1;
+                assert!(calls <= issued, "size {size}: the cursor did not advance");
+            }
+            got.sort();
+            assert_eq!(got, want, "size {size}: the windows are not the document");
+            unsafe { wz_dissect_live_close(h) };
+        }
+        unsafe { wz_dissect_live_close(whole) };
     }
 
     fn parsed(doc: &str) -> wz_session_core::json5::Json5Value {

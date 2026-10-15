@@ -1558,7 +1558,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 40
+#define WZ_DISSECT_ABI_REVISION 41
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5380,6 +5380,58 @@ int wz_dissect_live_fields_since(wz_dissect_live *h,
                                  const unsigned char *bytes, size_t len,
                                  const char *declarations,
                                  uint64_t after_seq, char **out);
+
+/* (ABI 41) -- wz_dissect_live_fields_since FOR AT MOST `max_rows` SEQUENCE
+ * NUMBERS, so the document and the string that holds it while it is built are as
+ * large as a window and not as large as the capture.
+ *
+ * WHAT IT IS FOR. The field document of a long capture is about 14 times the
+ * capture in JSON (measured by a consumer on 100 MB), and a finished capture has
+ * no later call to spread that over: the one document is all of it.
+ *
+ * THE WINDOW covers the numbers `after_seq + 1` through `after_seq + max_rows`.
+ * The rows in it are written, the rows past it are neither written nor walked, and
+ * `window.through_seq` is the last number covered: pass it as the next `after_seq`
+ * and the next window starts where this one ended.
+ *
+ *     uint64_t cursor = 0;
+ *     for (;;) {
+ *         char *doc;
+ *         wz_dissect_live_fields_since_window(h, file, len, "", cursor, 5000, &doc);
+ *         ... read the rows; cursor = window.through_seq ...
+ *         wz_dissect_string_free(doc);
+ *         if (cursor >= highest_number_issued) break;
+ *     }
+ *
+ * `max_rows` of 0 is no limit and is wz_dissect_live_fields_since exactly. The
+ * windows of a finished capture, taken in order, write each row once, and `revised`
+ * is empty throughout because a capture that does not grow moves no held row.
+ *
+ * IT BOUNDS NUMBERS AND NOT ROWS WRITTEN. A number can name a row this document does
+ * not write (a datagram row whose second read was declined has a number and no
+ * row), so a window holds at most `max_rows` rows and may hold fewer. The cursor
+ * passes the numbers, so no row is missed and none is repeated.
+ *
+ * WHAT A WINDOW COSTS. A window that ends inside a list leaves that list to be
+ * walked again from its first message at the next call, so a call costs the light
+ * fold of the messages up to the window's end plus the writing of the window's rows.
+ * The memory figure for a large capture is not claimed here: it is the consumer's
+ * to measure on its own.
+ *
+ * @bound max_rows work-ceiling -- the walk stops at the end of a window of
+ * sequence numbers instead of visiting every message, and so does the document.
+ * Nothing is dropped by it, which is why `dropped_by_limits` does not count it:
+ * the numbers past the window are the next window's, asked for by passing
+ * `window.through_seq` as the next `after_seq`. A window that ends inside a list
+ * walks that list again from its first message at the next call.
+ *
+ * WZ_DISSECT_ERR_INVALID_ARG and WZ_DISSECT_ERR_DECLARATION as for
+ * wz_dissect_live_fields_since. `h` is not const, for that door's reason. */
+int wz_dissect_live_fields_since_window(wz_dissect_live *h,
+                                        const unsigned char *bytes, size_t len,
+                                        const char *declarations,
+                                        uint64_t after_seq, uint64_t max_rows,
+                                        char **out);
 
 /* (ABI 20) -- THE VERDICT OF A SELECTOR OVER THE ROWS OF THAT
  * DOCUMENT, and nothing beside it.

@@ -1185,6 +1185,20 @@ static int check_follow_door(void) {
         CHECK(rc == WZ_DISSECT_OK && in_effect == 64,
               "1000 selector memories rc=%d in effect %zu", rc, in_effect);
     }
+    /* (ABI 41) -- the windowed since door refuses what the door it widens refuses,
+     * and hands back no string on a refusal. */
+    {
+        char *doc = NULL;
+        rc = wz_dissect_live_fields_since_window(NULL, NULL, 0, "", 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null handle fields_since_window rc=%d", rc);
+        rc = wz_dissect_live_fields_since_window(h, NULL, 0, NULL, 0, 3, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+              "null declarations fields_since_window rc=%d", rc);
+        rc = wz_dissect_live_fields_since_window(h, NULL, 0, "", 0, 3, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+              "null out fields_since_window rc=%d", rc);
+    }
     wz_dissect_live_close(h);
     return 0;
 }

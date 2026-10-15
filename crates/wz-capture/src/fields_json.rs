@@ -516,7 +516,7 @@ pub fn fields_json_since_remembering(
                 .stream
                 .iter()
                 .chain(memory.walk.datagram.iter())
-                .any(|w| w.unnumbered)
+                .any(|w| w.unnumbered || w.truncated)
             || d.message_lists_with_origin().any(|(_, origin, list)| {
                 matches!(
                     origin,
@@ -654,8 +654,14 @@ fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
 pub struct Since {
     /// Rows with a sequence number at or below this are not written.
     pub after_seq: u64,
-    /// The highest sequence number the handle had issued when the document was
-    /// made. Carried into `window.through_seq`.
+    /// The last sequence number the document covers, carried into
+    /// `window.through_seq`: the cursor to give next. A row numbered above it is
+    /// neither written nor walked.
+    ///
+    /// For a document that is not windowed this is the highest number the handle
+    /// had issued when the document was made, so no row is above it. A caller that
+    /// wants a bounded document passes a smaller one (a handle's `max_rows` is
+    /// `after_seq + max_rows`), and asks again from it for the rest.
     pub through_seq: u64,
 }
 
@@ -891,6 +897,12 @@ pub(crate) struct ListWalk {
     /// every since-document (dropping one is not recoverable), so a walk that
     /// skipped the old rows would not write what a whole one does.
     unnumbered: bool,
+    /// The document's window ended inside this list, so the walk stopped at the
+    /// first row past it and the rest was not visited. Where it stopped is not
+    /// where a continuing walk could pick up (the capture-order plan and its
+    /// running key assume every new message was visited), so the next call begins
+    /// the list again instead of continuing it.
+    truncated: bool,
     /// The scouting list's own marks, for the same purpose.
     scouting_walked: usize,
     scouting_first_produced: u64,
@@ -1112,6 +1124,7 @@ fn fields_json_selected(
                     list: lists.stream.get(i).copied(),
                 }),
                 after_seq: since.map(|s| s.after_seq),
+                through_seq: since.map(|s| s.through_seq),
                 zids: lists.stream.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
                 #[cfg(feature = "network-codecs")]
@@ -1157,6 +1170,7 @@ fn fields_json_selected(
                     list: lists.datagram.get(i).copied(),
                 }),
                 after_seq: since.map(|s| s.after_seq),
+                through_seq: since.map(|s| s.through_seq),
                 zids: lists.datagram.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
                 #[cfg(feature = "network-codecs")]
@@ -1429,7 +1443,17 @@ fn push_stream_flow(
     // such care -- it is filled up front from every list, and the packet a row
     // resolves AT is set per row. Only the WRITING is skipped.
     let mut folded: Vec<FoldedRow> = Vec::with_capacity(flow.frames.len() - start);
+    // WHERE THE WINDOW ENDS in this list: the first message numbered past the
+    // document's last row. A list numbers its messages in order, so everything from
+    // here on is past it. Not visited, not folded and not written: the consumer
+    // asks for those rows in its next window, and a walk that began again then will
+    // fold them in their turn.
+    let mut end = flow.frames.len();
     for (position, frame) in flow.frames.iter().enumerate().skip(start) {
+        if tags.beyond_window(tags.frame_seq(first_produced + position as u64)) {
+            end = position;
+            break;
+        }
         last_packet = flow
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
@@ -1463,7 +1487,18 @@ fn push_stream_flow(
             None => (flow.capture_order(), 0, None),
         },
     };
+    // Messages past the window were not examined: say so in the tally a payload
+    // reader reads, as a cap does, and leave them to the next window.
+    let truncated = end < flow.frames.len();
+    if truncated {
+        if let Some(d) = declarations {
+            d.note_unwalked_n(flow.frames.len() - end);
+        }
+    }
     for position in order {
+        if position >= end {
+            continue;
+        }
         let frame = &flow.frames[position];
         let FoldedRow {
             packet,
@@ -1598,6 +1633,7 @@ fn push_stream_flow(
         r.walk.chains = chains;
         r.walk.requests = requests;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
+        r.walk.truncated = truncated;
     }
     let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
 }
@@ -1648,7 +1684,17 @@ fn push_datagram_flow(
     // half; see `absorb_every_declaration`.
     // The stream half's index, for the stream half's reason.
     let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+    // Where the document's window ends in this list, as the stream half has it:
+    // the first message numbered past the last row, from which nothing is visited.
+    let mut truncated = false;
     for (position, frame) in flow.frames.iter().enumerate().skip(start) {
+        if tags.beyond_window(tags.frame_seq(first_produced + position as u64)) {
+            truncated = true;
+            if let Some(d) = declarations {
+                d.note_unwalked_n(flow.frames.len() - position);
+            }
+            break;
+        }
         // `stream_offset` names the PACKET here: a datagram link has no stream
         // for an offset to be into, so the field carries the only anchor there
         // is.
@@ -1798,6 +1844,10 @@ fn push_datagram_flow(
         let index = datagram.packet_index;
         let seq = tags.scouting_seq(&flow.flow, scouting_first + position as u64);
         unnumbered |= seq.is_none();
+        if tags.beyond_window(seq) {
+            truncated = true;
+            break;
+        }
         if tags.passed_by_cursor(seq) {
             continue;
         }
@@ -1903,6 +1953,7 @@ fn push_datagram_flow(
         r.walk.scouting_first_produced = scouting_first;
         r.walk.scouting_produced = flow.scouting.produced();
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
+        r.walk.truncated = truncated;
     }
     out.push_str("]}}");
 }
@@ -3693,6 +3744,11 @@ struct RowTags<'a> {
     /// The cursor: a row whose sequence number is at or below it is
     /// passed over, and every other row is written. `None` writes them all.
     after_seq: Option<u64>,
+    /// The last sequence number this document covers: a row numbered above it is
+    /// neither written nor walked, and the next call asks from here. For a document
+    /// that is not windowed it is the highest number the handle has issued, so no
+    /// row is above it. `None` for a document with no cursor.
+    through_seq: Option<u64>,
     /// The zid each direction of THIS flow's list announced, `[A, B]`, or
     /// `None` for a list whose handshake the capture never saw. What the
     /// end-to-end judge keys a sender by; see [`E2eSource`].
@@ -3982,6 +4038,16 @@ impl RowTags<'_> {
     /// dropping one is not.
     fn passed_by_cursor(&self, seq: Option<u64>) -> bool {
         matches!((self.after_seq, seq), (Some(after), Some(s)) if s <= after)
+    }
+
+    /// Is this row past the end of the window the document covers? Such a row is
+    /// not written and not walked: the consumer asks for it in the next window.
+    ///
+    /// A row with NO sequence number is never past it, for the reason
+    /// [`Self::passed_by_cursor`] gives: it cannot be compared, and writing a row
+    /// a window early is a recoverable answer where dropping one is not.
+    fn beyond_window(&self, seq: Option<u64>) -> bool {
+        matches!((self.through_seq, seq), (Some(through), Some(s)) if s > through)
     }
 
     /// Is this a row the cursor passes that the document writes again, because
@@ -7583,7 +7649,9 @@ mod tests {
             &EveryListNumbered,
             Since {
                 after_seq: 0,
-                through_seq: 1,
+                // Past every row of the capture: the window is not under test here,
+                // and a smaller number would cut the rows whose keys this pins.
+                through_seq: 1_000,
             },
         ));
         // And the documents that carry `closes` (revision 37): a stream and a

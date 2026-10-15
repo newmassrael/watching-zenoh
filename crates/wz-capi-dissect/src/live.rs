@@ -995,12 +995,55 @@ impl LiveDissection {
         declarations_text: &str,
         after_seq: u64,
     ) -> String {
+        self.fields_since_windowed(capture, map, declarations_text, after_seq, 0)
+    }
+
+    /// [`Self::fields_since`] for at most `max_rows` SEQUENCE NUMBERS after the
+    /// cursor, and `0` for no limit (which is [`Self::fields_since`]).
+    ///
+    /// # What a window is, and what it bounds
+    ///
+    /// A document of a long capture is as large as the capture, and so is the string
+    /// that holds it while it is built. A window covers the numbers
+    /// `after_seq + 1 ..= after_seq + max_rows`: the rows in it are written, the
+    /// rows past it are not written and not walked, and `window.through_seq` is the
+    /// last number covered, which is the cursor for the next window. The string is
+    /// as large as the window, whatever the capture.
+    ///
+    /// It bounds NUMBERS and not rows written: a number can name a row this
+    /// document does not write (a datagram row whose second read was declined has a
+    /// number and no row), so a window holds at most `max_rows` rows and may hold
+    /// fewer. The cursor passes the numbers, so no row is missed or repeated.
+    ///
+    /// # What a window costs
+    ///
+    /// The rows past the window are not touched, but a window that ends inside a
+    /// list leaves that list to be walked again from its first message at the next
+    /// call: the walk's saved position assumes every new message was visited. So a
+    /// call costs the light fold of the messages up to the window's end plus the
+    /// writing of the window's rows, where one document of the whole capture costs
+    /// the writing of every row at once. The windows of a finished capture, taken
+    /// in order, write each row once.
+    pub fn fields_since_windowed(
+        &mut self,
+        capture: &[u8],
+        map: Option<&wz_capture::payload::formats::FormatMap<'_>>,
+        declarations_text: &str,
+        after_seq: u64,
+        max_rows: u64,
+    ) -> String {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
         // The highest number the handle has issued, and NOT the highest row that
         // was written: a datagram row whose second read was declined has a
-        // number and no row, and the cursor has to pass it.
-        let through_seq = self.next_seq - 1;
+        // number and no row, and the cursor has to pass it. A window ends sooner
+        // when `max_rows` says so.
+        let issued = self.next_seq - 1;
+        let through_seq = if max_rows == 0 {
+            issued
+        } else {
+            issued.min(after_seq.saturating_add(max_rows))
+        };
         wz_capture::fields_json::fields_json_since_remembering(
             &self.dissection,
             capture,

@@ -200,6 +200,8 @@ mod closes_tests;
 mod fields_revised_tests;
 #[cfg(all(test, feature = "network-codecs"))]
 mod ordered_fold_tests;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod window_tests;
 // A map that is cheap to copy while it is being grown, which is what lets a plane
 // that is kept between calls be read without copying every verdict it holds. Its
 // only users are the exchange and payload planes, so it is built with them.
