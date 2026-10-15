@@ -1016,6 +1016,25 @@ impl RowKey {
             message_at: crate::FlowDissection::message_at(frame),
         }
     }
+
+    /// Where the row stands WITHIN its list: the direction it travelled and its
+    /// message position. The list is the other half of the key, and a caller that
+    /// is already walking one list names the rest by this pair.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn position_in_list(&self) -> (usize, usize) {
+        (self.direction, self.message_at)
+    }
+
+    /// The pair [`Self::position_in_list`] names, for a frame of the list being
+    /// walked, so a renderer indexes a row without building a key it has no list
+    /// for.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn position_of(frame: &wz_session_core::passive::PassiveFrame) -> (usize, usize) {
+        (
+            crate::agg::dir_index(frame.direction),
+            crate::FlowDissection::message_at(frame),
+        )
+    }
 }
 
 /// R2765 (open debt 788) — the selector's answers for one row's records, and

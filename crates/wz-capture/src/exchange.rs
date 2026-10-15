@@ -383,6 +383,9 @@ pub struct OpenExchange {
     /// be written onto it when the exchange is judged. See
     /// [`ExchangeTable::row_verdict`].
     row: crate::payload::RowKey,
+    /// Which of that row's batched records the `Request` was, so a final can name
+    /// the record and not only the row. A row may batch several.
+    record: usize,
     first_reply_at_ns: Option<u64>,
     replies: usize,
     errs: usize,
@@ -401,10 +404,44 @@ enum Ending {
     Closed {
         at: Option<u64>,
         row: crate::payload::RowKey,
+        /// Which of that row's batched records the `ResponseFinal` was.
+        record: usize,
     },
     /// The capture never showed a close: the flow's frames ran out, or the rid
     /// was reused before one arrived.
     Unclosed,
+}
+
+/// The request a `ResponseFinal` closed, as the row that carried the final can say
+/// it: where the request's row is, and what kind of record the request was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Closing {
+    /// The message row that carried the `Request`.
+    pub request: crate::payload::RowKey,
+    /// Which of that row's batched records the `Request` was.
+    pub request_record: usize,
+    /// The request's kind, in the selector grammar's words (`query`).
+    pub kind: crate::filter::RecordKind,
+}
+
+/// The batch of network records a frame carries, which is the thing this plane
+/// folds, or `None` for a frame that carries none (nothing, a fragment, a batch
+/// that could not be read at all).
+///
+/// Matched by name and without a catch-all for the reason
+/// [`ExchangeTable::observe_frame_where`] matches: a new `Carried` variant must
+/// fail to compile here rather than join the silent set. A renderer that has to
+/// find the same records the fold saw asks this and not its own match.
+#[cfg(feature = "dissect")]
+pub(crate) fn batch_of(frame: &PassiveFrame) -> Option<&BatchParse> {
+    match &frame.carried {
+        Carried::Batch(batch) => Some(batch),
+        #[cfg(feature = "reassembly")]
+        Carried::Reassembled { batch, .. } => Some(batch),
+        Carried::Undecompressible | Carried::Nothing => None,
+        #[cfg(feature = "reassembly")]
+        Carried::FragmentWithoutResolution | Carried::Fragment(_) => None,
+    }
 }
 
 /// Query/Reply exchanges and their latencies, over one or more flows.
@@ -429,6 +466,16 @@ pub struct ExchangeTable {
     /// lists, and the same key in another capture is another row.
     row_verdicts:
         crate::overlay_map::OverlayMap<crate::payload::RowKey, crate::payload::RowVerdict>,
+    /// For each batched RECORD (a row and the record's place in it) that was a
+    /// `ResponseFinal` closing an exchange the capture held the `Request` of: the
+    /// request it closed. A row can batch several records, so the key is the row AND
+    /// the record's index in it. Recorded whatever the
+    /// selector said of the exchange, because which request a final closes is a
+    /// fact about the pair and not an answer to a question; a final whose request
+    /// the capture never held has no entry (see [`Self::closing`]).
+    ///
+    /// Not merged by [`Self::merge`], for the reason `row_verdicts` is not.
+    closings: crate::overlay_map::OverlayMap<(crate::payload::RowKey, usize), Option<Closing>>,
     /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term. Set
     /// only by [`exchanges_where`], the entry point that has the whole capture.
     capture_origin_ms: Option<u64>,
@@ -586,8 +633,8 @@ impl ExchangeTable {
         }
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
-        for (message, span) in batch.records() {
-            self.observe_message(spaces, open, ctx, frame, message, span, filter);
+        for (record, (message, span)) in batch.records().enumerate() {
+            self.observe_message(spaces, open, ctx, frame, (record, message, span), filter);
         }
     }
 
@@ -604,8 +651,7 @@ impl ExchangeTable {
         open: &mut OpenExchanges,
         ctx: crate::node::ListContext<'_>,
         frame: &PassiveFrame,
-        message: &NetworkMessage,
-        span: Option<(usize, usize)>,
+        (record, message, span): (usize, &NetworkMessage, Option<(usize, usize)>),
         filter: &Filter,
     ) {
         let list = ctx.list();
@@ -650,6 +696,7 @@ impl ExchangeTable {
                     )
                     .unwrap_or(None),
                     row: crate::payload::RowKey::of(list, frame),
+                    record,
                     first_reply_at_ns: None,
                     replies: 0,
                     errs: 0,
@@ -685,7 +732,7 @@ impl ExchangeTable {
                     return;
                 };
                 let row = crate::payload::RowKey::of(list, frame);
-                self.finish(entry, Ending::Closed { at, row }, filter);
+                self.finish(entry, Ending::Closed { at, row, record }, filter);
             }
             _ => {}
         }
@@ -810,8 +857,15 @@ impl ExchangeTable {
         // The close's row exists only for an exchange that was closed, and a
         // close the capture never saw leaves the request's row the only one.
         self.row_verdicts.entry_or_default(entry.row).record(truth);
-        if let Ending::Closed { row, .. } = ending {
+        if let Ending::Closed { row, record, .. } = ending {
             self.row_verdicts.entry_or_default(row).record(truth);
+            // Before the early return below as well: the pairing does not depend
+            // on what a selector thought of the exchange.
+            *self.closings.entry_or_default((row, record)) = Some(Closing {
+                request: entry.row,
+                request_record: entry.record,
+                kind: entry.kind,
+            });
         }
         if truth != Truth::Yes {
             return;
@@ -975,6 +1029,22 @@ impl ExchangeTable {
     /// `kind == reply` / `kind == err` are its kinds.
     pub fn row_verdict(&self, key: &crate::payload::RowKey) -> Option<&crate::payload::RowVerdict> {
         self.row_verdicts.get(key)
+    }
+
+    /// The request the `ResponseFinal` carried by this message row closed, or
+    /// `None` when the row is not a final, or is one whose request the capture
+    /// never held.
+    ///
+    /// ⚠ THAT `None` IS NOT "NO REQUEST EXISTED". It is "this capture does not say
+    /// which": a capture that began mid-query, or whose list was trimmed past the
+    /// request, holds the final and not the request. A caller that can tell a
+    /// final from other rows (by the row's message name) reads `None` there as an
+    /// orphan, which [`ExchangeGaps::orphan_responses`] counts.
+    ///
+    /// Not a verdict and not selector-dependent: it is the same for every
+    /// selector, including the one that rejects the exchange.
+    pub fn closing(&self, final_row: &crate::payload::RowKey, record: usize) -> Option<&Closing> {
+        self.closings.get(&(*final_row, record))?.as_ref()
     }
 
     /// Merge another table's rows and totals into this one.

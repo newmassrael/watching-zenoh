@@ -3342,8 +3342,12 @@ int main(void) {
      * a family is declared; nothing retires.
      * 36: the `since` document gains `revised`, the rows at or below the cursor
      * whose digest moved since the last call, written again whole; it is
-     * empty when the capture only grew. A key arrives; nothing retires. */
-    revisioned[2].revision = 36;
+     * empty when the capture only grew. A key arrives; nothing retires.
+     * 37: every `carried` entry gains `closes`: for a `ResponseFinal` the request it
+     * closed (`request_kind`, `request_seq`, `request_record`, all null when the
+     * capture does not hold it), `null` for any other entry. Keys arrive and a
+     * `request_kind` family is declared; nothing retires. */
+    revisioned[2].revision = 37;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

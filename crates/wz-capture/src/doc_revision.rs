@@ -2033,6 +2033,47 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R36_CARRIES,
     },
+    // Revision 37 ADDS `closes` (with `request_kind`, `request_seq` and
+    // `request_record` inside it) and retires nothing: the `carried` entry of a
+    // `ResponseFinal` now says which request it closed. A consumer pinned to 36
+    // loses nothing: the key appears only on a final's entry, and a consumer that
+    // never read it reads the rows it always read.
+    //
+    // ON THE ENTRY AND NOT THE ROW, because a row is a transport message that can
+    // batch several records (a reply, a final and another query's request), and
+    // `carried` has an entry for each. A final inside a REASSEMBLED chain
+    // (`above_transport.carried`) is not covered: its entries read `null`.
+    //
+    // THE KEY IS ON EVERY ENTRY, the rule `body` states, so the word of `message`
+    // decides nothing about which keys arrive and `message` stays a passenger in the
+    // declared `carries` axis. Three answers, no two alike. An object with values:
+    // the exchange plane paired the final with a request it saw, and the object
+    // names the request's kind in the selector grammar's words, the sequence number
+    // of the row that carried it and its place among that row's records. An object
+    // of nulls: the request is not in the capture (it began mid-query, or the list
+    // was trimmed past it), which is the exchange plane's orphan, said on the entry.
+    // `null`: the entry is not a final. `request_seq` is itself `null` when the
+    // caller numbers no rows or the request's row is no longer held.
+    //
+    // THE PAIRING IS THE EXCHANGE PLANE'S. The renderer reads it and keeps none of
+    // its own, so the census's `exchanges` and this key cannot disagree about which
+    // request a final closed. It does not depend on a selector: a final is paired
+    // with the same request under any selector, including one that rejects the
+    // exchange.
+    //
+    // WHEN IT MOVES. A held final's `closes` can change after the row was written
+    // only if the request it names stops being held (a front trim of the list), so
+    // `closes` is among the cells a live handle may rewrite
+    // (`REVISABLE_ROW_CELLS`), and the since door's `revised` list carries it.
+    DocumentShape {
+        document: FIELDS,
+        revision: 37,
+        keys: FIELDS_R37_KEYS,
+        retiring: &[],
+        families: FIELDS_R37_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R37_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -13047,6 +13088,359 @@ pub const FIELDS_R36_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// What `request_kind` says at field-document revision 37 — the words of
+/// `crate::filter::RecordKind`, the kind a request is in the selector grammar.
+///
+/// A CODE SPAN and not a link, for the reason [`SELECTED_R13`] gives. Every kind
+/// the grammar names is listed, though a `Request` carries a query in practice:
+/// the set is the grammar's, so a consumer switching on the word does not have to
+/// know which of its members a request can be today.
+pub const REQUEST_KIND_R37: &[&str] = &["del", "err", "put", "query", "reply"];
+
+/// The keys the field document carries at revision 37: revision 36's PLUS
+/// `closes`, `request_kind`, `request_record` and `request_seq`, which the
+/// `carried` entry of a `ResponseFinal` writes to say which request it closed (see
+/// `crate::fields_json`'s `RowCloses`).
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R37_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "closes",
+    "compression",
+    "conduit",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "halves",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "revised",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "under",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+    "zid",
+];
+
+/// The value families the field document declares at revision 37: revision 36's
+/// PLUS `request_kind`, written out in full for the reason
+/// [`ValueFamily::values`] gives.
+pub const FIELDS_R37_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 37: revision 36's
+/// PLUS `request_kind`, a passenger (it names the request's kind and no other key
+/// depends on which word it is). Written out in full, for the reason the
+/// revision-36 table gives.
+pub const FIELDS_R37_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -15734,7 +16128,10 @@ mod tests {
             // six keys and a family, no word moves and nothing retires.
             // To 36 when the since door gained `revised`, the held rows it
             // writes again: one key, no word moves and nothing retires.
-            (FIELDS, 36),
+            // To 37 when the `carried` entry of a `ResponseFinal` gained `closes`,
+            // the request it closed: four keys and a `request_kind` family, no
+            // word moves and nothing retires.
+            (FIELDS, 37),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

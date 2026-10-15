@@ -1199,7 +1199,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":36,"key":"kind","values":[...],
+ *     {"name":"fields","revision":37,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1243,6 +1243,7 @@
  * @carries fields phase passenger
  * @carries fields priority passenger
  * @carries fields reason passenger
+ * @carries fields request_kind passenger
  * @carries fields selected passenger
  * @carries fields state discriminant
  * @carries fields under passenger
@@ -2645,6 +2646,32 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * decide on those two rows, as they do in the census's exchange plane. On any
  * other row they are `undecided`, because a push has no outcome.
  *
+ * WHICH REQUEST A ResponseFinal CLOSED IS SAID ON ITS `carried` ENTRY (since
+ * field-document revision 37), whether or not a selector was given. EVERY
+ * `carried` entry has a `closes` key, as every entry has a `body`, so the word of
+ * `message` decides nothing about which keys arrive. Three answers:
+ *
+ *     "closes":{"request_kind":"query","request_seq":41,"request_record":0}   paired
+ *     "closes":{"request_kind":null,"request_seq":null,"request_record":null}  not in
+ *                                                        this capture (an orphan)
+ *     "closes":null                          the entry is not a ResponseFinal
+ *
+ * It is on the ENTRY and not the row because a row is a transport message that can
+ * batch several records, and `carried` has an entry for each: two finals in one
+ * Frame each name their own request. `request_kind` is the request's kind in the
+ * selector's words (put, del, query, reply, err; in practice query),
+ * `request_seq` is the `seq` of the row that carried the request (null when the
+ * caller numbers no rows, a capture door, or that row is no longer held) and
+ * `request_record` is the request's place among that row's batched records.
+ * The orphan is the census's: the capture began mid-query, or the list was trimmed
+ * past the request. It is the exchange plane's own pairing, so `closes` and the
+ * census cannot disagree about which request a final closed, and it is the same
+ * under every selector, including one that rejects the exchange. A final inside a
+ * REASSEMBLED chain (`above_transport.carried`) reads `null`, so `null` there does
+ * not mean it is not a final. A held final's `closes` can change after the row was
+ * written only if its request stops being held, and then the row is among the
+ * since door's `revised` rows.
+ *
  * THE UNIT OF A TIME TERM IS THE MILLISECOND, and stays it (see "WHEN A RECORD
  * WAS CAPTURED" above): `time`, `elapsed`, `delay`, `first_reply` and
  * `completion` compare against whole milliseconds, each end of an interval
@@ -2685,6 +2712,12 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * selector as nothing. (An empty selector once wrote "yes" and
  * "unjudged" on every row, against this paragraph. A test now holds every
  * door this header marks SUBSUMED to the same bytes as its successor.)
+ *
+ * @values fields request_kind
+ *
+ * `request_kind` (inside `closes`, since field-document revision 37) is declared
+ * as a closed family too: the words of the selector grammar's `kind` field,
+ * put, del, query, reply and err, though a request carries a query in practice.
  *
  * @values fields selected
  *
@@ -4366,7 +4399,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":36,"key":"state",
+ *     "value_families":[{"name":"fields","revision":37,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

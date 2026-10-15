@@ -14102,6 +14102,74 @@ mod tests {
         p
     }
 
+    /// ONE stream session in which a query is asked, answered and closed, and then
+    /// goes quiet with keep-alives: the capture a request can be pushed out of by
+    /// a trim while the final that closed it is still held.
+    ///
+    /// The reply and the final travel in ONE Frame, as `census_capture`'s do and as
+    /// a responder batches them, so the final is a record among several in its row.
+    fn exchange_packets() -> Vec<Vec<u8>> {
+        let keepalive = [1u8, 0, 0x04];
+        let query = framed_frame(
+            0,
+            &wz_codecs::request::Request {
+                header: wz_codecs::request::Request::default().header
+                    | wz_codecs::wire_const::FLAG_N_N,
+                rid: 7,
+                keyexpr: literal("demo/q"),
+                body: wz_codecs::request::RequestVariant::CodecZenohQuery(
+                    wz_codecs::query::Query::default(),
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let mut answer_records = wz_codecs::response::Response {
+            header: wz_codecs::response::Response::default().header
+                | wz_codecs::wire_const::FLAG_N_N,
+            request_id: 7,
+            keyexpr: literal("demo/q"),
+            body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
+                body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
+                    wz_codecs::msg_put::MsgPut {
+                        payload_len: Some(6),
+                        payload: Some(b"answer"),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        answer_records.extend_from_slice(
+            &wz_codecs::response_final::ResponseFinal {
+                request_id: 7,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let answer = framed_frame(0, &answer_records);
+        let (init_a, init_b) = (framed_init(&[1, 2, 3, 4]), framed_init(&[5, 6, 7, 8]));
+        let (mut a, mut b) = (1000u32, 2000u32);
+        let mut p = Vec::new();
+        p.push(tcp_packet(a, &init_a));
+        a += init_a.len() as u32;
+        p.push(tcp_packet_reverse(b, &init_b));
+        b += init_b.len() as u32;
+        p.push(tcp_packet(a, &query));
+        a += query.len() as u32;
+        p.push(tcp_packet_reverse(b, &answer));
+        b += answer.len() as u32;
+        for _ in 0..4 {
+            p.push(tcp_packet(a, &keepalive));
+            a += keepalive.len() as u32;
+            p.push(tcp_packet_reverse(b, &keepalive));
+            b += keepalive.len() as u32;
+        }
+        p
+    }
+
     /// The classic pcap of the first `n` packets, which is a prefix of the file
     /// of all of them.
     fn pcap_prefix(packets: &[Vec<u8>], n: usize) -> Vec<u8> {
@@ -14831,6 +14899,35 @@ mod tests {
                 },
                 "",
                 cells(RETIRABLE_ROW_CELLS),
+            ),
+            // THE CONTROL for the next: an exchange that only grows. The final
+            // names its request on the row it first appears in and nothing moves
+            // it, which is what makes the cell the next scenario finds a finding.
+            (
+                "an exchange that only grows",
+                pcap_prefix(&exchange_packets(), exchange_packets().len()),
+                Default::default(),
+                "",
+                cells(&[]),
+            ),
+            // A request trimmed ahead of its final. The ring holds three frames:
+            // when the keep-alives push the request out, the final's row is still
+            // held and the exchange plane no longer has the request to pair it
+            // with, so `closes` becomes an object of nulls where it named a
+            // request.
+            (
+                "a request trimmed ahead of its final",
+                pcap_prefix(&exchange_packets(), exchange_packets().len()),
+                wz_capture::DissectionLimits {
+                    frames_per_flow: Some(3),
+                    ..Default::default()
+                },
+                "",
+                cells(&[
+                    "/carried[]/closes/request_kind",
+                    "/carried[]/closes/request_record",
+                    "/carried[]/closes/request_seq",
+                ]),
             ),
             (
                 "chains under a trim",

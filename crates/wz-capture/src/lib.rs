@@ -195,6 +195,8 @@ pub use ordered_fold::{CensusMemory, FoldStats};
 mod bounded_slots;
 pub use bounded_slots::MAX_SELECTOR_MEMORIES;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod closes_tests;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod fields_revised_tests;
 #[cfg(all(test, feature = "network-codecs"))]
 mod ordered_fold_tests;

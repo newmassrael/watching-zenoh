@@ -261,6 +261,30 @@ impl RecordKind {
             _ => return None,
         })
     }
+
+    /// The word a selector writes for this kind, and the one a document writes
+    /// when it names the kind of a record.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Put => "put",
+            Self::Del => "del",
+            Self::Query => "query",
+            Self::Reply => "reply",
+            Self::Err => "err",
+        }
+    }
+
+    /// Every word [`Self::word`] can return, by walking the variants: what a
+    /// declared value family is held to. Exhaustive on purpose, so a kind added
+    /// later fails to compile here rather than missing from the declaration.
+    pub fn names() -> Vec<&'static str> {
+        [Self::Put, Self::Del, Self::Query, Self::Reply, Self::Err]
+            .into_iter()
+            .map(|k| match k {
+                Self::Put | Self::Del | Self::Query | Self::Reply | Self::Err => k.word(),
+            })
+            .collect()
+    }
 }
 
 /// R311y636 (§1.1v) — how an exchange TURNED OUT, for the terms no `Request`

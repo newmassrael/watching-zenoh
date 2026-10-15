@@ -212,6 +212,7 @@ pub fn fields_json_where_coordinated(
             coordinates: Some(coordinates),
             since: None,
             sink: None,
+            closings: None,
             walk: None,
         },
     )
@@ -277,6 +278,7 @@ pub fn fields_json_since_coordinated(
             coordinates: Some(coordinates),
             since: Some(since),
             sink: None,
+            closings: None,
             walk: None,
         },
     )
@@ -321,6 +323,15 @@ pub struct FieldsMemory {
     /// The node census the session grouping is derived from, kept so that the
     /// grouping is not rebuilt from every message at each call.
     nodes: crate::node::NodeMemory,
+    /// The exchange plane's pairing of requests and finals, folded under the
+    /// identity selector and continued between calls like the census planes are,
+    /// so a `ResponseFinal` row can name the request it closed without the call
+    /// folding the whole capture again. It depends on no declaration text, so a
+    /// change of text does not empty it.
+    #[cfg(feature = "network-codecs")]
+    pairing: crate::ordered_fold::Resumable<crate::exchange::ExchangeFold>,
+    #[cfg(feature = "network-codecs")]
+    pairing_work: crate::FoldStats,
     saved: Option<FieldsSaved>,
     /// What the walker left: the keyexpr table, and for each list where it
     /// stopped and the folds it held. Meaningful only beside `saved`.
@@ -392,13 +403,37 @@ pub fn fields_json_since_remembering(
 ) -> String {
     if memory.key.as_deref() != Some(key) {
         let nodes = core::mem::take(&mut memory.nodes);
+        #[cfg(feature = "network-codecs")]
+        let pairing = core::mem::take(&mut memory.pairing);
+        #[cfg(feature = "network-codecs")]
+        let pairing_work = memory.pairing_work;
         *memory = FieldsMemory {
             key: Some(String::from(key)),
             nodes,
+            #[cfg(feature = "network-codecs")]
+            pairing,
+            #[cfg(feature = "network-codecs")]
+            pairing_work,
             ..FieldsMemory::default()
         };
     }
     let grouping = crate::node::SessionGrouping::of(&memory.nodes.nodes(d));
+    // Which request each `ResponseFinal` row closed: the exchange plane's own
+    // pairing, continued from where the last call stopped (it begins again only
+    // when the capture is not a prefix-extension of the one it folded, which is
+    // what the census planes do too), and the same table for the comparison below
+    // and for the document, so the two cannot differ on it.
+    #[cfg(feature = "network-codecs")]
+    let pairing_table = memory
+        .pairing
+        .advance(d, &grouping, &mut memory.pairing_work, || {
+            crate::exchange::ExchangeFold::begin(d, &crate::filter::Filter::any(), &grouping)
+        })
+        .table();
+    #[cfg(feature = "network-codecs")]
+    let closings: Option<&PairingTable> = Some(&pairing_table);
+    #[cfg(not(feature = "network-codecs"))]
+    let closings: Option<&PairingTable> = None;
     let origin_ms = d.capture_origin_ms();
     // The capture is a prefix-extension of the one the last call saw, and the
     // messages that arrived since, when it is.
@@ -431,6 +466,7 @@ pub fn fields_json_since_remembering(
                     coordinates: Some(coordinates),
                     since: None,
                     sink: Some(&probe),
+                    closings,
                     walk: None,
                 },
             );
@@ -550,6 +586,7 @@ pub fn fields_json_since_remembering(
             coordinates: Some(coordinates),
             since: Some(since),
             sink: Some(&sink),
+            closings,
             walk: Some(WalkRun {
                 state: &mut memory.walk,
                 resume,
@@ -682,6 +719,12 @@ pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/carried[]/keyexpr_cause",
     "/carried[]/keyexpr_id",
     "/chain/chain_id",
+    // A final's `closes` (on its `carried` entry) names the request the exchange
+    // plane paired it with, and the pairing needs the request to still be held: a
+    // front trim that takes the request leaves the final held and unpaired, so
+    // `closes` becomes an object of nulls where it named a request, and
+    // `request_seq` becomes `null` when only the request's row went.
+    "/carried[]/closes/**",
     "/payload_decode/**",
 ];
 
@@ -799,10 +842,25 @@ struct RowAttachments<'a> {
     /// What a since-document remembers of the rows it writes and which earlier
     /// rows it writes again. Absent for every document that remembers nothing.
     sink: Option<&'a RowSink>,
+    /// The exchange plane's pairing of requests and finals, when the caller
+    /// already holds it (a selector's walk made one, or a live handle kept one
+    /// between calls). Absent: the document makes the pairing itself, over the
+    /// identity selector. The pairing does not depend on a selector, so any table
+    /// the exchange plane made says the same thing about which request a final
+    /// closed.
+    closings: Option<&'a PairingTable>,
     /// The walker's own state, kept between calls, and whether this call
     /// continues it. Absent for every document that keeps none.
     walk: Option<WalkRun<'a>>,
 }
+
+/// What names the request a `ResponseFinal` row closed. Without the record plane
+/// there is no pairing to read, and the type says so by being empty.
+#[cfg(feature = "network-codecs")]
+type PairingTable = crate::exchange::ExchangeTable;
+/// See above.
+#[cfg(not(feature = "network-codecs"))]
+type PairingTable = ();
 
 /// What the field walker keeps of ONE message list between calls: where it
 /// stopped and the folds it left, so a walk that continues visits only the
@@ -826,6 +884,9 @@ pub(crate) struct ListWalk {
     /// The chain fold, which numbers a completing row by the identity its begun
     /// row opened.
     chains: ChainIds,
+    /// Where each request of the list was produced, for the rows of the finals
+    /// that close them.
+    requests: RequestIndex,
     /// Some row of the list had no sequence number. Such a row is written by
     /// every since-document (dropping one is not recoverable), so a walk that
     /// skipped the old rows would not write what a whole one does.
@@ -901,8 +962,29 @@ fn fields_json_selected(
         coordinates,
         since,
         sink,
+        closings,
         walk,
     } = attach;
+    // THE PAIRING a `ResponseFinal` row names its request from. A caller that
+    // holds one (a live handle's kept fold) hands it in; a selector's walk made
+    // one, and the pairing it recorded does not depend on the selector; and a
+    // document with neither folds the exchange plane once under the identity
+    // selector. Whichever it is, it is the exchange plane's own pairing and not a
+    // second opinion of this renderer.
+    #[cfg(feature = "network-codecs")]
+    let own_pairing;
+    #[cfg(feature = "network-codecs")]
+    let closings: Option<&PairingTable> =
+        match closings.or_else(|| verdicts.and_then(RowJudgement::exchanges)) {
+            Some(table) => Some(table),
+            None => {
+                own_pairing =
+                    crate::exchange::exchanges_grouped(d, &crate::filter::Filter::any(), grouping);
+                Some(&own_pairing)
+            }
+        };
+    #[cfg(not(feature = "network-codecs"))]
+    let _ = closings;
     // A map with no rules answers `NoRules` for every message, so it renders
     // nothing either way -- folded here so the row renderers ask one question
     // rather than two.
@@ -1032,6 +1114,8 @@ fn fields_json_selected(
                 after_seq: since.map(|s| s.after_seq),
                 zids: lists.stream.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
+                #[cfg(feature = "network-codecs")]
+                closings: RowClosings::of(closings, lists.stream.get(i).copied()),
             },
             run,
             &mut out,
@@ -1075,6 +1159,8 @@ fn fields_json_selected(
                 after_seq: since.map(|s| s.after_seq),
                 zids: lists.datagram.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
+                #[cfg(feature = "network-codecs")]
+                closings: RowClosings::of(closings, lists.datagram.get(i).copied()),
             },
             run,
             &mut out,
@@ -1299,6 +1385,10 @@ fn push_stream_flow(
             d.note_unwalked_n(start);
         }
     }
+    let mut requests = match run.as_mut() {
+        Some(r) if r.resume => core::mem::take(&mut r.walk.requests),
+        _ => RequestIndex::default(),
+    };
     let mut unnumbered = false;
     // R311y856 — folded in FRAME ORDER and before the cap bites, which is the
     // rule R311y701 settled for the same table: a keyexpr id resolves through
@@ -1343,6 +1433,9 @@ fn push_stream_flow(
         last_packet = flow
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
+        // Where a request stood, for the final that closes it to name; kept for
+        // every message this pass visits, whatever the cursor does to its row.
+        requests.note(frame, first_produced + position as u64);
         let seq = tags.frame_seq(first_produced + position as u64);
         unnumbered |= seq.is_none();
         folded.push(FoldedRow {
@@ -1401,6 +1494,7 @@ fn push_stream_flow(
                     declarations,
                     carried: Some(&frame.carried),
                     e2e,
+                    closes: None,
                 });
             }
             continue;
@@ -1467,6 +1561,7 @@ fn push_stream_flow(
                     declarations,
                     carried: Some(&frame.carried),
                     e2e,
+                    closes: RowCloses::of(&tags, &requests, frame),
                 },
                 w,
             ),
@@ -1501,6 +1596,7 @@ fn push_stream_flow(
         r.walk.order_packet = order_packet;
         r.walk.order_last = order_last;
         r.walk.chains = chains;
+        r.walk.requests = requests;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
     }
     let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
@@ -1534,6 +1630,10 @@ fn push_datagram_flow(
         Some(r) if r.resume => core::mem::take(&mut r.walk.chains),
         _ => ChainIds::default(),
     };
+    let mut requests = match run.as_mut() {
+        Some(r) if r.resume => core::mem::take(&mut r.walk.requests),
+        _ => RequestIndex::default(),
+    };
     if resumed {
         if let Some(d) = declarations {
             d.note_unwalked_n(start);
@@ -1558,6 +1658,10 @@ fn push_datagram_flow(
         // a datagram the second read disagrees about still advances the chain
         // fold exactly as the router was advanced by it.
         let session_row = chains.observe(frame);
+        // Where a request stood, ahead of every skip, so a final that closes it
+        // can name its sequence number whether or not the request's own row is
+        // written by this call.
+        requests.note(frame, first_produced + position as u64);
         // After the folds, and BEFORE the second read: a row the
         // cursor passes over is not re-read from the container, which is most of
         // what a datagram row costs.
@@ -1588,6 +1692,7 @@ fn push_datagram_flow(
                                 declarations,
                                 carried: Some(&frame.carried),
                                 e2e,
+                                closes: None,
                             });
                         }
                     }
@@ -1652,6 +1757,7 @@ fn push_datagram_flow(
                 declarations,
                 carried: Some(&frame.carried),
                 e2e,
+                closes: RowCloses::of(&tags, &requests, frame),
             },
             w,
         );
@@ -1750,6 +1856,8 @@ fn push_datagram_flow(
                 carried: None,
                 // Nor does it carry a sample, so there is no frame to judge.
                 e2e: E2eSource::default(),
+                // And no exchange: scouting is not a request protocol.
+                closes: None,
             },
             out,
         );
@@ -1790,6 +1898,7 @@ fn push_datagram_flow(
         r.walk.first_produced = first_produced;
         r.walk.produced = flow.frames.produced();
         r.walk.chains = chains;
+        r.walk.requests = requests;
         r.walk.scouting_walked = flow.scouting.len();
         r.walk.scouting_first_produced = scouting_first;
         r.walk.scouting_produced = flow.scouting.produced();
@@ -1931,6 +2040,10 @@ struct RowWalk<'a> {
     carried: Option<&'a wz_session_core::passive::Carried>,
     /// Who sent the row and when, for the end-to-end judge.
     e2e: E2eSource<'a>,
+    /// The pairing the `carried` entry of each `ResponseFinal` names its request
+    /// from. `None` for a row that is not being written (it is only judged), a
+    /// scouting row, and a document with no pairing for this list.
+    closes: Option<RowCloses<'a>>,
 }
 
 fn push_walk(row: RowWalk<'_>, out: &mut String) {
@@ -1943,6 +2056,7 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
         declarations,
         carried,
         e2e,
+        closes,
     } = row;
     let judging = E2eRow {
         declarations,
@@ -1971,7 +2085,7 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
                 escape_into(&field.name, out);
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
-                push_carried(bytes, &field, space, at, judging, out);
+                push_carried(bytes, &field, space, at, judging, closes, out);
                 push_payload_block(&field, declarations, at, out);
             } else {
                 let mut why = String::from("the session read these bytes as ");
@@ -2077,6 +2191,8 @@ fn judge_unwritten_row(row: RowWalk<'_>) {
         declarations,
         carried,
         e2e,
+        // A row that is only judged writes nothing, so it names no request.
+        closes: _,
     } = row;
     let Some(declarations) = declarations.filter(|d| d.has_e2e_rules()) else {
         return;
@@ -2330,6 +2446,7 @@ fn push_carried(
     space: MidSpace,
     at: KeyexprAt<'_>,
     judging: E2eRow<'_>,
+    closes: Option<RowCloses<'_>>,
     out: &mut String,
 ) {
     out.push_str(",\"carried\":[");
@@ -2339,6 +2456,7 @@ fn push_carried(
                      keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
                      payload: Option<crate::payload_decode::PayloadSlot>,
                      e2e: Option<crate::payload_decode::E2eJudged<'_>>,
+                     closed: Option<String>,
                      out: &mut String| {
         if !first {
             out.push(',');
@@ -2359,6 +2477,11 @@ fn push_carried(
         push_keyexpr_miss(keyexpr.as_ref().and_then(|k| k.as_ref().err()), out);
         push_payload_slot(payload.as_ref(), out);
         push_e2e(e2e.as_ref(), out);
+        // On EVERY entry, `null` on one that is not a `ResponseFinal`: the rule
+        // `body` states, and the reason `message` stays a passenger in the
+        // declared `carries` axis (see `RowCloses`).
+        out.push_str(",\"closes\":");
+        out.push_str(closed.as_deref().unwrap_or("null"));
         out.push('}');
     };
     // The first listing entry is the row itself; subsequent entries are its
@@ -2370,9 +2493,9 @@ fn push_carried(
         } else {
             None
         };
-        entry(message.name(), field, keyexpr, None, None, out);
+        entry(message.name(), field, keyexpr, None, None, None, out);
     }
-    for record in records {
+    for (index, record) in records.into_iter().enumerate() {
         let word = record_word(bytes, record);
         let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
         // Judged HERE, in the order the entries are written, which is the order
@@ -2381,12 +2504,18 @@ fn push_carried(
         let e2e = judging.declarations.and_then(|declarations| {
             judge_record(record, word, keyexpr.as_ref(), declarations, judging.source)
         });
+        // The pairing is by the record's place in its row, which is `index`: the
+        // exchange plane folds a batch's records in the order this list is in.
+        let closed = closes
+            .filter(|_| word == "ResponseFinal")
+            .map(|c| c.value(index));
         entry(
             word,
             record,
             keyexpr,
             crate::payload_decode::payload_slot(record),
             e2e,
+            closed,
             out,
         );
     }
@@ -2707,6 +2836,11 @@ fn push_above_transport(
             });
             push_e2e(e2e.as_ref(), out);
             push_payload_block(record, declarations, at, out);
+            // On every entry, like the row's own: `null` here. The pairing is made
+            // over the frames a list holds, and a record inside a reassembled
+            // chain is not one of them, so this list names no request. Last, so
+            // the keys the entry always wrote keep the order they were written in.
+            out.push_str(",\"closes\":null");
             out.push('}');
         }
         out.push(']');
@@ -3566,6 +3700,180 @@ struct RowTags<'a> {
     /// What a since-document remembers of the rows it writes, and the earlier
     /// rows it writes again. `None` for a document that remembers nothing.
     sink: Option<&'a RowSink>,
+    /// The pairing a `ResponseFinal` row names its request from, and this flow's
+    /// list index in it. `None` where the list has no index (a row this document
+    /// does not render), which leaves its finals without a `closes` key rather
+    /// than guessing.
+    #[cfg(feature = "network-codecs")]
+    closings: Option<RowClosings<'a>>,
+}
+
+/// The exchange plane's pairing, and the list it is read for.
+#[cfg(feature = "network-codecs")]
+#[derive(Clone, Copy)]
+struct RowClosings<'a> {
+    table: &'a crate::exchange::ExchangeTable,
+    list: usize,
+}
+
+#[cfg(feature = "network-codecs")]
+impl<'a> RowClosings<'a> {
+    fn of(table: Option<&'a crate::exchange::ExchangeTable>, list: Option<usize>) -> Option<Self> {
+        Some(Self {
+            table: table?,
+            list: list?,
+        })
+    }
+}
+
+/// Where each `Request` of ONE list stood, as the produced index of its message,
+/// so the row of a `ResponseFinal` can name the sequence number of the request it
+/// closed.
+///
+/// A request and the final that closes it are always in the SAME list (the
+/// exchange plane pairs them by list, direction and rid), and the request comes
+/// first, so a walk that visits a list's messages in list order has the request's
+/// index before any final that names it. A walk that continues keeps this between
+/// calls, because the request may be a message the continuing walk does not visit
+/// again.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequestIndex {
+    #[cfg(feature = "network-codecs")]
+    produced: alloc::collections::BTreeMap<(usize, usize), u64>,
+}
+
+impl RequestIndex {
+    /// Note a row of the list, at produced index `produced`. Only a row that
+    /// batches a `Request` is kept, found in the records the exchange plane folds.
+    #[cfg(feature = "network-codecs")]
+    fn note(&mut self, frame: &PassiveFrame, produced: u64) {
+        let batches_a_request = crate::exchange::batch_of(frame).is_some_and(|batch| {
+            batch.records().any(|(message, _)| {
+                matches!(
+                    message,
+                    wz_session_core::network_message::NetworkMessage::Request(_)
+                )
+            })
+        });
+        if batches_a_request {
+            self.produced
+                .insert(crate::payload::RowKey::position_of(frame), produced);
+        }
+    }
+
+    /// Without the record plane no final names a request, so nothing is kept.
+    #[cfg(not(feature = "network-codecs"))]
+    fn note(&mut self, _: &PassiveFrame, _: u64) {}
+
+    /// Where the request that stood at `request` in its list was produced.
+    #[cfg(feature = "network-codecs")]
+    fn produced_of(&self, request: &crate::payload::RowKey) -> Option<u64> {
+        self.produced.get(&request.position_in_list()).copied()
+    }
+}
+
+/// What one row needs to say, on the `carried` entry of each `ResponseFinal` it
+/// batches, which request that final closed.
+///
+/// # Per ENTRY, because a row batches records
+///
+/// A row is a transport message and `carried` has an entry for each network record
+/// it batches, so a `Frame` can hold a reply, a final and another query's request.
+/// The pairing is therefore by the record's place in its row (the exchange plane
+/// counts them in the order it folds them, which is the order `carried` lists
+/// them), and the answer is written on the entry whose `message` is
+/// `ResponseFinal`.
+///
+/// # The key is on EVERY entry, and three answers are told apart
+///
+/// - **an object with values** — the exchange plane paired this final with a
+///   request it saw. `request_kind` is that request's kind in the selector
+///   grammar's words, `request_seq` is the `seq` of the row that carried the
+///   request (or `null` when the caller numbers no rows or that row is no longer
+///   held), and `request_record` is the request's place among that row's batched
+///   records.
+/// - **an object of nulls** — the final's request is not in this capture: it began
+///   mid-query, or its list was trimmed past the request. That is the exchange
+///   plane's orphan ([`crate::exchange::ExchangeGaps::orphan_responses`]), said on
+///   the entry.
+/// - **`null`** — the entry is not a `ResponseFinal`, so there is no request to
+///   name. The key is on every entry for the reason `body` is: were it absent from
+///   an entry that is not a final, the word of `message` would decide whether the
+///   key arrives, which turns `message` into a discriminant in the declared
+///   `carries` axis and changes what every consumer was told about it.
+///
+/// A final inside a REASSEMBLED chain (`above_transport.carried`) is not covered:
+/// its entries read `null`, so `null` there does not mean it is not a final.
+#[cfg(feature = "network-codecs")]
+#[derive(Clone, Copy)]
+struct RowCloses<'a> {
+    table: &'a crate::exchange::ExchangeTable,
+    row: crate::payload::RowKey,
+    requests: &'a RequestIndex,
+    numbering: Option<RowNumbering<'a>>,
+}
+
+#[cfg(feature = "network-codecs")]
+impl<'a> RowCloses<'a> {
+    /// The pairing for the row `frame` is, or `None` where the document has none
+    /// for this list.
+    fn of(tags: &RowTags<'a>, requests: &'a RequestIndex, frame: &PassiveFrame) -> Option<Self> {
+        let RowClosings { table, list } = tags.closings?;
+        Some(Self {
+            table,
+            row: crate::payload::RowKey::of(list, frame),
+            requests,
+            numbering: tags.numbering,
+        })
+    }
+
+    /// The value of `closes` for the `ResponseFinal` that is record `record` of
+    /// this row.
+    fn value(&self, record: usize) -> String {
+        let mut out = String::new();
+        let Some(closing) = self.table.closing(&self.row, record) else {
+            // The orphan: an object, so it is told from an entry that is not a
+            // final (`null`), with nothing to name.
+            out.push_str("{\"request_kind\":null,\"request_seq\":null,\"request_record\":null}");
+            return out;
+        };
+        let seq = self
+            .requests
+            .produced_of(&closing.request)
+            .and_then(|produced| {
+                let n = self.numbering?;
+                n.coordinates.row_seq(n.list?, produced)
+            });
+        let _ = write!(
+            out,
+            "{{\"request_kind\":\"{}\",\"request_seq\":",
+            closing.kind.word()
+        );
+        match seq {
+            Some(seq) => {
+                let _ = write!(out, "{seq}");
+            }
+            None => out.push_str("null"),
+        }
+        let _ = write!(out, ",\"request_record\":{}}}", closing.request_record);
+        out
+    }
+}
+
+/// Without the record plane there is no pairing, and no entry says anything.
+#[cfg(not(feature = "network-codecs"))]
+#[derive(Clone, Copy)]
+struct RowCloses<'a>(core::marker::PhantomData<&'a ()>);
+
+#[cfg(not(feature = "network-codecs"))]
+impl<'a> RowCloses<'a> {
+    fn of(_: &RowTags<'a>, _: &'a RequestIndex, _: &PassiveFrame) -> Option<Self> {
+        None
+    }
+
+    fn value(&self, _: usize) -> String {
+        String::new()
+    }
 }
 
 /// What a since-document keeps of its rows, and which rows it writes AGAIN.
@@ -3866,6 +4174,13 @@ impl RowJudgement {
     /// for a selector that was judged.
     pub(crate) fn ambiguities(&self) -> &[crate::filter::ZidAmbiguity] {
         &self.ambiguities
+    }
+
+    /// The exchange plane this selector's walk made, or `None` when it was
+    /// ambiguous and no walk was made. Its record of which request each final
+    /// closed is the same for every selector.
+    pub(crate) fn exchanges(&self) -> Option<&crate::exchange::ExchangeTable> {
+        self.walk.as_ref().map(|w| &w.exchanges)
     }
 
     /// The row's answer folded over the records either plane judged on it, or
@@ -7271,6 +7586,10 @@ mod tests {
                 through_seq: 1,
             },
         ));
+        // And the documents that carry `closes` (revision 37): a stream and a
+        // datagram link, a put request and a query request each closed, and a
+        // final whose request the capture does not hold.
+        rendered.extend(crate::closes_tests::pin_documents());
         let states = PayloadDecoding::all();
         assert_eq!(
             states.len(),
@@ -7449,7 +7768,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 63] = [
+        let live: [(&str, &str, Vec<&'static str>); 64] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -7561,6 +7880,15 @@ mod tests {
                 rev::FIELDS,
                 "selected",
                 crate::fields_json::RowVerdict::names(),
+            ),
+            // The kind of the request a `ResponseFinal` closed, in the selector
+            // grammar's words (revision 37). One walk behind it and behind the
+            // grammar's `kind` field, so a kind added to the grammar reaches this
+            // family at `cargo build`.
+            (
+                rev::FIELDS,
+                "request_kind",
+                crate::filter::RecordKind::names(),
             ),
             (
                 rev::FIELDS,
@@ -8291,6 +8619,10 @@ mod tests {
         // Revision 34 — the documents that carry the end-to-end block, which only
         // a declared profile brings and no capture above declares.
         let e2e_docs = crate::e2e_row_tests::pin_documents();
+        // Revision 37 — the documents that carry `closes`, and `request_kind` over
+        // two of its words.
+        let mut closes_docs = crate::closes_tests::pin_documents();
+        closes_docs.extend(crate::closes_tests::datagram_pin_documents());
         let mut fields_docs: Vec<&String> = alloc::vec![
             &with,
             &without,
@@ -8303,6 +8635,7 @@ mod tests {
             &where_miss
         ];
         fields_docs.extend(e2e_docs.iter());
+        fields_docs.extend(closes_docs.iter());
         // EVERY capture above through the two other doors as well:
         // the selector's (rows gain `selected`) and the live door's (rows gain
         // `selected` and the record coordinates). The optional keys compose

@@ -47,12 +47,12 @@ const HEX_HIGH: &str = "88776655";
 
 /// The two kinds of link a row is produced for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Link {
+pub(crate) enum Link {
     Udp,
     Tcp,
 }
 
-const LINKS: [Link; 2] = [Link::Udp, Link::Tcp];
+pub(crate) const LINKS: [Link; 2] = [Link::Udp, Link::Tcp];
 
 /// A one-line profile: CRC first, a 2-byte counter that wraps at 65536, an
 /// identifier whose wire value is XORed and split, and a slot keyed on the
@@ -96,8 +96,8 @@ fn damaged(mut bytes: Vec<u8>) -> Vec<u8> {
 }
 
 /// A capture of one conversation, built packet by packet.
-struct Wire {
-    d: Dissection,
+pub(crate) struct Wire {
+    pub(crate) d: Dissection,
     packets: Vec<Vec<u8>>,
     link: Link,
     /// The next TCP sequence number of each end, low then high.
@@ -106,7 +106,7 @@ struct Wire {
 
 impl Wire {
     /// A conversation whose two ends have named themselves, when `named`.
-    fn new(link: Link, named: bool) -> Self {
+    pub(crate) fn new(link: Link, named: bool) -> Self {
         let mut wire = Self {
             d: Dissection::new(),
             packets: Vec::new(),
@@ -122,7 +122,7 @@ impl Wire {
 
     /// One message from the low end (`from_low`) or the high end, taken at
     /// `ns`. On a stream it is length-prefixed, as the stream reader needs.
-    fn send(&mut self, from_low: bool, ns: Option<u64>, message: &[u8]) {
+    pub(crate) fn send(&mut self, from_low: bool, ns: Option<u64>, message: &[u8]) {
         let packet = match self.link {
             Link::Udp => {
                 if from_low {
@@ -156,7 +156,7 @@ impl Wire {
         self.send(from_low, ns, &frame_carrying(&record));
     }
 
-    fn file(&self) -> Vec<u8> {
+    pub(crate) fn file(&self) -> Vec<u8> {
         let rows: Vec<(u32, u32, &[u8])> = self
             .packets
             .iter()
