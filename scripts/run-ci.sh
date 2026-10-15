@@ -6535,7 +6535,11 @@ layer_c1ay_cargo_test_router_hat() {
     # 44 -> 47: the same three storage-host selection tests seen from this
     # feature set. MEASURED by `guarded_count_gate.py` on this exact command:
     # 47 passed.
-    _runci_guarded_test "C1AY stock_config_tests role-parity 47" 47 \
+    # 47 -> 48: `a_scout_listen_already_typed_is_not_reported_withheld`, gated on
+    # `scouting-responder` like the cases around it, so the leg above does not
+    # compile it. MEASURED by `guarded_count_gate.py` on this exact command: 48
+    # passed.
+    _runci_guarded_test "C1AY stock_config_tests role-parity 48" 48 \
         cargo test -p wz-ap-demo \
         --features zenoh-config,scouting-responder,routing-peer,router-hat-router,scouting-active \
         stock_config_tests --quiet || return 1

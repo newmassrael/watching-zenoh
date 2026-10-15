@@ -1337,11 +1337,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     let multicast_scouting_off = (!cfg.multicast_scouting).then_some(
         KeyEffect::WithheldFromThisRun("this document disables multicast scouting"),
     );
+    // A `--connect` run is in the set for the client, which answers Scouts as a
+    // stock client does (`scouting/multicast/listen`, default true): the one-shot
+    // client starts the responder once its session is open. A `--peer` or
+    // `--router-hat` that also dials carries `--connect` and was in the set
+    // already, so the only run this adds is the client.
     let role_answers_scouts = exp
         .rest
         .iter()
         .chain(exp.added.iter())
-        .any(|a| a == "--peer" || a == "--router-hat");
+        .any(|a| a == "--peer" || a == "--router-hat" || a == "--connect");
     // The switch withholds a direction that ASKS for something. `listen: false`
     // asks for nothing -- it is what the absent flag already means -- and
     // reporting it as withheld would answer a question the operator did not
@@ -2549,6 +2554,13 @@ impl Expansion<'_> {
         blocked: Option<KeyEffect>,
     ) -> KeyEffect {
         match (blocked, self.typed(flag), on) {
+            // The operator typed the flag and the file asks for it too: the node
+            // does what both say, so the key is not "withheld". A run-level block
+            // is only a reason the EXPANSION would not add the flag, and the flag
+            // is already there. A build with no sink stays reported as such.
+            (Some(KeyEffect::WithheldFromThisRun(_)), true, true) => {
+                KeyEffect::AlreadyOnTheCommandLine
+            }
             (Some(blocked), _, _) => blocked,
             (None, true, true) => KeyEffect::AlreadyOnTheCommandLine,
             (None, true, false) => KeyEffect::OverriddenOnTheCommandLine,
@@ -6408,8 +6420,9 @@ mod stock_config_tests {
     /// key with the router row and differs in the one word `mode`, so an
     /// expansion that emitted `--router-hat` for everything, or `--scout-listen`
     /// for everything, fails one of the two. The client row is the second
-    /// control, and it is the one that keeps `--scout-listen` from being read as
-    /// unconditional: a client dials and answers nothing.
+    /// control, and with its silent twin (`listen: false`) it keeps
+    /// `--scout-listen` from being read as unconditional: a client answers
+    /// Scouts when its file asks and not otherwise.
     #[test]
     #[cfg(all(
         feature = "scouting-responder",
@@ -6477,17 +6490,85 @@ mod stock_config_tests {
             peer.added
         );
 
-        // CONTROL 2 — a client dials and answers nothing, so the same
-        // `listen: true` reaches no flag at all. Without this row the two
-        // scouting assertions above would pass against an expansion that emitted
-        // the flags unconditionally.
+        // CONTROL 2 — a client answers Scouts as a stock client does (its
+        // `scouting/multicast/listen` defaults to true), so the file's
+        // `listen: true` reaches `--scout-listen` and the group it names.
         let client = expand(&["--config", "z.json5"], &file("client", DIALS)).unwrap();
-        assert_eq!(client.added, argv(&["--connect", "tcp/r:7447"]));
+        assert_eq!(client.added[..2], argv(&["--connect", "tcp/r:7447"])[..]);
+        for flag in ["--scout-listen", "--scout-addr", "224.0.0.99:7999"] {
+            assert!(
+                client.added.iter().any(|a| a == flag),
+                "a client told by its file to be findable must join the group \
+                 it names ({flag} missing): {:?}",
+                client.added
+            );
+        }
         assert!(
-            !client.applied().contains(&"scouting/multicast/listen"),
-            "a client answers no Scouts, so its file's `listen: true` reached \
-             nothing and must not be reported applied: {:?}",
+            client.applied().contains(&"scouting/multicast/listen"),
+            "a client answers Scouts, so its file's `listen: true` reached a \
+             flag and must be reported applied: {:?}",
             client.applied()
+        );
+        // CONTROL 3 — the client row is not the flag for everything: a document
+        // that does not ask for the answer expands to nothing of it.
+        let silent = expand(
+            &["--config", "z.json5"],
+            r#"{ mode: "client", connect: { endpoints: ["tcp/r:7447"] },
+                 scouting: { multicast: { listen: false } } }"#,
+        )
+        .unwrap();
+        assert_eq!(silent.added, argv(&["--connect", "tcp/r:7447"]));
+    }
+
+    /// A flag the operator typed is not reported withheld because the run-mode
+    /// would not have received it from the file: the file asks for it, the
+    /// command line already carries it, and the node answers. Reported as
+    /// withheld, a node that answers Scouts was said not to.
+    ///
+    /// The control is the same run without the typed flag, which is withheld.
+    #[test]
+    #[cfg(feature = "scouting-responder")]
+    fn a_scout_listen_already_typed_is_not_reported_withheld() {
+        let file = r#"{ scouting: { multicast: { listen: true } } }"#;
+        let verdict = |exp: &StockConfigExpansion| {
+            exp.effects
+                .iter()
+                .find(|(k, _)| *k == "scouting/multicast/listen")
+                .map(|(_, e)| *e)
+        };
+
+        let typed = expand(
+            &[
+                "--listen",
+                "tcp/127.0.0.1:0",
+                "--scout-listen",
+                "--config",
+                "z.json5",
+            ],
+            file,
+        )
+        .unwrap();
+        assert_eq!(
+            verdict(&typed),
+            Some(KeyEffect::AlreadyOnTheCommandLine),
+            "{:?}",
+            typed.effects
+        );
+        assert!(
+            !typed.added.iter().any(|a| a == "--scout-listen"),
+            "the flag is already typed and must not be added again: {:?}",
+            typed.added
+        );
+
+        let untyped = expand(
+            &["--listen", "tcp/127.0.0.1:0", "--config", "z.json5"],
+            file,
+        )
+        .unwrap();
+        assert!(
+            matches!(verdict(&untyped), Some(KeyEffect::WithheldFromThisRun(_))),
+            "{:?}",
+            untyped.effects
         );
     }
 
@@ -6631,18 +6712,20 @@ mod stock_config_tests {
             )
         }
 
-        // A CLIENT: it dials, answers no Scouts, and the command line has no
-        // `--query` for the timeout to qualify.
+        // A single-session ACCEPTOR (`--listen`): it hosts no responder, and the
+        // command line has no `--query` for the timeout to qualify.
         //
         // R2091b (open-debt item 511) — this fixture used to be a `mode: "peer"`
         // document with only a listen endpoint, and that shape no longer
-        // withholds anything: it selects the peer mesh now, which answers. The
-        // fixture moved rather than the claim -- what is measured is still "a
-        // key whose flag this run withholds is not called applied", and a client
-        // is a run that genuinely withholds all three.
+        // withholds anything: it selects the peer mesh now, which answers. It
+        // then became a `mode: "client"` document, and a client answers Scouts
+        // now too (it carries `--scout-listen`), so the fixture moved again to
+        // the one run that still hosts no responder. What is measured is
+        // unchanged: "a key whose flag this run withholds is not called applied".
         let withheld = expand(
-            &["--config", "z.json5"],
-            &body("client", r#"connect: { endpoints: ["tcp/r:7447"] }"#),
+            &["--listen", "tcp/127.0.0.1:0", "--config", "z.json5"],
+            r#"{ queries_default_timeout: 12000,
+                 scouting: { multicast: { listen: true, address: "224.0.0.99:7999" } } }"#,
         )
         .unwrap();
         for flag in ["--scout-listen", "--scout-addr", "--query-timeout-ms"] {

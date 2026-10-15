@@ -107,7 +107,28 @@ enum Start {
     /// client answers Scout by default (`scouting/multicast/listen`), as role
     /// `client`, and with no locator because it listens on nothing.
     Client(&'static str),
+    /// A `--sessions` document of one unicast session of this role (`client` or
+    /// `peer`) carrying `scouting: { multicast: { listen: true, address } }`, and no
+    /// other argument. The consumer's own route to a node that answers Scouts: a
+    /// peer listens and advertises what it bound, a client dials the second
+    /// acceptor (`SESSIONS_CLIENT_ACCEPTOR`) and advertises nothing.
+    Sessions(&'static str),
+    /// ONE stock zenoh CLIENT config file (`mode: "client"`, a connect list,
+    /// `scouting/multicast/listen: true`) and no other argument: the document a
+    /// stock client answers Scouts from, which a drop-in is handed as it is.
+    ConfigClient,
 }
+
+/// The acceptor the config client arm dials.
+const CONFIG_CLIENT_ACCEPTOR: &str = "tcp/127.0.0.1:17462";
+
+/// The acceptor the sessions client arm dials: the first acceptor serves one
+/// session, which the `--connect` client arm has by then used.
+const SESSIONS_CLIENT_ACCEPTOR: &str = "tcp/127.0.0.1:17461";
+/// What a `--sessions` node says once its responder is up. The sessions mode starts
+/// no logger, so the line is its own (`SCOUT RESPONDER answering as <role>
+/// advertising [<locators>]`) and not the log line the other run modes print.
+const SESSIONS_BANNER: &str = "SCOUT RESPONDER answering as ";
 
 /// What an asker names in a Scout's `what`: the client role has its own bit, and a
 /// responder answers only a Scout that names the role it runs as
@@ -139,7 +160,7 @@ impl Arm {
     /// The roles this arm's Scout asks for.
     fn what(&self) -> u8 {
         match self.start {
-            Start::Client(_) => WHAT_CLIENT,
+            Start::Client(_) | Start::Sessions("client") | Start::ConfigClient => WHAT_CLIENT,
             _ => WHAT_ROUTER | WHAT_PEER,
         }
     }
@@ -148,7 +169,35 @@ impl Arm {
     /// listens on nothing, so its Hello carries no locator and it logs no
     /// advertised self locator.
     fn dialable(&self) -> bool {
-        !matches!(self.start, Start::Client(_))
+        !matches!(
+            self.start,
+            Start::Client(_) | Start::Sessions("client") | Start::ConfigClient
+        )
+    }
+
+    /// The text the node's output carries once it has chosen what to advertise.
+    fn advertised_needle(&self) -> &'static str {
+        match self.start {
+            Start::Sessions(_) => SESSIONS_BANNER,
+            _ => ADVERTISED_NEEDLE,
+        }
+    }
+
+    /// The text the node's output carries once its responder is up.
+    fn responder_needle(&self) -> &'static str {
+        match self.start {
+            Start::Sessions(_) => SESSIONS_BANNER,
+            _ => RESPONDER_NEEDLE,
+        }
+    }
+
+    /// The locator out of the line that follows `advertised_needle`. A sessions
+    /// banner lists its locators in brackets and this arm holds one.
+    fn advertised_locator(&self, line: &str) -> String {
+        match self.start {
+            Start::Sessions(_) => line.split('"').nth(1).unwrap_or_default().to_string(),
+            _ => line.to_string(),
+        }
     }
 
     /// The argv this arm starts the demo with, and the file it had to write to
@@ -161,6 +210,47 @@ impl Arm {
     /// answers and not that the FILE is what put it on that group.
     fn argv(&self, zid_hex: &str, dir: &std::path::Path) -> Vec<String> {
         match self.start {
+            Start::ConfigClient => {
+                let path = dir.join(format!("{}.json5", self.zid_prefix));
+                std::fs::write(
+                    &path,
+                    format!(
+                        r#"{{
+  mode: "client",
+  id: "{zid_hex}",
+  connect: {{ endpoints: ["{CONFIG_CLIENT_ACCEPTOR}"] }},
+  scouting: {{ multicast: {{ enabled: true, listen: true,
+                           address: "{}:{}" }} }},
+}}
+"#,
+                        self.group, self.port
+                    ),
+                )
+                .unwrap_or_else(|e| panic!("{}: staging the config file: {e}", self.name));
+                vec![String::from("--config"), path.display().to_string()]
+            }
+            Start::Sessions(mode) => {
+                let path = dir.join(format!("{}.json5", self.zid_prefix));
+                let link = if mode == "client" {
+                    format!(r#"connect: {{ endpoints: ["{SESSIONS_CLIENT_ACCEPTOR}"] }}"#)
+                } else {
+                    String::from(r#"listen: { endpoints: ["tcp/127.0.0.1:0"] }"#)
+                };
+                std::fs::write(
+                    &path,
+                    format!(
+                        r#"{{ sessions: [
+  {{ name: "found", mode: "{mode}", transport: "unicast", zid: "{zid_hex}",
+    {link},
+    scouting: {{ multicast: {{ listen: true, address: "{}:{}" }} }} }},
+] }}
+"#,
+                        self.group, self.port
+                    ),
+                )
+                .unwrap_or_else(|e| panic!("{}: staging the sessions document: {e}", self.name));
+                vec![String::from("--sessions"), path.display().to_string()]
+            }
             Start::Client(acceptor) => [
                 "--connect",
                 acceptor,
@@ -469,7 +559,66 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             zid_prefix: "7205",
             expect_whatami: WhatAmI::Client,
         },
+        // THE DOCUMENT. The same two roles started from a `--sessions` document
+        // whose session carries `scouting.multicast.listen`, which is how a
+        // harness launches a bundle of peers. The document key is the only thing
+        // that puts these nodes on the group, so a green here is "the key does
+        // what zenoh's key does" and not only "the flag does".
+        Arm {
+            start: Start::Sessions("peer"),
+            name: "--sessions <peer, scouting.multicast.listen>",
+            group: Ipv4Addr::new(224, 0, 0, 236),
+            port: 17457,
+            zid_prefix: "7206",
+            expect_whatami: WhatAmI::Peer,
+        },
+        Arm {
+            start: Start::Sessions("client"),
+            name: "--sessions <client, scouting.multicast.listen>",
+            group: Ipv4Addr::new(224, 0, 0, 237),
+            port: 17458,
+            zid_prefix: "7207",
+            expect_whatami: WhatAmI::Client,
+        },
+        // THE CLIENT FILE. The document a stock client answers Scouts from, with
+        // no flag beside it: its `listen: true` must reach `--scout-listen`, or the
+        // node comes up deaf to the network it replaces a member of.
+        Arm {
+            start: Start::ConfigClient,
+            name: "--config <mode: client>",
+            group: Ipv4Addr::new(224, 0, 0, 238),
+            port: 17459,
+            zid_prefix: "7208",
+            expect_whatami: WhatAmI::Client,
+        },
     ];
+
+    // The config client arm's acceptor, for the reason the first one is held.
+    let _config_acceptor = ChildGuard::wrap(
+        "config client-arm acceptor",
+        Command::new(&demo)
+            .args(["--listen", CONFIG_CLIENT_ACCEPTOR, "--key", CLIENT_ARM_KEY])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn the config client arm's acceptor: {e}")),
+    );
+
+    // The sessions client arm's acceptor, for the reason the first one is held.
+    let _sessions_acceptor = ChildGuard::wrap(
+        "sessions client-arm acceptor",
+        Command::new(&demo)
+            .args([
+                "--listen",
+                SESSIONS_CLIENT_ACCEPTOR,
+                "--key",
+                CLIENT_ARM_KEY,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn the sessions client arm's acceptor: {e}")),
+    );
 
     // The client arm needs something to dial: a plain wz acceptor, started once
     // and held for the whole test. It needs none of the scouting features.
@@ -524,8 +673,10 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
                 "the advertised self locator",
                 |captured| {
                     captured
-                        .split_once(ADVERTISED_NEEDLE)
-                        .map(|(_, rest)| rest.lines().next().unwrap_or("").trim().to_string())
+                        .split_once(arm.advertised_needle())
+                        .map(|(_, rest)| {
+                            arm.advertised_locator(rest.lines().next().unwrap_or("").trim())
+                        })
                         .filter(|s| !s.is_empty())
                 },
             )
@@ -542,7 +693,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
                 "the scout responder banner",
                 |captured| {
                     captured
-                        .split_once(RESPONDER_NEEDLE)
+                        .split_once(arm.responder_needle())
                         .map(|(_, rest)| rest.lines().next().unwrap_or("").trim().to_string())
                         .filter(|s| !s.is_empty())
                 },
