@@ -185,6 +185,8 @@ pub(crate) struct BuildCapabilities {
     pub(crate) iface: bool,
     /// A session that answers Scouts (`scouting-responder`).
     pub(crate) scouting_responder: bool,
+    /// The driver roles this build plays (see [`crate::sessions_driver::roles`]).
+    pub(crate) driver_roles: Vec<&'static str>,
     /// The unicast link schemes compiled in.
     pub(crate) schemes: Vec<&'static str>,
 }
@@ -195,6 +197,7 @@ impl BuildCapabilities {
             multicast: cfg!(feature = "transport-multicast"),
             iface: cfg!(feature = "locator-iface"),
             scouting_responder: cfg!(feature = "scouting-responder"),
+            driver_roles: crate::sessions_driver::available_words(),
             schemes: wz::runtime_tokio::compiled_in_link_schemes().to_vec(),
         }
     }
@@ -314,6 +317,20 @@ impl SessionsPlan {
                     "answering Scouts needs the `scouting-responder` build feature (build: \
                      cargo build -p wz-ap-demo --features scouting-responder)",
                 ));
+            }
+            for (j, entry) in s.driver.iter().enumerate() {
+                if caps.driver_roles.contains(&entry.word) {
+                    continue;
+                }
+                let why = match crate::sessions_driver::find(entry.word).and_then(|r| r.feature) {
+                    Some(feature) => format!(
+                        "the `{}` role needs the `{feature}` build feature (build: cargo \
+                         build -p wz-ap-demo --features {feature})",
+                        entry.word
+                    ),
+                    None => format!("the `{}` role is not played by this version", entry.word),
+                };
+                out.push(Refusal::new(format!("{path}.driver[{j}].role"), why));
             }
             match &s.link {
                 SessionLink::Group { endpoint, .. } => {
@@ -1099,8 +1116,34 @@ mod reader_tests {
             multicast,
             iface,
             scouting_responder: true,
+            driver_roles: crate::sessions_driver::all_words(),
             schemes: vec!["tcp", "udp", "tls"],
         }
+    }
+
+    /// A driver role this build does not play is refused at its own key, saying
+    /// which feature it needs, or that no build plays it yet.
+    #[test]
+    fn a_build_refuses_a_driver_role_it_does_not_play() {
+        let plan = read_sessions_document(
+            r#"{ sessions: [ { name: "a", mode: "client", transport: "unicast",
+                connect: { endpoints: ["tcp/127.0.0.1:7447"] },
+                driver: [ { role: "put", key: "d/u", payload: "x" },
+                          { role: "delete", key: "d/u" } ] } ] }"#,
+        )
+        .expect("passes the rules");
+        let mut only_put = caps(true, true);
+        only_put.driver_roles = vec!["put"];
+        let refused: Vec<String> = plan
+            .build_refusals(&only_put)
+            .into_iter()
+            .map(|r| r.to_string())
+            .collect();
+        assert_eq!(
+            refused,
+            vec!["sessions[0].driver[1].role: the `delete` role is not played by this version"]
+        );
+        assert!(plan.build_refusals(&caps(true, true)).is_empty());
     }
 
     /// What a build cannot run is refused at the key that asks for it.
