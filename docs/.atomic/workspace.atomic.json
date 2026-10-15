@@ -274744,6 +274744,92 @@
         "Open: the client role does not answer Scout, and a put larger than the negotiated batch is not fragmented in wz-capi-c."
       ]
     },
+    "Round 3348": {
+      "decision_summary": "Two consumer asks land. A put in the zenoh-c drop-in larger than the negotiated batch size left as ONE oversize batch and the call said sent: the build never selected transport-fragmentation on the runtime, so the frame writer had no fragment path, and the handshake advertised a constant 65535 whatever transport/link/tx/batch_size said. Both are repaired: the feature is selected, the advertised size comes from the config (zenoh default when none), and a test reads the TCP stream through a relay and bounds every frame by the negotiated size. A value past the 1 MiB reassembly slot is refused before sending. The connect client now answers Scout when told to (--scout-listen): Hello role client, no locator, as the genuine client does. NOT claimed: that any device reassembles fragments, the hosted run, or a green wz-capi-core stress test on this host.",
+      "changes_bullets": [
+        "crates/wz-capi-c: transport-fragmentation and wz-capture reassembly selected; session reads batch_size from the config; fragmentation_roundtrip test.",
+        "crates/wz-capi-core: LinkTx carries the queue model and the advertised batch size to every handshake; OpenStance gains batch_size.",
+        "crates/wz-capi-pico: passes the default batch size, unchanged on the wire.",
+        "crates/wz-ap-demo: --scout-listen on the --connect client; Layer M test gains a client arm."
+      ],
+      "verification_bullets": [
+        "On a build host, once: fmt and clippy of core, c and pico rc 0; fragmentation_roundtrip 1 passed; layer C0 rc 0; layer C1cc reached 62 of 68 legs, all passed.",
+        "Layer M router-hat leg passed with the client arm (Hello role client, no locator).",
+        "NOT verified: 6 C1cc legs and the zenohd legs of M (the host has no pico CLI or zenohd binary); the hosted run.",
+        "wz-capi-core drive stress test (1200 opens) fails on that host at the parent commit too, 3 of 3 runs; not caused by this change, cause not found."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumer: the batch size is now advertised from the config, so a session that states one negotiates it; the TX cap is 1 MiB.",
+        "Open: why the drive stress test fails on the build host at the parent commit."
+      ],
+      "publishable_decision_summary": "Two consumer asks land. A put in the zenoh-c drop-in larger than the negotiated batch size left as ONE oversize batch and the call said sent: the build never selected transport-fragmentation on the runtime, so the frame writer had no fragment path, and the handshake advertised a constant 65535 whatever transport/link/tx/batch_size said. Both are repaired: the feature is selected, the advertised size comes from the config (zenoh default when none), and a test reads the TCP stream through a relay and bounds every frame by the negotiated size. A value past the 1 MiB reassembly slot is refused before sending. The connect client now answers Scout when told to (--scout-listen): Hello role client, no locator, as the genuine client does. NOT claimed: that any device reassembles fragments, the hosted run, or a green wz-capi-core stress test on this host.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c: transport-fragmentation and wz-capture reassembly selected; session reads batch_size from the config; fragmentation_roundtrip test.",
+        "crates/wz-capi-core: LinkTx carries the queue model and the advertised batch size to every handshake; OpenStance gains batch_size.",
+        "crates/wz-capi-pico: passes the default batch size, unchanged on the wire.",
+        "crates/wz-ap-demo: --scout-listen on the --connect client; Layer M test gains a client arm."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, once: fmt and clippy of core, c and pico rc 0; fragmentation_roundtrip 1 passed; layer C0 rc 0; layer C1cc reached 62 of 68 legs, all passed.",
+        "Layer M router-hat leg passed with the client arm (Hello role client, no locator).",
+        "NOT verified: 6 C1cc legs and the zenohd legs of M (the host has no pico CLI or zenohd binary); the hosted run.",
+        "wz-capi-core drive stress test (1200 opens) fails on that host at the parent commit too, 3 of 3 runs; not caused by this change, cause not found."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell the consumer: the batch size is now advertised from the config, so a session that states one negotiates it; the TX cap is 1 MiB.",
+        "Open: why the drive stress test fails on the build host at the parent commit."
+      ]
+    },
+    "Round 3349": {
+      "decision_summary": "The hosted run of the Round 3347 push was red in three jobs, all caused by that wave, and each is paid here. Layer C1bn: the sessions driver test asked its get the instant the link opened and got a final with no reply; the get role takes an optional after_ms hold, as --query-after-ms does, and the test holds it. Layer C1bw: a doc link named a module that exists only with the field document built; it is no longer a link. Layer C0s: the barrier gate read only cfg(test) as test-only, so a test module declared cfg(all(test, feature..)) counted as a PRODUCER and a window test's format string covered the needle view size of, which made an unrelated declaration stale; the gate now reads cfg(all(test, ..)) as test-only, with a selftest arm. CORRECTION to Round 3347: its host run did not include C0s or C1bw, and its C1bn pass did not see the get race. NOT claimed: the hosted run of this push.",
+      "changes_bullets": [
+        "crates/wz-ap-demo: the sessions driver get role takes after_ms; its binary test holds the get.",
+        "crates/wz-capture: progress.rs no longer links a feature-gated module.",
+        "scripts/lib/barrier_needle_gate.py: cfg(all(test, ..)) is test-only; selftest arm added."
+      ],
+      "verification_bullets": [
+        "On a build host, once: fmt, clippy of wz-ap-demo, sessions unit tests 16, sessions_driver_binary 3, layers C0s C1bw C1ay C1bn all rc 0; the barrier gate check and selftest pass locally.",
+        "The three reds were read per job from run 38716450481 before the fix.",
+        "NOT verified: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Before a push, run the hosted-only lanes C0s and C1bw as well; the wave verified neither."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3347 push was red in three jobs, all caused by that wave, and each is paid here. Layer C1bn: the sessions driver test asked its get the instant the link opened and got a final with no reply; the get role takes an optional after_ms hold, as --query-after-ms does, and the test holds it. Layer C1bw: a doc link named a module that exists only with the field document built; it is no longer a link. Layer C0s: the barrier gate read only cfg(test) as test-only, so a test module declared cfg(all(test, feature..)) counted as a PRODUCER and a window test's format string covered the needle view size of, which made an unrelated declaration stale; the gate now reads cfg(all(test, ..)) as test-only, with a selftest arm. CORRECTION to Round 3347: its host run did not include C0s or C1bw, and its C1bn pass did not see the get race. NOT claimed: the hosted run of this push.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo: the sessions driver get role takes after_ms; its binary test holds the get.",
+        "crates/wz-capture: progress.rs no longer links a feature-gated module.",
+        "scripts/lib/barrier_needle_gate.py: cfg(all(test, ..)) is test-only; selftest arm added."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, once: fmt, clippy of wz-ap-demo, sessions unit tests 16, sessions_driver_binary 3, layers C0s C1bw C1ay C1bn all rc 0; the barrier gate check and selftest pass locally.",
+        "The three reds were read per job from run 38716450481 before the fix.",
+        "NOT verified: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Before a push, run the hosted-only lanes C0s and C1bw as well; the wave verified neither."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
