@@ -274830,6 +274830,52 @@
         "Before a push, run the hosted-only lanes C0s and C1bw as well; the wave verified neither."
       ]
     },
+    "Round 3350": {
+      "decision_summary": "The hosted run of the Round 3349 push was red in one job, Layer C1bz: a doc link to a private function in wz-capi-core made 8 broken links against a budget of 7; it is now a code span. Three consumer asks land. (1) A pcapng that states no drop count reports none: capture_reported_drops is None when unstated and the sum when stated, zero included, and capture_drop_statement tells Unstated, Stated and Overflowed apart. The JSON keys are unchanged, so no revision bump, but such a file now reads null where it read 0. (2) A --sessions session takes scouting.multicast {listen, address, interface, ttl} and answers Scouts, judged beside driver outside the shared validator rules; driver after_ms is common to every role, because a listener declares only after it accepts. (3) A client config file with scouting/multicast/listen true carries --scout-listen, and a typed flag is not reported withheld. NOT claimed: the hosted run of this push.",
+      "changes_bullets": [
+        "crates/wz-capture: pcapng drop ledger knows whether a count was stated; DropStatement; report text.",
+        "crates/wz-analyze: the report test reads the new wording; pcapng and pcap reports compare equal.",
+        "crates/wz-capi-core: the LinkTx doc no longer links a private function.",
+        "crates/wz-ap-demo: sessions_scouting.rs, the scouting key; DriverEntry after_ms; client config route.",
+        "crates/wz-integration-tests: the Layer M scout test gains sessions and client config arms.",
+        "scripts/run-ci.sh: the stock_config_tests role-parity count guard goes 47 to 48."
+      ],
+      "verification_bullets": [
+        "On a build host, in two passes over the same changes: fmt, clippy of wz-ap-demo in three feature sets, sessions unit tests 20 in two builds, sessions_driver_binary 3, the Layer M scout test with its sessions and client config arms, layers C0 C0s C1bw C1bz C1ay C1bn, and guarded_count_gate over the push range, all rc 0.",
+        "The red was read from job 116446970229 of run 38742340388 before the fix.",
+        "NOT verified: the hosted run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell zenoh-analyzer-25 the shapes and the pin: unstated drops, the sessions scouting key, the client config route."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3349 push was red in one job, Layer C1bz: a doc link to a private function in wz-capi-core made 8 broken links against a budget of 7; it is now a code span. Three consumer asks land. (1) A pcapng that states no drop count reports none: capture_reported_drops is None when unstated and the sum when stated, zero included, and capture_drop_statement tells Unstated, Stated and Overflowed apart. The JSON keys are unchanged, so no revision bump, but such a file now reads null where it read 0. (2) A --sessions session takes scouting.multicast {listen, address, interface, ttl} and answers Scouts, judged beside driver outside the shared validator rules; driver after_ms is common to every role, because a listener declares only after it accepts. (3) A client config file with scouting/multicast/listen true carries --scout-listen, and a typed flag is not reported withheld. NOT claimed: the hosted run of this push.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture: pcapng drop ledger knows whether a count was stated; DropStatement; report text.",
+        "crates/wz-analyze: the report test reads the new wording; pcapng and pcap reports compare equal.",
+        "crates/wz-capi-core: the LinkTx doc no longer links a private function.",
+        "crates/wz-ap-demo: sessions_scouting.rs, the scouting key; DriverEntry after_ms; client config route.",
+        "crates/wz-integration-tests: the Layer M scout test gains sessions and client config arms.",
+        "scripts/run-ci.sh: the stock_config_tests role-parity count guard goes 47 to 48."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, in two passes over the same changes: fmt, clippy of wz-ap-demo in three feature sets, sessions unit tests 20 in two builds, sessions_driver_binary 3, the Layer M scout test with its sessions and client config arms, layers C0 C0s C1bw C1bz C1ay C1bn, and guarded_count_gate over the push range, all rc 0.",
+        "The red was read from job 116446970229 of run 38742340388 before the fix.",
+        "NOT verified: the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push; a red is its own round.",
+        "Tell zenoh-analyzer-25 the shapes and the pin: unstated drops, the sessions scouting key, the client config route."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
