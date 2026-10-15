@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 41
+EXPECTED_VERSION = 42
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -389,6 +389,11 @@ EXPECTED_SYMBOLS = {
     # more integer in; the window's last number is `window.through_seq`, the cursor
     # for the next window. `0` is no limit.
     "wz_dissect_live_fields_since_window",
+    # (ABI 42) -- the callback a long call asks how it is going and that can stop it.
+    # One symbol: a function pointer and a `void *` the CALLER owns go in, nothing
+    # comes out, and a null pointer clears the hook. A stopped call answers
+    # `WZ_DISSECT_ERR_CANCELLED` (-11) from the doors it covers.
+    "wz_dissect_live_set_progress",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

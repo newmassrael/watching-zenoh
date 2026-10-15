@@ -194,6 +194,9 @@ pub use ordered_fold::{CensusMemory, FoldStats};
 // what a count is held to.
 mod bounded_slots;
 pub use bounded_slots::MAX_SELECTOR_MEMORIES;
+// A long walk that says how far it has got and can be told to stop.
+pub mod progress;
+pub use progress::Progress;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
 mod closes_tests;
 #[cfg(all(test, feature = "dissect", feature = "network-codecs"))]

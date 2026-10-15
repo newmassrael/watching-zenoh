@@ -66,6 +66,54 @@ use wz_capture::{
 };
 use wz_session_core::passive::{Direction, PassiveFrame};
 
+/// THE CALLBACK A CALLER SET FOR LONG CALLS: asked how far a census or a field
+/// document has got, and able to stop it. See [`LiveDissection::set_progress`].
+///
+/// `callback(user, done, total)` returns non-zero to go on and zero to stop. It is
+/// called on the thread that made the call, between steps of the work, and `user`
+/// is handed back untouched; this library never reads through it.
+#[derive(Clone, Copy)]
+pub struct ProgressHook {
+    callback: unsafe extern "C" fn(*mut core::ffi::c_void, u64, u64) -> core::ffi::c_int,
+    user: *mut core::ffi::c_void,
+}
+
+// SAFETY: the hook holds a function pointer and an address the CALLER owns and
+// never dereferences. Whether calling the one with the other is sound from a thread
+// is the caller's contract, stated on the setter: it is called on the thread of the
+// call that is running, and a handle shared between threads is the caller's to
+// keep to one call at a time if its callback is not thread-safe.
+unsafe impl Send for ProgressHook {}
+// SAFETY: as above; the hook is copied, not shared mutably.
+unsafe impl Sync for ProgressHook {}
+
+impl ProgressHook {
+    /// A hook that asks `callback`, handing it `user` each time.
+    pub fn new(
+        callback: unsafe extern "C" fn(*mut core::ffi::c_void, u64, u64) -> core::ffi::c_int,
+        user: *mut core::ffi::c_void,
+    ) -> Self {
+        Self { callback, user }
+    }
+
+    /// Ask: `true` to go on, `false` to stop.
+    fn ask(&self, done: u64, total: u64) -> bool {
+        // SAFETY: the caller of the setter promised `callback` may be called with
+        // `user` for as long as the hook is set.
+        unsafe { (self.callback)(self.user, done, total) != 0 }
+    }
+}
+
+/// Ask the hook how a long call is going: `true` to go on. No hook asks nothing and
+/// goes on. A `match` and not `map_or`/`is_none_or`, because the first is what
+/// clippy refuses and the second is newer than this crate's MSRV.
+fn asked(hook: Option<ProgressHook>, done: u64, total: u64) -> bool {
+    match hook {
+        Some(h) => h.ask(done, total),
+        None => true,
+    }
+}
+
 /// The `origin` a SCOUTING record carries.
 ///
 /// Not a `MessageListOrigin` code, because the scouting list is not one of that
@@ -349,6 +397,8 @@ pub struct LiveDissection {
     /// The digests of the rows [`Self::fields_since`] wrote, and the state of the
     /// capture it wrote them in: what lets it say which rows moved.
     fields_memory: wz_capture::fields_json::FieldsMemory,
+    /// The callback long calls ask how they are going, if the caller set one.
+    progress: Option<ProgressHook>,
     lost: u64,
     /// R2373 (open-debt item 661) — how far into a capture CONTAINER this
     /// handle has read, for [`Self::follow`].
@@ -480,6 +530,7 @@ impl LiveDissection {
             selection_said: wz_capture::selection_json::SelectionMemories::default(),
             census_memory: std::sync::Mutex::new(wz_capture::CensusMemory::new()),
             fields_memory: wz_capture::fields_json::FieldsMemory::new(),
+            progress: None,
             lost: 0,
             cursor: CaptureCursor::new(),
         }
@@ -828,12 +879,52 @@ impl LiveDissection {
     /// node; the scouting lists are folded over a copy on every call, and a
     /// capture that holds many exchanges that never close pays for each of them
     /// on every call, because a call judges the exchanges still open.
-    pub fn census(&self, filter: &wz_capture::filter::Filter) -> String {
+    ///
+    /// `None` when the callback set by [`Self::set_progress`] stopped the census; the
+    /// plane that was being folded is then dropped from the memory and the next call
+    /// folds it again.
+    pub fn census(&self, filter: &wz_capture::filter::Filter) -> Option<String> {
         let mut memory = self
             .census_memory
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        wz_capture::census_json::census_json_where_resumable(&self.dissection, filter, &mut memory)
+        let hook = self.progress;
+        let ask = |done: u64, total: u64| asked(hook, done, total);
+        let progress = hook.map(|_| wz_capture::Progress::new(&ask));
+        wz_capture::census_json::census_json_where_resumable_progress(
+            &self.dissection,
+            filter,
+            &mut memory,
+            progress.as_ref(),
+        )
+    }
+
+    /// SET, OR CLEAR WITH `None`, THE CALLBACK THE LONG CALLS ASK HOW THEY ARE
+    /// GOING.
+    ///
+    /// # What it covers
+    ///
+    /// [`Self::census`], [`Self::fields_where`], [`Self::fields_since`] and
+    /// [`Self::fields_since_windowed`]: the calls whose cost grows with the capture,
+    /// tens of seconds on 100 MB. The callback is asked every 256 steps (a message
+    /// folded, a row written) with how many are done and how many are expected, and
+    /// returns zero to stop the call, which then answers "stopped" and no document.
+    ///
+    /// # What it does not cover
+    ///
+    /// The selection documents (their verdict walk is made inside one function that
+    /// has no step to report), [`Self::drain`] (which hands out as many records as
+    /// the caller's buffer holds and returns, so a caller stops by not calling it
+    /// again) and [`Self::follow`]. `total` is a floor: a walk learns how much there
+    /// is as it goes, and a cursor or a window passes some of what it counts.
+    ///
+    /// # After a stop
+    ///
+    /// The handle is whole and usable. What the stopped call had folded or written is
+    /// not kept: the memory it was advancing is dropped and the next call begins it
+    /// again, which costs what a first call costs and is never a wrong answer.
+    pub fn set_progress(&mut self, hook: Option<ProgressHook>) {
+        self.progress = hook;
     }
 
     /// The work this handle's census memory has done: messages folded, folds
@@ -935,16 +1026,20 @@ impl LiveDissection {
         max_messages_shown_per_flow: Option<usize>,
         declarations: Option<&wz_capture::payload_decode::Declarations<'_>>,
         filter: &wz_capture::filter::Filter,
-    ) -> String {
+    ) -> Option<String> {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
-        wz_capture::fields_json::fields_json_where_coordinated(
+        let hook = self.progress;
+        let ask = |done: u64, total: u64| asked(hook, done, total);
+        let progress = hook.map(|_| wz_capture::Progress::new(&ask));
+        wz_capture::fields_json::fields_json_where_coordinated_progress(
             &self.dissection,
             capture,
             max_messages_shown_per_flow,
             declarations,
             filter,
             &ids,
+            progress.as_ref(),
         )
     }
 
@@ -994,7 +1089,7 @@ impl LiveDissection {
         map: Option<&wz_capture::payload::formats::FormatMap<'_>>,
         declarations_text: &str,
         after_seq: u64,
-    ) -> String {
+    ) -> Option<String> {
         self.fields_since_windowed(capture, map, declarations_text, after_seq, 0)
     }
 
@@ -1031,9 +1126,12 @@ impl LiveDissection {
         declarations_text: &str,
         after_seq: u64,
         max_rows: u64,
-    ) -> String {
+    ) -> Option<String> {
         self.drain(&mut []);
         let ids = HandleIds::of(self);
+        let hook = self.progress;
+        let ask = |done: u64, total: u64| asked(hook, done, total);
+        let progress = hook.map(|_| wz_capture::Progress::new(&ask));
         // The highest number the handle has issued, and NOT the highest row that
         // was written: a datagram row whose second read was declined has a
         // number and no row, and the cursor has to pass it. A window ends sooner
@@ -1044,7 +1142,7 @@ impl LiveDissection {
         } else {
             issued.min(after_seq.saturating_add(max_rows))
         };
-        wz_capture::fields_json::fields_json_since_remembering(
+        wz_capture::fields_json::fields_json_since_remembering_progress(
             &self.dissection,
             capture,
             map,
@@ -1055,6 +1153,7 @@ impl LiveDissection {
                 through_seq,
             },
             &mut self.fields_memory,
+            progress.as_ref(),
         )
     }
 

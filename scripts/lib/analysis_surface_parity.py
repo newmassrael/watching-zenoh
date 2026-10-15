@@ -842,6 +842,17 @@ ONLY_CAPI = {
         "cursor to continue from.",
         (),
     ),
+    # The callback a long call asks how it is going. Filed in the round that added
+    # the symbol.
+    "a callback that a long call of an OPEN handle reports progress to and can be stopped by": (
+        "wz_dissect_live_set_progress",
+        "DELIBERATE. The door exists because a consumer that LINKS this library runs "
+        "a census or a field document for tens of seconds inside its own interface "
+        "and needs a way to draw progress and to stop. The command line is a "
+        "process: its progress is on the terminal and its stop is the signal, so it "
+        "has no callback to register and no handle to hold one.",
+        (),
+    ),
     # What an open handle holds now, beside its ceilings. Filed in the round
     # that added the symbol.
     "what an OPEN handle still HOLDS, beside its ceilings": (

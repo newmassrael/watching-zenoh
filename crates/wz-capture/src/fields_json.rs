@@ -199,9 +199,33 @@ pub fn fields_json_where_coordinated(
     filter: &crate::filter::Filter,
     coordinates: &dyn RowCoordinates,
 ) -> String {
+    fields_json_where_coordinated_progress(
+        d,
+        capture,
+        max_messages_shown_per_flow,
+        declarations,
+        filter,
+        coordinates,
+        None,
+    )
+    .expect("a walk nobody can stop runs to its end")
+}
+
+/// [`fields_json_where_coordinated`], reporting how far the walk has got to
+/// `progress` and stopping when it says to: the answer is then `None`. This
+/// document keeps nothing between calls, so there is nothing to drop.
+pub fn fields_json_where_coordinated_progress(
+    d: &crate::Dissection,
+    capture: &[u8],
+    max_messages_shown_per_flow: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
+    filter: &crate::filter::Filter,
+    coordinates: &dyn RowCoordinates,
+    progress: Option<&crate::Progress<'_>>,
+) -> Option<String> {
     let grouping = crate::node::session_grouping(d);
     let verdicts = judged_by(d, filter, &grouping);
-    fields_json_selected(
+    let document = fields_json_selected(
         d,
         capture,
         max_messages_shown_per_flow,
@@ -213,9 +237,17 @@ pub fn fields_json_where_coordinated(
             since: None,
             sink: None,
             closings: None,
+            progress,
             walk: None,
         },
-    )
+    );
+    if crate::progress::cancelled(progress) {
+        return None;
+    }
+    if let Some(p) = progress {
+        p.finish();
+    }
+    Some(document)
 }
 
 /// The field document's rows AFTER a cursor, and only those.
@@ -279,6 +311,7 @@ pub fn fields_json_since_coordinated(
             since: Some(since),
             sink: None,
             closings: None,
+            progress: None,
             walk: None,
         },
     )
@@ -401,6 +434,29 @@ pub fn fields_json_since_remembering(
     since: Since,
     memory: &mut FieldsMemory,
 ) -> String {
+    fields_json_since_remembering_progress(d, capture, map, key, coordinates, since, memory, None)
+        .expect("a walk nobody can stop runs to its end")
+}
+
+/// [`fields_json_since_remembering`], reporting how far the walk has got to
+/// `progress` and stopping when it says to: the answer is then `None`.
+///
+/// A document that was stopped is half built, and the walk it advanced is half
+/// advanced, so nothing of it is kept: the memory's saved position and walk state
+/// are dropped and the next call begins the walk again. The digests of rows written
+/// by earlier calls, the node census and the pairing's folds are kept, since the
+/// stop did not touch them.
+#[allow(clippy::too_many_arguments)]
+pub fn fields_json_since_remembering_progress(
+    d: &crate::Dissection,
+    capture: &[u8],
+    map: Option<&crate::payload::formats::FormatMap<'_>>,
+    key: &str,
+    coordinates: &dyn RowCoordinates,
+    since: Since,
+    memory: &mut FieldsMemory,
+    progress: Option<&crate::Progress<'_>>,
+) -> Option<String> {
     if memory.key.as_deref() != Some(key) {
         let nodes = core::mem::take(&mut memory.nodes);
         #[cfg(feature = "network-codecs")]
@@ -426,9 +482,9 @@ pub fn fields_json_since_remembering(
     #[cfg(feature = "network-codecs")]
     let pairing_table = memory
         .pairing
-        .advance(d, &grouping, &mut memory.pairing_work, || {
+        .advance(d, &grouping, &mut memory.pairing_work, progress, || {
             crate::exchange::ExchangeFold::begin(d, &crate::filter::Filter::any(), &grouping)
-        })
+        })?
         .table();
     #[cfg(feature = "network-codecs")]
     let closings: Option<&PairingTable> = Some(&pairing_table);
@@ -467,9 +523,17 @@ pub fn fields_json_since_remembering(
                     since: None,
                     sink: Some(&probe),
                     closings,
+                    progress,
                     walk: None,
                 },
             );
+            // A probe that was stopped holds the digests of some rows only, and
+            // comparing them to the rows held would call every other row moved.
+            if crate::progress::cancelled(progress) {
+                memory.saved = None;
+                memory.walk = WalkState::default();
+                return None;
+            }
             let (now, _) = probe.into_parts();
             for (seq, was) in &memory.digests {
                 if *seq > since.after_seq {
@@ -587,6 +651,7 @@ pub fn fields_json_since_remembering(
             since: Some(since),
             sink: Some(&sink),
             closings,
+            progress,
             walk: Some(WalkRun {
                 state: &mut memory.walk,
                 resume,
@@ -595,6 +660,13 @@ pub fn fields_json_since_remembering(
             }),
         },
     );
+    // A document that was stopped is half built and the walk it advanced is half
+    // advanced: keep none of it, and let the next call begin the walk again.
+    if crate::progress::cancelled(progress) {
+        memory.saved = None;
+        memory.walk = WalkState::default();
+        return None;
+    }
     let walked_after: usize = memory
         .walk
         .stream
@@ -625,7 +697,10 @@ pub fn fields_json_since_remembering(
         origin_ms,
         through_seq: since.through_seq,
     });
-    document
+    if let Some(p) = progress {
+        p.finish();
+    }
+    Some(document)
 }
 
 /// A digest of the first bytes of a capture container and of the bytes just before
@@ -855,6 +930,11 @@ struct RowAttachments<'a> {
     /// the exchange plane made says the same thing about which request a final
     /// closed.
     closings: Option<&'a PairingTable>,
+    /// Told how far the walk has got, and able to stop it. Absent for a document
+    /// nobody is watching. A walk that was stopped returns a partial document, and
+    /// its caller reads [`Progress::cancelled`](crate::Progress::cancelled) and
+    /// throws it away.
+    progress: Option<&'a crate::Progress<'a>>,
     /// The walker's own state, kept between calls, and whether this call
     /// continues it. Absent for every document that keeps none.
     walk: Option<WalkRun<'a>>,
@@ -975,6 +1055,7 @@ fn fields_json_selected(
         since,
         sink,
         closings,
+        progress,
         walk,
     } = attach;
     // THE PAIRING a `ResponseFinal` row names its request from. A caller that
@@ -1004,6 +1085,17 @@ fn fields_json_selected(
     // R2458 (open-debt item 703) — which lists this document renders, DERIVED.
     // See `RenderedLists`.
     let lists = RenderedLists::of(d);
+    // How many rows the walk may write, for a caller watching it: every message the
+    // two flow tables hold. A floor, since a window or a cursor passes some of them.
+    if let Some(p) = progress {
+        p.expect(
+            d.flows().iter().map(|f| f.frames.len() as u64).sum::<u64>()
+                + d.datagram_flows()
+                    .iter()
+                    .map(|f| f.frames.len() as u64)
+                    .sum::<u64>(),
+        );
+    }
     // The walker's state, when the caller keeps it between calls. A caller that
     // does not gets a throwaway one and every producer is told to keep nothing,
     // so the document it writes is the document it always wrote.
@@ -1125,6 +1217,7 @@ fn fields_json_selected(
                 }),
                 after_seq: since.map(|s| s.after_seq),
                 through_seq: since.map(|s| s.through_seq),
+                progress,
                 zids: lists.stream.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
                 #[cfg(feature = "network-codecs")]
@@ -1171,6 +1264,7 @@ fn fields_json_selected(
                 }),
                 after_seq: since.map(|s| s.after_seq),
                 through_seq: since.map(|s| s.through_seq),
+                progress,
                 zids: lists.datagram.get(i).and_then(|&list| grouping.zids(list)),
                 sink,
                 #[cfg(feature = "network-codecs")]
@@ -1499,6 +1593,11 @@ fn push_stream_flow(
         if position >= end {
             continue;
         }
+        // A walk someone told to stop writes no more rows; its caller reads
+        // that from the progress and throws the document away.
+        if !tags.keep_going() {
+            break;
+        }
         let frame = &flow.frames[position];
         let FoldedRow {
             packet,
@@ -1695,6 +1794,10 @@ fn push_datagram_flow(
             }
             break;
         }
+        // As in the stream half: a stopped walk writes no more rows.
+        if !tags.keep_going() {
+            break;
+        }
         // `stream_offset` names the PACKET here: a datagram link has no stream
         // for an offset to be into, so the field carries the only anchor there
         // is.
@@ -1846,6 +1949,9 @@ fn push_datagram_flow(
         unnumbered |= seq.is_none();
         if tags.beyond_window(seq) {
             truncated = true;
+            break;
+        }
+        if !tags.keep_going() {
             break;
         }
         if tags.passed_by_cursor(seq) {
@@ -3749,6 +3855,9 @@ struct RowTags<'a> {
     /// that is not windowed it is the highest number the handle has issued, so no
     /// row is above it. `None` for a document with no cursor.
     through_seq: Option<u64>,
+    /// Told after each row written how far the walk has got, and able to stop it.
+    /// `None` for a document nobody is watching.
+    progress: Option<&'a crate::Progress<'a>>,
     /// The zid each direction of THIS flow's list announced, `[A, B]`, or
     /// `None` for a list whose handshake the capture never saw. What the
     /// end-to-end judge keys a sender by; see [`E2eSource`].
@@ -4048,6 +4157,12 @@ impl RowTags<'_> {
     /// a window early is a recoverable answer where dropping one is not.
     fn beyond_window(&self, seq: Option<u64>) -> bool {
         matches!((self.through_seq, seq), (Some(through), Some(s)) if s > through)
+    }
+
+    /// One row is about to be written: `false` once whoever watches the walk has
+    /// told it to stop, and for every row after.
+    fn keep_going(&self) -> bool {
+        crate::progress::step(self.progress)
     }
 
     /// Is this a row the cursor passes that the document writes again, because

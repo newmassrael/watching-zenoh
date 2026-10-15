@@ -1510,6 +1510,14 @@ extern "C" {
  * which is what separates it from BYTES_RETIRED's "gone from this reader". */
 #define WZ_DISSECT_ERR_NO_SUCH_PACKET (-10)
 
+/* (ABI 42) A long call was STOPPED by the callback set with
+ * wz_dissect_live_set_progress: it returned zero when asked how the call was going.
+ * No string is handed back and the handle is whole. Its own code, because nothing
+ * is wrong with the arguments or the capture: the caller asked for the call to end,
+ * and this is the answer to that. What the stopped call had folded or written is not
+ * kept, so the next call of the same door begins that work again. */
+#define WZ_DISSECT_ERR_CANCELLED (-11)
+
 /* R311y887 -- LIMIT PRESETS, for the doors that take one as an argument.
  *
  * An int and not a struct: a struct across this boundary would freeze wz's
@@ -1558,7 +1566,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 41
+#define WZ_DISSECT_ABI_REVISION 42
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5432,6 +5440,46 @@ int wz_dissect_live_fields_since_window(wz_dissect_live *h,
                                         const char *declarations,
                                         uint64_t after_seq, uint64_t max_rows,
                                         char **out);
+
+/* (ABI 42) -- THE CALLBACK A LONG CALL ASKS HOW IT IS GOING, and that can stop it.
+ *
+ * WHAT IT IS FOR. A census or a field document over a capture of 100 MB takes tens
+ * of seconds, and from the outside it is one call that returns at the end: nothing
+ * to draw a progress bar from, and nothing to stop it with when the window closed.
+ *
+ *     static int on_progress(void *user, uint64_t done, uint64_t total) {
+ *         update_bar(user, done, total);
+ *         return !user_pressed_cancel(user);     // zero stops the call
+ *     }
+ *     wz_dissect_live_set_progress(h, on_progress, ui);
+ *     rc = wz_dissect_live_census(h, "", &doc);
+ *     if (rc == WZ_DISSECT_ERR_CANCELLED) { ... no document ... }
+ *
+ * WHAT IT COVERS. wz_dissect_live_census, wz_dissect_live_fields_where,
+ * wz_dissect_live_fields_since and wz_dissect_live_fields_since_window: the calls
+ * whose cost grows with the capture. The callback is asked every 256 steps (a
+ * message folded, a row written) with how many are done and how many are expected,
+ * and returns non-zero to go on and ZERO TO STOP. `total` is a floor: a walk learns
+ * how much there is as it goes, and a cursor or a window passes some of what it
+ * counts, so `done` may end below it. A final report is made when a call finishes.
+ *
+ * WHAT IT DOES NOT COVER. The selection documents, whose verdict walk has no step to
+ * report; wz_dissect_live_drain, which hands out what your buffer holds and returns,
+ * so you stop by not calling it again; and wz_dissect_live_follow.
+ *
+ * AFTER A STOP the call returns WZ_DISSECT_ERR_CANCELLED and no string, and the
+ * handle is whole. What the stopped call had folded or written is not kept: the
+ * memory it was advancing is dropped and the next call of the same door begins that
+ * work again, which costs what a first call costs and is never a wrong answer.
+ *
+ * THREADS. The callback is called on the thread that made the call, between steps
+ * of the work. `user` is never read or written by this library. A handle that
+ * several threads call at once needs a callback that may be called from each.
+ *
+ * A NULL `callback` clears the hook. WZ_DISSECT_ERR_INVALID_ARG for a null `h`. */
+typedef int (*wz_dissect_progress_fn)(void *user, uint64_t done, uint64_t total);
+int wz_dissect_live_set_progress(wz_dissect_live *h,
+                                 wz_dissect_progress_fn callback, void *user);
 
 /* (ABI 20) -- THE VERDICT OF A SELECTOR OVER THE ROWS OF THAT
  * DOCUMENT, and nothing beside it.

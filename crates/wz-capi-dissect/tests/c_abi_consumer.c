@@ -1185,6 +1185,13 @@ static int check_follow_door(void) {
         CHECK(rc == WZ_DISSECT_OK && in_effect == 64,
               "1000 selector memories rc=%d in effect %zu", rc, in_effect);
     }
+    /* (ABI 42) -- the progress hook: a null handle is refused, and a null callback
+     * clears the hook and is accepted. */
+    rc = wz_dissect_live_set_progress(NULL, NULL, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle set_progress rc=%d", rc);
+    rc = wz_dissect_live_set_progress(h, NULL, NULL);
+    CHECK(rc == WZ_DISSECT_OK, "clearing the progress hook rc=%d", rc);
+    CHECK(WZ_DISSECT_ERR_CANCELLED == -11, "the cancelled code moved");
     /* (ABI 41) -- the windowed since door refuses what the door it widens refuses,
      * and hands back no string on a refusal. */
     {

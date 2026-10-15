@@ -154,6 +154,16 @@ pub const WZ_DISSECT_ERR_NOT_REASSEMBLED: c_int = -9;
 /// "gone from this reader".
 pub const WZ_DISSECT_ERR_NO_SUCH_PACKET: c_int = -10;
 
+/// (ABI 42) A long call was STOPPED by the callback the caller set with
+/// [`wz_dissect_live_set_progress`]: it returned zero when asked how the call was
+/// going. No string is handed back, and the handle is whole and usable.
+///
+/// Its own code and not [`WZ_DISSECT_ERR_INVALID_ARG`] or any other, because
+/// nothing is wrong with the arguments or the capture: the caller asked for the
+/// call to end, and this is the answer to that. What the stopped call had folded or
+/// written is not kept, so the next call of the same door begins that work again.
+pub const WZ_DISSECT_ERR_CANCELLED: c_int = -11;
+
 /// R311y887 — read with no ceilings at all, which is what a FILE deserves: it
 /// ends, so keeping every byte of it is already bounded.
 ///
@@ -388,6 +398,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 41, for `wz_dissect_live_fields_since_window`: the since document for at most
     // `max_rows` sequence numbers, so the document and the string that builds it
     // are as large as a window and not as large as the capture.
+    // 42, for `wz_dissect_live_set_progress` and `WZ_DISSECT_ERR_CANCELLED`: a
+    // callback the census and the field document ask how they are going, and that
+    // can stop them.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -405,7 +418,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 41;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 42;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3790,7 +3803,7 @@ pub unsafe extern "C" fn wz_dissect_live_census(
         Err(_) => return WZ_DISSECT_ERR_SELECTOR,
     };
     // SAFETY: caller contract above.
-    write_string(unsafe { (*handle).census(&filter) }, out)
+    write_answer(unsafe { (*handle).census(&filter) }, out)
 }
 
 /// (ABI 33) — THE SESSION TABLE OVER A LIVE HANDLE: the document
@@ -3936,7 +3949,7 @@ pub unsafe extern "C" fn wz_dissect_live_fields_where(
     let declared = wz_capture::payload_decode::Declarations::new(&map);
     // SAFETY: caller contract above.
     let doc = unsafe { (*handle).fields_where(capture, cap, Some(&declared), &filter) };
-    write_string(doc, out)
+    write_answer(doc, out)
 }
 
 /// (ABI 22) — THE ROWS OF A LIVE HANDLE'S FIELD DOCUMENT AFTER A CURSOR, and
@@ -4102,7 +4115,64 @@ unsafe fn fields_since_door(
     // SAFETY: caller contract above.
     let doc =
         unsafe { (*handle).fields_since_windowed(capture, Some(&map), text, after_seq, max_rows) };
-    write_string(doc, out)
+    write_answer(doc, out)
+}
+
+/// (ABI 42) — THE CALLBACK A LONG CALL ASKS HOW IT IS GOING, and that can stop it.
+///
+/// # What a consumer was waiting on
+///
+/// A census or a field document over a capture of 100 MB takes tens of seconds, and
+/// from the outside it is one call that returns at the end: nothing to draw a
+/// progress bar from, and nothing to stop it with when the window was closed.
+///
+/// `callback(user, done, total)` is asked every 256 steps (a message folded, a row
+/// written) by [`wz_dissect_live_census`], [`wz_dissect_live_fields_where`],
+/// [`wz_dissect_live_fields_since`] and [`wz_dissect_live_fields_since_window`]. It
+/// returns non-zero to go on and ZERO TO STOP, and the call then returns
+/// [`WZ_DISSECT_ERR_CANCELLED`] and no string. `total` is a floor that grows as the
+/// walk learns how much there is, and a cursor or a window passes some of what it
+/// counts, so `done` may end below it. A null `callback` clears the hook.
+///
+/// # After a stop
+///
+/// The handle is whole. What the stopped call had folded or written is not kept: the
+/// memory it was advancing is dropped and the next call of the same door begins that
+/// work again, which costs what a first call costs and is never a wrong answer.
+/// The decoded messages and what [`wz_dissect_live_drain`] has not handed out are
+/// untouched.
+///
+/// # What it does not cover
+///
+/// The selection documents, whose verdict walk has no step to report;
+/// [`wz_dissect_live_drain`], which hands out what the caller's buffer holds and
+/// returns, so a caller stops by not calling it again; and
+/// [`wz_dissect_live_follow`].
+///
+/// # Threads
+///
+/// The callback is called on the thread that made the call, between steps of the
+/// work. `user` is never read or written by this library. A handle that several
+/// threads call at once must have a callback that may be called from each.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `callback`, when not null,
+/// must stay callable with `user` until it is replaced, cleared, or the handle is
+/// closed.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_set_progress(
+    handle: *mut live::LiveDissection,
+    callback: Option<unsafe extern "C" fn(*mut core::ffi::c_void, u64, u64) -> c_int>,
+    user: *mut core::ffi::c_void,
+) -> c_int {
+    if handle.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let hook = callback.map(|callback| live::ProgressHook::new(callback, user));
+    // SAFETY: caller contract above.
+    unsafe { (*handle).set_progress(hook) };
+    WZ_DISSECT_OK
 }
 
 /// (ABI 20) — THE VERDICT OF A SELECTOR OVER THE ROWS OF A LIVE
@@ -4635,6 +4705,15 @@ fn write_string(s: String, out: *mut *mut c_char) -> c_int {
             WZ_DISSECT_OK
         }
         Err(_) => WZ_DISSECT_ERR_DECODE,
+    }
+}
+
+/// [`write_string`] for a call the caller's progress callback may have stopped:
+/// `None` is [`WZ_DISSECT_ERR_CANCELLED`] and writes nothing to `out`.
+fn write_answer(answer: Option<String>, out: *mut *mut c_char) -> c_int {
+    match answer {
+        Some(s) => write_string(s, out),
+        None => WZ_DISSECT_ERR_CANCELLED,
     }
 }
 
@@ -8205,7 +8284,7 @@ mod tests {
         // struct is new. The handle gains state of its own, the words it said.
         // 39, for `wz_dissect_live_followed`: one symbol, a `size_t` written
         // through a pointer the caller owns; no string, no struct, no state.
-        assert_eq!(wz_dissect_abi_version(), 41);
+        assert_eq!(wz_dissect_abi_version(), 42);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -14237,6 +14316,214 @@ mod tests {
             unsafe { wz_dissect_live_close(h) };
         }
         unsafe { wz_dissect_live_close(whole) };
+    }
+
+    /// Two handshakes and `n` keep-alives, as a pcap: enough messages that a walk is
+    /// asked how it is going more than once (it is asked every 256 steps).
+    fn long_capture(n: usize) -> Vec<u8> {
+        let keepalive = [1u8, 0, 0x04];
+        let (init_a, init_b) = (framed_init(&[1, 2, 3, 4]), framed_init(&[5, 6, 7, 8]));
+        let (mut a, mut b) = (1000u32, 2000u32);
+        let mut packets = vec![tcp_packet(a, &init_a)];
+        a += init_a.len() as u32;
+        packets.push(tcp_packet_reverse(b, &init_b));
+        b += init_b.len() as u32;
+        for i in 0..n {
+            if i % 2 == 0 {
+                packets.push(tcp_packet(a, &keepalive));
+                a += keepalive.len() as u32;
+            } else {
+                packets.push(tcp_packet_reverse(b, &keepalive));
+                b += keepalive.len() as u32;
+            }
+        }
+        let count = packets.len();
+        pcap_prefix(&packets, count)
+    }
+
+    /// What a test callback saw, behind the `user` pointer.
+    struct Reports {
+        calls: std::sync::Mutex<Vec<(u64, u64)>>,
+        stop_at_call: Option<usize>,
+    }
+
+    unsafe extern "C" fn record_and_maybe_stop(
+        user: *mut core::ffi::c_void,
+        done: u64,
+        total: u64,
+    ) -> c_int {
+        // SAFETY: the test passes a pointer to a `Reports` that outlives the call.
+        let reports = unsafe { &*(user as *const Reports) };
+        let mut calls = reports.calls.lock().expect("lock");
+        calls.push((done, total));
+        c_int::from(reports.stop_at_call != Some(calls.len()))
+    }
+
+    fn set_progress_door(h: *mut live::LiveDissection, reports: Option<&Reports>) -> c_int {
+        match reports {
+            Some(r) => unsafe {
+                wz_dissect_live_set_progress(
+                    h,
+                    Some(record_and_maybe_stop),
+                    r as *const Reports as *mut core::ffi::c_void,
+                )
+            },
+            None => unsafe { wz_dissect_live_set_progress(h, None, core::ptr::null_mut()) },
+        }
+    }
+
+    fn census_door(h: *mut live::LiveDissection) -> (c_int, Option<String>) {
+        let selector = std::ffi::CString::new("").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_live_census(h, selector.as_ptr(), &mut out) };
+        if out.is_null() {
+            return (rc, None);
+        }
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf-8")
+            .to_owned();
+        unsafe { wz_dissect_string_free(out) };
+        (rc, Some(doc))
+    }
+
+    /// (ABI 42) A STOPPED CENSUS leaves a whole handle: the call answers CANCELLED and
+    /// no string, and the next census is the one a handle that was never stopped
+    /// writes, byte for byte. The memory the stopped call was advancing is dropped, so
+    /// nothing it folded is folded twice.
+    #[test]
+    fn a_stopped_census_leaves_a_handle_that_writes_the_census_of_one_never_stopped() {
+        let file = long_capture(600);
+        let (stopped, fresh) = (
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+        );
+        for h in [stopped, fresh] {
+            assert_eq!(
+                unsafe { wz_dissect_live_follow(h, file.as_ptr(), file.len()) },
+                WZ_DISSECT_OK
+            );
+        }
+        let want = census_door(fresh).1.expect("a census");
+
+        let stops_at_once = Reports {
+            calls: std::sync::Mutex::new(Vec::new()),
+            stop_at_call: Some(1),
+        };
+        assert_eq!(
+            set_progress_door(stopped, Some(&stops_at_once)),
+            WZ_DISSECT_OK
+        );
+        let (rc, doc) = census_door(stopped);
+        assert_eq!(rc, WZ_DISSECT_ERR_CANCELLED);
+        assert!(doc.is_none(), "a stopped call must not hand back a string");
+        assert_eq!(
+            stops_at_once.calls.lock().expect("lock").len(),
+            1,
+            "the walk must stop at the call that said so, not ask again"
+        );
+
+        assert_eq!(set_progress_door(stopped, None), WZ_DISSECT_OK);
+        assert_eq!(census_door(stopped), (WZ_DISSECT_OK, Some(want)));
+        unsafe {
+            wz_dissect_live_close(stopped);
+            wz_dissect_live_close(fresh);
+        }
+    }
+
+    /// (ABI 42) A callback that never stops is only told how far the walk has got:
+    /// the figures never go down, `done` never passes `total`, it is asked more than
+    /// once on a long capture, and the document is the one with no callback at all.
+    #[test]
+    fn a_callback_that_never_stops_sees_the_walk_advance_and_changes_nothing() {
+        let file = long_capture(600);
+        let (watched, plain) = (
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+        );
+        for h in [watched, plain] {
+            assert_eq!(
+                unsafe { wz_dissect_live_follow(h, file.as_ptr(), file.len()) },
+                WZ_DISSECT_OK
+            );
+        }
+        let reports = Reports {
+            calls: std::sync::Mutex::new(Vec::new()),
+            stop_at_call: None,
+        };
+        assert_eq!(set_progress_door(watched, Some(&reports)), WZ_DISSECT_OK);
+        assert_eq!(census_door(watched), census_door(plain));
+        let calls = reports.calls.lock().expect("lock").clone();
+        assert!(calls.len() >= 2, "asked {} time(s)", calls.len());
+        for pair in calls.windows(2) {
+            assert!(pair[0].0 <= pair[1].0, "done went down: {pair:?}");
+        }
+        assert!(
+            calls.iter().all(|(done, total)| done <= total),
+            "done passed total: {calls:?}"
+        );
+        unsafe {
+            wz_dissect_live_close(watched);
+            wz_dissect_live_close(plain);
+        }
+    }
+
+    /// (ABI 42) A STOPPED FIELD DOCUMENT leaves the memory that remembers between
+    /// calls dropped and not half-advanced: the call after it writes the whole
+    /// document a handle that was never stopped writes.
+    #[test]
+    fn a_stopped_field_document_leaves_a_handle_that_writes_the_whole_one() {
+        let file = long_capture(600);
+        let (stopped, fresh) = (
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("a handle opens"),
+        );
+        for h in [stopped, fresh] {
+            assert_eq!(
+                unsafe { wz_dissect_live_follow(h, file.as_ptr(), file.len()) },
+                WZ_DISSECT_OK
+            );
+        }
+        let want = live_fields_since(fresh, &file, 0);
+
+        let stops_at_once = Reports {
+            calls: std::sync::Mutex::new(Vec::new()),
+            stop_at_call: Some(1),
+        };
+        assert_eq!(
+            set_progress_door(stopped, Some(&stops_at_once)),
+            WZ_DISSECT_OK
+        );
+        let declarations = std::ffi::CString::new("").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_fields_since(
+                stopped,
+                file.as_ptr(),
+                file.len(),
+                declarations.as_ptr(),
+                0,
+                &mut out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_ERR_CANCELLED);
+        assert!(out.is_null(), "a stopped call must not hand back a string");
+
+        assert_eq!(set_progress_door(stopped, None), WZ_DISSECT_OK);
+        assert_eq!(live_fields_since(stopped, &file, 0), want);
+        unsafe {
+            wz_dissect_live_close(stopped);
+            wz_dissect_live_close(fresh);
+        }
+    }
+
+    /// (ABI 42) A null handle is refused.
+    #[test]
+    fn set_progress_refuses_a_null_handle() {
+        assert_eq!(
+            set_progress_door(core::ptr::null_mut(), None),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
     }
 
     fn parsed(doc: &str) -> wz_session_core::json5::Json5Value {

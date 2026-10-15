@@ -198,24 +198,47 @@ pub fn census_json_where_resumable(
     filter: &crate::filter::Filter,
     memory: &mut crate::CensusMemory,
 ) -> String {
+    census_json_where_resumable_progress(d, filter, memory, None)
+        .expect("a walk nobody can stop runs to its end")
+}
+
+/// [`census_json_where_resumable`], reporting how far each plane's fold has got to
+/// `progress` and stopping when it says to: the answer is then `None`, and the
+/// plane that was being folded is dropped from `memory` so the next call begins it
+/// again (see [`crate::progress`]). The planes that finished before the stop keep
+/// what they folded.
+///
+/// The node census, which every plane's fold is valid against, is brought up first
+/// and is not reported on: it is the part of a census that costs little once a
+/// memory holds it.
+pub fn census_json_where_resumable_progress(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    memory: &mut crate::CensusMemory,
+    progress: Option<&crate::Progress<'_>>,
+) -> Option<String> {
     memory.for_filter(filter);
     let nodes = memory.node_census(d);
     let grouping = crate::node::SessionGrouping::of(&nodes);
-    let throughput = memory.keyexprs(d, &grouping);
-    census_document(
+    let throughput = memory.keyexprs(d, &grouping, progress)?;
+    let document = census_document(
         d,
         filter,
         CensusPlanes {
             #[cfg(feature = "network-codecs")]
-            exchanges: memory.exchanges(d, &grouping),
+            exchanges: memory.exchanges(d, &grouping, progress)?,
             #[cfg(feature = "network-codecs")]
-            payloads: memory.payloads(d, &grouping),
+            payloads: memory.payloads(d, &grouping, progress)?,
             #[cfg(feature = "network-codecs")]
-            interests: memory.interests(d, &grouping),
+            interests: memory.interests(d, &grouping, progress)?,
             throughput,
             nodes,
         },
-    )
+    );
+    if let Some(p) = progress {
+        p.finish();
+    }
+    Some(document)
 }
 
 /// The planes of a census document, however they were made.
