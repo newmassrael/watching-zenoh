@@ -86,7 +86,7 @@ pub(crate) struct Refusal {
 }
 
 impl Refusal {
-    fn new(path: impl Into<String>, why: impl Into<String>) -> Self {
+    pub(crate) fn new(path: impl Into<String>, why: impl Into<String>) -> Self {
         Refusal {
             path: path.into(),
             why: why.into(),
@@ -157,6 +157,9 @@ pub(crate) struct SessionSpec {
     /// printed form). `None`: the session draws a random one at start.
     pub(crate) zid: Option<String>,
     pub(crate) link: SessionLink,
+    /// The traffic this session generates once it serves (see
+    /// [`crate::sessions_driver`]); empty for a session that only holds its link.
+    pub(crate) driver: Vec<crate::sessions_driver::DriverRole>,
 }
 
 /// Every session of a document that passed the rules, in start order.
@@ -273,7 +276,12 @@ pub(crate) fn read_sessions_document(text: &str) -> Result<SessionsPlan, Vec<Ref
             "required, a list of the sessions to start",
         ));
     }
-    refusals.extend(rule_refusals(&doc));
+    // The shared rules are the validator's, which has no `driver`: they read the
+    // document with it taken out, and the driver is judged on its own.
+    refusals.extend(rule_refusals(&crate::sessions_driver::without_drivers(
+        &doc,
+    )));
+    refusals.extend(crate::sessions_driver::driver_refusals(&doc));
     if refusals.is_empty() {
         Ok(plan_of(&doc))
     } else {
@@ -825,6 +833,7 @@ fn plan_of(doc: &Json5Value) -> SessionsPlan {
                 mode,
                 zid,
                 link,
+                driver: crate::sessions_driver::roles_of(s),
             }
         })
         .collect();
@@ -836,19 +845,19 @@ fn plan_of(doc: &Json5Value) -> SessionsPlan {
 // validator's `json`/`yaml` loads do.
 // ---------------------------------------------------------------------------
 
-fn field<'a>(entries: &'a [(String, Json5Value)], key: &str) -> Option<&'a Json5Value> {
+pub(crate) fn field<'a>(entries: &'a [(String, Json5Value)], key: &str) -> Option<&'a Json5Value> {
     entries.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-fn has(entries: &[(String, Json5Value)], key: &str) -> bool {
+pub(crate) fn has(entries: &[(String, Json5Value)], key: &str) -> bool {
     entries.iter().any(|(k, _)| k == key)
 }
 
-fn key_set(entries: &[(String, Json5Value)]) -> BTreeSet<&str> {
+pub(crate) fn key_set(entries: &[(String, Json5Value)]) -> BTreeSet<&str> {
     entries.iter().map(|(k, _)| k.as_str()).collect()
 }
 
-fn as_str(value: &Json5Value) -> Option<&str> {
+pub(crate) fn as_str(value: &Json5Value) -> Option<&str> {
     match value {
         Json5Value::String(s) => Some(s),
         _ => None,
@@ -856,7 +865,7 @@ fn as_str(value: &Json5Value) -> Option<&str> {
 }
 
 /// `_positive_int`: an integer above zero (never a bool or a string).
-fn positive_int(value: &Json5Value) -> Option<u64> {
+pub(crate) fn positive_int(value: &Json5Value) -> Option<u64> {
     match value {
         Json5Value::Number(text) => number_as_u64(text).filter(|n| *n > 0),
         _ => None,
@@ -945,6 +954,7 @@ mod reader_tests {
                     link: SessionLink::Connect {
                         endpoints: vec!["tcp/127.0.0.1:7447".into(), "tcp/127.0.0.1:7448".into()],
                     },
+                    driver: Vec::new(),
                 },
                 SessionSpec {
                     index: 1,
@@ -956,6 +966,7 @@ mod reader_tests {
                         join_interval_ms: DEFAULT_JOIN_INTERVAL_MS,
                         lease_ms: DEFAULT_GROUP_LEASE_MS,
                     },
+                    driver: Vec::new(),
                 },
                 SessionSpec {
                     index: 2,
@@ -966,6 +977,7 @@ mod reader_tests {
                         endpoint: "tcp/127.0.0.1:0".into(),
                         max_sessions: 3,
                     },
+                    driver: Vec::new(),
                 },
             ]
         );

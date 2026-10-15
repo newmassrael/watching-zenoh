@@ -92,6 +92,7 @@ use wz::runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 mod args;
 mod runner;
 mod sessions;
+mod sessions_driver;
 mod sessions_run;
 mod shutdown;
 mod tasks;

@@ -6559,6 +6559,13 @@ layer_c1ay_cargo_test_router_hat() {
     # green run behind it.
     _runci_guarded_test "C1AY check_sessions_binary 4" 4 \
         cargo test -p wz-ap-demo --test check_sessions_binary --quiet || return 1
+    # The `driver` key of a `--sessions` session: roles that run on the session the
+    # document names, over a real loopback link (a listener holding a subscriber and
+    # a queryable, a client that publishes, puts, deletes and asks), a refused
+    # driver that names its key path, and the check that accepts a well formed one.
+    # Its own test target, with the count pinned for the reason above.
+    _runci_guarded_test "C1AY sessions_driver_binary 3" 3 \
+        cargo test -p wz-ap-demo --test sessions_driver_binary --quiet || return 1
     # R2087 (open-debt item 506) — the same argv -> exit status seam, for the qos
     # x lowlatency exclusivity that wiring `--qos` into `initiator_offer` made
     # this binary responsible for. Run at the feature set where BOTH modes are

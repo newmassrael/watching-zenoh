@@ -53,6 +53,7 @@ use wz::runtime_tokio::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 
 use crate::args::{resolve_node_zid, session_init_params_for, TransportTuning};
 use crate::sessions::{Mode, SessionLink, SessionSpec, SessionsPlan};
+use crate::sessions_driver::DriverRole;
 use crate::shutdown::shutdown_signal;
 
 /// How a session task finished.
@@ -149,7 +150,15 @@ async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool
     let name = spec.name.clone();
     let end = match spec.link {
         SessionLink::Connect { endpoints } => {
-            run_connect(&name, whatami(spec.mode), zid, &endpoints, stop).await
+            run_connect(
+                &name,
+                whatami(spec.mode),
+                zid,
+                &endpoints,
+                &spec.driver,
+                stop,
+            )
+            .await
         }
         SessionLink::Listen {
             endpoint,
@@ -161,6 +170,7 @@ async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool
                 zid,
                 &endpoint,
                 max_sessions,
+                &spec.driver,
                 stop,
             )
             .await
@@ -196,6 +206,7 @@ async fn run_connect(
     whatami: WhatAmI,
     zid: Vec<u8>,
     endpoints: &[String],
+    driver: &[DriverRole],
     mut stop: watch::Receiver<bool>,
 ) -> SessionEnd {
     let mut why = Vec::new();
@@ -227,7 +238,7 @@ async fn run_connect(
                         .map(|z| zid_to_zenoh_hex(&z))
                         .unwrap_or_else(|| "unknown".to_string())
                 );
-                return match serve_unicast(opened, stop).await {
+                return match serve_unicast(name, opened, driver, stop).await {
                     None => SessionEnd::Closed,
                     Some(outcome) => {
                         eprintln!("wz-ap-demo session {name}: ended ({outcome:?})");
@@ -275,8 +286,14 @@ async fn ended_or_stopped<D: std::future::Future>(
 
 /// Drive one Established unicast session until its peer ends it (`Some`, why)
 /// or the process stops (`None`); on a stop, close it on the wire first.
+///
+/// `driver` is the traffic the document asked this session to generate: its
+/// roles start once the session is up and end, with the session's clones dropped
+/// first, when it ends (see [`crate::sessions_driver::start`]).
 async fn serve_unicast(
+    name: &str,
     mut opened: OpenedSession,
+    driver: &[DriverRole],
     mut stop: watch::Receiver<bool>,
 ) -> Option<DriverOutcome> {
     let session = TokioSession::new(
@@ -284,6 +301,7 @@ async fn serve_unicast(
         Arc::new(Mutex::new(ApplicationLayerObserver::new())),
         Arc::new(opened.clock),
     );
+    let roles = crate::sessions_driver::start(name, &session, driver);
     let timeouts = SessionTimeouts::spec_defaults();
     let outcome = {
         let drive = drive_session_until_terminal(
@@ -297,6 +315,13 @@ async fn serve_unicast(
         );
         ended_or_stopped(drive, &mut stop).await
     };
+    // The roles hold clones of the session, so they end before it is dropped.
+    for role in &roles {
+        role.abort();
+    }
+    for role in roles {
+        let _ = role.await;
+    }
     drop(session);
     if outcome.is_none() {
         opened.actions.send_close_with_reason(CloseReason::Generic);
@@ -313,6 +338,7 @@ async fn run_listen(
     zid: Vec<u8>,
     endpoint: &str,
     max_sessions: usize,
+    driver: &[DriverRole],
     mut stop: watch::Receiver<bool>,
 ) -> SessionEnd {
     let mut listener = match bind_endpoint(endpoint).await {
@@ -350,6 +376,7 @@ async fn run_listen(
                 };
                 let name = name.to_string();
                 let stop = stop.clone();
+                let driver = driver.to_vec();
                 accepted.push(tokio::task::spawn_local(async move {
                     let opened = match accept_and_open_session(
                         link,
@@ -374,7 +401,7 @@ async fn run_listen(
                         .map(|z| zid_to_zenoh_hex(&z))
                         .unwrap_or_else(|| "unknown".to_string());
                     eprintln!("wz-ap-demo session {name}: accepted {peer}");
-                    match serve_unicast(opened, stop).await {
+                    match serve_unicast(&name, opened, &driver, stop).await {
                         None => eprintln!("wz-ap-demo session {name}: accepted {peer} closed"),
                         Some(outcome) => eprintln!(
                             "wz-ap-demo session {name}: accepted {peer} ended ({outcome:?})"

@@ -101,6 +101,12 @@ pub(crate) fn print_usage() {
     eprintln!("                             SIGTERM; nothing is routed between sessions. Takes no");
     eprintln!("                             other flag. A multicast session needs the");
     eprintln!("                             `transport-multicast` build feature.");
+    eprintln!("                             A unicast session may carry `driver: [..]`, the");
+    eprintln!("                             traffic it generates once it serves: roles publish");
+    eprintln!("                             (key, payload, period_ms, count), put (key,");
+    eprintln!("                             payload), delete (key), subscribe (key), get (key,");
+    eprintln!("                             timeout_ms) and answer (key, reply). Each prints");
+    eprintln!("                             `DRIVER <role> ...` lines. Not a deploy key.");
     eprintln!("    --check-sessions <file>  judge the same document and start nothing: no socket");
     eprintln!("                             is opened. Exit 0 accepted, 2 refused (every refusal");
     eprintln!("                             by its key path, as --sessions prints them), 3 the");
