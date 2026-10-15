@@ -102,10 +102,8 @@ pub(crate) enum KeyKind {
     /// A positive integer.
     Count,
     /// `true` or `false`.
-    #[allow(dead_code)] // read by the roles that take a switch
     Flag,
     /// One of these words.
-    #[allow(dead_code)] // read by the roles that take a choice
     Word(&'static [&'static str]),
 }
 
@@ -191,7 +189,6 @@ pub(crate) enum Value {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Args(Vec<(&'static str, Value)>);
 
-#[allow(dead_code)] // each reader is the one some role uses; see `roles/`
 impl Args {
     fn get(&self, name: &str) -> Option<&Value> {
         self.0.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
@@ -278,7 +275,6 @@ impl RoleDef {
     /// A role that needs `feature`; `available` is `cfg!(feature = "...")` in the
     /// role's own module, so a build without it still compiles and refuses the
     /// role by key path.
-    #[allow(dead_code)] // the roles that sit behind a feature
     pub(crate) const fn gated(
         word: &'static str,
         keys: &'static [KeyDef],
@@ -297,7 +293,6 @@ impl RoleDef {
     }
 
     /// The same role with a rule across its keys.
-    #[allow(dead_code)] // the roles whose keys constrain each other
     pub(crate) const fn checked(mut self, check: Check) -> Self {
         self.check = check;
         self
@@ -584,8 +579,11 @@ pub(crate) struct Ctx {
     args: Args,
 }
 
-#[allow(dead_code)] // each reader is the one some role uses; see `roles/`
 impl Ctx {
+    /// The keys as read, for a role that builds one value out of several. Only the
+    /// group roles do, and they sit behind a feature, so a build without it never
+    /// calls this.
+    #[cfg_attr(not(feature = "group"), allow(dead_code))]
     pub(crate) fn args(&self) -> &Args {
         &self.args
     }

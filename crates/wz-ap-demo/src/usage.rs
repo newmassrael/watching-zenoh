@@ -102,13 +102,28 @@ pub(crate) fn print_usage() {
     eprintln!("                             other flag. A multicast session needs the");
     eprintln!("                             `transport-multicast` build feature.");
     eprintln!("                             A unicast session may carry `driver: [..]`, the");
-    eprintln!("                             traffic it generates once it serves: roles publish");
-    eprintln!("                             (key, payload, period_ms, count), put (key,");
-    eprintln!("                             payload), delete (key), subscribe (key), get (key,");
-    eprintln!("                             timeout_ms) and answer (key, reply); any role takes");
+    eprintln!("                             traffic it generates once it serves. Roles and their");
+    eprintln!("                             keys: publish (key, payload, period_ms, count), put");
+    eprintln!("                             (key, payload), delete (key), subscribe (key), get");
+    eprintln!("                             (key, timeout_ms), answer (key, reply), query (key,");
+    eprintln!("                             period_ms, count, timeout_ms: a declared querier),");
+    eprintln!("                             pull (key, period_ms, capacity: a buffered");
+    eprintln!("                             subscriber drained every period), forward (key, to:");
+    eprintln!("                             republish on another key), liveliness_token (key),");
+    eprintln!("                             liveliness_subscribe (key, history), liveliness_get");
+    eprintln!("                             (key, timeout_ms), scout (what, address, interface,");
+    eprintln!("                             ttl, timeout_ms: print every Hello of the window;");
+    eprintln!("                             `scouting-active`), advanced_publish (key, payload,");
+    eprintln!("                             period_ms, count, cache, heartbeat_ms),");
+    eprintln!("                             advanced_subscribe (key, history, history_age_ms,");
+    eprintln!("                             recovery, periodic_ms) (both `advanced`),");
+    eprintln!("                             group_member (group, member_id, lease_ms) and");
+    eprintln!("                             group_view (group, member_id, lease_ms, size,");
+    eprintln!("                             timeout_ms) (both `group`). Any role takes");
     eprintln!("                             after_ms, how long to hold it once the session is up.");
-    eprintln!("                             Each prints `DRIVER <role> ...` lines. Not a deploy");
-    eprintln!("                             key.");
+    eprintln!("                             A role the build lacks the feature for is refused by");
+    eprintln!("                             key path. Each prints `DRIVER <role> ...` lines. Not");
+    eprintln!("                             a deploy key.");
     eprintln!("                             A unicast session may carry `scouting: {{ multicast:");
     eprintln!(
         "                             {{ listen: true, address, interface, ttl }} }}`, zenoh's"
