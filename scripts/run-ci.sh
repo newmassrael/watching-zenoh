@@ -6568,8 +6568,27 @@ layer_c1ay_cargo_test_router_hat() {
     # a queryable, a client that publishes, puts, deletes and asks), a refused
     # driver that names its key path, and the check that accepts a well formed one.
     # Its own test target, with the count pinned for the reason above.
-    _runci_guarded_test "C1AY sessions_driver_binary 3" 3 \
+    # A fourth case: a question to a suspended peer ends at its own deadline, which
+    # is the sweep a session of this process runs beside its drive loop.
+    _runci_guarded_test "C1AY sessions_driver_binary 4" 4 \
         cargo test -p wz-ap-demo --test sessions_driver_binary --quiet || return 1
+    # The other driver roles, one target per family, each over real `--sessions`
+    # processes and each with its count pinned: liveliness (a token seen to appear
+    # and go, its history, a liveliness get), and the declared querier, the
+    # forwarder and the pulled subscriber. Both are in the default build.
+    _runci_guarded_test "C1AY sessions_driver_liveliness_binary 3" 3 \
+        cargo test -p wz-ap-demo --test sessions_driver_liveliness_binary --quiet || return 1
+    _runci_guarded_test "C1AY sessions_driver_query_binary 3" 3 \
+        cargo test -p wz-ap-demo --test sessions_driver_query_binary --quiet || return 1
+    # The roles behind a build feature: the advanced publisher and subscriber
+    # (`advanced`) and the group member and viewer (`group`). Each target is
+    # `#![cfg(.. feature ..)]`, so a build that lost the feature would compile an
+    # empty target and `cargo test` would exit 0 having run nothing: the count is
+    # what says the tests are still there.
+    _runci_guarded_test "C1AY sessions_driver_advanced_binary 2" 2 \
+        cargo test -p wz-ap-demo --features advanced --test sessions_driver_advanced_binary --quiet || return 1
+    _runci_guarded_test "C1AY sessions_driver_group_binary 2" 2 \
+        cargo test -p wz-ap-demo --features group --test sessions_driver_group_binary --quiet || return 1
     # R2087 (open-debt item 506) — the same argv -> exit status seam, for the qos
     # x lowlatency exclusivity that wiring `--qos` into `initiator_offer` made
     # this binary responsible for. Run at the feature set where BOTH modes are
@@ -17224,6 +17243,14 @@ PY
     _runci_guarded_test "M router-hat answers a scout" 1 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_answers_a_scout -- --ignored || return 1
+    # The `scout` role of a `--sessions` driver: one process answers Scouts from a
+    # `scouting.multicast` block, a second asks from inside its own session and
+    # prints the Hello it hears. It needs the same multicast route as the leg above
+    # and nothing else, so it sits beside it. One target with one ignored test, the
+    # count pinned for the reason the leg above gives.
+    _runci_guarded_test "M sessions scout role" 1 \
+        cargo test -p wz-ap-demo --features scouting-active,scouting-responder \
+        --test sessions_driver_scout_binary -- --ignored || return 1
     # R2307 (open-debt item 515) — THE SAME CLAIM WITH A FOREIGN ADJUDICATOR.
     # The leg above proves the config spelling wz<->wz, and A4-3 refuses it a
     # cross-impl marker for exactly that; R2094's foreign leg proves the ARGV
