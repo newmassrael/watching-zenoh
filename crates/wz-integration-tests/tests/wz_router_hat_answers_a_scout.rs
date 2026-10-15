@@ -102,7 +102,24 @@ enum Start {
     Typed(&'static str),
     /// ONE stock zenoh config file, `mode: "<this>"`, and no other argument.
     ConfigFile(&'static str),
+    /// The one-shot `--connect` CLIENT, dialling this endpoint (an
+    /// acceptor the test starts) with `--scout-listen` beside it. The genuine
+    /// client answers Scout by default (`scouting/multicast/listen`), as role
+    /// `client`, and with no locator because it listens on nothing.
+    Client(&'static str),
 }
+
+/// What an asker names in a Scout's `what`: the client role has its own bit, and a
+/// responder answers only a Scout that names the role it runs as
+/// (`ScoutingResponder`'s gate), so the client arm cannot be asked with the
+/// router/peer mask the other arms use.
+const WHAT_CLIENT: u8 = 0b100;
+
+/// The acceptor the client arm dials.
+const CLIENT_ARM_ACCEPTOR: &str = "tcp/127.0.0.1:17460";
+/// The keyexpr both ends of the client arm subscribe to, which is only the role
+/// the demo insists each run has.
+const CLIENT_ARM_KEY: &str = "wz/scout/client-arm";
 
 /// One node under test: how it is started, where it answers, and what the wire
 /// must say about it.
@@ -119,6 +136,21 @@ struct Arm {
 }
 
 impl Arm {
+    /// The roles this arm's Scout asks for.
+    fn what(&self) -> u8 {
+        match self.start {
+            Start::Client(_) => WHAT_CLIENT,
+            _ => WHAT_ROUTER | WHAT_PEER,
+        }
+    }
+
+    /// Whether the node has an address to advertise. A client does not: it
+    /// listens on nothing, so its Hello carries no locator and it logs no
+    /// advertised self locator.
+    fn dialable(&self) -> bool {
+        !matches!(self.start, Start::Client(_))
+    }
+
     /// The argv this arm starts the demo with, and the file it had to write to
     /// mean it.
     ///
@@ -129,6 +161,22 @@ impl Arm {
     /// answers and not that the FILE is what put it on that group.
     fn argv(&self, zid_hex: &str, dir: &std::path::Path) -> Vec<String> {
         match self.start {
+            Start::Client(acceptor) => [
+                "--connect",
+                acceptor,
+                // The demo refuses a run with no role to play; a subscription is
+                // the quietest one.
+                "--key",
+                CLIENT_ARM_KEY,
+                "--scout-listen",
+                "--scout-addr",
+                &format!("{}:{}", self.group, self.port),
+                "--zid",
+                zid_hex,
+            ]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect(),
             Start::Typed(flag) => [
                 flag,
                 "tcp/127.0.0.1:0",
@@ -267,7 +315,7 @@ fn scout_and_read_hello(
     capture: &mut std::fs::File,
 ) -> Result<Vec<u8>, String> {
     let deadline = Instant::now() + Duration::from_secs(15);
-    let datagram = scout_datagram(WHAT_ROUTER | WHAT_PEER);
+    let datagram = scout_datagram(arm.what());
     let mut buf = vec![0u8; 2048];
     loop {
         // R2219 — BOTH exits are checked at the TOP, and moving them here is a
@@ -407,7 +455,33 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
             zid_prefix: "7204",
             expect_whatami: WhatAmI::Peer,
         },
+        // THE CLIENT. A `--connect` client with `--scout-listen`
+        // answers a Scout that asks for clients, and the Hello says `client`.
+        // Before this the client role had no responder at all, so a lab that
+        // wrote `scouting/multicast/listen: true` on a client document got a
+        // node nothing could find. Its control is the three arms above: the
+        // same scouter, a different role word on the wire.
+        Arm {
+            start: Start::Client(CLIENT_ARM_ACCEPTOR),
+            name: "--connect --scout-listen",
+            group: Ipv4Addr::new(224, 0, 0, 235),
+            port: 17456,
+            zid_prefix: "7205",
+            expect_whatami: WhatAmI::Client,
+        },
     ];
+
+    // The client arm needs something to dial: a plain wz acceptor, started once
+    // and held for the whole test. It needs none of the scouting features.
+    let _acceptor = ChildGuard::wrap(
+        "client-arm acceptor",
+        Command::new(&demo)
+            .args(["--listen", CLIENT_ARM_ACCEPTOR, "--key", CLIENT_ARM_KEY])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn the client arm's acceptor: {e}")),
+    );
 
     let scouter = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .expect("bind an ephemeral scouter that never joins the group");
@@ -442,18 +516,24 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
         // through the liveness-aware wait, so a node that aborts on its argv is
         // reported as a corpse with its own message instead of costing the full
         // budget and then being guessed about.
-        let advertised = wait_for_capture_alive(
-            node.child_mut(),
-            &mut capture,
-            Duration::from_secs(15),
-            "the advertised self locator",
-            |captured| {
-                captured
-                    .split_once(ADVERTISED_NEEDLE)
-                    .map(|(_, rest)| rest.lines().next().unwrap_or("").trim().to_string())
-                    .filter(|s| !s.is_empty())
-            },
-        );
+        let advertised = if arm.dialable() {
+            wait_for_capture_alive(
+                node.child_mut(),
+                &mut capture,
+                Duration::from_secs(15),
+                "the advertised self locator",
+                |captured| {
+                    captured
+                        .split_once(ADVERTISED_NEEDLE)
+                        .map(|(_, rest)| rest.lines().next().unwrap_or("").trim().to_string())
+                        .filter(|s| !s.is_empty())
+                },
+            )
+        } else {
+            // A client advertises nothing, so there is no locator line to wait
+            // for; the banner below is its readiness.
+            Ok(String::new())
+        };
         let banner = advertised.as_ref().ok().and_then(|_| {
             wait_for_capture_alive(
                 node.child_mut(),
@@ -563,6 +643,20 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
         // And it is DIALABLE: the locator on the wire is the one the node's own
         // advertise seam chose, not one composed for it. That is what makes the
         // discovery useful rather than merely observable.
+        //
+        // Except the client, which listens on nothing: genuine
+        // `get_hello_locators` is empty for it, so the Hello must carry NO
+        // locator, and one that did would advertise an address nothing serves.
+        if !arm.dialable() {
+            assert!(
+                walked.find("locator").is_none(),
+                "{} arm: a client listens on nothing, so its Hello must carry no \
+                 locator; got {:?}",
+                arm.name,
+                walked.find("locator").map(|f| &f.value)
+            );
+            continue;
+        }
         let locator = match walked.find("locator").map(|f| &f.value) {
             Some(FieldValue::Text(t)) => t.clone(),
             other => panic!(

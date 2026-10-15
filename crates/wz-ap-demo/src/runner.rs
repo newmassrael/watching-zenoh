@@ -3027,6 +3027,9 @@ pub(crate) async fn run_demo(
     // one-shot `--connect` client's startup connect phase. `None` is the
     // client default, one attempt.
     connect_timeout: Option<PhaseBudget>,
+    // `--scout-listen` on the `--connect` client: the socket the
+    // client's Scout responder joins. `None` is the run without one.
+    #[cfg(feature = "scouting-responder")] scout_listen: Option<crate::args::ScoutSocketArgs>,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -3056,6 +3059,8 @@ pub(crate) async fn run_demo(
     // R2885 (open-debt item 825) — `zid` is the node's identity, resolved once
     // in `main` (the configured `--zid`, else a random one) and shared with the
     // Scout frame and the advanced publisher, so all three name one node.
+    #[cfg(feature = "scouting-responder")]
+    let scout_zid = zid.clone();
     let params = demo_session_init_params(role.node_kind(), zid, &tuning)?;
     // R2112 (open-debt items 102 + 210) — the role this node ANNOUNCES, read
     // off the params BEFORE they are moved into whichever open path this
@@ -3364,6 +3369,20 @@ pub(crate) async fn run_demo(
         }
     };
     let actions = drive_src.actions().clone();
+
+    // The CLIENT role answers Scout like the genuine one. Upstream's
+    // `start_client` runs `responder(...)` on the multicast socket when
+    // `scouting/multicast/listen` is on (the client default is `true`), and the
+    // Hello it answers with names the node as a client with NO locators
+    // (`get_hello_locators` is empty for a node that listens on nothing). Started
+    // here, after Established, because the dial is the client's one act before it
+    // is a node: a responder that came up first would answer Scouts for a node
+    // whose session had not opened. A bind failure propagates for the reason
+    // `--scout-listen` does on the peer.
+    #[cfg(feature = "scouting-responder")]
+    if let Some(scout_socket) = scout_listen.as_ref() {
+        spawn_scouting_responder(scout_socket, node_whatami, &scout_zid, Vec::new()).await?;
+    }
 
     // ── Step 3: observer-side registry callbacks. The handshake exchanged no
     //          application frames, so wiring the observer here — after

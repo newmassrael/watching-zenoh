@@ -179,7 +179,8 @@ pub(crate) fn print_usage() {
     eprintln!("    --scout-timeout-ms <ms>  total --scout discovery budget, spent across repeated");
     eprintln!("                             Scout cycles (default 10000; requires --scout)");
     eprintln!("    --scout-addr <ip:port>   scouting socket to join instead of 224.0.0.224:7446");
-    eprintln!("                             (zenoh scouting/multicast/address; requires --scout)");
+    eprintln!("                             (zenoh scouting/multicast/address; requires --scout");
+    eprintln!("                             or --scout-listen)");
     eprintln!("    --scout-iface <name>     interface the Scout joins and leaves by; default is");
     eprintln!("                             every interface the route picks (requires --scout)");
     eprintln!("    --scout-ttl <n>          multicast hop limit for Scout datagrams, default 1 =");
@@ -187,7 +188,9 @@ pub(crate) fn print_usage() {
     eprintln!("    --scout-listen           the OTHER direction: answer Scouts on the group so");
     eprintln!("                             foreign nodes DISCOVER this one instead of being");
     eprintln!("                             told its endpoint (zenoh scouting/multicast/listen).");
-    eprintln!("                             --peer OR --router-hat mode; needs the");
+    eprintln!("                             --peer, --router-hat OR the --connect client (which");
+    eprintln!("                             answers as `client` advertising NO locator, as the");
+    eprintln!("                             genuine client does); needs the");
     eprintln!("                             `scouting-responder` feature. The Hello says which");
     eprintln!("                             role the node runs as, so --router-hat answers");
     eprintln!("                             `router` -- which is what a stock client's default");

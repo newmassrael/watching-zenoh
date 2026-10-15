@@ -1364,8 +1364,36 @@ fn demo_main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if scout_socket != crate::args::ScoutSocketArgs::default() && !scout_requested {
-        eprintln!("wz-ap-demo: --scout-addr / --scout-iface / --scout-ttl require --scout");
+    // `--scout-listen` on the one-shot client: the direction that
+    // ANSWERS Scouts, which the genuine client does by default
+    // (`scouting/multicast/listen`). It qualifies the same three socket flags as
+    // `--scout` does, and it has no meaning on an acceptor (`--listen`), which
+    // is not a client and has its own answering paths (`--peer`, `--router-hat`).
+    let scout_listen_requested = rest.iter().any(|a| a == "--scout-listen");
+    if scout_socket != crate::args::ScoutSocketArgs::default()
+        && !scout_requested
+        && !scout_listen_requested
+    {
+        eprintln!(
+            "wz-ap-demo: --scout-addr / --scout-iface / --scout-ttl require --scout \
+             or --scout-listen"
+        );
+        return ExitCode::from(2);
+    }
+    if scout_listen_requested && listen_opt.is_some() {
+        eprintln!(
+            "wz-ap-demo: --scout-listen answers as a client; an acceptor (--listen) \
+             does not take it (use --peer or --router-hat to be discoverable)"
+        );
+        return ExitCode::from(2);
+    }
+    #[cfg(not(feature = "scouting-responder"))]
+    if scout_listen_requested {
+        eprintln!(
+            "wz-ap-demo: --scout-listen requires the `scouting-responder` \
+             build feature (build: cargo build -p wz-ap-demo --features \
+             scouting-responder)"
+        );
         return ExitCode::from(2);
     }
     if scout_requested && (listen_opt.is_some() || connect_opt.is_some()) {
@@ -2656,6 +2684,8 @@ fn demo_main() -> ExitCode {
             timestamping,
             connect_retry,
             connect_timeout,
+            #[cfg(feature = "scouting-responder")]
+            scout_listen_requested.then_some(scout_socket),
         )
         .await
     });
