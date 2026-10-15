@@ -65,6 +65,7 @@ use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
+    DEFAULT_BATCH_SIZE,
 };
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 
@@ -327,6 +328,9 @@ pub unsafe extern "C" fn z_open(
             },
             OpenStance {
                 tx_queue: TxQueueConf::pico(),
+                // pico's config has no batch-size key this ABI reads, so it advertises zenoh's
+                // default, as it did when the number was a constant in the core.
+                batch_size: DEFAULT_BATCH_SIZE,
                 // pico negotiates no transport capability on unicast: its InitSyn
                 // carries the patch ext and nothing else
                 // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @

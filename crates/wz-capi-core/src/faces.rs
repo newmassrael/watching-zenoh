@@ -1607,7 +1607,10 @@ impl SharedSession {
         let params = crate::drive::init_params(
             wz_runtime_tokio::session_glue::WhatAmI::Peer,
             zid,
-            wz_runtime_tokio::session_glue::TxQueueConf::default(),
+            crate::drive::LinkTx {
+                queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+                batch_size: crate::drive::DEFAULT_BATCH_SIZE,
+            },
         )?;
         let actions = new_session_actions(driver, params, clock);
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));

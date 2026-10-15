@@ -756,6 +756,27 @@ impl ConfiguredZid {
     }
 }
 
+/// What a session's links are told about transmitting: the queue model the calling ABI stands
+/// for, and the batch size the session ADVERTISES in its InitSyn or InitAck.
+///
+/// The batch size is the half of the negotiation this node controls: the size both ends settle on
+/// is the smaller of the two advertised, and a frame the writer builds past it is fragmented
+/// (`emit_frame_or_fragments`). It was a constant here, so a config that stated
+/// `transport/link/tx/batch_size` was read and then not put on the wire, and a session could not
+/// be made to negotiate anything below 65535. Travelling WITH the queue model because both are
+/// read at the same place, [`init_params`], by every role that mints parameters.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkTx {
+    /// The transmit model: see [`OpenStance::tx_queue`].
+    pub queue: TxQueueConf,
+    /// The batch size advertised, in bytes.
+    pub batch_size: u16,
+}
+
+/// The batch size a session advertises when its config states none: zenoh's own default
+/// (`transport/link/tx/batch_size`, 65535).
+pub const DEFAULT_BATCH_SIZE: u16 = 65535;
+
 /// Fixed session-init parameters (mirrors the wz-ap-demo defaults), with a
 /// per-session [`fresh_zid`].
 ///
@@ -768,7 +789,7 @@ impl ConfiguredZid {
 pub(crate) fn init_params(
     whatami: WhatAmI,
     zid: Vec<u8>,
-    tx_queue: TxQueueConf,
+    link_tx: LinkTx,
 ) -> Result<SessionInitParams, EntropyUnavailable> {
     Ok(SessionInitParams {
         version: 0x09,
@@ -776,11 +797,11 @@ pub(crate) fn init_params(
         zid,
         seq_num_res: 2,
         req_id_res: 2,
-        batch_size: 65535,
+        batch_size: link_tx.batch_size,
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue,
+        tx_queue: link_tx.queue,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }
@@ -810,7 +831,7 @@ struct DriveContext {
     clock: TokioTime,
     /// The transmit model the calling ABI stands for: zenoh's bounded queue for
     /// zenoh-c, pico's blocking write for zenoh-pico. See [`open_blocking`].
-    tx_queue: TxQueueConf,
+    link_tx: LinkTx,
     /// The capabilities the calling ABI's session offers, dialled and accepted
     /// alike. See [`open_blocking`].
     offer: SessionOffer,
@@ -865,7 +886,7 @@ async fn drive_dial(
         shutdown,
         stop,
         clock,
-        tx_queue,
+        link_tx,
         offer,
         gate,
         scouting,
@@ -899,7 +920,7 @@ async fn drive_dial(
     // the C caller rather than dial with a cookie key anybody could forge.
     // Minted ONCE, before the phase: it is not a connect failure, so it is not
     // what `connect/retry` re-attempts.
-    let params = match init_params(whatami, zid.to_vec(), tx_queue) {
+    let params = match init_params(whatami, zid.to_vec(), link_tx) {
         Ok(p) => p,
         Err(_) => {
             let _ = tx.send(false);
@@ -928,7 +949,7 @@ async fn drive_dial(
     // R3076 -- every endpoint the config states, in its order, under `listen/exit_on_failure`.
     // R3089 -- and under the budget and the retry of `listen/timeout_ms` and `listen/retry`.
     let BoundListeners { legs: listen, late } =
-        match bind_listeners(&listen, listen_phase, &tls, &zid, tx_queue, offer, clock).await {
+        match bind_listeners(&listen, listen_phase, &tls, &zid, link_tx, offer, clock).await {
             Some(bound) => bound,
             None => {
                 let _ = tx.send(false);
@@ -2275,7 +2296,7 @@ struct LateBinds {
     pending: Vec<PendingBind>,
     tls: CapiTlsConfig,
     zid: Vec<u8>,
-    tx_queue: TxQueueConf,
+    link_tx: LinkTx,
     offer: SessionOffer,
     clock: TokioTime,
     /// Where each listener that binds late is told to the scouting responder; the responder reads
@@ -2332,7 +2353,7 @@ impl LateBinds {
             pending,
             tls,
             zid,
-            tx_queue,
+            link_tx,
             offer,
             clock,
             locators,
@@ -2347,7 +2368,7 @@ impl LateBinds {
                 let mut closing = closing.clone();
                 tokio::task::spawn_local(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
-                        bind_one(&pending.endpoint, &tls, &zid, tx_queue)
+                        bind_one(&pending.endpoint, &tls, &zid, link_tx)
                     });
                     let listening = tokio::select! {
                         listening = bound => listening,
@@ -2379,7 +2400,7 @@ impl LateBinds {
             pending,
             tls,
             zid,
-            tx_queue,
+            link_tx,
             locators,
             ..
         } = self;
@@ -2393,7 +2414,7 @@ impl LateBinds {
                         let locators = locators.clone();
                         tokio::task::spawn_local(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
-                                bind_one(&pending.endpoint, &tls, &zid, tx_queue)
+                                bind_one(&pending.endpoint, &tls, &zid, link_tx)
                             })
                             .await;
                             // A client that answers a Scout names its listener as it binds.
@@ -2437,9 +2458,9 @@ async fn bind_one(
     endpoint: &str,
     tls: &CapiTlsConfig,
     zid: &[u8],
-    tx_queue: TxQueueConf,
+    link_tx: LinkTx,
 ) -> Result<Listening, ()> {
-    bind_listener(endpoint, tls, zid, tx_queue).await.ok_or(())
+    bind_listener(endpoint, tls, zid, link_tx).await.ok_or(())
 }
 
 /// Bind the endpoints a session's `listen` states, in the order the config states them, under the
@@ -2469,12 +2490,12 @@ async fn bind_listeners(
     phase: ListenPhase,
     tls: &CapiTlsConfig,
     zid: &[u8],
-    tx_queue: TxQueueConf,
+    link_tx: LinkTx,
     offer: SessionOffer,
     clock: TokioTime,
 ) -> Option<BoundListeners> {
     let outcome = drive_bind_phase(phase.policy, phase.schedule, endpoints, |position, _| {
-        bind_one(&endpoints[position], tls, zid, tx_queue)
+        bind_one(&endpoints[position], tls, zid, link_tx)
     })
     .await
     .map_err(|e| log_open_failure("bind phase", &e))
@@ -2504,7 +2525,7 @@ async fn bind_listeners(
             pending,
             tls: tls.clone(),
             zid: zid.to_vec(),
-            tx_queue,
+            link_tx,
             offer,
             clock,
             locators: LateLocators::default(),
@@ -2524,7 +2545,7 @@ async fn bind_listener(
     endpoint: &str,
     tls: &CapiTlsConfig,
     zid: &[u8],
-    tx_queue: TxQueueConf,
+    link_tx: LinkTx,
 ) -> Option<Listening> {
     // Everything that can fail the open runs BEFORE the success signal the
     // caller sends, so a failure is reported to the C caller rather than
@@ -2567,7 +2588,7 @@ async fn bind_listener(
     // the open succeeded, so an entropy failure could only be reported as "no
     // peer ever connects". Built before the bind is announced, it is an ordinary
     // open failure like the two above.
-    let params = init_params(WhatAmI::Peer, zid.to_vec(), tx_queue)
+    let params = init_params(WhatAmI::Peer, zid.to_vec(), link_tx)
         .map_err(|e| log_open_failure(&format!("session parameters for {endpoint}"), &e))
         .ok()?;
     Some(Listening { listener, params })
@@ -2632,7 +2653,7 @@ async fn drive_listen(
         shutdown,
         stop,
         clock,
-        tx_queue,
+        link_tx,
         offer,
         gate,
         // A listener that is not also a dialler scouts for nobody (see `open_blocking`'s
@@ -2645,7 +2666,7 @@ async fn drive_listen(
         listen_phase,
     } = ctx;
     let Some(BoundListeners { legs, late }) =
-        bind_listeners(&endpoints, listen_phase, &tls, &zid, tx_queue, offer, clock).await
+        bind_listeners(&endpoints, listen_phase, &tls, &zid, link_tx, offer, clock).await
     else {
         let _ = tx.send(false);
         return;
@@ -2761,6 +2782,11 @@ pub struct OpenStance {
     /// ([`TxQueueConf::default`]), while pico writes on the caller's thread and
     /// never drops for a full socket ([`TxQueueConf::pico`]).
     pub tx_queue: TxQueueConf,
+    /// The batch size the session advertises at its handshake, dialled and accepted alike; see
+    /// [`LinkTx`]. A zenoh-c session reads it from `transport/link/tx/batch_size` and a session
+    /// whose config states none passes [`DEFAULT_BATCH_SIZE`]; zenoh-pico's ABI has no such key
+    /// and passes the constant.
+    pub batch_size: u16,
     /// What the session's links offer at their handshake, every dialled link and
     /// every accepted one alike: the other half of the same fact. A zenoh-c
     /// session offers what its config enables — QoS, and shared memory on the
@@ -2882,6 +2908,7 @@ pub fn open_blocking(
 ) -> Result<SessionState, OpenError> {
     let OpenStance {
         tx_queue,
+        batch_size,
         offer,
         zid,
         start_read_task,
@@ -2893,6 +2920,10 @@ pub fn open_blocking(
         gossip,
         listen_phase,
     } = stance;
+    let link_tx = LinkTx {
+        queue: tx_queue,
+        batch_size,
+    };
     let clock = TokioTime::new();
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
     // needed before the drive thread starts: the registry's plane holds the sender, and the
@@ -2970,7 +3001,7 @@ pub fn open_blocking(
                 shutdown: drive_shutdown,
                 stop: drive_stop,
                 clock,
-                tx_queue,
+                link_tx,
                 offer,
                 gate: drive_gate.clone(),
                 scouting,
@@ -3524,6 +3555,7 @@ mod tests {
     fn peer_stance() -> OpenStance {
         OpenStance {
             tx_queue: TxQueueConf::pico(),
+            batch_size: DEFAULT_BATCH_SIZE,
             offer: SessionOffer::universal(),
             zid: None,
             start_read_task: true,

@@ -12,7 +12,7 @@ use std::ffi::c_void;
 
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, ListenPhase, OpenError, OpenStance,
-    SessionState,
+    SessionState, DEFAULT_BATCH_SIZE,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::scouting_node::ScoutingPlan;
@@ -295,6 +295,12 @@ pub(crate) unsafe fn open_session(
             ZenohConfigIngest::timestamping_enabled,
         );
         let node = ingest.map(|ingest| ingest.config);
+        // The batch size the session ADVERTISES: `transport/link/tx/batch_size`, which the
+        // peer's own is negotiated down against (the smaller wins) and a frame past which is
+        // sent as fragments. A config that states none is zenoh's default.
+        let batch_size = node
+            .as_ref()
+            .map_or(DEFAULT_BATCH_SIZE, |node| node.batch_size);
         let phase = node.as_ref().map(|node| dial_phase(node, whatami));
         // R3076 -- what an endpoint that cannot be bound does to the open (`listen/exit_on_failure`
         // for this node's role, true when the document says nothing, as upstream's default is),
@@ -399,6 +405,7 @@ pub(crate) unsafe fn open_session(
         // zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
         let stance = OpenStance {
             tx_queue: TxQueueConf::default(),
+            batch_size,
             offer,
             zid,
             // zenoh-c has no switch for a session's read task: its runtime

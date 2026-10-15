@@ -159,8 +159,25 @@ wz-capi-core = { path = "../wz-capi-core", features = ["transport-qos"] }
 # set off would link the symbol and answer nothing — the vacuous-proof shape this
 # tree names. Naming the gate here makes the dependency explicit at the one place
 # that could otherwise drop it.
+# `transport-fragmentation` is selected EXPLICITLY, and the reason is MEASURED on this
+# ABI: a consumer's `z_put` of 3027 bytes to a device whose InitAck advertised a
+# 1450-byte batch left as ONE batch of 3056 bytes, the process answered `Z_OK` and
+# `sent`, and the device saw nothing; genuine zenoh-c splits the same value into
+# fragments of 1448, 1448 and 152. The feature is NOT in `wz-runtime-tokio`'s default
+# bundle and its absence is SILENT at the C ABI: without it the frame writer has no
+# fragment path, and a frame past the negotiated budget "leaves whole"
+# (`wz-session-core`, `emit_frame_or_fragments`). `wz-capi-pico` had been measured
+# with the same symptom (R311y484) and selects it; this crate had not carried the
+# lesson over. It brings `reassembly` with it, which this crate also needs: it is
+# BOTH peers in a drop-in topology, so a TX-only build would fragment into a peer
+# that cannot rejoin. Gated by `tests/fragmentation_roundtrip.rs`, which reads the
+# WIRE through a recording relay and asserts no transport frame exceeds the
+# negotiated batch.
+# A value larger than the reassembly slot (1 MiB) is REFUSED before it is sent
+# rather than fragmented into a chain no peer of this build could stage.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
+    "transport-fragmentation",
     "query-reply-err",
     # R2172 (open-debt item 548) — `zenoh_config`, which is where
     # `HONOURED_CONFIG_KEYS` lives. Named UNCONDITIONALLY on purpose: the door
@@ -188,7 +205,15 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 # defaults here, and a build that never asked for a codec would get it. The
 # writer needs none (`e2e_json` has no feature gate), and a build with the
 # defaults off compiles it.
-wz-capture = { path = "../wz-capture", default-features = false }
+#
+# `reassembly` is named for the reverse reason: `transport-fragmentation` above turns
+# on `wz-session-core/reassembly`, which adds the `Carried::Fragment`,
+# `Reassembled` and `FragmentWithoutResolution` variants, and `wz-capture` matches
+# `Carried` exhaustively under ITS OWN `reassembly` feature. With the two out of
+# step this crate stops compiling (E0004 in `wz-capture/src/agg.rs`), so the feature
+# that adds the variants and the feature that handles them are selected together,
+# as `wz-runtime-tokio`'s `wz-capture` line does.
+wz-capture = { path = "../wz-capture", default-features = false, features = ["reassembly"] }
 
 [dev-dependencies]
 # R311y867 — for `free_port()`, which three test files here used to carry a
