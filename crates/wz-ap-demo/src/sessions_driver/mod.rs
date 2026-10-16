@@ -29,7 +29,7 @@
 //!
 //! The roles are the words of [`roles::ROLES`], one module each under `roles/`.
 //! A role that needs a build feature the binary was built without is refused by
-//! key path, as is a role this version does not play yet, rather than skipped.
+//! key path rather than skipped.
 //!
 //! # A role is a key table and a function
 //!
@@ -40,7 +40,7 @@
 //! validation code of its own:
 //!
 //! * a key no role knows is `unknown key`; a key some other role knows is
-//!   `not a key of the `<role>` role`;
+//!   `not a key of the (role) role`, with the role's word in the parentheses;
 //! * each key is read by its kind and refused with the sentence of that kind;
 //! * `after_ms` is every role's: the hold after the session is Established;
 //! * a role's own rule ([`RoleDef::check`]) runs only once every key read well.
@@ -235,10 +235,6 @@ fn no_check(_: &Args) -> Vec<(&'static str, String)> {
     Vec::new()
 }
 
-fn not_played(_: Ctx) -> Play {
-    Box::pin(async {})
-}
-
 /// One role the driver can play.
 pub(crate) struct RoleDef {
     /// The word the document names the role by, and a line names it by.
@@ -296,19 +292,6 @@ impl RoleDef {
     pub(crate) const fn checked(mut self, check: Check) -> Self {
         self.check = check;
         self
-    }
-
-    /// A role the document language names and this version does not play: it takes
-    /// no key and every build refuses it by key path.
-    pub(crate) const fn unplayed(word: &'static str) -> Self {
-        RoleDef {
-            word,
-            keys: &[],
-            feature: None,
-            available: false,
-            check: no_check,
-            play: not_played,
-        }
     }
 }
 

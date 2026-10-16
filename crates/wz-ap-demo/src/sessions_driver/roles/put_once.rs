@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! `put`: put `payload` under `key` once.
+//!
+//! The file is not called `put.rs` because a citation of that name in the store
+//! already means the C ABI's `put.rs`, and a second tracked file of the name
+//! would make every such citation ambiguous.
 
 use wz::runtime_tokio::sample::SampleKind;
 

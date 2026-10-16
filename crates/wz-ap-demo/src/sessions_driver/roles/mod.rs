@@ -27,7 +27,7 @@ pub(crate) mod liveliness_subscribe;
 pub(crate) mod liveliness_token;
 pub(crate) mod publish;
 pub(crate) mod pull;
-pub(crate) mod put;
+pub(crate) mod put_once;
 pub(crate) mod query;
 pub(crate) mod scout;
 pub(crate) mod subscribe;
@@ -37,7 +37,7 @@ use super::RoleDef;
 /// Every role the document language has, in listing order.
 pub(crate) static ROLES: &[&RoleDef] = &[
     &publish::ROLE,
-    &put::ROLE,
+    &put_once::ROLE,
     &delete::ROLE,
     &subscribe::ROLE,
     &get::ROLE,
