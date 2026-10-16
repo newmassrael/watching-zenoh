@@ -275084,6 +275084,46 @@
         "Read CI 38862337742 of 4b308a0b3 when it finishes, Layer M first."
       ]
     },
+    "Round 3356": {
+      "decision_summary": "Two consumer claims on the live dissection. The since walk of the field document began again at every front trim, so under a frame ceiling a call cost everything the ceiling held; it now keeps its state across a trim (walk, node census and exchange pairing keyed by produced-index, tables compacted when they outgrow the lists), and a list keeps the chain fold of what it discards, so chain_id counts from the first message ever held (fields revision 38). After a trim the since door is the handle's history and the whole-document door is what it holds; the cells that may differ are named in the header. DissectionLimits gained frames_total, a ceiling over every flow taking the oldest in the capture (live tap 100000), written in caps.frames_total, which moved eight documents one revision; wz_dissect_live_open_bounded (ABI 43) sets both ceilings. selection_since gained window.continued. NOT claimed: the hosted result or the consumer's measurement.",
+      "changes_bullets": [
+        "wz-capture fields_json, lib, node, ordered_fold, exchange: the since walk, node census and pairing go on across a front trim; wz-session-core passive_messages: ChainFold kept by MessageList.",
+        "wz-capture: DissectionLimits.frames_total enforced oldest-first across flows, caps.frames_total in dropped_by_limits; doc_revision: eight documents bumped, fields 38 and 39.",
+        "wz-capi-dissect: wz_dissect_live_open_bounded (ABI 43), selection_since window.continued, header text for the trim rule; capi_abi_pin, analysis_surface_parity, discard_site_lint."
+      ],
+      "verification_bullets": [
+        "Through verify-once on the build host, after one repair of a test helper and the discard-site registry: C0, C0s, C1bw, C1bz, C1bn, C1cn, count-guard, clippy and tests of wz-capture, wz-capi-dissect, wz-analyze and wz-session-core, all rc 0.",
+        "New tests: a bounded handle walked across a trim writes the rows an unbounded one writes and began its walk once; the total ceiling takes the oldest across flows; the bounded open; an evicted selector reads continued false.",
+        "NOT verified: the hosted CI and Platform runs of this push, Layer M, and the consumer's measurement on its own capture."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of this push job by job, then answer the consumer with the pin for each of the two claims.",
+        "The main working tree hooks need the ff-only merge again only if .githooks changed; this push does not change it."
+      ],
+      "publishable_decision_summary": "Two consumer claims on the live dissection. The since walk of the field document began again at every front trim, so under a frame ceiling a call cost everything the ceiling held; it now keeps its state across a trim (walk, node census and exchange pairing keyed by produced-index, tables compacted when they outgrow the lists), and a list keeps the chain fold of what it discards, so chain_id counts from the first message ever held (fields revision 38). After a trim the since door is the handle's history and the whole-document door is what it holds; the cells that may differ are named in the header. DissectionLimits gained frames_total, a ceiling over every flow taking the oldest in the capture (live tap 100000), written in caps.frames_total, which moved eight documents one revision; wz_dissect_live_open_bounded (ABI 43) sets both ceilings. selection_since gained window.continued. NOT claimed: the hosted result or the consumer's measurement.",
+      "publishable_changes_bullets": [
+        "wz-capture fields_json, lib, node, ordered_fold, exchange: the since walk, node census and pairing go on across a front trim; wz-session-core passive_messages: ChainFold kept by MessageList.",
+        "wz-capture: DissectionLimits.frames_total enforced oldest-first across flows, caps.frames_total in dropped_by_limits; doc_revision: eight documents bumped, fields 38 and 39.",
+        "wz-capi-dissect: wz_dissect_live_open_bounded (ABI 43), selection_since window.continued, header text for the trim rule; capi_abi_pin, analysis_surface_parity, discard_site_lint."
+      ],
+      "publishable_verification_bullets": [
+        "Through verify-once on the build host, after one repair of a test helper and the discard-site registry: C0, C0s, C1bw, C1bz, C1bn, C1cn, count-guard, clippy and tests of wz-capture, wz-capi-dissect, wz-analyze and wz-session-core, all rc 0.",
+        "New tests: a bounded handle walked across a trim writes the rows an unbounded one writes and began its walk once; the total ceiling takes the oldest across flows; the bounded open; an evicted selector reads continued false.",
+        "NOT verified: the hosted CI and Platform runs of this push, Layer M, and the consumer's measurement on its own capture."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of this push job by job, then answer the consumer with the pin for each of the two claims.",
+        "The main working tree hooks need the ff-only merge again only if .githooks changed; this push does not change it."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
