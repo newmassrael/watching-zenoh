@@ -162,8 +162,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # thumbv7m-none-eabi` and `G.15 wz-runtime-freertos` both compiled, and Layer Q's
 # `Q.frt run mcu-freertos-demo via qemu-system-arm mps2-an385` BOOTED the new
 # kernel and passed. A header read cannot tell you a scheduler still schedules.
+#
+# R3359 (open-debt item 711) — FreeRTOS-Kernel 0 -> 1: upstream published V11.3.2
+# after the pin V11.3.1. This is the OBSERVATION half the clause above separates
+# from the bump: the row moves to what the gate measures, and the grade the gate
+# prints for it is `patch`, which opens no bump round (`BUMP_GRADE` opens at
+# `minor`). The pin itself is unchanged.
 PINNED: dict[str, tuple[str, int]] = {
-    "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 0),
+    "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 1),
     "eclipse-zenoh/zenoh": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-pico": ("MEASURED", 0),
