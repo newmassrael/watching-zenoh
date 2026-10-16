@@ -5841,7 +5841,11 @@ int wz_dissect_live_set_selector_memories(wz_dissect_live *h, size_t n,
  *     of every TCP flow. It is the one place this library holds bytes; a
  *     datagram flow holds decoded messages only and no byte figure is invented
  *     for it. It is not the count of bytes ever reassembled, which a trim does
- *     not lower.
+ *     not lower. Under a message ceiling (frames_per_flow, frames_total) the
+ *     stream is released behind the oldest held message, so it follows
+ *     held.frames and reaches caps.stream_bytes_per_direction only in a flow
+ *     whose held messages span that much; those releases are not counted in
+ *     dropped_by_limits.stream_bytes.
  *   - held.serial_frames is the part of held.frames that is a serial line. No
  *     ceiling bounds it, so it is left out of fullest_window: a caption that
  *     sees frames far above fullest_window.messages has a serial line to thank.

@@ -2094,6 +2094,15 @@ pub struct FlowDissection {
 /// rather than a capture's.
 const WS_CLASSIFY_BUDGET: usize = 8 * 1024;
 
+/// R3357 — the least a flow's unreachable stream bytes must come to before
+/// [`FlowDissection::release_stream_behind_held_messages`] gives them back.
+///
+/// Giving back bytes is a front-drain of the retained stream, which moves what
+/// stays. The other condition, half of what is retained, makes that move amortised
+/// constant per byte; this floor stops a flow of a few small messages from
+/// draining a few dozen bytes on every message taken.
+const STREAM_RELEASE_SLACK: usize = 4 * 1024;
+
 impl FlowDissection {
     /// R311y709 — this flow's recovered-against-fed counts.
     pub fn residue(&self) -> ByteResidue {
@@ -2208,6 +2217,55 @@ impl FlowDissection {
             Direction::A => &self.low_to_high,
             Direction::B => &self.high_to_low,
         }
+    }
+
+    /// R3357 — give back the reassembled bytes no held message can read.
+    ///
+    /// A message ceiling ([`DissectionLimits::frames_per_flow`],
+    /// [`DissectionLimits::frames_total`]) takes decoded messages and leaves the
+    /// bytes they were decoded from, which only
+    /// [`DissectionLimits::stream_bytes_per_direction`] bounds: 4 MiB per direction
+    /// per flow, so a handle whose ceiling holds 8 MiB of messages kept 64 MiB of
+    /// stream behind 16 flows. A message is read from its flow's stream at its own
+    /// offset and nowhere before it, so once the oldest held message has moved on
+    /// the bytes ahead of it are unreachable. This releases them.
+    ///
+    /// Only the direction of the OLDEST held message is released, up to where that
+    /// message begins: the list is in decode order, which within one direction is
+    /// byte order, so its first message is that direction's lowest offset. The
+    /// other direction is released when its own message reaches the front. The
+    /// release waits until the unreachable bytes are at least
+    /// [`STREAM_RELEASE_SLACK`] and half of what is retained, so the front-drain it
+    /// costs is paid once per doubling and not once per message taken.
+    ///
+    /// Not counted in [`DissectionDrops::stream_bytes`]: that tally is bytes a
+    /// ceiling took that a held message could still have used, and none of these
+    /// can be read by one. The messages that stood on them were counted when they
+    /// went. A message whose bytes are released anyway (a list not in byte order)
+    /// answers [`Self::message_bytes`] with the retained-stream error rather than
+    /// with other bytes.
+    ///
+    /// Called by the code that took messages from this flow's list, and only
+    /// then: a dissection with no message ceiling has taken nothing and keeps its
+    /// whole stream.
+    fn release_stream_behind_held_messages(&mut self) {
+        let Some(front) = self.frames.first() else {
+            return;
+        };
+        if front.offset_space != wz_session_core::passive::OffsetSpace::StreamBytes {
+            return;
+        }
+        let (direction, from) = (front.direction, front.stream_offset);
+        let assembler = self.assembler(direction);
+        let reachable_from = assembler.retained_from();
+        let unreachable = from.saturating_sub(reachable_from);
+        if unreachable < STREAM_RELEASE_SLACK || unreachable < assembler.stream().len() / 2 {
+            return;
+        }
+        match direction {
+            Direction::A => self.low_to_high.trim_before(from),
+            Direction::B => self.high_to_low.trim_before(from),
+        };
     }
 
     /// Where a stream message begins: past the framing prefix, and past
@@ -3134,13 +3192,28 @@ pub struct DissectionLimits {
     /// the serial line is bounded by neither ceiling. A message either ceiling takes
     /// is counted in the same tally, [`DissectionDrops::frames`].
     ///
+    /// # The bytes behind the messages
+    ///
+    /// A TCP flow's messages are read from its reassembled stream, so a ceiling that
+    /// takes messages and leaves the stream bounds the list and not the memory. Both
+    /// message ceilings therefore give back the stream bytes that stand before the
+    /// oldest message still held (see
+    /// `FlowDissection::release_stream_behind_held_messages`), and the retained
+    /// stream follows the held messages instead of filling to
+    /// [`Self::stream_bytes_per_direction`]. Those bytes are not counted in
+    /// [`DissectionDrops::stream_bytes`], which counts what a held message could
+    /// still have used.
+    ///
     /// # What it costs
     ///
     /// A pass over the flow tables per call that adds messages, and the same pass per
     /// message taken once the ceiling is reached: proportional to the number of
     /// flows held, which [`Self::max_flows_per_table`] bounds.
     pub frames_total: Option<usize>,
-    /// Reassembled bytes kept per DIRECTION of each TCP flow.
+    /// Reassembled bytes kept per DIRECTION of each TCP flow. Where a message
+    /// ceiling is also set, the stream is released behind the oldest held message
+    /// first, so this bites only for a flow whose held messages themselves span
+    /// more than this.
     pub stream_bytes_per_direction: Option<usize>,
     /// Entries kept in the skipped-packet list.
     pub skipped_packets: Option<usize>,
@@ -3591,6 +3664,87 @@ mod live_tap_tests {
                 .sum::<usize>();
         assert_eq!(held, 12);
         assert_eq!(d.health().drops.frames, 0);
+    }
+
+    /// One TCP flow carrying `packets` packets of 465 framed keepalives each, in
+    /// byte order, so the stream a message ceiling leaves behind is measurable.
+    fn feed_keepalive_stream(d: &mut Dissection, packets: usize) {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet};
+        let payload: Vec<u8> = framed_keepalive().repeat(465);
+        for i in 0..packets {
+            let seq = 1000 + (i * payload.len()) as u32;
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                i,
+                &tcp_packet(seq, &payload),
+            );
+        }
+    }
+
+    /// A MESSAGE CEILING GIVES BACK THE STREAM BEHIND THE MESSAGES IT TOOK.
+    ///
+    /// 46 500 messages ride 139 500 stream bytes; a ceiling of 100 holds 300 of
+    /// them. Before R3357 the stream filled toward `stream_bytes_per_direction`
+    /// whatever the ceiling held, which is how a handle capped at 100 000 messages
+    /// held 64 MiB behind 16 flows. Now the retained stream follows the held
+    /// messages, the held messages still read their bytes, and the release is not
+    /// counted as bytes a ceiling took.
+    #[test]
+    fn a_message_ceiling_gives_back_the_stream_behind_the_messages_it_took() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        for limits in [
+            DissectionLimits {
+                frames_total: Some(100),
+                ..DissectionLimits::default()
+            },
+            DissectionLimits {
+                frames_per_flow: Some(100),
+                ..DissectionLimits::default()
+            },
+        ] {
+            let mut d = Dissection::with_limits(limits);
+            feed_keepalive_stream(&mut d, 100);
+            let flow = &d.flows()[0];
+            assert_eq!(flow.frames.len(), 100, "{limits:?}: the ceiling held 100");
+            assert_eq!(
+                flow.low_to_high.len(),
+                100 * 1395,
+                "{limits:?}: the absolute count never goes backwards"
+            );
+            assert!(
+                flow.low_to_high.retained_from() > 0,
+                "{limits:?}: the bytes behind the taken messages were given back"
+            );
+            assert!(
+                flow.low_to_high.stream().len() < 16 * 1024,
+                "{limits:?}: the retained stream follows the held messages, held {}",
+                flow.low_to_high.stream().len()
+            );
+            for frame in [&flow.frames[0], &flow.frames[99]] {
+                assert_eq!(
+                    flow.message_bytes(frame).as_deref().ok(),
+                    Some(&keepalive[..]),
+                    "{limits:?}: a held message still reads its bytes"
+                );
+            }
+            assert_eq!(
+                d.drops().stream_bytes,
+                0,
+                "{limits:?}: bytes no held message can read are not a loss"
+            );
+        }
+    }
+
+    /// THE CONTROL: the same capture with no message ceiling keeps its whole stream,
+    /// so the test above measures the release and not the feed.
+    #[test]
+    fn without_a_message_ceiling_the_stream_is_kept_whole() {
+        let mut d = Dissection::new();
+        feed_keepalive_stream(&mut d, 100);
+        let flow = &d.flows()[0];
+        assert_eq!(flow.frames.len(), 46_500);
+        assert_eq!(flow.low_to_high.retained_from(), 0);
+        assert_eq!(flow.low_to_high.stream().len(), 100 * 1395);
     }
 
     /// THE TWO CEILINGS APPLY TOGETHER, and a message goes when either says so.
@@ -6665,6 +6819,7 @@ impl Dissection {
                     self.dropped_frames.absorb(receipt);
                 }
                 self.drops.frames += cut;
+                flow.release_stream_behind_held_messages();
             }
         }
         if let Some(keep) = self.limits.stream_bytes_per_direction {
@@ -6758,6 +6913,7 @@ impl Dissection {
                     };
                     self.dropped_frames.absorb(receipt);
                     self.drops.frames += 1;
+                    self.flows[i].release_stream_behind_held_messages();
                 }
                 TotalList::Datagram => {
                     let Some(receipt) = self.datagram_flows[i].frames.discard_oldest() else {

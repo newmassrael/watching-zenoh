@@ -339,6 +339,21 @@ impl StreamAssembler {
         cut
     }
 
+    /// R3357 — drop the retained bytes that stand before absolute `offset`.
+    /// Returns how many were discarded by THIS call: `0` when `offset` is at or
+    /// before [`Self::retained_from`].
+    ///
+    /// The same trim as [`Self::trim`], asked by position instead of by how much
+    /// to keep, because a caller that knows which bytes nothing reads any more
+    /// (the ones before its oldest held message) has the offset and not the
+    /// length. An offset past the end empties the retained bytes.
+    pub fn trim_before(&mut self, offset: usize) -> usize {
+        if offset <= self.discarded {
+            return 0;
+        }
+        self.trim(self.len().saturating_sub(offset))
+    }
+
     /// Whether the stream's origin was established from an observed SYN. When
     /// `false`, offset 0 is where the CAPTURE started, not where the stream
     /// did — an observer must not report the two the same way.

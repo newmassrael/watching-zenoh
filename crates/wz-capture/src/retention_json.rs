@@ -46,7 +46,10 @@
 //! a record door also hands out one record each. The reassembled stream is the
 //! one place this library holds BYTES, and `stream_bytes` is those; a datagram
 //! flow holds decoded messages only, and this document does not invent a byte
-//! figure for them.
+//! figure for them. Under a message ceiling (`frames_per_flow`, `frames_total`)
+//! the stream is released behind the oldest held message, so `stream_bytes`
+//! follows `frames` and fills toward `stream_bytes_per_direction` only for a flow
+//! whose held messages span that much.
 //!
 //! The serial line is counted in `frames` and named apart in `serial_frames`,
 //! because no ceiling bounds it: it is excluded from `fullest_window`, whose
