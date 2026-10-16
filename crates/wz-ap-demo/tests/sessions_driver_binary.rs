@@ -324,10 +324,16 @@ fn a_question_to_a_silent_peer_ends_at_its_deadline() {
 
     client.expect_line("DRIVER get asked key=demo/q");
     client.expect_line_within("DRIVER get final", Duration::from_secs(5));
-    assert_eq!(
-        client.count("DRIVER get reply"),
-        0,
-        "a suspended peer answered\n{}",
+    // What ends the question is the timeout the session itself delivers, one error
+    // reply, as upstream's does; a reply of any other kind would be the peer's.
+    let replies: Vec<&String> = client
+        .seen
+        .iter()
+        .filter(|l| l.contains("DRIVER get reply"))
+        .collect();
+    assert!(
+        replies.len() == 1 && replies[0].contains("kind=Err"),
+        "expected the timeout error reply alone, got {replies:?}\n{}",
         client.seen.join("\n")
     );
     signal(listener.child.id(), "CONT");
