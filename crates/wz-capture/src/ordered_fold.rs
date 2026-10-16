@@ -48,7 +48,7 @@ use crate::bounded_slots::BoundedSlots;
 use crate::link::FlowKey;
 use crate::node::SessionGrouping;
 use crate::progress::Progress;
-use crate::{Dissection, OrderMarks};
+use crate::{Dissection, OrderMarks, TrimPolicy};
 use wz_session_core::passive::PassiveFrame;
 
 /// What a plane keeps while it folds a capture in capture order.
@@ -99,6 +99,12 @@ impl<F> Default for Resumable<F> {
 }
 
 impl<F: OrderedFold> Resumable<F> {
+    /// The fold as it stands, or `None` before any call has made one.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn fold(&self) -> Option<&F> {
+        self.saved.as_ref().map(|saved| &saved.fold)
+    }
+
     /// Bring the fold up to `dissection`, continuing when it may and starting over
     /// when it may not, and hand it back.
     ///
@@ -120,11 +126,54 @@ impl<F: OrderedFold> Resumable<F> {
         progress: Option<&Progress<'_>>,
         begin: impl FnOnce() -> F,
     ) -> Option<&F> {
+        self.advance_with(
+            TrimPolicy::Restart,
+            dissection,
+            grouping,
+            stats,
+            progress,
+            begin,
+        )
+    }
+
+    /// [`Self::advance`] for a fold that keeps the HISTORY of the messages it has
+    /// taken: it goes on across a front trim instead of beginning again, and so
+    /// differs from the fold over what the capture holds NOW in whatever the
+    /// trimmed messages contributed. See [`TrimPolicy`] for who may ask for it.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn advance_across_trims(
+        &mut self,
+        dissection: &Dissection,
+        grouping: &SessionGrouping,
+        stats: &mut FoldStats,
+        progress: Option<&Progress<'_>>,
+        begin: impl FnOnce() -> F,
+    ) -> Option<&F> {
+        self.advance_with(
+            TrimPolicy::Continue,
+            dissection,
+            grouping,
+            stats,
+            progress,
+            begin,
+        )
+    }
+
+    fn advance_with(
+        &mut self,
+        trims: TrimPolicy,
+        dissection: &Dissection,
+        grouping: &SessionGrouping,
+        stats: &mut FoldStats,
+        progress: Option<&Progress<'_>>,
+        begin: impl FnOnce() -> F,
+    ) -> Option<&F> {
         let origin_ms = dissection.capture_origin_ms();
         let resumed = match &self.saved {
-            Some(s) if s.grouping == *grouping && s.origin_ms == origin_ms => {
-                dissection.capture_order_since(Some(&s.marks))
-            }
+            Some(s) if s.grouping == *grouping && s.origin_ms == origin_ms => match trims {
+                TrimPolicy::Restart => dissection.capture_order_since(Some(&s.marks)),
+                TrimPolicy::Continue => dissection.capture_order_since_across_trims(Some(&s.marks)),
+            },
             _ => None,
         };
         match resumed {

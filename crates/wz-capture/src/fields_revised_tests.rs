@@ -188,6 +188,14 @@ impl Run {
             .sum()
     }
 
+    /// Messages EVER produced, over every list: a count a trim does not lower.
+    fn produced(&self) -> u64 {
+        self.d
+            .message_lists()
+            .map(|(_, frames)| frames.produced())
+            .sum()
+    }
+
     /// The capture as a file, which the datagram rows are re-read from.
     fn file(&self) -> Vec<u8> {
         let rows: Vec<(u32, u32, &[u8])> = self
@@ -549,10 +557,22 @@ fn a_new_stream_flow_begins_the_walk_again_and_it_still_equals() {
     );
 }
 
-/// A ceiling on the frames a flow keeps trims its front, which renumbers the
-/// positions the walker kept, so each trimmed step walks whole and still equals.
+/// A ceiling on the frames a flow keeps trims its front, and the walk GOES ON.
+///
+/// A front trim renumbers the positions in the list, and a walk that counted by
+/// position began again at every one: a call after the ceiling was reached cost
+/// the whole of what the ceiling held. The walk now counts by produced-index, so
+/// each step visits exactly the messages that arrived and the walk begins once.
+///
+/// What the document says is what changed, and it is said here and not hidden: the
+/// state the rows are written from is the HISTORY of the handle, so once the
+/// handshake has been trimmed out of the list a reference that resolves nothing
+/// still reads the cause the session being known gives (`no_declaration`), where
+/// the plain door, which reads the list as it stands, no longer knows the session
+/// (`no_session`). That is the one cell that differs, in no row but the ones the
+/// trim took the input of, and nothing is written again under `revised`.
 #[test]
-fn a_trimmed_list_walks_whole_and_still_equals_the_plain_document() {
+fn a_trimmed_list_goes_on_and_the_history_reads_what_the_plain_door_cannot() {
     let limits = crate::DissectionLimits {
         frames_per_flow: Some(6),
         ..crate::DissectionLimits::default()
@@ -563,21 +583,57 @@ fn a_trimmed_list_walks_whole_and_still_equals_the_plain_document() {
     r.udp(false, 40000, &init_wire(ZID_B));
     let _ = r.remembering("", 0);
     let mut held = r.numbering.through();
+    let (mut equal, mut history_only) = (0usize, 0usize);
     for i in 0..14u64 {
+        let produced_before = r.produced();
         r.record(i % 2 == 0, 40000, &record_at(i));
+        let arrived = r.produced() - produced_before;
+        let before = r.memory.stats();
         let doc = r.remembering("", held);
-        // Apart from the rows written again. The trim takes the handshake out of
-        // the list, so rows held before it read a different cause for an
-        // unresolved reference afterwards (`no_declaration` while the session was
-        // known, `no_session` once it is not), and that IS a held row that moved:
-        // the plain door does not say so and this one does.
-        assert_eq!(without_revised(&doc), r.plain(held), "step {i}");
+        let plain = r.plain(held);
+        let after = r.memory.stats();
+        assert_eq!(
+            (
+                after.resumed - before.resumed,
+                after.restarted - before.restarted
+            ),
+            (1, 0),
+            "step {i}: a trim must not begin the walk again: {before:?} then {after:?}"
+        );
+        assert_eq!(
+            after.messages_walked - before.messages_walked,
+            arrived,
+            "step {i}: the walk visits the {arrived} message(s) that arrived and no others"
+        );
+        assert_eq!(array_of(&doc, "revised"), "[]", "step {i}: {doc}");
+        let as_the_list_stands = doc.replace(
+            "\"keyexpr_cause\":\"no_declaration\"",
+            "\"keyexpr_cause\":\"no_session\"",
+        );
+        if doc == plain {
+            equal += 1;
+        } else {
+            assert_eq!(
+                as_the_list_stands, plain,
+                "step {i}: the only cell that may differ is the cause of an unresolved reference"
+            );
+            history_only += 1;
+        }
         held = r.numbering.through();
     }
-    let stats = r.memory.stats();
-    assert!(stats.restarted > 1, "{stats:?}");
     assert!(
-        stats.revised_rows > 0,
-        "trimming the handshake away must have moved a held row: {stats:?}"
+        equal > 0,
+        "the steps before the trim read as the plain door does"
+    );
+    assert!(
+        history_only > 0,
+        "no step read a cause the plain door could not: the handshake was never trimmed away \
+         ({equal} equal steps)"
+    );
+    let stats = r.memory.stats();
+    assert_eq!(
+        (stats.restarted, stats.compared, stats.revised_rows),
+        (1, 0, 0),
+        "{stats:?}"
     );
 }

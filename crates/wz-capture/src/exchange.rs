@@ -1169,6 +1169,15 @@ impl ExchangeFold {
         }
     }
 
+    /// How many entries this fold keeps that grow with the messages it has taken
+    /// and not with the keyexprs it has seen: the exchanges still open and the
+    /// per-row tables. What a reader that keeps the fold across front trims
+    /// compares with what the lists hold, to know when it has outgrown them.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn kept_entries(&self) -> usize {
+        self.open.len() + self.table.closings.len() + self.table.row_verdicts.len()
+    }
+
     /// The table with every exchange still open given its verdict, over a copy.
     pub(crate) fn table(&self) -> ExchangeTable {
         let mut table = self.table.clone();

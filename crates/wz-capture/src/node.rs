@@ -935,12 +935,32 @@ impl NodeMemory {
 
     /// The node census of `dissection`, continuing the last one when it may.
     pub fn nodes(&mut self, dissection: &crate::Dissection) -> NodeCensus {
+        self.nodes_with(dissection, crate::TrimPolicy::Restart)
+    }
+
+    /// [`Self::nodes`] for a reader that keeps the HISTORY of what it has folded:
+    /// the census goes on across a front trim instead of beginning again, so it
+    /// still names a node whose handshake a ceiling has since taken, and a call
+    /// after a trim folds the messages that arrived and not the whole capture. It
+    /// differs from the census of the messages held NOW in whatever the trimmed
+    /// ones contributed (a node only they named, the bytes only they carried);
+    /// see [`crate::TrimPolicy`] for who may ask for it.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn nodes_across_trims(&mut self, dissection: &crate::Dissection) -> NodeCensus {
+        self.nodes_with(dissection, crate::TrimPolicy::Continue)
+    }
+
+    fn nodes_with(
+        &mut self,
+        dissection: &crate::Dissection,
+        trims: crate::TrimPolicy,
+    ) -> NodeCensus {
         let current: Vec<(
             FlowKey,
             crate::MessageListOrigin,
             &wz_session_core::passive_messages::MessageList,
         )> = dissection.message_lists_with_origin().collect();
-        if !self.resume(&current) {
+        if !self.resume(&current, trims) {
             self.restart(&current);
         }
         let mut census = self
@@ -997,6 +1017,7 @@ impl NodeMemory {
             crate::MessageListOrigin,
             &wz_session_core::passive_messages::MessageList,
         )],
+        trims: crate::TrimPolicy,
     ) -> bool {
         let Some(saved) = self.saved.as_mut() else {
             return false;
@@ -1010,14 +1031,17 @@ impl NodeMemory {
             };
             let mark = &saved.lists[at];
             let first = frames.produced() - frames.len() as u64;
+            // An EARLIER first message than the mark saw is another list standing
+            // where the mark's was, whatever the policy says of a trim.
             if mark.flow != *flow
                 || mark.origin != *origin
-                || mark.first_produced != first
+                || first < mark.first_produced
+                || (trims == crate::TrimPolicy::Restart && mark.first_produced != first)
                 || mark.produced > frames.produced()
             {
                 return false;
             }
-            let start = (mark.produced - mark.first_produced) as usize;
+            let start = (mark.produced.max(first) - first) as usize;
             if frames[start..].iter().any(names_a_zid) {
                 return false;
             }
@@ -1026,10 +1050,13 @@ impl NodeMemory {
         let mut all_ends = Vec::with_capacity(current.len());
         for (list, (flow, origin, frames)) in current.iter().enumerate() {
             let (start, mut ends) = match continues[list] {
-                Some(at) => (
-                    (saved.lists[at].produced - saved.lists[at].first_produced) as usize,
-                    saved.ends[at],
-                ),
+                Some(at) => {
+                    let first = frames.produced() - frames.len() as u64;
+                    (
+                        (saved.lists[at].produced.max(first) - first) as usize,
+                        saved.ends[at],
+                    )
+                }
                 None => (0, [None, None]),
             };
             if start < frames.len() {

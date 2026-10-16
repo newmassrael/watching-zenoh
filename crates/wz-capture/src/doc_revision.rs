@@ -2074,6 +2074,36 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R37_CARRIES,
     },
+    // Revision 38 moves a VALUE under a stationary key and adds, retires and
+    // declares nothing: `chain.chain_id` of a list whose front a ceiling has
+    // trimmed. The key set, the families and the `carries` table are revision
+    // 37's.
+    //
+    // WHAT MOVED. A chain's identity is a count of the chains that began before it
+    // in its list. It was counted from the first message the list still HELD, so a
+    // front trim that took the first message of a chain renumbered every chain
+    // after it, and `chain_id` named a chain within ONE document. It is now counted
+    // from the first message the list EVER held: the list keeps the chain fold of
+    // the messages it discards, and a reader that begins at the first held message
+    // starts from it. A list that never trimmed numbers exactly as before; a trimmed
+    // one numbers as an unbounded one would, so an identity you were given names the
+    // same chain in every later document, and `/chain/chain_id` leaves
+    // `REVISABLE_ROW_CELLS`. A cached document from revision 37 over a trimmed list
+    // carries the old numbers and should be read again.
+    //
+    // ALONGSIDE, NOT A KEY: the since door no longer begins its walk again when a
+    // ceiling trims a list's front, so it costs what arrived. That is a cost and a
+    // statement about which door reads which state (see `wz_dissect.h`), not a
+    // change of shape.
+    DocumentShape {
+        document: FIELDS,
+        revision: 38,
+        keys: FIELDS_R37_KEYS,
+        retiring: &[],
+        families: FIELDS_R37_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R37_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -16201,7 +16231,10 @@ mod tests {
             // To 37 when the `carried` entry of a `ResponseFinal` gained `closes`,
             // the request it closed: four keys and a `request_kind` family, no
             // word moves and nothing retires.
-            (FIELDS, 37),
+            // To 38 when `chain.chain_id` of a trimmed list stopped being
+            // renumbered by the trim: a value moves, no key arrives and nothing
+            // retires.
+            (FIELDS, 38),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

@@ -3520,7 +3520,7 @@ pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
     format!(
         "{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
          \"scouting\":{},\"scout_askers\":{},\"caps\":{{\"frames_per_flow\":{},\
-         \"stream_bytes_per_direction\":{},\"skipped_packets\":{},\
+         \"frames_total\":{},\"stream_bytes_per_direction\":{},\"skipped_packets\":{},\
          \"max_flows_per_table\":{},\"max_scout_askers\":{}}}}}",
         drops.frames,
         drops.stream_bytes,
@@ -3534,6 +3534,10 @@ pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
         drops.scouting,
         drops.scout_askers,
         cap(l.frames_per_flow),
+        // R3356 — the ceiling over every flow, beside the per-flow one. `frames`
+        // above counts what EITHER took, so without this a reader could not tell
+        // which bound a loss was measured against.
+        cap(l.frames_total),
         cap(l.stream_bytes_per_direction),
         cap(l.skipped_packets),
         cap(l.max_flows_per_table),
@@ -3558,8 +3562,16 @@ pub fn dropped_by_limits_text(d: &crate::Dissection) -> String {
         Some(n) => alloc::format!("{n}"),
         None => String::from("none"),
     };
+    // R3356 — the ceiling over every flow, said only where there is one: a line
+    // that spelled `none` for an axis the command line cannot set would be noise
+    // in every bounded run, and the JSON group (`caps.frames_total`) carries it
+    // either way. `frames` counts what either ceiling took.
+    let total = match l.frames_total {
+        Some(n) => alloc::format!(" (at most {n} held in all)"),
+        None => String::new(),
+    };
     format!(
-        "  dissection caps: {} frame(s) of {}, {} stream byte(s) of {}, \
+        "  dissection caps: {} frame(s) of {}{total}, {} stream byte(s) of {}, \
          {} skipped of {}, {} flow(s) of {}, {} scouting datagram(s) of {}, \
          {} scout asker(s) of {}\n",
         drops.frames,

@@ -284,7 +284,8 @@ mod tests {
              \"fullest_window\":{\"messages\":0,\"stream_bytes\":0},\"oldest_ts_ns\":null},\
              \"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\"flows\":0,\
              \"scouting\":0,\"scout_askers\":0,\"caps\":{\"frames_per_flow\":null,\
-             \"stream_bytes_per_direction\":null,\"skipped_packets\":null,\
+             \"frames_total\":null,\"stream_bytes_per_direction\":null,\
+             \"skipped_packets\":null,\
              \"max_flows_per_table\":null,\"max_scout_askers\":null}}}"
         );
     }

@@ -3371,8 +3371,11 @@ int main(void) {
      * 37: every `carried` entry gains `closes`: for a `ResponseFinal` the request it
      * closed (`request_kind`, `request_seq`, `request_record`, all null when the
      * capture does not hold it), `null` for any other entry. Keys arrive and a
-     * `request_kind` family is declared; nothing retires. */
-    revisioned[2].revision = 37;
+     * `request_kind` family is declared; nothing retires.
+     * 38: `chain.chain_id` of a trimmed list is counted from the first message the
+     * list EVER held, so a front trim renumbers nothing. A value moves; no key
+     * arrives and nothing retires. */
+    revisioned[2].revision = 38;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

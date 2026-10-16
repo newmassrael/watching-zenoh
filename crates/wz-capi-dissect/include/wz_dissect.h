@@ -1199,7 +1199,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":37,"key":"kind","values":[...],
+ *     {"name":"fields","revision":38,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -2676,9 +2676,11 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * census cannot disagree about which request a final closed, and it is the same
  * under every selector, including one that rejects the exchange. A final inside a
  * REASSEMBLED chain (`above_transport.carried`) reads `null`, so `null` there does
- * not mean it is not a final. A held final's `closes` can change after the row was
- * written only if its request stops being held, and then the row is among the
- * since door's `revised` rows.
+ * not mean it is not a final. In the whole-document door a held final's `closes`
+ * can change between two documents only if its request stops being held (a front
+ * trim), and the since door does NOT report that as `revised`: it keeps the
+ * pairing across the trim and the row it wrote keeps naming the request (see AFTER
+ * A FRONT TRIM at wz_dissect_live_fields_since).
  *
  * THE UNIT OF A TIME TERM IS THE MILLISECOND, and stays it (see "WHEN A RECORD
  * WAS CAPTURED" above): `time`, `elapsed`, `delay`, `first_reply` and
@@ -4407,7 +4409,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":37,"key":"state",
+ *     "value_families":[{"name":"fields","revision":38,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -5297,10 +5299,40 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *                                              keep these across calls as final.
  *     /carried[]/keyexpr_id                    since revision 24: the id moves with
  *     /above_transport/carried[]/keyexpr_id    the `keyexpr` it was written beside.
- *     /chain/chain_id                         chains are numbered from the first
- *                                              message the list still holds, so
- *                                              a front trim renumbers them. It
- *                                              names a chain within ONE document.
+ *
+ * `/chain/chain_id` IS NOT IN THIS LIST since field-document revision 38: it is
+ * counted from the first message the list EVER held (the list keeps the chain
+ * fold of the messages a ceiling discards), so a front trim renumbers nothing and
+ * an identity you were given names the same chain in every later document, from
+ * either door, whether or not the chain's first fragment is still held. A
+ * continuation of a chain whose first fragment the list never held (the capture
+ * began mid-chain) has no identity (`null`) and a fresh one for its closing row,
+ * as before.
+ *
+ * AFTER A FRONT TRIM THIS DOOR IS THE HANDLE'S HISTORY, AND THE WHOLE-DOCUMENT
+ * DOOR IS WHAT THE HANDLE HOLDS. A ceiling that takes the front of a list does not
+ * make this door begin again: the state a row is written from (the keyexpr table,
+ * the exchange pairing, the chain identities) is kept across the trim, so a call
+ * costs the messages that arrived. wz_dissect_live_fields_where renders the lists
+ * as they stand, so after a trim the two read differently in these cells, and only
+ * for a row whose inputs the trim took:
+ *
+ *     /carried[]/keyexpr, keyexpr_cause, keyexpr_id   (and the same under
+ *     /above_transport/carried[]) and /payload_decode   a reference to a
+ *                                              declaration whose message was
+ *                                              trimmed: here it still resolves
+ *     /carried[]/closes (its whole subtree)    a final whose request was trimmed:
+ *                                              here it still names the request's
+ *                                              kind (`request_seq` is `null` once
+ *                                              the request's ROW is gone)
+ *
+ * and /carried[]/e2e, which this door does not keep across a trim at all: a rule
+ * that binds a key to an end-to-end profile makes every call walk the whole
+ * capture (see WHAT A CALL COSTS), so with such a rule the two doors agree.
+ * The exchange pairing is dropped and begun again over what is held when its
+ * tables outgrow the lists (past four entries per held message), once per that
+ * many new messages; a final written in that call, and a row compared after it,
+ * read as the whole-document door reads them. Nothing else in a row differs.
  *
  * Since field-document revision 22 the list also names
  * /above_transport/carried[]/payload_decode, its whole subtree, which starts
@@ -5341,11 +5373,13 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  * declaration text. A different `declarations` text empties it, so ask from 0
  * after changing it. The comparison is of whole rows, and it is made only when
  * it could find something: a capture that only grew (the same message lists,
- * nothing trimmed from a list's front, every new message after the last one seen,
- * the same session grouping and capture origin) cannot have moved a row held,
- * because a row is a function of its own frame and of the capture's PREFIX up to
- * it, and the list is empty without a comparison. Any other state compares every
- * row once, which costs a walk of the whole capture.
+ * every new message after the last one seen, the same session grouping and
+ * capture origin) cannot have moved a row held, because a row is a function of
+ * its own frame and of the capture's PREFIX up to it, and the list is empty
+ * without a comparison. Any other state compares every row once, which costs a
+ * walk of the whole capture. A FRONT TRIM IS NOT SUCH A STATE for this door (see
+ * AFTER A FRONT TRIM above): a trim reports no revision, and the digests of rows
+ * the handle has stopped holding are given up.
  *
  * NOT CLAIMED. A row this handle never wrote has no digest and is never listed
  * (a first call with a cursor above 0 holds nothing to compare against). A row
@@ -5359,18 +5393,23 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  * when all of these hold, and is otherwise the whole capture's, exactly as it
  * was before:
  *   - the capture is the last one plus messages that sort after it: no list
- *     trimmed at its front, no list that appeared in front of another (a stream
- *     flow in front of the datagram flows), no message decoded after a packet
- *     that followed it (a stream segment held behind a gap);
+ *     that appeared or left in front of another (a stream flow in front of the
+ *     datagram flows), no message decoded after a packet that followed it (a
+ *     stream segment held behind a gap). A list trimmed at its FRONT is not a
+ *     reason: the walk goes on from the first message it did not see;
  *   - the session grouping and the capture's origin are unchanged;
  *   - the cursor is not below the one the last document gave
  *     (`window.through_seq`);
  *   - every row has a sequence number;
  *   - no declaration rule binds a key to an end-to-end profile;
  *   - no QUIC list holds a message;
+ *   - the last document did not end inside a list (a window from
+ *     wz_dissect_live_fields_since_window that stopped before the end);
  *   - the container you pass is the one the last call read.
- * The node census the grouping comes from is kept the same way and begins again
- * only when a message that arrived names a node (an INIT or a JOIN). Measured on
+ * These are the states that make a call walk the whole capture; a ceiling that
+ * trims the front is not among them. The node census the grouping comes from is
+ * kept the same way, across trims too, and begins again only when a message that
+ * arrived names a node (an INIT or a JOIN). Measured on
  * this library's own test population and not on a consumer's capture, with
  * 40,000 messages held: 0.6 ms for a call that continues, 15.7 ms for the walk
  * that starts over.

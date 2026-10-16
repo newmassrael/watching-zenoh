@@ -1133,7 +1133,7 @@ pub(crate) struct ListMark {
 
 /// What `FlowDissection::capture_order_from` returns: the positions in capture
 /// order, the running packet at the end, and the largest key.
-pub(crate) type OrderRun = (Vec<usize>, usize, Option<(usize, usize)>);
+pub(crate) type OrderRun = (Vec<usize>, usize, Option<(usize, u64)>);
 
 /// The messages `Dissection::capture_order_since` returns, each with its flow,
 /// its list and the packet it resolves to.
@@ -1144,7 +1144,51 @@ pub(crate) type OrderedFrames<'a> = alloc::vec::Vec<(FlowKey, usize, usize, &'a 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct OrderMarks {
     pub(crate) lists: alloc::vec::Vec<ListMark>,
-    pub(crate) last_key: Option<(usize, usize, usize)>,
+    /// `(packet, list, produced-index)` of the last message taken: the key the
+    /// next messages must sort after. The third part is a produced-index and not
+    /// a position, so a front trim does not move it.
+    pub(crate) last_key: Option<(usize, usize, u64)>,
+}
+
+/// Which list a message `DissectionLimits::frames_total` counts is in. Ordered,
+/// because the order breaks a tie between two lists whose oldest messages resolve
+/// to one packet, and a tie broken by anything else would make which message goes
+/// depend on the order the flow tables happen to hold their flows in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TotalList {
+    /// A stream flow's messages.
+    Stream,
+    /// A datagram flow's cleartext messages.
+    Datagram,
+    /// A datagram flow's scouting messages.
+    Scouting,
+    /// A datagram flow's recovered RFC 9221 datagrams.
+    QuicDatagram,
+}
+
+/// What a fold that remembers where it stopped does when a list's FRONT was
+/// trimmed since, which [`Dissection::capture_order_since`] must be told.
+///
+/// The two answers are two different folds, and which one a caller has is a fact
+/// about what it keeps, not a preference:
+///
+/// * a fold that must equal the fold over the messages the capture HOLDS NOW (a
+///   census plane: its document is held byte for byte to the whole-capture door's)
+///   cannot go on, because it already counted the trimmed message and the door that
+///   reads the capture afresh does not;
+/// * a fold that keeps the HISTORY of what it has taken (the state a since-document
+///   writes rows from: the keyexpr table, the exchange pairing, the chain
+///   identities) loses nothing by a trim, and refusing it would make every call
+///   after the first trim cost the whole capture, which is the cost a ceiling
+///   exists to remove.
+#[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrimPolicy {
+    /// A trim from a list's front ends the point: the fold begins again.
+    Restart,
+    /// A trim is not a reason to begin again: the fold takes the messages that
+    /// arrived and the ones it already took stay folded.
+    Continue,
 }
 
 /// R2205 (open-debt item 560) — WHY a decoded message's own bytes cannot be
@@ -2226,13 +2270,27 @@ impl FlowDissection {
     /// at the end, and the largest key. From `start` 0 with nothing before it this
     /// IS [`Self::capture_order`], which is defined by it, so a caller that
     /// continues an order and one that makes it whole use one rule.
+    ///
+    /// # The key is `(packet, produced-index)`, and why not the position
+    ///
+    /// The tiebreak inside one packet is the message's place in the list, and a
+    /// POSITION moves when a ceiling takes the front: a key a caller kept from
+    /// the last call would then be compared with positions counted from another
+    /// origin, and a continuation across a trim would be refused (or worse,
+    /// accepted wrongly). The produced-index is the message's place counted from
+    /// the first message the list ever held, which no trim moves, and it orders
+    /// the messages of one list exactly as the position does, so the order this
+    /// returns is the order it always returned. The positions in the answer are
+    /// still positions in the list as it stands, because that is what a caller
+    /// indexes with.
     pub(crate) fn capture_order_from(
         &self,
         start: usize,
         mut last: usize,
-        after: Option<(usize, usize)>,
+        after: Option<(usize, u64)>,
     ) -> Option<OrderRun> {
-        let mut keyed: Vec<(usize, usize)> =
+        let base = self.frames.produced() - self.frames.len() as u64;
+        let mut keyed: Vec<(usize, u64)> =
             Vec::with_capacity(self.frames.len().saturating_sub(start));
         for (position, frame) in self.frames.iter().enumerate().skip(start) {
             let first_byte = if frame.decompressed.is_some() {
@@ -2241,7 +2299,7 @@ impl FlowDissection {
                 Self::message_at(frame)
             };
             last = self.packet_for(frame.direction, first_byte).unwrap_or(last);
-            keyed.push((last, position));
+            keyed.push((last, base + position as u64));
         }
         // Total, so unstable is deterministic. Already sorted is the common
         // case and costs one pass.
@@ -2253,7 +2311,10 @@ impl FlowDissection {
         }
         let largest = keyed.last().copied().or(after);
         Some((
-            keyed.into_iter().map(|(_, position)| position).collect(),
+            keyed
+                .into_iter()
+                .map(|(_, produced)| (produced - base) as usize)
+                .collect(),
             last,
             largest,
         ))
@@ -3047,6 +3108,38 @@ pub struct DissectionLimits {
     /// Decoded frames kept per flow. Beyond it the OLDEST go — a live viewer
     /// is looking at what just happened.
     pub frames_per_flow: Option<usize>,
+    /// Decoded messages kept IN ALL, over every flow. Beyond it the OLDEST in the
+    /// capture go, whichever flow holds them.
+    ///
+    /// # What it bounds, and what [`Self::frames_per_flow`] cannot
+    ///
+    /// The per-flow ceiling bounds memory by the NUMBER OF FLOWS times itself: 16
+    /// flows at 10 000 each hold 160 000 messages, which is not what a caller who
+    /// wants "the last 100 000" asked for. This is that number. A viewer whose list
+    /// shows the last N rows sets it to N and the dissection holds what the list
+    /// holds, so the trim the list makes and the trim this makes take the same rows.
+    ///
+    /// "Oldest" is the order a capture is read in: the packet each message resolves
+    /// to, and within one packet the order of the flows. The two ceilings are
+    /// independent and both apply; a message goes when either says so.
+    ///
+    /// # Which lists are counted
+    ///
+    /// The ones [`Self::frames_per_flow`] counts and whose position in the capture
+    /// can be told: each stream flow's messages, and each datagram flow's cleartext
+    /// messages, scouting messages and recovered RFC 9221 datagrams. A recovered QUIC
+    /// STREAM is not counted, for the reason `DatagramDissection::budgeted_messages`
+    /// gives (its messages are offset in stream bytes, a coordinate that means
+    /// something else in each stream, so "oldest" has no answer across them), and
+    /// the serial line is bounded by neither ceiling. A message either ceiling takes
+    /// is counted in the same tally, [`DissectionDrops::frames`].
+    ///
+    /// # What it costs
+    ///
+    /// A pass over the flow tables per call that adds messages, and the same pass per
+    /// message taken once the ceiling is reached: proportional to the number of
+    /// flows held, which [`Self::max_flows_per_table`] bounds.
+    pub frames_total: Option<usize>,
     /// Reassembled bytes kept per DIRECTION of each TCP flow.
     pub stream_bytes_per_direction: Option<usize>,
     /// Entries kept in the skipped-packet list.
@@ -3150,6 +3243,11 @@ impl DissectionLimits {
         Self {
             reassembly_window_ms: Some(30_000),
             frames_per_flow: Some(10_000),
+            // Ten flows of the per-flow ceiling, and the figure a viewer scrolls
+            // a list of: the per-flow ceiling alone bounds memory by the number of
+            // flows, and a tap on a busy host has many. A single flow is held to
+            // its own 10 000 as before.
+            frames_total: Some(100_000),
             stream_bytes_per_direction: Some(4 * 1024 * 1024),
             skipped_packets: Some(10_000),
             max_flows_per_table: Some(1_024),
@@ -3391,6 +3489,7 @@ mod live_tap_tests {
         let DissectionLimits {
             reassembly_window_ms,
             frames_per_flow,
+            frames_total,
             stream_bytes_per_direction,
             skipped_packets,
             max_flows_per_table,
@@ -3406,6 +3505,7 @@ mod live_tap_tests {
                 reassembly_window_ms.map(|v| v as usize),
             ),
             ("frames_per_flow", frames_per_flow),
+            ("frames_total", frames_total),
             ("stream_bytes_per_direction", stream_bytes_per_direction),
             ("skipped_packets", skipped_packets),
             ("max_flows_per_table", max_flows_per_table),
@@ -5154,25 +5254,57 @@ impl Dissection {
         &self,
         prev: Option<&OrderMarks>,
     ) -> Option<(OrderedFrames<'_>, OrderMarks)> {
+        self.capture_order_since_policy(prev, TrimPolicy::Restart)
+    }
+
+    /// [`Self::capture_order_since`] for a fold that holds the HISTORY of the
+    /// messages it has taken and so may go on across a front trim: the same four
+    /// conditions with the second one lifted. See [`TrimPolicy::Continue`].
+    #[cfg_attr(not(feature = "dissect"), allow(dead_code))]
+    pub(crate) fn capture_order_since_across_trims(
+        &self,
+        prev: Option<&OrderMarks>,
+    ) -> Option<(OrderedFrames<'_>, OrderMarks)> {
+        self.capture_order_since_policy(prev, TrimPolicy::Continue)
+    }
+
+    fn capture_order_since_policy(
+        &self,
+        prev: Option<&OrderMarks>,
+        trims: TrimPolicy,
+    ) -> Option<(OrderedFrames<'_>, OrderMarks)> {
         let current: alloc::vec::Vec<(FlowKey, MessageListOrigin, &messages::MessageList)> =
             self.message_lists_with_origin().collect();
         let continues = list_continuations(&current, prev.map(|p| p.lists.as_slice()))?;
         let mut marks: alloc::vec::Vec<ListMark> = alloc::vec::Vec::new();
-        let mut walk: alloc::vec::Vec<(usize, usize, usize, FlowKey, &PassiveFrame)> =
+        // Keyed `(packet, list, produced-index)`: the position is the tiebreak
+        // inside a list, and a position moves when a trim takes the front, where
+        // the produced-index does not and orders a list's messages the same way.
+        let mut walk: alloc::vec::Vec<(usize, usize, u64, FlowKey, &PassiveFrame)> =
             alloc::vec::Vec::new();
         for (list, (flow, origin, frames)) in current.iter().copied().enumerate() {
             let first_produced = frames.produced() - frames.len() as u64;
             let (start, mut last) = match (prev, continues[list]) {
                 (Some(p), Some(at)) => {
                     let m = &p.lists[at];
+                    // A list that holds an EARLIER first message than the mark
+                    // saw is another list standing where the mark's was (its
+                    // counter began again), whatever the policy says of a trim.
                     if m.flow != flow
                         || m.origin != origin
-                        || m.first_produced != first_produced
+                        || first_produced < m.first_produced
+                        || (trims == TrimPolicy::Restart && m.first_produced != first_produced)
                         || m.produced > frames.produced()
                     {
                         return None;
                     }
-                    ((m.produced - m.first_produced) as usize, m.last_packet)
+                    // The mark may stand BEHIND the first message held: what a
+                    // trim took before this fold reached it is not in the list to
+                    // be folded, and the new messages begin at the front.
+                    (
+                        (m.produced.max(first_produced) - first_produced) as usize,
+                        m.last_packet,
+                    )
                 }
                 // A list the mark never saw: all of it is new.
                 _ => (0, 0usize),
@@ -5190,7 +5322,7 @@ impl Dissection {
                     }
                 };
                 last = packet.unwrap_or(last);
-                walk.push((last, list, position, flow, frame));
+                walk.push((last, list, first_produced + position as u64, flow, frame));
             }
             marks.push(ListMark {
                 flow,
@@ -5200,16 +5332,16 @@ impl Dissection {
                 last_packet: last,
             });
         }
-        walk.sort_by_key(|(packet, list, position, _, _)| (*packet, *list, *position));
+        walk.sort_by_key(|(packet, list, produced, _, _)| (*packet, *list, *produced));
         let prev_last = prev.and_then(|p| p.last_key);
-        if let (Some(before), Some((packet, list, position, _, _))) = (prev_last, walk.first()) {
-            if (*packet, *list, *position) <= before {
+        if let (Some(before), Some((packet, list, produced, _, _))) = (prev_last, walk.first()) {
+            if (*packet, *list, *produced) <= before {
                 return None;
             }
         }
         let last_key = walk
             .last()
-            .map(|(packet, list, position, _, _)| (*packet, *list, *position))
+            .map(|(packet, list, produced, _, _)| (*packet, *list, *produced))
             .or(prev_last);
         let frames = walk
             .into_iter()
@@ -6388,6 +6520,116 @@ impl Dissection {
             self.drops.stream_bytes += flow.low_to_high.trim(keep);
             self.drops.stream_bytes += flow.high_to_low.trim(keep);
         }
+        self.enforce_total_frames();
+    }
+
+    /// Decoded messages held that [`DissectionLimits::frames_total`] counts: each
+    /// stream flow's, and each datagram flow's cleartext, scouting and recovered
+    /// RFC 9221 lists. See the field's doc for the lists left out.
+    fn total_budgeted_frames(&self) -> usize {
+        self.flows.iter().map(|f| f.frames.len()).sum::<usize>()
+            + self
+                .datagram_flows
+                .iter()
+                .map(DatagramDissection::budgeted_messages)
+                .sum::<usize>()
+    }
+
+    /// The packet the OLDEST message of each list `frames_total` counts resolves
+    /// to, and which list it is, or `None` when every such list is empty.
+    ///
+    /// The order is `(packet, kind, flow)`: the packet is the capture order a
+    /// document reads in, and the other two only make a tie deterministic. A stream
+    /// message whose first byte no packet can be named for (its run map was trimmed
+    /// by the byte ceiling) reads as packet `0`: it is among the oldest of what is
+    /// held, and a message nothing can place is the one to give up first.
+    fn oldest_budgeted_message(&self) -> Option<(usize, TotalList, usize)> {
+        let mut oldest: Option<(usize, TotalList, usize)> = None;
+        let mut offer = |packet: usize, list: TotalList, flow: usize| {
+            let key = (packet, list, flow);
+            // A `match` and not `is_none_or`, which is newer than this crate's MSRV.
+            match oldest {
+                Some(best) if best <= key => {}
+                _ => oldest = Some(key),
+            }
+        };
+        for (i, flow) in self.flows.iter().enumerate() {
+            if let Some(frame) = flow.frames.first() {
+                let first_byte = if frame.decompressed.is_some() {
+                    frame.stream_offset + frame.prefix_width
+                } else {
+                    FlowDissection::message_at(frame)
+                };
+                let packet = flow.packet_for(frame.direction, first_byte).unwrap_or(0);
+                offer(packet, TotalList::Stream, i);
+            }
+        }
+        for (i, flow) in self.datagram_flows.iter().enumerate() {
+            if let Some(frame) = flow.frames.first() {
+                offer(frame.stream_offset, TotalList::Datagram, i);
+            }
+            if let Some(datagram) = flow.scouting.first() {
+                offer(datagram.packet_index, TotalList::Scouting, i);
+            }
+            if let Some(frame) = flow.quic_datagrams.first() {
+                offer(frame.stream_offset, TotalList::QuicDatagram, i);
+            }
+        }
+        oldest
+    }
+
+    /// R3356 — hold the decoded messages inside [`DissectionLimits::frames_total`]:
+    /// while more are held than the ceiling allows, give up the oldest in the
+    /// capture, whichever flow holds it.
+    ///
+    /// Called AFTER the per-flow ceilings, at every place a message list can have
+    /// grown, so a message goes when either ceiling says so. Every message taken is
+    /// accounted exactly as the per-flow ceiling accounts it ([`Discarded`] receipts
+    /// into `dropped_frames`, [`DissectionDrops::frames`] and `scouting`): a bound
+    /// that discards decoded messages and does not say so is the defect
+    /// [`DissectionDrops`] exists to prevent.
+    fn enforce_total_frames(&mut self) {
+        let Some(cap) = self.limits.frames_total else {
+            return;
+        };
+        let held = self.total_budgeted_frames();
+        for _ in 0..held.saturating_sub(cap) {
+            // Unreachable while more is held than the ceiling allows, and a
+            // `return` rather than a panic: a bound that cannot be met must not
+            // take the capture down with it.
+            let Some((_, list, i)) = self.oldest_budgeted_message() else {
+                return;
+            };
+            match list {
+                TotalList::Stream => {
+                    let Some(receipt) = self.flows[i].frames.discard_oldest() else {
+                        return;
+                    };
+                    self.dropped_frames.absorb(receipt);
+                    self.drops.frames += 1;
+                }
+                TotalList::Datagram => {
+                    let Some(receipt) = self.datagram_flows[i].frames.discard_oldest() else {
+                        return;
+                    };
+                    self.dropped_frames.absorb(receipt);
+                    self.drops.frames += 1;
+                }
+                TotalList::Scouting => {
+                    if self.datagram_flows[i].scouting.discard_oldest() {
+                        self.drops.scouting += 1;
+                    }
+                }
+                TotalList::QuicDatagram => {
+                    let Some(receipt) = self.datagram_flows[i].quic_datagrams.discard_oldest()
+                    else {
+                        return;
+                    };
+                    self.dropped_frames.absorb(receipt);
+                    self.drops.frames += 1;
+                }
+            }
+        }
     }
 
     /// R311y594b — the one accumulation that cannot be trimmed in place.
@@ -6682,6 +6924,16 @@ impl Dissection {
         self.evict_datagram_flows_beyond_cap();
     }
 
+    /// Both ceilings on messages, for the datagram paths: the flow's own
+    /// ([`Self::enforce_datagram_flow_cap`]) and then the one over every flow
+    /// ([`Self::enforce_total_frames`]). A message goes when either ceiling says
+    /// so, and the per-flow one runs first because it is the cheaper to answer: it
+    /// reads one flow, where the total reads the table.
+    fn enforce_datagram_message_cap(&mut self, idx: usize) {
+        self.enforce_datagram_flow_cap(idx);
+        self.enforce_total_frames();
+    }
+
     /// R311y713 (§B3) — hold one datagram flow's DECODED MESSAGES inside
     /// `frames_per_flow`, across both of the lists it keeps them in.
     ///
@@ -6696,7 +6948,7 @@ impl Dissection {
     /// which is the rule `frames_per_flow` already states one list at a time.
     /// Both lists carry the packet index, so "oldest" is answerable across
     /// them without inventing an ordering.
-    fn enforce_datagram_message_cap(&mut self, idx: usize) {
+    fn enforce_datagram_flow_cap(&mut self, idx: usize) {
         let Some(cap) = self.limits.frames_per_flow else {
             return;
         };

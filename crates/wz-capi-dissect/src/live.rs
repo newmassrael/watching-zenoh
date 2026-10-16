@@ -1463,6 +1463,36 @@ impl wz_capture::fields_json::RowCoordinates for HandleIds {
     fn scouting_row_seq(&self, flow: &FlowKey, produced: u64) -> Option<u64> {
         seq_in_runs(&self.scouting.get(flow)?.runs, produced)
     }
+
+    /// The numbers of the rows this handle still holds: the runs of every list,
+    /// which a front trim has already cut down to what is held, merged into
+    /// ascending ranges.
+    fn held_seq_ranges(&self) -> Option<Vec<(u64, u64)>> {
+        let mut ranges: Vec<(u64, u64)> = self
+            .lists
+            .iter()
+            .flatten()
+            .flat_map(|numbers| numbers.runs.iter())
+            .chain(
+                self.scouting
+                    .values()
+                    .flat_map(|numbers| numbers.runs.iter()),
+            )
+            .filter(|run| run.len > 0)
+            .map(|run| (run.first_seq, run.first_seq + run.len - 1))
+            .collect();
+        ranges.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+        for (first, last) in ranges {
+            match merged.last_mut() {
+                Some((_, held_last)) if first <= held_last.saturating_add(1) => {
+                    *held_last = (*held_last).max(last);
+                }
+                _ => merged.push((first, last)),
+            }
+        }
+        Some(merged)
+    }
 }
 
 /// A watermark for a list this handle has not tracked before, on the shared

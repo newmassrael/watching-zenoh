@@ -6056,7 +6056,8 @@ mod tests {
     /// how this workspace keeps such a literal out of the population.
     const NO_CAPS_NO_BITE: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scouting\":0,\"scout_askers\":0,\
-         \"caps\":{\"frames_per_flow\":null,\"stream_bytes_per_direction\":null,\
+         \"caps\":{\"frames_per_flow\":null,\"frames_total\":null,\
+         \"stream_bytes_per_direction\":null,\
          \"skipped_packets\":null,\"max_flows_per_table\":null,\
          \"max_scout_askers\":null}}";
 
@@ -6068,7 +6069,8 @@ mod tests {
     /// nearest without one having to bite.
     const LIVE_TAP_ONE_FLOW_BIT: &str = "\"dropped_by_limits\":{\"frames\":0,\
          \"stream_bytes\":0,\"skipped\":0,\"flows\":1,\"scouting\":0,\"scout_askers\":0,\
-         \"caps\":{\"frames_per_flow\":10000,\"stream_bytes_per_direction\":4194304,\
+         \"caps\":{\"frames_per_flow\":10000,\"frames_total\":100000,\
+         \"stream_bytes_per_direction\":4194304,\
          \"skipped_packets\":10000,\"max_flows_per_table\":1024,\
          \"max_scout_askers\":1024}}";
 
@@ -15288,6 +15290,96 @@ mod tests {
         }
     }
 
+    /// A SINCE WALK GOES ON ACROSS A FRONT TRIM, costs what ARRIVED, and writes the
+    /// rows a reader that missed no message would have written.
+    ///
+    /// A live handle under a frame ceiling trims the front of its list on every
+    /// packet once the ceiling is reached, and a since walk that began again at each
+    /// trim paid for everything the ceiling still held on every call: the cost grew
+    /// with the ceiling and not with the traffic. The same feed is read twice, once
+    /// by a handle with no ceiling (the rows nothing was ever trimmed from) and once
+    /// by a handle that holds 40 messages, asked after every packet at the cursor of
+    /// its last answer. The walk must begin ONCE and go on, every message must be
+    /// visited once, and every row the bounded handle wrote must be the row the
+    /// unbounded one wrote, chain identities included: the identity is counted from
+    /// the first message the list ever held, so a trim renumbers nothing.
+    ///
+    /// ANTI-VACUITY: the capture holds many times what the ceiling does, so the
+    /// bounded handle trimmed on most of its calls.
+    #[test]
+    fn a_since_walk_goes_on_across_a_front_trim_and_a_chain_keeps_its_identity() {
+        use wz_session_core::json5::Json5Value as V;
+        let file = wz_capture::fixtures::stream_chain_sequence_capture(200);
+        let ends = pcap_record_ends(&file);
+
+        let whole: std::collections::BTreeMap<u64, V> = {
+            let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+            for &end in &ends {
+                unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            }
+            let doc = parsed(&live_fields(handle, &file));
+            let rows = rows_of(&doc)
+                .into_iter()
+                .map(|row| (seq_of(row), row.clone()))
+                .collect();
+            unsafe { wz_dissect_live_close(handle) };
+            rows
+        };
+
+        let limits = wz_capture::DissectionLimits {
+            frames_per_flow: Some(40),
+            ..Default::default()
+        };
+        let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+        let mut cursor = 0u64;
+        let mut delivered: std::collections::BTreeMap<u64, V> = std::collections::BTreeMap::new();
+        for &end in &ends {
+            unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            let doc = live_fields_since(handle, &file[..end], cursor);
+            cursor = through_seq_of(&doc);
+            let value = parsed(&doc);
+            for row in rows_of(&value) {
+                delivered.insert(seq_of(row), row.clone());
+            }
+        }
+        let work = unsafe { (*handle).fields_work() };
+        unsafe { wz_dissect_live_close(handle) };
+
+        assert!(
+            cursor > 40 * 4,
+            "{cursor} rows against a ceiling of 40: the list was trimmed on most calls"
+        );
+        assert_eq!(
+            delivered.len() as u64,
+            cursor,
+            "every row issued was written once, none lost to a trim"
+        );
+        assert!(
+            work.restarted <= 3,
+            "the walk began again {} time(s); a trim must not be one of them: {work:?}",
+            work.restarted
+        );
+        assert!(
+            work.resumed + 4 >= ends.len() as u64,
+            "almost every call went on from where the last stopped: {work:?}"
+        );
+        assert!(
+            work.messages_walked <= 2 * cursor,
+            "{} messages visited for {cursor} rows: a call that began again at \
+             each trim visits the 40 the ceiling holds every time ({work:?})",
+            work.messages_walked
+        );
+        for (seq, row) in &delivered {
+            let expected = whole
+                .get(seq)
+                .expect("the unbounded handle has the row too");
+            assert_eq!(
+                row, expected,
+                "row {seq} written by the bounded handle differs from the one nothing was trimmed from"
+            );
+        }
+    }
+
     // ── which cells of an issued row can differ at a later state ────────────────
 
     /// Where each record of a `pcap::write` file ends, so a prefix can be cut on
@@ -15516,6 +15608,11 @@ mod tests {
                     "/carried[]/closes/request_seq",
                 ]),
             ),
+            // A CONTROL since the list began to keep the chain fold of what it
+            // discards: a trim that takes the first message of a chain used to
+            // renumber every chain after it, and `/chain/chain_id` was a cell
+            // this scenario found. The identity is now counted from the first
+            // message the list EVER held, so the same trim moves nothing.
             (
                 "chains under a trim",
                 wz_capture::fixtures::chain_sequence_capture(3),
@@ -15524,7 +15621,7 @@ mod tests {
                     ..Default::default()
                 },
                 "",
-                cells(&["/chain/chain_id"]),
+                cells(&[]),
             ),
             (
                 "a declaration decoded after its reference",

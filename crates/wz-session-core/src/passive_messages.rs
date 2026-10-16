@@ -67,9 +67,13 @@
 //! a type. This is that ending, applied to the other list.
 
 use alloc::collections::VecDeque;
+#[cfg(feature = "reassembly")]
+use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
 
 use crate::passive::PassiveFrame;
+#[cfg(feature = "reassembly")]
+use crate::reassembly_dispatch::IngestOutcome;
 
 /// Decoded transport messages, in the order the observer produced them.
 ///
@@ -129,6 +133,130 @@ pub struct MessageList {
     /// zero, and a watermark above zero is how a consumer knows the slot it was
     /// tracking is not the list now standing in it.
     produced: u64,
+    /// The chain identities the messages this list has DISCARDED left behind:
+    /// the fold [`ChainFold`] describes, run over every message that was
+    /// removed from the front, in the order it was removed.
+    ///
+    /// # Why the list carries it
+    ///
+    /// A fragment chain's identity is a count of the chains that began before it
+    /// in its list. Counted from the first message the list HOLDS, a front trim
+    /// that takes the first message of a chain renumbers every chain after it,
+    /// and a consumer that was handed an identity cannot keep it. Counted from
+    /// the first message the list EVER held, the number is a fact about the
+    /// list's history and a trim cannot move it. A trim is the one moment the
+    /// message is still in hand, so it is the one place the fold can take it:
+    /// a reader that begins its walk later starts from this state instead of
+    /// from nothing, and numbers every chain as a reader that never missed a
+    /// message would have.
+    #[cfg(feature = "reassembly")]
+    chain_prefix: ChainFold,
+}
+
+/// The key a fragment chain is held under: the direction it travelled, whether
+/// it is on the reliable channel, and its priority. The router keys a chain by
+/// `(peer, reliable, priority)` and an observer holds one router per direction,
+/// so this is the same key, read off the same fields.
+#[cfg(feature = "reassembly")]
+pub type ChainKey = (crate::passive::Direction, bool, crate::qos::Priority);
+
+/// CHAIN IDENTITY, one per list, assigned in message order, and kept across a
+/// front trim by the list that holds the messages (see [`MessageList`]).
+///
+/// # What the identity is, and what it is not
+///
+/// A number shared by every row that touched ONE chain, unique within its list
+/// and counted from 0 in the order chains began. It is an identity for ROWS: it
+/// says which fragments belong together, not where in any buffer they were
+/// joined.
+///
+/// # Why it is folded here and cannot drift from the router
+///
+/// The fold follows the router's OWN outcome rather than re-judging anything:
+///
+/// * `Begun` opens a new identity. A chain already open on the key was ended by
+///   the router without a row (a `First` restart, or a deadline sweep), so
+///   minting unconditionally is what keeps the two in step.
+/// * `Continued` takes the key's open identity, or none when the chain began
+///   before the first message the fold has seen.
+/// * `Reassembled` and `Aborted` take it and close it, or mint one for a chain
+///   that began and ended on this very fragment.
+/// * `Refused` has none: no chain was allocated.
+#[cfg(feature = "reassembly")]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChainFold {
+    next: u64,
+    open: Vec<(ChainKey, u64)>,
+}
+
+#[cfg(feature = "reassembly")]
+impl ChainFold {
+    /// Advance the fold by one message, and say what the router made of it and
+    /// the identity of the chain it touched.
+    ///
+    /// `None` for a message that is not a fragment, or that carries no router
+    /// outcome (a whole lz4 batch no message was read out of): the fold does not
+    /// move. The identity is `None` for a continuation of a chain this fold never
+    /// saw begin, and for a refusal.
+    pub fn observe(&mut self, frame: &PassiveFrame) -> Option<(IngestOutcome, Option<u64>)> {
+        use crate::inbound::InboundFrame;
+        use crate::passive::Carried;
+        use crate::reassembly_dispatch::AbortReason;
+
+        let Ok(InboundFrame::Fragment {
+            reliable, priority, ..
+        }) = &frame.frame
+        else {
+            return None;
+        };
+        let key = (frame.direction, *reliable, *priority);
+        let outcome = match &frame.carried {
+            Carried::Fragment(outcome) => *outcome,
+            // The joiner handed a payload back on this fragment.
+            Carried::Reassembled { .. } => IngestOutcome::Reassembled,
+            // The router ran on a flow with no SN resolution and ended the chain
+            // this fragment continued, because only the ring could have judged
+            // the step. The session reports that as a variant of its own, so the
+            // outcome is named here rather than carried: it is the one the
+            // variant stands for.
+            Carried::FragmentWithoutResolution => IngestOutcome::Aborted(AbortReason::Unresolvable),
+            // `Undecompressible` is a whole lz4 batch no message was read out of,
+            // so no fragment reached the router.
+            Carried::Undecompressible | Carried::Nothing | Carried::Batch(_) => return None,
+        };
+        let identity = match outcome {
+            IngestOutcome::Begun => Some(self.begin(key)),
+            IngestOutcome::Continued => self.current(key),
+            IngestOutcome::Reassembled | IngestOutcome::Aborted(_) => Some(self.close(key)),
+            IngestOutcome::Refused(_) => None,
+        };
+        Some((outcome, identity))
+    }
+
+    fn begin(&mut self, key: ChainKey) -> u64 {
+        let id = self.next;
+        self.next += 1;
+        match self.open.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = id,
+            None => self.open.push((key, id)),
+        }
+        id
+    }
+
+    fn current(&self, key: ChainKey) -> Option<u64> {
+        self.open.iter().find(|(k, _)| *k == key).map(|(_, id)| *id)
+    }
+
+    fn close(&mut self, key: ChainKey) -> u64 {
+        match self.open.iter().position(|(k, _)| *k == key) {
+            Some(i) => self.open.swap_remove(i).1,
+            None => {
+                let id = self.next;
+                self.next += 1;
+                id
+            }
+        }
+    }
 }
 
 impl MessageList {
@@ -137,7 +265,17 @@ impl MessageList {
         Self {
             held: VecDeque::new(),
             produced: 0,
+            #[cfg(feature = "reassembly")]
+            chain_prefix: ChainFold::default(),
         }
+    }
+
+    /// The chain fold the messages this list has DISCARDED left behind: the state
+    /// a reader that begins at the first message the list holds must start from to
+    /// number chains as one that saw every message would. See the field's own doc.
+    #[cfg(feature = "reassembly")]
+    pub fn chain_prefix(&self) -> &ChainFold {
+        &self.chain_prefix
     }
 
     /// Restore the "one contiguous run" invariant every reader of this type
@@ -196,6 +334,13 @@ impl MessageList {
         }
         let frame = self.held.pop_front();
         self.keep_contiguous();
+        // The one moment the message is still in hand: fold what a chain's
+        // identity needs of it, so the count does not depend on how much of the
+        // front a ceiling has taken. See the field's doc.
+        #[cfg(feature = "reassembly")]
+        if let Some(gone) = &frame {
+            let _ = self.chain_prefix.observe(gone);
+        }
         Some(Discarded {
             // `produced` deliberately does NOT move here. It counts what was
             // ever appended, and a trim is the one event a consumer's watermark

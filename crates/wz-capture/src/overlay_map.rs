@@ -70,7 +70,7 @@ impl<K: Ord + Clone, V: Clone + Default> OverlayMap<K, V> {
     }
 
     /// How many keys the map holds.
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "dissect", feature = "network-codecs")))]
     pub(crate) fn len(&self) -> usize {
         let fresh = self
             .delta

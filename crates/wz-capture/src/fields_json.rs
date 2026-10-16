@@ -335,13 +335,30 @@ pub fn fields_json_since_coordinated(
 /// A held row is written from the frame it stands for (fixed once decoded) and
 /// from state that is a function of the capture's PREFIX up to it: the keyexpr
 /// table at the row's packet, the end-to-end counters of its slot before it, the
-/// chain numbering from the first message the list holds. So when the capture
-/// is a prefix-extension of the one the last call saw (see
+/// exchange pairing, the chain numbering from the first message the list EVER held.
+/// So when the capture is a prefix-extension of the one the last call saw (see
 /// [`crate::Dissection`]'s ordering condition, held by the same check the census
-/// folds use), with the same session grouping and the same declaration text, no
-/// held row can read differently and the document says so without looking: there
-/// is nothing to compare. Any other state is compared, by writing every row once
-/// into a scratch and holding each digest against the one remembered.
+/// folds use but for one thing: a front trim does not end the prefix, see below),
+/// with the same session grouping and the same declaration text, no held row can
+/// read differently and the document says so without looking: there is nothing to
+/// compare. Any other state is compared, by writing every row once into a scratch
+/// and holding each digest against the one remembered.
+///
+/// # A front trim, and what this memory is then
+///
+/// A ceiling that takes the front of a list does not end the prefix, because what
+/// the rows already written were written from is the HISTORY this memory holds, and
+/// a call after a trim then costs the messages that arrived and not the capture.
+/// The price is stated, not hidden: after a trim this memory is the history of the
+/// handle and the whole-document door is the capture it HOLDS, so they can read
+/// differently in the cells [`REVISABLE_ROW_CELLS`] names, and only for a row whose
+/// inputs a trim took (a reference to a declaration that was trimmed, a final whose
+/// request was). Three things still begin the walk again, and each costs a pass over
+/// what is held: an end-to-end profile rule (its counters are a fact about the
+/// frames BEFORE a row, which a walk that skips the old rows does not move), a
+/// window that ended inside a list, and any state the prefix test refuses (a flow
+/// that left or appeared in front of one, a message that sorts before one already
+/// taken, a handshake that changes who owns a list).
 ///
 /// # What it does not claim
 ///
@@ -412,6 +429,30 @@ impl FieldsMemory {
     pub fn stats(&self) -> FieldsStats {
         self.stats
     }
+
+    /// Whether the exchange pairing this memory keeps across front trims has
+    /// grown past what the lists hold.
+    ///
+    /// The pairing goes on across a trim, so it still holds the exchanges whose
+    /// messages the ceiling has taken, and a handle that lives for hours would
+    /// carry every exchange it ever saw. Its per-row tables can never need more
+    /// than a few entries per held message (a row batches a handful of records),
+    /// so past four per held message and a floor the fold is dropped and begun
+    /// again over what is held. That costs one pass per that many new messages,
+    /// and what it gives up is only the pairing of finals whose requests the
+    /// ceiling had already taken (a row written after it then names no request, as
+    /// a reader that began at the front would have written it).
+    #[cfg(feature = "network-codecs")]
+    fn pairing_outgrew(&self, d: &crate::Dissection) -> bool {
+        let Some(fold) = self.pairing.fold() else {
+            return false;
+        };
+        let held: usize = d
+            .message_lists_with_origin()
+            .map(|(_, _, list)| list.len())
+            .sum();
+        fold.kept_entries() > 4 * held + 1024
+    }
 }
 
 /// [`fields_json_since_coordinated`], and the rows the cursor passes whose text
@@ -473,16 +514,29 @@ pub fn fields_json_since_remembering_progress(
             ..FieldsMemory::default()
         };
     }
-    let grouping = crate::node::SessionGrouping::of(&memory.nodes.nodes(d));
+    // The node census and the pairing below go on ACROSS a front trim: this memory
+    // keeps the history of what it has folded, because the rows it writes are a
+    // function of that history and a trim must not make every later call cost the
+    // whole capture. See `crate::TrimPolicy`.
+    let grouping = crate::node::SessionGrouping::of(&memory.nodes.nodes_across_trims(d));
     // Which request each `ResponseFinal` row closed: the exchange plane's own
     // pairing, continued from where the last call stopped (it begins again only
     // when the capture is not a prefix-extension of the one it folded, which is
-    // what the census planes do too), and the same table for the comparison below
-    // and for the document, so the two cannot differ on it.
+    // what the census planes do too, and a trim of a list's front does not end
+    // the prefix), and the same table for the comparison below and for the
+    // document, so the two cannot differ on it.
+    //
+    // Its per-row tables are bounded by what the lists hold: when they have grown
+    // past a multiple of it the fold is dropped and begun again over the held
+    // messages, which costs one pass per that many new messages.
+    #[cfg(feature = "network-codecs")]
+    if memory.pairing_outgrew(d) {
+        memory.pairing = Default::default();
+    }
     #[cfg(feature = "network-codecs")]
     let pairing_table = memory
         .pairing
-        .advance(d, &grouping, &mut memory.pairing_work, progress, || {
+        .advance_across_trims(d, &grouping, &mut memory.pairing_work, progress, || {
             crate::exchange::ExchangeFold::begin(d, &crate::filter::Filter::any(), &grouping)
         })?
         .table();
@@ -492,12 +546,15 @@ pub fn fields_json_since_remembering_progress(
     let closings: Option<&PairingTable> = None;
     let origin_ms = d.capture_origin_ms();
     // The capture is a prefix-extension of the one the last call saw, and the
-    // messages that arrived since, when it is.
+    // messages that arrived since, when it is. A trim of a list's FRONT does not
+    // end the prefix here: the rows already written were written from the
+    // history this memory holds, and the messages a ceiling took are not rows that
+    // can still be asked for (see `crate::TrimPolicy`).
     let advance = memory
         .saved
         .as_ref()
         .filter(|saved| saved.grouping == grouping && saved.origin_ms == origin_ms)
-        .and_then(|saved| d.capture_order_since(Some(&saved.marks)));
+        .and_then(|saved| d.capture_order_since_across_trims(Some(&saved.marks)));
     let continues = advance.is_some();
 
     let mut revised = alloc::collections::BTreeSet::new();
@@ -600,9 +657,11 @@ pub fn fields_json_since_remembering_progress(
             return None;
         }
         for (walk, flow) in memory.walk.datagram.iter().zip(d.datagram_flows()) {
-            let first = flow.scouting.produced() - flow.scouting.len() as u64;
-            if walk.scouting_first_produced != first
-                || walk.scouting_produced > flow.scouting.produced()
+            // A scouting list that produced FEWER than the walk saw is another
+            // list; one whose front moved is the same list, trimmed, and the
+            // walk goes on from the first message it did not see.
+            if walk.scouting_produced > flow.scouting.produced()
+                || walk.produced > flow.frames.produced()
             {
                 return None;
             }
@@ -613,7 +672,15 @@ pub fn fields_json_since_remembering_progress(
                 // A flow the last walk did not see: nothing walked of it yet.
                 None => flow.capture_order_from(0, 0, None),
                 Some(walk) => {
-                    flow.capture_order_from(walk.walked, walk.order_packet, walk.order_last)
+                    if walk.produced > flow.frames.produced() {
+                        return None;
+                    }
+                    let first_held = flow.frames.produced() - flow.frames.len() as u64;
+                    flow.capture_order_from(
+                        walk.resume_position(first_held),
+                        walk.order_packet,
+                        walk.order_last,
+                    )
                 }
             });
             plans.last()?.as_ref()?;
@@ -621,17 +688,6 @@ pub fn fields_json_since_remembering_progress(
         Some(plans)
     })();
     let resume = resume_plans.is_some();
-    let walked_before: usize = if resume {
-        memory
-            .walk
-            .stream
-            .iter()
-            .chain(memory.walk.datagram.iter())
-            .map(|w| w.walked)
-            .sum()
-    } else {
-        0
-    };
     // The marks a prefix-extension handed back are the marks of the capture as it
     // stands, so the walk that follows does not make them again from the first
     // message (which is a sort of every message and would put the cost back).
@@ -667,14 +723,18 @@ pub fn fields_json_since_remembering_progress(
         memory.walk = WalkState::default();
         return None;
     }
-    let walked_after: usize = memory
+    // What this call visited, which each list's producer recorded. Summed after
+    // the call and not as a difference of two sums of lengths, because a front
+    // trim makes a list SHORTER between two calls and the difference would then
+    // be negative.
+    let visited: usize = memory
         .walk
         .stream
         .iter()
         .chain(memory.walk.datagram.iter())
-        .map(|w| w.walked)
+        .map(|w| w.visited)
         .sum();
-    memory.stats.messages_walked += (walked_after - walked_before) as u64;
+    memory.stats.messages_walked += visited as u64;
     if resume {
         memory.stats.resumed += 1;
     } else {
@@ -683,6 +743,18 @@ pub fn fields_json_since_remembering_progress(
     let (written, kept) = sink.into_parts();
     memory.stats.revised_rows += kept.len() as u64;
     memory.digests.extend(written);
+    // The digests of rows a ceiling has since taken answer nothing: no later call
+    // can compare a row the handle no longer holds. Dropped once they outnumber
+    // the held rows by a fraction, so the memory follows the handle's size and a
+    // call does not pass over the whole map for the sake of a few rows.
+    if memory.digests.len() > 256 {
+        if let Some(ranges) = coordinates.held_seq_ranges() {
+            let held: u64 = ranges.iter().map(|(first, last)| last - first + 1).sum();
+            if memory.digests.len() as u64 > held + held / 4 + 256 {
+                memory.digests.retain(|seq, _| seq_in_ranges(&ranges, *seq));
+            }
+        }
+    }
     let marks = match advance_marks {
         Some(marks) => marks,
         None => {
@@ -750,9 +822,9 @@ pub struct Since {
 /// from what a row's writer reads, not collected from runs: a row is written from
 /// the frame it stands for (fixed once it is decoded), the message bytes and the
 /// packet map behind them (see [`RETIRABLE_ROW_CELLS`]), the keyexpr table, the
-/// end-to-end judge's counters, the chain fold and the caller's declarations.
-/// Only those last four can differ between two renderings of a row that is
-/// still held, and each names its cells:
+/// end-to-end judge's counters, the exchange pairing and the caller's
+/// declarations. Only those last four can differ between two renderings of a
+/// row that is still held, and each names its cells:
 ///
 /// * **The keyexpr table** is folded over every list in capture order, and a
 ///   declaration is stamped with the packet it went past at. A declaration that
@@ -772,17 +844,20 @@ pub struct Since {
 ///   late brings the block itself into being. The cells are everything under
 ///   the `e2e` key of each `carried` entry and of each `above_transport.carried`
 ///   entry, the key included.
-/// * **The chain fold** numbers chains from the first message the list still
-///   holds. A front trim that takes the first message of a chain renumbers every
-///   chain after it, so `chain.chain_id` names a chain WITHIN one document and is
-///   not a value to keep across two.
+/// * **The exchange pairing** names, on a final's `carried` entry, the request it
+///   closed (`closes`), and a front trim that takes the request leaves the final
+///   held and unpaired. The cells are everything under `closes`.
 /// * **The caller's declarations** are an input of every document: a row written
 ///   under one declaration text and read under another differs under
 ///   `payload_decode` for that reason, which is the same subtree.
 ///
 /// What is NOT here, and was measured to hold: `direction`, `offset_space`,
 /// `message_at`, `packet`, the four coordinates and `seq`, `sn`, and the rest of
-/// `chain` (`outcome`, `reason`) are read off the decoded frame. A chain result
+/// `chain` (`outcome`, `reason`) are read off the decoded frame. `chain.chain_id`
+/// is not here either, and it WAS until a list began to keep the chain fold of the
+/// messages it discards: the identity is counted from the first message the list
+/// EVER held, so a front trim renumbers nothing and a consumer may keep it across
+/// documents. A chain result
 /// arrives as a NEW row, the one that completed it, and not as a change to an
 /// earlier fragment's. Giving up on a reassembly gap (a handle's `end` call)
 /// releases held messages as new rows and changes none that was already written.
@@ -799,7 +874,6 @@ pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/carried[]/keyexpr",
     "/carried[]/keyexpr_cause",
     "/carried[]/keyexpr_id",
-    "/chain/chain_id",
     // A final's `closes` (on its `carried` entry) names the request the exchange
     // plane paired it with, and the pairing needs the request to still be held: a
     // front trim that takes the request leaves the final held and unpaired, so
@@ -876,6 +950,26 @@ pub trait RowCoordinates {
     fn scouting_row_seq(&self, _flow: &crate::link::FlowKey, _produced: u64) -> Option<u64> {
         None
     }
+    /// The sequence numbers of the rows the caller STILL HOLDS, as inclusive
+    /// `(first, last)` ranges in ascending order, disjoint and not adjacent; or
+    /// `None` for a numbering that cannot say.
+    ///
+    /// What a memory that keeps something per row asks, to give up what it keeps
+    /// for rows a front trim has taken: a row the caller no longer holds can never
+    /// be passed, compared or written again, and a memory that kept every row it
+    /// ever saw would grow with the life of a handle whose ceilings exist to stop
+    /// that. `None` is the true answer for a numbering that issues none, and the
+    /// memory then keeps what it has.
+    fn held_seq_ranges(&self) -> Option<Vec<(u64, u64)>> {
+        None
+    }
+}
+
+/// Whether `seq` lies in one of `ranges`, which are ascending and disjoint (see
+/// [`RowCoordinates::held_seq_ranges`]).
+fn seq_in_ranges(ranges: &[(u64, u64)], seq: u64) -> bool {
+    let at = ranges.partition_point(|(_, last)| *last < seq);
+    ranges.get(at).is_some_and(|(first, _)| *first <= seq)
 }
 
 /// R2458 (open-debt item 703) — the same document, against a grouping the
@@ -953,20 +1047,24 @@ type PairingTable = ();
 /// messages that arrived.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ListWalk {
-    /// Messages of the list walked (the positions below this are old rows).
-    walked: usize,
-    /// The oldest produced-index held when the walk stopped, and how many were
-    /// ever produced: a list whose front was trimmed is not continued.
-    first_produced: u64,
+    /// Messages this walk visited (a message a cursor passed without visiting is
+    /// not counted): what the memory's work counter sums.
+    visited: usize,
+    /// How many messages the list had ever produced when the walk stopped. The
+    /// messages BELOW this were walked, so a walk that continues starts at the
+    /// first held message at or past it ([`Self::resume_position`]), wherever a
+    /// front trim has since put the front. A produced-index and not a position,
+    /// because a position is counted from the front and the front moves.
     produced: u64,
     /// Pass one's running packet, which a message with no packet of its own
     /// inherits.
     last_packet: usize,
     /// The capture-order key's running packet and its largest key so far, which
     /// the next messages must sort after (see
-    /// [`crate::FlowDissection::capture_order_from`]).
+    /// [`crate::FlowDissection::capture_order_from`]). The key's second part is a
+    /// produced-index, so a trim does not move it.
     order_packet: usize,
-    order_last: Option<(usize, usize)>,
+    order_last: Option<(usize, u64)>,
     /// The chain fold, which numbers a completing row by the identity its begun
     /// row opened.
     chains: ChainIds,
@@ -983,10 +1081,23 @@ pub(crate) struct ListWalk {
     /// running key assume every new message was visited), so the next call begins
     /// the list again instead of continuing it.
     truncated: bool,
-    /// The scouting list's own marks, for the same purpose.
-    scouting_walked: usize,
-    scouting_first_produced: u64,
+    /// The scouting list's own mark, for the same purpose.
     scouting_produced: u64,
+}
+
+impl ListWalk {
+    /// The position, in a list whose oldest held message has produced-index
+    /// `first_held`, of the first message this walk did not see: everything
+    /// before it was walked and is still held, and what a trim took is not there
+    /// to be walked. `0` when the trim took everything this walk had seen.
+    fn resume_position(&self, first_held: u64) -> usize {
+        self.produced.saturating_sub(first_held) as usize
+    }
+
+    /// [`Self::resume_position`] for the scouting list.
+    fn scouting_resume_position(&self, first_held: u64) -> usize {
+        self.scouting_produced.saturating_sub(first_held) as usize
+    }
 }
 
 /// Where the capture container's own walk stopped, so that a walk that continues
@@ -1026,7 +1137,7 @@ pub(crate) struct WalkRun<'a> {
 
 /// The order in which a stream flow's new messages are written, the running
 /// packet at its end, and its largest key.
-pub(crate) type CaptureOrderPlan = (Vec<usize>, usize, Option<(usize, usize)>);
+pub(crate) type CaptureOrderPlan = (Vec<usize>, usize, Option<(usize, u64)>);
 
 /// One list's share of a [`WalkRun`].
 pub(crate) struct FlowRun<'a> {
@@ -1475,18 +1586,27 @@ fn push_stream_flow(
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    // The produced-index of the OLDEST message still held, so a row's
+    // sequence number is looked up by an index a front trim does not move.
+    let first_produced = flow.frames.produced() - flow.frames.len() as u64;
     // A resumed walk starts where the last one stopped and takes the folds it
     // left; every message before `start` is a row the cursor passes (the caller
     // holds that to be true before it asks), so none of them is visited and the
     // tally says so once. Any other walk starts at the first message.
+    //
+    // `start` is counted from the front of the list AS IT STANDS: a ceiling may
+    // have taken messages this walk already saw, and the ones it saw that are
+    // still held are the ones before `start`.
     let resumed = run.as_ref().is_some_and(|r| r.resume);
     let start = match run.as_ref() {
-        Some(r) if r.resume => r.walk.walked,
+        Some(r) if r.resume => r.walk.resume_position(first_produced),
         _ => 0,
     };
+    // A restart numbers chains from what the discarded messages left, so a chain
+    // keeps its identity whether the walk went on or began again.
     let mut chains = match run.as_mut() {
         Some(r) if r.resume => core::mem::take(&mut r.walk.chains),
-        _ => ChainIds::default(),
+        _ => ChainIds::after_discards(&flow.frames),
     };
     if resumed {
         if let Some(d) = declarations {
@@ -1497,6 +1617,10 @@ fn push_stream_flow(
         Some(r) if r.resume => core::mem::take(&mut r.walk.requests),
         _ => RequestIndex::default(),
     };
+    // A request whose message a trim took can have no row to name: what the index
+    // keeps of it is only a map entry, and it would grow with every request the
+    // handle ever saw.
+    requests.forget_before(first_produced);
     let mut unnumbered = false;
     // R311y856 — folded in FRAME ORDER and before the cap bites, which is the
     // rule R311y701 settled for the same table: a keyexpr id resolves through
@@ -1516,9 +1640,6 @@ fn push_stream_flow(
         Some(r) if r.resume => r.walk.last_packet,
         _ => 0usize,
     };
-    // The produced-index of the OLDEST message still held, so a row's
-    // sequence number is looked up by an index a front trim does not move.
-    let first_produced = flow.frames.produced() - flow.frames.len() as u64;
     // PASS ONE, in LIST order, which is the order the session decoded the
     // messages in and so the only order its folds are valid in: the chain fold
     // follows the router's outcomes as they came, and a row's keyexpr scope is
@@ -1723,8 +1844,7 @@ fn push_stream_flow(
     }
     if let Some(r) = run.as_mut() {
         // Where this walk stopped, for the next one to start from.
-        r.walk.walked = flow.frames.len();
-        r.walk.first_produced = first_produced;
+        r.walk.visited = flow.frames.len().saturating_sub(start);
         r.walk.produced = flow.frames.produced();
         r.walk.last_packet = last_packet;
         r.walk.order_packet = order_packet;
@@ -1755,20 +1875,32 @@ fn push_datagram_flow(
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
-    // See the stream producer: a resumed walk starts where the last stopped.
+    // See the stream producer: a resumed walk starts where the last stopped, and
+    // where that is is counted from the front of the list AS IT STANDS.
+    //
+    // The produced-index of the oldest message each list still holds, so a row's
+    // sequence number is looked up by an index a front trim does not move.
+    let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+    // The scouting list's own produced-index base: `ScoutingList` is trimmed from
+    // the front by the same ceiling and counts what it ever held.
+    let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
     let resumed = run.as_ref().is_some_and(|r| r.resume);
     let (start, scouting_start) = match run.as_ref() {
-        Some(r) if r.resume => (r.walk.walked, r.walk.scouting_walked),
+        Some(r) if r.resume => (
+            r.walk.resume_position(first_produced),
+            r.walk.scouting_resume_position(scouting_first),
+        ),
         _ => (0, 0),
     };
     let mut chains = match run.as_mut() {
         Some(r) if r.resume => core::mem::take(&mut r.walk.chains),
-        _ => ChainIds::default(),
+        _ => ChainIds::after_discards(&flow.frames),
     };
     let mut requests = match run.as_mut() {
         Some(r) if r.resume => core::mem::take(&mut r.walk.requests),
         _ => RequestIndex::default(),
     };
+    requests.forget_before(first_produced);
     if resumed {
         if let Some(d) = declarations {
             d.note_unwalked_n(start);
@@ -1781,8 +1913,6 @@ fn push_datagram_flow(
     // every reason this loop has for skipping one. R2513 (open-debt item 713) —
     // the absorb moved to the capture-ordered pre-pass, exactly as in the stream
     // half; see `absorb_every_declaration`.
-    // The stream half's index, for the stream half's reason.
-    let first_produced = flow.frames.produced() - flow.frames.len() as u64;
     // Where the document's window ends in this list, as the stream half has it:
     // the first message numbered past the last row, from which nothing is visited.
     let mut truncated = false;
@@ -1940,9 +2070,6 @@ fn push_datagram_flow(
     // consumer merges on. NOT stamped into the id spaces: a scouting message
     // references no keyexpr, and its packet may precede the last frame's, which
     // would move a cursor that only moves forward.
-    // The scouting list's own produced-index base: `ScoutingList` is
-    // trimmed from the front by the same ceiling and counts what it ever held.
-    let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
     for (position, datagram) in flow.scouting.iter().enumerate().skip(scouting_start) {
         let index = datagram.packet_index;
         let seq = tags.scouting_seq(&flow.flow, scouting_first + position as u64);
@@ -2050,13 +2177,10 @@ fn push_datagram_flow(
     }
     if let Some(r) = run.as_mut() {
         // Where this walk stopped, for the next one to start from.
-        r.walk.walked = flow.frames.len();
-        r.walk.first_produced = first_produced;
+        r.walk.visited = flow.frames.len().saturating_sub(start);
         r.walk.produced = flow.frames.produced();
         r.walk.chains = chains;
         r.walk.requests = requests;
-        r.walk.scouting_walked = flow.scouting.len();
-        r.walk.scouting_first_produced = scouting_first;
         r.walk.scouting_produced = flow.scouting.produced();
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
         r.walk.truncated = truncated;
@@ -3296,14 +3420,35 @@ impl ChainReason {
 /// Folded for EVERY frame, including rows the listing cap holds back, for the
 /// reason the keyexpr anchor is: an identity assigned only to printed rows
 /// would renumber when the cap moved.
+///
+/// # What a front trim does to it
+///
+/// Nothing. The fold itself is `wz_session_core::passive_messages::ChainFold`,
+/// and the list keeps the fold of the messages it has DISCARDED
+/// ([`wz_session_core::passive_messages::MessageList::chain_prefix`]), so a walk
+/// that begins at the first message the list holds starts from that state
+/// ([`Self::after_discards`]) and numbers every chain as a walk that never missed
+/// a message would. An identity already handed out therefore names the same chain
+/// in every later document, which is what a consumer that keeps rows across calls
+/// needs, and `/chain/chain_id` is no longer a cell a trim can rewrite.
 #[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
 #[derive(Clone, Debug, Default)]
 struct ChainIds {
-    next: u64,
-    open: Vec<((Direction, bool, wz_session_core::qos::Priority), u64)>,
+    #[cfg(feature = "reassembly")]
+    fold: wz_session_core::passive_messages::ChainFold,
 }
 
 impl ChainIds {
+    /// The fold at the first message `list` holds: whatever the messages it has
+    /// discarded left. For a list that never discarded, the empty fold.
+    #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
+    fn after_discards(list: &wz_session_core::passive_messages::MessageList) -> Self {
+        Self {
+            #[cfg(feature = "reassembly")]
+            fold: list.chain_prefix().clone(),
+        }
+    }
+
     /// The row's two session verdicts, advancing the chain fold by one frame.
     fn observe(&mut self, frame: &PassiveFrame) -> SessionRow {
         SessionRow {
@@ -3314,55 +3459,33 @@ impl ChainIds {
 
     #[cfg(feature = "reassembly")]
     fn chain_row(&mut self, frame: &PassiveFrame) -> Option<ChainRow> {
-        use wz_session_core::inbound::InboundFrame;
-        use wz_session_core::passive::Carried;
-        use wz_session_core::reassembly_dispatch::{AbortReason, IngestOutcome};
-        let Ok(InboundFrame::Fragment {
-            reliable, priority, ..
-        }) = &frame.frame
-        else {
-            return None;
-        };
-        let key = (frame.direction, *reliable, *priority);
-        let outcome = match &frame.carried {
-            Carried::Fragment(outcome) => *outcome,
-            // The joiner handed a payload back on this fragment.
-            Carried::Reassembled { .. } => IngestOutcome::Reassembled,
-            // The router ran on a flow with no SN resolution and ended the
-            // chain this fragment continued, because only the ring could have
-            // judged the step. The session reports that as a variant of its own
-            // (the fragment could not be placed), so the outcome is named here
-            // rather than carried: it is the one the variant stands for.
-            Carried::FragmentWithoutResolution => IngestOutcome::Aborted(AbortReason::Unresolvable),
-            // `Undecompressible` is a whole lz4 batch no message was read out
-            // of, so no fragment reached the router.
-            Carried::Undecompressible | Carried::Nothing | Carried::Batch(_) => return None,
-        };
+        use wz_session_core::reassembly_dispatch::IngestOutcome;
+        let (outcome, chain_id) = self.fold.observe(frame)?;
         Some(match outcome {
             IngestOutcome::Begun => ChainRow {
                 outcome: ChainOutcome::Begun,
                 reason: None,
-                chain_id: Some(self.open(key)),
+                chain_id,
             },
             IngestOutcome::Continued => ChainRow {
                 outcome: ChainOutcome::Continued,
                 reason: None,
-                chain_id: self.current(key),
+                chain_id,
             },
             IngestOutcome::Reassembled => ChainRow {
                 outcome: ChainOutcome::Reassembled,
                 reason: None,
-                chain_id: Some(self.close(key)),
+                chain_id,
             },
             IngestOutcome::Aborted(why) => ChainRow {
                 outcome: ChainOutcome::Aborted,
                 reason: Some(ChainReason::of_abort(why)),
-                chain_id: Some(self.close(key)),
+                chain_id,
             },
             IngestOutcome::Refused(why) => ChainRow {
                 outcome: ChainOutcome::Refused,
                 reason: Some(ChainReason::of_refusal(why)),
-                chain_id: None,
+                chain_id,
             },
         })
     }
@@ -3372,34 +3495,6 @@ impl ChainIds {
     #[cfg(not(feature = "reassembly"))]
     fn chain_row(&mut self, _frame: &PassiveFrame) -> Option<ChainRow> {
         None
-    }
-
-    #[cfg(feature = "reassembly")]
-    fn open(&mut self, key: (Direction, bool, wz_session_core::qos::Priority)) -> u64 {
-        let id = self.next;
-        self.next += 1;
-        match self.open.iter_mut().find(|(k, _)| *k == key) {
-            Some(slot) => slot.1 = id,
-            None => self.open.push((key, id)),
-        }
-        id
-    }
-
-    #[cfg(feature = "reassembly")]
-    fn current(&self, key: (Direction, bool, wz_session_core::qos::Priority)) -> Option<u64> {
-        self.open.iter().find(|(k, _)| *k == key).map(|(_, id)| *id)
-    }
-
-    #[cfg(feature = "reassembly")]
-    fn close(&mut self, key: (Direction, bool, wz_session_core::qos::Priority)) -> u64 {
-        match self.open.iter().position(|(k, _)| *k == key) {
-            Some(i) => self.open.swap_remove(i).1,
-            None => {
-                let id = self.next;
-                self.next += 1;
-                id
-            }
-        }
     }
 }
 
@@ -3905,6 +4000,10 @@ impl<'a> RowClosings<'a> {
 pub(crate) struct RequestIndex {
     #[cfg(feature = "network-codecs")]
     produced: alloc::collections::BTreeMap<(usize, usize), u64>,
+    /// The produced-index below which the last [`Self::forget_before`] already
+    /// forgot every request.
+    #[cfg(feature = "network-codecs")]
+    forgotten_before: u64,
 }
 
 impl RequestIndex {
@@ -3929,6 +4028,31 @@ impl RequestIndex {
     /// Without the record plane no final names a request, so nothing is kept.
     #[cfg(not(feature = "network-codecs"))]
     fn note(&mut self, _: &PassiveFrame, _: u64) {}
+
+    /// Forget the requests whose messages are older than `first_held`, the
+    /// produced-index of the oldest message the list still holds.
+    ///
+    /// A request a trim took has no row for a final to name the sequence number
+    /// of (`request_seq` reads `null` for it), so the entry answers nothing, and an
+    /// index that kept every request a live handle ever saw would grow with the
+    /// handle's life. Costs a pass over what is kept, and is skipped when nothing
+    /// is.
+    #[cfg(feature = "network-codecs")]
+    fn forget_before(&mut self, first_held: u64) {
+        // The front only moves forward, so a call that finds it where the last
+        // call left it has nothing to forget and does not pass over the index.
+        if first_held <= self.forgotten_before {
+            return;
+        }
+        self.forgotten_before = first_held;
+        if !self.produced.is_empty() {
+            self.produced.retain(|_, produced| *produced >= first_held);
+        }
+    }
+
+    /// Without the record plane nothing is kept, so nothing is forgotten.
+    #[cfg(not(feature = "network-codecs"))]
+    fn forget_before(&mut self, _: u64) {}
 
     /// Where the request that stood at `request` in its list was produced.
     #[cfg(feature = "network-codecs")]
