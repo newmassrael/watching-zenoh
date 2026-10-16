@@ -274916,6 +274916,48 @@
         "Tell zenoh-analyzer-25 that all 17 driver roles are played, with the keys and lines of each, and the pin."
       ]
     },
+    "Round 3352": {
+      "decision_summary": "The hosted run of the Round 3351 push was red in one job, Layer M: the new sessions scout role leg rebuilt the shared demo binary at its own features, so the zenohd legs after it ran a demo without zenoh-config; it now runs last in the layer. A consumer measured a put refused for size (over the 1 MiB reassembly slot) that used a reliable-channel sequence number: the next frame went out one ahead and zenoh-pico closed the session. The refusals before any byte leaves (the size cap, an empty fragment budget) now give the sequence number back (AtomicTxSn::unmint). wz-capi-c answers a message too large with WZ_CAPI_C_E_VALUE_TOO_LARGE (-100), not Z_EINVAL, and reports the cap through wz_capi_c_session_max_message_bytes; its ABI revision moves 5 to 6. CORRECTION to Round 3351: it says no Layer C1bn leg names the advanced and group role targets; C1bn's whole-crate wz-ap-demo leg does. NOT claimed: the hosted run of this push, or Layer M (needs zenohd and pico, absent on the build host).",
+      "changes_bullets": [
+        "crates/wz-session-core: AtomicTxSn and FrameTxConduits unmint; the size-cap and empty-budget refusals give the SN back.",
+        "crates/wz-runtime-tokio/tests: layer3_reassembly_tx gains the refused-publish SN case.",
+        "crates/wz-capi-c: limits.rs (the size door), WZ_CAPI_C_E_VALUE_TOO_LARGE for put, delete and the publisher; header, ABI pin, revision 6; the wire test.",
+        "scripts/run-ci.sh: C1l count guard 2 to 3; the scout role leg moves to the end of Layer M."
+      ],
+      "verification_bullets": [
+        "On a build host: fmt; clippy of wz-session-core (two feature sets), wz-runtime-tokio and wz-capi-c; layer3_reassembly_tx 3; session-core reassembly lib 37; the whole wz-capi-c crate including the wire test of a 4 B put, a refused value and a 5 B put (the value conduit's sequence numbers 63 then 64); layers C0 C0s C1bw C1bz C1ch C1l and guarded_count_gate, all rc 0.",
+        "The Layer M red was read from job 116769007068 of run 38837245359 before the fix.",
+        "NOT verified: Layer M after the move (it needs zenohd and the pico CLI, which the build host lacks); the hosted run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push, job by job, and Layer M first: it is the one lane the build host cannot run.",
+        "Tell zenoh-analyzer-25 the pin: the SN give-back, the -100 code and the size door."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3351 push was red in one job, Layer M: the new sessions scout role leg rebuilt the shared demo binary at its own features, so the zenohd legs after it ran a demo without zenoh-config; it now runs last in the layer. A consumer measured a put refused for size (over the 1 MiB reassembly slot) that used a reliable-channel sequence number: the next frame went out one ahead and zenoh-pico closed the session. The refusals before any byte leaves (the size cap, an empty fragment budget) now give the sequence number back (AtomicTxSn::unmint). wz-capi-c answers a message too large with WZ_CAPI_C_E_VALUE_TOO_LARGE (-100), not Z_EINVAL, and reports the cap through wz_capi_c_session_max_message_bytes; its ABI revision moves 5 to 6. CORRECTION to Round 3351: it says no Layer C1bn leg names the advanced and group role targets; C1bn's whole-crate wz-ap-demo leg does. NOT claimed: the hosted run of this push, or Layer M (needs zenohd and pico, absent on the build host).",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: AtomicTxSn and FrameTxConduits unmint; the size-cap and empty-budget refusals give the SN back.",
+        "crates/wz-runtime-tokio/tests: layer3_reassembly_tx gains the refused-publish SN case.",
+        "crates/wz-capi-c: limits.rs (the size door), WZ_CAPI_C_E_VALUE_TOO_LARGE for put, delete and the publisher; header, ABI pin, revision 6; the wire test.",
+        "scripts/run-ci.sh: C1l count guard 2 to 3; the scout role leg moves to the end of Layer M."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: fmt; clippy of wz-session-core (two feature sets), wz-runtime-tokio and wz-capi-c; layer3_reassembly_tx 3; session-core reassembly lib 37; the whole wz-capi-c crate including the wire test of a 4 B put, a refused value and a 5 B put (the value conduit's sequence numbers 63 then 64); layers C0 C0s C1bw C1bz C1ch C1l and guarded_count_gate, all rc 0.",
+        "The Layer M red was read from job 116769007068 of run 38837245359 before the fix.",
+        "NOT verified: Layer M after the move (it needs zenohd and the pico CLI, which the build host lacks); the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push, job by job, and Layer M first: it is the one lane the build host cannot run.",
+        "Tell zenoh-analyzer-25 the pin: the SN give-back, the -100 code and the size door."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
