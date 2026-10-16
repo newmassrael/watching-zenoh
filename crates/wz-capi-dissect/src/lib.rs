@@ -401,6 +401,11 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 42, for `wz_dissect_live_set_progress` and `WZ_DISSECT_ERR_CANCELLED`: a
     // callback the census and the field document ask how they are going, and that
     // can stop them.
+    // 43, for `wz_dissect_live_open_bounded`: a live handle whose two ceilings on
+    // decoded messages (per flow, and over every flow) the caller sets. The
+    // `caps` group of every document that carries `dropped_by_limits` gained
+    // `frames_total` on the same step, and each of those documents moved one
+    // revision.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -418,7 +423,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 42;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 43;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3144,6 +3149,71 @@ pub unsafe extern "C" fn wz_dissect_live_open(
         return WZ_DISSECT_ERR_INVALID_ARG;
     };
     let handle = Box::new(live::LiveDissection::new(preset));
+    // SAFETY: null-checked above.
+    unsafe { *out = Box::into_raw(handle) };
+    WZ_DISSECT_OK
+}
+
+/// (ABI 43) — open a live handle under the live-tap preset with the two ceilings
+/// on DECODED MESSAGES set by the caller: how many one flow keeps, and how many the
+/// handle keeps in all.
+///
+/// # Why the numbers cross as arguments when the preset does not
+///
+/// A preset is a closed enumeration so that no limits struct crosses the boundary
+/// and freezes today's axes into the ABI. These two are the exception because a
+/// caller can only choose them: how many rows a viewer's list holds is the
+/// viewer's, and a ceiling that is not the list's limit either trims rows the list
+/// still shows or holds rows the list has dropped.
+///
+/// # What each bounds, said exactly
+///
+/// `frames_per_flow` is the most decoded messages ONE flow keeps: a stream flow's
+/// messages, a datagram flow's cleartext, scouting and recovered RFC 9221
+/// messages together, and each recovered QUIC stream on its own. Memory is bounded
+/// by the number of flows (at most `max_flows_per_table` in each table) times it.
+///
+/// `frames_total` is the most decoded messages the handle keeps IN ALL: over every
+/// stream flow's messages and every datagram flow's cleartext, scouting and RFC 9221
+/// messages, the OLDEST in the capture going first whichever flow holds them. A
+/// recovered QUIC stream is not counted (its messages are offset in stream bytes,
+/// which has no order across streams) and the serial line is bounded by neither.
+/// With `frames_total` equal to a list's row limit the handle holds what the list
+/// holds, and the trim the list makes and the trim the handle makes take the same
+/// rows.
+///
+/// The two apply together and a message goes when either says so. `0` for either
+/// leaves the preset's own figure (10 000 per flow, 100 000 in all). Every other
+/// axis is the live-tap preset's. A value too large for the platform's `size_t` is
+/// [`WZ_DISSECT_ERR_INVALID_ARG`], never a quiet clamp.
+///
+/// # Safety
+/// `out` must be a writable pointer to a `*mut wz_dissect_live` and must not be
+/// null. On success it receives a handle to be released exactly once with
+/// [`wz_dissect_live_close`].
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_open_bounded(
+    frames_per_flow: u64,
+    frames_total: u64,
+    out: *mut *mut live::LiveDissection,
+) -> c_int {
+    if out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let mut limits = wz_capture::DissectionLimits::for_live_tap();
+    if frames_per_flow != 0 {
+        let Ok(n) = usize::try_from(frames_per_flow) else {
+            return WZ_DISSECT_ERR_INVALID_ARG;
+        };
+        limits.frames_per_flow = Some(n);
+    }
+    if frames_total != 0 {
+        let Ok(n) = usize::try_from(frames_total) else {
+            return WZ_DISSECT_ERR_INVALID_ARG;
+        };
+        limits.frames_total = Some(n);
+    }
+    let handle = Box::new(live::LiveDissection::new(limits));
     // SAFETY: null-checked above.
     unsafe { *out = Box::into_raw(handle) };
     WZ_DISSECT_OK
@@ -8290,7 +8360,10 @@ mod tests {
         // struct is new. The handle gains state of its own, the words it said.
         // 39, for `wz_dissect_live_followed`: one symbol, a `size_t` written
         // through a pointer the caller owns; no string, no struct, no state.
-        assert_eq!(wz_dissect_abi_version(), 42);
+        // 43, for `wz_dissect_live_open_bounded`: one symbol, two integers in and
+        // the handle written through a pointer the caller owns, released by
+        // `wz_dissect_live_close`; no string, no struct.
+        assert_eq!(wz_dissect_abi_version(), 43);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -13397,6 +13470,78 @@ mod tests {
         let clockless = live_retention(fed).expect("a fed handle");
         unsafe { wz_dissect_live_close(fed) };
         vec![clocked, clockless]
+    }
+
+    /// (ABI 43) THE BOUNDED OPEN SETS BOTH CEILINGS, REPORTS THEM, AND THEY BITE.
+    ///
+    /// `0` for either leaves the live-tap preset's figure (10 000 per flow, 100 000
+    /// in all). Chosen figures arrive in the `caps` group the retention document
+    /// carries, and a handle fed twelve packets over three flows under a per-flow
+    /// ceiling of 4 and a total of 5 holds five messages (the per-flow ceiling alone
+    /// would hold twelve: four on each flow is more than each flow has) and counts
+    /// the seven it took. A null `out` is refused.
+    #[test]
+    fn the_bounded_open_sets_both_ceilings_reports_them_and_they_bite() {
+        assert_eq!(
+            unsafe { wz_dissect_live_open_bounded(5, 8, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        let open = |per_flow: u64, total: u64| {
+            let mut handle: *mut live::LiveDissection = core::ptr::null_mut();
+            let rc = unsafe { wz_dissect_live_open_bounded(per_flow, total, &mut handle) };
+            assert_eq!(rc, WZ_DISSECT_OK, "open_bounded({per_flow}, {total})");
+            assert!(!handle.is_null(), "OK must come with a handle");
+            handle
+        };
+
+        let preset = open(0, 0);
+        let doc = live_retention(preset).expect("a fresh handle");
+        assert_eq!(
+            in_group(&doc, "frames_per_flow", "frames_per_flow"),
+            "10000",
+            "{doc}"
+        );
+        assert_eq!(
+            in_group(&doc, "frames_per_flow", "frames_total"),
+            "100000",
+            "{doc}"
+        );
+        unsafe { wz_dissect_live_close(preset) };
+
+        let handle = open(4, 5);
+        for i in 0..12u8 {
+            let at = (i % 3) * 2;
+            let packet = udp_packet(
+                [10, 0, 0, 1 + at],
+                7447,
+                [10, 0, 0, 2 + at],
+                7447,
+                &KEEPALIVE,
+            );
+            push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);
+        }
+        let doc = live_retention(handle).expect("a fed handle");
+        assert_eq!(
+            in_group(&doc, "frames_per_flow", "frames_per_flow"),
+            "4",
+            "{doc}"
+        );
+        assert_eq!(
+            in_group(&doc, "frames_per_flow", "frames_total"),
+            "5",
+            "{doc}"
+        );
+        assert_eq!(
+            in_group(&doc, "stream_flows", "frames"),
+            "5",
+            "held in all: {doc}"
+        );
+        assert_eq!(
+            in_group(&doc, "scout_askers", "frames"),
+            "7",
+            "taken: {doc}"
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     /// What a drain hands out is what the lists held all along, and the door

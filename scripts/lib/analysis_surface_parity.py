@@ -853,6 +853,20 @@ ONLY_CAPI = {
         "has no callback to register and no handle to hold one.",
         (),
     ),
+    # The two ceilings on decoded messages a caller chooses. Filed in the round
+    # that added the symbol.
+    "an OPEN handle whose ceilings on decoded messages the caller chooses": (
+        "wz_dissect_live_open_bounded",
+        "DELIBERATE, for the same reason the `wz_dissect_live_open` row above gives. "
+        "The door exists because a consumer that LINKS this library keeps a list "
+        "of a number of rows the person set, and the handle must hold what the list "
+        "holds: a ceiling that is not the list's limit trims rows the list still "
+        "shows or keeps rows it has dropped. The numbers are state of an open "
+        "handle chosen at the moment it opens. The command line reads a capture "
+        "once; its `--bounded` flag is the live-tap preset, and a figure per axis "
+        "has no list to follow.",
+        (),
+    ),
     # What an open handle holds now, beside its ceilings. Filed in the round
     # that added the symbol.
     "what an OPEN handle still HOLDS, beside its ceilings": (

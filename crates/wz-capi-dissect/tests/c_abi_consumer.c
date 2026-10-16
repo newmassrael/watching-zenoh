@@ -647,6 +647,39 @@ static int check_selection_since_door(void) {
     return 0;
 }
 
+/* (ABI 43) -- THE BOUNDED OPEN, driven from C: the two ceilings on decoded
+ * messages are the caller's. Twelve keepalives on ONE flow under a per-flow
+ * ceiling of 4 and a total of 5 leave four held (the per-flow ceiling is the
+ * stricter), eight taken, and the retention document names both figures; a null
+ * `out` is refused. */
+static int check_open_bounded_door(void) {
+    wz_dissect_live *h = NULL;
+    unsigned char frame[64];
+    size_t frame_len = udp_keepalive_frame(frame);
+    char *doc = NULL;
+    unsigned i;
+    int rc;
+
+    rc = wz_dissect_live_open_bounded(4, 5, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+
+    rc = wz_dissect_live_open_bounded(4, 5, &h);
+    CHECK(rc == WZ_DISSECT_OK && h != NULL, "open_bounded rc=%d", rc);
+    for (i = 0; i < 12; i++) {
+        rc = wz_dissect_live_push(h, 1, 1000000u + i, frame, frame_len);
+        CHECK(rc == WZ_DISSECT_OK, "bounded push %u rc=%d", i, rc);
+    }
+    rc = wz_dissect_live_retention(h, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL, "bounded retention rc=%d", rc);
+    CHECK(strstr(doc, "\"frames_per_flow\":4,\"frames_total\":5,") != NULL,
+          "both ceilings are named beside what is held: %s", doc);
+    CHECK(strstr(doc, "\"held\":{\"frames\":4,") != NULL,
+          "four messages are held under the per-flow ceiling: %s", doc);
+    wz_dissect_string_free(doc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 /* R2205 (open-debt item 560) -- THE BYTES UNDER THE DESCRIPTION, driven from C.
  *
  * Its own function and not another arm of check_live_door for the reason that
@@ -3843,6 +3876,11 @@ int main(void) {
 
     /* (ABI 38) -- and the verdict over the rows AFTER A CURSOR. */
     if (check_selection_since_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 43) -- and the open that takes the two message ceilings. */
+    if (check_open_bounded_door() != 0) {
         return 1;
     }
 

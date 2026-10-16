@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 42
+EXPECTED_VERSION = 43
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -394,6 +394,13 @@ EXPECTED_SYMBOLS = {
     # comes out, and a null pointer clears the hook. A stopped call answers
     # `WZ_DISSECT_ERR_CANCELLED` (-11) from the doors it covers.
     "wz_dissect_live_set_progress",
+    # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
+    # sets: how many one flow keeps, and how many the handle keeps in all. One
+    # symbol: two integers in and the handle through a pointer the CALLER owns,
+    # released by `wz_dissect_live_close` as every live handle is; `0` for either
+    # leaves the live-tap preset's figure. The `caps` group of every document that
+    # carries `dropped_by_limits` gained `frames_total` on the same step.
+    "wz_dissect_live_open_bounded",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

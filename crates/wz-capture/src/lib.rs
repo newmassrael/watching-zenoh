@@ -3524,6 +3524,156 @@ mod live_tap_tests {
         }
     }
 
+    /// One packet per step, cycling over a stream flow and two datagram flows, so
+    /// the packet index of a message is the step it was pushed at and the oldest
+    /// message in the capture is the one pushed first, whichever flow holds it.
+    fn push_cycle(d: &mut Dissection, steps: usize) {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet, udp_packet};
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        for i in 0..steps {
+            let packet = match i % 3 {
+                0 => tcp_packet(1000 + 3 * (i / 3) as u32, &framed_keepalive()),
+                1 => udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &keepalive),
+                _ => udp_packet([10, 0, 0, 3], 7447, [10, 0, 0, 4], 7447, &keepalive),
+            };
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, i, &packet);
+        }
+    }
+
+    /// The packet index each held datagram message of flow `flow` was pushed at.
+    fn datagram_packets(d: &Dissection, flow: usize) -> Vec<usize> {
+        d.datagram_flows()[flow]
+            .frames
+            .iter()
+            .map(|frame| frame.stream_offset)
+            .collect()
+    }
+
+    /// `frames_total` HOLDS THE NEWEST MESSAGES OF THE CAPTURE, whichever flow
+    /// holds them.
+    ///
+    /// Twelve packets over three flows with a ceiling of five: what is held is the
+    /// five pushed last, one stream message and two on each datagram flow, and the
+    /// seven taken are counted. The per-flow ceiling could not say this: it bounds
+    /// each flow by itself and holds the number of flows times its figure.
+    #[test]
+    fn a_total_ceiling_holds_the_newest_messages_of_the_capture_across_flows() {
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_total: Some(5),
+            ..DissectionLimits::default()
+        });
+        push_cycle(&mut d, 12);
+
+        assert_eq!(d.flows().len(), 1);
+        assert_eq!(d.datagram_flows().len(), 2);
+        // Steps 7..=11 are the newest five: 9 on the stream flow, 7 and 10 on the
+        // first datagram flow, 8 and 11 on the second.
+        assert_eq!(d.flows()[0].frames.len(), 1, "the stream flow's newest");
+        assert_eq!(datagram_packets(&d, 0), [7, 10]);
+        assert_eq!(datagram_packets(&d, 1), [8, 11]);
+        assert_eq!(
+            d.health().drops.frames,
+            12 - 5,
+            "every message taken is counted"
+        );
+    }
+
+    /// THE CONTROL: with no total ceiling the same twelve packets are all held, and
+    /// nothing is counted taken, so the test above measures the ceiling.
+    #[test]
+    fn without_a_total_ceiling_the_same_capture_is_held_whole() {
+        let mut d = Dissection::new();
+        push_cycle(&mut d, 12);
+        let held = d.flows()[0].frames.len()
+            + d.datagram_flows()
+                .iter()
+                .map(|f| f.frames.len())
+                .sum::<usize>();
+        assert_eq!(held, 12);
+        assert_eq!(d.health().drops.frames, 0);
+    }
+
+    /// THE TWO CEILINGS APPLY TOGETHER, and a message goes when either says so.
+    ///
+    /// A per-flow ceiling of 1 alone leaves three messages (one per flow); a total
+    /// of 2 alone leaves the newest two of the capture; together the stricter one
+    /// decides, and the tally counts what both took, once each.
+    #[test]
+    fn the_per_flow_and_the_total_ceiling_apply_together() {
+        let mut both = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(1),
+            frames_total: Some(2),
+            ..DissectionLimits::default()
+        });
+        push_cycle(&mut both, 12);
+        let held = both.flows()[0].frames.len()
+            + both
+                .datagram_flows()
+                .iter()
+                .map(|f| f.frames.len())
+                .sum::<usize>();
+        assert_eq!(held, 2);
+        // The newest two are steps 10 and 11, on the two datagram flows.
+        assert_eq!(datagram_packets(&both, 0), [10]);
+        assert_eq!(datagram_packets(&both, 1), [11]);
+        assert_eq!(both.health().drops.frames, 12 - 2);
+
+        let mut per_flow = Dissection::with_limits(DissectionLimits {
+            frames_per_flow: Some(1),
+            ..DissectionLimits::default()
+        });
+        push_cycle(&mut per_flow, 12);
+        let held = per_flow.flows()[0].frames.len()
+            + per_flow
+                .datagram_flows()
+                .iter()
+                .map(|f| f.frames.len())
+                .sum::<usize>();
+        assert_eq!(
+            held, 3,
+            "the per-flow ceiling alone holds one message per flow"
+        );
+    }
+
+    /// A SCOUTING MESSAGE IS COUNTED, and is taken in its place in the capture.
+    ///
+    /// The scouting list and the transport list of one flow share the packet
+    /// coordinate, so a ceiling of 3 over a group that scouts and carries traffic
+    /// keeps the three newest of the two lists together, and the scouting ones it
+    /// takes are counted as scouting.
+    #[test]
+    fn a_total_ceiling_counts_scouting_messages_and_takes_them_in_capture_order() {
+        use crate::datagram_tests::{scout_message, udp_packet, SCOUT_GROUP};
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_total: Some(3),
+            ..DissectionLimits::default()
+        });
+        let scout = scout_message();
+        let keepalive = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        // Steps 0..=5: scout, scout, keepalive, scout, keepalive, keepalive on one
+        // group; the newest three are steps 3 (scout), 4 and 5 (transport).
+        for (i, wire) in [&scout, &scout, &keepalive, &scout, &keepalive, &keepalive]
+            .into_iter()
+            .enumerate()
+        {
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                i,
+                &udp_packet([10, 0, 0, 9], 43210, SCOUT_GROUP, 7446, wire),
+            );
+        }
+        let flow = &d.datagram_flows()[0];
+        assert_eq!(
+            flow.scouting.len(),
+            1,
+            "one scout is among the newest three"
+        );
+        assert_eq!(flow.scouting[0].packet_index, 3);
+        assert_eq!(flow.frames.len(), 2);
+        assert_eq!(d.health().drops.scouting, 2, "the two oldest scouts");
+        assert_eq!(d.health().drops.frames, 1, "and the one transport message");
+    }
+
     /// R311y709 (G2) — AND IT REACHES A DISSECTION.
     ///
     /// The other half of "zero references": a preset nobody installs is not
@@ -3703,7 +3853,8 @@ fn least_recently_active<F>(
 /// [`SkippedPacket`] exists for one layer down.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DissectionDrops {
-    /// Decoded frames discarded to stay inside `frames_per_flow`.
+    /// Decoded frames discarded to stay inside `frames_per_flow` or
+    /// `frames_total`: what EITHER ceiling took, counted once each.
     pub frames: usize,
     /// Reassembled bytes discarded to stay inside
     /// `stream_bytes_per_direction`.
@@ -3715,7 +3866,7 @@ pub struct DissectionDrops {
     /// the one number over both. [`FlowsSeen`] has them apart.
     pub flows: usize,
     /// R311y651 (§4.4) — scouting datagrams discarded to stay inside
-    /// `frames_per_flow`.
+    /// `frames_per_flow` or `frames_total`.
     ///
     /// Its own field rather than folded into `frames`, for the reason
     /// [`DatagramDissection::scouting`] is its own list: a scouting message is
@@ -6584,7 +6735,7 @@ impl Dissection {
     ///
     /// Called AFTER the per-flow ceilings, at every place a message list can have
     /// grown, so a message goes when either ceiling says so. Every message taken is
-    /// accounted exactly as the per-flow ceiling accounts it ([`Discarded`] receipts
+    /// accounted exactly as the per-flow ceiling accounts it (the discard receipts
     /// into `dropped_frames`, [`DissectionDrops::frames`] and `scouting`): a bound
     /// that discards decoded messages and does not say so is the defect
     /// [`DissectionDrops`] exists to prevent.

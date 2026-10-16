@@ -1566,7 +1566,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 42
+#define WZ_DISSECT_ABI_REVISION 43
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -4687,6 +4687,58 @@ typedef struct wz_dissect_record {
  * @bound limits work-ceiling -- it bounds what the handle RETAINS between
  * packets, and wz_dissect_live_lost is what it discarded. */
 int wz_dissect_live_open(int limits, wz_dissect_live **out);
+
+/* (ABI 43) -- OPEN A LIVE HANDLE WITH THE TWO CEILINGS ON DECODED MESSAGES SET
+ * BY YOU: how many ONE flow keeps, and how many the handle keeps IN ALL.
+ *
+ * WHY THE NUMBERS ARE ARGUMENTS WHEN THE PRESET IS NOT. A preset is a closed
+ * enumeration so that no limits struct crosses this boundary and freezes today's
+ * axes into the ABI. These two are the exception because only the caller can
+ * choose them: how many rows a viewer's list holds is the viewer's, and a ceiling
+ * that is not the list's limit either trims rows the list still shows or holds
+ * rows the list has already dropped. With `frames_total` equal to the list's row
+ * limit the handle holds what the list holds, and the trim the list makes and the
+ * trim the handle makes take the same rows.
+ *
+ * WHAT EACH BOUNDS, EXACTLY.
+ *
+ *   frames_per_flow  The most decoded messages ONE flow keeps: a stream flow's
+ *                    messages; a datagram flow's cleartext, scouting and recovered
+ *                    RFC 9221 messages TOGETHER; and each recovered QUIC stream on
+ *                    its own. The memory it gives is a bound times the NUMBER OF
+ *                    FLOWS (at most 1,024 held in each of the two flow tables
+ *                    under this preset), so 16 flows at 10,000 hold 160,000.
+ *   frames_total     The most decoded messages the handle keeps IN ALL, over every
+ *                    stream flow's messages and every datagram flow's cleartext,
+ *                    scouting and RFC 9221 messages. The OLDEST in the capture go
+ *                    first, whichever flow holds them: "oldest" is the order a
+ *                    capture is read in (the packet a message resolves to, and
+ *                    within one packet the order of the flows). It is the bound
+ *                    the person who set a row limit meant.
+ *
+ * NOT COUNTED by frames_total: a recovered QUIC STREAM, whose messages are offset
+ * in stream bytes (a coordinate that means something else in each stream, so
+ * "oldest" has no answer across streams) and which stays bounded by
+ * frames_per_flow alone; and the serial line, which neither ceiling bounds.
+ *
+ * The two apply together and a message goes when EITHER says so. A message taken
+ * by either is counted in `dropped_by_limits.frames` (or `scouting`), and the
+ * document says which ceilings were in force under `dropped_by_limits.caps`
+ * (`frames_per_flow` and `frames_total`).
+ *
+ * `0` for either leaves the live-tap preset's own figure: 10,000 per flow and
+ * 100,000 in all. Every other axis is the live-tap preset's. A value too large
+ * for this platform's size_t is WZ_DISSECT_ERR_INVALID_ARG, never a quiet clamp,
+ * and a null `out` is the same error.
+ *
+ * WHAT IT COSTS. Once the ceiling is reached each message that arrives passes
+ * over the flow tables to find the oldest: proportional to the number of flows
+ * held, which the preset bounds.
+ *
+ * On WZ_DISSECT_OK, `*out` is a handle to be released exactly once with
+ * wz_dissect_live_close. */
+int wz_dissect_live_open_bounded(uint64_t frames_per_flow, uint64_t frames_total,
+                                 wz_dissect_live **out);
 
 /* Feed one captured packet. `link_type` is its pcap link type -- the same
  * numbering wz_dissect_readable_surfaces reports.
