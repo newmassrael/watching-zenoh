@@ -275002,6 +275002,44 @@
         "A hosted red the table did not require is repaired by a trigger in scripts/lib/verify_lanes.json, in the same commit."
       ]
     },
+    "Round 3354": {
+      "decision_summary": "CORRECTION to Round 3353: the receipt gate is gate 2c4 in the pre-push hook, not gate 2v; gate 2v was already the replay ABI gate and two gates printing [gate 2v] could not be told apart. Round 3353 also found that its own pushes never ran the new gate: git runs the hooks of core.hooksPath, which points at the main working tree's .githooks, a checkout older than the integration worktree, so a change to the hook is inert until that directory carries it. The integration worktree now has its own worktree-scoped core.hooksPath at its committed hooks, and the real hook was run against a range with no receipts and refused it with [gate 2c4]. The main working tree and the other worktrees still run the old hook, so a push from them is not graded by gate 2c4 until their hooks directory is updated. NOT claimed: the hosted run of this push.",
+      "changes_bullets": [
+        ".githooks/pre-push: the receipt gate is named 2c4 and prints [gate 2c4].",
+        "scripts/verify-once.sh, scripts/lib/verify_lanes.json, scripts/lib/verify_plan.py, scripts/run-ci.sh: comments name gate 2c4."
+      ],
+      "verification_bullets": [
+        "The real pre-push hook of the integration worktree was run with a push range that has no receipts and refused it: rc 1, [gate 2c4], the lanes listed.",
+        "Through verify-once on the build host: C0, C0s and the count-guard lane after the rename, rc 0.",
+        "NOT verified: the hosted run of this push; a push from the main working tree or another worktree, which still runs the older hook."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of the Round 3353 push (CI 38851529804), Layer M and the Windows C ABI job first.",
+        "Decide whether the main working tree's .githooks is brought up to date, so every push is graded by gate 2c4."
+      ],
+      "publishable_decision_summary": "CORRECTION to Round 3353: the receipt gate is gate 2c4 in the pre-push hook, not gate 2v; gate 2v was already the replay ABI gate and two gates printing [gate 2v] could not be told apart. Round 3353 also found that its own pushes never ran the new gate: git runs the hooks of core.hooksPath, which points at the main working tree's .githooks, a checkout older than the integration worktree, so a change to the hook is inert until that directory carries it. The integration worktree now has its own worktree-scoped core.hooksPath at its committed hooks, and the real hook was run against a range with no receipts and refused it with [gate 2c4]. The main working tree and the other worktrees still run the old hook, so a push from them is not graded by gate 2c4 until their hooks directory is updated. NOT claimed: the hosted run of this push.",
+      "publishable_changes_bullets": [
+        ".githooks/pre-push: the receipt gate is named 2c4 and prints [gate 2c4].",
+        "scripts/verify-once.sh, scripts/lib/verify_lanes.json, scripts/lib/verify_plan.py, scripts/run-ci.sh: comments name gate 2c4."
+      ],
+      "publishable_verification_bullets": [
+        "The real pre-push hook of the integration worktree was run with a push range that has no receipts and refused it: rc 1, [gate 2c4], the lanes listed.",
+        "Through verify-once on the build host: C0, C0s and the count-guard lane after the rename, rc 0.",
+        "NOT verified: the hosted run of this push; a push from the main working tree or another worktree, which still runs the older hook."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of the Round 3353 push (CI 38851529804), Layer M and the Windows C ABI job first.",
+        "Decide whether the main working tree's .githooks is brought up to date, so every push is graded by gate 2c4."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
