@@ -17245,14 +17245,6 @@ PY
     _runci_guarded_test "M router-hat answers a scout" 1 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_answers_a_scout -- --ignored || return 1
-    # The `scout` role of a `--sessions` driver: one process answers Scouts from a
-    # `scouting.multicast` block, a second asks from inside its own session and
-    # prints the Hello it hears. It needs the same multicast route as the leg above
-    # and nothing else, so it sits beside it. One target with one ignored test, the
-    # count pinned for the reason the leg above gives.
-    _runci_guarded_test "M sessions scout role" 1 \
-        cargo test -p wz-ap-demo --features scouting-active,scouting-responder \
-        --test sessions_driver_scout_binary -- --ignored || return 1
     # R2307 (open-debt item 515) — THE SAME CLAIM WITH A FOREIGN ADJUDICATOR.
     # The leg above proves the config spelling wz<->wz, and A4-3 refuses it a
     # cross-impl marker for exactly that; R2094's foreign leg proves the ARGV
@@ -17713,6 +17705,20 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # command PRINTED; the file's ninth test needs no delivery and runs everywhere.
     _runci_guarded_test "M a C ABI session scouts and is found" 8 \
         cargo test -p wz-capi-c --test scouting_open -- --ignored --test-threads=1 || return 1
+    # The `scout` role of a `--sessions` driver: one process answers Scouts from a
+    # `scouting.multicast` block, a second asks from inside its own session and
+    # prints the Hello it hears. It needs a multicast route and nothing else.
+    #
+    # LAST IN THE LAYER, and that is the point: this `cargo test` builds the demo
+    # binary at ITS OWN feature set (`scouting-active,scouting-responder`), which
+    # replaces `target/debug/wz-ap-demo` for every leg that reads the binary the
+    # demo build above made. Placed beside the router-hat leg it left the zenohd
+    # legs below it running a demo with no `zenoh-config` (`--config requires the
+    # zenoh-config feature`, exit 2), a red only a host with zenohd can show. One
+    # target with one ignored test, the count pinned as for the legs above.
+    _runci_guarded_test "M sessions scout role" 1 \
+        cargo test -p wz-ap-demo --features scouting-active,scouting-responder \
+        --test sessions_driver_scout_binary -- --ignored || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────
