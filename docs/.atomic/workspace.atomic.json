@@ -274958,6 +274958,50 @@
         "Tell zenoh-analyzer-25 the pin: the SN give-back, the -100 code and the size door."
       ]
     },
+    "Round 3353": {
+      "decision_summary": "Verification becomes a table and a receipt. scripts/lib/verify_lanes.json says which lane a changed file requires; verify_plan.py plans, records and checks; scripts/verify-once.sh runs only the lanes without a current receipt, in one build-host invocation; pre-push gate 2v refuses a push whose required lane has no passing receipt for the bytes that trigger it. A receipt binds to the trigger files' git blobs, so a ledger commit never invalidates one and unchanged bytes are never run twice. A lane the host cannot run (Layer M) is printed as deferred. The hosted Platform run of the Round 3352 push was red in one job, C ABI on Windows: the wz-capi-core open test saw 1 of 1200 dials accepted by another round's listener. Cause: the test-support port picker kept no process-wide record and its flock claim is unix-only, so two live rounds could draw one number; the pick now records it. NOT claimed: the hosted run of this push.",
+      "changes_bullets": [
+        "scripts/lib: verify_lanes.json (the table) and verify_plan.py (plan, script, record, check, selftest).",
+        "scripts/verify-once.sh: runs the lanes without a current receipt in one build-host invocation.",
+        ".githooks/pre-push: gate 2v; scripts/run-ci.sh: the planner selftest joins Layer C0.",
+        "crates/wz-runtime-tokio-test-support: the pick records the number it hands out, in one step with the check."
+      ],
+      "verification_bullets": [
+        "The planner selftest (15 cases) passes; the hook-structure gates (boundary, graded surface, default region, provenance) pass with gate 2v in the hook.",
+        "Through verify-once itself, on the build host: this change's lanes C0 C0s count-guard (first run), then C0 C0s C1bw C1bz count-guard and clippy and tests of wz-runtime-tokio-test-support after the port fix, all rc 0; a second run with nothing changed ran nothing; the check refused a range with no receipts and accepted this one.",
+        "The Platform red was read from job 116801267659 of run 38847507447 before the fix; it cannot be reproduced on Linux, where the flock claim hides it.",
+        "NOT verified: the hosted run of this push; Layer M after the Round 3352 move (still needs zenohd and pico)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push job by job: Layer M first, then the Windows C ABI job.",
+        "A hosted red the table did not require is repaired by a trigger in scripts/lib/verify_lanes.json, in the same commit."
+      ],
+      "publishable_decision_summary": "Verification becomes a table and a receipt. scripts/lib/verify_lanes.json says which lane a changed file requires; verify_plan.py plans, records and checks; scripts/verify-once.sh runs only the lanes without a current receipt, in one build-host invocation; pre-push gate 2v refuses a push whose required lane has no passing receipt for the bytes that trigger it. A receipt binds to the trigger files' git blobs, so a ledger commit never invalidates one and unchanged bytes are never run twice. A lane the host cannot run (Layer M) is printed as deferred. The hosted Platform run of the Round 3352 push was red in one job, C ABI on Windows: the wz-capi-core open test saw 1 of 1200 dials accepted by another round's listener. Cause: the test-support port picker kept no process-wide record and its flock claim is unix-only, so two live rounds could draw one number; the pick now records it. NOT claimed: the hosted run of this push.",
+      "publishable_changes_bullets": [
+        "scripts/lib: verify_lanes.json (the table) and verify_plan.py (plan, script, record, check, selftest).",
+        "scripts/verify-once.sh: runs the lanes without a current receipt in one build-host invocation.",
+        ".githooks/pre-push: gate 2v; scripts/run-ci.sh: the planner selftest joins Layer C0.",
+        "crates/wz-runtime-tokio-test-support: the pick records the number it hands out, in one step with the check."
+      ],
+      "publishable_verification_bullets": [
+        "The planner selftest (15 cases) passes; the hook-structure gates (boundary, graded surface, default region, provenance) pass with gate 2v in the hook.",
+        "Through verify-once itself, on the build host: this change's lanes C0 C0s count-guard (first run), then C0 C0s C1bw C1bz count-guard and clippy and tests of wz-runtime-tokio-test-support after the port fix, all rc 0; a second run with nothing changed ran nothing; the check refused a range with no receipts and accepted this one.",
+        "The Platform red was read from job 116801267659 of run 38847507447 before the fix; it cannot be reproduced on Linux, where the flock claim hides it.",
+        "NOT verified: the hosted run of this push; Layer M after the Round 3352 move (still needs zenohd and pico)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push job by job: Layer M first, then the Windows C ABI job.",
+        "A hosted red the table did not require is repaired by a trigger in scripts/lib/verify_lanes.json, in the same commit."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
