@@ -20,7 +20,7 @@ requires. Two callers read it, so they cannot disagree:
   scripts/verify-once.sh   `plan` and `script`: every lane the push requires and
                            has no current receipt for, as ONE remote script, run
                            in ONE build-host invocation; then `record`.
-  .githooks/pre-push       gate 2v, `check`: refuses a push whose required lane
+  .githooks/pre-push       gate 2c4, `check`: refuses a push whose required lane
                            has no passing receipt for the bytes that trigger it.
 
 A RECEIPT is bound to the trigger files and nothing else: its digest is the git

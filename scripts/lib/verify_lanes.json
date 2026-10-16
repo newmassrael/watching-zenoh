@@ -5,7 +5,7 @@
     "THE ONE PLACE that says which verification a changed file requires.",
     "A lane is required when a file the push changes matches one of its `triggers`.",
     "verify_plan.py reads this table for both halves: scripts/verify-once.sh runs the",
-    "stale lanes in ONE invocation, and the pre-push gate 2v refuses a push whose",
+    "stale lanes in ONE invocation, and the pre-push gate 2c4 refuses a push whose",
     "required lane has no passing receipt for the exact bytes that trigger it.",
     "A miss found on a hosted run belongs HERE: add the trigger that would have",
     "required the lane, in the same commit that repairs the miss."

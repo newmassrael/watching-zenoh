@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # R3353 (no register item) -- verify a change ONCE, on the build host, and leave
-# a receipt the pre-push gate 2v reads.
+# a receipt the pre-push gate 2c4 reads.
 #
 #   bash scripts/verify-once.sh            run every lane the push requires and has
 #                                          no current receipt for, in ONE invocation

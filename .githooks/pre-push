@@ -320,7 +320,7 @@ if [[ -n "$diff_base" ]]; then
     fi
 fi
 
-# ─── gate 2v — a passing receipt for every lane this push requires (R3353) ─
+# ─── gate 2c4 — a passing receipt for every lane this push requires (R3353) ─
 # grades: pushed-range
 # Gate 2c below reads the PREVIOUS push's hosted verdict, after the fact. This
 # reads the verification THIS push owes, before it: which lanes the changed files
@@ -337,7 +337,7 @@ fi
 if [[ -n "$diff_base" ]]; then
     if ! python3 scripts/lib/verify_plan.py check "$diff_base..$local_sha"; then
         echo "" >&2
-        echo "pre-push: [gate 2v] a lane this push requires has no passing receipt for the" >&2
+        echo "pre-push: [gate 2c4] a lane this push requires has no passing receipt for the" >&2
         echo "          bytes that trigger it. Run: bash scripts/verify-once.sh" >&2
         echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
         exit 1
