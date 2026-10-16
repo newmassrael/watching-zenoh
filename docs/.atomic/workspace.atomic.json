@@ -275124,6 +275124,46 @@
         "The main working tree hooks need the ff-only merge again only if .githooks changed; this push does not change it."
       ]
     },
+    "Round 3357": {
+      "decision_summary": "A live handle's held stream bytes grew while its held frames stayed at the ceiling. The message ceilings (frames_per_flow, frames_total) took decoded messages and left the reassembled stream under them, which only stream_bytes_per_direction bounds: 4 MiB per direction per flow, 64 MiB behind 16 flows against the 8 MiB the held messages need. A flow now gives back the stream bytes before its oldest held message whenever it takes messages, once they are at least 4 KiB and half of what is retained, so the cost stays amortised. Held messages still read their bytes; the release is not counted in dropped_by_limits.stream_bytes, since no held message can read those bytes and the messages were counted when they went. No document key moves, so no revision moves. The census refold after a front trim is unchanged on purpose. NOT claimed: the hosted result, or the consumer's measurement of the new bound.",
+      "changes_bullets": [
+        "wz-capture tcp: StreamAssembler::trim_before(offset), the trim asked by position.",
+        "wz-capture lib: FlowDissection::release_stream_behind_held_messages, called where frames_per_flow and frames_total take a stream message; STREAM_RELEASE_SLACK; limit docs.",
+        "wz-capture retention_json and wz_dissect.h: text on held.stream_bytes under a message ceiling."
+      ],
+      "verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bw, C1bz, count-guard, clippy and tests of wz-capture and wz-capi-dissect, all rc 0.",
+        "New tests: under either message ceiling the retained stream follows the held messages (under 16 KiB for 139500 bytes fed), the oldest and newest held messages read their bytes, and dropped_by_limits.stream_bytes stays 0; the control with no ceiling keeps the whole stream.",
+        "NOT verified: the hosted CI and Platform runs of this push, and the consumer's retention document under the new bound."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of this push job by job, then give the consumer the pin and ask for one 2000 pps run with the retention document at 0, 50 and 120 seconds.",
+        "Only the direction of the oldest held message is released; the other direction waits for its own message to reach the front or for the 4 MiB cap. If a consumer holds a flow with a quiet front direction and a busy back one, release both by scanning to each direction's first held message."
+      ],
+      "publishable_decision_summary": "A live handle's held stream bytes grew while its held frames stayed at the ceiling. The message ceilings (frames_per_flow, frames_total) took decoded messages and left the reassembled stream under them, which only stream_bytes_per_direction bounds: 4 MiB per direction per flow, 64 MiB behind 16 flows against the 8 MiB the held messages need. A flow now gives back the stream bytes before its oldest held message whenever it takes messages, once they are at least 4 KiB and half of what is retained, so the cost stays amortised. Held messages still read their bytes; the release is not counted in dropped_by_limits.stream_bytes, since no held message can read those bytes and the messages were counted when they went. No document key moves, so no revision moves. The census refold after a front trim is unchanged on purpose. NOT claimed: the hosted result, or the consumer's measurement of the new bound.",
+      "publishable_changes_bullets": [
+        "wz-capture tcp: StreamAssembler::trim_before(offset), the trim asked by position.",
+        "wz-capture lib: FlowDissection::release_stream_behind_held_messages, called where frames_per_flow and frames_total take a stream message; STREAM_RELEASE_SLACK; limit docs.",
+        "wz-capture retention_json and wz_dissect.h: text on held.stream_bytes under a message ceiling."
+      ],
+      "publishable_verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bw, C1bz, count-guard, clippy and tests of wz-capture and wz-capi-dissect, all rc 0.",
+        "New tests: under either message ceiling the retained stream follows the held messages (under 16 KiB for 139500 bytes fed), the oldest and newest held messages read their bytes, and dropped_by_limits.stream_bytes stays 0; the control with no ceiling keeps the whole stream.",
+        "NOT verified: the hosted CI and Platform runs of this push, and the consumer's retention document under the new bound."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of this push job by job, then give the consumer the pin and ask for one 2000 pps run with the retention document at 0, 50 and 120 seconds.",
+        "Only the direction of the oldest held message is released; the other direction waits for its own message to reach the front or for the 4 MiB cap. If a consumer holds a flow with a quiet front direction and a busy back one, release both by scanning to each direction's first held message."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
