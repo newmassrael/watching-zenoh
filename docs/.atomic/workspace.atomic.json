@@ -275200,6 +275200,40 @@
         "If a direction with no held message in the first 64 still outgrows its frames, expose per-direction retained bytes in the retention document (a revision move)."
       ]
     },
+    "Round 3359": {
+      "decision_summary": "Hosted Layer U went red on the push of Round 3358: upstream FreeRTOS-Kernel published V11.3.2 after the pin V11.3.1, and the gate's table recorded the row at distance 0 while the gate measured 1. This is the observation half of open-debt item 711 and not the bump: the row in PINNED moves to what the gate measures, the grade the gate prints for it is patch, and a patch opens no bump round because BUMP_GRADE opens at minor. The pin is unchanged. No wz code is involved; the red was not caused by the stream-byte change it was found beside. NOT claimed: the hosted result of this push, or a bump of the FreeRTOS-Kernel pin, which stays a round of its own and which the owner's track-every-release policy still owes at some point.",
+      "changes_bullets": [
+        "scripts/lib/upstream_release_distance.py: PINNED row FreeRTOS-Kernel 0 -> 1, with the clause saying why."
+      ],
+      "verification_bullets": [
+        "Layer U run locally against the live releases API: pass, with the grade for the FreeRTOS-Kernel row printed as patch and no bump round owed. verify-once on the build host: C0 and C0s, rc 0.",
+        "NOT verified: the hosted CI run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI run of this push job by job; the validate job is the one that carried Layer U.",
+        "Item 711 stays open for the FreeRTOS-Kernel pin bump to V11.3.2."
+      ],
+      "publishable_decision_summary": "Hosted Layer U went red on the push of Round 3358: upstream FreeRTOS-Kernel published V11.3.2 after the pin V11.3.1, and the gate's table recorded the row at distance 0 while the gate measured 1. This is the observation half of open-debt item 711 and not the bump: the row in PINNED moves to what the gate measures, the grade the gate prints for it is patch, and a patch opens no bump round because BUMP_GRADE opens at minor. The pin is unchanged. No wz code is involved; the red was not caused by the stream-byte change it was found beside. NOT claimed: the hosted result of this push, or a bump of the FreeRTOS-Kernel pin, which stays a round of its own and which the owner's track-every-release policy still owes at some point.",
+      "publishable_changes_bullets": [
+        "scripts/lib/upstream_release_distance.py: PINNED row FreeRTOS-Kernel 0 -> 1, with the clause saying why."
+      ],
+      "publishable_verification_bullets": [
+        "Layer U run locally against the live releases API: pass, with the grade for the FreeRTOS-Kernel row printed as patch and no bump round owed. verify-once on the build host: C0 and C0s, rc 0.",
+        "NOT verified: the hosted CI run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI run of this push job by job; the validate job is the one that carried Layer U.",
+        "Item 711 stays open for the FreeRTOS-Kernel pin bump to V11.3.2."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
