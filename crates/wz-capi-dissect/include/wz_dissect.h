@@ -1153,7 +1153,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":20,
+ *     {"document":{"name":"census","revision":21,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1199,11 +1199,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":38,"key":"kind","values":[...],
+ *     {"name":"fields","revision":39,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":20,"key":"mode","values":[...],
+ *     {"name":"census","revision":21,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1752,7 +1752,17 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
  * that ceiling with `frames` and is counted apart from it, so a discovery
  * flow the bound trimmed no longer reads as a flow that lost nothing. It
  * arrived at census revision 12, field-document revision 11 and summary
- * revision 4 -- every document that embeds this group. */
+ * revision 4 -- every document that embeds this group.
+ *
+ * And `caps` names `frames_total`, the ceiling over every flow: the number
+ * of decoded messages kept in all, or `null` for none. It is written always,
+ * beside `frames_per_flow`, so a bounded run and an unbounded one differ by
+ * a value and never by a missing key. `dropped_by_limits.frames` counts what
+ * EITHER the per-flow or the total ceiling took, so read it against both. It
+ * arrived at census revision 21, field-document revision 39, summary
+ * revision 7, health revision 4, retention revision 4, selection revision 5,
+ * selection_since revision 3 and session_table revision 2 -- every document
+ * that embeds this group. */
 int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
                                     char **out);
 
@@ -1998,7 +2008,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":1},"ok":true,
+ *     {"document":{"name":"session_table","revision":2},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
@@ -4409,7 +4419,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":38,"key":"state",
+ *     "value_families":[{"name":"fields","revision":39,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -5621,7 +5631,7 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * had issued) and, from revision 2, whether this call CONTINUED the selector's
  * memory (true) or BEGAN it (false); see WHAT THE HANDLE REMEMBERS.
  *
- *     {"document":{"name":"selection_since","revision":2},
+ *     {"document":{"name":"selection_since","revision":3},
  *      "window":{"after_seq":7,"through_seq":9,"continued":true},
  *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
  *               "selected":"undecided"}, ...],

@@ -582,7 +582,7 @@ static int check_selection_since_door(void) {
     /* From zero: every row, numbered, with the window to ask next. */
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, &doc);
     CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since from 0 rc=%d", rc);
-    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":2") !=
+    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":3") !=
               NULL,
           "the since document must open with its name and revision: %s", doc);
     CHECK(strstr(doc, "\"continued\":false") != NULL,
@@ -2201,7 +2201,7 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":1},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":2},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
@@ -3190,8 +3190,10 @@ int main(void) {
      * a prefix that names one node now selects that node's records.
      * 20: the node plane gains `ends[]`, the end of a discovery flow a node
      * sent from. Three keys (`ends`, `node`, `sender_end`) and one passenger family;
-     * no value moves under an old key. */
-    revisioned[0].revision = 20;
+     * no value moves under an old key.
+     * 21: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
+     * flow. A key arrives; nothing retires. */
+    revisioned[0].revision = 21;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -3212,8 +3214,10 @@ int main(void) {
      * 6: the transport checksum gained a fourth state, `partial`: the key
      * `transport_checksum_partial` arrives under `health.streams`, and
      * `transport_checksum_invalid` stops counting a segment the sender's
-     * transmit offload left unfinished. */
-    revisioned[1].revision = 6;
+     * transmit offload left unfinished.
+     * 7: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
+     * flow. A key arrives; nothing retires. */
+    revisioned[1].revision = 7;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -3374,8 +3378,10 @@ int main(void) {
      * `request_kind` family is declared; nothing retires.
      * 38: `chain.chain_id` of a trimmed list is counted from the first message the
      * list EVER held, so a front trim renumbers nothing. A value moves; no key
-     * arrives and nothing retires. */
-    revisioned[2].revision = 38;
+     * arrives and nothing retires.
+     * 39: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
+     * flow. A key arrives; nothing retires. */
+    revisioned[2].revision = 39;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -3399,8 +3405,10 @@ int main(void) {
     /* 2: the retention counters follow the integer line (see the census).
      * 3: `oldest_ts_ns` keeps every nanosecond the capture recorded and is
      * the instant of the packet that carried the oldest message's first
-     * byte; a precision and a value move under a stationary key. */
-    revisioned[4].revision = 3;
+     * byte; a precision and a value move under a stationary key.
+     * 4: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
+     * flow. A key arrives; nothing retires. */
+    revisioned[4].revision = 4;
     revisioned[4].doc = NULL;
     {
         wz_dissect_live *retained = NULL;
@@ -3414,8 +3422,9 @@ int main(void) {
      * reason: an empty handle still answers. */
     revisioned[5].name = "health";
     /* 2 when it gained `datagram_sequence`; 3 on the summary's move to 6, the
-     * same `health` object. */
-    revisioned[5].revision = 3;
+     * same `health` object; 4 on the summary's move to 7, `caps` gaining
+     * `frames_total`. */
+    revisioned[5].revision = 4;
     revisioned[5].doc = NULL;
     {
         wz_dissect_live *healthy = NULL;
@@ -3508,9 +3517,11 @@ int main(void) {
     /* (ABI 33) -- the session table. 1: the first revision a consumer could
      * read. Built from a container that is not a capture, which is the cheapest
      * way to hold the document's opening to the revision this consumer was
-     * written against: a refusal is the same document, under the same envelope. */
+     * written against: a refusal is the same document, under the same envelope.
+     * 2: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
+     * flow. A key arrives; nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 1;
+    revisioned[12].revision = 2;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
@@ -3566,13 +3577,15 @@ int main(void) {
         rc = wz_dissect_proto_messages(&one, 1, &revisioned[17].doc);
     }
     CHECK(rc == WZ_DISSECT_OK, "proto_message_list document rc=%d", rc);
-    /* (ABI 38) -- the since document, at 2: an empty handle still answers, the
+    /* (ABI 38) -- the since document, at 3: an empty handle still answers, the
      * cheapest way to hold the document's opening to the revision this
      * consumer was written against.
      * 2: its `window` gains `continued`, whether the call found the selector's
-     * memory or began it. A key arrives; nothing retires. */
+     * memory or began it. A key arrives; nothing retires.
+     * 3: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
+     * flow. A key arrives; nothing retires. */
     revisioned[18].name = "selection_since";
-    revisioned[18].revision = 2;
+    revisioned[18].revision = 3;
     revisioned[18].doc = NULL;
     {
         wz_dissect_live *quiet = NULL;

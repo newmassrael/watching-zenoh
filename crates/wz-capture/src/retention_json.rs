@@ -278,7 +278,7 @@ mod tests {
         let doc = retention_json(&Dissection::new());
         assert_eq!(
             doc,
-            "{\"document\":{\"name\":\"retention\",\"revision\":3},\
+            "{\"document\":{\"name\":\"retention\",\"revision\":4},\
              \"held\":{\"frames\":0,\"scouting\":0,\"serial_frames\":0,\"skipped\":0,\
              \"stream_bytes\":0,\"stream_flows\":0,\"datagram_flows\":0,\
              \"fullest_window\":{\"messages\":0,\"stream_bytes\":0},\"oldest_ts_ns\":null},\
@@ -553,7 +553,7 @@ mod tests {
             doc.contains("\"oldest_ts_ns\":\"1700000000000000000\"}"),
             "a real-clock instant is the digits in a string: {doc}"
         );
-        assert!(doc.contains("\"revision\":3"), "{doc}");
+        assert!(doc.contains("\"revision\":4"), "{doc}");
 
         // The last millisecond that stays a number: 9_007_199_254 ms is 9.007e15 ns
         // and under the line; one more is over it.

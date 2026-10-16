@@ -1865,7 +1865,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
         "the example's numbers"
     );
     let doc = session_table_json(&packets.dissect());
-    let want = "{\"document\":{\"name\":\"session_table\",\"revision\":1},\"ok\":true,\
+    let want = "{\"document\":{\"name\":\"session_table\",\"revision\":2},\"ok\":true,\
                 \"sessions\":[{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
                 \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
                 \"first_seen_ts_ns\":\"1700000000000000000\",\
