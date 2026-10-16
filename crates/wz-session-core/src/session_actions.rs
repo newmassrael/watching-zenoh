@@ -944,6 +944,23 @@ impl AtomicTxSn {
         slot.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Give back the SN the LAST mint on `reliable`'s channel handed out, for a
+    /// send that was refused before any byte of it left: the channel's next
+    /// frame then carries that SN again, and the peer sees no gap.
+    ///
+    /// Only correct for the caller that minted it and still holds the conduit's
+    /// TX lock, so no other mint can have followed; every mint site does, and
+    /// this is called nowhere else. Upstream does the same when a message gives
+    /// up before its first fragment: it restores the SN and writes nothing.
+    pub fn unmint(&self, reliable: bool) {
+        let slot = if reliable {
+            &self.reliable
+        } else {
+            &self.best_effort
+        };
+        slot.fetch_sub(1, Ordering::SeqCst);
+    }
+
     /// Re-seed BOTH channels to `initial_sn` on reopen (the fresh-rebuild
     /// path). SeqCst pairs with `mint` / `reserve_next` so the store cannot
     /// reorder against a straggling in-flight mint.
@@ -1008,6 +1025,12 @@ impl FrameTxConduits {
     /// Reserve one follow-on SN on `(priority, reliable)` — the fragment walk.
     pub fn reserve_next(&self, priority: Priority, reliable: bool) {
         self.select(priority).reserve_next(reliable);
+    }
+
+    /// Give back the SN the last mint on `(priority, reliable)` handed out, for a
+    /// send refused before any byte of it left — see [`AtomicTxSn::unmint`].
+    pub fn unmint(&self, priority: Priority, reliable: bool) {
+        self.select(priority).unmint(reliable);
     }
 
     /// Re-seed EVERY conduit to `initial_sn` on reopen.
@@ -9035,19 +9058,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `send_wire`, so NO wire bytes leave and the chain reserves
         // none of the `count - 1` follow-on SNs.
         //
-        // One SN is still spent: both callers mint `sn` before they
-        // can know the encoded length (the batching arm frames into
-        // `batch.buf`, the immediate arm into `encode_frame_envelope`),
-        // so a refused send leaves a 1-SN gap in this conduit's ring.
-        // That is the same 1-SN gap the pre-R311y206 fragment path put
-        // on the wire routinely, which the note below records as
-        // tolerated by the peer's half-window SN check — and here it
-        // costs one SN on a path the caller is told failed, instead of
-        // a message the caller was told succeeded. Closing the gap
-        // means minting lazily after the encode, which is a bigger
-        // change to the one-lock mint-through-emit discipline than
-        // this error path earns.
+        // The caller minted `sn` before it could know the encoded length,
+        // and gives it back here: the conduit's lock has been held since
+        // that mint, so it is still the last one, and the next frame on
+        // the channel must carry it again. Left spent it is a 1-SN hole
+        // in the reliable ring, which the half-window check of a peer
+        // that does not tolerate it (zenoh-pico: the session closes at
+        // the next frame) turns into a lost session, while the caller
+        // was told only that this one message failed.
         if body_len > max_reassembly_bytes {
+            self.outbound_frame_sn.unmint(priority, reliable);
             return Err(SendWireError::ExceedsReassemblyCap);
         }
         // R311y215 — a QoS chain carries an ext_qos on every fragment, so
@@ -9128,13 +9148,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // for THIS message: there is no chain for a peer to
                     // be holding, so no marker is due. Upstream's
                     // equivalent arm restores the SN and writes nothing
-                    // (`common/pipeline.rs`, `ext_first.is_some()`).
-                    //
-                    // wz cannot restore it: `sn` was minted by the
-                    // caller before the encoded length was knowable, so
-                    // a refused send leaves the same 1-SN gap
-                    // `ExceedsReassemblyCap` above leaves, for the same
-                    // reason and with the same tolerance.
+                    // (`common/pipeline.rs`, `ext_first.is_some()`), and
+                    // so does this: `sn` is the last mint under the
+                    // conduit's lock, as for `ExceedsReassemblyCap` above.
+                    self.outbound_frame_sn.unmint(priority, reliable);
                     return Err(SendWireError::FragmentTxBudgetExhausted);
                 }
                 // Fragments are already on the wire and the peer is

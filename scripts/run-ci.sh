@@ -10755,7 +10755,9 @@ layer_c1l_reassembly() {
     # R2238 (open-debt item 580) — 1 -> 2: the finite-fragment-budget abandon
     # e2e joined this file. MEASURED under THIS feature set (which is not the
     # one Layer Z builds the same file with): `running 2 tests`.
-    _runci_guarded_test C1l 2 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
+    # 2 -> 3: a publish refused before it left gives its sequence number back (a
+    # device closed the session at the hole the refusal left).
+    _runci_guarded_test C1l 3 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
         || return 1
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_rx --quiet \
         || return 1

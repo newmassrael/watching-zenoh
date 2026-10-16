@@ -49,6 +49,7 @@ use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::locator::parse_any_locator;
+use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
@@ -519,5 +520,116 @@ async fn an_exhausted_fragment_budget_abandons_the_chain_and_says_so_on_the_wire
         "arm C's budget ({MID_CHAIN_BUDGET}) must stop the chain ({b} fragments) \
          PART-WAY — a budget at or past the chain length would exhaust after the \
          last fragment, where there is nothing left to abandon"
+    );
+}
+
+/// A publish refused before any byte of it left gives its sequence number back.
+///
+/// MEASURED on a device: a value past the session's size limit was refused
+/// (`ExceedsCapacity`, nothing sent), and the very next value's frame went out one
+/// sequence number ahead of the last frame the device had seen. zenoh-pico closes
+/// the session at a hole in its reliable channel, so a refusal the caller was told
+/// about cost it the session, and the next value was reported sent.
+///
+/// The gate reads the reliable channel's counter, through the same mint every
+/// frame draws from: the SN the channel hands out after a refusal is the SN right
+/// after the one it handed out before it. Two refusals are driven, because they
+/// leave through two arms of the chain (the size limit, and an empty fragment
+/// budget), and a control shows the counter is not simply insensitive: a chain
+/// that WAS sent moves it by its fragments.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_publish_refused_before_it_left_gives_its_sequence_number_back() {
+    let payload: Vec<u8> = (0..200u32).map(|i| (i * 13) as u8).collect();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let acc_open = async {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        params.batch_size = BATCH_SIZE;
+        accept_and_open_session(
+            DialedLink::Tcp(stream),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        params.batch_size = BATCH_SIZE;
+        connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established")
+    };
+    let (_opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+    assert_eq!(
+        opened_init.actions.negotiated_batch_mtu(),
+        BATCH_SIZE as usize,
+        "the 200-byte put must need a chain, or neither refusal is reachable"
+    );
+
+    let actions = opened_init.actions.clone();
+    let publisher = TokioSession::new(
+        opened_init.actions.clone(),
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(opened_init.clock),
+    );
+    // `put()` is reliable, so it draws from the channel this reads. The mask is
+    // the whole word: the counter is read as it is, with no ring to wrap past.
+    let next = || actions.next_outbound_frame_sn(Priority::DEFAULT, true, u64::MAX);
+
+    // The size limit: a message past it is refused with nothing sent.
+    actions.set_max_reassembly_bytes(100);
+    let before = next();
+    let refused = publisher.publish(KEYEXPR, &payload, PublishOptions::put());
+    assert!(
+        matches!(refused, Err(PublishError::ExceedsCapacity)),
+        "a message past the limit is refused as ExceedsCapacity; got {refused:?}"
+    );
+    assert_eq!(
+        next(),
+        before + 1,
+        "the refusal used a sequence number: the next frame on the reliable channel \
+         would leave a hole its peer closes the session at"
+    );
+
+    // An empty fragment budget: refused before the first fragment, nothing sent.
+    actions.set_max_reassembly_bytes(usize::MAX);
+    actions.set_fragment_tx_budget(0);
+    let before = next();
+    let abandoned = publisher.publish(KEYEXPR, &payload, PublishOptions::put());
+    assert!(
+        matches!(abandoned, Err(PublishError::FragmentChainAbandoned)),
+        "a publish with no fragment credit is refused; got {abandoned:?}"
+    );
+    assert_eq!(
+        next(),
+        before + 1,
+        "the refusal for an empty budget used a sequence number"
+    );
+
+    // The control: a chain that is sent moves the counter by its fragments, so the
+    // two equalities above are not a counter that nothing moves.
+    actions.set_fragment_tx_budget(usize::MAX);
+    let before = next();
+    publisher
+        .publish(KEYEXPR, &payload, PublishOptions::put())
+        .expect("with room and credit the same publish is sent");
+    assert!(
+        next() > before + 2,
+        "a sent chain of several fragments must advance the counter by more than one"
     );
 }
