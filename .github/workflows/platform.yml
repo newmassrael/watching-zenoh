@@ -27,7 +27,10 @@
 # is the intended coupling: a host that does not run wz is a red, not a note.
 #
 # Triggers. A push to main that touches what the leg builds or the gate that
-# declares it, and a manual dispatch for a narrowed or repeated run.
+# declares it, and a manual dispatch for a narrowed or repeated run. "What the
+# leg builds" is the dependency closure of its crates, not only the crates it is
+# about: `scripts/lib/platform_trigger_paths_gate.py` derives that closure and
+# fails when a crate in it has no path here.
 
 name: Platform
 
@@ -47,6 +50,23 @@ on:
       - "crates/wz-capi-c/**"
       - "crates/zenoh-pico-sys/**"
       - "crates/wz-host-interop-tests/**"
+      - "crates/wz/**"
+      - "crates/wz-capi-dissect/**"
+      - "crates/wz-capture/**"
+      - "crates/wz-cdylib-build/**"
+      - "crates/wz-codecs/**"
+      - "crates/wz-codecs-test-support/**"
+      - "crates/wz-codegen-build/**"
+      - "crates/wz-packet-fixtures/**"
+      - "crates/wz-rest/**"
+      - "crates/wz-routing-graph/**"
+      - "crates/wz-runtime-core/**"
+      - "crates/wz-runtime-tokio-test-support/**"
+      - "crates/wz-session-core-test-support/**"
+      - "crates/wz-session-wire-fixtures/**"
+      - "crates/wz-statechart-bridge/**"
+      - "crates/wz-switchboard-schema/**"
+      - "vendor/sce"
       - "crates/Cargo.toml"
       - "crates/Cargo.lock"
       - "rust-toolchain.toml"

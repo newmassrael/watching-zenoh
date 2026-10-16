@@ -14,7 +14,7 @@
     {
       "id": "C0",
       "layer": "C0",
-      "triggers": ["crates/**/*.rs", "crates/**/Cargo.toml", "scripts/**", ".githooks/**"],
+      "triggers": ["crates/**/*.rs", "crates/**/Cargo.toml", "scripts/**", ".githooks/**", ".github/workflows/platform.yml"],
       "why": "the static gates read every source and script: citations, doc form, header, door pins"
     },
     {

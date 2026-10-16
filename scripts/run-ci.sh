@@ -3773,6 +3773,13 @@ layer_c0_test_discipline() {
     # job, which is the only place those hosts exist.
     python3 scripts/lib/platform_surface_matrix.py --selftest || return 1
     python3 scripts/lib/platform_surface_matrix.py --check || return 1
+    # R3355 — the Platform workflow starts only for a push under its `paths:`
+    # list, and the list named the crates the lane is ABOUT, not the crates it
+    # BUILDS: a repair to the port picker its Windows test depends on never
+    # started the lane that could have graded it. The closure is derived from
+    # `cargo tree`, so a crate added under a lane crate is found by that commit.
+    python3 scripts/lib/platform_trigger_paths_gate.py --selftest || return 1
+    python3 scripts/lib/platform_trigger_paths_gate.py --check || return 1
     # R2991 — a field of a pico options struct that NO function reads. The pico
     # ABI mirrors zenoh-pico's options field for field, and mirroring the layout
     # is not reading the fields: a program's request that nothing reads links,
