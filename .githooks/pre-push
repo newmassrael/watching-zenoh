@@ -926,6 +926,10 @@ round_fed_gates=(
     # link module gates in wz-runtime-tokio's lib.rs. MEASURED: 2.3s, a text read
     # plus one `cargo metadata --no-deps`, no build.
     "platform_surface_matrix.py --check"
+    # R3355 -- every crate the Platform lane builds has a `paths:` entry in its
+    # workflow. Round-fed by the workflow file and the crate manifests. MEASURED:
+    # 2.3s warm, one `cargo metadata --no-deps` and one `cargo tree` per lane crate.
+    "platform_trigger_paths_gate.py --check"
     # R2991 -- a field of a pico options struct that no function reads. Round-fed
     # by what it reads: the pico ABI crate's own source. A text parse, no build.
     "pico_option_field_reader_gate.py --check"
