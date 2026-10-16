@@ -2441,6 +2441,11 @@ layer_c0_test_discipline() {
     # The table in this gate is what keeps the cheap ones above it.
     python3 scripts/lib/hook_default_region_gate.py --selftest || return 1
     python3 scripts/lib/hook_default_region_gate.py || return 1
+    # R3353 — verification as a table and a receipt: which lane a changed file
+    # requires (`verify_lanes.json`), the receipt `scripts/verify-once.sh` writes and
+    # pre-push gate 2v reads. The selftest builds a throwaway repository and drives
+    # the plan, the receipts and the check through their states.
+    python3 scripts/lib/verify_plan.py --selftest >/dev/null || return 1
     # R3190 (open-debt item 791) — pre-push gate 0b2: a commit that adds a
     # home-path line and a later commit that removes it leave the tip clean
     # (gate 0b reads the checkout) while the blob is published. The selftest

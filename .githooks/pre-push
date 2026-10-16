@@ -320,6 +320,30 @@ if [[ -n "$diff_base" ]]; then
     fi
 fi
 
+# ─── gate 2v — a passing receipt for every lane this push requires (R3353) ─
+# grades: pushed-range
+# Gate 2c below reads the PREVIOUS push's hosted verdict, after the fact. This
+# reads the verification THIS push owes, before it: which lanes the changed files
+# require is `scripts/lib/verify_lanes.json`, and the receipt for a lane is a
+# file `scripts/verify-once.sh` wrote when the lane passed on the build host,
+# bound to the git blobs of the files that trigger it. Measured before this gate
+# existed: a push went out with the ABI pin, a count guard and the static gates
+# never run, and each was found by a hosted red; the same wave ran the build host
+# nine times for one batch. A ledger or ack commit changes no trigger, so it never
+# invalidates a receipt; a lane the build host cannot run (Layer M) is printed as
+# deferred and does not block. Reads two git objects per file and a few small
+# files: well under a second. There is no waiver: run `scripts/verify-once.sh`,
+# which runs only what is missing, or edit the table where the diff shows it.
+if [[ -n "$diff_base" ]]; then
+    if ! python3 scripts/lib/verify_plan.py check "$diff_base..$local_sha"; then
+        echo "" >&2
+        echo "pre-push: [gate 2v] a lane this push requires has no passing receipt for the" >&2
+        echo "          bytes that trigger it. Run: bash scripts/verify-once.sh" >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+    fi
+fi
+
 # ─── gate 2c — the PREVIOUS push's hosted verdict (R311y765) ────────
 # grades: not-a-file
 # Gate 2b above mechanises ONE lane. This is the lane-agnostic half, and it is
