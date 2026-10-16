@@ -274876,6 +274876,46 @@
         "Tell zenoh-analyzer-25 the shapes and the pin: unstated drops, the sessions scouting key, the client config route."
       ]
     },
+    "Round 3351": {
+      "decision_summary": "The hosted run of the Round 3350 push was green in every job. All 17 roles of a --sessions driver are now played: liveliness_token, liveliness_subscribe and liveliness_get; query (a declared querier), pull (a buffered subscriber drained every period) and forward; scout (every Hello of a window, behind scouting-active); advanced_publish and advanced_subscribe (behind advanced); group_member and group_view (behind group). A driver role is a RoleDef, a key table with kinds, the feature it needs and a function, one file each under roles/, so the key rules and refusal sentences are written once and a build without a role's feature refuses it by key path. A session now sweeps timed-out questions, which only the one-shot run modes did: a get to a suspended peer ends with the timeout error reply and a final. The roles were written by five agents that a guard hook (C4) kept from building, testing or pushing; the branches were merged and verified once. NOT claimed: the hosted run of this push.",
+      "changes_bullets": [
+        "crates/wz-ap-demo: sessions_driver is a module; roles/ holds one file per role (17); sessions_run sweeps timed-out questions.",
+        "crates/wz-ap-demo/tests: liveliness, query, advanced, group and scout role targets; the sessions driver target gains the silent-peer case.",
+        "scripts/run-ci.sh: count guards for the new targets (3, 3, 2, 2, 1) and the sessions driver target 3 to 4."
+      ],
+      "verification_bullets": [
+        "On a build host: fmt; clippy of wz-ap-demo in seven feature sets; bin tests 83 (default) and 92 (all driver features); the Layer M scout test and the scout role test; layers C0 C0s C1bw C1bz C1cn; then, after one test fix, C1ay C1bn, the sessions driver target 4 and guarded_count_gate over the range, all rc 0.",
+        "Earlier passes found a dead-code error, a citation made ambiguous by a second put.rs, a doc line, and two faults of the new silent-peer test; each was repaired and re-run.",
+        "NOT verified: the hosted run of this push. The advanced and group role targets run in C1ay only; no leg of Layer C1bn names them."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted result of this push, job by job; a red is its own round.",
+        "Tell zenoh-analyzer-25 that all 17 driver roles are played, with the keys and lines of each, and the pin."
+      ],
+      "publishable_decision_summary": "The hosted run of the Round 3350 push was green in every job. All 17 roles of a --sessions driver are now played: liveliness_token, liveliness_subscribe and liveliness_get; query (a declared querier), pull (a buffered subscriber drained every period) and forward; scout (every Hello of a window, behind scouting-active); advanced_publish and advanced_subscribe (behind advanced); group_member and group_view (behind group). A driver role is a RoleDef, a key table with kinds, the feature it needs and a function, one file each under roles/, so the key rules and refusal sentences are written once and a build without a role's feature refuses it by key path. A session now sweeps timed-out questions, which only the one-shot run modes did: a get to a suspended peer ends with the timeout error reply and a final. The roles were written by five agents that a guard hook (C4) kept from building, testing or pushing; the branches were merged and verified once. NOT claimed: the hosted run of this push.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo: sessions_driver is a module; roles/ holds one file per role (17); sessions_run sweeps timed-out questions.",
+        "crates/wz-ap-demo/tests: liveliness, query, advanced, group and scout role targets; the sessions driver target gains the silent-peer case.",
+        "scripts/run-ci.sh: count guards for the new targets (3, 3, 2, 2, 1) and the sessions driver target 3 to 4."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: fmt; clippy of wz-ap-demo in seven feature sets; bin tests 83 (default) and 92 (all driver features); the Layer M scout test and the scout role test; layers C0 C0s C1bw C1bz C1cn; then, after one test fix, C1ay C1bn, the sessions driver target 4 and guarded_count_gate over the range, all rc 0.",
+        "Earlier passes found a dead-code error, a citation made ambiguous by a second put.rs, a doc line, and two faults of the new silent-peer test; each was repaired and re-run.",
+        "NOT verified: the hosted run of this push. The advanced and group role targets run in C1ay only; no leg of Layer C1bn names them."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted result of this push, job by job; a red is its own round.",
+        "Tell zenoh-analyzer-25 that all 17 driver roles are played, with the keys and lines of each, and the pin."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
