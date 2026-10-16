@@ -333,6 +333,15 @@ impl StreamAssembler {
         }
         let cut = self.stream.len() - keep;
         self.stream.drain(..cut);
+        // R3358 — `drain` shortens the vector and keeps its capacity, so a stream
+        // that once held a lot kept the allocation after the trim and the trim
+        // freed nothing a process could see. Past twice what is now held, the
+        // capacity comes down to a quarter above it, which the stream's next
+        // growth fits inside without another allocation.
+        let held = self.stream.len();
+        if self.stream.capacity() > 2 * held + 4096 {
+            self.stream.shrink_to(held + held / 4 + 4096);
+        }
         self.discarded += cut;
         let base = self.discarded;
         self.runs.retain(|r| r.stream_offset + r.len > base);
@@ -691,6 +700,42 @@ mod tests {
             SegmentOutcome::Duplicate
         );
         assert_eq!(s.stream(), b"hello", "nothing was added");
+    }
+
+    /// `trim_before` drops the bytes ahead of an offset, leaves the rest at its
+    /// absolute positions, and gives the memory back: a vector that held 64 KiB and
+    /// holds 1 KiB after the trim does not keep the 64 KiB allocation.
+    #[test]
+    fn trimming_before_an_offset_keeps_the_rest_and_frees_the_memory() {
+        let mut s = StreamAssembler::new();
+        let chunk = [7u8; 1000];
+        for i in 0..64u32 {
+            s.push(&seg(1000 + i * 1000, 0x18, &chunk, i as usize));
+        }
+        assert_eq!(s.len(), 64_000);
+        assert!(s.stream.capacity() >= 64_000);
+
+        assert_eq!(s.trim_before(0), 0, "an offset at the start trims nothing");
+        assert_eq!(s.trim_before(63_000), 63_000);
+        assert_eq!(s.retained_from(), 63_000);
+        assert_eq!(s.stream().len(), 1_000);
+        assert_eq!(s.len(), 64_000, "the absolute count never goes backwards");
+        assert!(
+            s.stream.capacity() < 8 * 1024,
+            "the allocation follows what is held, not what once was: {}",
+            s.stream.capacity()
+        );
+        assert_eq!(
+            s.trim_before(62_000),
+            0,
+            "an offset already trimmed is a no-op"
+        );
+        assert_eq!(
+            s.trim_before(70_000),
+            1_000,
+            "past the end empties the stream"
+        );
+        assert!(s.stream().is_empty());
     }
 
     /// The ordinary case: a SYN establishes the origin, then contiguous data.

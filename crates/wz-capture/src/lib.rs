@@ -2098,10 +2098,22 @@ const WS_CLASSIFY_BUDGET: usize = 8 * 1024;
 /// [`FlowDissection::release_stream_behind_held_messages`] gives them back.
 ///
 /// Giving back bytes is a front-drain of the retained stream, which moves what
-/// stays. The other condition, half of what is retained, makes that move amortised
-/// constant per byte; this floor stops a flow of a few small messages from
-/// draining a few dozen bytes on every message taken.
+/// stays. The other condition, a [`STREAM_RELEASE_DIVISOR`]th of what is retained,
+/// keeps that move a few times the bytes that arrive; this floor stops a flow of a
+/// few small messages from draining a few dozen bytes on every message taken.
 const STREAM_RELEASE_SLACK: usize = 4 * 1024;
+
+/// R3358 — a direction releases once its unreachable bytes are this fraction of
+/// what it retains. The first release (half) left the retained stream swinging
+/// between one and two times what the held messages need, which a consumer reads
+/// as growth; an eighth keeps it within a seventh above, at a drain of about eight
+/// times the bytes that arrive.
+const STREAM_RELEASE_DIVISOR: usize = 8;
+
+/// R3358 — how many messages from the front of a flow's list are searched for each
+/// direction's oldest. A bound on a per-message cost: a direction whose oldest
+/// message is further back than this is a direction with few messages.
+const STREAM_RELEASE_SCAN: usize = 64;
 
 impl FlowDissection {
     /// R311y709 — this flow's recovered-against-fed counts.
@@ -2230,13 +2242,16 @@ impl FlowDissection {
     /// offset and nowhere before it, so once the oldest held message has moved on
     /// the bytes ahead of it are unreachable. This releases them.
     ///
-    /// Only the direction of the OLDEST held message is released, up to where that
-    /// message begins: the list is in decode order, which within one direction is
-    /// byte order, so its first message is that direction's lowest offset. The
-    /// other direction is released when its own message reaches the front. The
-    /// release waits until the unreachable bytes are at least
-    /// [`STREAM_RELEASE_SLACK`] and half of what is retained, so the front-drain it
-    /// costs is paid once per doubling and not once per message taken.
+    /// Each direction is released up to where its OLDEST held message begins: the
+    /// list is in decode order, which within one direction is byte order, so a
+    /// direction's first message in the list is its lowest offset. That message is
+    /// looked for among the first [`STREAM_RELEASE_SCAN`] of the list and a
+    /// direction with none there is left alone (its messages are sparse, so its
+    /// bytes are few). A direction releases once its unreachable bytes are at least
+    /// [`STREAM_RELEASE_SLACK`] and a [`STREAM_RELEASE_DIVISOR`]th of what it
+    /// retains, so the front-drain it costs is a few times the bytes that arrive,
+    /// not a copy of the whole stream per message taken, and the retained stream
+    /// stays within a seventh above what the held messages need.
     ///
     /// Not counted in [`DissectionDrops::stream_bytes`]: that tally is bytes a
     /// ceiling took that a held message could still have used, and none of these
@@ -2249,23 +2264,31 @@ impl FlowDissection {
     /// then: a dissection with no message ceiling has taken nothing and keeps its
     /// whole stream.
     fn release_stream_behind_held_messages(&mut self) {
-        let Some(front) = self.frames.first() else {
-            return;
-        };
-        if front.offset_space != wz_session_core::passive::OffsetSpace::StreamBytes {
-            return;
+        for direction in [Direction::A, Direction::B] {
+            let Some(oldest) = self
+                .frames
+                .iter()
+                .take(STREAM_RELEASE_SCAN)
+                .find(|frame| frame.direction == direction)
+            else {
+                continue;
+            };
+            if oldest.offset_space != wz_session_core::passive::OffsetSpace::StreamBytes {
+                continue;
+            }
+            let from = oldest.stream_offset;
+            let assembler = self.assembler(direction);
+            let unreachable = from.saturating_sub(assembler.retained_from());
+            if unreachable < STREAM_RELEASE_SLACK
+                || unreachable < assembler.stream().len() / STREAM_RELEASE_DIVISOR
+            {
+                continue;
+            }
+            match direction {
+                Direction::A => self.low_to_high.trim_before(from),
+                Direction::B => self.high_to_low.trim_before(from),
+            };
         }
-        let (direction, from) = (front.direction, front.stream_offset);
-        let assembler = self.assembler(direction);
-        let reachable_from = assembler.retained_from();
-        let unreachable = from.saturating_sub(reachable_from);
-        if unreachable < STREAM_RELEASE_SLACK || unreachable < assembler.stream().len() / 2 {
-            return;
-        }
-        match direction {
-            Direction::A => self.low_to_high.trim_before(from),
-            Direction::B => self.high_to_low.trim_before(from),
-        };
     }
 
     /// Where a stream message begins: past the framing prefix, and past
@@ -3745,6 +3768,51 @@ mod live_tap_tests {
         assert_eq!(flow.frames.len(), 46_500);
         assert_eq!(flow.low_to_high.retained_from(), 0);
         assert_eq!(flow.low_to_high.stream().len(), 100 * 1395);
+    }
+
+    /// BOTH DIRECTIONS ARE RELEASED, each behind its own oldest held message.
+    ///
+    /// A flow whose peer answers carries bytes both ways, and a release that
+    /// followed only the direction of the list's front left the other direction to
+    /// fill toward its own cap. Alternating packets of 465 messages each way under
+    /// a ceiling that holds the last two packets leaves both directions held, and
+    /// both retained streams follow them.
+    #[test]
+    fn a_message_ceiling_gives_back_the_stream_of_both_directions() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet, tcp_packet_reverse};
+        let payload: Vec<u8> = framed_keepalive().repeat(465);
+        let mut d = Dissection::with_limits(DissectionLimits {
+            frames_total: Some(940),
+            ..DissectionLimits::default()
+        });
+        for i in 0..100usize {
+            let seq = 1000 + (i * payload.len()) as u32;
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                2 * i,
+                &tcp_packet(seq, &payload),
+            );
+            d.push_packet(
+                crate::link::LINKTYPE_ETHERNET,
+                2 * i + 1,
+                &tcp_packet_reverse(seq, &payload),
+            );
+        }
+        let flow = &d.flows()[0];
+        assert_eq!(flow.frames.len(), 940, "the ceiling held 940");
+        for (name, assembler) in [("A", &flow.low_to_high), ("B", &flow.high_to_low)] {
+            assert_eq!(assembler.len(), 100 * 1395, "{name}: every byte was fed");
+            assert!(
+                assembler.retained_from() > 0,
+                "{name}: the bytes behind its taken messages were given back"
+            );
+            assert!(
+                assembler.stream().len() < 16 * 1024,
+                "{name}: its retained stream follows its held messages, held {}",
+                assembler.stream().len()
+            );
+        }
+        assert_eq!(d.drops().stream_bytes, 0);
     }
 
     /// THE TWO CEILINGS APPLY TOGETHER, and a message goes when either says so.
