@@ -353,11 +353,28 @@ ALLOWED = [
         "the trim it reconciles is counted by `drain` itself (`*lost +=`)",
     ),
     (
-        "wz-capture/fields_json.rs",
+        "wz-session-core/passive_messages.rs",
         "Some(i) => self.open.swap_remove(i).1,",
-        "a fragment chain leaving the renderer's OPEN-chain index because it "
-        "closed; the removal returns the chain's id to the row being rendered. "
-        "The index is rendering bookkeeping, and nothing captured is in it",
+        "a fragment chain leaving the list's OPEN-chain index because it closed; "
+        "the removal returns the chain's id to the row being rendered. The fold "
+        "moved here from the renderer so the list can keep it across a front trim; "
+        "the index is identity bookkeeping, and nothing captured is in it",
+    ),
+    (
+        "wz-capture/fields_json.rs",
+        "memory.digests.retain(|seq, _| seq_in_ranges(&ranges, *seq));",
+        "the digests of rows the handle no longer HOLDS, given up so the memory "
+        "follows the handle's size. A digest is a change detector for a row a "
+        "consumer holds, and a row a ceiling took was counted as lost by the "
+        "handle when it was taken; no capture evidence is in the map",
+    ),
+    (
+        "wz-capture/fields_json.rs",
+        "self.produced.retain(|_, produced| *produced >= first_held);",
+        "the request index forgetting requests whose messages a ceiling took. It "
+        "maps a request's place to the produced-index a final names its row by; "
+        "the messages themselves were counted as dropped when taken, and the "
+        "entry answers nothing once its row is gone",
     ),
     (
         "wz-capture/lib.rs",

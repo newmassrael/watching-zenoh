@@ -191,8 +191,8 @@ impl Run {
     /// Messages EVER produced, over every list: a count a trim does not lower.
     fn produced(&self) -> u64 {
         self.d
-            .message_lists()
-            .map(|(_, frames)| frames.produced())
+            .message_lists_with_origin()
+            .map(|(_, _, frames)| frames.produced())
             .sum()
     }
 
