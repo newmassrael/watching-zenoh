@@ -275164,6 +275164,42 @@
         "Only the direction of the oldest held message is released; the other direction waits for its own message to reach the front or for the 4 MiB cap. If a consumer holds a flow with a quiet front direction and a busy back one, release both by scanning to each direction's first held message."
       ]
     },
+    "Round 3358": {
+      "decision_summary": "The consumer measured the Round 3357 release and found held stream bytes still rising and the process heap unmoved. Three causes, all in that release. It released at half of what a direction retains, so the retained stream swung between one and two times what the held messages need; it now releases at an eighth. StreamAssembler::trim used Vec::drain, which keeps the allocation, so nothing was returned to the process; it now shrinks the allocation when it exceeds twice what is held, which also applies to the per-direction byte cap. Only the direction of the oldest held message was released; each direction is now released behind its own oldest held message, searched among the first 64 of the list. No document key, revision or ABI moves. NOT claimed: the hosted result, or that the consumer's next measurement is flat.",
+      "changes_bullets": [
+        "wz-capture tcp: trim shrinks the allocation past twice what is held; test for trim_before and the freed memory.",
+        "wz-capture lib: release_stream_behind_held_messages per direction, STREAM_RELEASE_DIVISOR 8, STREAM_RELEASE_SCAN 64; test for both directions."
+      ],
+      "verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bw, C1bz, count-guard, clippy and tests of wz-capture, all rc 0.",
+        "NOT verified: the hosted CI and Platform runs of this push, and the consumer's retention documents under the new bound."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of this push job by job, then give the consumer the pin and ask for the retention documents at 0, 50 and 120 seconds again.",
+        "If a direction with no held message in the first 64 still outgrows its frames, expose per-direction retained bytes in the retention document (a revision move)."
+      ],
+      "publishable_decision_summary": "The consumer measured the Round 3357 release and found held stream bytes still rising and the process heap unmoved. Three causes, all in that release. It released at half of what a direction retains, so the retained stream swung between one and two times what the held messages need; it now releases at an eighth. StreamAssembler::trim used Vec::drain, which keeps the allocation, so nothing was returned to the process; it now shrinks the allocation when it exceeds twice what is held, which also applies to the per-direction byte cap. Only the direction of the oldest held message was released; each direction is now released behind its own oldest held message, searched among the first 64 of the list. No document key, revision or ABI moves. NOT claimed: the hosted result, or that the consumer's next measurement is flat.",
+      "publishable_changes_bullets": [
+        "wz-capture tcp: trim shrinks the allocation past twice what is held; test for trim_before and the freed memory.",
+        "wz-capture lib: release_stream_behind_held_messages per direction, STREAM_RELEASE_DIVISOR 8, STREAM_RELEASE_SCAN 64; test for both directions."
+      ],
+      "publishable_verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bw, C1bz, count-guard, clippy and tests of wz-capture, all rc 0.",
+        "NOT verified: the hosted CI and Platform runs of this push, and the consumer's retention documents under the new bound."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of this push job by job, then give the consumer the pin and ask for the retention documents at 0, 50 and 120 seconds again.",
+        "If a direction with no held message in the first 64 still outgrows its frames, expose per-direction retained bytes in the retention document (a revision move)."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
