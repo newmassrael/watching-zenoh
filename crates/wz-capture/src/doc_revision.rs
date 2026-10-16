@@ -2104,6 +2104,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R37_CARRIES,
     },
+    // Revision 39 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. The families and the
+    // `carries` table are revision 37's and no word moves. A consumer pinned to
+    // revision 38 loses nothing: the key is an addition an object-by-name reader
+    // does not see. A cached document from revision 38 lacks the key and should be
+    // read again by a consumer that wants it.
+    DocumentShape {
+        document: FIELDS,
+        revision: 39,
+        keys: FIELDS_R39_KEYS,
+        retiring: &[],
+        families: FIELDS_R37_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R37_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2215,6 +2231,21 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: SUMMARY,
         revision: 6,
         keys: SUMMARY_R6_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // Revision 7 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. No word moves. A
+    // consumer pinned to revision 6 loses nothing: the key is an addition an
+    // object-by-name reader does not see. A cached document from revision 6 lacks
+    // the key and should be read again by a consumer that wants it.
+    DocumentShape {
+        document: SUMMARY,
+        revision: 7,
+        keys: SUMMARY_R7_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -2787,6 +2818,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SESSION_TABLE_R1_CARRIES,
     },
+    // Revision 2 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. No family or
+    // `carries` row moves and no word moves. A consumer pinned to revision 1 loses
+    // nothing: the key is an addition an object-by-name reader does not see. A
+    // cached document from revision 1 lacks the key and should be read again by a
+    // consumer that wants it.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 2,
+        keys: SESSION_TABLE_R2_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R1_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R1_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -2901,6 +2948,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // Revision 4 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. No word moves. This
+    // is the door that says what a live handle still holds and the ceilings that
+    // bound it, so a consumer of it reads the new ceiling first. A consumer pinned
+    // to revision 3 loses nothing: the key is an addition an object-by-name reader
+    // does not see. A cached document from revision 3 lacks the key and should be
+    // read again by a consumer that wants it.
+    DocumentShape {
+        document: RETENTION,
+        revision: 4,
+        keys: RETENTION_R4_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     // What a live handle has lost or doubted, in the summary's own words.
     //
     // A document of its own because the summary is the only other place the
@@ -2952,6 +3016,21 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: HEALTH,
         revision: 3,
         keys: HEALTH_R3_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // Revision 4 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. No word moves. A
+    // consumer pinned to revision 3 loses nothing: the key is an addition an
+    // object-by-name reader does not see. A cached document from revision 3 lacks
+    // the key and should be read again by a consumer that wants it.
+    DocumentShape {
+        document: HEALTH,
+        revision: 4,
+        keys: HEALTH_R4_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -3050,6 +3129,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTION_R1_CARRIES,
     },
+    // Revision 5 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. No family or
+    // `carries` row moves and no word moves. A consumer pinned to revision 4 loses
+    // nothing: the key is an addition an object-by-name reader does not see. A
+    // cached document from revision 4 lacks the key and should be read again by a
+    // consumer that wants it.
+    DocumentShape {
+        document: SELECTION,
+        revision: 5,
+        keys: SELECTION_R5_KEYS,
+        retiring: &[],
+        families: SELECTION_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_R1_CARRIES,
+    },
     // THE VERDICTS OF THE ROWS AFTER A CURSOR, AND THE EARLIER ROWS THAT MOVED.
     //
     // A document of its own and not a mode of `selection`, for that document's
@@ -3092,6 +3187,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: SELECTION_SINCE,
         revision: 2,
         keys: SELECTION_SINCE_R2_KEYS,
+        retiring: &[],
+        families: SELECTION_SINCE_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_SINCE_R1_CARRIES,
+    },
+    // Revision 3 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. No family or
+    // `carries` row moves and no word moves. A consumer pinned to revision 2 loses
+    // nothing: the key is an addition an object-by-name reader does not see. A
+    // cached document from revision 2 lacks the key and should be read again by a
+    // consumer that wants it.
+    DocumentShape {
+        document: SELECTION_SINCE,
+        revision: 3,
+        keys: SELECTION_SINCE_R3_KEYS,
         retiring: &[],
         families: SELECTION_SINCE_R1_FAMILIES,
         planes: &[],
@@ -3155,6 +3266,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: CENSUS,
         revision: 20,
         keys: CENSUS_R20_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
+    // Revision 21 ADDS `frames_total`, inside `dropped_by_limits.caps`, and
+    // retires nothing: ONE key arrives, the ceiling over every flow (the number of
+    // decoded messages kept in all), `null` when none is set. No family, `carries`
+    // row or plane moves and no word moves. A consumer pinned to revision 20
+    // loses nothing: the key is an addition an object-by-name reader does not
+    // see. A cached document from revision 20 lacks the key and should be read
+    // again by a consumer that wants it.
+    DocumentShape {
+        document: CENSUS,
+        revision: 21,
+        keys: CENSUS_R21_KEYS,
         retiring: &[],
         families: CENSUS_R20_FAMILIES,
         planes: CENSUS_R6_PLANES,
@@ -10746,6 +10873,55 @@ pub const SESSION_TABLE_R1_KEYS: &[&str] = &[
     "why",
 ];
 
+/// The keys the `session_table` document carries at revision 2: revision 1's
+/// PLUS `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, on the rule revision 7 of the field
+/// document set for a key that arrives.
+pub const SESSION_TABLE_R2_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "bytes",
+    "caps",
+    "cell",
+    "count",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "excluded",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "high",
+    "initiator",
+    "last_seen_ts_ns",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "name",
+    "ok",
+    "phase",
+    "port",
+    "reason",
+    "refusal",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "unstated",
+    "why",
+];
+
 /// The `session_table` document's value families at revision 1.
 ///
 /// Eight, and every one carries at least two words, which the carries gate
@@ -10982,6 +11158,42 @@ pub const SELECTION_R4_KEYS: &[&str] = &[
     "stream_bytes_per_direction",
 ];
 
+/// The keys the selection document carries at revision 5: revision 4's PLUS
+/// `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, for [`SELECTION_R4_KEYS`]' reason: the set
+/// moved.
+pub const SELECTION_R5_KEYS: &[&str] = &[
+    "ambiguous_zid_prefixes",
+    "anchor",
+    "batch_index",
+    "candidates",
+    "caps",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "list_id",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "name",
+    "prefix",
+    "revision",
+    "rows",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+];
+
 /// The `selection_since` document's key set at revision 1: the verdict
 /// document's, with `seq` on a row, the `window` group (`after_seq`,
 /// `through_seq`), the `revised` array and `was` on its rows.
@@ -11047,6 +11259,49 @@ pub const SELECTION_SINCE_R2_KEYS: &[&str] = &[
     "flows",
     "frames",
     "frames_per_flow",
+    "list_id",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "name",
+    "prefix",
+    "revised",
+    "revision",
+    "rows",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "through_seq",
+    "was",
+    "window",
+];
+
+/// The keys the `selection_since` document carries at revision 3: revision
+/// 2's PLUS `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, on the rule revision 7 of the field
+/// document set for a key that arrives.
+pub const SELECTION_SINCE_R3_KEYS: &[&str] = &[
+    "after_seq",
+    "ambiguous_zid_prefixes",
+    "anchor",
+    "batch_index",
+    "candidates",
+    "caps",
+    "continued",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
     "list_id",
     "max_flows_per_table",
     "max_scout_askers",
@@ -11156,6 +11411,38 @@ pub const RETENTION_R2_KEYS: &[&str] = RETENTION_R1_KEYS;
 /// milliseconds, now every nanosecond the capture recorded), not a key and not
 /// its type; see the row.
 pub const RETENTION_R3_KEYS: &[&str] = RETENTION_R2_KEYS;
+
+/// The keys the retention document carries at revision 4: revision 3's PLUS
+/// `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, for [`CENSUS_R15_KEYS`]' reason: the set
+/// moved, and an alias would follow revision 1's list instead of pinning it.
+pub const RETENTION_R4_KEYS: &[&str] = &[
+    "caps",
+    "datagram_flows",
+    "document",
+    "dropped_by_limits",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "fullest_window",
+    "held",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "messages",
+    "name",
+    "oldest_ts_ns",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "serial_frames",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+];
 
 /// The health document's key set at revision 1: the envelope, the summary's
 /// whole `health` object, and `flows_seen`.
@@ -13360,6 +13647,169 @@ pub const FIELDS_R37_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// The keys the field document carries at revision 39: revision 37's (and so
+/// 38's) PLUS `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives. Revision 38 moved a value and no key, so it reuses revision 37's
+/// set; this one is the next that differs.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R39_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "closes",
+    "compression",
+    "conduit",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "revised",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "under",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+    "zid",
+];
+
 /// The value families the field document declares at revision 37: revision 36's
 /// PLUS `request_kind`, written out in full for the reason
 /// [`ValueFamily::values`] gives.
@@ -14440,6 +14890,194 @@ pub const CENSUS_R20_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// The keys the census document carries at revision 21: revision 20's PLUS
+/// `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, for revision 18's reason: this set moves.
+pub const CENSUS_R21_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "aborted_unresolvable",
+    "addr",
+    "admissible",
+    "aggregate",
+    "ambiguous_zid_prefixes",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "candidates",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "end",
+    "ends",
+    "errs",
+    "evidence",
+    "exchanges",
+    "family",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_ns",
+    "max_scout_askers",
+    "mean_ms",
+    "mean_ns",
+    "messages",
+    "min_ms",
+    "min_ns",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "node",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "scouting",
+    "selection",
+    "sender_end",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_ns",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
 /// Which end of a flow a node sent from, at census revision 20 — the words
 /// `crate::link::FlowEnd::name` returns, which are the two key names a flow
 /// object is indexed by (`flow[sender_end]` is the endpoint).
@@ -14640,6 +15278,102 @@ pub const SUMMARY_R6_KEYS: &[&str] = &[
     "ws_resync_skipped_bytes",
 ];
 
+/// The keys the summary document carries at revision 7: revision 6's PLUS
+/// `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives: the set gains the one name and no other.
+pub const SUMMARY_R7_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram_flows",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "tcp_flows",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_partial",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
 /// The health document's key set at revision 3: revision 2's PLUS
 /// `transport_checksum_partial`.
 ///
@@ -14667,6 +15401,103 @@ pub const HEALTH_R3_KEYS: &[&str] = &[
     "fragments",
     "frames",
     "frames_per_flow",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_partial",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
+/// The keys the health document carries at revision 4: revision 3's PLUS
+/// `frames_total`, inside `caps`, the ceiling over every flow.
+///
+/// Written out rather than aliased, for the reason [`SUMMARY_R6_KEYS`] gives.
+pub const HEALTH_R4_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram",
+    "datagram_sequence",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "flows_seen",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
     "framing",
     "gap_bytes_missing",
     "gaps",
@@ -16115,7 +16946,9 @@ mod tests {
             // To 20 when the node plane gained `ends[]`: which end of a
             // discovery flow a node sent from. Three keys, one family
             // (`sender_end`, a passenger), and no value moves under an old key.
-            (CENSUS, 20u32),
+            // To 21 when `caps` gained `frames_total`, the ceiling over every
+            // flow: one key, no word moves and nothing retires.
+            (CENSUS, 21u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -16234,7 +17067,9 @@ mod tests {
             // To 38 when `chain.chain_id` of a trimmed list stopped being
             // renumbered by the trim: a value moves, no key arrives and nothing
             // retires.
-            (FIELDS, 38),
+            // To 39 when `caps` gained `frames_total`, the ceiling over every
+            // flow: one key, no word moves and nothing retires.
+            (FIELDS, 39),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -16247,7 +17082,9 @@ mod tests {
             // To 6 when the transport checksum gained a fourth state: one key,
             // `transport_checksum_partial`, and `transport_checksum_invalid`
             // stopped counting a segment the sender's offload left unfinished.
-            (SUMMARY, 6),
+            // To 7 when `caps` gained `frames_total`, the ceiling over every
+            // flow: one key, no word moves and nothing retires.
+            (SUMMARY, 7),
             // R2175 (open-debt item 552) — to 3 when it gained
             // `value_families`, the catalogue of every switchable key's words.
             // R2184 (item 556) — to 4 when the `value_families` rows gained
@@ -16304,7 +17141,9 @@ mod tests {
             // The same report for bytes that already exist.
             (TRANSPORT_LAYOUT, 1),
             // The capture read as sessions, one row per zid pair.
-            (SESSION_TABLE, 1),
+            // To 2 when `caps` gained `frames_total`, the ceiling over every
+            // flow: one key, no word moves and nothing retires.
+            (SESSION_TABLE, 2),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.
@@ -16314,25 +17153,32 @@ mod tests {
             // To 4 when it gained `ambiguous_zid_prefixes` (five keys, absent
             // unless a selector's `zid` prefix began two or more of the
             // capture's zids, and then every row reads `unjudged`).
-            (SELECTION, 4),
+            // To 5 when `caps` gained `frames_total`, the ceiling over every
+            // flow: one key, no word moves and nothing retires.
+            (SELECTION, 5),
             // The same verdicts for the rows after a cursor, and the earlier
             // rows whose word moved.
             // To 2 when its `window` gained `continued`: whether the call found
             // the selector's memory or began it. One key, no word moves and
             // nothing retires.
-            (SELECTION_SINCE, 2),
+            // To 3 when `caps` gained `frames_total`, the ceiling over every
+            // flow: one key, no word moves and nothing retires.
+            (SELECTION_SINCE, 3),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.
             // To 3 when `oldest_ts_ns` kept its nanoseconds: it was a whole
             // number of milliseconds widened.
-            (RETENTION, 3),
+            // To 4 when `caps` gained `frames_total`, the ceiling over every
+            // flow: one key, no word moves and nothing retires.
+            (RETENTION, 4),
             // What a live handle has lost or doubted: the summary's `health`
             // object and the count of flows its stream counters are over.
             // To 2 when it gained `datagram_sequence`, the sequence group over
             // the datagram links alone.
             // To 3 on the summary's move to 6: the same `health` object.
-            (HEALTH, 3),
+            // To 4 on the summary's move to 7: `caps` gained `frames_total`.
+            (HEALTH, 4),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");
