@@ -286,7 +286,11 @@ fn batches(stream: &[u8]) -> Vec<(u8, usize, Option<u64>)> {
             continue;
         };
         let mut reliable_sn = None;
-        if matches!(header & 0x1f, 0x05 | 0x06) && header & 0x20 != 0 {
+        // A batch with the extension flag (`0x80`) carries a QoS extension: it rides
+        // another priority's conduit, which counts from its own start (the
+        // declarations, here). Only a batch with none is a value's, on the default
+        // priority conduit this test judges.
+        if matches!(header & 0x1f, 0x05 | 0x06) && header & 0x20 != 0 && header & 0x80 == 0 {
             let (mut sn, mut shift) = (0u64, 0);
             for &byte in &batch[1..] {
                 sn |= u64::from(byte & 0x7f) << shift;
