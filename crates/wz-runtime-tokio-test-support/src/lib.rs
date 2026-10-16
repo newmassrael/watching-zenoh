@@ -539,6 +539,28 @@ pub fn test_hal_now_ticks() -> u64 {
 /// Ports this process has already handed out. See [`free_port`].
 static HANDED_OUT_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
+/// Record `port` as handed out by this process, in ONE step with asking whether it
+/// already was: `false` means this process gave the number to someone before.
+///
+/// This is what keeps two THREADS of a process from drawing the same number, on every
+/// host. The cross-process claim (`claim_file_in`) is a `flock`, which exists on unix
+/// only, and on unix it also keeps two threads apart because two descriptors of one file
+/// conflict. Elsewhere the claim is absent, and a pick checked only against the kernel's
+/// socket table cannot tell a number another thread has drawn and not yet bound from a
+/// free one: both threads see it free, both go on to bind it, and where a listener sets
+/// `SO_REUSEADDR` (every wz listener does, as upstream's does) Windows lets both
+/// succeed. A dial then reaches the other round's listener. A hosted run counted that as
+/// 1 of 1200 dials; eight rounds live at once drawing from about 8192 numbers meet about
+/// once in that many, which is the whole of that count.
+fn record_in_process(port: u16) -> bool {
+    let mut seen = HANDED_OUT_PORTS.lock().expect("port ledger");
+    if seen.contains(&port) {
+        return false;
+    }
+    seen.push(port);
+    true
+}
+
 /// How many candidates [`free_port`] will reject before giving up. A bound
 /// rather than a loop, for the reason every other limit in this workspace has
 /// one: the number of attempts must not be decided by the kernel.
@@ -609,9 +631,8 @@ const FREE_PORT_ATTEMPTS: usize = 64;
 /// number bound in every child another thread forks while the probe is open, which
 /// kept a program started for it from binding it (see `pick_in`).
 pub fn free_port() -> u16 {
-    let port = unbound_unautoselected();
-    HANDED_OUT_PORTS.lock().expect("port ledger").push(port);
-    port
+    // The ledger entry is made by the pick itself, atomically with the check.
+    unbound_unautoselected()
 }
 
 /// The ledger half of the older, socket-holding [`free_port`], with the source of
@@ -861,8 +882,10 @@ pub fn unbound_unautoselected() -> u16 {
     for _ in 0..FREE_PORT_ATTEMPTS {
         let port = first + (random_draw() % span) as u16;
         match pick_in(&claims, port) {
-            Pick::Free => return port,
-            Pick::Taken => claimed += 1,
+            // Free by the kernel's table and the claim registry: also not a number this
+            // process gave out, which no table can show for one that is not bound yet.
+            Pick::Free if record_in_process(port) => return port,
+            Pick::Free | Pick::Taken => claimed += 1,
             Pick::InUse => in_use += 1,
         }
     }
@@ -1383,7 +1406,10 @@ pub async fn establish_capability_pair(
 
 #[cfg(test)]
 mod port_tests {
-    use super::{autoselect_range, free_port, hand_out, refusing_port};
+    use super::{
+        autoselect_range, free_port, hand_out, record_in_process, refusing_port,
+        unbound_unautoselected,
+    };
     #[cfg(unix)]
     use super::{claim_across_processes, claim_in};
     use std::collections::BTreeSet;
@@ -1880,6 +1906,57 @@ mod port_tests {
         assert_eq!(
             handed_next, third,
             "the repeat of {first} was handed out instead of being rejected"
+        );
+    }
+
+    /// A number the pick hands out is in the ledger when it returns, and the ledger
+    /// answers a second record of it with `false`.
+    ///
+    /// The cross-process claim is a `flock` and exists on unix only; on a host without
+    /// it the ledger is what keeps two threads of the process from drawing one number
+    /// before either has bound it. The pick used to hand a number out WITHOUT recording
+    /// it (only `free_port` recorded, after the fact, and nothing consulted the ledger),
+    /// so a unix host's `flock` hid the gap and Windows showed it: a dial accepted by
+    /// another round's listener, 1 of 1200 on a hosted run. This reads the ledger directly,
+    /// so it is red wherever the claim is, which no outcome of a bind could be.
+    #[test]
+    fn a_pick_records_its_number_and_a_second_record_is_refused() {
+        let port = unbound_unautoselected();
+        assert!(
+            !record_in_process(port),
+            "{port} was handed out by the pick and was not in the ledger: another thread \
+             could be given it before this one binds"
+        );
+        // The ledger itself: a number is recorded once.
+        assert!(record_in_process(1), "a number not handed out was refused");
+        assert!(!record_in_process(1), "a number recorded twice");
+    }
+
+    /// Threads picking at once are never given one number, wherever the claim file is.
+    #[test]
+    fn threads_picking_at_once_are_given_distinct_numbers() {
+        let pickers: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..50)
+                        .map(|_| unbound_unautoselected())
+                        .collect::<Vec<u16>>()
+                })
+            })
+            .collect();
+        let all: Vec<u16> = pickers
+            .into_iter()
+            .flat_map(|picker| picker.join().expect("a picker thread"))
+            .collect();
+        let mut distinct = all.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            all.len(),
+            "{} numbers were handed out to threads and {} of them were repeats",
+            all.len(),
+            all.len() - distinct.len()
         );
     }
 
