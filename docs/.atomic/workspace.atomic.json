@@ -275040,6 +275040,50 @@
         "Decide whether the main working tree's .githooks is brought up to date, so every push is graded by gate 2c4."
       ]
     },
+    "Round 3355": {
+      "decision_summary": "The Platform workflow starts on a push to main only for a change under its paths list, and that list named the crates the lane is about, not the crates it builds. Walking the real cargo dependency trees of the lane crates found 19 workspace packages the lane compiles that no path covered: 16 under crates/ (wz-codecs, wz-runtime-core, wz-routing-graph, wz-capture, the wz facade among them) and the three sce runtime crates. The cost seen: the Round 3353 repair to the port picker the Windows C ABI test depends on (wz-runtime-tokio-test-support) never started the lane that could grade it. The paths list now carries all 17 entries, a new static gate (platform_trigger_paths_gate.py, in Layer C0 and the pre-push hook) derives the closure from cargo tree and fails on an uncovered crate or an empty population, and the planner C0 lane triggers on platform.yml. The dispatched Platform run of 4b308a0b3 was read: six jobs green, Windows C ABI included.",
+      "changes_bullets": [
+        ".github/workflows/platform.yml: 17 paths added (16 crates and vendor/sce), header comment names the gate.",
+        "scripts/lib/platform_trigger_paths_gate.py: new, --selftest (12 cases) and --check; wired into Layer C0 in scripts/run-ci.sh and into .githooks/pre-push (round-fed gate reach demanded it).",
+        "scripts/lib/verify_lanes.json: the C0 lane triggers on .github/workflows/platform.yml."
+      ],
+      "verification_bullets": [
+        "Red-first: the gate run against the unmodified workflow listed the 19 uncovered packages, rc 1; after the paths were added it reported 24 lane crates, 27 packages in their trees, all covered, rc 0.",
+        "Through verify-once on the build host: C0 and C0s rc 0 after a first C0 run failed only on round-fed-gate-reach (the new gate was not in the hook); count-guard lane current.",
+        "Hosted: Platform run 38866369243 (workflow_dispatch, windows and macos, headSha 4b308a0b3) concluded success with all six jobs green, C ABI (windows-latest) among them, so the Round 3353 port ledger repair is confirmed on Windows.",
+        "NOT verified: the hosted CI and Platform runs of this push; CI 38862337742 of 4b308a0b3 was still running when read."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of this push job by job; the Platform workflow should now start for it because platform.yml is under its own paths.",
+        "The main working tree's .githooks must be updated (git merge --ff-only z1 there) for pushes from it to run the new hook gate; the integration worktree already does.",
+        "Read CI 38862337742 of 4b308a0b3 when it finishes, Layer M first."
+      ],
+      "publishable_decision_summary": "The Platform workflow starts on a push to main only for a change under its paths list, and that list named the crates the lane is about, not the crates it builds. Walking the real cargo dependency trees of the lane crates found 19 workspace packages the lane compiles that no path covered: 16 under crates/ (wz-codecs, wz-runtime-core, wz-routing-graph, wz-capture, the wz facade among them) and the three sce runtime crates. The cost seen: the Round 3353 repair to the port picker the Windows C ABI test depends on (wz-runtime-tokio-test-support) never started the lane that could grade it. The paths list now carries all 17 entries, a new static gate (platform_trigger_paths_gate.py, in Layer C0 and the pre-push hook) derives the closure from cargo tree and fails on an uncovered crate or an empty population, and the planner C0 lane triggers on platform.yml. The dispatched Platform run of 4b308a0b3 was read: six jobs green, Windows C ABI included.",
+      "publishable_changes_bullets": [
+        ".github/workflows/platform.yml: 17 paths added (16 crates and vendor/sce), header comment names the gate.",
+        "scripts/lib/platform_trigger_paths_gate.py: new, --selftest (12 cases) and --check; wired into Layer C0 in scripts/run-ci.sh and into .githooks/pre-push (round-fed gate reach demanded it).",
+        "scripts/lib/verify_lanes.json: the C0 lane triggers on .github/workflows/platform.yml."
+      ],
+      "publishable_verification_bullets": [
+        "Red-first: the gate run against the unmodified workflow listed the 19 uncovered packages, rc 1; after the paths were added it reported 24 lane crates, 27 packages in their trees, all covered, rc 0.",
+        "Through verify-once on the build host: C0 and C0s rc 0 after a first C0 run failed only on round-fed-gate-reach (the new gate was not in the hook); count-guard lane current.",
+        "Hosted: Platform run 38866369243 (workflow_dispatch, windows and macos, headSha 4b308a0b3) concluded success with all six jobs green, C ABI (windows-latest) among them, so the Round 3353 port ledger repair is confirmed on Windows.",
+        "NOT verified: the hosted CI and Platform runs of this push; CI 38862337742 of 4b308a0b3 was still running when read."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of this push job by job; the Platform workflow should now start for it because platform.yml is under its own paths.",
+        "The main working tree's .githooks must be updated (git merge --ff-only z1 there) for pushes from it to run the new hook gate; the integration worktree already does.",
+        "Read CI 38862337742 of 4b308a0b3 when it finishes, Layer M first."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
