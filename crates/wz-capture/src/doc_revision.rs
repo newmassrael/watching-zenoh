@@ -3040,6 +3040,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTION_SINCE_R1_CARRIES,
     },
+    // Revision 2 ADDS `window.continued` and retires nothing: ONE key arrives, a
+    // boolean, so no family and no `carries` row moves.
+    //
+    // WHY A KEY AND NOT A CONVENTION. The handle keeps a selector's remembered
+    // words in a least-recently-used set whose size the caller chooses, and a call
+    // under a selector whose memory was given up begins it anew: nothing at or
+    // below the cursor is compared, so no earlier row is revised. `after_seq` is
+    // the cursor the caller GAVE, echoed, and the document said nothing else about
+    // the memory, so a caller keeping a cursor per selector could not tell a
+    // continued call from a fresh one and held a stale word without knowing it.
+    //
+    // WHAT IT SAYS. `true` when an earlier call under this selector wrote the memory
+    // the call used. `false` when the call began it: the first call under the
+    // selector, or the first after its memory was given up. With a cursor above 0,
+    // `false` is the signal that the words held for the rows at or below it can no
+    // longer be corrected by this handle; asking that selector again from 0 is the
+    // way to be right. It is always written, never absent, so a consumer does not
+    // test for the key.
+    DocumentShape {
+        document: SELECTION_SINCE,
+        revision: 2,
+        keys: SELECTION_SINCE_R2_KEYS,
+        retiring: &[],
+        families: SELECTION_SINCE_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_SINCE_R1_CARRIES,
+    },
     // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
     // and an ambiguous one is reported.
     //
@@ -10969,6 +10996,49 @@ pub const SELECTION_SINCE_R1_KEYS: &[&str] = &[
     "window",
 ];
 
+/// The `selection_since` document's key set at revision 2: revision 1's PLUS
+/// `continued`, inside `window`, saying whether the call found the selector's
+/// memory or began it.
+///
+/// Written out rather than aliased, on the rule revision 7 of the field document
+/// set for a key that arrives.
+pub const SELECTION_SINCE_R2_KEYS: &[&str] = &[
+    "after_seq",
+    "ambiguous_zid_prefixes",
+    "anchor",
+    "batch_index",
+    "candidates",
+    "caps",
+    "continued",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "list_id",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "name",
+    "prefix",
+    "revised",
+    "revision",
+    "rows",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "through_seq",
+    "was",
+    "window",
+];
+
 /// The words a row can read at `selection_since` revision 1: the verdict
 /// document's four, written out again so that widening one vocabulary moves its
 /// own document's revision and not the other's.
@@ -16214,7 +16284,10 @@ mod tests {
             (SELECTION, 4),
             // The same verdicts for the rows after a cursor, and the earlier
             // rows whose word moved.
-            (SELECTION_SINCE, 1),
+            // To 2 when its `window` gained `continued`: whether the call found
+            // the selector's memory or began it. One key, no word moves and
+            // nothing retires.
+            (SELECTION_SINCE, 2),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.

@@ -582,9 +582,11 @@ static int check_selection_since_door(void) {
     /* From zero: every row, numbered, with the window to ask next. */
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, &doc);
     CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since from 0 rc=%d", rc);
-    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":1") !=
+    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":2") !=
               NULL,
           "the since document must open with its name and revision: %s", doc);
+    CHECK(strstr(doc, "\"continued\":false") != NULL,
+          "the first call under a selector begins its memory: %s", doc);
     CHECK(strstr(doc, "\"seq\":1,") != NULL && strstr(doc, "\"seq\":2,") != NULL,
           "both rows are numbered: %s", doc);
     CHECK(strstr(doc, "\"revised\":[]") != NULL,
@@ -604,6 +606,8 @@ static int check_selection_since_door(void) {
     CHECK(strstr(doc, "\"seq\":3,") != NULL && strstr(doc, "\"seq\":2,") == NULL &&
               strstr(doc, "\"seq\":1,") == NULL,
           "only the row after the cursor is written: %s", doc);
+    CHECK(strstr(doc, "\"continued\":true") != NULL,
+          "the next call under the same selector finds its memory: %s", doc);
     CHECK(strstr(doc, "\"revised\":[]") != NULL,
           "a KeepAlive's word does not move: %s", doc);
     cursor = since_through(doc);
@@ -3559,11 +3563,13 @@ int main(void) {
         rc = wz_dissect_proto_messages(&one, 1, &revisioned[17].doc);
     }
     CHECK(rc == WZ_DISSECT_OK, "proto_message_list document rc=%d", rc);
-    /* (ABI 38) -- the since document, at 1: an empty handle still answers, the
+    /* (ABI 38) -- the since document, at 2: an empty handle still answers, the
      * cheapest way to hold the document's opening to the revision this
-     * consumer was written against. */
+     * consumer was written against.
+     * 2: its `window` gains `continued`, whether the call found the selector's
+     * memory or began it. A key arrives; nothing retires. */
     revisioned[18].name = "selection_since";
-    revisioned[18].revision = 1;
+    revisioned[18].revision = 2;
     revisioned[18].doc = NULL;
     {
         wz_dissect_live *quiet = NULL;

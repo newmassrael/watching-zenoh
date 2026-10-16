@@ -1219,6 +1219,13 @@ impl LiveDissection {
     /// compared as given, so a selector that means the same thing in other words
     /// starts a memory too, which costs a full answer and never a wrong one.
     ///
+    /// The document's `window.continued` says which of the two this call was:
+    /// `true` when an earlier call under the selector wrote the memory used, `false`
+    /// when this call began it, the first call or the first after the memory was
+    /// given up for another selector's. It is the only place a caller holding a
+    /// cursor per selector can learn that its words for the rows at or below the
+    /// cursor are no longer corrected here.
+    ///
     /// # Cost
     ///
     /// The document follows what is new and what moved. The WALK that decides the

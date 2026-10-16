@@ -5576,13 +5576,14 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * handle's count of rows it has issued, unique and increasing and untouched by a
  * ceiling trimming a list. 0 asks for every row. The document's
  *
- *     "window":{"after_seq":A,"through_seq":T}
+ *     "window":{"after_seq":A,"through_seq":T,"continued":C}
  *
- * says the cursor you gave and the one to give next, the highest number the
- * handle had issued.
+ * says the cursor you gave, the one to give next (the highest number the handle
+ * had issued) and, from revision 2, whether this call CONTINUED the selector's
+ * memory (true) or BEGAN it (false); see WHAT THE HANDLE REMEMBERS.
  *
- *     {"document":{"name":"selection_since","revision":1},
- *      "window":{"after_seq":7,"through_seq":9},
+ *     {"document":{"name":"selection_since","revision":2},
+ *      "window":{"after_seq":7,"through_seq":9,"continued":true},
  *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
  *               "selected":"undecided"}, ...],
  *      "revised":[{"seq":7,"direction":"a","list_id":3,"anchor":6,
@@ -5624,6 +5625,19 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * the same thing in other words starts a memory too, which costs a full answer and
  * never a wrong one. A cursor BEHIND the last call's is allowed: the rows it lists
  * are written with their words and are not reported as revised.
+ *
+ * `window.continued` IS HOW YOU TELL WHICH. The memories are a set of at most `n`
+ * (wz_dissect_live_set_selector_memories), the selector asked least recently is
+ * given up when another needs the room, and a call under a selector whose memory
+ * was given up begins it anew. `after_seq` is the cursor YOU gave, echoed, so it
+ * cannot say that. `continued` is true when an earlier call under this selector
+ * wrote the memory this call used, false when this call began it: the first call
+ * under the selector, or the first after its memory was given up. A consumer that
+ * keeps a cursor per selector acts on exactly one case, `continued` false with a
+ * cursor above 0: no row at or below the cursor was compared and none is written
+ * again, so a word you hold for such a row may be stale, and the way to be right is
+ * to ask that selector again from 0. The key is always written. It says nothing
+ * about the CENSUS memories, which are a separate set of the same size.
  *
  * AN EMPTY SELECTOR IS THE IDENTITY, as for every door here: rows carry their
  * coordinates and no "selected", nothing is revised, and nothing is remembered.

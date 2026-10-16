@@ -311,6 +311,12 @@ pub fn selection_json_where_coordinated(
 #[derive(Debug, Default, Clone)]
 pub struct SelectionMemory {
     said: BTreeMap<u64, RowVerdict>,
+    /// Whether a call of [`selection_since_json_coordinated`] has written this
+    /// memory. A memory is made empty when a selector has none, and a selector
+    /// whose memory was given up to make room is made empty again, so this is
+    /// the one fact that tells a caller which of the two the call found: the
+    /// document says it as `window.continued`.
+    written: bool,
 }
 
 impl SelectionMemory {
@@ -440,6 +446,19 @@ fn push_revised_row(row: &Row, was: RowVerdict, first: &mut bool, out: &mut Stri
 /// reported revised and every row from the cursor on is new: ask from 0 after a
 /// selector change, as the rows before the cursor are never written again. With
 /// no selector there are no words, the memory is emptied, and nothing is revised.
+///
+/// # `window.continued`: whether the call found the selector's memory
+///
+/// `window.after_seq` is the cursor the caller GAVE, so it cannot say whether the
+/// words that cursor is about were still held. `window.continued` does: `true`
+/// when an earlier call under this selector wrote the memory this call used, and
+/// `false` when the call began it, which is the first call under the selector or
+/// the first after the handle gave its memory up to make room for another
+/// selector's (the memories are a least-recently-used set, see
+/// [`SelectionMemories`]). A `false` with a cursor above 0 is the one case a
+/// consumer must act on: no row at or below the cursor is compared and none
+/// is written again, so a word the consumer holds for such a row may be stale, and
+/// the way to be right is to ask that selector again from 0.
 pub fn selection_since_json_coordinated(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
@@ -472,12 +491,15 @@ pub fn selection_since_json_coordinated(
         }
     });
     memory.said = said_now;
+    // Read BEFORE it is set: whether this call found a memory an earlier call
+    // had written, which is the only answer the caller cannot get anywhere else.
+    let continued = core::mem::replace(&mut memory.written, true);
 
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTION_SINCE, &mut out);
     let _ = write!(
         out,
-        ",\"window\":{{\"after_seq\":{},\"through_seq\":{}}},\"rows\":[",
+        ",\"window\":{{\"after_seq\":{},\"through_seq\":{},\"continued\":{continued}}},\"rows\":[",
         since.after_seq, since.through_seq
     );
     let mut first = true;
@@ -860,11 +882,69 @@ pub(crate) mod tests {
             );
             assert!(
                 doc.contains(&alloc::format!(
-                    "\"window\":{{\"after_seq\":0,\"through_seq\":{n}}}"
+                    "\"window\":{{\"after_seq\":0,\"through_seq\":{n},\"continued\":false}}"
                 )),
                 "{doc}"
             );
         }
+    }
+
+    /// WHETHER A CALL FOUND THE SELECTOR'S MEMORY is said in the window, and it is
+    /// the only way a caller holding a cursor can tell.
+    ///
+    /// The first call under a selector begins its memory (`false`); the next
+    /// finds it (`true`). Under ONE memory slot a second selector gives the first
+    /// one's up, so asking the first again begins it anew (`false`) while the
+    /// cursor the caller holds is still above 0: the case the field exists for. With
+    /// two slots the first selector is still held and the same call continues.
+    #[test]
+    fn the_window_says_whether_the_selectors_memory_was_continued_or_began() {
+        let (d, _) = mixed_session_with_file();
+        let n = labels().len() as u64;
+        let continued = |doc: &str| {
+            if doc.contains("\"continued\":true") {
+                true
+            } else if doc.contains("\"continued\":false") {
+                false
+            } else {
+                panic!("no continued in the window of {doc}")
+            }
+        };
+        let ask = |memories: &mut SelectionMemories, selector: &str, after: u64| {
+            since(&d, n, selector, after, memories.for_selector(selector))
+        };
+
+        let mut one = SelectionMemories::default();
+        assert_eq!(one.capacity(), 1);
+        assert!(
+            !continued(&ask(&mut one, "kind == query", 0)),
+            "a first call begins"
+        );
+        assert!(
+            continued(&ask(&mut one, "kind == query", n)),
+            "the next call under the same selector finds its memory"
+        );
+        assert!(
+            !continued(&ask(&mut one, "closed == no", 0)),
+            "another selector begins its own"
+        );
+        assert!(
+            !continued(&ask(&mut one, "kind == query", n)),
+            "the first selector's memory was given up for the second's, and the \
+             call says so although the caller's cursor is above 0"
+        );
+        assert_eq!(one.evictions(), 2);
+
+        let mut two = SelectionMemories::default();
+        assert_eq!(two.set_capacity(2), 2);
+        ask(&mut two, "kind == query", 0);
+        ask(&mut two, "closed == no", 0);
+        assert!(
+            continued(&ask(&mut two, "kind == query", n)),
+            "with room for both, alternating selectors continue"
+        );
+        assert!(continued(&ask(&mut two, "closed == no", n)));
+        assert_eq!(two.evictions(), 0);
     }
 
     /// A CURSOR LEAVES OUT THE ROWS IT PASSES, and only those.

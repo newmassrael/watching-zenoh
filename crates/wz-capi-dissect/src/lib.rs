@@ -4268,7 +4268,8 @@ pub unsafe extern "C" fn wz_dissect_live_selection(
 /// `seq`, the handle's count of rows it has issued, unique and increasing and
 /// untouched by a ceiling trimming a list. `0` asks for every row. The document's
 /// `window` says the cursor asked at (`after_seq`) and the one to ask next
-/// (`through_seq`), the highest number the handle had issued.
+/// (`through_seq`), the highest number the handle had issued, and (revision 2)
+/// `continued`: whether the call found the selector's memory or began it.
 ///
 /// # A verdict can change after it is given, and `revised` says which
 ///
@@ -4286,8 +4287,11 @@ pub unsafe extern "C" fn wz_dissect_live_selection(
 /// unless [`wz_dissect_live_set_selector_memories`] says more. A text with no
 /// memory starts one: nothing is revised and every row after the cursor is new, so
 /// ask from `0` after changing the selector. With one memory that also empties
-/// the previous selector's; with several it does not. An empty selector is the
-/// identity, as it is for
+/// the previous selector's; with several it does not. `window.continued` says
+/// which this call was: `false` for the first call under a selector and for the
+/// first after its memory was given up for another's, which is the case a consumer
+/// holding a cursor per selector must act on (ask that selector again from `0`). An
+/// empty selector is the identity, as it is for
 /// every door: rows carry their coordinates and no `selected`, and nothing is
 /// revised. A selector that does not parse is [`WZ_DISSECT_ERR_SELECTOR`].
 ///
@@ -13026,7 +13030,7 @@ mod tests {
             3,
             "the three requests are open: {first}"
         );
-        assert!(first.contains("\"revision\":1"), "{first}");
+        assert!(first.contains("\"revision\":2"), "{first}");
         let cursor = through_seq_of(&first);
         assert!(cursor > 3, "{first}");
 
@@ -13072,6 +13076,62 @@ mod tests {
             next,
             "{other}"
         );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// `window.continued` of a since document.
+    fn continued_of(doc: &str) -> bool {
+        if doc.contains("\"continued\":true") {
+            true
+        } else if doc.contains("\"continued\":false") {
+            false
+        } else {
+            panic!("no continued in the window of {doc}")
+        }
+    }
+
+    /// AN EVICTED SELECTOR'S NEXT CALL SAYS IT BEGAN, through the ABI and on a real
+    /// handle.
+    ///
+    /// Three selectors on a handle that keeps two memories. The third gives up the
+    /// least recently used one, so asking that one again, with the cursor its caller
+    /// still holds, begins its memory: `continued` is false, nothing at or below the
+    /// cursor is compared, and `revised` is empty although the exchanges have closed
+    /// since. A selector whose memory was kept continues. This is the one case a
+    /// consumer holding a cursor per selector cannot tell from the document's other
+    /// keys.
+    #[test]
+    fn an_evicted_selectors_next_call_says_it_began_and_a_kept_one_says_it_continued() {
+        let (low, high) = selector_packets();
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        assert_eq!(selector_memories_door(handle, 2), (WZ_DISSECT_OK, 2));
+        push_live(handle, 1_000, &low);
+
+        // Memories, least recently used first, after each call:
+        let a = live_selection_since(handle, "closed == no", 0).expect("a, first"); // [a]
+        let b = live_selection_since(handle, "kind == query", 0).expect("b, first"); // [a, b]
+        assert!(!continued_of(&a) && !continued_of(&b), "{a} {b}");
+        let cursor = through_seq_of(&a);
+
+        // The third selector needs a slot, and `a` was asked least recently: [b, c].
+        let c = live_selection_since(handle, "bytes >= 0", 0).expect("c, first");
+        assert!(!continued_of(&c), "{c}");
+
+        // The exchanges close. A memory that WAS kept would report the three
+        // requests revised; the evicted selector has nothing to compare, and the
+        // document says why instead of leaving the consumer to infer it. Giving `a`
+        // a slot again gives up `b`, the least recently used: [c, a].
+        push_live(handle, 9_000, &high);
+        let again = live_selection_since(handle, "closed == no", cursor).expect("a, after");
+        assert!(
+            !continued_of(&again),
+            "an evicted selector begins anew: {again}"
+        );
+        assert_eq!(since_array(&again, "revised"), "[]", "{again}");
+
+        // `c` was kept, so it continues.
+        let kept = live_selection_since(handle, "bytes >= 0", cursor).expect("c, after");
+        assert!(continued_of(&kept), "{kept}");
         unsafe { wz_dissect_live_close(handle) };
     }
 
