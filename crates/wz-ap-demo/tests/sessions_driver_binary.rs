@@ -317,7 +317,9 @@ fn a_question_to_a_silent_peer_ends_at_its_deadline() {
         ),
     );
     let mut client = Node::spawn(&["--sessions", &client_doc]);
-    listener.expect_line("accepted ");
+    // The client is Established when it says READY; suspending the listener any
+    // earlier (its own `accepted` line comes first) strands the handshake.
+    client.expect_line("READY client unicast connected");
     signal(listener.child.id(), "STOP");
 
     client.expect_line("DRIVER get asked key=demo/q");
