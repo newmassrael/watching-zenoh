@@ -1479,7 +1479,12 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 ///
 /// It moves to 5 for the sender of an end-to-end protected message
 /// (`crate::e2e_sender`), eight new symbols.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 5;
+///
+/// It moves to 6 for the size of a message (`crate::limits`), one new symbol,
+/// and for the code `z_put`, `z_delete` and the publisher's put and delete answer
+/// with when a message is larger than the session sends
+/// (`WZ_CAPI_C_E_VALUE_TOO_LARGE`, which was `Z_EINVAL` before).
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 6;
 
 /// Report this build's footprints — the drop-in's half of the layout gate.
 ///

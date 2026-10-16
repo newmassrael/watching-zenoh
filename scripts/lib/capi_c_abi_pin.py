@@ -139,7 +139,7 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 5
+EXPECTED_REVISION = 6
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
@@ -233,6 +233,8 @@ EXPECTED_SYMBOLS = {
     "wz_capi_c_e2e_sender_drop",
     "wz_capi_c_internal_e2e_sender_null",
     "wz_capi_c_internal_e2e_sender_check",
+    # What one message may weigh (revision 6), asked before it is sent. Ungated.
+    "wz_capi_c_session_max_message_bytes",
 }
 
 PREFIX = "wz_capi_c_"

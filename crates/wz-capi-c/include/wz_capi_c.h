@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 5
+#define WZ_CAPI_C_ABI_REVISION 6
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -548,6 +548,30 @@ void wz_capi_c_e2e_sender_drop(wz_capi_c_moved_e2e_sender_t *this_);
 void wz_capi_c_internal_e2e_sender_null(wz_capi_c_owned_e2e_sender_t *this_);
 bool wz_capi_c_internal_e2e_sender_check(
     const wz_capi_c_owned_e2e_sender_t *this_);
+
+/* ------------------------------------------------------------------ *
+ * What one message may weigh (revision 6).
+ *
+ * A z_put, z_delete, z_publisher_put or z_publisher_delete whose message
+ * is larger than this session sends is refused BEFORE anything leaves,
+ * with WZ_CAPI_C_E_VALUE_TOO_LARGE rather than the Z_EINVAL it used to
+ * share with every other refusal. A refused message uses no sequence
+ * number: the next value goes out as if this one had not been asked, and
+ * the session carries on. The same code answers a key the codec cannot
+ * carry. The number is outside zenoh-c's Z_E* range, so no upstream code
+ * can take it.
+ * ------------------------------------------------------------------ */
+
+#define WZ_CAPI_C_E_VALUE_TOO_LARGE (-100)
+
+/* The most bytes of ONE encoded message this session sends, through
+ * `out`. The count is the whole network message (header, key,
+ * extensions, payload and their headers), so a value is a little smaller
+ * than it, by the key and a few tens of bytes: use the number to say a
+ * limit and to size values, and the code above to know a particular put
+ * was over. Z_ENULL for a null or closed `session` or a null `out`. */
+z_result_t wz_capi_c_session_max_message_bytes(const z_loaned_session_t *session,
+                                               size_t *out);
 
 /* ------------------------------------------------------------------ *
  * Group membership: zenoh-ext's Group / Member / GroupEvent (R2932).

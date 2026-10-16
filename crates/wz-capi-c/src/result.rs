@@ -21,6 +21,16 @@
 /// zenoh-c's status type: `int8_t`.
 pub type ZResult = i8;
 
+/// The code a publish that no face could carry returns: the size refusal has a
+/// code of its own, so a caller can tell a person "larger than this session
+/// sends"; there is no other fan-out failure today, and a future one would be
+/// `Z_EINVAL` until it earns its own.
+pub fn publish_refusal(why: wz_capi_core::faces::FanoutError) -> ZResult {
+    match why {
+        wz_capi_core::faces::FanoutError::ExceedsCapacity => WZ_CAPI_C_E_VALUE_TOO_LARGE,
+    }
+}
+
 /// Success (`Z_OK`).
 pub const Z_OK: ZResult = 0;
 /// An argument was invalid (`Z_EINVAL`).
@@ -66,6 +76,19 @@ pub const Z_EINVAL_MUTEX: ZResult = -22;
 /// DIFFERENT verdict from [`Z_EINVAL_MUTEX`], and a caller that could not tell
 /// them apart would spin forever on an unusable handle.
 pub const Z_EBUSY_MUTEX: ZResult = -16;
+/// A put or delete was refused BEFORE anything left, because the message is
+/// larger than this session sends (`wz_capi_c`'s own code, not one of
+/// zenoh-c's: upstream reports no size at all and leaves the peer to drop what
+/// it cannot hold).
+///
+/// A message is refused when its encoded body (the key, the extensions, the
+/// payload and their headers) is more than
+/// [`wz_capi_c_session_max_message_bytes`](crate::limits::wz_capi_c_session_max_message_bytes)
+/// says, and a refused message uses no sequence number, so the session carries on
+/// with the next value exactly as if it had not been asked. The same code names
+/// a key the codec cannot carry. The number is outside zenoh-c's `Z_E*` range
+/// (-1 to -8, -16, -22 and -128), so a later upstream code cannot take it.
+pub const WZ_CAPI_C_E_VALUE_TOO_LARGE: ZResult = -100;
 /// An unclassified failure (`Z_EGENERIC` = `INT8_MIN`). zenoh-c spells its
 /// catch-all as the type's minimum rather than as another small negative, so the
 /// value is transcribed rather than chosen.
@@ -90,6 +113,7 @@ mod tests {
             Z_ESESSION_CLOSED,
             Z_EINVAL_MUTEX,
             Z_EBUSY_MUTEX,
+            WZ_CAPI_C_E_VALUE_TOO_LARGE,
             Z_EGENERIC,
         ];
         for (i, a) in errs.iter().enumerate() {

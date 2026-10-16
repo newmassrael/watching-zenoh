@@ -36,7 +36,7 @@ use crate::publisher::{
 };
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 use crate::publisher::{z_reliability_t, Z_RELIABILITY_RELIABLE};
-use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{publish_refusal, ZResult, Z_ENULL, Z_OK};
 use crate::session::session_state;
 
 /// Options for `z_put` (`zenoh_commons.h:927-970`).
@@ -336,10 +336,11 @@ pub unsafe extern "C" fn z_put(
         let sent = publish_outbound(&state.shared, keyexpr, mapping, payload, &publish);
         match sent {
             Ok(_) => Z_OK,
-            // The only fan-out failure is a payload/keyexpr the bounded codec
-            // cannot carry, which is an invalid argument rather than a network
-            // condition.
-            Err(_) => Z_EINVAL,
+            // The only fan-out failure is a message too large to send (a payload
+            // past the session's cap, or a key the bounded codec cannot carry): a
+            // condition of the value, not of the network, and it has a code of its
+            // own. Nothing left and no sequence number was used.
+            Err(why) => publish_refusal(why),
         }
     })
 }
@@ -385,7 +386,7 @@ pub unsafe extern "C" fn z_delete(
         };
         match sent {
             Ok(_) => Z_OK,
-            Err(_) => Z_EINVAL,
+            Err(why) => publish_refusal(why),
         }
     })
 }

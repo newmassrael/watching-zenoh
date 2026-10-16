@@ -119,6 +119,9 @@ pub mod get;
 pub mod group;
 pub mod handlers;
 pub mod keyexpr;
+// What one message may weigh, asked before it is sent. A wz-own door like
+// `config_verdict`, so ungated for the same reason: upstream reports no limit.
+pub mod limits;
 pub mod liveliness;
 pub mod log;
 pub mod matching;

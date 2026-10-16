@@ -259,6 +259,174 @@ fn a_put_past_the_negotiated_batch_leaves_as_fragments_and_arrives_whole() {
     }
 }
 
+/// The sequence numbers of the reliable Frame and Fragment batches in a stream the
+/// dialer wrote, in order. A transport batch opens with its message header: Frame
+/// is `0x05` and Fragment `0x06`, each with the R flag (`0x20`) for the reliable
+/// channel, then the sequence number as a variable-length integer.
+fn reliable_sequence_numbers(stream: &[u8]) -> Vec<u64> {
+    batches(stream)
+        .into_iter()
+        .filter_map(|(_, _, sn)| sn)
+        .collect()
+}
+
+/// Every transport batch of the stream as `(header byte, length, reliable SN)`, so a
+/// failure shows the whole writing and not only the numbers it judged.
+fn batches(stream: &[u8]) -> Vec<(u8, usize, Option<u64>)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 2 <= stream.len() {
+        let len = u16::from_le_bytes([stream[at], stream[at + 1]]) as usize;
+        if at + 2 + len > stream.len() {
+            break;
+        }
+        let batch = &stream[at + 2..at + 2 + len];
+        at += 2 + len;
+        let Some(&header) = batch.first() else {
+            continue;
+        };
+        let mut reliable_sn = None;
+        if matches!(header & 0x1f, 0x05 | 0x06) && header & 0x20 != 0 {
+            let (mut sn, mut shift) = (0u64, 0);
+            for &byte in &batch[1..] {
+                sn |= u64::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+            reliable_sn = Some(sn);
+        }
+        out.push((header, len, reliable_sn));
+    }
+    out
+}
+
+/// A value larger than the session sends is refused before anything leaves, with a
+/// code of its own, and uses no sequence number.
+///
+/// MEASURED on a device: after a 1 MiB value was refused, the next value's frame
+/// went out one sequence number ahead (`..a5, a7`, `a6` never written) and the
+/// device closed the session at once, while the process said the later value was
+/// sent. The wire is the gate: every reliable frame the dialer writes carries the
+/// number after the one before it, across the refusal.
+#[test]
+fn a_value_past_the_cap_is_refused_with_its_own_code_and_leaves_no_hole() {
+    use wz_capi_c::limits::wz_capi_c_session_max_message_bytes;
+    use wz_capi_c::result::WZ_CAPI_C_E_VALUE_TOO_LARGE;
+
+    let (acceptor_port, relay_port) = (free_port(), free_port());
+    let delivered: Delivered = Arc::new(Mutex::new(HashMap::new()));
+    let relay = Relay::start(relay_port, acceptor_port);
+    // The control values are told apart by their length; the refused one is past
+    // the cap whatever the key adds.
+    const BEFORE: usize = 4;
+    const AFTER: usize = 5;
+    let too_large = 1_048_576 + 1024;
+
+    unsafe {
+        let acceptor = open(
+            "listen/endpoints",
+            &format!("tcp/127.0.0.1:{acceptor_port}"),
+        );
+        let ctx = Box::into_raw(Box::new(Ctx {
+            delivered: delivered.clone(),
+        })) as *mut c_void;
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample), None, ctx);
+        let ke = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+        let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&acceptor),
+                &mut sub,
+                z_view_keyexpr_loan(&view),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        let dialer = open("connect/endpoints", &format!("tcp/127.0.0.1:{relay_port}"));
+        let put = |size: usize| {
+            let data = payload_of(size);
+            let mut payload: z_owned_bytes_t = std::mem::zeroed();
+            assert_eq!(
+                z_bytes_copy_from_buf(&mut payload, data.as_ptr(), data.len()),
+                Z_OK
+            );
+            let mut opts: z_put_options_t = std::mem::zeroed();
+            z_put_options_default(&mut opts);
+            z_put(
+                z_session_loan(&dialer),
+                z_view_keyexpr_loan(&view),
+                (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+                &mut opts,
+            )
+        };
+        let arrive = |size: usize| {
+            let want = payload_of(size);
+            let until = Instant::now() + Duration::from_secs(15);
+            loop {
+                assert_eq!(put(size), Z_OK, "the put of {size} bytes was refused");
+                std::thread::sleep(Duration::from_millis(100));
+                if delivered.lock().unwrap().get(&size) == Some(&want) {
+                    return;
+                }
+                assert!(Instant::now() < until, "{size} bytes never arrived");
+            }
+        };
+
+        // The door says the limit, and says it for a session that is open only.
+        let mut cap = 0usize;
+        assert_eq!(
+            wz_capi_c_session_max_message_bytes(z_session_loan(&dialer), &mut cap),
+            Z_OK
+        );
+        assert_eq!(cap, 1_048_576, "the cap the door reports is the slot size");
+        assert!(too_large > cap, "the refused value must be past the cap");
+
+        arrive(BEFORE);
+        let refused = put(too_large);
+        assert_eq!(
+            refused, WZ_CAPI_C_E_VALUE_TOO_LARGE,
+            "a value past the cap has a code of its own, not the generic one"
+        );
+        assert_ne!(refused, wz_capi_c::result::Z_EINVAL);
+        arrive(AFTER);
+
+        let wire = relay.seen.lock().unwrap().clone();
+        let sns = reliable_sequence_numbers(&wire);
+        assert!(
+            sns.len() >= 2,
+            "the dialer wrote {} reliable frame(s) around the refusal",
+            sns.len()
+        );
+        for pair in sns.windows(2) {
+            assert_eq!(
+                pair[1].wrapping_sub(pair[0]) & 0xffff_ffff,
+                1,
+                "a reliable frame skipped a sequence number across the refusal: {sns:?}; the \
+                 peer closes the session at the hole. Every batch the dialer wrote, as \
+                 (header, length, reliable SN): {:?}",
+                batches(&wire)
+            );
+        }
+        assert!(
+            delivered.lock().unwrap().get(&too_large).is_none(),
+            "the refused value was delivered"
+        );
+
+        z_undeclare_subscriber(
+            (&mut sub as *mut z_owned_subscriber_t).cast::<z_moved_subscriber_t>(),
+        );
+        close_session(dialer);
+        close_session(acceptor);
+        drop(Box::from_raw(ctx as *mut Ctx));
+    }
+}
+
 unsafe fn close_session(mut session: z_owned_session_t) {
     let _ = z_close(z_session_loan_mut(&mut session), std::ptr::null_mut());
     z_session_drop((&mut session as *mut z_owned_session_t).cast::<z_moved_session_t>());
