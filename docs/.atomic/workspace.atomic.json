@@ -275234,6 +275234,38 @@
         "Item 711 stays open for the FreeRTOS-Kernel pin bump to V11.3.2."
       ]
     },
+    "Round 3360": {
+      "decision_summary": "The Platform workflow's C ABI job listed three crates (wz-capi-core, wz-capi-pico, wz-capi-c) and so never built or tested wz-capi-dissect on Windows or macOS, although a change to its path triggered the workflow: a green Platform run said nothing about the door an analyzer feeds captured packets through. The list now includes it, so each host builds it and runs its unit tests. The integration-test condition changed from the existence of a tests directory to the existence of a .rs file in it, because that crate's tests directory holds one C file and cargo refuses --test '*' when the pattern matches no target; the three earlier crates have .rs tests and behave as before. The door reads packets the caller hands it and opens no socket, so what is asked is that it builds and passes. NOT claimed: that it passes on either host; the first Platform run that contains this is the answer.",
+      "changes_bullets": [
+        ".github/workflows/platform.yml: wz-capi-dissect joins the C ABI crate loop; the integration-test condition looks for .rs files."
+      ],
+      "verification_bullets": [
+        "Through verify-once on the build host: C0, rc 0. The workflow itself cannot run off the hosted macOS and Windows runners.",
+        "NOT verified: the Platform run of this push on either host."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the Platform run of this push job by job, the Windows C ABI job first; a red there is the first measurement of that door on that host and is paid as its own round."
+      ],
+      "publishable_decision_summary": "The Platform workflow's C ABI job listed three crates (wz-capi-core, wz-capi-pico, wz-capi-c) and so never built or tested wz-capi-dissect on Windows or macOS, although a change to its path triggered the workflow: a green Platform run said nothing about the door an analyzer feeds captured packets through. The list now includes it, so each host builds it and runs its unit tests. The integration-test condition changed from the existence of a tests directory to the existence of a .rs file in it, because that crate's tests directory holds one C file and cargo refuses --test '*' when the pattern matches no target; the three earlier crates have .rs tests and behave as before. The door reads packets the caller hands it and opens no socket, so what is asked is that it builds and passes. NOT claimed: that it passes on either host; the first Platform run that contains this is the answer.",
+      "publishable_changes_bullets": [
+        ".github/workflows/platform.yml: wz-capi-dissect joins the C ABI crate loop; the integration-test condition looks for .rs files."
+      ],
+      "publishable_verification_bullets": [
+        "Through verify-once on the build host: C0, rc 0. The workflow itself cannot run off the hosted macOS and Windows runners.",
+        "NOT verified: the Platform run of this push on either host."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the Platform run of this push job by job, the Windows C ABI job first; a red there is the first measurement of that door on that host and is paid as its own round."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
