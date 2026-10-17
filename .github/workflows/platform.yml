@@ -563,7 +563,12 @@ jobs:
             echo "capi-probe on ${RUNNER_OS}: $1 $2" >> "$GITHUB_STEP_SUMMARY"
           }
           overall=PASS
-          for crate in wz-capi-core wz-capi-pico wz-capi-c; do
+          # `wz-capi-dissect` is the door an analyzer feeds captured packets through, and
+          # no job of this workflow or of the CI workflow built it on either host before:
+          # its path was a trigger, its crate was not in this list. It reads packets the
+          # caller hands it and opens no socket, so what is asked here is that it builds
+          # and its unit tests pass.
+          for crate in wz-capi-core wz-capi-pico wz-capi-c wz-capi-dissect; do
             built=FAIL
             (cd crates && cargo build -p "$crate") && built=PASS
             verdict "$crate builds:" "$built"
@@ -579,7 +584,9 @@ jobs:
             # are the layout and arithmetic one. The ones that need a router binary are
             # `#[ignore]`d and do not run here. Output is not captured so that a test
             # which measures the host (`refusal-probe:`) prints its number on a pass.
-            if [ -d "crates/$crate/tests" ]; then
+            # A `tests/` directory is not a test target: `wz-capi-dissect`'s holds one C
+            # file, which `cargo test --test '*'` matches to nothing and refuses.
+            if compgen -G "crates/$crate/tests/*.rs" > /dev/null; then
               integrated=SKIPPED
               if [ "$built" = PASS ]; then
                 integrated=FAIL
