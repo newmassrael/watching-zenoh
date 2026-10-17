@@ -275380,6 +275380,44 @@
         "Open: why Layer C0 grew by 130s on one run; the three congestion-control wait keys need a wz-sender stall relay and a congestion-control flag on the demo; the performance differential against libzenohc is not started."
       ]
     },
+    "Round 3364": {
+      "decision_summary": "The hosted CI run of Round 3363's push went red in one job, validate (Layers A + C0), at Layer A4: a doc sentence in a new test header spelled the proof-row marker, and the cross-impl audit parsed it as a malformed row. The sentence is reworded. The miss was mine: A4 is hosted-only and in no verify-once lane, since it skips without mnemosyne-cli where the build host lacks it, so a push that adds a test file runs `WZ_A4_REQUIRE=1 bash scripts/audit-crossimpl-proof.sh` itself; it now did and passes. The same run is the first hosted judge of the config-depth tests Round 3363 wired: all passed first time, pico, zenohd and multicast ones included, and the two jobs split from default-off read 512s and 761s of 1800s. NOT claimed: the hosted result of this push.",
+      "changes_bullets": [
+        "wz-integration-tests: a header sentence of wz_router_hlc_stamp_to_pico_zsub_from_a_config_file.rs no longer spells the proof-row marker."
+      ],
+      "verification_bullets": [
+        "Layer A4 run locally through scripts/audit-crossimpl-proof.sh: rc 0, no malformed row.",
+        "Read from the hosted run 39013540861 job by job: every job green but validate; the new tests and the two split jobs as stated in the decision.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of this push job by job; validate carries Layer A4.",
+        "A push that adds a test file runs WZ_A4_REQUIRE=1 bash scripts/audit-crossimpl-proof.sh before it, since no verify-once lane can.",
+        "Next in the depth track: the performance differential against libzenohc, then the build work the research found (auth sinks, config startup path for access control, max_sessions order, namespace in peer and router, queries_default_timeout)."
+      ],
+      "publishable_decision_summary": "The hosted CI run of Round 3363's push went red in one job, validate (Layers A + C0), at Layer A4: a doc sentence in a new test header spelled the proof-row marker, and the cross-impl audit parsed it as a malformed row. The sentence is reworded. The miss was mine: A4 is hosted-only and in no verify-once lane, since it skips without mnemosyne-cli where the build host lacks it, so a push that adds a test file runs `WZ_A4_REQUIRE=1 bash scripts/audit-crossimpl-proof.sh` itself; it now did and passes. The same run is the first hosted judge of the config-depth tests Round 3363 wired: all passed first time, pico, zenohd and multicast ones included, and the two jobs split from default-off read 512s and 761s of 1800s. NOT claimed: the hosted result of this push.",
+      "publishable_changes_bullets": [
+        "wz-integration-tests: a header sentence of wz_router_hlc_stamp_to_pico_zsub_from_a_config_file.rs no longer spells the proof-row marker."
+      ],
+      "publishable_verification_bullets": [
+        "Layer A4 run locally through scripts/audit-crossimpl-proof.sh: rc 0, no malformed row.",
+        "Read from the hosted run 39013540861 job by job: every job green but validate; the new tests and the two split jobs as stated in the decision.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of this push job by job; validate carries Layer A4.",
+        "A push that adds a test file runs WZ_A4_REQUIRE=1 bash scripts/audit-crossimpl-proof.sh before it, since no verify-once lane can.",
+        "Next in the depth track: the performance differential against libzenohc, then the build work the research found (auth sinks, config startup path for access control, max_sessions order, namespace in peer and router, queries_default_timeout)."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
