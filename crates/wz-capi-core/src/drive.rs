@@ -3607,6 +3607,15 @@ mod tests {
     fn an_open_that_dialled_a_peer_returns_with_its_face_in_the_registry() {
         const THREADS: usize = 8;
         const ROUNDS_PER_THREAD: usize = 150;
+        // Eight rounds at a time, each a listener and a dialler with a runtime apiece, hold
+        // hundreds of descriptors at once: more than the 1024 a build host's shell allows, where
+        // the open fails with `Too many open files` and the test reports the host's setting as
+        // a failed dial. The process asks for what it needs.
+        let limit = wz_runtime_tokio_test_support::raise_open_file_limit(65_536);
+        assert!(
+            limit >= 4096,
+            "the open-file limit is {limit}, too low for {THREADS} concurrent rounds"
+        );
         let workers: Vec<_> = (0..THREADS)
             .map(|_| {
                 std::thread::spawn(|| {

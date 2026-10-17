@@ -635,6 +635,50 @@ pub fn free_port() -> u16 {
     unbound_unautoselected()
 }
 
+/// Raise this process's soft limit on open files to `wanted`, or to the hard limit when that
+/// is lower, and answer the soft limit the process has afterwards.
+///
+/// A test that opens many sessions at once (each is a runtime, an I/O reactor and its sockets)
+/// holds hundreds of descriptors, and the soft limit of a shell on a build host is commonly
+/// 1024 where a developer's machine and a hosted runner allow far more. Past it the open fails
+/// with `Too many open files`, which the code under test reports as a failed open: the test then
+/// fails on the host's setting and says nothing of the code (measured: a 1,200-dial test failed
+/// on both build hosts at 1024, at the commit before any change of this round, and passed in
+/// under two seconds at 65,536). Raising the soft limit to what the hard limit permits is what
+/// every long-lived server does on start, and is a change to this process alone. Not unix: no
+/// such limit is modelled, and the answer is `wanted`.
+pub fn raise_open_file_limit(wanted: u64) -> u64 {
+    #[cfg(unix)]
+    {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `getrlimit` writes the struct it is handed, which is fully initialised and
+        // lives for the call.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+            return 0;
+        }
+        let target = (wanted as libc::rlim_t).min(limit.rlim_max);
+        if target > limit.rlim_cur {
+            let raised = libc::rlimit {
+                rlim_cur: target,
+                rlim_max: limit.rlim_max,
+            };
+            // SAFETY: `setrlimit` reads the struct it is handed, which is fully initialised
+            // and lives for the call; it changes this process's limit alone.
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+                return target as u64;
+            }
+        }
+        limit.rlim_cur as u64
+    }
+    #[cfg(not(unix))]
+    {
+        wanted
+    }
+}
+
 /// The ledger half of the older, socket-holding [`free_port`], with the source of
 /// candidates passed in so a test can feed it a candidate that was handed out
 /// before. A candidate that is in the ledger is rejected with its listener held, and
