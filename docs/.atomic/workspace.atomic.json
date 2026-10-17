@@ -275302,6 +275302,46 @@
         "Item 711 has no remaining bump owed once that run is green."
       ]
     },
+    "Round 3362": {
+      "decision_summary": "The config-depth track resumes (the atoms are done): 60 honoured keys were not wire-proven, and a research pass over them found 27 proven by an effect test, 28 with a sink and no such test, 5 with no sink. This round adds effect tests for nine of the 28: a document through apply_zenoh_config and install_interceptors into a router forwarder for downsampling, low_pass_filter and the five access_control keys, each paired with a control; scouting/timeout and scouting/delay now assert bounds a default cannot meet; scouting/multicast/enabled has a found/not-found pair; the tls so_sndbuf key joins the file-fed socket-buffer table. The tests found a defect, fixed here: an item that omits flows was compiled to no flow, so downsampling and low_pass_filter documents did nothing. It now means both directions, as upstream. NOT claimed: the Layer M and zenohd rows (hosted only), the --config startup path for these keys, or the remaining 19.",
+      "changes_bullets": [
+        "wz-runtime-tokio config: flows_or_both, used by the downsampling and low_pass_filter apply arms; router_forward: the document-to-delivery tests.",
+        "wz-capi-c tests: scouting/timeout and scouting/delay bounds, a scouting/multicast/enabled pair; wz-integration-tests: a tls so_sndbuf file row.",
+        "scripts/run-ci.sh: the scouting_open count guard moves 8 -> 9."
+      ],
+      "verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bw, C1bz, C1bn, C1cn, C1l, count-guard, clippy and tests of wz-runtime-tokio and wz-capi-c, clippy of wz-integration-tests, all rc 0 after two repairs (the omitted-flows defect the low-pass test exposed, and a dead-code gate on the new helper).",
+        "NOT verified: the scouting/multicast/enabled pair (Layer M) and the tls so_sndbuf row (zenohd), both hosted only."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of this push job by job; Layer M and the zenohd job are the first judges of two rows.",
+        "Findings from the research that are build work, not tests: transport/unicast/max_sessions refuses after the OpenAck where upstream refuses before it; five transport/auth keys are read and spent nowhere; access_control, downsampling and low_pass_filter reach no sink from a --config startup; namespace has a sink only in the one-shot client; queries_default_timeout differs from upstream in default, width and the meaning of zero; the demo router does not hold scouting/delay.",
+        "Remaining sink-without-test keys: scouting/multicast ttl, autoconnect, autoconnect_strategy, max_sessions, transport_weights, three tls certificates, three congestion waits, eight queue sizes."
+      ],
+      "publishable_decision_summary": "The config-depth track resumes (the atoms are done): 60 honoured keys were not wire-proven, and a research pass over them found 27 proven by an effect test, 28 with a sink and no such test, 5 with no sink. This round adds effect tests for nine of the 28: a document through apply_zenoh_config and install_interceptors into a router forwarder for downsampling, low_pass_filter and the five access_control keys, each paired with a control; scouting/timeout and scouting/delay now assert bounds a default cannot meet; scouting/multicast/enabled has a found/not-found pair; the tls so_sndbuf key joins the file-fed socket-buffer table. The tests found a defect, fixed here: an item that omits flows was compiled to no flow, so downsampling and low_pass_filter documents did nothing. It now means both directions, as upstream. NOT claimed: the Layer M and zenohd rows (hosted only), the --config startup path for these keys, or the remaining 19.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio config: flows_or_both, used by the downsampling and low_pass_filter apply arms; router_forward: the document-to-delivery tests.",
+        "wz-capi-c tests: scouting/timeout and scouting/delay bounds, a scouting/multicast/enabled pair; wz-integration-tests: a tls so_sndbuf file row.",
+        "scripts/run-ci.sh: the scouting_open count guard moves 8 -> 9."
+      ],
+      "publishable_verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bw, C1bz, C1bn, C1cn, C1l, count-guard, clippy and tests of wz-runtime-tokio and wz-capi-c, clippy of wz-integration-tests, all rc 0 after two repairs (the omitted-flows defect the low-pass test exposed, and a dead-code gate on the new helper).",
+        "NOT verified: the scouting/multicast/enabled pair (Layer M) and the tls so_sndbuf row (zenohd), both hosted only."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of this push job by job; Layer M and the zenohd job are the first judges of two rows.",
+        "Findings from the research that are build work, not tests: transport/unicast/max_sessions refuses after the OpenAck where upstream refuses before it; five transport/auth keys are read and spent nowhere; access_control, downsampling and low_pass_filter reach no sink from a --config startup; namespace has a sink only in the one-shot client; queries_default_timeout differs from upstream in default, width and the meaning of zero; the demo router does not hold scouting/delay.",
+        "Remaining sink-without-test keys: scouting/multicast ttl, autoconnect, autoconnect_strategy, max_sessions, transport_weights, three tls certificates, three congestion waits, eight queue sizes."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
