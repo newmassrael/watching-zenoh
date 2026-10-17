@@ -3614,6 +3614,65 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
         use crate::tx_buf::TxBuf;
+        // The common case, in one hold of the slot table's lock: this binding's own link holds
+        // the open frame, so it is taken out, appended to and put back without letting go of
+        // the table in between. The general walk below takes the lock to remove the slot and
+        // again to return it, and a stream appends a message to the same frame many times.
+        // Nothing is run under the lock but the encode of the message into the slot, which
+        // takes no other lock; the send an overflow owes happens after the lock is released.
+        enum Step<'l> {
+            /// The message is in the frame, which is back in the table.
+            Appended,
+            /// The frame is full (or of another reliability) and leaves as it is; the lease is
+            /// the frame, out of the table.
+            Leaves(crate::tx_lease::TxLease<'l>, Reliability),
+            /// The link no longer describes the slot: the open frame is lost.
+            Lost,
+            /// This link holds no open frame: an aggregated session's other link may.
+            Elsewhere,
+        }
+        let link = self.own_link();
+        let step = R::with_mutex_mut(&link.batch_slots, |slots| {
+            let Some(held) = slots[idx].take() else {
+                return Step::Elsewhere;
+            };
+            let Some((_, mut slot)) = Self::resume_batch_slot(Some((link, held)), &mut batch.lend)
+            else {
+                return Step::Lost;
+            };
+            let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
+            if open_channel == Reliability::from_reliable_bool(reliable) {
+                let wpos = slot.len();
+                let appended = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut slot);
+                    encode_body(&mut sink).is_ok()
+                } && slot.len() <= mtu;
+                if appended {
+                    batch.stage.count += 1;
+                    slots[idx] = Some(slot.hold());
+                    return Step::Appended;
+                }
+                // Overflow: roll the partial encode back before the frame
+                // leaves, exactly as the heap stage truncates its vector.
+                slot.truncate(wpos);
+            }
+            Step::Leaves(slot, open_channel)
+        });
+        match step {
+            Step::Appended => return true,
+            Step::Lost => {
+                batch.stage.lent = false;
+                batch.stage.count = 0;
+                return false;
+            }
+            Step::Leaves(slot, open_channel) => {
+                batch.stage.lent = false;
+                batch.stage.count = 0;
+                self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
+                return false;
+            }
+            Step::Elsewhere => {}
+        }
         self.with_batch_holder(idx, |found| {
             let Some((link, mut slot)) = Self::resume_batch_slot(found, &mut batch.lend) else {
                 batch.stage.lent = false;
