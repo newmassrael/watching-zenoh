@@ -191,6 +191,15 @@ impl TxBuf for CappedTxBuf<'_, '_> {
         }
         self.inner.append(bytes)
     }
+
+    /// Forwarded as a byte, so the buffer underneath can store it without the
+    /// one-byte slice the default would build and pass through two calls.
+    fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
+        if self.inner.len() >= self.cap {
+            return Err(CodecError::BufferOverflow);
+        }
+        self.inner.append_byte(byte)
+    }
 }
 
 /// Adapts a [`TxBuf`] to the codec's [`SceSink`].

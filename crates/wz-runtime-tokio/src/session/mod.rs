@@ -1553,29 +1553,30 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // observer access via the R::with_mutex_mut closure form (R311ct API).
         #[cfg(feature = "pubsub-allow-loop")]
         {
-            let delivered = if opts.allowed_destination.allows_local() {
-                let sample = build_loopback_sample(keyexpr, payload, &opts);
-                let delivered = R::with_mutex_mut(&self.observer, |observer| {
-                    observer.subscribers.local_publish(&sample)
-                });
-                // R311lh / R311lj — drain the fires THIS publish staged (the
-                // loopback `local_publish`) so the local subscriber callbacks
-                // run synchronously on the caller thread, outside the observer
-                // lock, before `publish` returns. Gated on the local-delivery
-                // path (a Remote-only publish stages nothing). The
-                // observer-serialized take keeps a concurrent drive-loop batch
-                // atomic (R311lj).
-                //
-                // R311y554 — subject to the session's `LocalDeliveryDrain`: a
-                // host that forbids callbacks off its drive task stages here
-                // and the drive loop delivers. Ordering survives either way,
-                // because the queue is FIFO and this call stages before it
-                // returns.
-                self.drain_local_fires_if_inline();
-                delivered
-            } else {
-                0
-            };
+            let delivered =
+                if opts.allowed_destination.allows_local() && self.has_local_subscriber(keyexpr) {
+                    let sample = build_loopback_sample(keyexpr, payload, &opts);
+                    let delivered = R::with_mutex_mut(&self.observer, |observer| {
+                        observer.subscribers.local_publish(&sample)
+                    });
+                    // R311lh / R311lj — drain the fires THIS publish staged (the
+                    // loopback `local_publish`) so the local subscriber callbacks
+                    // run synchronously on the caller thread, outside the observer
+                    // lock, before `publish` returns. Gated on the local-delivery
+                    // path (a Remote-only publish stages nothing). The
+                    // observer-serialized take keeps a concurrent drive-loop batch
+                    // atomic (R311lj).
+                    //
+                    // R311y554 — subject to the session's `LocalDeliveryDrain`: a
+                    // host that forbids callbacks off its drive task stages here
+                    // and the drive loop delivers. Ordering survives either way,
+                    // because the queue is FIFO and this call stages before it
+                    // returns.
+                    self.drain_local_fires_if_inline();
+                    delivered
+                } else {
+                    0
+                };
             Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
@@ -1970,6 +1971,25 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             let _ = interest_id;
             false
         }
+    }
+
+    /// Whether a subscriber of THIS session would receive a local publish on
+    /// `keyexpr`.
+    ///
+    /// The loopback leg asks it first: a publish that no local subscriber
+    /// matches has nothing to deliver, so it builds no sample (a copy of the
+    /// payload and of the key), stages no fire and wakes no drive loop. Most
+    /// publishers have no subscriber in their own process, and without the
+    /// question each of their messages paid for all three. It is the registry's
+    /// own prediction of `local_publish`, which its tests hold to the delivery.
+    ///
+    /// `pubsub-allow-loop`-gated for the reason of
+    /// [`Self::drain_local_fires_if_inline`], whose callers it shares.
+    #[cfg(feature = "pubsub-allow-loop")]
+    fn has_local_subscriber(&self, keyexpr: &str) -> bool {
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.has_local_matching(keyexpr)
+        })
     }
 
     /// Run the caller-thread half of the deferred drain, subject to this
@@ -3435,7 +3455,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // R311db — observer access via R::with_mutex_mut (closure form).
         #[cfg(feature = "pubsub-allow-loop")]
         {
-            let delivered = if opts.allowed_destination.allows_local() {
+            let delivered = if opts.allowed_destination.allows_local()
+                && self.has_local_subscriber(loopback_keyexpr)
+            {
                 let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
                 let delivered = R::with_mutex_mut(&self.observer, |observer| {
                     observer.subscribers.local_publish(&sample)

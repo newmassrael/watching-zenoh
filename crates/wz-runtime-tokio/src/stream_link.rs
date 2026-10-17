@@ -1054,7 +1054,12 @@ pub async fn writer_task<W>(mut writer: W, mut queue: OutboundQueue)
 where
     W: AsyncWrite + Unpin,
 {
-    while let Some(mut wire) = queue.next_wire().await {
+    // R3366 — `next_wire_packed`, not `next_wire`: this writes a BYTE STREAM, where
+    // the frames queued behind the one taken are the next bytes of the same stream,
+    // so they leave in the same write. One write per frame was a system call and
+    // a lock round per message, and a small-message stream ran fifty times slower
+    // than the reference library's for it.
+    while let Some(mut wire) = queue.next_wire_packed().await {
         // R3239 — on a pooled queue the frame is a slot of the link's transmit
         // pool, armed when it was taken off its lane: the write that begins here
         // is the bus master this row has, so the slot is started now and goes

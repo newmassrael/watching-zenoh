@@ -276,6 +276,32 @@ impl<const N: usize> BoundedVec<u8, N> {
         Ok(&mut self.inner[start..end])
     }
 
+    /// Append every byte of `src` in one operation.
+    ///
+    /// R3365 — the bulk form of [`Self::push`]. A caller that appends a slice by
+    /// pushing its bytes one at a time pays a capacity check and a store per byte
+    /// and keeps the compiler from turning the loop into a copy: measured on the
+    /// reassembly path, one function that did exactly that was 85% of the
+    /// instructions a subscriber executed for a 64 KiB message, about ten per byte.
+    ///
+    /// All or nothing on the fixed backing: `src` is refused whole when it does
+    /// not fit, where a push loop would have staged a prefix first. The growable
+    /// backing always succeeds, `N` being advisory there.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub fn extend_from_slice(&mut self, src: &[u8]) -> Result<(), CapacityFull<()>> {
+        self.inner.extend_from_slice(src);
+        Ok(())
+    }
+
+    /// Append every byte of `src` in one operation. See the growable arm for the
+    /// contract; this one enforces `N`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub fn extend_from_slice(&mut self, src: &[u8]) -> Result<(), CapacityFull<()>> {
+        self.inner
+            .extend_from_slice(src)
+            .map_err(|_| CapacityFull(()))
+    }
+
     /// The growable backing's own buffer, moved out: no copy. What lets a
     /// collection that was filled in place be handed on as storage of its own
     /// (a completed reassembly chain, lent up to the application). Only the

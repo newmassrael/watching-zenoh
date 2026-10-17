@@ -2522,14 +2522,21 @@ impl SharedSession {
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
             match local_leg(&self.local, local, payload) {
-                Leg::Delivered(n) => delivered += n,
+                Leg::Delivered(n) => {
+                    delivered += n;
+                    // Only a delivery stages anything for the drain to run; a
+                    // publish no subscriber of this session matched woke the
+                    // drive loop for nothing, once per message.
+                    if n > 0 {
+                        self.local_wake.notify_one();
+                    }
+                }
                 // The plane's link is inert, so the skipped arm is unreachable through
                 // it; kept because the local leg's error handling must not be more
                 // brittle than the wire leg's if the plane ever changes.
                 Leg::Skipped => {}
                 Leg::Refused => return Err(FanoutError::ExceedsCapacity),
             }
-            self.local_wake.notify_one();
         }
         Ok(delivered)
     }

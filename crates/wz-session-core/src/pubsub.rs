@@ -2026,6 +2026,15 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// `ctx->allow_local` (`filtering.c:66`, `:127`).
     #[cfg(feature = "storage-profile")]
     pub fn has_local_matching(&self, publish_keyexpr: &str) -> bool {
+        // Nothing here a local publish could reach: answer before the key is taken apart. A
+        // publisher with no subscriber in its own process asks this once per message.
+        if !self
+            .subscribers
+            .iter()
+            .any(|subscriber| subscriber.allowed_origin.allows_local())
+        {
+            return false;
+        }
         let mut publish_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
         for c in publish_keyexpr.split('/') {
             // A keyexpr deeper than the declared bound cannot be

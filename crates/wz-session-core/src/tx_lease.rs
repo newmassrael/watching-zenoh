@@ -232,6 +232,23 @@ impl TxBuf for TxLease<'_> {
         self.len += bytes.len();
         Ok(())
     }
+
+    /// One byte stored directly. The default goes through [`TxBuf::append`] with a
+    /// one-byte slice, which is a `memcpy` call for a length the compiler cannot see
+    /// is one; a frame's header is written a byte at a time, so that call was paid
+    /// several times per message.
+    fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
+        if self.capacity() - self.len < 1 {
+            return Err(CodecError::BufferOverflow);
+        }
+        // SAFETY: the destination byte `headroom + len` lies in the slot (checked
+        // above) and the slot is this lease's alone (see `as_slice`).
+        unsafe {
+            self.base.add(self.headroom + self.len).write(byte);
+        }
+        self.len += 1;
+        Ok(())
+    }
 }
 
 impl Drop for TxLease<'_> {

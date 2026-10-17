@@ -61,7 +61,8 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, WaitTimeoutResult};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Notify};
@@ -151,7 +152,7 @@ pub fn outbound_channel_with_capacity(
             occupied: [0; Priority::NUM],
             congested: [false; Priority::NUM],
             block_first: [false; Priority::NUM],
-            in_flight: None,
+            in_flight: [None; Priority::NUM],
             closed: false,
             senders: 1,
             spare: Vec::new(),
@@ -163,7 +164,7 @@ pub fn outbound_channel_with_capacity(
             receiver_gone: false,
         }),
         ready: Notify::new(),
-        room: Condvar::new(),
+        room: RoomSignal::new(),
     });
     (
         OutboundTx {
@@ -264,7 +265,61 @@ struct Lanes {
     ready: Notify,
     /// Wakes senders waiting for room when the writer frees some, or the
     /// queue closes.
-    room: Condvar,
+    room: RoomSignal,
+}
+
+/// The senders' wait for room: a [`Condvar`] that is notified only while
+/// someone waits on it.
+///
+/// `std`'s futex condvar makes a system call on EVERY notify, waiter or not, and
+/// the writer notifies after every frame it takes. A sender that never waits
+/// (the usual case: the lane has room) paid for that call per message, in a
+/// process whose only job is to move messages.
+///
+/// A waiter counts itself in while it holds the lanes' lock and before the wait
+/// gives the lock up; a notifier changed the state under that same lock before
+/// it asks. So either the waiter's check saw the change, or the count the
+/// notifier reads includes the waiter: a wake-up cannot be lost.
+struct RoomSignal {
+    cv: Condvar,
+    waiters: AtomicUsize,
+}
+
+impl RoomSignal {
+    fn new() -> Self {
+        Self {
+            cv: Condvar::new(),
+            waiters: AtomicUsize::new(0),
+        }
+    }
+
+    /// Only the pooled queue waits without a bound (for a free slot).
+    #[cfg(feature = "runtime-zero-copy")]
+    fn wait<'a>(&self, guard: MutexGuard<'a, LaneState>) -> LockResult<MutexGuard<'a, LaneState>> {
+        self.waiters.fetch_add(1, Ordering::SeqCst);
+        let woken = self.cv.wait(guard);
+        self.waiters.fetch_sub(1, Ordering::SeqCst);
+        woken
+    }
+
+    fn wait_timeout<'a>(
+        &self,
+        guard: MutexGuard<'a, LaneState>,
+        limit: Duration,
+    ) -> LockResult<(MutexGuard<'a, LaneState>, WaitTimeoutResult)> {
+        self.waiters.fetch_add(1, Ordering::SeqCst);
+        let woken = self.cv.wait_timeout(guard, limit);
+        self.waiters.fetch_sub(1, Ordering::SeqCst);
+        woken
+    }
+
+    /// Wake the waiters, if there are any. Call after the state they wait on
+    /// changed under the lanes' lock.
+    fn notify_all(&self) {
+        if self.waiters.load(Ordering::SeqCst) > 0 {
+            self.cv.notify_all();
+        }
+    }
 }
 
 struct LaneState {
@@ -292,9 +347,13 @@ struct LaneState {
     /// Indexed by the message's own priority, as zenoh indexes it — not by
     /// lane, which a no-QoS session collapses to one.
     block_first: [bool; Priority::NUM],
-    /// The frame the writer holds, as `(lane, bytes)`: still occupying its
-    /// lane until the writer asks for the next one.
-    in_flight: Option<(usize, usize)>,
+    /// The bytes the writer holds in each lane, `None` where it holds none:
+    /// still occupying the lane until the writer asks for the next item.
+    ///
+    /// R3366 — one entry per lane and not one frame, because a stream writer
+    /// takes everything that is queued as one buffer ([`LaneState::take_next_packed`]),
+    /// and that buffer holds frames of several lanes.
+    in_flight: [Option<usize>; Priority::NUM],
     /// No further enqueue lands — set by the receiver's `close` (the seal).
     closed: bool,
     /// Live `OutboundTx` clones; the queue is finished once this reaches 0
@@ -564,7 +623,7 @@ impl LaneState {
         };
         match entry {
             Entry::Heap(priority, frame) => {
-                self.in_flight = Some((lane, frame.len()));
+                self.in_flight[lane] = Some(frame.len());
                 Taken::Frame(priority, Out::Heap(frame))
             }
             #[cfg(feature = "runtime-zero-copy")]
@@ -580,7 +639,7 @@ impl LaneState {
                     .class(batch.class)
                     .arm(batch.idx)
                     .expect("a queued batch is the CPU's, so it arms");
-                self.in_flight = Some((lane, batch.fill));
+                self.in_flight[lane] = Some(batch.fill);
                 Taken::Frame(
                     batch.priority,
                     Out::Slot {
@@ -644,15 +703,108 @@ impl LaneState {
     }
 
     fn release_in_flight(&mut self) -> bool {
-        match self.in_flight.take() {
-            Some((lane, bytes)) => {
+        let mut freed = false;
+        for lane in 0..Priority::NUM {
+            if let Some(bytes) = self.in_flight[lane].take() {
                 self.occupied[lane] = self.occupied[lane].saturating_sub(bytes);
                 // zenoh lowers the mark when a written batch returns to its
                 // priority's pool (`fn refill(`), room or not.
                 self.congested[lane] = false;
-                true
+                freed = true;
             }
-            None => false,
+        }
+        freed
+    }
+
+    /// R3366 — [`Self::take_next`] for a BYTE-STREAM writer: everything queued, up
+    /// to `budget` bytes, as ONE buffer, in exactly the order `take_next` would
+    /// have handed the frames out one by one.
+    ///
+    /// # Why this exists
+    ///
+    /// A writer that takes a frame, writes it and asks for the next pays one
+    /// system call, one lock round and one wake-up per frame. Measured against
+    /// the reference library on a small-message stream (8-byte payloads, a
+    /// loopback link), that was one write of 30 bytes per message where the
+    /// reference writes 8 KiB, and a publish rate fifty times lower. zenoh's
+    /// transmission pipeline coalesces a burst of messages into a batch; this is
+    /// that, at the queue.
+    ///
+    /// # Why it is correct on a byte stream
+    ///
+    /// Each frame is already the bytes the peer reads (its length prefix
+    /// included), and a stream carries them back to back, so the concatenation of
+    /// frames IS the wire the frames written one by one would have made. Nothing
+    /// is added, reordered or split: a lane stays FIFO (a conduit's sequence
+    /// numbers keep their order), the lanes are drained in the priority order
+    /// `take_next` uses, and a frame that does not fit the budget stays queued for
+    /// the next take whole. A DATAGRAM link must not use this (one frame is one
+    /// datagram there), which is why it is a separate door and not a change to
+    /// `take_next`.
+    ///
+    /// # No added latency
+    ///
+    /// It never waits for more to arrive: it takes what is queued when the writer
+    /// asks, so a lone frame leaves at once and, being alone, is handed over
+    /// as it is, without a copy. Frames pile up behind a write that is under
+    /// way, and that backlog is what the next take packs.
+    ///
+    /// The bound's accounting is `take_next`'s: every packed frame stays in its
+    /// lane's occupancy until the writer asks again.
+    ///
+    /// A pooled queue packs frames into its own batches already, so it is taken
+    /// as `take_next` takes it.
+    fn take_next_packed(&mut self, budget: usize) -> (Taken, bool) {
+        #[cfg(feature = "runtime-zero-copy")]
+        if self.pool.is_some() {
+            return self.take_next();
+        }
+        let freed = self.release_in_flight();
+        // What is queued now: the occupancy minus nothing, the previous take
+        // having just been released above.
+        let queued: usize = self.occupied.iter().sum();
+        let mut first: Option<(Priority, Vec<u8>)> = None;
+        let mut joined: Option<Vec<u8>> = None;
+        'lanes: for lane in 0..Priority::NUM {
+            while let Some(Entry::Heap(_, frame)) = self.lanes[lane].front() {
+                if let Some((_, head)) = first.as_ref() {
+                    let so_far = joined.as_ref().map_or(head.len(), Vec::len);
+                    if so_far.saturating_add(frame.len()) > budget {
+                        break 'lanes;
+                    }
+                }
+                let Some(Entry::Heap(priority, frame)) = self.lanes[lane].pop_front() else {
+                    break;
+                };
+                self.in_flight[lane] = Some(self.in_flight[lane].unwrap_or(0) + frame.len());
+                if first.is_none() {
+                    // The first frame of the take: held as it is, in case it is
+                    // the only one.
+                    first = Some((priority, frame));
+                    continue;
+                }
+                if let Some(buffer) = joined.as_mut() {
+                    buffer.extend_from_slice(&frame);
+                    self.give_spare(frame);
+                    continue;
+                }
+                // The second frame: only now is there something to join.
+                let (_, head) = first.as_mut().expect("the first frame was held above");
+                let mut buffer =
+                    Vec::with_capacity(queued.min(budget).max(head.len() + frame.len()));
+                buffer.extend_from_slice(head);
+                buffer.extend_from_slice(&frame);
+                self.give_spare(std::mem::take(head));
+                self.give_spare(frame);
+                joined = Some(buffer);
+            }
+        }
+        match (first, joined) {
+            (None, _) => (Taken::Empty, freed),
+            (Some((priority, _)), Some(buffer)) => {
+                (Taken::Frame(priority, Out::Heap(buffer)), freed)
+            }
+            (Some((priority, frame)), None) => (Taken::Frame(priority, Out::Heap(frame)), freed),
         }
     }
 }
@@ -1589,13 +1741,38 @@ impl OutboundRx {
     /// R3239 — [`Self::recv_wire`], with the priority the frame was sent at (a
     /// batch's: the priority of the first frame in it).
     pub async fn recv_wire_tagged(&mut self) -> Option<(Priority, WireFrame)> {
+        self.recv_wire_tagged_with(false).await
+    }
+
+    /// R3366 — [`Self::recv_wire`] for a BYTE-STREAM writer: all that is queued, up
+    /// to the queue's batch size, as one buffer in the order the frames would
+    /// have been taken one by one. See [`LaneState::take_next_packed`] for why
+    /// that is the same wire, and why a datagram writer must not use it.
+    pub async fn recv_wire_packed(&mut self) -> Option<WireFrame> {
+        self.recv_wire_mode(true).await
+    }
+
+    /// [`Self::recv_wire`] or [`Self::recv_wire_packed`], by `packed`: the one
+    /// call the seal-aware queue wrapper makes either way.
+    pub(crate) async fn recv_wire_mode(&mut self, packed: bool) -> Option<WireFrame> {
+        self.recv_wire_tagged_with(packed)
+            .await
+            .map(|(_, wire)| wire)
+    }
+
+    async fn recv_wire_tagged_with(&mut self, packed: bool) -> Option<(Priority, WireFrame)> {
         loop {
             let notified = self.shared.ready.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
                 let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
-                let (taken, freed) = st.take_next();
+                let (taken, freed) = if packed {
+                    let budget = st.batch_bytes.max(1);
+                    st.take_next_packed(budget)
+                } else {
+                    st.take_next()
+                };
                 let finished = matches!(taken, Taken::Empty) && (st.closed || st.senders == 0);
                 drop(st);
                 if freed {
@@ -1638,6 +1815,24 @@ impl OutboundRx {
         }
         match taken {
             Taken::Frame(priority, out) => Some((priority, self.wire(out))),
+            _ => None,
+        }
+    }
+
+    /// R3366 — [`Self::recv_wire_packed`] when something is queued right now. For
+    /// a test that must ask without waiting.
+    #[cfg(test)]
+    pub(crate) fn try_recv_wire_packed(&mut self) -> Option<WireFrame> {
+        let (taken, freed) = {
+            let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+            let budget = st.batch_bytes.max(1);
+            st.take_next_packed(budget)
+        };
+        if freed {
+            self.shared.room.notify_all();
+        }
+        match taken {
+            Taken::Frame(_, out) => Some(self.wire(out)),
             _ => None,
         }
     }
@@ -1999,15 +2194,26 @@ impl OutboundQueue {
     /// ([`WireFrame::begin_write`]), writes it, and hands it back
     /// ([`Self::recycle_wire`]) or drops it.
     pub async fn next_wire(&mut self) -> Option<WireFrame> {
+        self.next_wire_with(false).await
+    }
+
+    /// R3366 — [`Self::next_wire`] for a BYTE-STREAM writer: what is queued, up
+    /// to a batch, as one buffer ([`OutboundRx::recv_wire_packed`]). The seal
+    /// behaves exactly as it does there.
+    pub async fn next_wire_packed(&mut self) -> Option<WireFrame> {
+        self.next_wire_with(true).await
+    }
+
+    async fn next_wire_with(&mut self, packed: bool) -> Option<WireFrame> {
         loop {
             if self.sealed || self.seal.is_none() {
-                return self.rx.recv_wire().await;
+                return self.rx.recv_wire_mode(packed).await;
             }
             let seal = self.seal.as_mut().expect("checked directly above");
             let mut sealed_now = false;
             let frame = tokio::select! {
                 biased;
-                frame = self.rx.recv_wire() => Some(frame),
+                frame = self.rx.recv_wire_mode(packed) => Some(frame),
                 changed = seal.changed() => {
                     sealed_now = match changed {
                         Ok(()) => *seal.borrow_and_update(),
@@ -2558,6 +2764,101 @@ mod tests {
             order.push(String::from_utf8(frame).expect("ascii"));
         }
         assert_eq!(order, ["ctl", "rt", "data", "bg-1", "bg-2"]);
+    }
+
+    /// R3366 — a byte-stream writer takes everything that is queued as ONE buffer,
+    /// and that buffer is the frames in exactly the order they would have left one
+    /// by one (the test above), so the wire it makes is the same wire.
+    #[tokio::test]
+    async fn a_stream_writer_takes_what_is_queued_as_one_buffer_in_the_one_by_one_order() {
+        let (tx, mut rx) = outbound_channel();
+        tx.send(Priority::Background, b"bg-1".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Background, b"bg-2".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.send(Priority::RealTime, b"rt".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        drop(tx);
+
+        let wire = rx.recv_wire_packed().await.expect("a buffer").into_vec();
+        assert_eq!(wire, b"ctlrtdatabg-1bg-2");
+        assert!(
+            rx.recv_wire_packed().await.is_none(),
+            "all of it left in the one take"
+        );
+    }
+
+    /// R3366 — a frame that is alone is handed over as it is: no copy, and so no
+    /// cost for the link that is never busy. Packing only ever starts at the second
+    /// frame.
+    #[tokio::test]
+    async fn a_lone_queued_frame_is_taken_whole_and_uncopied() {
+        let (tx, mut rx) = outbound_channel();
+        let frame = b"only".to_vec();
+        let at = frame.as_ptr();
+        tx.send(Priority::Data, frame).expect("enqueue");
+
+        let wire = rx.recv_wire_packed().await.expect("a frame").into_vec();
+        assert_eq!(wire, b"only");
+        assert_eq!(wire.as_ptr(), at, "the buffer itself, not a copy of it");
+    }
+
+    /// R3366 — the take stops at the batch size and splits no frame: what does not
+    /// fit stays queued, whole, for the next take; and a frame larger than the
+    /// budget is still taken (alone), because a frame is the unit and a budget
+    /// cannot make it smaller.
+    #[tokio::test]
+    async fn the_packed_take_stops_at_the_budget_and_splits_no_frame() {
+        let (tx, mut rx) = outbound_channel_with_capacity([8; Priority::NUM], 10);
+        for frame in [b"aaaa", b"bbbb", b"cccc"] {
+            tx.send(Priority::Data, frame.to_vec()).expect("enqueue");
+        }
+        let first = rx.recv_wire_packed().await.expect("a buffer").into_vec();
+        assert_eq!(
+            first, b"aaaabbbb",
+            "8 of the 10, the next frame would be 12"
+        );
+        let second = rx.recv_wire_packed().await.expect("a buffer").into_vec();
+        assert_eq!(second, b"cccc", "the frame that did not fit, whole");
+
+        tx.send(Priority::Data, vec![7u8; 25]).expect("enqueue");
+        tx.send(Priority::Data, b"after".to_vec()).expect("enqueue");
+        let big = rx.recv_wire_packed().await.expect("a frame").into_vec();
+        assert_eq!(big, vec![7u8; 25], "past the budget, taken alone");
+        let after = rx.recv_wire_packed().await.expect("a frame").into_vec();
+        assert_eq!(after, b"after");
+    }
+
+    /// R3366 — every frame of a packed take stays in its lane's occupancy until the
+    /// writer asks for the next item, as one frame being written always has: the
+    /// bound a sender waits on is not lowered by the take, only by the write that
+    /// the next ask says is over. Two lanes are packed here, so the release has to
+    /// reach both.
+    #[test]
+    fn a_packed_take_holds_each_lanes_bytes_until_the_next_ask() {
+        let (tx, mut rx) = outbound_channel_with_capacity([2; Priority::NUM], 6);
+        tx.send(Priority::Control, b"abc".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::RealTime, b"def".to_vec())
+            .expect("enqueue");
+        let occupied = |rx: &OutboundRx| {
+            let st = rx.shared.state.lock().expect("lanes");
+            (
+                st.occupied[Priority::Control.wire_byte() as usize],
+                st.occupied[Priority::RealTime.wire_byte() as usize],
+            )
+        };
+        assert_eq!(occupied(&rx), (3, 3), "queued");
+
+        let wire = rx.try_recv_wire_packed().expect("a buffer").into_vec();
+        assert_eq!(wire, b"abcdef", "both lanes in one buffer");
+        assert_eq!(occupied(&rx), (3, 3), "still held while it is written");
+
+        assert!(rx.try_recv_wire_packed().is_none(), "nothing more queued");
+        assert_eq!(occupied(&rx), (0, 0), "released by the next ask, in both");
     }
 
     /// R2921 — a lane is bounded, the bound is its own, and a frame keeps its
