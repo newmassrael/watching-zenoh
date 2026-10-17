@@ -17721,6 +17721,14 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # off the file's `#[ignore]`d tests and the run printed.
     _runci_guarded_test "M a C ABI session scouts and is found" 9 \
         cargo test -p wz-capi-c --test scouting_open -- --ignored --test-threads=1 || return 1
+    # R3362 -- two config keys read off the datagrams a scouting session sends and the nodes it
+    # dials, each as a pair with a control: the IP TTL of a Scout is the key's (and 1 without it),
+    # and a peer whose `autoconnect` leaves its role out does not dial a node that answers while
+    # the same peer without the key does. One ignored test per file, serial for the group space.
+    _runci_guarded_test "M a Scout carries the configured multicast TTL" 1 \
+        cargo test -p wz-capi-c --test scouting_ttl -- --ignored --test-threads=1 || return 1
+    _runci_guarded_test "M autoconnect decides which answering node a peer dials" 1 \
+        cargo test -p wz-capi-c --test scouting_autoconnect -- --ignored --test-threads=1 || return 1
     # The `scout` role of a `--sessions` driver: one process answers Scouts from a
     # `scouting.multicast` block, a second asks from inside its own session and
     # prints the Hello it hears. It needs a multicast route and nothing else.
@@ -18391,6 +18399,26 @@ layer_z_zenohd_interop() {
     # e2e tests, so serial execution costs only wall-clock, not coverage.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
+    # R3362 — three config-depth legs that need NO foreign binary and run on the build
+    # above (it carries `tls`, `routing-peer`, `router-hat-router` and `zenoh-config`),
+    # each a set of arms with a control that removes the key. (1) The three
+    # `transport/link/tls/*` certificate keys from two config files: a session
+    # establishes, a dialer without `root_ca_certificate` or with a foreign one is
+    # refused, an acceptor without the certificate and key does not listen. (2)
+    # `routing/router/linkstate/transport_weights` from a config file, read as the
+    # weight in the LinkState a router floods, with controls (key absent, a zid that is
+    # no neighbour). (3) `queries_default_timeout` from a config file ends a query at
+    # its deadline, and without the key no deadline fires; it needs the silent peer.
+    _runci_guarded_test "Z tls keys from a config file" 4 \
+        cargo test -p wz-integration-tests \
+        --test wz_tls_keys_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
+    _runci_guarded_test "Z router link weight from a config file" 3 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_link_weight_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
+    (cd crates && cargo build -p wz-e2e-silent-peer --quiet) || return 1
+    _runci_guarded_test "Z query timeout from a config file" 2 \
+        cargo test -p wz-integration-tests \
+        --test wz_ap_demo_query_timeout_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
     # R311y372 — wz LOWLATENCY transport cross-impl: wz dials zenohd with
     # `--lowlatency`, negotiates the Z_EXT_LOWLATENCY unit ext (asserted true via
     # the demo log), and its lean (4-byte-prefixed, Frame-less) Put routes through
@@ -19974,7 +20002,7 @@ layer_e6_peer_mesh() {
     # (`--session-lifecycle`) are compiled in for the leg below. Additive: nothing
     # hosts them unless that flag is typed, so no other E6 leg changes behaviour.
     (cd crates && cargo build -p wz-ap-demo \
-        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress --quiet) || return 1
+        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,zenoh-config --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the
@@ -20025,6 +20053,12 @@ layer_e6_peer_mesh() {
     if [[ -x target/zenoh-pico-cli/z_put && -x target/zenoh-pico-cli/z_pub ]]; then
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_adminspace_write_from_pico_zput -- --ignored --quiet) || return 1
+        # R3362 — `adminspace/permissions/write` from a CONFIG FILE, on the same binary
+        # (this layer's build carries `zenoh-config`): a granting document is applied,
+        # and two documents that omit the key or state `false` are denied.
+        _runci_guarded_test "E6 adminspace write from a config file" 3 \
+            cargo test -p wz-integration-tests \
+            --test wz_peer_adminspace_write_from_pico_zput_from_a_config_file -- --ignored --quiet || return 1
     else
         _pico_cli_unavailable "Layer E6 (pico adminspace config-write z_put/z_pub)" || return 1
     fi
@@ -20087,6 +20121,12 @@ layer_e6_peer_mesh() {
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_interest_pending_gc_pico_interop -- --ignored --quiet --test-threads=1) \
             || return 1
+        # R3362 — `routing/interests/timeout` from a CONFIG FILE, on the same binary: a
+        # document stating 2500 ms ends the frozen-upstream get at that deadline, and a
+        # document that omits the key leaves the default 10 s window pending.
+        _runci_guarded_test "E6 interest timeout from a config file" 2 \
+            cargo test -p wz-integration-tests \
+            --test wz_peer_interest_pending_gc_pico_interop_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
     else
         _pico_cli_unavailable "E6 leg wz_peer_interest_pending_gc_pico_interop" || return 1
     fi
@@ -20402,6 +20442,13 @@ layer_e6g_adminspace_read() {
     fi
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
+    # R3362 — `adminspace/enabled` and `adminspace/permissions/read` from a CONFIG FILE:
+    # the host and the read gate both come from the document, and a document naming
+    # only `enabled` is the control. A build that adds `zenoh-config` to the one above.
+    (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-read,zenoh-config --quiet) || return 1
+    _runci_guarded_test "E6g adminspace read-deny from a config file" 2 \
+        cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_read_deny_to_pico_zget_from_a_config_file -- --ignored --quiet || return 1
 }
 
 # ─── Layer E6h — §5.23 adminspace-config-hotreload E2E (vs zenoh-pico) ──────────
@@ -20985,6 +21032,15 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         cargo test -p wz-integration-tests \
         --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
         --exact wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped || return 1
+    # R3362 — `timestamping/drop_future_timestamp` from a CONFIG FILE, on a build that
+    # adds `zenoh-config` to leg 1's: the document is the only difference between the
+    # drop arm and its two controls (key absent, key `false`), and the drop arm above
+    # is typed as an argv word. Three tests, so the guard reddens on a dropped
+    # `#[ignore]` (0 selected).
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,time-hlc,zenoh-config --quiet) || return 1
+    _runci_guarded_test "E8t drop-future-timestamp from a config file" 3 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_hlc_stamp_to_pico_zsub_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
     # The negative twin, on its OWN build (no time-hlc).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
     _runci_guarded_test "E8t without time-hlc" 1 \
