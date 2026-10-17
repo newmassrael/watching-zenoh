@@ -181,6 +181,94 @@ pub trait SampleSink {
     /// Deliver one matched sample. The [`SampleView`] is borrowed for the
     /// duration of the call only.
     fn deliver(&mut self, sample: &dyn SampleView);
+
+    /// Deliver one matched plain `Put` of a received frame
+    /// ([`PlainSample`]). The default is [`Self::deliver`]; a sink that can keep what
+    /// it needs of the sample as a range of the frame (a reference to the frame's
+    /// storage, not a copy of the payload) overrides it, and then also
+    /// [`Self::end_plain_frame`].
+    #[cfg(feature = "alloc")]
+    fn deliver_plain(&mut self, sample: &PlainSample<'_>) {
+        self.deliver(sample);
+    }
+
+    /// The frame whose plain `Put`s were just offered through [`Self::deliver_plain`]
+    /// has no more records for this table: a sink that gathered them hands over what it
+    /// has. Called on every sink of the table after each such frame, matched or not, so
+    /// it must cost nothing when nothing was gathered.
+    #[cfg(feature = "alloc")]
+    fn end_plain_frame(&mut self) {}
+}
+
+/// A plain `Put` of a received frame, as a [`SampleView`] over the frame it arrived in:
+/// the keyexpr resolved for it, and the payload a range of the frame. A subscriber
+/// that keeps the sample takes a second reference to the frame's storage
+/// ([`SampleView::payload_shared`]) instead of copying the payload out; a sink that
+/// gathers a frame's samples reads [`Self::frame`] and [`Self::payload_range`] and
+/// keeps those.
+#[cfg(feature = "alloc")]
+pub struct PlainSample<'s> {
+    keyexpr: &'s str,
+    frame: &'s crate::link::RxBytes,
+    range: (u32, u32),
+    reliability: Reliability,
+    qos: Option<crate::sample::QosLevel>,
+    shared: core::cell::OnceCell<Option<crate::link::RxBytes>>,
+}
+
+#[cfg(feature = "alloc")]
+impl<'s> PlainSample<'s> {
+    /// The sample of the `range` of `frame`, on `keyexpr`.
+    pub fn new(
+        keyexpr: &'s str,
+        frame: &'s crate::link::RxBytes,
+        range: (u32, u32),
+        reliability: Reliability,
+        qos: Option<crate::sample::QosLevel>,
+    ) -> Self {
+        Self {
+            keyexpr,
+            frame,
+            range,
+            reliability,
+            qos,
+            shared: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// The frame the sample arrived in, whose storage a sink may take a reference to.
+    pub fn frame(&self) -> &'s crate::link::RxBytes {
+        self.frame
+    }
+
+    /// Where the payload lies in [`Self::frame`], as `start..end`.
+    pub fn payload_range(&self) -> core::ops::Range<usize> {
+        self.range.0 as usize..self.range.1 as usize
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl SampleView for PlainSample<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn payload(&self) -> &[u8] {
+        &self.frame.as_slice()[self.payload_range()]
+    }
+    fn kind(&self) -> SampleKind {
+        SampleKind::Put
+    }
+    fn reliability(&self) -> Reliability {
+        self.reliability
+    }
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        self.qos
+    }
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.shared
+            .get_or_init(|| self.frame.subslice(self.payload_range()))
+            .as_ref()
+    }
 }
 
 /// The closed sink of a node with no allocator: a function and the state it works on,
@@ -221,9 +309,36 @@ impl<S> SampleSink for FnSink<S> {
 #[cfg(feature = "alloc")]
 type BoxedSampleFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
 
+/// What a [`BoxedSink`] holds: the heap form of a [`SampleSink`], `Send` so the registry
+/// that stores it can cross threads. A capturing closure is one (see
+/// [`BoxedSink::new`]); a sink that gathers the plain `Put`s of a frame implements the
+/// two plain methods itself ([`BoxedSink::from_frame_sink`]).
+#[cfg(feature = "alloc")]
+pub trait FrameSink: Send + 'static {
+    /// [`SampleSink::deliver`].
+    fn sample(&mut self, view: &dyn SampleView);
+    /// [`SampleSink::deliver_plain`]; the default delivers the sample as any other.
+    fn plain(&mut self, sample: &PlainSample<'_>) {
+        self.sample(sample);
+    }
+    /// [`SampleSink::end_plain_frame`].
+    fn plain_frame_end(&mut self) {}
+}
+
+/// A capturing closure as a [`FrameSink`]: every sample is a call of it.
+#[cfg(feature = "alloc")]
+struct ClosureSink(BoxedSampleFn);
+
+#[cfg(feature = "alloc")]
+impl FrameSink for ClosureSink {
+    fn sample(&mut self, view: &dyn SampleView) {
+        (self.0)(view)
+    }
+}
+
 #[cfg(feature = "alloc")]
 pub struct BoxedSink {
-    inner: BoxedSampleFn,
+    inner: Box<dyn FrameSink>,
 }
 
 #[cfg(feature = "alloc")]
@@ -231,7 +346,14 @@ impl BoxedSink {
     /// Wrap a capturing closure as a heap-stored sink.
     pub fn new(callback: impl FnMut(&dyn SampleView) + Send + 'static) -> Self {
         Self {
-            inner: Box::new(callback),
+            inner: Box::new(ClosureSink(Box::new(callback))),
+        }
+    }
+
+    /// Store a sink that answers the plain-`Put` methods itself.
+    pub fn from_frame_sink(sink: impl FrameSink) -> Self {
+        Self {
+            inner: Box::new(sink),
         }
     }
 }
@@ -239,7 +361,15 @@ impl BoxedSink {
 #[cfg(feature = "alloc")]
 impl SampleSink for BoxedSink {
     fn deliver(&mut self, sample: &dyn SampleView) {
-        (self.inner)(sample)
+        self.inner.sample(sample)
+    }
+
+    fn deliver_plain(&mut self, sample: &PlainSample<'_>) {
+        self.inner.plain(sample)
+    }
+
+    fn end_plain_frame(&mut self) {
+        self.inner.plain_frame_end()
     }
 }
 

@@ -2327,11 +2327,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let (cell, sink) = self.deferred_sample_sink(callback);
         // R311de — observer access via R::with_mutex_mut closure form.
         let id = R::with_mutex_mut(&self.observer, |observer| {
-            let id = observer.subscribers.register_with_locality(
-                keyexpr.to_string(),
-                options.allowed_origin,
-                sink,
-            );
+            let id = observer
+                .subscribers
+                .register_sink(keyexpr, options.allowed_origin, sink)
+                .expect("register on the alloc backing never exceeds declared capacity");
             // R311y788 — a LOCAL declaration can flip a publisher's
             // matching status just as an inbound remote one can, and pico
             // reports both (`_z_write_filter_ctx_add_local_match`,

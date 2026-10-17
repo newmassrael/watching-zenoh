@@ -1954,14 +1954,36 @@ impl<C: SampleSink> SubscriberTable<C> {
                 &mut self.subscribers,
                 &mut self.memo,
                 self.epoch,
-                view,
+                view.keyexpr(),
                 is_remote,
+                |sink| sink.deliver(view),
             )
         }
         #[cfg(not(feature = "alloc"))]
         {
             fire_into(&mut self.subscribers, view, is_remote)
         }
+    }
+
+    /// [`Self::fire_to_subscribers`] for a plain `Put` of a frame
+    /// ([`crate::sink::PlainSample`]): the same matcher and memory, and each matching sink
+    /// is handed the sample through [`SampleSink::deliver_plain`], which a sink that can
+    /// keep a range of the frame instead of a copy of the sample answers more cheaply than
+    /// [`SampleSink::deliver`].
+    #[cfg(feature = "alloc")]
+    fn fire_plain_to_subscribers(
+        &mut self,
+        sample: &crate::sink::PlainSample<'_>,
+        is_remote: bool,
+    ) -> usize {
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.epoch,
+            sample.keyexpr(),
+            is_remote,
+            |sink| sink.deliver_plain(sample),
+        )
     }
 }
 
@@ -2028,16 +2050,16 @@ fn fire_into_memoized<C: SampleSink>(
     subscribers: &mut BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
     memo: &mut MatchMemo,
     epoch: u64,
-    view: &dyn SampleView,
+    key: &str,
     is_remote: bool,
+    mut deliver: impl FnMut(&mut C),
 ) -> usize {
-    let key = view.keyexpr();
     let at = MatchMemo::slot_of(key);
     if let Some(slot) = &memo.slots[at] {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             for position in &slot.hits {
                 if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
-                    subscriber.sink.deliver(view);
+                    deliver(&mut subscriber.sink);
                 }
             }
             return slot.hits.len();
@@ -2063,7 +2085,7 @@ fn fire_into_memoized<C: SampleSink>(
             continue;
         }
         if keyexpr_intersects_target(&subscriber.pattern, &target) {
-            subscriber.sink.deliver(view);
+            deliver(&mut subscriber.sink);
             hits.push(position as u16);
         }
     }

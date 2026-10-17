@@ -194,17 +194,116 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     pub(super) fn deferred_sample_sink(
         &self,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> (SampleCell<R>, impl FnMut(&dyn SampleView) + Send + 'static) {
+    ) -> (SampleCell<R>, wz_session_core::sink::BoxedSink) {
         let erased: BoxedSampleCallback = Box::new(callback);
         let cell: SampleCell<R> = wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
-        let queue = self.fires.clone();
-        let cell_for_sink = cell.clone();
-        let sink = move |view: &dyn SampleView| {
-            let owned = crate::sample::Sample::from_view(view);
-            let cell = cell_for_sink.clone();
-            cell.stage(&queue, move |cb| cb(&owned));
+        let sink = DeferredSampleSink {
+            cell: cell.clone(),
+            queue: self.fires.clone(),
+            batch: None,
         };
-        (cell, sink)
+        (
+            cell,
+            wz_session_core::sink::BoxedSink::from_frame_sink(sink),
+        )
+    }
+}
+
+/// The sink [`Session::deferred_sample_sink`] installs in the subscriber registry: it never
+/// runs the callback (the observer lock is held), it stages the callback's call on the
+/// deferred-fire queue.
+///
+/// A sample that arrives on its own is copied to the owned retention form and staged as one
+/// job. The plain `Put`s of a received frame arrive as ranges of the frame and are gathered
+/// instead: what the callback needs of each (which key, which range of the frame, the QoS
+/// byte) is a few words, kept in one list, and the frame's end hands the list over as ONE
+/// staged job that calls the callback for each, in order. So a stream pays for a job, a
+/// ticket and a take of the callback per frame and not per message, and builds no
+/// owned sample at all. The order of the callback's calls and what guards them are the
+/// cell's, as for a single sample: the job is one invocation through
+/// [`SampleCell::stage`] (so a callback undeclared before the drain is not called), and it
+/// checks the cell between calls (so one that undeclares itself is not called again).
+struct DeferredSampleSink<R: SessionRuntime> {
+    cell: SampleCell<R>,
+    queue: wz_session_core::deferred_fire::DeferredFireQueue<R>,
+    /// The plain `Put`s of the frame being delivered, gathered until its end.
+    batch: Option<PlainBatch>,
+}
+
+/// What a callback is called with for the plain `Put`s of one frame.
+struct PlainBatch {
+    /// The frame, whose storage the payloads are ranges of; one reference, kept until the
+    /// callback has run.
+    frame: wz_session_core::link::RxBytes,
+    reliability: wz_session_core::reliability::Reliability,
+    /// The distinct keys of the frame, in order of first appearance; a stream has one.
+    keys: Vec<String>,
+    items: Vec<PlainItem>,
+}
+
+/// One gathered `Put`: its key (an index into [`PlainBatch::keys`]), the range of the
+/// frame that is its payload, and its QoS.
+struct PlainItem {
+    key: u32,
+    range: (u32, u32),
+    qos: Option<wz_session_core::sample::QosLevel>,
+}
+
+impl<R: SessionRuntime> wz_session_core::sink::FrameSink for DeferredSampleSink<R> {
+    fn sample(&mut self, view: &dyn SampleView) {
+        let owned = crate::sample::Sample::from_view(view);
+        let cell = self.cell.clone();
+        cell.stage(&self.queue, move |cb| cb(&owned));
+    }
+
+    fn plain(&mut self, sample: &wz_session_core::sink::PlainSample<'_>) {
+        let batch = self.batch.get_or_insert_with(|| PlainBatch {
+            frame: sample.frame().clone(),
+            reliability: sample.reliability(),
+            keys: Vec::new(),
+            items: Vec::new(),
+        });
+        let key = sample.keyexpr();
+        // The last key first: consecutive messages of a stream carry the same one.
+        let index = match batch.keys.iter().rposition(|held| held == key) {
+            Some(index) => index,
+            None => {
+                batch.keys.push(String::from(key));
+                batch.keys.len() - 1
+            }
+        };
+        let range = sample.payload_range();
+        batch.items.push(PlainItem {
+            key: index as u32,
+            range: (range.start as u32, range.end as u32),
+            qos: sample.qos(),
+        });
+    }
+
+    fn plain_frame_end(&mut self) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        let cell = self.cell.clone();
+        let watched = cell.clone();
+        cell.stage(&self.queue, move |cb| {
+            for item in &batch.items {
+                // A call that undeclared the subscriber stops the calls after it, as the
+                // cell stops a later job: the callback is not started again once its
+                // undeclare has returned.
+                if watched.is_dead() {
+                    break;
+                }
+                let sample = wz_session_core::sink::PlainSample::new(
+                    &batch.keys[item.key as usize],
+                    &batch.frame,
+                    item.range,
+                    batch.reliability,
+                    item.qos,
+                );
+                cb(&sample);
+            }
+        });
     }
 }
 

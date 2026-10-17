@@ -1559,6 +1559,153 @@ fn inbound_push_aliased_in_our_space(
     }
 }
 
+/// A frame of plain Puts as the drive loop reports it on the lane: `puts` encoded back to
+/// back as the wire carries them, then read by the same reader the loop uses.
+#[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
+fn plain_puts_frame(
+    puts: &[(u64, Option<&str>, &[u8])],
+) -> wz_session_core::driver_loop::DriverLoopOutcome {
+    let mut batch = Vec::new();
+    for (id, suffix, payload) in puts {
+        let push = wz_session_core::lent_push::put_with_qos(
+            *id,
+            *suffix,
+            payload,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
+        let mut one = Vec::new();
+        push.encode(&mut sce_forge_runtime::codec::VecSink::new(&mut one))
+            .expect("a Vec grows");
+        batch.extend_from_slice(&one);
+    }
+    let frame = wz_session_core::link::RxBytes::from(batch);
+    let puts = wz_session_core::plain_push::read_plain_puts(&frame).expect("every record is plain");
+    wz_session_core::driver_loop::DriverLoopOutcome::FramePlainPuts {
+        reliable: true,
+        sn: 0,
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        payload: frame,
+        puts,
+    }
+}
+
+/// The lane through a whole session: a frame of plain Puts calls the subscriber's callback
+/// once per Put that routes, in the order they lie in the frame, with the key, the payload
+/// and the reliability the owned path would give it; a key nobody declared is dropped.
+#[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
+#[test]
+fn a_frame_of_plain_puts_calls_the_callback_once_per_put_in_order() {
+    let (session, _driver) = build_session();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Vec<u8>, bool)>::new()));
+    let seen_cb = seen.clone();
+    let _sub = session
+        .declare_subscriber("home/**", SubscribeOptions::default(), move |sample| {
+            seen_cb.lock().unwrap().push((
+                sample.keyexpr().to_string(),
+                sample.payload().to_vec(),
+                sample.reliability() == wz_session_core::reliability::Reliability::Reliable,
+            ));
+        })
+        .expect("declared");
+
+    let outcome = plain_puts_frame(&[
+        (0, Some("home/a"), b"1"),
+        (0, Some("home/b"), b"22"),
+        (9, None, b"nobody declared 9"),
+        (0, Some("home/a"), b"333"),
+    ]);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("home/a".to_string(), b"1".to_vec(), true),
+            ("home/b".to_string(), b"22".to_vec(), true),
+            ("home/a".to_string(), b"333".to_vec(), true),
+        ]
+    );
+}
+
+/// A callback that undeclares its own subscriber in the middle of a frame is not called for
+/// the Puts after it: the frame's calls are one staged job, and the job looks at the cell
+/// between them.
+#[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
+#[test]
+fn a_callback_that_undeclares_itself_is_not_called_again_in_the_same_frame() {
+    let (session, _driver) = build_session();
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (slot_cb, calls_cb) = (slot.clone(), calls.clone());
+    let sub = session
+        .declare_subscriber("home/**", SubscribeOptions::default(), move |_| {
+            calls_cb.fetch_add(1, Ordering::SeqCst);
+            if let Some(sub) = slot_cb.lock().unwrap().take() {
+                let sub: Subscriber<crate::runtime_impl::TokioRuntime> = sub;
+                sub.undeclare();
+            }
+        })
+        .expect("declared");
+    *slot.lock().unwrap() = Some(sub);
+
+    let outcome = plain_puts_frame(&[
+        (0, Some("home/a"), b"1"),
+        (0, Some("home/a"), b"2"),
+        (0, Some("home/a"), b"3"),
+    ]);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the first call undeclared the subscriber; the two after it must not reach it"
+    );
+}
+
+/// The lane reads an `M=0` alias, an id this session declared, as the owned path does.
+#[cfg(all(
+    feature = "codec-push",
+    feature = "declare-keyexpr",
+    feature = "pubsub-put"
+))]
+#[test]
+fn a_plain_put_on_an_alias_in_our_own_space_fires_a_subscriber() {
+    let (session, _driver) = build_session();
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+    let seen_cb = seen.clone();
+    let _sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), move |sample| {
+            seen_cb
+                .lock()
+                .unwrap()
+                .push((sample.keyexpr().to_string(), sample.payload().to_vec()));
+        })
+        .expect("declared");
+
+    // Header 0x1d (Push, no N, M=0), id 7, Put header, length, payload: the bytes of
+    // `inbound_push_aliased_in_our_space`'s Push.
+    let bytes = vec![0x1du8, 7, 0x01, 4, b'2', b'2', b'.', b'5'];
+    let frame = wz_session_core::link::RxBytes::from(bytes);
+    let puts = wz_session_core::plain_push::read_plain_puts(&frame).expect("a plain put");
+    assert!(!puts[0].sender_mapping, "M=0: the id is in OUR space");
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePlainPuts {
+        reliable: true,
+        sn: 0,
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        payload: frame,
+        puts,
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("home/temp".to_string(), b"22.5".to_vec())]
+    );
+}
+
 /// R311y739 — THE WIRING PROOF, and it is deliberately end-to-end rather than a
 /// field read: `Session::new` installs the actions bundle as our id space, a
 /// later `send_declare_keyexpr` writes into that same bundle, and an inbound

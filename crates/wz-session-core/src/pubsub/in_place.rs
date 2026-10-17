@@ -328,47 +328,6 @@ impl<C: SampleSink> SubscriberTable<C> {
     }
 }
 
-/// The sample a plain `Put` is delivered as ([`SubscriberTable::dispatch_plain_puts`]):
-/// the keyexpr resolved for it, and the payload a range of the frame it arrived in.
-/// A subscriber that keeps the sample takes a second reference to that frame's storage
-/// ([`SampleView::payload_shared`]) instead of copying the payload out.
-#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
-struct PlainSample<'s> {
-    keyexpr: &'s str,
-    frame: &'s crate::link::RxBytes,
-    range: (u32, u32),
-    reliability: Reliability,
-    qos: Option<QosLevel>,
-    shared: OnceCell<Option<crate::link::RxBytes>>,
-}
-
-#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
-impl SampleView for PlainSample<'_> {
-    fn keyexpr(&self) -> &str {
-        self.keyexpr
-    }
-    fn payload(&self) -> &[u8] {
-        &self.frame.as_slice()[self.range.0 as usize..self.range.1 as usize]
-    }
-    fn kind(&self) -> SampleKind {
-        SampleKind::Put
-    }
-    fn reliability(&self) -> Reliability {
-        self.reliability
-    }
-    fn qos(&self) -> Option<QosLevel> {
-        self.qos
-    }
-    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
-        self.shared
-            .get_or_init(|| {
-                self.frame
-                    .subslice(self.range.0 as usize..self.range.1 as usize)
-            })
-            .as_ref()
-    }
-}
-
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
 impl<C: SampleSink> SubscriberTable<C> {
     /// Deliver the plain `Put`s of one frame
@@ -416,15 +375,13 @@ impl<C: SampleSink> SubscriberTable<C> {
             let qos = put.qos.map(QosLevel::from_raw);
             #[cfg(not(feature = "pubsub-qos"))]
             let qos: Option<QosLevel> = None;
-            let sample = PlainSample {
-                keyexpr,
-                frame,
-                range: put.payload,
-                reliability,
-                qos,
-                shared: OnceCell::new(),
-            };
-            self.fire_to_subscribers(&sample, true);
+            let sample =
+                crate::sink::PlainSample::new(keyexpr, frame, put.payload, reliability, qos);
+            self.fire_plain_to_subscribers(&sample, true);
+        }
+        // The frame is done with this table: a sink that gathered its samples hands over.
+        for subscriber in self.subscribers.iter_mut() {
+            subscriber.sink.end_plain_frame();
         }
     }
 }
