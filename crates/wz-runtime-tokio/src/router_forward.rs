@@ -10821,6 +10821,361 @@ mod tests {
         assert_eq!(fwd.interceptor_dropped(), 0, "nothing dropped");
     }
 
+    // The config-document proofs. Each test drives a json5 document through the
+    // reader and `WzConfig::apply_zenoh_config`, installs what that compiled on a
+    // real forwarder with `install_interceptors`, and counts the frames a
+    // subscriber's face receives. Every key is shown by a PAIR over one fixed
+    // topology and one fixed traffic, differing only in the document, so a key
+    // that is parsed and stored but never reaches the forwarder cannot pass.
+
+    /// A peer publisher (face 0) and two client subscribers: face 1 on
+    /// `demo/data` and face 2 on `other/data`. The second subscriber is what
+    /// lets a test show that a key the document does NOT govern is still
+    /// delivered, which a lone `demo/data` subscriber could not tell apart from
+    /// "nobody subscribed". Both sinks start empty.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(
+            feature = "access-acl",
+            feature = "access-downsampling",
+            feature = "access-quota"
+        )
+    ))]
+    fn document_topology() -> (
+        RouterForwarder,
+        Arc<RecordingLinkDriver>,
+        Arc<RecordingLinkDriver>,
+    ) {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (publisher, _sink_publisher) = face(zid(0xAA), WIRE_PEER);
+        let (demo, sink_demo) = face(zid(0xCC), WIRE_CLIENT);
+        let (other, sink_other) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &publisher);
+        fwd.register(FaceId(1), &demo);
+        fwd.register(FaceId(2), &other);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(2), declare_sub("other/data"));
+        sink_demo.reset();
+        sink_other.reset();
+        (fwd, sink_demo, sink_other)
+    }
+
+    /// Read `document`, apply it to a fresh `WzConfig` and install the compiled
+    /// interceptors on `fwd`, returning the keys the apply reports as landed. The
+    /// whole production join in one place, so no test installs a hand-built
+    /// config where the document should have produced it.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(
+            feature = "access-acl",
+            feature = "access-downsampling",
+            feature = "access-quota"
+        )
+    ))]
+    fn install_document(fwd: &RouterForwarder, document: &str) -> Vec<&'static str> {
+        let ingest = crate::zenoh_config::ZenohNodeConfig::from_json5(document)
+            .expect("a real zenohd starts on this document");
+        let mut cfg = crate::config::WzConfig::new();
+        let applied = cfg.apply_zenoh_config(&ingest);
+        cfg.install_interceptors(fwd);
+        applied
+    }
+
+    /// One Put from the publisher on `keyexpr`.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(
+            feature = "access-acl",
+            feature = "access-downsampling",
+            feature = "access-quota"
+        )
+    ))]
+    fn forward_put(fwd: &RouterForwarder, keyexpr: &str, payload: &[u8]) {
+        let push =
+            wz_session_core::push_build::build_push_literal(keyexpr, payload).expect("build push");
+        forward_one(fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+    }
+
+    /// The downsampling document for `demo/**` at `freq` Hz, on the ingress flow
+    /// only: the rate state is then consulted once per message at the top of
+    /// `forward`, so the number delivered is the rate's own answer and not also
+    /// a function of how many egress gates a relay passes.
+    #[cfg(all(feature = "zenoh-config", feature = "access-downsampling"))]
+    fn downsampling_document(freq: &str) -> String {
+        r#"{ downsampling: [ { id: "ds1", messages: ["put"], flows: ["ingress"],
+             rules: [ { key_expr: "demo/**", freq: @FREQ@ } ] } ] }"#
+            .replace("@FREQ@", freq)
+    }
+
+    /// Three Puts on each subscriber's key under `document`; returns frames
+    /// delivered to the `demo/data` face, to the `other/data` face, the
+    /// forwarder's drop count and the keys the apply reports as landed.
+    #[cfg(all(feature = "zenoh-config", feature = "access-downsampling"))]
+    fn three_puts_each(document: &str) -> (usize, usize, usize, Vec<&'static str>) {
+        let (fwd, sink_demo, sink_other) = document_topology();
+        let applied = install_document(&fwd, document);
+        for _ in 0..3 {
+            forward_put(&fwd, "demo/data", b"payload");
+        }
+        for _ in 0..3 {
+            forward_put(&fwd, "other/data", b"payload");
+        }
+        (
+            sink_demo.frame_count(),
+            sink_other.frame_count(),
+            fwd.interceptor_dropped(),
+            applied,
+        )
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-downsampling"))]
+    #[test]
+    fn a_downsampling_document_at_zero_frequency_drops_every_matching_put() {
+        // Upstream leaves the threshold at `Duration::MAX` for `freq: 0` without
+        // the shift that makes the first message due, so even the FIRST Put on a
+        // governed key is dropped. The key the rule does not govern is untouched.
+        let (demo, other, dropped, applied) = three_puts_each(&downsampling_document("0"));
+        assert_eq!(applied, vec!["downsampling"], "the key landed");
+        assert_eq!(demo, 0, "all three Puts on the governed key are dropped");
+        assert_eq!(other, 3, "the key outside `demo/**` is delivered in full");
+        assert_eq!(dropped, 3, "each drop is the downsampler's, at ingress");
+
+        // Control: the same traffic with the key absent from the document.
+        let (demo, other, dropped, applied) = three_puts_each("{}");
+        assert!(applied.is_empty(), "an empty document applies nothing");
+        assert_eq!(demo, 3, "without `downsampling` every Put is delivered");
+        assert_eq!(other, 3);
+        assert_eq!(dropped, 0, "and nothing is dropped");
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-downsampling"))]
+    #[test]
+    fn a_downsampling_document_at_a_slow_rate_delivers_only_the_first_put() {
+        // A rate is not a drop-all: 0.001 Hz is a 1000 s interval, so the first
+        // Put is due and the next two arrive far inside the interval. The pair
+        // with the zero-frequency test is what tells the two rules apart, and the
+        // `{}` run is the unset control (3 of 3).
+        let (demo, other, dropped, applied) = three_puts_each(&downsampling_document("0.001"));
+        assert_eq!(applied, vec!["downsampling"], "the key landed");
+        assert_eq!(demo, 1, "one of three Puts on the governed key");
+        assert_eq!(other, 3, "the ungoverned key is delivered in full");
+        assert_eq!(dropped, 2, "the two Puts inside the interval are dropped");
+
+        let (demo, _other, dropped, _applied) = three_puts_each("{}");
+        assert_eq!(demo, 3, "unset: all three delivered");
+        assert_eq!(dropped, 0);
+    }
+
+    /// A 4-byte and a 37-byte Put on each subscriber's key under `document`;
+    /// returns frames delivered to the `demo/data` face, to the `other/data`
+    /// face, the forwarder's drop count and the keys the apply reports as
+    /// landed.
+    #[cfg(all(feature = "zenoh-config", feature = "access-quota"))]
+    fn short_and_long_puts_each(document: &str) -> (usize, usize, usize, Vec<&'static str>) {
+        let (fwd, sink_demo, sink_other) = document_topology();
+        let applied = install_document(&fwd, document);
+        for key in ["demo/data", "other/data"] {
+            forward_put(&fwd, key, b"tiny");
+            forward_put(&fwd, key, b"this payload is longer than the limit");
+        }
+        (
+            sink_demo.frame_count(),
+            sink_other.frame_count(),
+            fwd.interceptor_dropped(),
+            applied,
+        )
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-quota"))]
+    #[test]
+    fn a_low_pass_document_delivers_the_short_payload_and_drops_the_long_one() {
+        // The limit is 8 and the payloads are 4 and 37 bytes, so neither sits on
+        // the boundary the comparison (`size <= limit` admits) would decide.
+        let (demo, other, dropped, applied) = short_and_long_puts_each(
+            r#"{ low_pass_filter: [ { id: "f1", messages: ["put"],
+                 key_exprs: ["demo/**"], size_limit: 8 } ] }"#,
+        );
+        assert_eq!(applied, vec!["low_pass_filter"], "the key landed");
+        assert_eq!(demo, 1, "only the short payload reaches the governed key");
+        assert_eq!(other, 2, "the key outside `demo/**` carries both payloads");
+        assert_eq!(dropped, 1, "the one long payload on `demo/data` is dropped");
+
+        // Control: the same four Puts with the key absent.
+        let (demo, other, dropped, applied) = short_and_long_puts_each("{}");
+        assert!(applied.is_empty(), "an empty document applies nothing");
+        assert_eq!(demo, 2, "without `low_pass_filter` both payloads pass");
+        assert_eq!(other, 2);
+        assert_eq!(dropped, 0, "and nothing is dropped");
+    }
+
+    /// The `access_control` document the tests below vary one value of. Two rules
+    /// are always defined: `r_main` on `rule_key` and `r_decoy` on a key nobody
+    /// publishes, both ingress denials of Put; the one policy names
+    /// `policy_rule`, for the one subject, which names the publisher's zid as
+    /// `subject_zid`. The publisher's zid is four 0xAA bytes, whose upstream hex
+    /// spelling (little-endian, trailing zeros trimmed) is `aaaaaaaa`.
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    fn acl_document(
+        enabled: bool,
+        default_permission: &str,
+        rule_key: &str,
+        subject_zid: &str,
+        policy_rule: &str,
+    ) -> String {
+        r#"{ access_control: {
+              enabled: @ENABLED@, default_permission: "@DEFAULT@",
+              rules: [
+                { id: "r_main", key_exprs: ["@RULE_KEY@"], messages: ["put"],
+                  flows: ["ingress"], permission: "deny" },
+                { id: "r_decoy", key_exprs: ["decoy/**"], messages: ["put"],
+                  flows: ["ingress"], permission: "deny" } ],
+              subjects: [ { id: "s_pub", zids: ["@ZID@"] } ],
+              policies: [ { rules: ["@POLICY_RULE@"], subjects: ["s_pub"] } ] } }"#
+            .replace("@ENABLED@", if enabled { "true" } else { "false" })
+            .replace("@DEFAULT@", default_permission)
+            .replace("@RULE_KEY@", rule_key)
+            .replace("@ZID@", subject_zid)
+            .replace("@POLICY_RULE@", policy_rule)
+    }
+
+    /// One Put from the publisher on each subscriber's key under `document`;
+    /// returns frames delivered to the `demo/data` face, to the `other/data`
+    /// face, and the forwarder's drop count. Asserts the five `access_control`
+    /// keys all landed, so a subtree the compile refused (which would deliver
+    /// everything and look like an allow) cannot pass as a pair's control.
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    fn acl_outcome(document: &str) -> (usize, usize, usize) {
+        let (fwd, sink_demo, sink_other) = document_topology();
+        let applied = install_document(&fwd, document);
+        for key in [
+            "access_control/default_permission",
+            "access_control/enabled",
+            "access_control/policies",
+            "access_control/rules",
+            "access_control/subjects",
+        ] {
+            assert!(applied.contains(&key), "{key} landed in the live config");
+        }
+        forward_put(&fwd, "demo/data", b"payload");
+        forward_put(&fwd, "other/data", b"payload");
+        (
+            sink_demo.frame_count(),
+            sink_other.frame_count(),
+            fwd.interceptor_dropped(),
+        )
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    #[test]
+    fn an_access_control_document_denies_the_governed_key_and_delivers_the_rest() {
+        // The baseline every pair below varies one value of: enabled, allow by
+        // default, `r_main` denies Put on `demo/**` for the publisher's zid.
+        let (demo, other, dropped) = acl_outcome(&acl_document(
+            true, "allow", "demo/**", "aaaaaaaa", "r_main",
+        ));
+        assert_eq!(demo, 0, "the denied key is not delivered");
+        assert_eq!(
+            other, 1,
+            "the key no rule governs falls to the allow default"
+        );
+        assert_eq!(dropped, 1, "the denial is witnessed once, at ingress");
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    #[test]
+    fn access_control_enabled_decides_whether_the_rules_are_enforced() {
+        let on = acl_document(true, "allow", "demo/**", "aaaaaaaa", "r_main");
+        assert_eq!(acl_outcome(&on), (0, 1, 1), "enabled: the rule denies");
+
+        // The same rules, rule ids and subject, with only the switch changed.
+        let off = acl_document(false, "allow", "demo/**", "aaaaaaaa", "r_main");
+        assert_eq!(
+            acl_outcome(&off),
+            (1, 1, 0),
+            "disabled: no policy is installed and the denied key is delivered"
+        );
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    #[test]
+    fn access_control_default_permission_decides_what_no_rule_governs() {
+        // Neither run's governing rule (`r_main` on `decoy/**`) matches either
+        // published key, so the default alone decides both Puts.
+        let allow = acl_document(true, "allow", "decoy/**", "aaaaaaaa", "r_main");
+        assert_eq!(
+            acl_outcome(&allow),
+            (1, 1, 0),
+            "allow by default: an unmatched Put is delivered"
+        );
+
+        let deny = acl_document(true, "deny", "decoy/**", "aaaaaaaa", "r_main");
+        assert_eq!(
+            acl_outcome(&deny),
+            (0, 0, 2),
+            "deny by default: both unmatched Puts are dropped at ingress"
+        );
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    #[test]
+    fn access_control_rules_decide_which_key_is_denied() {
+        // Only the rule's `key_exprs` differ, and the denial follows it.
+        let on_demo = acl_document(true, "allow", "demo/**", "aaaaaaaa", "r_main");
+        assert_eq!(acl_outcome(&on_demo), (0, 1, 1), "demo/** is denied");
+
+        let on_other = acl_document(true, "allow", "other/**", "aaaaaaaa", "r_main");
+        assert_eq!(
+            acl_outcome(&on_other),
+            (1, 0, 1),
+            "with the rule moved to other/**, demo/data is delivered and \
+             other/data is the denied key"
+        );
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    #[test]
+    fn access_control_subjects_decide_which_peer_a_rule_governs() {
+        // The subject names the publisher's own zid, so the rule reaches it.
+        let matching = acl_document(true, "allow", "demo/**", "aaaaaaaa", "r_main");
+        assert_eq!(
+            acl_outcome(&matching),
+            (0, 1, 1),
+            "a subject naming the publisher's zid: its Put is denied"
+        );
+
+        // The identical rule and policy for a different zid (0xBB x4): the
+        // publisher is not that subject, so the deny does not apply to it.
+        let other_peer = acl_document(true, "allow", "demo/**", "bbbbbbbb", "r_main");
+        assert_eq!(
+            acl_outcome(&other_peer),
+            (1, 1, 0),
+            "a subject naming another zid: the publisher's Put is delivered"
+        );
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "access-acl"))]
+    #[test]
+    fn access_control_policies_decide_which_defined_rules_are_in_force() {
+        // `r_main` is defined in both documents; only the policy's list differs.
+        // A rule no policy names is not compiled.
+        let names_main = acl_document(true, "allow", "demo/**", "aaaaaaaa", "r_main");
+        assert_eq!(
+            acl_outcome(&names_main),
+            (0, 1, 1),
+            "the policy names r_main: demo/data is denied"
+        );
+
+        let omits_main = acl_document(true, "allow", "demo/**", "aaaaaaaa", "r_decoy");
+        assert_eq!(
+            acl_outcome(&omits_main),
+            (1, 1, 0),
+            "the policy omits r_main: it is defined but not in force, so \
+             demo/data is delivered"
+        );
+    }
+
     #[test]
     fn tick_re_advertises_a_native_sub_to_a_late_joining_child() {
         // A subscription learned before a peer joined converges onto the new tree
