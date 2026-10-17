@@ -34,7 +34,7 @@ use crate::string::owned_string_from;
 /// otherwise its last element is `payload.len()`.
 pub(crate) struct BytesState {
     pub(crate) payload: Payload,
-    pub(crate) bounds: Vec<usize>,
+    pub(crate) bounds: Bounds,
     /// The `z_loaned_shm_t` this payload answers `z_bytes_as_loaned_shm` with, made the
     /// first time it is asked and kept for as long as the payload lives, because
     /// the loan is a pointer the caller holds (R3052). `None` inside is a payload
@@ -107,6 +107,59 @@ impl Payload {
     }
 }
 
+/// The END offsets of a payload's slices ([`BytesState::bounds`]), with the one-slice
+/// payload, which is nearly every payload, held in place: a list kept on the heap for a
+/// single number was an allocation and a release for every payload that was built, cloned
+/// or received.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Bounds {
+    /// No slice: the empty payload.
+    #[default]
+    Empty,
+    /// One slice, ending at the number.
+    One([usize; 1]),
+    /// Several slices, in order.
+    Many(Vec<usize>),
+}
+
+impl Bounds {
+    /// The end offsets, in order.
+    pub(crate) fn as_slice(&self) -> &[usize] {
+        match self {
+            Bounds::Empty => &[],
+            Bounds::One(end) => end,
+            Bounds::Many(ends) => ends,
+        }
+    }
+
+    /// Forget every boundary. A list that grew past one slice keeps its storage.
+    fn clear(&mut self) {
+        match self {
+            Bounds::Many(ends) => ends.clear(),
+            other => *other = Bounds::Empty,
+        }
+    }
+
+    /// Append the end of the next slice.
+    fn push(&mut self, end: usize) {
+        match self {
+            Bounds::Empty => *self = Bounds::One([end]),
+            Bounds::One([first]) => *self = Bounds::Many(vec![*first, end]),
+            Bounds::Many(ends) => ends.push(end),
+        }
+    }
+}
+
+impl From<Vec<usize>> for Bounds {
+    fn from(ends: Vec<usize>) -> Self {
+        match ends.as_slice() {
+            [] => Bounds::Empty,
+            [end] => Bounds::One([*end]),
+            _ => Bounds::Many(ends),
+        }
+    }
+}
+
 impl BytesState {
     /// A payload that is ONE slice — every constructor except the writer's.
     pub(crate) fn whole(payload: Vec<u8>) -> Self {
@@ -116,9 +169,9 @@ impl BytesState {
     /// A payload as it arrived: ONE slice, whatever holds it, unless what holds it is a list of
     /// slices kept apart (R3124), whose boundaries are those slices'.
     pub(crate) fn of(payload: Payload) -> Self {
-        let mut bounds = Vec::new();
+        let mut bounds = Bounds::Empty;
         Self::fill_bounds(&payload, &mut bounds);
-        Self::from_parts(payload, bounds)
+        Self::with_bounds(payload, bounds)
     }
 
     /// Replace the payload of a state that is kept from one sample to the next, in place:
@@ -139,7 +192,7 @@ impl BytesState {
 
     /// The slice boundaries of `payload`, written into `bounds` (emptied first): one per
     /// slice kept apart, none for an empty payload, one whole otherwise.
-    fn fill_bounds(payload: &Payload, bounds: &mut Vec<usize>) {
+    fn fill_bounds(payload: &Payload, bounds: &mut Bounds) {
         bounds.clear();
         match payload {
             Payload::Shared(bytes) => {
@@ -156,6 +209,10 @@ impl BytesState {
 
     /// A payload with its slice boundaries named.
     pub(crate) fn from_parts(payload: Payload, bounds: Vec<usize>) -> Self {
+        Self::with_bounds(payload, Bounds::from(bounds))
+    }
+
+    fn with_bounds(payload: Payload, bounds: Bounds) -> Self {
         Self {
             payload,
             bounds,
@@ -178,12 +235,9 @@ impl BytesState {
                 return bytes.slices().nth(index);
             }
         }
-        let end = *self.bounds.get(index)?;
-        let start = if index == 0 {
-            0
-        } else {
-            self.bounds[index - 1]
-        };
+        let ends = self.bounds.as_slice();
+        let end = *ends.get(index)?;
+        let start = if index == 0 { 0 } else { ends[index - 1] };
         self.payload.get(start..end)
     }
 }
@@ -1358,7 +1412,7 @@ pub unsafe extern "C" fn z_bytes_writer_append(
         state.buf.extend_from_slice(&incoming.payload);
         // The appended payload's OWN slice arrangement is preserved, so
         // appending a three-slice payload adds three slices rather than one.
-        for end in &incoming.bounds {
+        for end in incoming.bounds.as_slice() {
             state.sealed.push(base + end);
         }
         Z_OK
@@ -1507,7 +1561,11 @@ mod received_slices_tests {
         let (second, b) = page(b"de");
         let state = BytesState::of(Payload::Shared(RxBytes::sliced(vec![a, b])));
 
-        assert_eq!(state.bounds, [3, 5], "two slices, ending where each ends");
+        assert_eq!(
+            state.bounds.as_slice(),
+            [3, 5],
+            "two slices, ending where each ends"
+        );
         assert_eq!(
             state.slice(0).expect("a first slice").as_ptr(),
             first.as_slice().as_ptr(),
@@ -1526,7 +1584,7 @@ mod received_slices_tests {
     fn a_payload_of_one_received_slice_is_one_slice() {
         let (storage, one) = page(b"abc");
         let state = BytesState::of(Payload::Shared(one));
-        assert_eq!(state.bounds, [3]);
+        assert_eq!(state.bounds.as_slice(), [3]);
         assert_eq!(
             state.slice(0).expect("the slice").as_ptr(),
             storage.as_slice().as_ptr()

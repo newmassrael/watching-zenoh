@@ -1970,7 +1970,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// is handed the sample through [`SampleSink::deliver_plain`], which a sink that can
     /// keep a range of the frame instead of a copy of the sample answers more cheaply than
     /// [`SampleSink::deliver`].
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
     fn fire_plain_to_subscribers(
         &mut self,
         sample: &crate::sink::PlainSample<'_>,

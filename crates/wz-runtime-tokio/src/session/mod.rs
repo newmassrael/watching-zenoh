@@ -3597,6 +3597,83 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts)?)
     }
 
+    /// Send a plain Put on a key this session declared, to the peer, and nothing else: the
+    /// message of a publisher whose options are fixed for the stream
+    /// ([`PublishOptions::plain_put_params`]), without the per-message work the general
+    /// [`Self::publish_aliased`] does for options that may differ each time (a clone of them,
+    /// the timestamp resolution, a metadata bundle, the loopback leg).
+    ///
+    /// The caller owns what that work decided: that this session does not stamp what it
+    /// publishes ([`Self::stamps_publishes`]) and that no subscriber of this session wants the
+    /// Put ([`Self::has_local_delivery_for`]); a put for which either holds takes the general
+    /// publish.
+    ///
+    /// A build that does not send plain Puts from borrowed bytes never has the parameters to
+    /// call this with ([`PublishOptions::plain_put_params`] answers `None` there), so the
+    /// answer such a build gives is a refusal and not a send.
+    pub fn publish_plain_declared(
+        &self,
+        mapping_id: u64,
+        payload: &[u8],
+        params: &PlainPutParams,
+    ) -> Result<(), PublishError> {
+        #[cfg(all(
+            feature = "codec-push",
+            not(feature = "transport-stats"),
+            not(feature = "access-acl"),
+            not(feature = "routing-namespace")
+        ))]
+        {
+            self.actions().send_plain_put_qos(
+                mapping_id,
+                None,
+                payload,
+                params.qos,
+                params.reliable,
+                params.express,
+                params.priority,
+            )?;
+            Ok(())
+        }
+        #[cfg(not(all(
+            feature = "codec-push",
+            not(feature = "transport-stats"),
+            not(feature = "access-acl"),
+            not(feature = "routing-namespace")
+        )))]
+        {
+            let _ = (mapping_id, payload, params);
+            Err(PublishError::ExceedsCapacity)
+        }
+    }
+
+    /// Whether this session stamps what it publishes with its node clock, which makes every
+    /// Put it sends carry a timestamp and so not a plain one.
+    pub fn stamps_publishes(&self) -> bool {
+        #[cfg(feature = "pubsub-timestamp")]
+        {
+            self.node_hlc.is_stamping()
+        }
+        #[cfg(not(feature = "pubsub-timestamp"))]
+        {
+            false
+        }
+    }
+
+    /// Whether a subscriber of this session wants a Put on `keyexpr`: the answer the
+    /// loopback leg of a publish acts on.
+    pub fn has_local_delivery_for(&self, keyexpr: &str) -> bool {
+        #[cfg(feature = "pubsub-allow-loop")]
+        {
+            self.has_local_subscriber(keyexpr)
+        }
+        #[cfg(not(feature = "pubsub-allow-loop"))]
+        {
+            let _ = keyexpr;
+            false
+        }
+    }
+
     /// R311lg — build the deferred staging sink a reply-stream
     /// registration installs: the z_get `query*` path stores it in the
     /// [`crate::reply::ReplyRegistry`]; R311lk routes the liveliness-get

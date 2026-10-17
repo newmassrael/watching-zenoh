@@ -10396,7 +10396,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos,
             wz_codecs::push::Push::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::unread(),
-            |sink| crate::lent_push::put_with_qos(mapping_id, suffix, value, qos).encode(sink),
+            |sink| crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos),
         )?;
         #[cfg(feature = "transport-batching")]
         if express {

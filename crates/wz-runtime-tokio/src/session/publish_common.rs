@@ -447,6 +447,69 @@ impl PublishOptions {
             qos: gated_qos(self.qos),
         }
     }
+
+    /// What a Put needs to be sent when it is plain apart from its QoS, worked out once: a
+    /// holder of options that stay the same for a stream of messages (a declared publisher)
+    /// keeps the answer and sends each message with
+    /// [`Session::publish_plain_declared`](super::Session::publish_plain_declared), without
+    /// cloning these options and reading them again per message.
+    ///
+    /// `None` when the options are not a plain Put (a Del, a timestamp, an encoding, a
+    /// source, an attachment), which then take the general publish. The answer holds the
+    /// same facts the general publish derives from the options (`reliable_bool`, the
+    /// express flag, `priority_band`), by the same code.
+    ///
+    /// Also `None` in a build that does not send a plain Put from borrowed bytes (it counts
+    /// or filters the owned message, or has no Push codec): the build's one answer, so a
+    /// caller never asks which features are on.
+    pub fn plain_put_params(&self) -> Option<PlainPutParams> {
+        #[cfg(all(
+            feature = "codec-push",
+            not(feature = "transport-stats"),
+            not(feature = "access-acl"),
+            not(feature = "routing-namespace")
+        ))]
+        {
+            if self.kind != SampleKind::Put {
+                return None;
+            }
+            let meta = self.push_metadata();
+            if !meta.is_plain_apart_from_qos() {
+                return None;
+            }
+            Some(PlainPutParams {
+                destination: self.allowed_destination,
+                qos: meta.qos,
+                reliable: self.reliable_bool(),
+                express: meta.is_express(),
+                priority: self.priority_band(),
+            })
+        }
+        #[cfg(not(all(
+            feature = "codec-push",
+            not(feature = "transport-stats"),
+            not(feature = "access-acl"),
+            not(feature = "routing-namespace")
+        )))]
+        {
+            None
+        }
+    }
+}
+
+/// The facts a plain Put is sent from ([`PublishOptions::plain_put_params`]).
+#[derive(Debug, Clone, Copy)]
+pub struct PlainPutParams {
+    /// Where the Put may go: the wire, this session's own subscribers, or both.
+    pub destination: Locality,
+    /// The QoS byte it carries, when it carries one.
+    pub qos: Option<QosLevel>,
+    /// The frame's reliability flag.
+    pub reliable: bool,
+    /// Whether it drains the open batch after it is sent.
+    pub express: bool,
+    /// The priority conduit it rides.
+    pub priority: Priority,
 }
 
 /// W3 (SCE pin 7a94d084a) — typed reject from the literal /

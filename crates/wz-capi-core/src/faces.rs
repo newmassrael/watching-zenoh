@@ -1177,6 +1177,11 @@ pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>
 #[derive(Default)]
 struct Inner {
     faces: BTreeMap<u64, FaceEntry>,
+    /// The sessions of `faces`, as one shared list that a sender takes a reference to instead
+    /// of collecting a new one per message ([`SharedSession::face_set`]). Rebuilt by
+    /// [`Self::refresh_face_set`] at each of the three places `faces` changes, under the lock
+    /// that changes it, so a reader sees the faces as of a whole step and never a half one.
+    face_set: Arc<Vec<TokioSession>>,
     /// R2259 (open-debt item 593) — the face-lifecycle observers the C
     /// link/transport event planes register, keyed by the id
     /// [`SharedSession::watch_faces`] hands back.
@@ -1264,6 +1269,17 @@ struct Inner {
 }
 
 impl Inner {
+    /// Rebuild [`Self::face_set`] from `faces`. Call it right after `faces` changes, with the
+    /// lock still held.
+    fn refresh_face_set(&mut self) {
+        self.face_set = Arc::new(
+            self.faces
+                .values()
+                .map(|face| face.session.clone())
+                .collect(),
+        );
+    }
+
     /// R2580 — EVERY SESSION A DECLARATION REACHES: the live faces, and the
     /// local plane. The one answer to that question, so no declaration site
     /// decides it for itself.
@@ -2041,6 +2057,7 @@ impl SharedSession {
                 peer_zid,
             },
         );
+        guard.refresh_face_set();
         drop(guard);
         // R2932 — a replaced entry's group copies are copies of a session that
         // is gone, so their members leave the union the way `face_down`'s do.
@@ -2137,7 +2154,12 @@ impl SharedSession {
         // Drop OUTSIDE the lock: dropping the entry drops its subscribers,
         // and the last one may release the final `Arc<CClosure>` and run the
         // C `drop(context)`.
-        let removed = self.lock().faces.remove(&id);
+        let removed = {
+            let mut guard = self.lock();
+            let removed = guard.faces.remove(&id);
+            guard.refresh_face_set();
+            removed
+        };
         // R2259 (item 593) — the DEPARTED face's identity, taken while the
         // entry is still alive. There is no other moment: `face_down` is handed
         // an id, and once the entry drops nothing can say which peer it was.
@@ -2237,7 +2259,12 @@ impl SharedSession {
         // Take OUTSIDE the lock, drop OUTSIDE the lock — the standing
         // discipline: dropping a face runs the C `drop(context)` for any
         // closure it held the last reference to.
-        let faces = std::mem::take(&mut self.lock().faces);
+        let faces = {
+            let mut guard = self.lock();
+            let faces = std::mem::take(&mut guard.faces);
+            guard.refresh_face_set();
+            faces
+        };
         // R2932 — a closed session sees no peer, so a C group's union loses
         // every member it heard over the wire, as `face_down` would take them.
         for mut entry in faces.into_values() {
@@ -2512,11 +2539,11 @@ impl SharedSession {
         R: Fn(&TokioSession, PublishOptions, &P) -> Leg,
         L: FnOnce(&TokioSession, PublishOptions, P) -> Leg,
     {
-        let sessions = self.face_sessions_with_wake();
+        let sessions = self.face_set();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
-            for (session, _) in &sessions {
+            for session in sessions.iter() {
                 match remote_leg(session, remote.clone(), &payload) {
                     Leg::Delivered(n) => delivered += n,
                     Leg::Skipped => {}
@@ -3089,6 +3116,54 @@ impl SharedSession {
             .into_iter()
             .filter(|session| session.batch_stop().is_ok())
             .count()
+    }
+
+    /// The sessions of the live faces, as one shared list: a reference to what the registry
+    /// keeps, not a list collected and cloned from it, which is what a sender that only needs
+    /// the sessions takes for every message. A list taken here is the faces as of one step of
+    /// the registry; a face that comes or goes after is not in it.
+    pub fn face_set(&self) -> Arc<Vec<TokioSession>> {
+        self.lock().face_set.clone()
+    }
+
+    /// A Put on a key the caller declared, from options that stay the same for its stream
+    /// ([`PublishOptions::plain_put_params`]), sent to every face with none of the per-message
+    /// set-up of [`Self::publish_declared_all`]: no clone of the options, no list of faces
+    /// built, no metadata bundle, no loopback leg.
+    ///
+    /// `None` when the put is not plain HERE, and nothing has been sent: this node's own
+    /// subscriber wants it (the loopback leg then has work that only the general publish
+    /// does), or a face stamps what it sends (so the put would carry a timestamp). The caller
+    /// then takes [`Self::publish_declared_all`], which does both. `Some` is what that call
+    /// would have answered.
+    pub fn put_plain_declared(
+        &self,
+        keyexpr: &str,
+        mapping_id: u64,
+        payload: &[u8],
+        params: &wz_runtime_tokio::session::PlainPutParams,
+    ) -> Option<Result<usize, FanoutError>> {
+        if params.destination.allows_local() && self.local.has_local_delivery_for(keyexpr) {
+            return None;
+        }
+        let sessions = self.face_set();
+        if params.destination.allows_remote() {
+            if sessions.iter().any(|session| session.stamps_publishes()) {
+                return None;
+            }
+            for session in sessions.iter() {
+                match session.publish_plain_declared(mapping_id, payload, params) {
+                    Ok(()) => {}
+                    // Per-face and transient, as in the general fan-out: the surviving faces
+                    // still receive the sample.
+                    Err(PublishError::TransportUnavailable) => {}
+                    Err(_) => return Some(Err(FanoutError::ExceedsCapacity)),
+                }
+            }
+        }
+        // The loopback leg ran for nobody (nothing here wants the put), as the general
+        // publish's would have found.
+        Some(Ok(0))
     }
 
     /// A snapshot of every connected face's session PAIRED with its re-arm
@@ -4421,6 +4496,82 @@ mod matching_aggregate_tests {
             seen.lock().expect("test mutex").as_slice(),
             &[b"aliased".to_vec()]
         );
+    }
+
+    /// The plain lane of a declared key answers for a put that nothing in this node wants (it
+    /// is sent to the faces, here none, and delivers to nobody), and STEPS ASIDE for one that
+    /// this node's own subscriber wants, sending nothing, so that the general publish keeps
+    /// the loopback leg that only it carries out. A put whose destination leaves the node out
+    /// is plain whatever subscribes here.
+    #[test]
+    fn a_plain_put_on_a_declared_key_steps_aside_for_a_local_subscriber() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let mapping = shared
+            .declare_keyexpr("wz/plain/target".to_owned())
+            .expect("the first alias id is not exhausted");
+        let params = PublishOptions::put()
+            .plain_put_params()
+            .expect("this build sends plain puts");
+
+        // Nobody here wants it: the lane answers, and the answer is the general publish's.
+        assert!(
+            matches!(
+                shared.put_plain_declared("wz/plain/target", mapping, b"x", &params),
+                Some(Ok(0))
+            ),
+            "no subscriber, no face: sent to nobody"
+        );
+
+        let seen = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
+        let sink_log = seen.clone();
+        let sink: SubscriberSink = Arc::new(move || {
+            let log = sink_log.clone();
+            Box::new(move |sample: &dyn SampleView| {
+                log.lock()
+                    .expect("test mutex")
+                    .push(sample.payload().to_vec());
+            })
+        });
+        shared.declare_subscriber("wz/plain/target".to_owned(), Locality::Any, sink);
+
+        // A subscriber of this node wants it: the lane steps aside and delivers nothing...
+        assert!(
+            shared
+                .put_plain_declared("wz/plain/target", mapping, b"y", &params)
+                .is_none(),
+            "a local subscriber wants it: the general publish owns the loopback leg"
+        );
+        assert_eq!(
+            shared.drain_local_plane(),
+            0,
+            "stepping aside staged nothing"
+        );
+        // ...and the general publish, which the caller then takes, delivers it.
+        let delivered = shared
+            .publish_declared_all(
+                "wz/plain/target",
+                mapping,
+                b"y",
+                &PublishOptions::put().with_locality(Locality::Any),
+            )
+            .expect("a faceless declared publish is not an error");
+        assert_eq!(delivered, 1);
+        assert_eq!(shared.drain_local_plane(), 1);
+        assert_eq!(
+            seen.lock().expect("test mutex").as_slice(),
+            &[b"y".to_vec()]
+        );
+
+        // A destination that leaves this node out is plain whatever subscribes here.
+        let remote_only = PublishOptions::put()
+            .with_locality(Locality::Remote)
+            .plain_put_params()
+            .expect("this build sends plain puts");
+        assert!(matches!(
+            shared.put_plain_declared("wz/plain/target", mapping, b"z", &remote_only),
+            Some(Ok(0))
+        ));
+        assert_eq!(shared.drain_local_plane(), 0);
     }
 
     /// R311y557 — an UNDECLARED alias stops delivering in-process.

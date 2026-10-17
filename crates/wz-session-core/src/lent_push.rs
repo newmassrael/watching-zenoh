@@ -32,6 +32,9 @@ use wz_codecs::wireexpr_local::WireexprLocal;
 /// The `N` flag of the Push header: a keyexpr suffix rides inline.
 const FLAG_PUSH_N: u8 = 0x20;
 
+/// The `M` flag of the Push header: the id is in the sender's mapping.
+const FLAG_PUSH_M: u8 = 0x40;
+
 /// A Put's header with no timestamp, no encoding and no extension: the payload
 /// follows its length.
 const PUT_HEADER: u8 = 0x01;
@@ -140,10 +143,108 @@ pub fn put_with_qos<'a>(
     push
 }
 
+/// The bytes of [`put_with_qos`] written straight into `sink`, without composing the codec's
+/// `Push` and walking its variants to encode it: the Push header, the key (the id, and a suffix
+/// with its length), the QoS extension when it rides, the Put header, the payload's length and
+/// the payload. A stream of equal messages sends this one shape, and the generic encoder's
+/// walk over a message of any shape was most of what encoding it cost. The two are the same
+/// bytes for every input (see the equality test), so the shape stays the codec's and this is
+/// only a faster way to write it.
+pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
+    sink: &mut S,
+    mapping_id: u64,
+    suffix: Option<&str>,
+    value: &[u8],
+    qos: crate::sample::QosLevel,
+) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    // The QoS extension rides when `pubsub-qos` is built and the byte is not the default one.
+    #[cfg(feature = "pubsub-qos")]
+    let with_qos = qos != crate::sample::QosLevel::DEFAULT;
+    #[cfg(not(feature = "pubsub-qos"))]
+    let with_qos = {
+        let _ = qos;
+        false
+    };
+    let header = wz_codecs::wire_const::N_MID_PUSH
+        | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
+        // `M`: the id is in the sender's space, which the codec derives from its
+        // `WireexprLocal` arm at encode time.
+        | FLAG_PUSH_M
+        // The header says an outer extension chain follows.
+        | if with_qos { 0x80 } else { 0 };
+    sink.write_u8(header)?;
+    sink.write_vle_u64(mapping_id)?;
+    if let Some(text) = suffix {
+        sink.write_vle_u64(text.len() as u64)?;
+        sink.write_bytes(text.as_bytes())?;
+    }
+    #[cfg(feature = "pubsub-qos")]
+    if with_qos {
+        // ENC_ZINT(0x20) | id_qos(0x01), no `Z`: the only extension of the chain.
+        sink.write_u8(0x21)?;
+        sink.write_vle_u64(u64::from(qos.raw))?;
+    }
+    sink.write_u8(PUT_HEADER)?;
+    sink.write_vle_u64(value.len() as u64)?;
+    sink.write_bytes(value)
+}
+
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::push_build::build_push_literal;
+
+    /// The direct writer and the codec's encoder write the same bytes: for a literal key and
+    /// for an id, with and without a suffix, for the default QoS byte and for others, and for
+    /// payloads whose lengths take one, two and three VLE bytes.
+    #[test]
+    fn the_direct_writer_is_the_codecs_bytes() {
+        let mut compared = 0usize;
+        for id in [0u64, 1, 127, 128, 300, 16_384, 65_535] {
+            for suffix in [
+                None,
+                Some("a"),
+                Some("test/thr"),
+                Some("a/much/longer/key/x"),
+            ] {
+                if id == 0 && suffix.is_none() {
+                    continue;
+                }
+                for raw in [0x05u8, 0x1a, 0x00, 0xff] {
+                    let qos = crate::sample::QosLevel::from_raw(raw);
+                    for payload in [
+                        &b""[..],
+                        &b"x"[..],
+                        &[7u8; 127][..],
+                        &[9u8; 300][..],
+                        &[1u8; 20_000][..],
+                    ] {
+                        let mut want = alloc::vec::Vec::new();
+                        put_with_qos(id, suffix, payload, qos)
+                            .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut want))
+                            .expect("a Vec grows");
+                        let mut got = alloc::vec::Vec::new();
+                        write_plain_put(
+                            &mut sce_forge_runtime::codec::VecSink::new(&mut got),
+                            id,
+                            suffix,
+                            payload,
+                            qos,
+                        )
+                        .expect("a Vec grows");
+                        assert_eq!(
+                            got,
+                            want,
+                            "id {id} suffix {suffix:?} qos {raw:#04x} {} payload bytes",
+                            payload.len()
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(compared > 500, "{compared}");
+    }
 
     /// The borrowed composition and the owned builder it replaces put the same bytes on
     /// the wire, for the keyexprs and payloads a Put can carry, the empty ones included.

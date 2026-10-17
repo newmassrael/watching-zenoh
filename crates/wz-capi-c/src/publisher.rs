@@ -368,6 +368,12 @@ pub(crate) struct PublisherState {
     /// the `encoding` field is `z_moved_encoding_t*`, i.e. CONSUMED at declare,
     /// so reading it again per put would be reading a moved value.
     base: PublishOptions,
+    /// What a Put on this publisher is sent from when it is plain (no encoding, attachment,
+    /// timestamp or source of its own, which `base` has none of), worked out once from `base`:
+    /// a put that brings no options of its own is then sent without cloning `base` and reading
+    /// it again ([`wz_runtime_tokio::session::PublishOptions::plain_put_params`]). `None` when
+    /// `base` is not plain, or the build does not send plain Puts.
+    plain: Option<wz_runtime_tokio::session::PlainPutParams>,
 }
 
 impl Drop for PublisherState {
@@ -486,6 +492,15 @@ struct PutOverrides {
 }
 
 impl PutOverrides {
+    /// Whether the put brought nothing of its own: no encoding, attachment, source or
+    /// timestamp over the publisher's declare-time options.
+    fn is_empty(&self) -> bool {
+        self.encoding.is_none()
+            && self.attachment.is_none()
+            && self.source_info.is_none()
+            && self.timestamp.is_none()
+    }
+
     /// Take the owned fields out of a `z_publisher_put_options_t`.
     ///
     /// # Safety
@@ -672,6 +687,9 @@ pub unsafe extern "C" fn z_declare_publisher(
         } else {
             None
         };
+        // SAFETY: the caller's contract for `options`.
+        let base = unsafe { resolve_publisher_options(options) };
+        let plain = base.plain_put_params();
         let mut boxed = Box::new(PublisherState {
             shared: state.shared.clone(),
             // The mapping travels with the keyexpr rather than with the session, which is
@@ -686,8 +704,8 @@ pub unsafe extern "C" fn z_declare_publisher(
             held_declaration: held,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             matching: std::sync::Mutex::new(None),
-            // SAFETY: the caller's contract for `options`.
-            base: unsafe { resolve_publisher_options(options) },
+            base,
+            plain,
         });
         // Bind AFTER the box, never before: the cached view must point at the
         // state's final address.
@@ -725,6 +743,26 @@ pub unsafe extern "C" fn z_publisher_put(
         let (Some(state), Some(payload)) = (unsafe { publisher_state(this_) }, payload) else {
             return Z_ENULL;
         };
+        // A put on a declared key that brings nothing of its own, from a publisher whose
+        // options are plain, is sent from the facts worked out at declare time: no clone of
+        // the options, no list of faces built. A put this node's own subscriber wants, or one
+        // a face stamps, is answered `None` and takes the general publish below.
+        if overrides.is_empty() {
+            if let (Some(plain), Some(mapping), crate::bytes::Outbound::Bytes(bytes)) =
+                (state.plain.as_ref(), state.wire_mapping(), &payload)
+            {
+                if let Some(sent) =
+                    state
+                        .shared
+                        .put_plain_declared(&state.keyexpr.keyexpr, mapping, bytes, plain)
+                {
+                    return match sent {
+                        Ok(_) => Z_OK,
+                        Err(why) => publish_refusal(why),
+                    };
+                }
+            }
+        }
         // The publisher's declare-time bundle is the base; the per-put options
         // taken above override it field by field.
         let publish = overrides.apply(state.base.clone());
