@@ -221,12 +221,6 @@ DEFERRED: dict[str, str] = {
         "grade whatever stale artifact `crates/target` happened to hold -- the "
         "exact failure `binary_freshness_lint.py` exists to count."
     ),
-    "debt_plane_census.py": (
-        "exit 3 is its NORMAL state whenever a debt claim stands, which is a "
-        "fact about the register's queue and not about the tree this push "
-        "sends. A push blocked on the contents of the debt queue would be a "
-        "verdict on the wrong subject; 0.35s is not what keeps it out."
-    ),
     "prose_named_identifier_gate.py": (
         "16.49s in --check mode. R2576 recorded that as twice the whole rest "
         "of this population; R2578's widening retired that comparison rather "
