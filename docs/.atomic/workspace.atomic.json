@@ -275418,6 +275418,58 @@
         "Next in the depth track: the performance differential against libzenohc, then the build work the research found (auth sinks, config startup path for access control, max_sessions order, namespace in peer and router, queries_default_timeout)."
       ]
     },
+    "Round 3365": {
+      "decision_summary": "The send and receive paths are rebuilt after zenoh's pipeline: a per-priority open frame the writer pulls when idle, a strict reader for plain Put frames that skips the owned message, one callback job per frame, and a send of a declared publisher's Put with no set-up. Measured on a quiet host against the real libzenohc with its own throughput examples: send +22-24% at every size, wz to wz +28-50%, receive +14-16% at 64 B and 1 KiB, a tie at 8 B that the reference publisher bounds (wz used 51% CPU per message, the reference 99%). Two bugs found with red-first tests are fixed: a writer flush that waited on a sender's lock and stalled a kilobyte stream, and a control message overtaking data. Layer P now runs the differential hosted. NOT claimed: the hosted result of this push, pico CLI legs, pooled or datagram packing, and Layer C0 locally (one gate red on the main tree too).",
+      "changes_bullets": [
+        "wz-session-core: plain_push strict reader, FramePlainPuts delivery, lent-batch append under one slot-table hold, control barrier, and the SN ring formula kept on PeerInitCaps.",
+        "wz-runtime-tokio: pull-based writer with a coalesce wait, a flush that never waits for a sender's lock, one deferred job per frame of Puts.",
+        "wz-capi-core and wz-capi-c: declared-publisher plain Put lane, shared payload clone, the subscriber's sample marshal kept between calls.",
+        "Tests: packed_writer_e2e carries three tests, the stream tests build in every feature set, and the stats test waits for the Frame to be counted.",
+        "CI: Layer P wired into the job with the oracle, C1bb guard 1 to 3, vendor/sce pin bumped, and the throughput file kept out of the proof corpus."
+      ],
+      "verification_bullets": [
+        "verify-once on a build host: C0s, C1bw, C1bz, C1l, C1bn, C1cn, count-guard, clippy and tests of the changed crates all pass.",
+        "Layer C0 fails only on round-fed-gate-reach (a deferred gate that left its population); the main tree fails it the same way, so it is not from this round.",
+        "WZ_A4_REQUIRE=1 scripts/audit-crossimpl-proof.sh: rc 0.",
+        "Read from the hosted run 39019717264: one job red, the pico cancellation diff (legD get before the querier filter opened), repaired by the wait added in this push.",
+        "NOT verified: the hosted result of this push, the pico CLI legs of C1cc, pooled and datagram packing, pubsub-qos off with the plain lane, Layer P hosted time budget."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of this push job by job, Layer P and the job-budget margin first, then C1cc and Layer E.",
+        "Fix round-fed-gate-reach: drop the debt_plane_census.py row from the hook's DEFERRED table.",
+        "Remaining send-path cost: the take_outbound box and allocation (about 300 instructions), the tx-limits cache, TxLease::resume pointer caching.",
+        "Receive per-frame lock leftovers (about 70 instructions per message); the lock-free staging queue stays a prototype until a measurement says it buys more."
+      ],
+      "publishable_decision_summary": "The send and receive paths are rebuilt after zenoh's pipeline: a per-priority open frame the writer pulls when idle, a strict reader for plain Put frames that skips the owned message, one callback job per frame, and a send of a declared publisher's Put with no set-up. Measured on a quiet host against the real libzenohc with its own throughput examples: send +22-24% at every size, wz to wz +28-50%, receive +14-16% at 64 B and 1 KiB, a tie at 8 B that the reference publisher bounds (wz used 51% CPU per message, the reference 99%). Two bugs found with red-first tests are fixed: a writer flush that waited on a sender's lock and stalled a kilobyte stream, and a control message overtaking data. Layer P now runs the differential hosted. NOT claimed: the hosted result of this push, pico CLI legs, pooled or datagram packing, and Layer C0 locally (one gate red on the main tree too).",
+      "publishable_changes_bullets": [
+        "wz-session-core: plain_push strict reader, FramePlainPuts delivery, lent-batch append under one slot-table hold, control barrier, and the SN ring formula kept on PeerInitCaps.",
+        "wz-runtime-tokio: pull-based writer with a coalesce wait, a flush that never waits for a sender's lock, one deferred job per frame of Puts.",
+        "wz-capi-core and wz-capi-c: declared-publisher plain Put lane, shared payload clone, the subscriber's sample marshal kept between calls.",
+        "Tests: packed_writer_e2e carries three tests, the stream tests build in every feature set, and the stats test waits for the Frame to be counted.",
+        "CI: Layer P wired into the job with the oracle, C1bb guard 1 to 3, vendor/sce pin bumped, and the throughput file kept out of the proof corpus."
+      ],
+      "publishable_verification_bullets": [
+        "verify-once on a build host: C0s, C1bw, C1bz, C1l, C1bn, C1cn, count-guard, clippy and tests of the changed crates all pass.",
+        "Layer C0 fails only on round-fed-gate-reach (a deferred gate that left its population); the main tree fails it the same way, so it is not from this round.",
+        "WZ_A4_REQUIRE=1 scripts/audit-crossimpl-proof.sh: rc 0.",
+        "Read from the hosted run 39019717264: one job red, the pico cancellation diff (legD get before the querier filter opened), repaired by the wait added in this push.",
+        "NOT verified: the hosted result of this push, the pico CLI legs of C1cc, pooled and datagram packing, pubsub-qos off with the plain lane, Layer P hosted time budget."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of this push job by job, Layer P and the job-budget margin first, then C1cc and Layer E.",
+        "Fix round-fed-gate-reach: drop the debt_plane_census.py row from the hook's DEFERRED table.",
+        "Remaining send-path cost: the take_outbound box and allocation (about 300 instructions), the tx-limits cache, TxLease::resume pointer caching.",
+        "Receive per-frame lock leftovers (about 70 instructions per message); the lock-free staging queue stays a prototype until a measurement says it buys more."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
