@@ -237,9 +237,27 @@ async fn wz_reply_source_info_decoded_by_pico_z_get() {
     };
 
     let result = tokio::select! {
-        _ = drive => panic!(
-            "wz drive loop reached a terminal state before pico decoded the reply source_info"
-        ),
+        // z_get is a one-shot burst-and-exit querier: once it has its reply and the final
+        // notification it prints and exits, which closes the session, so the drive loop ends
+        // exactly when pico is done and may end before the poll above has looked. That is no
+        // failure by itself; the verdict is what pico printed, read again after a short wait for
+        // the capture thread to hand over the last lines.
+        outcome = drive => {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let captured = read_captured(&mut z_get_stdout_reader);
+                if captured.contains(received_witness) && captured.contains(source_info_witness) {
+                    break Ok(());
+                }
+                if Instant::now() >= deadline {
+                    break Err(format!(
+                        "wz drive loop reached a terminal state ({outcome:?}) before pico \
+                         decoded the reply source_info.\n--- captured stdout ---\n{captured}"
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
         r = scenario => r,
     };
 
