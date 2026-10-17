@@ -1801,6 +1801,11 @@ impl SharedSession {
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock))
             .with_node_clock(self.node_hlc.clone())
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+        // This face's events are dispatched through the face session's own subscriber
+        // registry (`Self::dispatch`) and nothing here filters or forwards the owned
+        // messages of a frame, so the drive loop may report a frame of plain Puts as the
+        // places of its records and skip building a message for each.
+        actions.set_plain_put_lane(true);
         // R3065 -- the face reads what its peer sends through the node's own clients.
         install_shm_reader(&session, &self.shm_clients);
 

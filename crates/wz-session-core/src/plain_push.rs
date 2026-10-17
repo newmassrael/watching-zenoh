@@ -140,6 +140,33 @@ pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
     ))
 }
 
+/// Every record of a frame's batch as a plain `Put`, or `None` when ANY of them is not
+/// (and when the batch holds none): all or nothing, so a frame is read by one reader
+/// and the order of its records is never split between two.
+///
+/// One allocation for the whole frame, sized by its first record, which is what a
+/// stream's frame of equal messages needs.
+#[cfg(feature = "alloc")]
+pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
+    let mut puts = alloc::vec::Vec::new();
+    let mut at = 0usize;
+    while at < buf.len() {
+        let (put, end) = read_plain_put(buf, at)?;
+        if puts.capacity() == 0 {
+            // Records of the size the first one is: its bytes, and the header around them.
+            let width = (end - at).max(1);
+            puts.reserve_exact((buf.len() / width).clamp(1, 4096));
+        }
+        puts.push(put);
+        at = end;
+    }
+    if puts.is_empty() {
+        None
+    } else {
+        Some(puts)
+    }
+}
+
 #[cfg(all(test, feature = "alloc", feature = "codec-push"))]
 mod tests {
     use super::*;
@@ -394,6 +421,49 @@ mod tests {
         assert!(
             agreed > 100,
             "the damaged corpus exercised the reader: {agreed}"
+        );
+    }
+
+    /// A frame's batch is read whole or not at all: every record of equal messages comes
+    /// back in wire order, and one record that is not a plain Put (here a keep-alive-sized
+    /// record of another message, a Put with an encoding, a truncated tail) turns the
+    /// whole batch over to the codec, with the plain records before it unread.
+    #[test]
+    fn a_batch_is_read_whole_or_not_at_all() {
+        // Z-less records, byte by byte: id 3 and a payload of `n`, as a stream sends.
+        let record = |tag: u8| {
+            alloc::vec![
+                0x5du8, // Push, M and no N: the peer's id, no suffix, no extension
+                3,
+                PLAIN_PUT_HEADER,
+                1,
+                tag
+            ]
+        };
+        let mut batch = alloc::vec::Vec::new();
+        for tag in 0..40u8 {
+            batch.extend_from_slice(&record(tag));
+        }
+        let puts = read_plain_puts(&batch).expect("a batch of plain puts");
+        assert_eq!(puts.len(), 40);
+        for (index, put) in puts.iter().enumerate() {
+            assert_eq!(put.id, 3);
+            assert!(put.sender_mapping);
+            assert_eq!(batch[put.payload.0 as usize], index as u8);
+        }
+
+        let mut mixed = batch.clone();
+        mixed.extend_from_slice(&[0x5d, 3, PLAIN_PUT_HEADER | 0x40, 0, 1, 7]);
+        assert!(
+            read_plain_puts(&mixed).is_none(),
+            "an encoding on the last put"
+        );
+        let mut cut = batch.clone();
+        cut.pop();
+        assert!(read_plain_puts(&cut).is_none(), "a truncated tail");
+        assert!(
+            read_plain_puts(&[]).is_none(),
+            "an empty batch is the codec's"
         );
     }
 }

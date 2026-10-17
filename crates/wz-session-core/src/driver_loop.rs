@@ -93,6 +93,27 @@ pub enum DriverLoopOutcome {
         /// match (signature-stability).
         priority: crate::qos::Priority,
     },
+    /// A `Frame` every record of which is a plain `Put` (see [`crate::plain_push`]),
+    /// reported as the records' places in the frame rather than as the owned messages
+    /// [`Self::FramePayload`] carries: what a data stream is made of, delivered to the
+    /// subscribers without building a message per record.
+    ///
+    /// Produced only for a session whose host turned the lane on
+    /// ([`crate::session_actions::SessionLinkActions::set_plain_put_lane`]), and for a
+    /// frame where EVERY record is plain; one record that is anything else (a declare,
+    /// a request, a put with a timestamp) makes the whole frame a [`Self::FramePayload`],
+    /// so the order of a frame's records is never split between the two forms. Its
+    /// `reliable`, `sn` and `priority` are the frame's, as the owned outcome's are, and
+    /// the frame passed the same sequence-number gate.
+    #[cfg(feature = "alloc")]
+    FramePlainPuts {
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+        /// The frame's batch of records; `puts` are ranges of it.
+        payload: crate::link::RxBytes,
+        puts: Vec<crate::plain_push::PlainPut>,
+    },
     /// A `Frame` the session read that carried no record to deliver: the heap
     /// profile reports it as a [`Self::FramePayload`] with an empty batch, and a
     /// build with no allocator, which has no batch to be empty, reports this

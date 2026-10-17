@@ -966,6 +966,17 @@ impl<C: SampleSink> SubscriberTable<C> {
                     self.dispatch(peer, message, reliability);
                 }
             }
+            // A frame of plain Puts, reported as where they lie in it: the stream
+            // lane, delivered without an owned message per record.
+            #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+            IterationEvent::Poll(DriverLoopOutcome::FramePlainPuts {
+                reliable,
+                payload,
+                puts,
+                ..
+            }) => {
+                self.dispatch_plain_puts(peer, *reliable, payload, puts);
+            }
             // A Push lent where its frame lies, and on the slot profile the control
             // records lent beside it: a Declare's alias is absorbed and a
             // subscriber Interest is answered from the same views.
@@ -4859,6 +4870,99 @@ mod tests {
             Some("home/temp".to_string()),
         );
         assert_eq!(registry.resolve_inbound_mapping(8), None);
+    }
+
+    /// What one registry records of each sample it delivers, in the form two registries
+    /// can be compared by.
+    fn record_samples(
+        registry: &mut SubscriberRegistry<BoxedSink>,
+        pattern: &str,
+    ) -> Arc<std::sync::Mutex<Vec<String>>> {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_in = seen.clone();
+        registry.register(pattern, move |sample| {
+            seen_in.lock().unwrap().push(std::format!(
+                "{} {:?} {:?} {:?} {:?}",
+                sample.keyexpr(),
+                sample.payload(),
+                sample.kind(),
+                sample.reliability(),
+                sample.qos()
+            ));
+        });
+        seen
+    }
+
+    /// A frame of plain Puts reaches a subscriber as the owned path delivers the same
+    /// frame: the same keys (an alias, an alias with a suffix, a literal), payloads, QoS and
+    /// reliability, in the same order, with a key nobody declared dropped by both and a key
+    /// no subscriber matches delivered to nobody by both.
+    #[test]
+    fn a_frame_of_plain_puts_is_delivered_as_the_owned_path_delivers_it() {
+        use crate::driver_loop::IterationEvent;
+        let long = vec![5u8; 300];
+        let puts: [(u64, Option<&str>, &[u8], u8); 7] = [
+            (7, None, b"alias", 0x05),
+            (7, Some("/sub"), b"", 0x05),
+            (0, Some("demo/literal"), &long, 0x1a),
+            (9, None, b"nobody declared 9", 0x05),
+            (0, Some("other/key"), b"matches no subscriber", 0x05),
+            (7, None, b"alias again", 0x1a),
+            (0, Some("demo/literal"), b"x", 0x05),
+        ];
+        let mut batch = Vec::new();
+        for (id, suffix, payload, qos) in puts {
+            let push = crate::lent_push::put_with_qos(
+                id,
+                suffix,
+                payload,
+                crate::sample::QosLevel::from_raw(qos),
+            );
+            let mut one = Vec::new();
+            push.encode(&mut sce_forge_runtime::codec::VecSink::new(&mut one))
+                .unwrap();
+            batch.extend_from_slice(&one);
+        }
+
+        for reliable in [true, false] {
+            let reliability = Reliability::from_reliable_bool(reliable);
+            let mut owned = SubscriberRegistry::new();
+            let mut lane = SubscriberRegistry::new();
+            let seen_owned = record_samples(&mut owned, "demo/**");
+            let seen_lane = record_samples(&mut lane, "demo/**");
+            for registry in [&mut owned, &mut lane] {
+                registry.dispatch(
+                    &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "demo/alias"))),
+                    Reliability::Reliable,
+                );
+            }
+
+            for message in crate::network_message::parse_frame_payload(&batch).unwrap() {
+                owned.dispatch(&message, reliability);
+            }
+            let frame = crate::link::RxBytes::from(batch.clone());
+            let read = crate::plain_push::read_plain_puts(&frame).expect("every record is plain");
+            assert_eq!(read.len(), puts.len());
+            let outcome = DriverLoopOutcome::FramePlainPuts {
+                reliable,
+                sn: 0,
+                priority: crate::qos::Priority::DEFAULT,
+                payload: frame,
+                puts: read,
+            };
+            lane.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+
+            let (want, got) = (
+                seen_owned.lock().unwrap().clone(),
+                seen_lane.lock().unwrap().clone(),
+            );
+            assert_eq!(
+                want.len(),
+                5,
+                "the owned path delivers the five that route: {want:?}"
+            );
+            assert_eq!(got, want, "reliable={reliable}");
+        }
     }
 
     #[test]

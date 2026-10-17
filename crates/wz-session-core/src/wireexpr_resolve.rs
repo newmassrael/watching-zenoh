@@ -602,6 +602,24 @@ pub fn resolve_wireexpr_into<'k, S: CodecStorage>(
     resolve_parts(arm, id, suffix, spaces, out)
 }
 
+/// [`resolve_wireexpr_view`] over the parts [`crate::plain_push`] reads out of a
+/// record: `sender_mapping` is the `M` flag (the id is in the sender's space), and the
+/// rule and the answer are the same as for the codec's own forms.
+pub fn resolve_plain_parts<'k>(
+    sender_mapping: bool,
+    id: u64,
+    suffix: Option<&'k str>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
+    let arm = if sender_mapping {
+        Space::Peer
+    } else {
+        Space::Own
+    };
+    resolve_parts(arm, id, suffix, spaces, out)
+}
+
 /// The resolution rule over the parts of a wireexpr, whichever form carried them:
 /// `id == 0` is the suffix verbatim, `M=1` reads the peer's space, `M=0` reads
 /// ours or answers `None` when no own space was given, and an id the space does

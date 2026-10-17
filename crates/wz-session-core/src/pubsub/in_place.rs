@@ -328,6 +328,107 @@ impl<C: SampleSink> SubscriberTable<C> {
     }
 }
 
+/// The sample a plain `Put` is delivered as ([`SubscriberTable::dispatch_plain_puts`]):
+/// the keyexpr resolved for it, and the payload a range of the frame it arrived in.
+/// A subscriber that keeps the sample takes a second reference to that frame's storage
+/// ([`SampleView::payload_shared`]) instead of copying the payload out.
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+struct PlainSample<'s> {
+    keyexpr: &'s str,
+    frame: &'s crate::link::RxBytes,
+    range: (u32, u32),
+    reliability: Reliability,
+    qos: Option<QosLevel>,
+    shared: OnceCell<Option<crate::link::RxBytes>>,
+}
+
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+impl SampleView for PlainSample<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn payload(&self) -> &[u8] {
+        &self.frame.as_slice()[self.range.0 as usize..self.range.1 as usize]
+    }
+    fn kind(&self) -> SampleKind {
+        SampleKind::Put
+    }
+    fn reliability(&self) -> Reliability {
+        self.reliability
+    }
+    fn qos(&self) -> Option<QosLevel> {
+        self.qos
+    }
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.shared
+            .get_or_init(|| {
+                self.frame
+                    .subslice(self.range.0 as usize..self.range.1 as usize)
+            })
+            .as_ref()
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+impl<C: SampleSink> SubscriberTable<C> {
+    /// Deliver the plain `Put`s of one frame
+    /// ([`DriverLoopOutcome::FramePlainPuts`](crate::driver_loop::DriverLoopOutcome::FramePlainPuts)),
+    /// in the order they lie in it: what [`Self::dispatch_push`] delivers for the owned
+    /// projection of each, without building one. A plain Put has no timestamp, no
+    /// encoding, no attachment and no source, so none of those is read and the self-echo
+    /// rule, which needs a source, has nothing to test.
+    ///
+    /// A key the peer never declared (or the empty key) is dropped, as the owned path
+    /// drops it, and one record's key never affects another's.
+    pub(super) fn dispatch_plain_puts(
+        &mut self,
+        peer: &SubscriberPeer,
+        reliable: bool,
+        frame: &crate::link::RxBytes,
+        puts: &[crate::plain_push::PlainPut],
+    ) {
+        let reliability = Reliability::from_reliable_bool(reliable);
+        let spaces = peer.mapping_spaces();
+        for put in puts {
+            let suffix = match put.suffix {
+                Some((from, to)) => {
+                    match core::str::from_utf8(&frame.as_slice()[from as usize..to as usize]) {
+                        Ok(text) => Some(text),
+                        // The reader validated it; a frame that changed under it is dropped.
+                        Err(_) => continue,
+                    }
+                }
+                None => None,
+            };
+            let mut composed = KeyexprBuf::new();
+            let keyexpr = match crate::wireexpr_resolve::resolve_plain_parts(
+                put.sender_mapping,
+                put.id,
+                suffix,
+                spaces,
+                &mut composed,
+            ) {
+                Ok(Some(keyexpr)) => keyexpr,
+                // Undeclared id or empty key; the growable backing never answers past-bound.
+                Ok(None) | Err(KeyexprPastBound) => continue,
+            };
+            #[cfg(feature = "pubsub-qos")]
+            let qos = put.qos.map(QosLevel::from_raw);
+            #[cfg(not(feature = "pubsub-qos"))]
+            let qos: Option<QosLevel> = None;
+            let sample = PlainSample {
+                keyexpr,
+                frame,
+                range: put.payload,
+                reliability,
+                qos,
+                shared: OnceCell::new(),
+            };
+            self.fire_to_subscribers(&sample, true);
+        }
+    }
+}
+
 // The lent delivery against the owned one on the same record: every field a
 // subscriber can read through `SampleView` must be the same, the fallbacks must
 // deliver what the copying path delivers and be counted, and the self-echo rule

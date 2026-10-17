@@ -1718,6 +1718,16 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// the drive loop.
     #[cfg(feature = "routing-namespace")]
     pub namespace_ingress: R::Mutex<Option<NamespaceIngress>>,
+    /// Whether the drive loop may read a frame whose every record is a plain `Put`
+    /// with [`crate::plain_push`] and report it as
+    /// [`DriverLoopOutcome::FramePlainPuts`](crate::driver_loop::DriverLoopOutcome::FramePlainPuts),
+    /// instead of decoding it into owned messages. Off until the host that dispatches
+    /// the session's events through a subscriber registry turns it on
+    /// ([`SessionLinkActions::set_plain_put_lane`]): the outcome is that registry's to
+    /// read, and a host that filters, forwards or counts the owned messages must keep
+    /// getting them.
+    #[cfg(feature = "alloc")]
+    pub plain_put_lane: core::sync::atomic::AtomicBool,
     /// R239 — monotonic outbound `Request.request_id` allocator.
     /// Mirrors zenoh-pico's `_z_session_t._query_id` slot
     /// (`vendor/zenoh-pico/src/session/query.c:99` —
@@ -2926,6 +2936,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 namespace_egress: R::new_mutex(None::<OwnedNonWildKeyExpr>),
                 #[cfg(feature = "routing-namespace")]
                 namespace_ingress: R::new_mutex(None::<NamespaceIngress>),
+                #[cfg(feature = "alloc")]
+                plain_put_lane: core::sync::atomic::AtomicBool::new(false),
                 next_outbound_request_id: AtomicU64::new(0),
                 next_outbound_token_id: AtomicU64::new(0),
                 next_outbound_interest_id: AtomicU64::new(0),
@@ -6811,6 +6823,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-qos")]
     pub fn is_qos(&self) -> bool {
         R::with_mutex_mut(&self.is_qos, |s| *s)
+    }
+
+    /// Allow the drive loop to report a frame of plain `Put`s as one
+    /// [`DriverLoopOutcome::FramePlainPuts`](crate::driver_loop::DriverLoopOutcome::FramePlainPuts)
+    /// (see [`SessionCore::plain_put_lane`]). The host that sets it dispatches this
+    /// session's events through a subscriber registry and applies no per-message policy
+    /// of its own to them.
+    #[cfg(feature = "alloc")]
+    pub fn set_plain_put_lane(&self, on: bool) {
+        self.core
+            .plain_put_lane
+            .store(on, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the drive loop may take the plain-`Put` lane for the next frame: the host
+    /// asked for it, and nothing rewrites a message's key on its way in (a routing
+    /// namespace strips the owned messages, which the lane does not build).
+    #[cfg(feature = "alloc")]
+    pub fn plain_put_lane_open(&self) -> bool {
+        if !self
+            .core
+            .plain_put_lane
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        #[cfg(feature = "routing-namespace")]
+        if R::with_mutex_mut(&self.core.namespace_ingress, |slot| slot.is_some()) {
+            return false;
+        }
+        true
     }
 
     /// R2924 — [`Self::is_qos`] in every build: a build without

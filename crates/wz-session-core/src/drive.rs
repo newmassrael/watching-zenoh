@@ -879,6 +879,29 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                     if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
                         return refused;
                     }
+                    // The lane of a data stream: a frame every record of which is a plain
+                    // Put is reported as where its records lie, and the generic decode
+                    // below never runs for it. One record that is anything else sends the
+                    // whole frame down the generic path, so this reads what the codec
+                    // reads or declines. Not under `transport-stats`, which counts the
+                    // owned messages, and not on the fixed backing, whose bounded keyexpr
+                    // buffer cannot hold every key a Put names.
+                    #[cfg(all(
+                        feature = "pubsub-put",
+                        not(feature = "transport-stats"),
+                        not(feature = "bounded-heapless")
+                    ))]
+                    if actions.plain_put_lane_open() {
+                        if let Some(puts) = crate::plain_push::read_plain_puts(&payload) {
+                            return DriverLoopOutcome::FramePlainPuts {
+                                reliable,
+                                sn,
+                                priority,
+                                payload,
+                                puts,
+                            };
+                        }
+                    }
                     match parse_frame_payload_out_of_line(&payload) {
                         // `payload` is a range of the unit when the unit was
                         // lent, so the messages below are ranges of it too.
