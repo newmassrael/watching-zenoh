@@ -659,7 +659,12 @@ pub fn raise_open_file_limit(wanted: u64) -> u64 {
         if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
             return 0;
         }
-        let target = (wanted as libc::rlim_t).min(limit.rlim_max);
+        // `rlim_t` is as wide as the platform makes it (64 bits here, 32 on some), so the
+        // numbers are converted rather than cast: a `wanted` too big for it is the largest it
+        // holds, and a limit is always read back as the 64 bits this function answers in.
+        let wide = |value: libc::rlim_t| u64::try_from(value).unwrap_or(u64::MAX);
+        let narrow = |value: u64| libc::rlim_t::try_from(value).unwrap_or(libc::rlim_t::MAX);
+        let target = narrow(wanted).min(limit.rlim_max);
         if target > limit.rlim_cur {
             let raised = libc::rlimit {
                 rlim_cur: target,
@@ -668,10 +673,10 @@ pub fn raise_open_file_limit(wanted: u64) -> u64 {
             // SAFETY: `setrlimit` reads the struct it is handed, which is fully initialised
             // and lives for the call; it changes this process's limit alone.
             if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
-                return target as u64;
+                return wide(target);
             }
         }
-        limit.rlim_cur as u64
+        wide(limit.rlim_cur)
     }
     #[cfg(not(unix))]
     {
