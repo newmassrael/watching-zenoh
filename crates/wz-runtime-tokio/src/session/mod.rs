@@ -1525,27 +1525,67 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             // window after an express send; the multicast arm ignores it — UDP
             // multicast has no batch window).
             let express = meta.is_express();
-            // R311ms / R311nb — build the Put / Del as a `NetworkMessage::Push`
-            // (the transport-agnostic outbound currency) and route it through
-            // the [`Self::send_network_message`] seam, which runtime-dispatches
-            // to the owned transport. The builder's `CodecError` maps to
-            // `SendWireError::Codec` -> `ExceedsCapacity` via
-            // `From<SendWireError> for PublishError`.
-            let push = match opts.kind {
-                SampleKind::Put => wz_session_core::push_build::build_push_literal_with_meta(
-                    keyexpr, payload, &meta,
-                ),
-                SampleKind::Del => {
-                    wz_session_core::push_build::build_push_del_literal_with_meta(keyexpr, &meta)
+            // A plain Put (nothing but, at most, the QoS byte) is sent from the borrowed
+            // text and bytes: the owned message below is a copy of each, a chain and a
+            // `Box`, built to be encoded once and dropped. A transport with no such path,
+            // or a build where the owned message is read on the way out, answers `None`
+            // and takes the owned one.
+            #[cfg(all(
+                not(feature = "transport-stats"),
+                not(feature = "access-acl"),
+                not(feature = "routing-namespace")
+            ))]
+            let sent_plain = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
+                match Tp::send_plain_put_qos(
+                    &self.transport,
+                    0,
+                    Some(keyexpr),
+                    payload,
+                    meta.qos,
+                    reliable,
+                    express,
+                    priority,
+                ) {
+                    Some(sent) => {
+                        sent?;
+                        true
+                    }
+                    None => false,
                 }
+            } else {
+                false
+            };
+            #[cfg(any(
+                feature = "transport-stats",
+                feature = "access-acl",
+                feature = "routing-namespace"
+            ))]
+            let sent_plain = false;
+            if !sent_plain {
+                // R311ms / R311nb — build the Put / Del as a `NetworkMessage::Push`
+                // (the transport-agnostic outbound currency) and route it through
+                // the [`Self::send_network_message`] seam, which runtime-dispatches
+                // to the owned transport. The builder's `CodecError` maps to
+                // `SendWireError::Codec` -> `ExceedsCapacity` via
+                // `From<SendWireError> for PublishError`.
+                let push = match opts.kind {
+                    SampleKind::Put => wz_session_core::push_build::build_push_literal_with_meta(
+                        keyexpr, payload, &meta,
+                    ),
+                    SampleKind::Del => {
+                        wz_session_core::push_build::build_push_del_literal_with_meta(
+                            keyexpr, &meta,
+                        )
+                    }
+                }
+                .map_err(SendWireError::Codec)?;
+                self.send_network_message_qos(
+                    wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+                    reliable,
+                    express,
+                    priority,
+                )?;
             }
-            .map_err(SendWireError::Codec)?;
-            self.send_network_message_qos(
-                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
-                reliable,
-                express,
-                priority,
-            )?;
         }
         // R311cc — pubsub-allow-loop gates the local_publish loopback branch.
         // cfg-off short-circuits to 0 (only remote dispatch fires; the
@@ -3420,33 +3460,67 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // `resolve_outbound_mapping` lookup in `publish_aliased_auto`
             // stays on `actions()` — it is unicast keyexpr-table bookkeeping,
             // not a wire send.
-            let push = match opts.kind {
-                SampleKind::Put => wz_session_core::push_build::build_push_aliased_with_meta(
+            // A plain aliased Put is sent from the borrowed bytes, as the literal one is in
+            // `Self::publish`: with the key as a one-id alias, the message is the id, the
+            // QoS byte and the payload, and building an owned copy of them to encode once is
+            // most of what the send costs.
+            #[cfg(all(
+                not(feature = "transport-stats"),
+                not(feature = "access-acl"),
+                not(feature = "routing-namespace")
+            ))]
+            let sent_plain = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
+                // This body is the unicast session's, so the bundle is the send seam.
+                self.actions().send_plain_put_qos(
                     mapping_id,
                     inline_suffix,
                     payload,
-                    &meta,
-                ),
-                SampleKind::Del => wz_session_core::push_build::build_push_del_aliased_with_meta(
-                    mapping_id,
-                    inline_suffix,
-                    &meta,
-                ),
+                    meta.qos,
+                    reliable,
+                    express,
+                    opts.priority_band(),
+                )?;
+                true
+            } else {
+                false
+            };
+            #[cfg(any(
+                feature = "transport-stats",
+                feature = "access-acl",
+                feature = "routing-namespace"
+            ))]
+            let sent_plain = false;
+            if !sent_plain {
+                let push = match opts.kind {
+                    SampleKind::Put => wz_session_core::push_build::build_push_aliased_with_meta(
+                        mapping_id,
+                        inline_suffix,
+                        payload,
+                        &meta,
+                    ),
+                    SampleKind::Del => {
+                        wz_session_core::push_build::build_push_del_aliased_with_meta(
+                            mapping_id,
+                            inline_suffix,
+                            &meta,
+                        )
+                    }
+                }
+                .map_err(SendWireError::Codec)?;
+                // R311y-item3 — route through the QoS send seam with the band
+                // derived from the SINGLE `opts.qos` source, so an aliased publish
+                // rides the matching per-priority conduit exactly like the literal
+                // `Self::publish` (was `send_network_message` = hard DEFAULT conduit,
+                // which left the aliased path split while `publish` was unified). The
+                // `_qos` seam is present wherever this `codec-push` + `transport-
+                // unicast` leg compiles (same gate `Self::publish`'s remote leg uses).
+                self.send_network_message_qos(
+                    wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+                    reliable,
+                    express,
+                    opts.priority_band(),
+                )?;
             }
-            .map_err(SendWireError::Codec)?;
-            // R311y-item3 — route through the QoS send seam with the band
-            // derived from the SINGLE `opts.qos` source, so an aliased publish
-            // rides the matching per-priority conduit exactly like the literal
-            // `Self::publish` (was `send_network_message` = hard DEFAULT conduit,
-            // which left the aliased path split while `publish` was unified). The
-            // `_qos` seam is present wherever this `codec-push` + `transport-
-            // unicast` leg compiles (same gate `Self::publish`'s remote leg uses).
-            self.send_network_message_qos(
-                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
-                reliable,
-                express,
-                opts.priority_band(),
-            )?;
         }
         #[cfg(not(feature = "codec-push"))]
         let _ = (mapping_id, inline_suffix);

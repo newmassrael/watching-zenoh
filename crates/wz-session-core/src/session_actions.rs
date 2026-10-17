@@ -590,6 +590,13 @@ pub struct TxConduits<R: SessionRuntime> {
     /// conduit's lock may stand for the others.
     #[cfg(feature = "transport-batching")]
     active: core::sync::atomic::AtomicBool,
+    /// The link's writer pulls what the conduits stage (see
+    /// [`BoxedLinkDriver::set_idle_flush`]), so the window is open for as long as
+    /// the session lives and no caller opens or closes it. Its own flag rather than
+    /// `active`: `zp_batch_stop` closes the window the caller opened and must not
+    /// close this one, which is the link's and not the caller's.
+    #[cfg(feature = "transport-batching")]
+    auto: core::sync::atomic::AtomicBool,
     conduits: [R::Mutex<BatchTx>; TX_CONDUITS],
 }
 
@@ -633,6 +640,8 @@ impl<R: SessionRuntime> TxConduits<R> {
         Self {
             #[cfg(feature = "transport-batching")]
             active: core::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "transport-batching")]
+            auto: core::sync::atomic::AtomicBool::new(false),
             conduits: core::array::from_fn(|_| R::new_mutex(BatchTx::default())),
         }
     }
@@ -735,13 +744,39 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn is_active(&self) -> bool {
-        self.active.load(core::sync::atomic::Ordering::SeqCst)
+        self.active.load(core::sync::atomic::Ordering::SeqCst) || self.is_auto()
     }
 
     #[cfg(feature = "transport-batching")]
     fn set_active(&self, active: bool) {
         self.active
             .store(active, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The link pulls the staged frames itself (the `auto` field). Read where
+    /// [`Self::is_active`] is, by the emit chokepoint only.
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn is_auto(&self) -> bool {
+        self.auto.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "transport-batching")]
+    fn set_auto(&self, auto: bool) {
+        self.auto.store(auto, core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Every conduit back to its initial state, the window closed. The
@@ -8825,6 +8860,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 )),
             }
         });
+        // The window is the link's (`set_auto_batching`): a frame may now be open in
+        // a conduit, and the link's writer flushes it when it has nothing else to
+        // write. Told here, once the conduit's lock is released, because the writer's
+        // flush takes that lock.
+        #[cfg(feature = "transport-batching")]
+        if matches!(push, Ok(PushOutcome::Pushed)) && self.tx_conduits.is_auto() {
+            self.own_link().link_driver().tx_staged();
+        }
         match push {
             // R2923 — upstream's `handle_push_result`
             // (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `if !pushed && !msg.is_droppable() {`):
@@ -9410,6 +9453,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "transport-batching"))]
         Err(SendWireError::FeatureDisabled)
+    }
+
+    /// Open the batching window for good, because the link's writer pulls what the conduits
+    /// stage ([`BoxedLinkDriver::set_idle_flush`] answered `true`): every network message is
+    /// absorbed into its conduit's open frame, and the writer's flush at idle is what puts the
+    /// frame on the wire. Zenoh's transmission pipeline is this shape: producers stage into a
+    /// batch, the consumer takes whatever is staged when it has room, so a burst leaves in a few
+    /// large frames and a lone message leaves at once.
+    ///
+    /// Not `zp_batch_start`: that window belongs to the caller, who closes it with
+    /// `zp_batch_stop`; this one belongs to the link and outlives every such call. Without
+    /// `transport-batching` there is no window to open and this does nothing.
+    pub fn set_auto_batching(&self, on: bool) {
+        #[cfg(feature = "transport-batching")]
+        self.tx_conduits.set_auto(on);
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = on;
+    }
+
+    /// Send every conduit's open batch frame now, whatever opened the window: the flush the
+    /// link's writer runs when it has nothing to write ([`BoxedLinkDriver::set_idle_flush`]).
+    /// [`Self::batch_flush`] without the typed answer a caller of `zp_batch_flush` is owed.
+    pub fn flush_staged(&self) {
+        #[cfg(feature = "transport-batching")]
+        self.flush_open_batch();
     }
 
     /// R311jq — typed chokepoint entries: each hands its per-type body
@@ -10237,6 +10305,63 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The DEFAULT-priority case of the express variant below (one home for
         // the build + dispatch, priority DEFAULT so no ext_qos ever rides).
         self.send_push_literal_qos(keyexpr_suffix, value, reliable, Priority::DEFAULT)
+    }
+
+    /// A plain `Put` (no timestamp, encoding, source info or attachment), with the QoS the
+    /// publisher set, encoded from the caller's own text and bytes, on the key
+    /// `(mapping_id, suffix)`: `(0, Some(key))` is the literal key and any other id is a key
+    /// this session declared. The wire of
+    /// [`crate::push_build::build_push_literal_with_meta`] with none of what that builder
+    /// makes to be encoded once and dropped (an owned keyexpr, an owned payload, the
+    /// extension chain, and the `Box` the network message travels in), which was the larger
+    /// part of what a publish cost before the frame reached a buffer.
+    ///
+    /// The send is [`Self::dispatch_network_message`]'s, so the congestion control, the
+    /// batching window, the express flush and the fragmentation of an oversize payload are
+    /// the owned message's. `qos` is what [`crate::declare_ext_qos::read_push_qos`] reads off
+    /// the owned message's extension; a build without `pubsub-qos` writes none and reads the
+    /// DEFAULT, here too.
+    ///
+    /// Not compiled with `transport-stats`: the stats class of a message is read off its
+    /// owned form, and that is the build that keeps it.
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "alloc",
+        not(feature = "transport-stats")
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_plain_put_qos(
+        &self,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        value: &[u8],
+        qos: Option<crate::sample::QosLevel>,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Result<(), SendWireError> {
+        #[cfg(feature = "pubsub-qos")]
+        let qos = qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
+        #[cfg(not(feature = "pubsub-qos"))]
+        let qos = {
+            let _ = qos;
+            crate::sample::QosLevel::DEFAULT
+        };
+        self.dispatch_network_message(
+            priority,
+            reliable,
+            qos,
+            wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            crate::stats::NetworkStatsClass::unread(),
+            |sink| crate::lent_push::put_with_qos(mapping_id, suffix, value, qos).encode(sink),
+        )?;
+        #[cfg(feature = "transport-batching")]
+        if express {
+            self.flush_open_batch();
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = express;
+        Ok(())
     }
 
     /// R311y215 — the express (priority-carrying) twin of

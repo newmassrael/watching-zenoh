@@ -61,7 +61,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, WaitTimeoutResult};
 use std::time::{Duration, Instant};
 
@@ -165,6 +165,9 @@ pub fn outbound_channel_with_capacity(
         }),
         ready: Notify::new(),
         room: RoomSignal::new(),
+        idle_hook: Mutex::new(None),
+        flush_wanted: AtomicBool::new(false),
+        staged: AtomicU64::new(0),
     });
     (
         OutboundTx {
@@ -266,7 +269,34 @@ struct Lanes {
     /// Wakes senders waiting for room when the writer frees some, or the
     /// queue closes.
     room: RoomSignal,
+    /// What the writer runs when it has nothing to write and is about to wait: the
+    /// session's flush of the batch frames it has staged
+    /// ([`OutboundTx::set_idle_hook`]).
+    idle_hook: Mutex<Option<IdleHook>>,
+    /// A sender staged something the hook would flush and has said so
+    /// ([`OutboundTx::wake_for_flush`]); the writer clears it just before it runs the
+    /// hook. It is what keeps the wake to one per idle spell and not one per message.
+    flush_wanted: AtomicBool,
+    /// How many messages senders have staged for the hook to flush, ever
+    /// ([`OutboundTx::wake_for_flush`] counts each). The writer reads it twice a few
+    /// microseconds apart to tell producers that are still adding from producers that
+    /// have stopped, which is zenoh's batching backoff
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull_deep(`: pull once
+    /// "no new bytes have been written on the batch").
+    staged: AtomicU64,
 }
+
+/// The writer's idle hook.
+type IdleHook = Arc<dyn Fn() + Send + Sync>;
+
+/// How long the writer lets producers keep adding to the open frames before it flushes
+/// them, at most. Zenoh's `batching/time_limit` is a millisecond; the writer waits for
+/// the producers to stop and only this long if they do not.
+const COALESCE_LIMIT: Duration = Duration::from_micros(200);
+
+/// How far apart the writer's two reads of the staged count are: long enough that a
+/// producer that stages a message every microsecond or two shows up in it.
+const COALESCE_PROBE: Duration = Duration::from_micros(3);
 
 /// The senders' wait for room: a `Condvar` that is notified only while
 /// someone waits on it.
@@ -871,6 +901,29 @@ impl OutboundTx {
             .expect("outbound lanes poisoned")
             .spare
             .len()
+    }
+
+    /// Have the writer run `hook` whenever it is about to wait with nothing queued: the
+    /// session's flush of the batch frames it holds, which hands them to this queue.
+    ///
+    /// The writer holds nothing of the queue's while it runs the hook, so the hook may send
+    /// into the queue. A second call replaces the first (a link that is swapped under a live
+    /// session installs the new session's hook).
+    pub fn set_idle_hook(&self, hook: IdleHook) {
+        *self.shared.idle_hook.lock().expect("idle hook poisoned") = Some(hook);
+    }
+
+    /// Tell the writer that the hook has something to flush, once per spell in which it is
+    /// asleep or busy: while the flag stands, a sender that stages another message finds it
+    /// set and costs one load. The writer clears it just before it runs the hook, so a
+    /// message staged after that wakes it again.
+    pub fn wake_for_flush(&self) {
+        self.shared.staged.fetch_add(1, Ordering::Relaxed);
+        if !self.shared.flush_wanted.load(Ordering::Relaxed)
+            && !self.shared.flush_wanted.swap(true, Ordering::SeqCst)
+        {
+            self.shared.ready.notify_one();
+        }
     }
 
     /// Enqueue `frame` on `priority`'s lane, whatever the lane holds.
@@ -1760,7 +1813,38 @@ impl OutboundRx {
             .map(|(_, wire)| wire)
     }
 
+    /// Before the idle hook flushes, let producers that are still staging finish: while the
+    /// staged count moves between two reads a few microseconds apart, wait, for at most
+    /// [`COALESCE_LIMIT`]. A producer that stops (a lone message, the end of a burst) is
+    /// seen to have stopped by the second read, so the flush it is owed leaves within
+    /// microseconds; a producer that does not stop is flushed by the limit, and by its own
+    /// frame filling up before that. Without the wait the writer, which is faster than a
+    /// producer that has to build each message, flushes after nearly every one and sends a
+    /// few hundred bytes a write where zenoh sends kilobytes.
+    ///
+    /// A spin and not a sleep: the runtime's timer has a millisecond granularity, which is
+    /// the whole of the budget. It runs on the writer's own task, so it delays nothing the
+    /// producers do.
+    fn let_producers_finish(&self) {
+        let started = Instant::now();
+        let mut seen = self.shared.staged.load(Ordering::Relaxed);
+        loop {
+            let probe = Instant::now();
+            while probe.elapsed() < COALESCE_PROBE {
+                std::hint::spin_loop();
+            }
+            let now = self.shared.staged.load(Ordering::Relaxed);
+            if now == seen || started.elapsed() >= COALESCE_LIMIT {
+                return;
+            }
+            seen = now;
+        }
+    }
+
     async fn recv_wire_tagged_with(&mut self, packed: bool) -> Option<(Priority, WireFrame)> {
+        // The idle hook runs once per call: if it flushed something the next take finds it,
+        // and if it did not there is nothing more to ask before waiting.
+        let mut idle_hook_ran = false;
         loop {
             let notified = self.shared.ready.notified();
             tokio::pin!(notified);
@@ -1781,6 +1865,29 @@ impl OutboundRx {
                 match taken {
                     Taken::Frame(priority, out) => return Some((priority, self.wire(out))),
                     Taken::Empty if finished => return None,
+                    // Nothing queued and the writer is about to wait: this is the moment
+                    // the session's staged batch frames are owed a write. Cleared BEFORE
+                    // the hook runs, so a message staged while it runs raises the flag
+                    // again and wakes the next wait.
+                    Taken::Empty if !idle_hook_ran => {
+                        let hook = self
+                            .shared
+                            .idle_hook
+                            .lock()
+                            .expect("idle hook poisoned")
+                            .clone();
+                        if let Some(hook) = hook {
+                            idle_hook_ran = true;
+                            // Cleared before the hook runs, and only a flag that stood means
+                            // something was staged since the last flush: no wait for a
+                            // writer that is merely going to sleep.
+                            if self.shared.flush_wanted.swap(false, Ordering::SeqCst) {
+                                self.let_producers_finish();
+                            }
+                            hook();
+                            continue;
+                        }
+                    }
                     // Empty and not finished, or a lend in progress at the head
                     // of the highest lane: a send, a commit, an abort or the
                     // last sender's drop notifies.
@@ -1788,6 +1895,10 @@ impl OutboundRx {
                 }
             }
             notified.await;
+            // Woken: something was sent, staged or closed, and the hook is owed a run
+            // before the writer waits again. Left set, it would let a message staged
+            // after the first idle spell sit unflushed until the next unrelated wake.
+            idle_hook_ran = false;
         }
     }
 

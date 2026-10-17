@@ -56,6 +56,18 @@ impl PushMetadata {
             && self.qos.is_none()
     }
 
+    /// `true` when no slot but the QoS byte is set: a Put of this metadata is the bare Put
+    /// header and the payload, with at most the outer QoS extension, which is the shape
+    /// `lent_push::literal_put_with_qos` composes over the caller's own bytes. A timestamp,
+    /// an encoding, a source info or an attachment takes the owned builder, which carries
+    /// them.
+    pub fn is_plain_apart_from_qos(&self) -> bool {
+        self.timestamp.is_none()
+            && self.encoding.is_none()
+            && self.source_info.is_none()
+            && self.attachment.is_none()
+    }
+
     /// `true` when the QoS layer requests express delivery (the
     /// [`QosLevel::is_express`] projection of the optional `qos` slot).
     /// The single source for the "is this Push express" derivation the

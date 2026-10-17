@@ -350,7 +350,7 @@ pub(crate) fn publish_outbound(
 ) -> Result<usize, wz_capi_core::faces::FanoutError> {
     match (payload, mapping) {
         (Outbound::Bytes(bytes), Some(mapping)) => {
-            shared.publish_aliased_all(mapping, None, &bytes, opts)
+            shared.publish_declared_all(keyexpr, mapping, &bytes, opts)
         }
         (Outbound::Bytes(bytes), None) => shared.publish_all(keyexpr, &bytes, opts),
         #[cfg(all(

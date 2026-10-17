@@ -18,6 +18,12 @@
 //! keyexpr is `id == 0` with the suffix inline, there is no extension, and the body
 //! is the bare Put header, no optional field, then the payload.
 
+#[cfg(feature = "pubsub-qos")]
+use sce_forge_runtime::heapless::Vec as HeaplessVec;
+#[cfg(feature = "pubsub-qos")]
+use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+#[cfg(feature = "pubsub-qos")]
+use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::msg_put::MsgPut;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
@@ -50,6 +56,88 @@ pub fn literal_put<'a>(keyexpr_suffix: &'a str, value: &'a [u8]) -> Push<'a> {
             ..MsgPut::default()
         }),
     }
+}
+
+/// [`literal_put`] carrying `qos` on the Push's outer extension chain, exactly where
+/// [`crate::push_build::build_push_literal_with_meta`] puts it: one ext, id `0x01`, a
+/// `ZINT` body, and the Push header's `Z` bit. The DEFAULT byte rides no extension, so a
+/// plain publish stays wire-identical to the metadata-stripped baseline (pico's
+/// `has_qos_ext = msg->_qos._val != _Z_N_QOS_DEFAULT._val`), and a build without
+/// `pubsub-qos` carries none, as the owned builder does.
+///
+/// The chain is a fixed-capacity vector on the stack, so a Put with QoS is composed over the
+/// caller's own text and bytes with nothing built on a heap; the owned builder costs three
+/// allocations and a copy of each input per message, to be encoded once and dropped.
+pub fn literal_put_with_qos<'a>(
+    keyexpr_suffix: &'a str,
+    value: &'a [u8],
+    qos: crate::sample::QosLevel,
+) -> Push<'a> {
+    put_with_qos(0, Some(keyexpr_suffix), value, qos)
+}
+
+/// The same Put on a keyexpr the sender declared: `mapping_id`, then `suffix` when the key
+/// is the declaration with something appended
+/// ([`crate::push_build::build_push_aliased_with_meta`]'s bytes). With no suffix the Push
+/// header's `N` flag is clear and the wire carries the id alone, which is what makes an
+/// aliased publish cheaper to send and to read than the literal key it stands for.
+///
+/// `mapping_id` is not zero: that id is the literal key's.
+pub fn aliased_put_with_qos<'a>(
+    mapping_id: u64,
+    suffix: Option<&'a str>,
+    value: &'a [u8],
+    qos: crate::sample::QosLevel,
+) -> Push<'a> {
+    debug_assert!(mapping_id != 0, "id 0 is the literal key, not an alias");
+    put_with_qos(mapping_id, suffix, value, qos)
+}
+
+/// The one composition behind [`literal_put_with_qos`] and [`aliased_put_with_qos`]: a Put on
+/// `(mapping_id, suffix)`, the `N` flag set exactly when a suffix rides.
+pub fn put_with_qos<'a>(
+    mapping_id: u64,
+    suffix: Option<&'a str>,
+    value: &'a [u8],
+    qos: crate::sample::QosLevel,
+) -> Push<'a> {
+    // Mutated only when the QoS extension can ride (`pubsub-qos`).
+    #[allow(unused_mut)]
+    let mut push = Push {
+        header: wz_codecs::wire_const::N_MID_PUSH | if suffix.is_some() { FLAG_PUSH_N } else { 0 },
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: mapping_id,
+                suffix_len: suffix.map(|text| text.len() as u64),
+                suffix,
+            }),
+        },
+        extensions: None,
+        body: PushVariant::CodecZenohMsgPut(MsgPut {
+            header: PUT_HEADER,
+            payload_len: Some(value.len() as u64),
+            payload: Some(value),
+            ..MsgPut::default()
+        }),
+    };
+    #[cfg(feature = "pubsub-qos")]
+    if qos != crate::sample::QosLevel::DEFAULT {
+        let mut chain: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
+        // One extension: no `Z` bit on it, which only says another follows.
+        let _ = chain.push(ExtEntry {
+            // ENC_ZINT(0x20) | id_qos(0x01); no `M`, qos is informational.
+            header: 0x20 | 0x01,
+            body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+                value: u64::from(qos.raw),
+            }),
+        });
+        push.extensions = Some(chain);
+        // The Push header says an outer chain follows.
+        push.header |= 0x80;
+    }
+    #[cfg(not(feature = "pubsub-qos"))]
+    let _ = qos;
+    push
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -91,5 +179,108 @@ mod tests {
             }
         }
         assert_eq!(compared, keyexprs.len() * payloads.len());
+    }
+
+    /// With QoS the borrowed composition and the owned metadata builder put the same bytes
+    /// on the wire: the DEFAULT byte rides no extension, and every other byte rides the
+    /// outer chain with the Push header's `Z` bit, across the priorities, the congestion
+    /// controls and the express bit a publisher sets.
+    #[test]
+    fn the_borrowed_put_with_qos_is_the_owned_builders_bytes() {
+        use crate::metadata::PushMetadata;
+        use crate::push_build::build_push_literal_with_meta;
+        use crate::sample::QosLevel;
+
+        let mut qos_bytes: alloc::vec::Vec<u8> = (0..=0x1f).collect();
+        qos_bytes.push(QosLevel::DEFAULT.raw);
+        let payloads: [&[u8]; 3] = [b"", b"x", &[9u8; 700]];
+        let mut compared = 0usize;
+        let mut with_extension = 0usize;
+        for raw in qos_bytes {
+            let qos = QosLevel::from_raw(raw);
+            for payload in payloads {
+                let meta = PushMetadata {
+                    qos: Some(qos),
+                    ..PushMetadata::default()
+                };
+                let owned = build_push_literal_with_meta("demo/qos/key", payload, &meta)
+                    .expect("a literal Put with QoS builds");
+                let mut want = alloc::vec::Vec::new();
+                owned
+                    .try_as_borrowed()
+                    .expect("the owned Put has a view")
+                    .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut want))
+                    .expect("a Vec grows");
+                let mut got = alloc::vec::Vec::new();
+                literal_put_with_qos("demo/qos/key", payload, qos)
+                    .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut got))
+                    .expect("a Vec grows");
+                assert_eq!(
+                    got,
+                    want,
+                    "qos byte {raw:#04x}, {} payload bytes",
+                    payload.len()
+                );
+                if owned.extensions.is_some() {
+                    with_extension += 1;
+                }
+                compared += 1;
+            }
+        }
+        assert!(compared > 0);
+        // The control: the extension really rides for the non-default bytes, so the
+        // equality above is not two empty chains agreeing.
+        #[cfg(feature = "pubsub-qos")]
+        assert!(
+            with_extension > 0 && with_extension < compared,
+            "some bytes carry an extension and the DEFAULT one does not: {with_extension} of {compared}"
+        );
+        #[cfg(not(feature = "pubsub-qos"))]
+        assert_eq!(with_extension, 0);
+    }
+
+    /// An aliased Put, with and without a suffix and with and without QoS, is the owned
+    /// aliased builder's bytes: the `N` flag rides exactly when a suffix does, and the id is
+    /// written as the key.
+    #[test]
+    fn the_borrowed_aliased_put_is_the_owned_builders_bytes() {
+        use crate::metadata::PushMetadata;
+        use crate::push_build::build_push_aliased_with_meta;
+        use crate::sample::QosLevel;
+
+        let mut compared = 0usize;
+        for id in [1u64, 7, 127, 128, 300, 65_535] {
+            for suffix in [None, Some("tail"), Some("a/longer/suffix/than/one")] {
+                for raw in [QosLevel::DEFAULT.raw, 0x11, 0x1a] {
+                    for payload in [&b""[..], &b"x"[..], &[5u8; 400][..]] {
+                        let qos = QosLevel::from_raw(raw);
+                        let meta = PushMetadata {
+                            qos: Some(qos),
+                            ..PushMetadata::default()
+                        };
+                        let owned = build_push_aliased_with_meta(id, suffix, payload, &meta)
+                            .expect("an aliased Put builds");
+                        let mut want = alloc::vec::Vec::new();
+                        owned
+                            .try_as_borrowed()
+                            .expect("the owned Put has a view")
+                            .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut want))
+                            .expect("a Vec grows");
+                        let mut got = alloc::vec::Vec::new();
+                        aliased_put_with_qos(id, suffix, payload, qos)
+                            .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut got))
+                            .expect("a Vec grows");
+                        assert_eq!(
+                            got,
+                            want,
+                            "id {id}, suffix {suffix:?}, qos {raw:#04x}, {} payload bytes",
+                            payload.len()
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 6 * 3 * 3 * 3);
     }
 }

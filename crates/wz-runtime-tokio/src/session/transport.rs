@@ -146,6 +146,38 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
         priority: wz_session_core::qos::Priority,
     ) -> Result<(), SendWireError>;
 
+    /// A plain Put (no timestamp, encoding, source info or attachment) sent from the caller's
+    /// own text and bytes, without the owned network message
+    /// [`Self::send_network_message_qos`] takes, or `None` when this transport has no such
+    /// path and the caller sends the owned message as before. The answer is per transport:
+    /// the unicast bundle encodes from the borrowed parts straight into its batch frame, and
+    /// a multicast group queues an owned item for its own pipeline.
+    ///
+    /// Compiled only where the owned message is not read on the way out: the stats class is
+    /// taken from it, the egress policy is judged on it, and the namespace is applied to it.
+    #[cfg(all(
+        feature = "codec-push",
+        not(feature = "transport-stats"),
+        not(feature = "access-acl"),
+        not(feature = "routing-namespace")
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn send_plain_put_qos(
+        payload: &Self::Payload,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        value: &[u8],
+        qos: Option<wz_session_core::sample::QosLevel>,
+        reliable: bool,
+        express: bool,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<Result<(), SendWireError>> {
+        let _ = (
+            payload, mapping_id, suffix, value, qos, reliable, express, priority,
+        );
+        None
+    }
+
     /// R2702 — the §5.16 ACL SUBJECT source for this transport, or `None` when
     /// the transport has no authenticated peer to be a subject.
     ///
@@ -256,6 +288,29 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
             let _ = (payload, msg, reliable, express, priority);
             Err(SendWireError::FeatureDisabled)
         }
+    }
+
+    // The unicast bundle encodes a plain Put from the borrowed parts, into the frame its
+    // batch holds open.
+    #[cfg(all(
+        feature = "codec-push",
+        not(feature = "transport-stats"),
+        not(feature = "access-acl"),
+        not(feature = "routing-namespace")
+    ))]
+    fn send_plain_put_qos(
+        payload: &Self::Payload,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        value: &[u8],
+        qos: Option<wz_session_core::sample::QosLevel>,
+        reliable: bool,
+        express: bool,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<Result<(), SendWireError>> {
+        Some(
+            payload.send_plain_put_qos(mapping_id, suffix, value, qos, reliable, express, priority),
+        )
     }
 }
 

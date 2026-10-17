@@ -825,6 +825,18 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.tx.reshape(shape)
     }
 
+    // The writer task is the consumer of this queue, and it is the one that runs the
+    // hook: when it has nothing to write it flushes what the session staged, which is
+    // the pull zenoh's transmission pipeline has (R3367).
+    fn set_idle_flush(&self, hook: Arc<dyn Fn() + Send + Sync>) -> bool {
+        self.tx.set_idle_hook(hook);
+        true
+    }
+
+    fn tx_staged(&self) {
+        self.tx.wake_for_flush()
+    }
+
     // R2952 — the block-first slot lives on this link's outbound queue.
     fn block_first_acquire(&self, priority: Priority, wait_us: u64) -> bool {
         self.tx.block_first_acquire(priority, wait_us)

@@ -2602,6 +2602,31 @@ impl SharedSession {
         })
     }
 
+    /// [`Self::publish_aliased_all`] for a caller that holds the literal the alias stands for:
+    /// a publisher declared over a key keeps it, and handing it over spares every face the
+    /// lookup that finds it again (a lock on the face's outbound table and a copy of the
+    /// string, once per face and once more for the local leg, per message).
+    ///
+    /// The faces are the ones the key was announced on: [`Self::face_up`] replays every
+    /// declaration before a face is visible to a sender, so a face in the registry holds the
+    /// mapping, and the lookup was a check of something already true. A face whose declare
+    /// failed mid-teardown is a face that is going away.
+    pub fn publish_declared_all(
+        &self,
+        keyexpr: &str,
+        mapping_id: u64,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        self.fan_out(opts, |session, leg| {
+            Leg::of_alias(
+                session
+                    .publish_aliased(mapping_id, None, keyexpr, payload, leg)
+                    .map_err(PublishAliasError::from),
+            )
+        })
+    }
+
     /// Record a C keyexpr declaration in the SSOT and announce it on every live
     /// face, returning the allocated mapping id (never 0).
     ///

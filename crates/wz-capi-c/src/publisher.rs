@@ -344,6 +344,11 @@ pub struct z_publisher_put_options_t {
 pub(crate) struct PublisherState {
     pub(crate) shared: Arc<SharedSession>,
     pub(crate) keyexpr: KeyexprState,
+    /// The key declaration this publisher took for itself, when the key it was declared over
+    /// was not one the caller declared: held for the publisher's life, released when it is
+    /// dropped. What a put names its key by, with the caller's own declaration ahead of it
+    /// ([`Self::wire_mapping`]).
+    held_declaration: Option<u64>,
     loaned_keyexpr: z_loaned_keyexpr_t,
     /// The background matching listener this publisher declared, if any.
     ///
@@ -365,7 +370,24 @@ pub(crate) struct PublisherState {
     base: PublishOptions,
 }
 
+impl Drop for PublisherState {
+    fn drop(&mut self) {
+        // Let go of the key this publisher declared for itself: the last holder retracts it
+        // on every face, and nothing goes on the wire while another publisher on the same
+        // key still holds it.
+        if let Some(id) = self.held_declaration.take() {
+            self.shared.release_keyexpr(id);
+        }
+    }
+}
+
 impl PublisherState {
+    /// The id a put on this publisher names its key by: the key the caller declared, or the
+    /// one the publisher took for itself, or `None` for the literal.
+    pub(crate) fn wire_mapping(&self) -> Option<u64> {
+        self.keyexpr.mapping.or(self.held_declaration)
+    }
+
     /// Record a background matching listener, retiring any previous one.
     ///
     /// Replacing rather than appending is upstream's shape: a second background
@@ -636,18 +658,32 @@ pub unsafe extern "C" fn z_declare_publisher(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&keyexpr).is_err() {
             return Z_EINVAL;
         }
+        // A publisher declared over a DECLARED keyexpr inherits its alias, so every put on
+        // the handle rides it. One declared over a plain key declares the key itself, as
+        // zenoh-pico does for every publisher: the peer then reads each put as an id, and
+        // does not match the key's text against its tables once per message, which the
+        // reader measured at about a third of what it spends on a literal put. The
+        // declaration is held for the publisher's life and let go when it is dropped
+        // (`PublisherState::drop`); a session that has no id left publishes the literal.
+        // SAFETY: the caller's contract for `key_expr`, already read above by `keyexpr_str`.
+        let declared = unsafe { crate::keyexpr::keyexpr_mapping(key_expr) };
+        let held = if declared.is_none() {
+            state.shared.acquire_keyexpr(keyexpr.clone())
+        } else {
+            None
+        };
         let mut boxed = Box::new(PublisherState {
             shared: state.shared.clone(),
-            // A publisher declared over a DECLARED keyexpr inherits its alias,
-            // so every put on the handle rides it — upstream's shape, and the
-            // reason the mapping travels with the keyexpr rather than with the
-            // session.
+            // The mapping travels with the keyexpr rather than with the session, which is
+            // upstream's shape. Only a declaration the CALLER made rides in it: the view
+            // `z_publisher_keyexpr` hands out points at this field, and a program may
+            // keep a copy of it past the publisher, where the publisher's own
+            // declaration is already let go.
             keyexpr: crate::keyexpr::KeyexprState {
                 keyexpr,
-                // SAFETY: the caller's contract for `key_expr`, already read
-                // above by `keyexpr_str`.
-                mapping: unsafe { crate::keyexpr::keyexpr_mapping(key_expr) },
+                mapping: declared,
             },
+            held_declaration: held,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             matching: std::sync::Mutex::new(None),
             // SAFETY: the caller's contract for `options`.
@@ -697,7 +733,7 @@ pub unsafe extern "C" fn z_publisher_put(
         let sent = crate::bytes::publish_outbound(
             &state.shared,
             &state.keyexpr.keyexpr,
-            state.keyexpr.mapping,
+            state.wire_mapping(),
             payload,
             &publish,
         );
@@ -752,7 +788,7 @@ pub unsafe extern "C" fn z_publisher_delete(
                 }
             }
         };
-        let sent = match state.keyexpr.mapping {
+        let sent = match state.wire_mapping() {
             Some(mapping) => state
                 .shared
                 .publish_aliased_all(mapping, None, &[], &options),

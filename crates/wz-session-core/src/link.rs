@@ -661,6 +661,29 @@ pub trait BoxedLinkDriver {
         let _ = shape;
     }
 
+    /// Have the link's writer run `hook` whenever it is about to wait with nothing to write,
+    /// and answer whether it will: the seam that lets a session stage frames and have the link
+    /// pull them when it has room, which is zenoh's transmission pipeline (its writer takes
+    /// whatever the producers have staged, so a burst leaves in few large batches and a lone
+    /// message leaves at once, with no timer between them).
+    ///
+    /// The hook is the session's flush of its open batch frames. It may take the session's
+    /// conduit locks and hand frames to this very link, so the writer calls it holding nothing
+    /// of its own. The default answers `false`, which keeps the session's frame-per-message
+    /// send: a driver that writes synchronously has no writer to ask, and a driver that WRAPS
+    /// another must forward this or every session behind it stays unbatched.
+    #[cfg(feature = "alloc")]
+    fn set_idle_flush(&self, hook: alloc::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+        let _ = hook;
+        false
+    }
+
+    /// The session has staged frames for this link that no write carries yet: wake the writer so
+    /// it reaches the hook above. Called after a send that left a frame open, so it must cost
+    /// next to nothing when the writer is already awake; the default is the driver that has no
+    /// writer to wake.
+    fn tx_staged(&self) {}
+
     fn open_blocking(&self);
     fn close_blocking(&self);
 

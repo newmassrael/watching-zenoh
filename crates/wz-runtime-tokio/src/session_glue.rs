@@ -418,6 +418,8 @@ pub fn new_session_actions<T: TimeSource>(
     // returns the non-injective `R::ActionsHandle<T>` (this profile's `Arc`),
     // so neither the `Arc<dyn _>` driver arg nor the declared return type can
     // back-infer `R` the way the former `Arc<Self>` return did.
+    #[cfg(feature = "transport-batching")]
+    let flushing_driver = driver.clone();
     let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock);
     // R311y813 — bind this bundle's acceptor cookie to one handshake. An
     // entropy failure leaves the slot at its fail-closed `None`: the acceptor
@@ -452,6 +454,23 @@ pub fn new_session_actions<T: TimeSource>(
     // the first time one of them moved.
     #[cfg(feature = "transport-fragmentation")]
     actions.set_max_reassembly_bytes(crate::reassembly::REASSEMBLY_SLOT_SIZE);
+    // A link whose writer will pull what the session stages (a stream link's) gets the
+    // session's batch window open for good: the data plane stages into one open frame per
+    // priority and the writer flushes it when it has nothing else to write. The hook holds
+    // the session weakly, because the link outlives nothing it needs to keep alive and the
+    // session holds the link.
+    #[cfg(feature = "transport-batching")]
+    {
+        let staged = Arc::downgrade(&actions);
+        let flush: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(actions) = staged.upgrade() {
+                actions.flush_staged();
+            }
+        });
+        if flushing_driver.set_idle_flush(flush) {
+            actions.set_auto_batching(true);
+        }
+    }
     actions
 }
 
