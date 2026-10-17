@@ -275342,6 +275342,44 @@
         "Remaining sink-without-test keys: scouting/multicast ttl, autoconnect, autoconnect_strategy, max_sessions, transport_weights, three tls certificates, three congestion waits, eight queue sizes."
       ]
     },
+    "Round 3363": {
+      "decision_summary": "The hosted CI run of the config-depth push (Round 3362) went red in one job, default-off builds + gate provenance, with every lane in it green: the job's budget margin fired at 1636s of 1800s (90%). The same job had read 1491-1529s on its three runs before it, because Layer C0 cost 615-620s each time and 748s on this one while C1cf held at 655-686s. The cause of C0's extra 130s was not found; the remedy the margin gate names is to split a lane into its own job, so Layer C0 moves to a new job, gate-provenance, and defaults-off keeps C1cf; the cache-class and apt-census rows follow the job. Predicted landing: about half the budget each, to be judged by the first hosted run. The same round adds the config-depth tests the Round 3362 entry listed as next, and lane wiring for them. NOT claimed: the hosted result of any of this, the pico, zenohd and Layer M rows, or why C0 grew.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: Layer C0 leaves defaults-off for a new gate-provenance job; cache-classes.json and apt_package_census.py list it.",
+        "wz-integration-tests, wz-capi-c, wz-ap-demo: effect tests that feed router link weights, three tls keys, connect_scouted, query timeout, drop-future-timestamp, adminspace read and write and interest timeout from a config file, and the multicast TTL and autoconnect keys of a scouting session.",
+        "scripts/run-ci.sh: Layers M, Z, E8t, E6g and E6 run them; Layer E skips from_a_config_file."
+      ],
+      "verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bn, C1bw, C1bz, C1cn, count-guard and clippy of wz-integration-tests, all rc 0; the TLS, link-weight, query-timeout and connect_scouted tests were also run on the build host and pass (4, 3, 2 and 2 tests).",
+        "NOT verified: the new CI job's duration, and every test that needs pico, zenohd or multicast delivery (Layers E8t, E6g, E6, M), which run hosted only."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of this push job by job: the two new jobs' durations against the half-budget prediction, then Layer M, Z, E8t, E6g and E6 for the tests that ran nowhere before.",
+        "Open: why Layer C0 grew by 130s on one run; the three congestion-control wait keys need a wz-sender stall relay and a congestion-control flag on the demo; the performance differential against libzenohc is not started."
+      ],
+      "publishable_decision_summary": "The hosted CI run of the config-depth push (Round 3362) went red in one job, default-off builds + gate provenance, with every lane in it green: the job's budget margin fired at 1636s of 1800s (90%). The same job had read 1491-1529s on its three runs before it, because Layer C0 cost 615-620s each time and 748s on this one while C1cf held at 655-686s. The cause of C0's extra 130s was not found; the remedy the margin gate names is to split a lane into its own job, so Layer C0 moves to a new job, gate-provenance, and defaults-off keeps C1cf; the cache-class and apt-census rows follow the job. Predicted landing: about half the budget each, to be judged by the first hosted run. The same round adds the config-depth tests the Round 3362 entry listed as next, and lane wiring for them. NOT claimed: the hosted result of any of this, the pico, zenohd and Layer M rows, or why C0 grew.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: Layer C0 leaves defaults-off for a new gate-provenance job; cache-classes.json and apt_package_census.py list it.",
+        "wz-integration-tests, wz-capi-c, wz-ap-demo: effect tests that feed router link weights, three tls keys, connect_scouted, query timeout, drop-future-timestamp, adminspace read and write and interest timeout from a config file, and the multicast TTL and autoconnect keys of a scouting session.",
+        "scripts/run-ci.sh: Layers M, Z, E8t, E6g and E6 run them; Layer E skips from_a_config_file."
+      ],
+      "publishable_verification_bullets": [
+        "Through verify-once on the build host: C0, C0s, C1bn, C1bw, C1bz, C1cn, count-guard and clippy of wz-integration-tests, all rc 0; the TLS, link-weight, query-timeout and connect_scouted tests were also run on the build host and pass (4, 3, 2 and 2 tests).",
+        "NOT verified: the new CI job's duration, and every test that needs pico, zenohd or multicast delivery (Layers E8t, E6g, E6, M), which run hosted only."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of this push job by job: the two new jobs' durations against the half-budget prediction, then Layer M, Z, E8t, E6g and E6 for the tests that ran nowhere before.",
+        "Open: why Layer C0 grew by 130s on one run; the three congestion-control wait keys need a wz-sender stall relay and a congestion-control flag on the demo; the performance differential against libzenohc is not started."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
