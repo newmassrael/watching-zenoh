@@ -113,10 +113,9 @@ docs/GENERATED.md
 # directory form. The comment here used to promise a carve-out in exactly that
 # unusable shape; matching the entries instead makes it work.
 .claude/*
-# The remote-build declaration is a REPOSITORY fact — what may be offloaded to
-# a build machine and what may not — rather than local state. A clone without
-# it cannot offload anything, and the skill reads it from the repo root.
-!.claude/remote-build.toml
+# The build-machine declaration is a REPOSITORY fact and lives at the root as
+# `bx.toml`, so nothing under `.claude/` is re-included. (Until 2026-10-17 it
+# was the file under `.claude/`, kept tracked by a negation here.)
 
 # Activity logs (local working notes; outside mnemosyne workspace).
 # Cross-session handoff lives in the atomic changelog (audit-traced);
