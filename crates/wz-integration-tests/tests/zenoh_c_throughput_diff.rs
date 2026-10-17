@@ -52,6 +52,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, read_captured, wait_for_tcp_accept_alive, wz_capi_c_release_cdylib,
     zenoh_c_oracle, ChildGuard, PortReservation,
@@ -217,7 +218,7 @@ fn run_once(publisher: &Path, subscriber: &Path, size: usize) -> Run {
                 "-o",
                 &format!("( sport = :{port} or dport = :{port} )"),
             ])
-            .output()
+            .output_bounded()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
         eprintln!(
@@ -350,7 +351,7 @@ fn ratio(value: f64, baseline: f64) -> f64 {
 // wz-proves: none -- a throughput measurement, not a behaviour claim; it asserts only that every combination measured something and reports the rest.
 #[test]
 #[ignore = "binary-dep e2e (zenoh-c oracle + the release cdylib); Layer P runs via --ignored"]
-fn upstream_throughput_examples_measured_on_libzenohc_and_on_wz() {
+fn capi_c_throughput_examples_measured_on_libzenohc_and_on_wz() {
     let (include, ref_libdir, examples) = zenoh_c_oracle().unwrap_or_else(|| {
         panic!(
             "the zenoh-c oracle is absent: this measurement has nothing to compare wz with \

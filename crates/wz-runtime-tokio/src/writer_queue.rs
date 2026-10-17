@@ -268,7 +268,7 @@ struct Lanes {
     room: RoomSignal,
 }
 
-/// The senders' wait for room: a [`Condvar`] that is notified only while
+/// The senders' wait for room: a `Condvar` that is notified only while
 /// someone waits on it.
 ///
 /// `std`'s futex condvar makes a system call on EVERY notify, waiter or not, and

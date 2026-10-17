@@ -1984,7 +1984,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// own prediction of `local_publish`, which its tests hold to the delivery.
     ///
     /// `pubsub-allow-loop`-gated for the reason of
-    /// [`Self::drain_local_fires_if_inline`], whose callers it shares.
+    /// `drain_local_fires_if_inline`, whose callers it shares.
     #[cfg(feature = "pubsub-allow-loop")]
     fn has_local_subscriber(&self, keyexpr: &str) -> bool {
         R::with_mutex_mut(&self.observer, |observer| {
