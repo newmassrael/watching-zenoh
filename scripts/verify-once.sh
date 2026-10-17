@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-bx="${BX:-$HOME/.claude/remote-build/bin/bx}"
+bx="${BX:-$HOME/.local/bin/bx}"
 plan="scripts/lib/verify_plan.py"
 
 if [[ -n "$(git status --porcelain)" ]]; then
