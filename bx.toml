@@ -1,16 +1,20 @@
+schema = 1
+
 # R311y752 — what this repository needs from a build machine, and nothing about
-# WHICH machine. Addresses live in `~/.claude/remote-build/hosts.toml`, outside
-# this tree, so a public repo never carries them (remote-build SKILL rule 11).
+# WHICH machine. Addresses live in bx's registry (`bx-paths.sh registry`),
+# outside this tree, so a public repo never carries them (remote-build SKILL
+# rule 11).
 
 # Tracked files only. This repo's history has already paid for an accidental
 # disclosure once, and `all` would send whatever is sitting untracked in the
 # working tree to another host.
 send = "tracked"
 
-# Belt and braces: `crates/target` is a SYMLINK into ~/.buildcache (SKILL rule
-# 1) and would arrive as a broken link. `git ls-files` already omits both, so
-# these entries are here to survive a future switch to `send = "all"`.
-exclude = ["/crates/target", "/target"]
+# `crates/target` is a SYMLINK into ~/.buildcache (SKILL rule 1) and would
+# arrive as a broken link; `git ls-files` omits it and `/target`, and that is
+# what keeps both home. An `exclude` line sat here until 2026-10-17 "to survive
+# a future switch to `send = "all"`": bx never read it, and bx.toml has no
+# `all` to switch to and refuses a key bx does not define.
 
 needs = ["cargo", "python3", "git"]
 
