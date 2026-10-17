@@ -5729,6 +5729,11 @@ layer_c1bb_cargo_test_qos() {
         || return 1
     _runci_guarded_test C1bb 3 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test qos_e2e --quiet \
         || return 1
+    # R3366 -- the stream writer packs what is queued into one write. This is the
+    # session's side of that claim: a burst over three priorities arrives whole, once
+    # and in order, which a join that cut or doubled a frame would fail.
+    _runci_guarded_test C1bb 1 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test packed_writer_e2e --quiet \
+        || return 1
     _runci_guarded_test C1bb 1 cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,transport-unicast --lib is_qos_negotiates_by_and_and_is_lowlatency_exclusive --quiet \
         || return 1
     # R311y514 — `session-extqos` JOINED this lane's feature set and the pin moved
@@ -17070,6 +17075,30 @@ install qemu-system-arm" || fail=1
     return "$fail"
 }
 
+# ─── Layer P — throughput differential against the real libzenohc ──
+#
+# Opt-in via `--layer P` or `WZ_RUN_LAYER_P=1`; `WZ_P_REQUIRE=1` arms it (an absent
+# oracle then fails instead of skipping). A MEASUREMENT, not a verdict: upstream's
+# `z_pub_thr` and `z_sub_thr` on libzenohc and on the RELEASE libwz_capi_c, four
+# publisher/subscriber combinations, printing msg/s and the CPU one message costs each
+# side. It asserts only that every combination carried traffic, because a floor written
+# before there is a distribution is a number made to be passed.
+#
+# Opt-in because the figures are only as good as the host: a shared build host holding a
+# load of 20 on 32 cores made the same wz publisher read 50,000 msg/s inside the build
+# tool's CPU weight and over 500,000 outside it. Run it on a quiet machine, and read the
+# CPU-per-message columns before the rates.
+layer_p_throughput_differential() {
+    if [[ "${WZ_P_REQUIRE:-0}" != "1" && "$ONLY_LAYER" != "P" && "${WZ_RUN_LAYER_P:-0}" -ne 1 ]]; then
+        echo "Layer P SKIP (opt-in measurement lane; --layer P or WZ_RUN_LAYER_P=1)"
+        return 0
+    fi
+    # The test refuses a stale release cdylib, so it is built first.
+    (cd crates && cargo build --release -p wz-capi-c --quiet) || return 1
+    _runci_guarded_test P 1 cargo test -p wz-integration-tests --test zenoh_c_throughput_diff --quiet -- --ignored --nocapture --test-threads=1 \
+        || return 1
+}
+
 # ─── Layer M — active-scouting multicast loopback e2e ──────────────
 #
 # R311ep: opt-in via `--layer M` or `WZ_RUN_LAYER_M=1`. Runs the
@@ -23241,6 +23270,7 @@ run_layer Z layer_z_zenohd_interop || overall=1
 # R311y841 — beside Z rather than beside E5: its oracle is the zenoh core
 # examples build-zenohd.sh provisions, so it belongs wherever zenohd does.
 run_layer E5z layer_e5z_router_query_target || overall=1
+run_layer P layer_p_throughput_differential || overall=1
 
 echo ""
 # R311y414 — a `--layer <name>` that matches NO lane used to run nothing and
