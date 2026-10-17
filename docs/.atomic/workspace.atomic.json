@@ -275266,6 +275266,42 @@
         "Read the Platform run of this push job by job, the Windows C ABI job first; a red there is the first measurement of that door on that host and is paid as its own round."
       ]
     },
+    "Round 3361": {
+      "decision_summary": "FreeRTOS-Kernel pin V11.3.1 -> V11.3.2, the bump open-debt item 711 left owing after Round 3359 moved the table row to the observation. The owner's policy is to track every release; a patch does not require a bump round, so this is made on that policy and not because the gate demands it. Measured first on what freertos-sys has: of the files it compiles (tasks.c, list.c, queue.c, ARM_CM3 port.c, heap_4.c) and the headers it binds, every change between the tags is a version banner or the tskKERNEL_VERSION macros, plus one renamed and retyped parameter on xPortIsAuthorizedToAccessBuffer, declared only under portUSING_MPU_WRAPPERS and neither bound nor defined by the ARM_CM3 port. No wz source reads the version string. The row in PINNED returns to 0. NOT claimed: that Layers G and Q pass on the new kernel; they ran hosted only, and the first completed hosted run that contains this is the answer.",
+      "changes_bullets": [
+        "vendor/freertos-kernel: submodule moves from V11.3.1 to V11.3.2.",
+        "scripts/lib/upstream_release_distance.py: PINNED row FreeRTOS-Kernel 1 -> 0, with the measurement of the surface that changed."
+      ],
+      "verification_bullets": [
+        "The diff of the compiled files and bound headers between the two tags read in full: version text and one MPU-only prototype. Layer U run locally against the live releases API: distance 0, pass. verify-once on the build host: C0 and C0s, rc 0.",
+        "NOT verified: Layer G.14 and G.15 (cross-compile of freertos-sys and wz-runtime-freertos) and Layer Q.frt (the QEMU boot of the demo on the new kernel), which are hosted only; the previous bump ran them by hand and this one did not."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI run of this push job by job, the cross-compile and QEMU job first: the demo must boot to its session PASS on V11.3.2.",
+        "Item 711 has no remaining bump owed once that run is green."
+      ],
+      "publishable_decision_summary": "FreeRTOS-Kernel pin V11.3.1 -> V11.3.2, the bump open-debt item 711 left owing after Round 3359 moved the table row to the observation. The owner's policy is to track every release; a patch does not require a bump round, so this is made on that policy and not because the gate demands it. Measured first on what freertos-sys has: of the files it compiles (tasks.c, list.c, queue.c, ARM_CM3 port.c, heap_4.c) and the headers it binds, every change between the tags is a version banner or the tskKERNEL_VERSION macros, plus one renamed and retyped parameter on xPortIsAuthorizedToAccessBuffer, declared only under portUSING_MPU_WRAPPERS and neither bound nor defined by the ARM_CM3 port. No wz source reads the version string. The row in PINNED returns to 0. NOT claimed: that Layers G and Q pass on the new kernel; they ran hosted only, and the first completed hosted run that contains this is the answer.",
+      "publishable_changes_bullets": [
+        "vendor/freertos-kernel: submodule moves from V11.3.1 to V11.3.2.",
+        "scripts/lib/upstream_release_distance.py: PINNED row FreeRTOS-Kernel 1 -> 0, with the measurement of the surface that changed."
+      ],
+      "publishable_verification_bullets": [
+        "The diff of the compiled files and bound headers between the two tags read in full: version text and one MPU-only prototype. Layer U run locally against the live releases API: distance 0, pass. verify-once on the build host: C0 and C0s, rc 0.",
+        "NOT verified: Layer G.14 and G.15 (cross-compile of freertos-sys and wz-runtime-freertos) and Layer Q.frt (the QEMU boot of the demo on the new kernel), which are hosted only; the previous bump ran them by hand and this one did not."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI run of this push job by job, the cross-compile and QEMU job first: the demo must boot to its session PASS on V11.3.2.",
+        "Item 711 has no remaining bump owed once that run is green."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
