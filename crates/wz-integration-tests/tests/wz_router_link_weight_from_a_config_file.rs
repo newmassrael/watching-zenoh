@@ -21,7 +21,7 @@
 //!   carries the per-link weight list, holding that weight;
 //! * the same file without the key: the entry carries NO weight list, which is
 //!   upstream's rule that the list is written only when some weight is not the
-//!   default (`make_link_state` in `zenoh/src/net/protocol/network.rs`);
+//!   default (`zenoh/src/net/protocol/network.rs` @ `make_link_state`);
 //! * the file names a zid that is not the peer's: again no weight list, so the
 //!   weight is attached to a link by the zid it names and not applied to
 //!   whichever link exists.

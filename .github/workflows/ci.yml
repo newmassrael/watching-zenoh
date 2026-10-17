@@ -1689,8 +1689,16 @@ jobs:
   # told: ~84s of setup (this job's prep is `nondefault`'s, plus cmake) + 336 +
   # 301 = ~721s, or 40% of the 1800s budget. Above the 20% floor. The FIRST run
   # will exceed that: its rust-cache key is new and therefore cold.
+  #
+  # R3363 — LAYER C0 LEFT THIS JOB, to `gate-provenance` below. The job read
+  # `elapsed 1636s of 1800s budget (90%)` on run 39005743466 with every lane green,
+  # so the alarm fired on the margin alone: C0 had cost 615-620s on the four runs
+  # before it and 748s on that one, and C1cf 655-686s on all five. C0 is python and
+  # `cargo metadata`, brings no provisioning of its own, and is the lane that grows
+  # with the test corpus; C1cf is what needs `cmake` and the pico submodule. Apart,
+  # each lands near half the budget.
   defaults-off:
-    name: default-off builds + gate provenance (Layers C0, C1cf)
+    name: default-off builds (Layer C1cf)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -1763,21 +1771,6 @@ jobs:
           save-if: "false"
           workspaces: crates -> target
 
-      - name: Layer C0 — binary-dep test #[ignore] discipline
-        # R235-hotfix — pre-flight scan: any wz-integration-tests
-        # `tests/*.rs` that calls wz_ap_demo_binary() or
-        # zenoh_pico_cli_binary( MUST mark every #[test] with an
-        # adjacent #[ignore = "..."] so Layer C1 (cargo test
-        # --workspace) skips it on fresh CI checkouts where the
-        # required binaries are not yet built. Catches the bug
-        # class at PR time rather than after Layer C1 panics with
-        # "binary not found" downstream.
-        #
-        # R2525 — moved here from `ci` for item 590's budget. This is still the
-        # SHAPE half: no mnemosyne-cli on this job, so the store-reading arm
-        # stays SKIPped here and armed only where it is provisioned.
-        run: bash scripts/run-ci.sh --layer C0
-
       - name: Layer C1cf — every crate builds with default features off
         # R311y821 — nothing local built a SHRUNKEN feature combination of a
         # changed crate, so a cfg-gated import behind an ungated signature was
@@ -1790,11 +1783,83 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1cf
 
       - name: Budget margin — this job's own clock
-        # The floor is 20, like `nondefault`'s and not `ci`'s 30: a job holding
-        # two lanes is the case the floor exists to catch, and if these two ever
-        # shrink back under a fifth of the budget they should hand it back
-        # rather than sit on it. The alarm stays 90 for the reason the `ci` copy
-        # gives.
+        # The floor is 20, like `nondefault`'s and not `ci`'s 30: a job that
+        # shrinks back under a fifth of its budget should hand it back rather than
+        # sit on it. The alarm stays 90 for the reason the `ci` copy gives.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
+  # R3363 — Layer C0, split out of `defaults-off` (see the note above that job).
+  # Its provisioning is that job's, which the apt census derives per job: nothing
+  # here is a package C0 reads, but the census states what a job INSTALLS and the
+  # two jobs install the same list, so one row of it covers both.
+  gate-provenance:
+    name: gate provenance (Layer C0)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `fetch-depth: 0` and `submodules: recursive` for the reasons the
+        # `defaults-off` copy gives: `reason_citation_gate.py` reads the full
+        # history to tell a deleted path from one wz never had, and the pico
+        # submodule is read by the gates that cite it.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Layer C0 — binary-dep test #[ignore] discipline
+        # R235-hotfix — pre-flight scan: any wz-integration-tests
+        # `tests/*.rs` that calls wz_ap_demo_binary() or
+        # zenoh_pico_cli_binary( MUST mark every #[test] with an
+        # adjacent #[ignore = "..."] so Layer C1 (cargo test
+        # --workspace) skips it on fresh CI checkouts where the
+        # required binaries are not yet built. Catches the bug
+        # class at PR time rather than after Layer C1 panics with
+        # "binary not found" downstream.
+        #
+        # R2525 — moved to `defaults-off` from `ci` for item 590's budget, and
+        # R3363 — from there to this job. This is still the SHAPE half: no
+        # mnemosyne-cli on this job, so the store-reading arm stays SKIPped here
+        # and armed only where it is provisioned.
+        run: bash scripts/run-ci.sh --layer C0
+
+      - name: Budget margin — this job's own clock
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 

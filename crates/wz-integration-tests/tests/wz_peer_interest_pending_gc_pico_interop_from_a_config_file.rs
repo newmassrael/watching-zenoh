@@ -25,9 +25,9 @@
 //! would return early in the control.
 //!
 //! The bounds are the flag-level file's: pico has no timeout of its own for a
-//! current interest (`vendor/zenoh-pico/src/net/liveliness.c:348`), so its process
-//! exit is the wire observable, a frozen upstream cannot answer, and the lease
-//! cannot expire in under 10 s.
+//! current interest (the note in the flag-level file's header, which cites the
+//! pico source), so its process exit is the wire observable, a frozen upstream
+//! cannot answer, and the lease cannot expire in under 10 s.
 //!
 //! Requires: wz-ap-demo built with `--features routing-peer,routing-interest-pending-gc,zenoh-config`
 //! and the zenoh-pico CLI. Layer E6's lane owns that build.

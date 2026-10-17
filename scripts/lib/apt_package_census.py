@@ -237,6 +237,9 @@ _add(
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
+        # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
+        # the same list as that job, so it takes the same rows.
+        "gate-provenance",
         "footprint",
         "interop",
         "cross-mcu",
@@ -277,6 +280,9 @@ _add(
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
+        # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
+        # the same list as that job, so it takes the same rows.
+        "gate-provenance",
         "footprint",
         "interop",
         "cross-mcu",
@@ -320,6 +326,9 @@ _add(
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
+        # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
+        # the same list as that job, so it takes the same rows.
+        "gate-provenance",
         "footprint",
         "feature-gates",
         # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
@@ -433,7 +442,7 @@ _add(
     # nondefault gets a separate native-engine row above (R2805).
     ["ci", "validate-codegen", "codegen-verify", "interop", "feature-gates",
      "transport-modes", "isolated-crates", "capi-c-arms", "e2e-demo",
-     "e2e-demo-pico", "dissect", "defaults-off"],
+     "e2e-demo-pico", "dissect", "defaults-off", "gate-provenance"],
 )
 _add(
     "cmake",
@@ -503,6 +512,9 @@ _add(
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
+        # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
+        # the same list as that job, so it takes the same rows.
+        "gate-provenance",
         "footprint",
         "interop",
         "cross-mcu",
