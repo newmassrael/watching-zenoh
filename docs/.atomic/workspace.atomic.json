@@ -275470,6 +275470,42 @@
         "Receive per-frame lock leftovers (about 70 instructions per message); the lock-free staging queue stays a prototype until a measurement says it buys more."
       ]
     },
+    "Round 3366": {
+      "decision_summary": "Correction to Round 3365, which could not be edited. It said Layer C0 was red locally on a gate the main tree also failed, and carried the repair forward. The cause is found and repaired: the move of the bx declaration to bx.toml left the .claude directory untracked, and the round-fed gate derived the census out of its population by that alone, so its DEFERRED row for the census became stale. The row is dropped, as the gate's own message asks; its reasoning, that exit 3 is that gate's normal state, stays in git history. Layer C0 now passes on the build host together with C0s, C1bw, C1bz, C1bn, C1cn, the count guard and clippy of the integration tests. Round 3365's claim that C0 was not locally verified no longer holds. NOT claimed: the hosted result of this push.",
+      "changes_bullets": [
+        "scripts/lib/round_fed_gate_reach.py: the DEFERRED row for debt_plane_census.py is removed."
+      ],
+      "verification_bullets": [
+        "Bisected on the gate alone: it passes at the origin tip and fails from the commit that renamed the bx declaration.",
+        "verify-once on a build host: C0, C0s, C1bw, C1bz, C1bn, C1cn, count-guard and clippy of wz-integration-tests all pass.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of this push job by job, Layer P and the job-budget margin first.",
+        "The remaining items of Round 3365 stand, except its note on the round-fed gate."
+      ],
+      "publishable_decision_summary": "Correction to Round 3365, which could not be edited. It said Layer C0 was red locally on a gate the main tree also failed, and carried the repair forward. The cause is found and repaired: the move of the bx declaration to bx.toml left the .claude directory untracked, and the round-fed gate derived the census out of its population by that alone, so its DEFERRED row for the census became stale. The row is dropped, as the gate's own message asks; its reasoning, that exit 3 is that gate's normal state, stays in git history. Layer C0 now passes on the build host together with C0s, C1bw, C1bz, C1bn, C1cn, the count guard and clippy of the integration tests. Round 3365's claim that C0 was not locally verified no longer holds. NOT claimed: the hosted result of this push.",
+      "publishable_changes_bullets": [
+        "scripts/lib/round_fed_gate_reach.py: the DEFERRED row for debt_plane_census.py is removed."
+      ],
+      "publishable_verification_bullets": [
+        "Bisected on the gate alone: it passes at the origin tip and fails from the commit that renamed the bx declaration.",
+        "verify-once on a build host: C0, C0s, C1bw, C1bz, C1bn, C1cn, count-guard and clippy of wz-integration-tests all pass.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of this push job by job, Layer P and the job-budget margin first.",
+        "The remaining items of Round 3365 stand, except its note on the round-fed gate."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
