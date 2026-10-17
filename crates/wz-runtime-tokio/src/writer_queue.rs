@@ -298,6 +298,17 @@ const COALESCE_LIMIT: Duration = Duration::from_micros(200);
 /// producer that stages a message every microsecond or two shows up in it.
 const COALESCE_PROBE: Duration = Duration::from_micros(3);
 
+/// How many probes the writer spins through before it decides the producers are a stream and
+/// stops spinning: a producer that is still adding after this many reads, microseconds of
+/// them, is not about to stop, and the wait that remains is better spent asleep than on the
+/// core.
+const COALESCE_SPIN_PROBES: u32 = 3;
+
+/// How long the writer sleeps between reads once the producers have proved to be a stream.
+/// The kernel's timer slack makes the real sleep somewhat longer; the total stays inside
+/// [`COALESCE_LIMIT`], which bounds the wait whichever way it is spent.
+const COALESCE_SLEEP: Duration = Duration::from_micros(50);
+
 /// The senders' wait for room: a `Condvar` that is notified only while
 /// someone waits on it.
 ///
@@ -1822,17 +1833,27 @@ impl OutboundRx {
     /// producer that has to build each message, flushes after nearly every one and sends a
     /// few hundred bytes a write where zenoh sends kilobytes.
     ///
-    /// A spin and not a sleep: the runtime's timer has a millisecond granularity, which is
-    /// the whole of the budget. It runs on the writer's own task, so it delays nothing the
-    /// producers do.
+    /// The first reads are a spin and not a sleep, because a sleep cannot be as short as the
+    /// few microseconds a lone message may wait: the runtime's timer has a millisecond
+    /// granularity and the thread's is tens of microseconds. A producer that is still
+    /// adding after [`COALESCE_SPIN_PROBES`] reads is a stream, and from there the writer
+    /// sleeps between reads ([`COALESCE_SLEEP`]) instead of keeping a core at full speed for
+    /// as long as the stream lasts. It runs on the writer's own thread, so it delays nothing
+    /// the producers do.
     fn let_producers_finish(&self) {
         let started = Instant::now();
         let mut seen = self.shared.staged.load(Ordering::Relaxed);
+        let mut probes = 0u32;
         loop {
-            let probe = Instant::now();
-            while probe.elapsed() < COALESCE_PROBE {
-                std::hint::spin_loop();
+            if probes < COALESCE_SPIN_PROBES {
+                let probe = Instant::now();
+                while probe.elapsed() < COALESCE_PROBE {
+                    std::hint::spin_loop();
+                }
+            } else {
+                std::thread::park_timeout(COALESCE_SLEEP);
             }
+            probes += 1;
             let now = self.shared.staged.load(Ordering::Relaxed);
             if now == seen || started.elapsed() >= COALESCE_LIMIT {
                 return;
