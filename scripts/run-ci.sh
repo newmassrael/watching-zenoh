@@ -5731,8 +5731,11 @@ layer_c1bb_cargo_test_qos() {
         || return 1
     # R3366 -- the stream writer packs what is queued into one write. This is the
     # session's side of that claim: a burst over three priorities arrives whole, once
-    # and in order, which a join that cut or doubled a frame would fail.
-    _runci_guarded_test C1bb 1 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test packed_writer_e2e --quiet \
+    # and in order, which a join that cut or doubled a frame would fail. The file grew
+    # 1 -> 3 with the session's own batching: a put on a declared alias never overtakes
+    # its declaration, and a long stream of kilobyte puts is never stalled by the writer's
+    # flush waiting for a lock a sender holds. 3 = what the command PRINTED.
+    _runci_guarded_test C1bb 3 cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test packed_writer_e2e --quiet \
         || return 1
     _runci_guarded_test C1bb 1 cargo test -p wz-runtime-tokio --features transport-qos,transport-lowlatency,transport-unicast --lib is_qos_negotiates_by_and_and_is_lowlatency_exclusive --quiet \
         || return 1
