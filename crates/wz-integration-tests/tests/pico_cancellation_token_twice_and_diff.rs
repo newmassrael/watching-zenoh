@@ -248,6 +248,23 @@ static void legD(const z_loaned_session_t *cli, const z_loaned_keyexpr_t *ke) {
     z_owned_querier_t querier;
     if (z_declare_querier(cli, &querier, ke, NULL) < 0) { printf("legD.declare=FAILED\n"); return; }
 
+    /* A querier's write filter is created ACTIVE ("nothing matches") and opens
+       when a matching queryable is learned, which happens on the read task and
+       not before `z_declare_querier` returns. A get issued while it is still
+       active sends nothing and answers 0 BEFORE the token is looked at, so the
+       leg would measure that race instead of the token. Wait for the filter to
+       open, bounded; the outcome is printed and anchored as a precondition. */
+    int opened = 0;
+    for (int i = 0; i < 200 && !opened; i++) {
+        z_matching_status_t status;
+        if (z_querier_get_matching_status(z_loan(querier), &status) == 0 && status.matching) {
+            opened = 1;
+        } else {
+            z_sleep_ms(25);
+        }
+    }
+    printf("legD.filter_opened=%d\n", opened);
+
     z_owned_cancellation_token_t t;
     if (z_cancellation_token_new(&t) < 0) { printf("legD.token_new=FAILED\n"); return; }
     z_cancellation_token_cancel(z_cancellation_token_loan_mut(&t));
@@ -435,6 +452,9 @@ fn anchors() -> Vec<&'static str> {
         "legC.get.rc=0",
         "legC.query.recv.rc=0",
         "legC.dropped_before_cancel=0",
+        // legD's precondition: the querier's write filter had opened, so the
+        // get reached the token check instead of the filter's early `Z_OK`.
+        "legD.filter_opened=1",
         "done",
     ]
 }
