@@ -284,6 +284,12 @@ pub struct SubscriberTable<C: SampleSink> {
     /// it learns that the table moved without the table having to know the
     /// session: that is what lets one table serve many peers.
     epoch: u64,
+    /// Which subscribers the keys that arrived lately matched, so that a key that comes
+    /// again is delivered without matching it against every subscription's pattern.
+    /// Valid for one `epoch`: a subscription registered or retired moves it,
+    /// and an entry from an earlier one is not read. See `MatchMemo`.
+    #[cfg(feature = "alloc")]
+    memo: MatchMemo,
     /// transport-shm — the receive side of shared memory for a push: the negotiated
     /// capability, the AP-injected resolver, the means of acknowledging the peer's
     /// slices, the drop counters, and the un-swap itself. R3042 moved all of it into
@@ -701,6 +707,8 @@ impl<C: SampleSink> SubscriberTable<C> {
             subscribers: BoundedVec::new(),
             next_id: 1,
             epoch: 0,
+            #[cfg(feature = "alloc")]
+            memo: MatchMemo::new(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
             #[cfg(all(
@@ -1929,14 +1937,144 @@ impl<C: SampleSink> SubscriberTable<C> {
     }
 
     fn fire_to_subscribers(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
-        fire_into(&mut self.subscribers, view, is_remote)
+        #[cfg(feature = "alloc")]
+        {
+            fire_into_memoized(
+                &mut self.subscribers,
+                &mut self.memo,
+                self.epoch,
+                view,
+                is_remote,
+            )
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            fire_into(&mut self.subscribers, view, is_remote)
+        }
     }
+}
+
+/// How many distinct keys `MatchMemo` remembers at once.
+#[cfg(feature = "alloc")]
+const MEMO_SLOTS: usize = 8;
+
+/// One remembered key: which subscribers it matched, under which table state.
+#[cfg(feature = "alloc")]
+struct MemoSlot {
+    /// The table epoch the answer was worked out at.
+    epoch: u64,
+    /// The locality the answer was worked out for: wire-arrived and local-origin
+    /// deliveries filter on different sides of a subscriber's `allowed_origin`.
+    remote: bool,
+    key: alloc::string::String,
+    /// The positions in the subscriber table, ascending, of the subscribers that matched.
+    hits: alloc::vec::Vec<u16>,
+}
+
+/// A small direct-mapped memory of which subscribers a key matched, so that the key arriving
+/// again (a stream's every message carries the same one) is delivered without splitting it and
+/// every subscription's pattern on `/` and intersecting them, which was the larger part of what
+/// delivering a sample cost once it was decoded.
+///
+/// Zenoh keeps the same answer in the resource a key resolves to (its `Resource::matches`),
+/// invalidated by the routing tables' version; here the table's `epoch` is
+/// that version, and it moves on every registration and every retirement, the only two
+/// writers of the subscriber list. An entry carries the epoch it was made at and is read only
+/// at that one, so a subscription added or retired between two messages is seen by the second.
+#[cfg(feature = "alloc")]
+struct MatchMemo {
+    slots: [Option<MemoSlot>; MEMO_SLOTS],
+}
+
+#[cfg(feature = "alloc")]
+impl MatchMemo {
+    fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| None),
+        }
+    }
+
+    /// The slot `key` maps to: a hash of its bytes (FNV-1a, which is a handful of
+    /// instructions per byte and has no setup), folded to the table's size.
+    fn slot_of(key: &str) -> usize {
+        let mut hash: u32 = 0x811c_9dc5;
+        for byte in key.as_bytes() {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        (hash ^ (hash >> 15)) as usize % MEMO_SLOTS
+    }
+}
+
+/// `fire_into` with the memory: a key remembered at this epoch is delivered to the
+/// subscribers it matched without being matched again; any other key is matched as
+/// `fire_into` matches it and what it matched is remembered.
+///
+/// The subscribers fired and the order they fire in are `fire_into`'s: the matched positions
+/// are kept ascending, which is the table's order.
+#[cfg(feature = "alloc")]
+fn fire_into_memoized<C: SampleSink>(
+    subscribers: &mut BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
+    memo: &mut MatchMemo,
+    epoch: u64,
+    view: &dyn SampleView,
+    is_remote: bool,
+) -> usize {
+    let key = view.keyexpr();
+    let at = MatchMemo::slot_of(key);
+    if let Some(slot) = &memo.slots[at] {
+        if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
+            for position in &slot.hits {
+                if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
+                    subscriber.sink.deliver(view);
+                }
+            }
+            return slot.hits.len();
+        }
+    }
+    // Not remembered at this epoch: match it as `fire_into` does, noting each hit. A key
+    // that cannot be matched at all (deeper than the bound) delivers to nobody and is not
+    // remembered.
+    let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+    for chunk in key.split('/') {
+        if target.push(chunk).is_err() {
+            return 0;
+        }
+    }
+    let mut hits: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+    for (position, subscriber) in subscribers.iter_mut().enumerate() {
+        let pass = if is_remote {
+            subscriber.allowed_origin.allows_remote()
+        } else {
+            subscriber.allowed_origin.allows_local()
+        };
+        if !pass {
+            continue;
+        }
+        if keyexpr_intersects_target(&subscriber.pattern, &target) {
+            subscriber.sink.deliver(view);
+            hits.push(position as u16);
+        }
+    }
+    let fired = hits.len();
+    memo.slots[at] = Some(MemoSlot {
+        epoch,
+        remote: is_remote,
+        key: alloc::string::String::from(key),
+        hits,
+    });
+    fired
 }
 
 /// [`SubscriberRegistry::fire_to_subscribers`] over the subscriber table alone,
 /// so a caller that holds other fields of the registry borrowed (the in-place
 /// delivery, whose keyexpr may be the peer table's own literal) can fire with
 /// them still borrowed. The one matcher both reach.
+///
+/// With an allocator the copying receive reaches it through `fire_into_memoized`, which
+/// remembers what a key matched; the in-place receive and every build without an allocator
+/// reach it directly, and a build that has neither caller leaves it unused.
+#[cfg_attr(feature = "alloc", allow(dead_code))]
 fn fire_into<C: SampleSink>(
     subscribers: &mut BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
     view: &dyn SampleView,
@@ -6361,6 +6499,74 @@ mod tests {
             true,
         );
         assert_eq!(none, 0, "non-matching keyexpr does not fire");
+    }
+
+    /// The match memory delivers a repeated key to exactly the subscribers a fresh match
+    /// finds, and never a stale set: a subscription registered or retired between two
+    /// messages is seen by the second, a key that matches several subscribers reaches them
+    /// all in the table's order, and the locality an answer was worked out for is part of
+    /// it (a Remote-only subscriber answers a wire-arrived key and not a local-origin one).
+    #[test]
+    fn the_match_memory_follows_the_subscriptions_and_the_locality() {
+        use crate::locality::Locality;
+        use crate::sink::BorrowedSample;
+        use std::sync::Mutex;
+        use std::vec::Vec;
+
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = |name: &'static str| {
+            let order = order.clone();
+            move |_: &dyn SampleView| order.lock().unwrap().push(name)
+        };
+        let key = |keyexpr: &'static str| BorrowedSample {
+            keyexpr,
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        let mut reg = SubscriberRegistry::new();
+        let wildcard = reg.register("a/*", log("wildcard"));
+
+        // Three messages on one key: the first is matched, the next two are remembered.
+        for _ in 0..3 {
+            assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 1);
+        }
+        assert_eq!(order.lock().unwrap().len(), 3);
+
+        // A subscription registered now moves the epoch: the next message reaches both,
+        // in the table's order, and the one after that (remembered) still does.
+        reg.register("a/x", log("exact"));
+        order.lock().unwrap().clear();
+        for _ in 0..2 {
+            assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 2);
+        }
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["wildcard", "exact", "wildcard", "exact"]
+        );
+
+        // A subscription retired moves it again: only the exact one is left.
+        assert!(reg.unregister(wildcard));
+        order.lock().unwrap().clear();
+        for _ in 0..2 {
+            assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 1);
+        }
+        assert_eq!(*order.lock().unwrap(), ["exact", "exact"]);
+
+        // A key nobody matches is a remembered nobody, and stays so.
+        for _ in 0..2 {
+            assert_eq!(reg.dispatch_borrowed(&key("other/y"), true), 0);
+        }
+
+        // The locality is part of the answer: a Remote-only subscriber is fired for a
+        // wire-arrived key and not for a local-origin one, whichever was asked first.
+        reg.register_with_locality("loc/k", Locality::Remote, log("remote-only"));
+        order.lock().unwrap().clear();
+        assert_eq!(reg.dispatch_borrowed(&key("loc/k"), false), 0);
+        assert_eq!(reg.dispatch_borrowed(&key("loc/k"), true), 1);
+        assert_eq!(reg.dispatch_borrowed(&key("loc/k"), false), 0);
+        assert_eq!(reg.dispatch_borrowed(&key("loc/k"), true), 1);
+        assert_eq!(*order.lock().unwrap(), ["remote-only", "remote-only"]);
     }
 }
 

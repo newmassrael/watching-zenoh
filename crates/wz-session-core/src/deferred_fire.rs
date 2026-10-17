@@ -392,12 +392,62 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
         let Some(callback) = taken else {
             return;
         };
-        // Run-or-restore loop: run the parked calls in their order until
-        // the next number is missing, then restore — unless a kill arrived,
-        // in which case the callback (and whatever is still parked) is
-        // dropped. `callback_slot` is taken by the restore arm, so a
-        // surviving `Some` after the loop drops outside the cell lock.
-        let mut callback_slot = Some(callback);
+        self.run_parked(Some(callback));
+    }
+
+    /// Run the call with ticket `number`, in its turn, taking the shortest way there.
+    ///
+    /// The common turn is the uncontended one: the callback is at rest, it is this number's
+    /// turn, nothing is behind it. Then there is nobody to hand the call to and nothing to
+    /// wait for, so it is not boxed, parked under its number and taken out again: the
+    /// callback is taken, the call runs over it with the cell unlocked, and the loop that
+    /// serves whatever arrived meanwhile takes over (`run_parked`). A call that is not in
+    /// that position goes the way `run_ticket` always took it.
+    ///
+    /// The cell's guarantees are the slow path's: the number stays `next` for as long as the
+    /// call runs, so a drainer holding a later number, or a call made from inside this one,
+    /// finds the callback out and parks, and is run before the callback is restored; a kill
+    /// that lands meanwhile drops the callback at the restore instead of resurrecting it.
+    fn run_call<G: FnOnce(&mut F) + Send + 'static>(&self, number: u64, call: G) {
+        enum Turn<F> {
+            Dead,
+            Elsewhere,
+            Mine(F),
+        }
+        let turn = R::with_mutex_mut(&self.state, |s| {
+            if s.dead {
+                Turn::Dead
+            } else if s.next == number && s.callback.is_some() {
+                Turn::Mine(s.callback.take().expect("checked just above"))
+            } else {
+                Turn::Elsewhere
+            }
+        });
+        match turn {
+            // The call is dropped here, outside the cell lock.
+            Turn::Dead => drop(call),
+            Turn::Elsewhere => self.run_ticket(number, Box::new(call)),
+            Turn::Mine(callback) => {
+                let mut callback_slot = Some(callback);
+                call(callback_slot.as_mut().expect("set just above"));
+                // This number's turn is over. A kill that ran meanwhile leaves the
+                // number alone: `run_parked` sees the cell dead and drops everything.
+                R::with_mutex_mut(&self.state, |s| {
+                    if !s.dead {
+                        s.next += 1;
+                    }
+                });
+                self.run_parked(callback_slot);
+            }
+        }
+    }
+
+    /// The cell's runner: with the callback in hand (`callback_slot`), run the parked calls in
+    /// their order until the next number is missing, then restore the callback, unless a
+    /// kill arrived, in which case the callback and whatever is still parked are dropped.
+    /// `callback_slot` is taken by the restore, so a surviving `Some` drops outside the
+    /// cell lock.
+    fn run_parked(&self, mut callback_slot: Option<F>) {
         loop {
             let next = R::with_mutex_mut(&self.state, |s| {
                 if s.dead {
@@ -465,7 +515,7 @@ impl<R: Runtime, F: Send + 'static> Ticket<R, F> {
     /// [`DeferredListenerCell::invoke`].
     pub fn invoke(mut self, f: impl FnOnce(&mut F) + Send + 'static) {
         self.spent = true;
-        self.cell.run_ticket(self.number, Box::new(f));
+        self.cell.run_call(self.number, f);
     }
 
     /// Run `f` as the cell's last call in this ticket's turn; see
