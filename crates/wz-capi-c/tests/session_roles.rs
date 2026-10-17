@@ -230,7 +230,10 @@ fn a_peer_that_scouts_and_finds_nobody_opens_after_its_scouting_delay() {
         open_with(&[
             ("mode", String::from("\"peer\"")),
             ("scouting/multicast/address", String::from(PEER_GROUP)),
-            ("scouting/delay", String::from("300")),
+            // 1200 and not a value near zenoh's default of 500: the lower bound below is what
+            // tells the key from the default, so the two have to be far enough apart that a
+            // node which ignored the key cannot meet it.
+            ("scouting/delay", String::from("1200")),
         ])
     };
     let waited = started.elapsed();
@@ -239,8 +242,9 @@ fn a_peer_that_scouts_and_finds_nobody_opens_after_its_scouting_delay() {
         "a peer with nothing to dial and nobody to find opens"
     );
     assert!(
-        waited >= Duration::from_millis(250),
-        "the open returned after {waited:?}, before its scouting delay: it did not wait for anyone"
+        waited >= Duration::from_millis(1100),
+        "the open returned after {waited:?}, before its 1200 ms scouting delay (the default is \
+         500 ms): it did not wait for anyone, or did not read the key"
     );
     // SAFETY: the session is live; `ctx` is freed after it closes.
     let (hits, ctx) = unsafe { count_samples(&session) };
@@ -272,9 +276,13 @@ fn a_client_that_scouts_and_finds_nobody_fails_after_its_timeout() {
     };
     let waited = started.elapsed();
     assert_eq!(rc, Z_ENETWORK);
+    // The upper bound is the key's proof: zenoh's default is 3000 ms, so a node that ignored
+    // `scouting/timeout` gives up at about 3 s and misses 1500 ms, with room either side for a
+    // loaded host.
     assert!(
-        waited >= Duration::from_millis(350) && waited < Duration::from_secs(5),
-        "the search was bounded by 400 ms and the open gave up after {waited:?}"
+        waited >= Duration::from_millis(350) && waited < Duration::from_millis(1500),
+        "the search was bounded by 400 ms (the default is 3000 ms) and the open gave up after \
+         {waited:?}"
     );
     // SAFETY: a gravestone drops as a no-op.
     unsafe { close_session(session) };

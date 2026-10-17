@@ -466,6 +466,58 @@ fn a_wz_session_is_found_by_a_session_that_scouts() {
     }
 }
 
+/// `scouting/multicast/enabled: false` takes a session off the multicast group altogether: the same
+/// peer that is found when the key is left alone is NOT found with it, though it listens and its
+/// group is the finder's.
+///
+/// The two arms share a group and a listener shape, and the first is the control: without it the
+/// second would pass on a host where no multicast datagram is delivered at all. The key is the
+/// only thing that differs between the peers.
+#[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+fn a_wz_session_with_multicast_scouting_disabled_is_not_found_and_without_the_key_it_is() {
+    let (_, _, group_text) = group(12);
+    for (enabled, expected) in [(None, Z_OK), (Some("false"), Z_ENETWORK)] {
+        let port = free_port();
+        let mut peer = vec![
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/address", group_text.clone()),
+            ("scouting/delay", String::from("50")),
+            ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
+        ];
+        if let Some(value) = enabled {
+            peer.push(("scouting/multicast/enabled", String::from(value)));
+        }
+        // SAFETY: fresh configs and sessions.
+        let (rc, found) = unsafe { open_with(&peer) };
+        assert_eq!(rc, Z_OK, "the peer itself opens ({enabled:?})");
+        // SAFETY: a fresh config and session.
+        let (rc, finder) = unsafe {
+            open_with(&[
+                ("mode", String::from("\"client\"")),
+                ("scouting/multicast/address", group_text.clone()),
+                ("scouting/timeout", String::from("1500")),
+            ])
+        };
+        assert_eq!(
+            rc,
+            expected,
+            "a peer with `scouting/multicast/enabled` = {enabled:?} was {} by a client that \
+             scouts its group",
+            if expected == Z_OK {
+                "not found"
+            } else {
+                "found"
+            }
+        );
+        // SAFETY: the finder is a gravestone or live, and the peer is live; both owned here.
+        unsafe {
+            close_session(finder);
+            close_session(found);
+        }
+    }
+}
+
 /// A session told not to answer (`scouting/multicast/listen: false`) is not found, though it
 /// listens and its group is the finder's: the client searches its whole timeout and its open
 /// fails, as it does with nobody on the group.

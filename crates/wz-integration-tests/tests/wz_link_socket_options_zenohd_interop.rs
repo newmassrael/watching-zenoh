@@ -582,6 +582,17 @@ fn buffer_rows() -> Vec<BufferRow> {
             so_rcvbuf: None,
             so_sndbuf: None,
         },
+        // The tls send buffer from a FILE: the one of the four socket-buffer keys with
+        // no row of its own from a document (a tls link took it only through
+        // `--link-config`), so a reader that dropped `transport/link/tls/so_sndbuf`
+        // would have passed every row above.
+        BufferRow {
+            locator: "tls/127.0.0.1:{port}",
+            node: &[("tls", "so_sndbuf", SMALL_SNDBUF)],
+            from_file: true,
+            so_rcvbuf: None,
+            so_sndbuf: Some(SMALL_SNDBUF),
+        },
     ]
 }
 
