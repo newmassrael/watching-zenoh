@@ -168,8 +168,20 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # from the bump: the row moves to what the gate measures, and the grade the gate
 # prints for it is `patch`, which opens no bump round (`BUMP_GRADE` opens at
 # `minor`). The pin itself is unchanged.
+#
+# R3361 (open-debt item 711) — FreeRTOS-Kernel 1 -> 0, V11.3.1 -> V11.3.2, the
+# bump the clause above left owing, and the owner's track-every-release policy is
+# why it is made though a patch does not require it. Measured first, on the
+# surface `freertos-sys` actually has: of the files it compiles (tasks.c, list.c,
+# queue.c, the GCC/ARM_CM3 port.c, heap_4.c) and the headers it binds (FreeRTOS.h,
+# task.h, portable.h, projdefs.h, queue.h, list.h, ARM_CM3 portmacro.h), every
+# change between the two tags is a version banner or the `tskKERNEL_VERSION_*`
+# macros, plus one parameter renamed and retyped (`ulBufferLength` uint32_t ->
+# `xBufferLength` size_t) on `xPortIsAuthorizedToAccessBuffer`, which is declared
+# only under `portUSING_MPU_WRAPPERS == 1` and which neither wz binds nor the
+# ARM_CM3 port defines. No wz source reads the version string.
 PINNED: dict[str, tuple[str, int]] = {
-    "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 1),
+    "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 0),
     "eclipse-zenoh/zenoh": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
     "eclipse-zenoh/zenoh-pico": ("MEASURED", 0),
