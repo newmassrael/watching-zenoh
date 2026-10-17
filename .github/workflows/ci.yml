@@ -5491,6 +5491,31 @@ jobs:
           WZ_C1CE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1ce
 
+      - name: Layer P — throughput differential against the real libzenohc
+        # In THIS job because it needs what this job already provisions: the zenoh-c
+        # oracle (the same cache key as the steps above) and its upstream examples,
+        # `z_pub_thr` and `z_sub_thr`, which the lane compiles against libzenohc and
+        # against the release libwz_capi_c.
+        #
+        # WHAT IT GRADES, AND WHAT IT DOES NOT. It runs the four publisher/subscriber
+        # combinations at three sizes and asserts that every one CARRIED TRAFFIC. It
+        # asserts no rate: a floor written before there is a distribution is a number
+        # made to be passed, and a shared runner's figures are only as good as its
+        # neighbours (the lane's own header measured one host at 50,000 against over
+        # 500,000 msg/s for the same publisher). The liveness is the point. A publisher
+        # of kilobyte messages that stopped for good after a few seconds, with both its
+        # threads asleep and its connection open, passed every test in the tree and was
+        # found only by running a C publisher against zenoh-c: the sender and the link's
+        # writer each waited for a lock the other held. No in-process test reaches that
+        # pair at the rate a C publisher sends, and this lane does.
+        #
+        # WZ_P_REQUIRE=1 for the reason the steps above give: without it an absent
+        # oracle is a SKIP, and a skip is green. This job provisions the oracle, so
+        # if that step ever silently yields nothing this lane reds instead of passing.
+        env:
+          WZ_P_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer P
+
   # ─────────────────────────────────────────────────────────────────
   # R311y865 (unregistered debt 249) — the lanes that SPAWN A BINARY.
   #

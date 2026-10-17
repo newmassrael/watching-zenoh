@@ -1819,7 +1819,7 @@ impl OutboundRx {
 
     /// R3366 — [`Self::recv_wire`] for a BYTE-STREAM writer: all that is queued, up
     /// to the queue's batch size, as one buffer in the order the frames would
-    /// have been taken one by one. See [`LaneState::take_next_packed`] for why
+    /// have been taken one by one. See `LaneState::take_next_packed` for why
     /// that is the same wire, and why a datagram writer must not use it.
     pub async fn recv_wire_packed(&mut self) -> Option<WireFrame> {
         self.recv_wire_mode(true).await
