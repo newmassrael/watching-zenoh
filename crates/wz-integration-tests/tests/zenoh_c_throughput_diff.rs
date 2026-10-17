@@ -348,7 +348,6 @@ fn ratio(value: f64, baseline: f64) -> f64 {
     }
 }
 
-// wz-proves: none -- a throughput measurement, not a behaviour claim; it asserts only that every combination measured something and reports the rest.
 #[test]
 #[ignore = "binary-dep e2e (zenoh-c oracle + the release cdylib); Layer P runs via --ignored"]
 fn capi_c_throughput_examples_measured_on_libzenohc_and_on_wz() {
