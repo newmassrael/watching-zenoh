@@ -1,426 +1,171 @@
 # watching-zenoh — AI Agent Operating Guide
 
-This file is auto-read by Claude Code at every session start. It defines
-**Mnemosyne SSOT operating rules** for the 12 design docs registered in
-`mnemosyne.toml`.
+Auto-read at every session start. Defines the **Mnemosyne SSOT operating rules**
+for the 12 design docs registered in `mnemosyne.toml`. Detail that matters only
+for one action (push, license header, upstream citation, pin bump) lives in
+`docs/agent-reference.md` — read the named section when you take that action.
 
-Prior-session context is recovered from the atomic store changelog
+Prior-session context comes from the atomic store changelog
 (`query_section(.., include_changelog=true)` or `list_sections` →
-ChangelogEntry traversal). The legacy `notes/SESSION_KICKOFF.md`
-activity log was removed in Round 10 — atomic ledger entries (Round 1+)
-are the audit-traced replacement.
+ChangelogEntry traversal), not from a session log file.
 
 ## SSOT contract
 
 The atomic store (`docs/.atomic/workspace.atomic.json`) is the single,
-directly-validated SSOT. Its Section / ChangelogEntry bodies are
-governed by Mnemosyne: mutations route through the typed `set_section_*`
-/ `append-changelog-entry` primitives, not through `Edit` / `Write` on
-the sidecar JSON. The justification is the same as for any audit-traced
-spec system: a typed primitive validates each change against tier rules
-(T1 cross-ref orphan, frozen ledger) before persisting, while a regex
-`Edit` silently drifts structure.
+directly-validated SSOT. Its Section / ChangelogEntry bodies change only through
+the typed `set_section_*` / `add_section_*` / `append-changelog-entry`
+primitives, never through `Edit` / `Write` on the sidecar JSON: a typed
+primitive validates against tier rules (T1 cross-ref orphan, frozen ledger)
+before persisting, while a regex `Edit` silently drifts structure.
 
-R408 markdown-doc retirement (2026-06-04): Mnemosyne upstream
-(R395-R400) retired the ParsedDoc validator, the `GENERATED.md` render,
-and the `generate-docs` cascade. The former `mnemosyne.toml::workspace.docs`
-member files (ARCHITECTURE.md, README.md, docs/*.md) are now ordinary
-human-readable design notes that Mnemosyne no longer parses or
-§N-orphan-validates. Edit them directly; they are not the validated
-surface and may drift from the store. To read the SSOT, use
-`mnemosyne-cli query` / `query_section`, not a rendered doc.
+The former member docs (ARCHITECTURE.md, README.md, docs/*.md) are ordinary
+human-readable design notes since R408: not parsed, not validated, may drift
+from the store. Edit them directly. Read the SSOT with `mnemosyne-cli query` /
+`query_section`. There is no `GENERATED.md` and no NarrativeSection /
+`prose_blocks` escape hatch (`anti-patterns` #9); un-decomposable prose means
+restructure the prose. Background: `docs/agent-reference.md` § Atomic store.
 
 ## Before any action on a registered doc
 
-1. **Read the Mnemosyne concepts you have not yet internalized this
-   session** (in order; `anti-patterns` is must-read second — skipping
-   it caused this workspace's NarrativeSection mis-recommendation in
-   the 2026-05-08 session):
-   - `mnemosyne://concepts/overview`
-   - `mnemosyne://concepts/anti-patterns`
-   - `mnemosyne://concepts/atomic-store`
-   - `mnemosyne://concepts/frozen-ledger`
-   - `mnemosyne://concepts/tier-rules`
-   - `mnemosyne://concepts/workflow`
-
-   **If these resources are unreachable, the MCP server is STALE, not
-   absent.** `mnemosyne-mcp` is pinned to the same `MNEMOSYNE_REV` as the
-   CLI but nothing in the CI installer installs it, so a pin bump moves
-   the CLI and leaves the server behind; it then dies at startup parsing
-   a `mnemosyne.toml` field it does not know, and the client reports only
-   `Connection closed` — which reads exactly like "no server configured".
-   R311y429 bumped the rev for `scan_exclusions` and this went undiagnosed
-   for two rounds. Run `bash scripts/install-mnemosyne-mcp.sh` (reads the
-   rev from the pin, verifies with a real `initialize` handshake) and
-   restart the session. Do NOT proceed treating the concepts as
-   unavailable, and do NOT edit `mnemosyne.toml` to make the old server
-   start.
-
-   R311y462 made this failure mode LOUD instead of latent, and added one
-   rule. `mnemosyne.toml` now carries `[tool] pin`, which must equal
-   `MNEMOSYNE_REV` in `scripts/install-mnemosyne-cli.sh` — one fact in two
-   places on purpose: the installer constant is the SSOT (both workflows
-   install it; `install-mnemosyne-mcp.sh` parses it out of HEAD), while the
-   toml key is where every binary reads it, **including the MCP server,
-   which the installer's schema gate never interrogates**. A build whose
-   rev does not prefix-match the pin now refuses with an actionable error
-   instead of silently reinterpreting the tree. Consequence when moving
-   it: install the new rev's **cli AND mcp**, confirm both from cargo's own
-   ledger (`~/.cargo/.crates.toml`, not `--version`), then move both
-   constants in ONE commit. Backwards, the old binary dies in TOML parse
-   before it can explain itself, and `MNEMOSYNE_PIN_SKIP=1` does not
-   rescue that — it is read only after the config has parsed.
-2. Run `validate_workspace` to surface the current baseline (T1 orphan
-   count, atomic ledger entries/sections, style violations). Snapshot
-   the numbers — you will compare against this after your mutation.
-   (R408: the round-trip and GENERATED.md-sync dimensions are gone; the
-   scan is store-direct.)
+1. Read the Mnemosyne concepts not yet read this session, in order
+   (`anti-patterns` is must-read second): `mnemosyne://concepts/` `overview`,
+   `anti-patterns`, `atomic-store`, `frozen-ledger`, `tier-rules`, `workflow`.
+   **Unreachable resources mean the MCP server is STALE, not absent** (it dies
+   parsing a `mnemosyne.toml` field it does not know; the client says only
+   `Connection closed`). Run `bash scripts/install-mnemosyne-mcp.sh`, restart
+   the session, and do NOT edit `mnemosyne.toml` to make the old server start.
+   Pin-bump procedure: `docs/agent-reference.md` § Stale MCP server and the
+   tool pin.
+2. Run `validate_workspace` and snapshot the baseline (T1 orphan count, ledger
+   entries/sections, style violations) to compare after your mutation.
 3. For section-targeted changes: `query_section(section_id,
    include_related=true, include_changelog=true)` first.
 
 ## Mutation rules
 
-- **Store Section body edits** → reach for the `set_section_*` /
-  `add_section_*` primitives (MCP or `mnemosyne-cli`). Do not `Edit` /
-  `Write` the sidecar JSON directly.
-- **Sidecar direct `Write` / `Edit`** on
-  `docs/.atomic/workspace.atomic.json` is forbidden by default
-  (`anti-patterns` #8) — it bypasses tier-rule validation. Route every
-  Section / ChangelogEntry body change through a typed primitive.
-  (R408 retired `GENERATED.md` and `generate-docs`; there is no longer a
-  render cascade to keep in sync — the store IS the artifact.)
-- **Changelog entries** (atomic-store audit ledger + the
-  `rfc-open-questions-log.md::Change log`) → append via
-  **`bash scripts/append-round.sh`**, which takes the CLI's own arguments
-  unchanged:
-  `scripts/append-round.sh --entry-id "Round N"
-  --decision-file <path> --changes-file <path> --verification-file <path>
-  --impact <id>[,<id>...] --carry-file <path>`.
-  **`--impact` takes STORE SECTION IDS, not the §-number you would say out
-  loud** — `feature-inventory--…/5-atomic-feature-catalog/5-4-session`, not
-  `§5.4-session`. Copy them out of `mnemosyne-cli query --list-sections`.
-  The wrapper exists solely to resolve those ids BEFORE the append: this
-  class has leaked six times (Round 193, y327, y503 ×2, y579, y782), and the
-  window is one call wide — `validate_workspace` catches a bad ref, but only
-  after the entry has FROZEN, at which point the fix is no longer a retype
-  but an `[[orphan_ledger]]` row plus a whole re-citing round. Calling
-  `mnemosyne-cli append-changelog-entry` directly still works and is what the
-  wrapper `exec`s; it just gives up the only cheap moment there is.
-  (Historical note: an earlier MCP
-  build exposed an `append_changelog_entry_v2` tool that shelled to an
-  `append-changelog-entry-v2` subcommand the CLI never shipped, failing
-  `unknown command`. That tool name is RETIRED as of R423 (`c2dbdf14`):
-  the CLI + MCP binaries are version-aligned again and the MCP server now
-  exposes `append_changelog_entry` (v1). The CLI `append-changelog-entry`
-  above stays the canonical append path; the surviving MCP v1 tool is
-  untested here.) The other MCP mutate primitives — `set_section_*`,
-  `set_inventory_status`, etc. — are CLI-aligned and remain the preferred
-  path. New entries must use the
-  configured `entry_id_prefix = "Round "` (the date-based legacy entries
-  remain as prose under the section heading; do not retrofit them to
-  `Round N` form — frozen-ledger spirit applies even though they predate
-  the atomic store).
-- **After every mutation** → `validate_workspace`. Confirm orphan delta
-  = 0 (no new orphans), T3 warn count not increased, atomic ledger drift
-  consistent with the mutation (entries / sections delta matches what the
-  call should have produced).
-- If a mutation needs to reference a section that does not exist yet,
-  add the target section first (avoid creating new orphans).
-
-## Atomic store baseline
-
-`docs/.atomic/workspace.atomic.json` holds the workspace as 257
-atomic Sections + 576 ChangelogEntries (R408-migration baseline,
-schema v8). The typed mutate API surface is the only path for
-mutating Section / ChangelogEntry bodies.
-
-There is no `GENERATED.md` render any more (R408 retired it). The
-atomic store IS the artifact and the SSOT; read it via
-`mnemosyne-cli query` / `query_section`. The former prose docs
-(ARCHITECTURE.md, README.md, docs/*.md) survive as un-validated
-human design notes — useful narrative, but not authoritative and not
-kept in sync with the store.
-
-No NarrativeSection / `prose_blocks` escape-hatch — that route is
-`mnemosyne://concepts/anti-patterns` #9 violation (schema extensions
-are out of scope; the 4 entity types are closed-form per Round 60
-ratify). If a piece of prose appears "un-decomposable", that is a
-signal to restructure the prose, not to add an escape-hatch field.
-
-Phase A / B / C / D / E atomic-decompose migration completed at
-Round 27 (Phase E final — README atomic decompose). All 12 registered
-docs live in the atomic store with typed Section bodies; no doc
-remains in the transitional raw-markdown state.
-
-## Raw `Edit` carve-out — closed
-
-The transitional `Edit` / `Write` carve-out applied while docs were
-mid-migration from raw markdown to atomic Section form. With migration
-complete at Round 27, no registered doc remains in the transitional
-state; all Section body mutations route through the typed primitives.
-The clause is preserved here as historical context only.
+- Section body edits → `set_section_*` / `add_section_*` (MCP or
+  `mnemosyne-cli`). Never `Edit` / `Write` the sidecar JSON.
+- Changelog entries (atomic ledger and `rfc-open-questions-log.md::Change log`)
+  → **`bash scripts/append-round.sh`**, which takes the CLI's own arguments:
+  `--entry-id "Round N" --decision-file <path> --changes-file <path>
+  --verification-file <path> --impact <id>[,<id>...] --carry-file <path>`.
+  **`--impact` takes STORE SECTION IDS** (copy from `mnemosyne-cli query
+  --list-sections`), not the §-number you would say aloud. The wrapper resolves
+  them before the append; once an entry freezes, a bad ref costs a whole
+  re-citing round. Entry ids use the `Round ` prefix.
+- After every mutation → `validate_workspace`: orphan delta 0, T3 warn count
+  not increased, entries/sections delta matches the call.
+- If a mutation references a section that does not exist yet, add the target
+  section first.
 
 ## Local CI gates
 
-`.githooks/` provides three hooks. One-time install per clone:
+One-time per clone: `git config core.hooksPath .githooks`. Requires
+`mnemosyne-cli` and `python3` on `PATH` (a missing python3 is a hard FAIL).
 
-```
-git config core.hooksPath .githooks
-```
-
-- **pre-commit** — four checks; ~0.35s for a ledger-only commit, plus
-  `cargo fmt` when a `crates/**.rs` is staged. (1) a staged
-  `crates/**/Cargo.toml` without its `crates/Cargo.lock` (R52.1);
-  (2) `cargo fmt --check` when any `crates/**.rs` is staged (R311au);
-  (3) **schema pin (R311y418)**, via `scripts/lib/schema-pin-gate.sh` —
-  refuses the commit when the **index's** store `schema_version` exceeds
-  `MNEMOSYNE_MAX_SCHEMA` in `scripts/install-mnemosyne-cli.sh`, i.e.
-  when a local mutate has migrated the store past what the pinned CI
-  reader can open; and when that ceiling moves without `MNEMOSYNE_REV`
-  moving too, since raising the ceiling alone only silences the gate.
-  Check 4 is blind to the schema case in the shape that has fired (the
-  local binary that just migrated the store can still read it, so it
-  passes while hosted Layer A reds); all four firings — R311y15, y401,
-  y406, y416 — surfaced on hosted CI, never locally. Bump
-  `MNEMOSYNE_REV` and `MNEMOSYNE_MAX_SCHEMA` together, in their own
-  commit. (4) `mnemosyne-cli validate-workspace` — blocks any commit
-  that introduces a new T1 orphan or a resolved-but-still-ledgered
-  entry (drift catch).
-- **commit-msg** — enforces `COMMIT_FORMAT.md` (subject and body
-  ≤72 bytes per line, no multi-line bullet wraps, no
-  Co-Authored-By / "Generated with Claude Code" / emoji).
-- **pre-push** — fast publication and SSOT checks by default. The owner's
-  2026-09-23 instruction supersedes the accumulated local-sweep requirements:
-  **slow checks belong in hosted CI**, even when they only parse source files.
-  One push spent over 16 minutes in static checks; the previous full hook took
-  about 90 minutes. Historical warm timings are not a current runtime budget.
-
-  Mandatory gates remain: confidential vocabulary, home paths and identities
-  (0/0b/0c), schema and tool pins (1), workspace SSOT validation (2), the
-  claim-scoped proof audit (2b), and the previous hosted verdict (2c, without
-  waiting for a running job). Since open-debt item 897 the default hook also
-  runs the cheap, tree-only checks that hosted CI went red on while the hook
-  stayed green: the upstream-citation form gates (2f, about 11s), the hosted
-  static lanes C0d/C0e/C0f with the count-guard lint (2c2, about 7s), and the
-  count-guard oracle in its build-free mode (2c3, item 898, about 2s):
-  `guarded_count_gate.py --cached-only` selects the guards the push range
-  reaches and judges them against the per-clone measurement cache. A cached
-  count that disagrees with its declared number REFUSES the push (a known wrong
-  number); a reached guard with no measurement for this tree prints one
-  DEFERRED line, naming the count and the command that measures them, and the
-  push proceeds (hosted CI judges it); an oracle that cannot run or read
-  refuses, since that says nothing about any count. `scripts/lib/hook_default_region_gate.py`
-  holds the list of checks above the boundary, with each check's measured
-  seconds, and the checks that stay hosted on purpose (Layer U, which needs the
-  network, and the count-guard builds, whose cold measurement was 473s for one
-  guard). The default hook exits after these checks.
-
-  The remaining static gates, feature tests/census, Layer 0, changed-crate
-  tests and documentation checks, reduced-feature checks, clippy and workspace
-  builds are **deferred to hosted CI**. Deferral is printed and is not a local
-  passing result. Verify the change's focused behavior during development;
-  do not repeat a broad CI sweep just because a push is about to happen.
-
-  To explicitly request the preserved extended local sweep, use
-  `WZ_PREPUSH_EXTENDED=1 git push origin main`. This does not bypass mandatory
-  checks. Count-guard builds remain separately opt-in with
-  `WZ_PREPUSH_COUNT_GUARD=1` inside that extended sweep. The scripts and hosted
-  lane assertions are unchanged; hosted failures are diagnosed next round.
-  Run `bash scripts/run-ci.sh` manually when a full local CI run is wanted.
-
-- **Development speed first** (owner, 2026-10-09). Verification is batched,
-  not repeated per item. A worker on one item verifies only that item: its
-  build, the item's tests, and clippy of the crates it touched (per crate;
-  never two crates with `--all-features` in one command). It does not run the
-  full gate array, the Layer C0 family or the count-guard oracle per item.
-  Finished work is merged into ONE integration branch; the preflight (gate
-  array, C0/C0d/C0e/C0f/U, upstream citation gate, count guards by oracle)
-  runs ONCE there and the branch is pushed ONCE with one acknowledgement row,
-  so a single hosted run is not cancelled by the next push. Do not hold work
-  waiting for a hosted run; read its result when it arrives. Never skip a
-  failing gate and never bypass the hooks.
-
-`pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
-(install via
-`cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli`).
-The agent-session MCP server is a SEPARATE binary at the same pin —
-`bash scripts/install-mnemosyne-mcp.sh`, which reads `MNEMOSYNE_REV`
-through the same parser the hooks use. It is deliberately not part of
-the CI installer (CI never speaks MCP), which is exactly why it can
-drift; see step 1 of "Before any action on a registered doc".
-`pre-commit` and `pre-push` additionally require `python3` — the schema
-pin reads the store's `schema_version` with a real JSON parse, which is
-indifferent to serialization and type-checks the value (the literal
-`schema_version` also occurs 22× in ledger prose inside that file). Its
-absence is a hard FAIL, not a skip: a gate that cannot read its input
-must not report green. `run-ci.sh` is split on this — Layers D (:4603)
-and F (:4873) SKIP-green on python3 — but each sits behind a
-`WZ_*_REQUIRE` arming flag with a hosted hard-fail behind it, which a
-git hook has neither of; Layer C0 (:1061) FAILs, and that is the shape
-here.
-`commit-msg` needs only bash + GNU grep with the `-P` flag.
+- **pre-commit** — Cargo.toml ↔ Cargo.lock pairing, `cargo fmt --check`,
+  schema pin (store `schema_version` ≤ `MNEMOSYNE_MAX_SCHEMA`; bump
+  `MNEMOSYNE_REV` and `MNEMOSYNE_MAX_SCHEMA` together in their own commit),
+  `mnemosyne-cli validate-workspace` (no new T1 orphan).
+- **commit-msg** — enforces `COMMIT_FORMAT.md`: subject and body ≤72 bytes per
+  line, no multi-line bullet wraps, no Co-Authored-By / "Generated with Claude
+  Code" / emoji.
+- **pre-push** — fast publication and SSOT checks only; slow checks belong to
+  hosted CI (owner, 2026-09-23). Deferral is printed and is not a local pass.
+  Verify the change's focused behavior while developing; do not repeat a broad
+  sweep because a push is near. `WZ_PREPUSH_EXTENDED=1 git push origin main`
+  requests the extended sweep; `bash scripts/run-ci.sh` is the full local CI.
+  Gate list, timings and opt-ins: `docs/agent-reference.md` § Local CI gates.
+- **Development speed first** (owner, 2026-10-09). Verification is batched. A
+  worker on one item verifies only that item: its build, its tests, and clippy
+  of the crates it touched (per crate; never two crates with `--all-features`
+  in one command) — not the full gate array, Layer C0 family or count-guard
+  oracle. Finished work merges into ONE integration branch; the preflight runs
+  ONCE there and the branch is pushed ONCE with one acknowledgement row. Do not
+  hold work waiting for a hosted run; read its result when it arrives. Never
+  skip a failing gate and never bypass the hooks.
 
 ## License + SPDX header policy
 
-This project is **dual-licensed**: `AGPL-3.0-or-later` (free, with
-AGPL-3 obligations — whole-work copyleft, anti-tivoization, and the
-§13 source offer to remote users of a modified version) OR
-`LicenseRef-watching-zenoh-Commercial` (paid, 6-way exemption). See
-`LICENSE` for the overview, `LICENSE-AGPL-3.0.md` for the verbatim
-free-tier text, and `LICENSE-COMMERCIAL.md` for the commercial
-alternative.
-
-The free tier was `LGPL-3.0-or-later` until 2026-08-25. Revisions
-published under it keep those terms for the copies they were given
-with; this tree carries the AGPL expression from that commit on. The
-substitution is rerunnable and gated —
-`scripts/lib/relicense_spdx.py` (exact-literal, `--check` mode FAILs
-when any tracked file still carries the old expression).
-
-That script takes a REQUIRED mode and has no default: `--check`
-reads, `--apply` writes, `--selftest` drives both against a fixture.
-An unknown argument is refused by name. Until R2104b it decided with
-`"--check" in sys.argv`, so every other input — `--help`, a typo, no
-argument at all — fell through to the REWRITE path; `--help` printed
-`rewrote 0 file(s)` and exited 0. Read and write are opposites here,
-so the program will not guess which was meant.
-
-Author-side source files (SCXML, Rust, C, header, deploy YAML) carry
-the SPDX header:
+Dual-licensed: `AGPL-3.0-or-later` OR `LicenseRef-watching-zenoh-Commercial`
+(see `LICENSE`). Author-side source files carry this header:
 
 ```
 SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 ```
 
-Applies to: `sources/**.scxml`, `crates/**/*.rs`, `deploy/**.yaml`.
-
-(R311y794 removed `runtime/**/*.{rs,c,h}` from this list: there is no
-`runtime/` directory in this tree and there has not been one. The clause
-was a rule with no subject — the same class of residual the atom register
-carries, found here while mapping paths to lanes for pre-push gate 5.)
-
-**Generated files** (`out/**`, committed in-repo since R311y22) carry
-whatever header `sce-codegen` emits: SCE's own header where SCE emits
-one (the statechart `*_sm.rs` files; MIT before the Round 3008 pin,
-AGPL-3.0-only WITH the SCE Linking Exception OR SCE Commercial since),
-and NO SPDX header at all on the
-codec / buffer-pool emits (SCE does not header those). Do NOT add a wz
-SPDX header to any `out/**` file, and do not overwrite an SCE-emitted
-one — SCE owns the generation-time header policy (see
-`LICENSE-GENERATED.md` in the SCE repo). They are regenerated by the
-`xtask` codegen SSOT and gated by run-ci Layer B2.
-
-**Third-party vendored code** keeps its original SPDX header. When the
-first vendored snippet lands, add a top-level `THIRD_PARTY.md` ledger
-recording origin, version, and license.
-
-**Doc / config files** that are not source (Markdown, JSON metadata,
-config TOML) inherit the repo-level `LICENSE` and do not require
-in-file SPDX headers.
+Applies to `sources/**.scxml`, `crates/**/*.rs`, `deploy/**.yaml`. Do NOT add it
+to `out/**` (generated; SCE owns that header policy) and do not overwrite an
+SCE-emitted one. Vendored code keeps its original header; Markdown/JSON/TOML
+inherit `LICENSE`. `scripts/lib/relicense_spdx.py` requires an explicit mode
+(`--check` / `--apply` / `--selftest`). Detail: `docs/agent-reference.md`
+§ License.
 
 ## Hard prohibitions
 
-- Do not `Edit` / `Write` `mnemosyne.toml` to bypass validation
-  (e.g. removing a doc from `workspace.docs` to silence its orphans).
-  If a doc genuinely cannot be carried, raise it explicitly.
-- Do not retroactively rewrite an existing changelog entry body —
-  frozen-ledger anti-pattern. New corrections arrive as new entries.
-- Do not drive T3 warn / T4 info counts to zero by mass prose
-  rewrite — Round 138 tier mobility ratify, the warning surface is
-  intentionally non-zero.
+- Do not `Edit` / `Write` `mnemosyne.toml` to bypass validation (e.g. removing a
+  doc from `workspace.docs` to silence its orphans). If a doc genuinely cannot
+  be carried, raise it explicitly.
+- Do not retroactively rewrite an existing changelog entry body — frozen-ledger
+  anti-pattern. Corrections arrive as new entries.
+- Do not drive T3 warn / T4 info counts to zero by mass prose rewrite — the
+  warning surface is intentionally non-zero (Round 138 tier mobility ratify).
 
 ## External references
 
-These are **reference sources, not dependencies** — wz is a from-scratch
-reimplementation, so nothing below is a cargo dep of this workspace. Read them
-directly whenever SCE / Zenoh state is in question; never infer from memory
-(see Response style).
+Reference sources, not dependencies — wz is a from-scratch reimplementation.
+Read them directly whenever SCE / Zenoh state is in question; never infer from
+memory. **Machine-local absolute paths are NOT recorded here** (committed file;
+resolve per machine, keep in agent memory).
 
-**Machine-local absolute paths are deliberately NOT recorded in this file.**
-This file is committed: a path that is correct on one clone is wrong on the
-next, it leaks the author's home layout, and nothing gates it. R311y302 is the
-proof — the absolute zenoh checkout path that used to live here had silently
-rotted to a directory that no longer exists, and it was cited for months.
-Resolve the paths per machine and keep them in agent memory or a local
-untracked note.
-
-- **SCE** — the codegen engine; pinned, and read-only from wz sessions.
-- **Zenoh (Rust), at the PINNED version** — the CORE crates (`zenoh`,
+- **SCE** — codegen engine; pinned, read-only from wz sessions.
+- **Zenoh (Rust), at the PINNED version** — core crates (`zenoh`,
   `zenoh-protocol`, `zenoh-codec`, `zenoh-buffers`, `zenoh-keyexpr`,
-  `zenoh-config`, `zenoh-link-*`). The version this tree compares against and
-  enforces is `UPSTREAM_VERSION` in `scripts/lib/upstream_feature_census.py`
-  (1.10.1). The number written here is HELD by
-  `scripts/lib/claude_md_upstream_pin_gate.py`, which fails on any version
-  token in this bullet that differs from the constant, and on a bullet that no
-  longer names the constant or states a version; move the constant and this
-  number in one commit. This is what
-  §5.12-codec / §5.1-transport anchor to, and it is why those domains are
-  gradable. Do NOT locate the tree yourself: `upstream_root()` in
+  `zenoh-config`, `zenoh-link-*`). The version compared against and enforced is
+  `UPSTREAM_VERSION` in `scripts/lib/upstream_feature_census.py` (1.10.1). The
+  number written here is HELD by `scripts/lib/claude_md_upstream_pin_gate.py`,
+  which fails on any version token in this bullet that differs from the
+  constant, and on a bullet that no longer names the constant or states a
+  version; move the constant and this number in one commit. Do NOT locate the
+  tree yourself: `upstream_root()` in
   `scripts/lib/upstream_citation_anchor_gate.py` is the one resolver, and it
-  accepts only a checkout whose manifest declares exactly that version (no
-  fallback; none found is a FAIL). The tree is a cargo git checkout, the
-  `build-zenohd.sh` shallow clone, or an explicit `ZENOHD_SRC`; the registry
-  cache copy of the crates is last in the census chain and lacks the workspace
-  layout `upstream_root()` needs. A checkout of ANY OTHER version left on the
-  machine (the previous pin's, for one) is a different upstream: a person who
-  finds it reads it coherently and cites it, and the citations are wrong at
-  the pin. Never cite from it.
-- **Zenoh STORAGE upstream — needs a DELIBERATE checkout; no build provisions
-  it.** `zenoh-plugin-storage-manager` and `zenoh-backend-traits` are nobody's
-  cargo dependency, so the cargo-cache route above never yields them. The
-  §5.11-storage / §5.24-storage-backend atoms and `adminspace.rs` anchor to
-  them, so grading their A3 impl axis needs a checkout of the `zenoh` repo's
-  `plugins/` tree at the pinned version. **Whether that checkout exists on THIS
-  machine is machine-local state: resolve it per the rule above — never read
-  "blocked" off a note, including a prior session's.** R311y339 is the proof:
-  this bullet said "it BLOCKS work" and an agent-memory hook said "ABSENT ->
-  UNGRADABLE" for ~37 rounds after the clone had already landed; both were
-  quoted instead of checked, and the domain stayed shut for months over a
-  directory that was there. Absent the checkout, A3-UNAUDITED is the honest
-  state, not a gap to paper over — but "absent" is a fact to establish, not to
-  inherit. The read-directly rule is NOT waived by the reference being
-  inconvenient.
-- **zenoh-pico** — vendored as a SUBMODULE at `vendor/zenoh-pico/`, so it is
-  present in a clone that initialises submodules (`--recurse-submodules`, or a
-  later `git submodule update --init`) and ABSENT from one that does not: a
-  bare clone leaves the directory empty, and `git ls-files vendor/zenoh-pico/`
-  yields the gitlink rather than the tree. `vendor/sce` is the same shape, so
-  the contrast is not pico-versus-the-rest — it is the two SUBMODULES against
-  the zenoh references above, which no submodule carries and which each need
-  provisioning of their own. (R2363: this bullet used to say "always available
-  to every clone", which was false on both halves — the availability and the
-  "unlike the others" — three lines under the paragraph that says an absence is
-  a fact to establish rather than inherit.)
+  accepts only a checkout of exactly that version (none found is a FAIL). Never
+  cite from a checkout of any other version left on the machine.
+- **Zenoh STORAGE upstream** (`zenoh-plugin-storage-manager`,
+  `zenoh-backend-traits`) — needs a DELIBERATE checkout of the `zenoh` repo's
+  `plugins/` tree at the pinned version; no build provisions it. Whether it
+  exists on THIS machine is a fact to establish per session, never to inherit
+  from a note. Absent → A3-UNAUDITED is the honest state.
+- **zenoh-pico**, **`vendor/sce`** — git SUBMODULES; empty in a clone that did
+  not init submodules (`git submodule update --init`).
+
+Full detail and the failure history: `docs/agent-reference.md` § External
+references.
 
 ## Response style
 
 - Korean for prose; file paths and code identifiers in English.
 - Cite file:line for any source claim. No memory-only assertions about
   SCE / Zenoh state — verify by direct read.
-- Complex multi-line regex on a registered doc → ask the user to apply
-  it manually rather than risk corruption.
+- Complex multi-line regex on a registered doc → ask the user to apply it
+  manually rather than risk corruption.
 
 ## Auto-kickoff trigger
 
 사용자가 첫 메시지로 `/load`, `시작`, `이어가자`, `kickoff` 중 하나만
-입력하면 아래 5단계를 그대로 수행한다 (R58: NEXT_SESSION.md 활동 로그
-genre가 atomic ledger의 carry_forward와 중복이라 제거됨 — 시작 프롬프트는
-이 파일이 단일 소스):
+입력하면 아래 5단계를 그대로 수행한다:
 
 1. Mnemosyne concept 6종 적재 (overview → anti-patterns →
    atomic-store → frozen-ledger → tier-rules → workflow) — 이번 세션에
    아직 안 읽은 것만
 2. `validate_workspace` 로 베이스라인 (T1 orphan / atomic ledger
-   entries·sections / style) 캡처 (R408: round-trip·GENERATED.md sync
-   차원은 제거됨 — store-direct 스캔)
+   entries·sections / style) 캡처
 3. 가장 최근 atomic changelog entry 조회 후 `carry_forward` 복원 —
    `mnemosyne-cli query` / `query_section` 으로 latest impact_refs 추적
-   (R408: `docs/GENERATED.md` 렌더는 폐기됨; store 가 단일 소스)
 4. `git status` + `git log --oneline -5` 로 미푸시 commit + 최근 활동 확인
 5. SCE 상태가 작업에 필요하면 SCE 소스를 직접 read (경로는 머신-로컬 —
-   External references 규칙에 따라 여기 하드코딩하지 않음; agent memory /
-   `vendor/sce`에서 확인)
+   `vendor/sce` 또는 agent memory 에서 확인)
 
 실행 시 "kickoff 시작" 만 짧게 알리고 중간 단계별 verbose 보고는 생략.
 종료 후 carry 우선순위 + 다음 단계 제안.
