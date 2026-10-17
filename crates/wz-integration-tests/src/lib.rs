@@ -1017,6 +1017,25 @@ pub mod common {
         );
     }
 
+    /// R3365 — the same cdylib, but the RELEASE build and only that.
+    ///
+    /// [`wz_capi_c_cdylib`] prefers the debug artifact, which is right for a test
+    /// of behaviour and wrong for one of speed: the reference library the oracle
+    /// installs is an optimised build, so a throughput figure for wz taken from a
+    /// debug one measures the profile and not the implementation. A caller that
+    /// compares speed asks for this one, and the guard against a stale artifact
+    /// is the one the debug resolver has.
+    pub fn wz_capi_c_release_cdylib() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let release = crates_dir.join("target/release/libwz_capi_c.so");
+        assert!(
+            release.is_file(),
+            "{release:?} not found; run `cargo build --release -p wz-capi-c` first"
+        );
+        assert_capi_cdylib_is_not_stale(&release, &crates_dir, "wz-capi-c");
+        release
+    }
+
     /// The zenoh-c ORACLE on this machine: its include dir, its library dir, and
     /// its example corpus.
     ///
