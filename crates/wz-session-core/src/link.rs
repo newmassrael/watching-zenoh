@@ -672,7 +672,7 @@ pub trait BoxedLinkDriver {
     /// of its own. The default answers `false`, which keeps the session's frame-per-message
     /// send: a driver that writes synchronously has no writer to ask, and a driver that WRAPS
     /// another must forward this or every session behind it stays unbatched.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     fn set_idle_flush(&self, hook: alloc::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
         let _ = hook;
         false

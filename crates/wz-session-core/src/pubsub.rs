@@ -289,8 +289,9 @@ pub struct SubscriberTable<C: SampleSink> {
     /// asks whether anything in its own process wants a message once per message, and the
     /// answer is almost always "no subscriber at all"; this lets it be given by a load
     /// ([`Self::local_live`]) instead of a lock. Moved only where the list moves
-    /// (`register_sink`, `unregister`), under the table's own lock.
-    #[cfg(feature = "alloc")]
+    /// (`register_sink`, `unregister`), under the table's own lock. Absent on a target without
+    /// pointer-width atomics, which has no second thread to read it.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     local_live: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
     /// Which subscribers the keys that arrived lately matched, so that a key that comes
     /// again is delivered without matching it against every subscription's pattern.
@@ -715,7 +716,7 @@ impl<C: SampleSink> SubscriberTable<C> {
             subscribers: BoundedVec::new(),
             next_id: 1,
             epoch: 0,
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
             local_live: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)),
             #[cfg(feature = "alloc")]
             memo: MatchMemo::new(),
@@ -903,7 +904,7 @@ impl<C: SampleSink> SubscriberTable<C> {
             .map_err(|_| RegisterError::TableFull)?;
         self.next_id = self.next_id.saturating_add(1);
         self.epoch = self.epoch.saturating_add(1);
-        #[cfg(feature = "alloc")]
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
         if allowed_origin.allows_local() {
             self.local_live
                 .fetch_add(1, core::sync::atomic::Ordering::Release);
@@ -915,7 +916,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// loads without taking the lock that guards this table: `0` means no subscriber of this
     /// process wants a message from it ([`Self::has_local_matching`] would answer `false`),
     /// any other value means the question is open and is answered by it.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     pub fn local_live(&self) -> alloc::sync::Arc<core::sync::atomic::AtomicUsize> {
         self.local_live.clone()
     }
@@ -934,7 +935,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// leaves each of them to see the epoch move ([`SubscriberPeer::reconcile`]).
     pub fn unregister(&mut self, id: SubscriptionId) -> bool {
         let before = self.subscribers.len();
-        #[cfg(feature = "alloc")]
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
         let reached_local = self
             .subscribers
             .iter()
@@ -944,7 +945,7 @@ impl<C: SampleSink> SubscriberTable<C> {
         let removed = before != self.subscribers.len();
         if removed {
             self.epoch = self.epoch.saturating_add(1);
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
             if reached_local {
                 self.local_live
                     .fetch_sub(1, core::sync::atomic::Ordering::Release);
