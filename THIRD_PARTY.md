@@ -15,7 +15,7 @@ changelog that authorized the bump.
 ## vendor/sce — SCXML Core Engine
 
 - **Origin**: https://github.com/newmassrael/scxml-core-engine
-- **Commit pin**: `c24887ceb9` (2026-10-17)
+- **Commit pin**: `ce73a64c59` (2026-10-18)
 - **License**: dual-licensed — AGPL-3.0-only WITH SCE Linking
   Exception OR LicenseRef-SCE-Commercial. See
   `vendor/sce/LICENSE` for the full text. Before the Round 3008 pin
@@ -39,7 +39,13 @@ changelog that authorized the bump.
   the SCE repo at the pinned revision, which states the two
   conditions: an unmodified generator, and a work that is not a
   competing product).
-- **Upstream-tracking**: the 2026-10-17 pin moved from `b73f19d2ba` to
+- **Upstream-tracking**: the 2026-10-18 pin moved from `c24887ceb9` to
+  `ce73a64c59` (11 commits on) for one repair: the queue runtime no longer
+  compiled the modules that need read-modify-write atomics on a target
+  that lacks them, so `sce-forge-runtime` built again for
+  `thumbv6m-none-eabi`, which the previous pin broke in this tree's
+  cross-compile layer. Every generated tree under `out/` regenerates byte
+  for byte. The 2026-10-17 pin moved from `b73f19d2ba` to
   `c24887ceb9` (726 commits on) for the queue runtime SCE gained in the
   range: the multi-producer `scq` ring, the `intrusive` MPSC list and the
   segmented `lscq`, beside the `spsc` ring the old pin already carried.
