@@ -18,11 +18,11 @@
 //! keyexpr is `id == 0` with the suffix inline, there is no extension, and the body
 //! is the bare Put header, no optional field, then the payload.
 
-#[cfg(feature = "pubsub-qos")]
+#[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
-#[cfg(feature = "pubsub-qos")]
+#[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-#[cfg(feature = "pubsub-qos")]
+#[cfg(all(feature = "pubsub-qos", feature = "storage-profile"))]
 use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::msg_put::MsgPut;
 use wz_codecs::push::{Push, PushVariant};
@@ -33,6 +33,7 @@ use wz_codecs::wireexpr_local::WireexprLocal;
 const FLAG_PUSH_N: u8 = 0x20;
 
 /// The `M` flag of the Push header: the id is in the sender's mapping.
+#[cfg(feature = "storage-profile")]
 const FLAG_PUSH_M: u8 = 0x40;
 
 /// A Put's header with no timestamp, no encoding and no extension: the payload
@@ -71,6 +72,10 @@ pub fn literal_put<'a>(keyexpr_suffix: &'a str, value: &'a [u8]) -> Push<'a> {
 /// The chain is a fixed-capacity vector on the stack, so a Put with QoS is composed over the
 /// caller's own text and bytes with nothing built on a heap; the owned builder costs three
 /// allocations and a copy of each input per message, to be encoded once and dropped.
+///
+/// `QosLevel` lives in `sample`, which only a build with a storage profile has, so this and the
+/// three composers below are absent without one.
+#[cfg(feature = "storage-profile")]
 pub fn literal_put_with_qos<'a>(
     keyexpr_suffix: &'a str,
     value: &'a [u8],
@@ -86,6 +91,7 @@ pub fn literal_put_with_qos<'a>(
 /// aliased publish cheaper to send and to read than the literal key it stands for.
 ///
 /// `mapping_id` is not zero: that id is the literal key's.
+#[cfg(feature = "storage-profile")]
 pub fn aliased_put_with_qos<'a>(
     mapping_id: u64,
     suffix: Option<&'a str>,
@@ -98,6 +104,7 @@ pub fn aliased_put_with_qos<'a>(
 
 /// The one composition behind [`literal_put_with_qos`] and [`aliased_put_with_qos`]: a Put on
 /// `(mapping_id, suffix)`, the `N` flag set exactly when a suffix rides.
+#[cfg(feature = "storage-profile")]
 pub fn put_with_qos<'a>(
     mapping_id: u64,
     suffix: Option<&'a str>,
@@ -150,6 +157,7 @@ pub fn put_with_qos<'a>(
 /// walk over a message of any shape was most of what encoding it cost. The two are the same
 /// bytes for every input (see the equality test), so the shape stays the codec's and this is
 /// only a faster way to write it.
+#[cfg(feature = "storage-profile")]
 pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
     mapping_id: u64,
@@ -205,6 +213,7 @@ pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
 /// Write `value` as the codec's `vle_u64` at `buf[at..]` and return where it ends: seven data
 /// bits a byte with the high bit set while more follow, at most eight such bytes, and a ninth
 /// that carries its eight bits whole (`SceSink::write_vle_u64`, byte for byte).
+#[cfg(feature = "storage-profile")]
 fn put_vle(buf: &mut [u8; 24], mut at: usize, mut value: u64) -> usize {
     let mut continued = 0u32;
     while value >= 0x80 && continued < 8 {
