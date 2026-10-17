@@ -264,9 +264,32 @@ async fn a_publish_is_recorded_in_the_registry_on_its_link() {
     // R2843 — the registry the session builds for itself, which is what its
     // adminspace serves. The zids are zenoh's rendering of `[1; 4]` / `[2; 4]`:
     // little-endian read as a `u128`, one leading zero stripped.
-    let registry = opened_init.actions.session_stats_registry("v1");
+    //
+    // The publish returns once the Put is in the session's open frame; the frame
+    // is a transport message of its own and is counted when the writer puts it on
+    // the link, which it does as soon as it is idle and not before. So the registry
+    // is read until the Frame shows (the InitSyn and the OpenSyn already have), with
+    // a deadline that a healthy writer never comes near.
     let mut doc = String::new();
-    registry.encode_metrics(&mut doc, MetricsQuery::default());
+    for _ in 0..200 {
+        doc.clear();
+        opened_init
+            .actions
+            .session_stats_registry("v1")
+            .encode_metrics(&mut doc, MetricsQuery::default());
+        let framed = doc.lines().any(|line| {
+            line.starts_with("zenoh_tx_transport_message_total{")
+                && line
+                    .rsplit(' ')
+                    .next()
+                    .and_then(|count| count.parse::<u64>().ok())
+                    .is_some_and(|count| count >= 3)
+        });
+        if framed {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     let head = r#"local_id="1010101",local_whatami="peer""#;
     // The transport carries the labels the HANDSHAKE learned — the peer's zid

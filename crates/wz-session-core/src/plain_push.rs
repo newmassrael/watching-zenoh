@@ -195,18 +195,20 @@ mod tests {
     use wz_codecs::push::{Push, PushVariant};
     use wz_codecs::wireexpr::WireexprVariant;
 
-    /// What the generated codec reads out of `bytes` for a record this reader accepts: the key
-    /// parts, the payload and the QoS byte, in the same shape.
-    fn through_the_codec(
-        bytes: &[u8],
-    ) -> Option<(
+    /// The id, whether the mapping is the sender's, the suffix, the payload, the QoS byte and
+    /// the length of the record: what the generated codec reads out of one.
+    type CodecRead = (
         u64,
         bool,
         Option<alloc::string::String>,
         alloc::vec::Vec<u8>,
         Option<u8>,
         usize,
-    )> {
+    );
+
+    /// What the generated codec reads out of `bytes` for a record this reader accepts: the key
+    /// parts, the payload and the QoS byte, in the same shape.
+    fn through_the_codec(bytes: &[u8]) -> Option<CodecRead> {
         let mut cursor = SceCursor::new(bytes);
         let push = Push::decode(&mut cursor).ok()?;
         let (id, suffix, mapping) = match &push.keyexpr.body {
