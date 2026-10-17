@@ -4722,11 +4722,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// runs there: the acceptor's RX SN seed waits for the restore.
     pub fn negotiated_sn_mask(&self) -> u64 {
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        self.sn_mask_for(peer)
+    }
+
+    /// [`Self::negotiated_sn_mask`] over a peer's caps already read: the one formula, so a
+    /// caller that needs this and [`Self::negotiated_batch_mtu`] reads the caps once.
+    fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
         let res = match peer {
             Some(p) => self.params.seq_num_res.min(p.seq_num_res),
             None => self.params.seq_num_res,
         };
         crate::sn::mask_from_res(res)
+    }
+
+    /// The negotiated batch budget and SN ring mask together: both of
+    /// [`Self::negotiated_batch_mtu`] and [`Self::negotiated_sn_mask`], with the peer's caps
+    /// read under one hold of their mutex instead of two. What every send resolves before it
+    /// takes its conduit's lock.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn negotiated_tx_limits(&self) -> (usize, u64) {
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        (self.batch_mtu_for(peer), self.sn_mask_for(peer))
     }
 
     /// R311qh — the remote peer's zid as learned at handshake (from the inbound
@@ -4794,9 +4821,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // [`BoxedLinkDriver::link_mtu`]'s `DEFAULT_LINK_MTU` (65535),
         // inert against the `u16` batch advertisements, so TCP / UDP are
         // unchanged.
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        self.batch_mtu_for(peer)
+    }
+
+    /// [`Self::negotiated_batch_mtu`] over a peer's caps already read: the one formula.
+    fn batch_mtu_for(&self, peer: Option<PeerInitCaps>) -> usize {
         let own = self.params.effective_batch_size() as usize;
         let link = self.link_driver().link_mtu();
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
         match peer {
             Some(p) => own.min(p.batch_size as usize).min(link),
             None => own.min(link),
@@ -8527,13 +8559,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `_wbuf` capacity between both concerns). Resolved before the
         // batch lock for the same disjoint-mutex discipline as `sn_mask`
         // below (the accessor takes `inbound_peer_init_caps`).
-        let mtu = self.negotiated_batch_mtu();
-
-        // R311kb — the negotiated SN ring every mint below walks
+        //
+        // R311kb — and the negotiated SN ring every mint below walks
         // ([`Self::negotiated_sn_mask`]). Resolved here, before the batch
-        // lock: the accessor takes the `inbound_peer_init_caps` mutex, and
-        // session mutex scopes stay disjoint by discipline.
-        let sn_mask = self.negotiated_sn_mask();
+        // lock, in the same hold of the `inbound_peer_init_caps` mutex
+        // ([`Self::negotiated_tx_limits`]): session mutex scopes stay disjoint
+        // by discipline.
+        let (mtu, sn_mask) = self.negotiated_tx_limits();
 
         // This profile's own reassembly budget, resolved HERE for the same
         // reason as `mtu` and `sn_mask` above: the accessor takes a mutex,

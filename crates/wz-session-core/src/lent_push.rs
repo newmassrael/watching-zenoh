@@ -172,21 +172,49 @@ pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
         | FLAG_PUSH_M
         // The header says an outer extension chain follows.
         | if with_qos { 0x80 } else { 0 };
-    sink.write_u8(header)?;
-    sink.write_vle_u64(mapping_id)?;
+    // The fixed fields are assembled on the stack and handed to the sink in one write each,
+    // not a byte at a time: every byte written through a lease is a call that checks the slot's
+    // room, and a message is five of them or more. The longest head is the header, a nine-byte
+    // id and a nine-byte suffix length (19 bytes); the longest tail is the QoS extension (its
+    // header and a one-byte value), the Put header and a nine-byte length (13 bytes).
+    let mut head = [0u8; 24];
+    let mut used = 0usize;
+    head[used] = header;
+    used += 1;
+    used = put_vle(&mut head, used, mapping_id);
     if let Some(text) = suffix {
-        sink.write_vle_u64(text.len() as u64)?;
+        used = put_vle(&mut head, used, text.len() as u64);
+        sink.write_bytes(&head[..used])?;
         sink.write_bytes(text.as_bytes())?;
+        used = 0;
     }
     #[cfg(feature = "pubsub-qos")]
     if with_qos {
         // ENC_ZINT(0x20) | id_qos(0x01), no `Z`: the only extension of the chain.
-        sink.write_u8(0x21)?;
-        sink.write_vle_u64(u64::from(qos.raw))?;
+        head[used] = 0x21;
+        used += 1;
+        used = put_vle(&mut head, used, u64::from(qos.raw));
     }
-    sink.write_u8(PUT_HEADER)?;
-    sink.write_vle_u64(value.len() as u64)?;
+    head[used] = PUT_HEADER;
+    used += 1;
+    used = put_vle(&mut head, used, value.len() as u64);
+    sink.write_bytes(&head[..used])?;
     sink.write_bytes(value)
+}
+
+/// Write `value` as the codec's `vle_u64` at `buf[at..]` and return where it ends: seven data
+/// bits a byte with the high bit set while more follow, at most eight such bytes, and a ninth
+/// that carries its eight bits whole (`SceSink::write_vle_u64`, byte for byte).
+fn put_vle(buf: &mut [u8; 24], mut at: usize, mut value: u64) -> usize {
+    let mut continued = 0u32;
+    while value >= 0x80 && continued < 8 {
+        buf[at] = (value as u8 & 0x7f) | 0x80;
+        at += 1;
+        value >>= 7;
+        continued += 1;
+    }
+    buf[at] = value as u8;
+    at + 1
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -200,7 +228,20 @@ mod tests {
     #[test]
     fn the_direct_writer_is_the_codecs_bytes() {
         let mut compared = 0usize;
-        for id in [0u64, 1, 127, 128, 300, 16_384, 65_535] {
+        // The ids reach every VLE width the codec writes, the nine-byte one included.
+        for id in [
+            0u64,
+            1,
+            127,
+            128,
+            300,
+            16_384,
+            65_535,
+            1 << 35,
+            1 << 56,
+            1 << 63,
+            u64::MAX,
+        ] {
             for suffix in [
                 None,
                 Some("a"),
