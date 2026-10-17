@@ -5,10 +5,16 @@ schema = 1
 # outside this tree, so a public repo never carries them (remote-build SKILL
 # rule 11).
 
-# Tracked files only. This repo's history has already paid for an accidental
-# disclosure once, and `all` would send whatever is sitting untracked in the
-# working tree to another host.
-send = "tracked"
+# Tracked files only, never untracked ones. This repo's history has already paid
+# for an accidental disclosure once, and anything wider would send whatever is
+# sitting untracked in the working tree to another host.
+#
+# AND THE SUBMODULES, at the commits this tree records: the workspace depends on
+# `vendor/sce` through path dependencies (`sce-forge-runtime`, `sce-rust-runtime`,
+# `sce-portable-bytes`), so a far side without it cannot build. This said
+# `tracked` until 2026-10-17, which bx then ignored and sent every submodule
+# anyway; bx now does what the value says, so the value has to say this.
+send = "tracked+submodules"
 
 # `crates/target` is a SYMLINK into ~/.buildcache (SKILL rule 1) and would
 # arrive as a broken link; `git ls-files` omits it and `/target`, and that is
