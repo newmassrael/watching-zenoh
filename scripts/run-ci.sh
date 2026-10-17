@@ -17715,7 +17715,11 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # R3071 -- 6 -> 8: a peer that states no listener binds one of its own and is found at it, and a
     # peer that states an EMPTY list binds nothing and has nothing to dial. 8 = the number this
     # command PRINTED; the file's ninth test needs no delivery and runs everywhere.
-    _runci_guarded_test "M a C ABI session scouts and is found" 8 \
+    #
+    # R3362 -- 8 -> 9: `scouting/multicast/enabled: false` takes a peer off the group, shown as a
+    # pair on one group (found without the key, not found with it). 9 = the number the lint read
+    # off the file's `#[ignore]`d tests and the run printed.
+    _runci_guarded_test "M a C ABI session scouts and is found" 9 \
         cargo test -p wz-capi-c --test scouting_open -- --ignored --test-threads=1 || return 1
     # The `scout` role of a `--sessions` driver: one process answers Scouts from a
     # `scouting.multicast` block, a second asks from inside its own session and

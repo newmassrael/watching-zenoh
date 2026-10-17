@@ -384,6 +384,28 @@ enum WriteKeyForm<'a> {
     },
 }
 
+/// The flows a `downsampling` or `low_pass_filter` item governs: the ones it names,
+/// or BOTH when it names none.
+///
+/// The reader keeps an omitted `flows` as an empty list (upstream's `None`), and
+/// upstream reads `None` as ingress and egress (`low_pass.rs` `get_or_insert`,
+/// `downsampling.rs` `unwrap_or`). A rule compiled with the empty list governs no
+/// flow, and `for_flow` then installs nothing, so a document that left `flows` out
+/// (the usual form) was honoured by the reader and did nothing at all.
+#[cfg(all(
+    feature = "routing-peer",
+    any(feature = "access-quota", feature = "access-downsampling")
+))]
+fn flows_or_both(
+    flows: Vec<crate::interceptor::InterceptorFlow>,
+) -> Vec<crate::interceptor::InterceptorFlow> {
+    if flows.is_empty() {
+        crate::interceptor::InterceptorFlow::ALL.to_vec()
+    } else {
+        flows
+    }
+}
+
 /// Classify a runtime write key into its [`WriteKeyForm`].
 #[cfg(all(
     feature = "zenoh-config",
@@ -2613,7 +2635,7 @@ impl WzConfig {
                         key_exprs: conf.key_exprs.clone(),
                         max_payload_size: conf.size_limit as usize,
                         messages,
-                        flows,
+                        flows: flows_or_both(flows),
                         link_protocols: links,
                         interfaces: conf.interfaces.clone(),
                     });
@@ -2673,7 +2695,7 @@ impl WzConfig {
                                 rule.freq,
                             ),
                             messages: messages.clone(),
-                            flows: flows.clone(),
+                            flows: flows_or_both(flows.clone()),
                             link_protocols: links.clone(),
                             interfaces: item.interfaces.clone(),
                         });

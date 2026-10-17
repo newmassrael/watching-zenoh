@@ -10968,6 +10968,25 @@ mod tests {
         assert_eq!(dropped, 0);
     }
 
+    /// An item that leaves `flows` out governs BOTH directions, as upstream's `None`
+    /// does. Every other document in this module names `flows`, which is how a
+    /// compile that read the omission as "no flow" stayed hidden: the reader kept
+    /// the absent list empty, the rule then governed no flow, no interceptor was
+    /// installed, and the document did nothing while `apply_zenoh_config` reported
+    /// the key as landed.
+    #[cfg(all(feature = "zenoh-config", feature = "access-downsampling"))]
+    #[test]
+    fn a_downsampling_item_that_omits_flows_still_governs_the_traffic() {
+        let (demo, other, dropped, applied) = three_puts_each(
+            r#"{ downsampling: [ { id: "ds1", messages: ["put"],
+                 rules: [ { key_expr: "demo/**", freq: 0 } ] } ] }"#,
+        );
+        assert_eq!(applied, vec!["downsampling"], "the key landed");
+        assert_eq!(demo, 0, "an omitted `flows` filters the governed key");
+        assert_eq!(other, 3, "the ungoverned key is delivered in full");
+        assert_eq!(dropped, 3, "the three drops are the downsampler's");
+    }
+
     /// A 4-byte and a 37-byte Put on each subscriber's key under `document`;
     /// returns frames delivered to the `demo/data` face, to the `other/data`
     /// face, the forwarder's drop count and the keys the apply reports as
