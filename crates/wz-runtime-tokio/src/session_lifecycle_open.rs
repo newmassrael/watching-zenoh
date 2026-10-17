@@ -142,7 +142,7 @@ impl SessionOpener for LinkstateOpener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sce_forge_runtime::codec::{SceBytes, SceString};
+    use sce_forge_runtime::codec::{SceBytes, SceStr, SceString};
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::linkstate_list::LinkstateListOwned;

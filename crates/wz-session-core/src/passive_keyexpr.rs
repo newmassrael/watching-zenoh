@@ -208,6 +208,7 @@ impl KeyexprTables {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sce_forge_runtime::codec::SceStr;
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 

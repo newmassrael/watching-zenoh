@@ -27,7 +27,7 @@
 //! type already forbids. The module/fn names are `owned_*` (not `bounded_*`,
 //! R311nq rename) precisely because the alloc carrier is unbounded.
 
-use sce_forge_runtime::codec::{CodecError, SceBytes, SceString};
+use sce_forge_runtime::codec::{CodecError, SceBytes, SceStr, SceString};
 
 /// Copy a byte slice into the profile-aware `SceBytes<N>` owned carrier
 /// (alloc: unbounded `Vec<u8>`; no-alloc: `heapless::Vec<u8, N>` with

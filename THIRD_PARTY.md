@@ -15,7 +15,7 @@ changelog that authorized the bump.
 ## vendor/sce — SCXML Core Engine
 
 - **Origin**: https://github.com/newmassrael/scxml-core-engine
-- **Commit pin**: `b73f19d2ba` (Round 3044, 2026-10-05)
+- **Commit pin**: `c24887ceb9` (2026-10-17)
 - **License**: dual-licensed — AGPL-3.0-only WITH SCE Linking
   Exception OR LicenseRef-SCE-Commercial. See
   `vendor/sce/LICENSE` for the full text. Before the Round 3008 pin
@@ -39,7 +39,15 @@ changelog that authorized the bump.
   the SCE repo at the pinned revision, which states the two
   conditions: an unmodified generator, and a work that is not a
   competing product).
-- **Upstream-tracking**: Round 3044 bumped from `6d7c7b6f65` to
+- **Upstream-tracking**: the 2026-10-17 pin moved from `b73f19d2ba` to
+  `c24887ceb9` (726 commits on) for the queue runtime SCE gained in the
+  range: the multi-producer `scq` ring, the `intrusive` MPSC list and the
+  segmented `lscq`, beside the `spsc` ring the old pin already carried.
+  SCE's license files are identical across the range, and every generated
+  tree under `out/` regenerates byte for byte, with no lockfile moving.
+  The one change the range asked of this tree is that `SceString`'s
+  `from_view` is now a method of the `SceStr` trait, so the files that call
+  it import the trait. Round 3044 bumped from `6d7c7b6f65` to
   `b73f19d2ba` (a chain may tell each entry what the entry before it was,
   which the Query codec needs to read the value upstream sends after a
   shared-memory marker, and the repair that lets a chain hand its

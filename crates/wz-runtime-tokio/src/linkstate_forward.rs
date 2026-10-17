@@ -8234,7 +8234,7 @@ mod tests {
     use super::*;
     use crate::runtime_impl::TokioRuntime;
     use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
-    use sce_forge_runtime::codec::{SceBytes, SceString};
+    use sce_forge_runtime::codec::{SceBytes, SceStr, SceString};
     #[cfg(feature = "access-acl")]
     use wz_access_control::{AclConfig, AclMessage, AclRule, Permission, SubjectSelector};
     use wz_codecs::linkstate::LinkstateOwned;

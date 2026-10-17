@@ -4745,6 +4745,7 @@ mod tests {
     #[test]
     fn a_declare_inside_a_frame_populates_the_keyexpr_tables() {
         use crate::passive_keyexpr::Resolved;
+        use sce_forge_runtime::codec::SceStr;
         use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
         use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
