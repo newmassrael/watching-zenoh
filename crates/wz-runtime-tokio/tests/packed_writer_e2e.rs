@@ -60,6 +60,43 @@ fn payload_of(index: u32) -> Vec<u8> {
     payload
 }
 
+/// One put of a stream test, BLOCKING where the build can say so: a droppable message that finds
+/// no room within `wait_before_drop` is dropped by policy, which a host loaded enough to delay
+/// the writer by a millisecond turns into a short count, and these tests claim that every
+/// message arrives. The borrowed send takes the congestion control in its QoS byte; a build that
+/// counts or filters the owned message (`transport-stats`) has no borrowed send, and its put goes
+/// the default way: its host is not one these tests are run on loaded.
+fn put_blocking(
+    actions: &wz_runtime_tokio::session_glue::SessionLinkActions,
+    keyexpr: &str,
+    payload: &[u8],
+    priority: Priority,
+) {
+    #[cfg(all(feature = "codec-push", not(feature = "transport-stats")))]
+    {
+        let block = wz_session_core::sample::QosLevel::from_parts(
+            priority,
+            wz_session_core::qos::CongestionControl::Block,
+            false,
+        );
+        actions
+            .send_plain_put_qos(
+                0,
+                Some(keyexpr),
+                payload,
+                Some(block),
+                true,
+                false,
+                priority,
+            )
+            .expect("a stream put routes through the QoS send seam");
+    }
+    #[cfg(not(all(feature = "codec-push", not(feature = "transport-stats"))))]
+    actions
+        .send_push_literal_qos(keyexpr, payload, true, priority)
+        .expect("a stream put routes through the QoS send seam");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -153,28 +190,10 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
         tokio::task::spawn_blocking(move || {
             for index in 0..PER_LANE {
                 for (keyexpr, priority) in LANES {
-                    // BLOCKING, not droppable: this test claims that the join delivers every
-                    // frame whole, once and in order, and a droppable message that finds no
-                    // room within `wait_before_drop` is dropped by policy, which a host loaded
-                    // enough to delay the writer by a millisecond turns into a short count
-                    // (measured on a build host at load 50: 4461 of 4500, and five clean
-                    // runs on an idle one). The policy is another test's subject.
-                    let block = wz_session_core::sample::QosLevel::from_parts(
-                        priority,
-                        wz_session_core::qos::CongestionControl::Block,
-                        false,
-                    );
-                    init_actions
-                        .send_plain_put_qos(
-                            0,
-                            Some(keyexpr),
-                            &payload_of(index),
-                            Some(block),
-                            true,
-                            false,
-                            priority,
-                        )
-                        .expect("a burst publish routes through the QoS send seam");
+                    // BLOCKING, not droppable (measured on a build host at load 50: 4461
+                    // of 4500 with the droppable put, five clean runs on an idle one). The
+                    // drop policy is another test's subject.
+                    put_blocking(&init_actions, keyexpr, &payload_of(index), priority);
                 }
             }
         })
@@ -362,7 +381,11 @@ async fn puts_on_a_declared_alias_never_overtake_its_declaration() {
 /// `wait_before_drop` is dropped, which is the congestion policy and not a fault, and a
 /// stream of them delivers fewer than it sent however the locks are taken. A blocking one is
 /// delivered or the session is closed, so "every message arrived" is the claim.
-#[cfg(all(feature = "declare-keyexpr", not(feature = "transport-stats")))]
+#[cfg(all(
+    feature = "declare-keyexpr",
+    feature = "codec-push",
+    not(feature = "transport-stats")
+))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_long_kilobyte_stream_is_never_stalled_by_the_writers_flush() {
     use wz_session_core::qos::CongestionControl;
