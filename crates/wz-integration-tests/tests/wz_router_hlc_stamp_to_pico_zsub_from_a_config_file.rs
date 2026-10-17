@@ -33,7 +33,7 @@
 //!
 //! The foreign decoder only witnesses the router's decision; the document ->
 //! flag step is wz's own, so these legs claim no atom and say so. The flag-level
-//! file carries the `wz-proves:` rows for the wire behaviour.
+//! file carries the proof rows for the wire behaviour.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
