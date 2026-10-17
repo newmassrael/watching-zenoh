@@ -153,8 +153,27 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
         tokio::task::spawn_blocking(move || {
             for index in 0..PER_LANE {
                 for (keyexpr, priority) in LANES {
+                    // BLOCKING, not droppable: this test claims that the join delivers every
+                    // frame whole, once and in order, and a droppable message that finds no
+                    // room within `wait_before_drop` is dropped by policy, which a host loaded
+                    // enough to delay the writer by a millisecond turns into a short count
+                    // (measured on a build host at load 50: 4461 of 4500, and five clean
+                    // runs on an idle one). The policy is another test's subject.
+                    let block = wz_session_core::sample::QosLevel::from_parts(
+                        priority,
+                        wz_session_core::qos::CongestionControl::Block,
+                        false,
+                    );
                     init_actions
-                        .send_push_literal_qos(keyexpr, &payload_of(index), true, priority)
+                        .send_plain_put_qos(
+                            0,
+                            Some(keyexpr),
+                            &payload_of(index),
+                            Some(block),
+                            true,
+                            false,
+                            priority,
+                        )
                         .expect("a burst publish routes through the QoS send seam");
                 }
             }
