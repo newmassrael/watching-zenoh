@@ -35,6 +35,11 @@ use crate::string::owned_string_from;
 pub(crate) struct BytesState {
     pub(crate) payload: Payload,
     pub(crate) bounds: Bounds,
+    /// The bytes of an owned payload, made shareable the first time something clones it
+    /// ([`Self::share`]) and kept, so the second clone and every later one is a reference
+    /// count. A payload is immutable once built, which is what makes the cache a copy that can
+    /// never go stale; [`Self::reset`], the one thing that replaces a payload, drops it.
+    share: std::sync::OnceLock<std::sync::Arc<Vec<u8>>>,
     /// The `z_loaned_shm_t` this payload answers `z_bytes_as_loaned_shm` with, made the
     /// first time it is asked and kept for as long as the payload lives, because
     /// the loan is a pointer the caller holds (R3052). `None` inside is a payload
@@ -58,6 +63,11 @@ pub(crate) struct BytesState {
 #[derive(Clone)]
 pub(crate) enum Payload {
     Owned(Vec<u8>),
+    /// Bytes shared by reference count: what [`BytesState::share`] hands a clone, so that
+    /// cloning a payload (which `z_bytes_clone` is for, and a put consumes) is a reference
+    /// and not a copy, as upstream's `ZBytes` clone is. Immutable, like every payload once
+    /// built; the last holder frees it.
+    Counted(std::sync::Arc<Vec<u8>>),
     Shared(wz_runtime_tokio::RxBytes),
     /// A chunk of a provider of THIS process, kept as the chunk (R3059): the payload a
     /// program builds from a buffer with `z_bytes_from_shm`. It reads as its bytes like
@@ -76,6 +86,7 @@ impl core::ops::Deref for Payload {
     fn deref(&self) -> &[u8] {
         match self {
             Payload::Owned(bytes) => bytes,
+            Payload::Counted(bytes) => bytes,
             Payload::Shared(bytes) => bytes.as_slice(),
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
@@ -97,6 +108,10 @@ impl Payload {
     pub(crate) fn into_vec(self) -> Vec<u8> {
         match self {
             Payload::Owned(bytes) => bytes,
+            // Moved out when this is the last holder, copied when others hold it too.
+            Payload::Counted(bytes) => {
+                std::sync::Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone())
+            }
             Payload::Shared(bytes) => bytes.into_vec(),
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
@@ -180,6 +195,7 @@ impl BytesState {
     pub(crate) fn reset(&mut self, payload: Payload) {
         Self::fill_bounds(&payload, &mut self.bounds);
         self.payload = payload;
+        self.share = std::sync::OnceLock::new();
         // The loan of shared memory made for the previous payload is not this one's.
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
@@ -187,6 +203,24 @@ impl BytesState {
         ))]
         {
             self.shm_loan = std::sync::OnceLock::new();
+        }
+    }
+
+    /// This payload's bytes as a payload that SHARES them with it: a reference count, where
+    /// copying an owned payload (the clone of a payload that is then consumed by a put, in a
+    /// loop) was an allocation, the bytes, and their release. The first call makes the
+    /// shareable copy and keeps it; a payload that is already counted is just referenced.
+    /// `None` for a payload held some other way (received, or a chunk of shared memory),
+    /// which the caller copies as it always did.
+    pub(crate) fn share(&self) -> Option<Payload> {
+        match &self.payload {
+            Payload::Owned(bytes) => Some(Payload::Counted(
+                self.share
+                    .get_or_init(|| std::sync::Arc::new(bytes.clone()))
+                    .clone(),
+            )),
+            Payload::Counted(bytes) => Some(Payload::Counted(bytes.clone())),
+            _ => None,
         }
     }
 
@@ -216,6 +250,7 @@ impl BytesState {
         Self {
             payload,
             bounds,
+            share: std::sync::OnceLock::new(),
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
                 not(feature = "zenoh-c-no-unstable-api")
@@ -266,15 +301,12 @@ pub(crate) unsafe fn bytes_slice<'a>(this_: *const z_loaned_bytes_t) -> Option<&
 }
 
 /// The [`BytesState`] behind a LOANED handle, for a caller that needs more of it
-/// than its bytes (R3052: whether the payload is a chunk of shared memory).
+/// than its bytes (R3052: whether the payload is a chunk of shared memory; and the
+/// clone, which shares an owned payload's bytes instead of copying them).
 ///
 /// # Safety
 /// `this_` must be null, or a valid loaned bytes whose handle slot holds a live
 /// `BytesState` pointer.
-#[cfg(all(
-    feature = "zenoh-c-shared-memory",
-    not(feature = "zenoh-c-no-unstable-api")
-))]
 pub(crate) unsafe fn bytes_state<'a>(this_: *const z_loaned_bytes_t) -> Option<&'a BytesState> {
     if this_.is_null() {
         return None;
@@ -317,7 +349,9 @@ pub(crate) unsafe fn take_payload(moved: *mut z_moved_bytes_t) -> Option<Vec<u8>
 /// are the sends with a path that can carry a descriptor; every other consumer of a payload
 /// calls [`take_payload`] and gets the bytes whatever the payload was built from.
 pub(crate) enum Outbound {
-    Bytes(Vec<u8>),
+    /// The bytes, as the payload holds them (owned, counted or received): a put reads them
+    /// through `Deref`, so none of those is copied to be sent.
+    Bytes(Payload),
     #[cfg(all(
         feature = "zenoh-c-shared-memory",
         not(feature = "zenoh-c-no-unstable-api")
@@ -363,7 +397,9 @@ pub(crate) unsafe fn take_outbound(moved: *mut z_moved_bytes_t) -> Option<Outbou
             not(feature = "zenoh-c-no-unstable-api")
         ))]
         Payload::Issued(chunk) => Some(Outbound::Chunk(chunk)),
-        other => Some(Outbound::Bytes(other.into_vec())),
+        // The payload as it is held: a counted one stays counted, so a put of a clone does
+        // not copy what the clone exists to avoid copying.
+        other => Some(Outbound::Bytes(other)),
     }
 }
 
@@ -399,7 +435,7 @@ pub(crate) unsafe fn take_query_value(
     // SAFETY: the caller's contract.
     match unsafe { take_outbound(moved) } {
         None => (None, None),
-        Some(Outbound::Bytes(bytes)) => (Some(bytes), None),
+        Some(Outbound::Bytes(bytes)) => (Some(bytes.into_vec()), None),
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
@@ -555,12 +591,19 @@ pub unsafe extern "C" fn z_bytes_clone(dst: *mut z_owned_bytes_t, this_: *const 
         }
         unsafe { *dst = z_owned_bytes_t::null_value() };
         // SAFETY: the caller's contract.
-        let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
+        let Some(source) = (unsafe { bytes_state(this_) }) else {
             // Upstream returns void here, so a null source leaves the gravestone
             // already written above rather than reporting anything.
             return Z_ENULL;
         };
-        let handle = Box::into_raw(Box::new(BytesState::whole(bytes.to_vec()))) as Handle;
+        // An owned payload is cloned by reference (upstream's `ZBytes` clone is one): the
+        // bytes are copied once, into the share the source keeps, and every clone after
+        // that is a count. A payload held another way is copied as one slice, as before.
+        let state = match source.share() {
+            Some(shared) => BytesState::of(shared),
+            None => BytesState::whole(source.payload.to_vec()),
+        };
+        let handle = Box::into_raw(Box::new(state)) as Handle;
         unsafe { *dst = z_owned_bytes_t::from_handle(handle) };
         Z_OK
     });

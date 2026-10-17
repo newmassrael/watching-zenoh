@@ -1808,7 +1808,7 @@ mod tests {
         let query_qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, false);
         let put = |express| PendingReply::Put {
             keyexpr: "a/b".to_owned(),
-            payload: Outbound::Bytes(vec![1]),
+            payload: Outbound::Bytes(crate::bytes::Payload::Owned(vec![1])),
             encoding: None,
             attachment: None,
             timestamp: None,

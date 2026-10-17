@@ -284,6 +284,14 @@ pub struct SubscriberTable<C: SampleSink> {
     /// it learns that the table moved without the table having to know the
     /// session: that is what lets one table serve many peers.
     epoch: u64,
+    /// How many subscribers a publish from this process can reach (those whose locality
+    /// allows a local origin), readable without the lock that guards this table. A publisher
+    /// asks whether anything in its own process wants a message once per message, and the
+    /// answer is almost always "no subscriber at all"; this lets it be given by a load
+    /// ([`Self::local_live`]) instead of a lock. Moved only where the list moves
+    /// (`register_sink`, `unregister`), under the table's own lock.
+    #[cfg(feature = "alloc")]
+    local_live: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
     /// Which subscribers the keys that arrived lately matched, so that a key that comes
     /// again is delivered without matching it against every subscription's pattern.
     /// Valid for one `epoch`: a subscription registered or retired moves it,
@@ -708,6 +716,8 @@ impl<C: SampleSink> SubscriberTable<C> {
             next_id: 1,
             epoch: 0,
             #[cfg(feature = "alloc")]
+            local_live: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(feature = "alloc")]
             memo: MatchMemo::new(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
@@ -893,7 +903,21 @@ impl<C: SampleSink> SubscriberTable<C> {
             .map_err(|_| RegisterError::TableFull)?;
         self.next_id = self.next_id.saturating_add(1);
         self.epoch = self.epoch.saturating_add(1);
+        #[cfg(feature = "alloc")]
+        if allowed_origin.allows_local() {
+            self.local_live
+                .fetch_add(1, core::sync::atomic::Ordering::Release);
+        }
         Ok(id)
+    }
+
+    /// The count of subscribers a local publish can reach, as a handle a reader keeps and
+    /// loads without taking the lock that guards this table: `0` means no subscriber of this
+    /// process wants a message from it ([`Self::has_local_matching`] would answer `false`),
+    /// any other value means the question is open and is answered by it.
+    #[cfg(feature = "alloc")]
+    pub fn local_live(&self) -> alloc::sync::Arc<core::sync::atomic::AtomicUsize> {
+        self.local_live.clone()
     }
 
     /// Remove a previously-registered subscriber. Returns `true` if
@@ -910,10 +934,21 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// leaves each of them to see the epoch move ([`SubscriberPeer::reconcile`]).
     pub fn unregister(&mut self, id: SubscriptionId) -> bool {
         let before = self.subscribers.len();
+        #[cfg(feature = "alloc")]
+        let reached_local = self
+            .subscribers
+            .iter()
+            .find(|s| s.id == id)
+            .is_some_and(|s| s.allowed_origin.allows_local());
         self.subscribers.retain(|s| s.id != id);
         let removed = before != self.subscribers.len();
         if removed {
             self.epoch = self.epoch.saturating_add(1);
+            #[cfg(feature = "alloc")]
+            if reached_local {
+                self.local_live
+                    .fetch_sub(1, core::sync::atomic::Ordering::Release);
+            }
         }
         removed
     }

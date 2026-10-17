@@ -674,6 +674,11 @@ where
     /// profiles can bind their own mutex (`embassy_sync::Mutex<...>`,
     /// `critical_section::Mutex<...>`) without touching this field.
     observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+    /// The observer's count of subscribers a publish from this session can reach, read
+    /// without the observer's lock ([`SubscriberTable::local_live`](wz_session_core::pubsub::SubscriberTable::local_live)).
+    /// A publish asks whether anything here wants it once per message; with no subscriber
+    /// the answer is a load. Shared on `clone()`, as the observer is.
+    local_live: Arc<core::sync::atomic::AtomicUsize>,
     /// R311kz — per-session deferred-fire queue (the F-6 fix): the
     /// matching-listener sinks installed in the registries stage their
     /// fires here (under the observer lock), and the drive-loop
@@ -1165,6 +1170,8 @@ where
             local_stage_wake: self.local_stage_wake.clone(),
             transport: self.transport.clone(),
             observer: self.observer.clone(),
+            // The count of the very observer shared above.
+            local_live: self.local_live.clone(),
             fires: self.fires.clone(),
             clock: self.clock.clone(),
             // An Arc bump, deliberately: a fork must SHARE the node clock, not
@@ -2027,6 +2034,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// `drain_local_fires_if_inline`, whose callers it shares.
     #[cfg(feature = "pubsub-allow-loop")]
     fn has_local_subscriber(&self, keyexpr: &str) -> bool {
+        // Nothing in this process can want it: answered without the observer's lock. A
+        // publisher with no subscriber of its own asks this once per message.
+        if self.local_live.load(core::sync::atomic::Ordering::Acquire) == 0 {
+            return false;
+        }
         R::with_mutex_mut(&self.observer, |observer| {
             observer.subscribers.has_local_matching(keyexpr)
         })
@@ -2374,6 +2386,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         clock: Arc<T>,
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
+        let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
         Self::from_inner(SessionInner {
             local_delivery: LocalDeliveryDrain::default(),
             local_stage_wake: None,
@@ -2382,6 +2395,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 tx,
             },
             observer,
+            local_live,
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
             // R311y531 — always empty on a multicast session: the hold API is
@@ -2578,6 +2592,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             actions.params.whatami,
             crate::node_clock::TimestampingEnabled::default(),
         );
+        let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
         let session = Self::from_inner(SessionInner {
             // R311y554 — the default is the pre-policy behaviour; a host that
             // needs the drive-task hand-off opts in with
@@ -2589,6 +2604,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // TransportState<R, T>>::Payload`); no enum-variant wrap.
             transport: actions,
             observer,
+            local_live,
             // R311kz — fresh deferred-fire queue per logical session;
             // every deferred sink (matching, decl listeners, data
             // planes) clones a handle out of it at registration.
