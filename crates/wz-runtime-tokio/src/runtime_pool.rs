@@ -761,6 +761,19 @@ impl Runtime for PartitionedRuntime {
         f(&mut *guard)
     }
 
+    /// The non-waiting twin, with the same poison recovery.
+    fn try_with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>
+    where
+        T: Send + 'static,
+    {
+        let mut guard = match mutex.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(f(&mut *guard))
+    }
+
     fn new_mutex<T>(value: T) -> Self::Mutex<T>
     where
         T: Send + 'static,

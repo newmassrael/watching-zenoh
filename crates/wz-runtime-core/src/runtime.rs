@@ -148,6 +148,23 @@ pub trait Runtime: Send + Sync + 'static {
     where
         T: Send + 'static;
 
+    /// [`Self::with_mutex_mut`] that does not wait: `None` when someone else holds the mutex
+    /// right now, and `f` has not run.
+    ///
+    /// For a caller that must not block on a lock whose holder may be waiting for THAT
+    /// caller: the link's writer flushing the frames the session has open, while a sender
+    /// holds one conduit's lock and waits for the writer to make room, which is a wait
+    /// neither can end. The default blocks, as [`Self::with_mutex_mut`] does and for the
+    /// profiles it is right for: a single-task profile has no other holder to find the
+    /// mutex held by, so its answer is always `Some`. A profile with real threads
+    /// overrides it.
+    fn try_with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>
+    where
+        T: Send + 'static,
+    {
+        Some(Self::with_mutex_mut(mutex, f))
+    }
+
     /// R311di-pre-e — construction-side complement of
     /// [`Self::with_mutex_mut`]. Wraps `value` in a `Self::Mutex<T>`
     /// using the per-profile concrete-type constructor: tokio binds to

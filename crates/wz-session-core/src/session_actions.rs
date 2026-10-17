@@ -8953,12 +8953,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // write. Told here, once the conduit's lock is released, because the writer's
         // flush takes that lock.
         #[cfg(feature = "transport-batching")]
-        if matches!(push, Ok(PushOutcome::Pushed)) && self.tx_conduits.is_auto() {
-            if priority == Priority::Control {
+        if self.tx_conduits.is_auto() {
+            if priority == Priority::Control && matches!(push, Ok(PushOutcome::Pushed)) {
                 // The barrier's second half: the control message does not wait for the writer
                 // to go idle, since the data staged after it is owed to follow it.
                 self.flush_open_batch();
             } else {
+                // Whatever the outcome, not only a message staged: the writer's flush skips a
+                // conduit whose lock a sender holds ([`Self::flush_open_batch_nowait`]), and
+                // this sender, done with its conduit, is who tells it to come back. A send that
+                // was dropped for congestion, or refused, has staged nothing, but may have
+                // been holding the lock of a conduit with a frame still open.
                 self.own_link().link_driver().tx_staged();
             }
         }
@@ -9464,36 +9469,70 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // seam agree by construction on which conduit is which.
             let priority = TxConduits::<R>::conduit_priority(idx);
             R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
-                // ARCHITECTURE section 9.1 -- a frame open in a lent slot leaves
-                // as that slot, with nothing copied.
-                //
-                // Fixed-memory step S4 — under `tx-lend-only` no frame is staged
-                // on the heap, so a conduit with no lent frame open has nothing
-                // to drain, and this is all the drain there is.
-                #[cfg(feature = "tx-lend-only")]
-                if batch.stage.lent {
-                    self.close_lent_batch(batch, idx, priority);
-                }
-                #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
-                if batch.stage.lent {
-                    self.close_lent_batch(batch, idx, priority);
-                    return;
-                }
-                #[cfg(not(feature = "tx-lend-only"))]
-                {
-                    let stage = &mut batch.stage;
-                    if stage.buf.is_empty() {
-                        return;
-                    }
-                    stage.count = 0;
-                    let frame = core::mem::take(&mut stage.buf);
-                    let channel = crate::frame_encode::frame_wire_reliability(&frame);
-                    // Route each frame by its OWN conduit (y217 #3) — this drain path
-                    // carries no caller priority, so the band comes from the walk.
-                    self.send_wire(&frame, channel, priority);
-                }
+                self.flush_conduit(idx, priority, batch);
             });
         }
+    }
+
+    /// [`Self::flush_open_batch`] for the link's writer, which must never WAIT for a conduit's
+    /// lock: a conduit whose lock is held is skipped, and left open.
+    ///
+    /// A sender holds its conduit's lock across its wait for room on the link
+    /// ([`PushDeadline`]: the wait is part of the congestion decision that precedes the
+    /// frame's sequence number), and room is what the writer makes by sending what is queued.
+    /// A writer that waited for that lock in its idle flush, while the sender waited for
+    /// room, would wait for the sender, who waits for it (measured: a publisher of kilobyte
+    /// messages stopped for good within seconds, on both threads asleep). Skipping is safe
+    /// because a sender that finds the writer owed a flush asks for one again when it is done
+    /// with the conduit, whatever the outcome ([`Self::dispatch_network_message_at`]'s last
+    /// step), and the writer then runs this again and finds the lock free.
+    #[cfg(feature = "transport-batching")]
+    fn flush_open_batch_nowait(&self) {
+        for idx in 0..TX_CONDUITS {
+            let priority = TxConduits::<R>::conduit_priority(idx);
+            // `None`: held by a sender, who will ask again. Nothing is open in this call's view
+            // of that conduit that the sender's own call does not own.
+            let _ = R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                self.flush_conduit(idx, priority, batch);
+            });
+        }
+    }
+
+    /// Send the frame open in one conduit, under that conduit's lock (`batch`): the body of
+    /// the walks of [`Self::flush_open_batch`] and [`Self::flush_open_batch_nowait`].
+    #[cfg(feature = "transport-batching")]
+    fn flush_conduit(&self, idx: usize, priority: Priority, batch: &mut BatchTx) {
+        // ARCHITECTURE section 9.1 -- a frame open in a lent slot leaves
+        // as that slot, with nothing copied.
+        //
+        // Fixed-memory step S4 — under `tx-lend-only` no frame is staged
+        // on the heap, so a conduit with no lent frame open has nothing
+        // to drain, and this is all the drain there is.
+        #[cfg(feature = "tx-lend-only")]
+        if batch.stage.lent {
+            self.close_lent_batch(batch, idx, priority);
+        }
+        #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
+        if batch.stage.lent {
+            self.close_lent_batch(batch, idx, priority);
+            return;
+        }
+        #[cfg(not(feature = "tx-lend-only"))]
+        {
+            let stage = &mut batch.stage;
+            if stage.buf.is_empty() {
+                return;
+            }
+            stage.count = 0;
+            let frame = core::mem::take(&mut stage.buf);
+            let channel = crate::frame_encode::frame_wire_reliability(&frame);
+            // Route each frame by its OWN conduit (y217 #3) — this drain path
+            // carries no caller priority, so the band comes from the walk.
+            self.send_wire(&frame, channel, priority);
+        }
+        // Read only by the lent-batch arms.
+        #[cfg(not(any(feature = "tx-lend-only", feature = "transport-tx-lend")))]
+        let _ = idx;
     }
 
     /// zenoh-pico `zp_batch_start` parity — open a batching window: every
@@ -9570,8 +9609,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// link's writer runs when it has nothing to write ([`BoxedLinkDriver::set_idle_flush`]).
     /// [`Self::batch_flush`] without the typed answer a caller of `zp_batch_flush` is owed.
     pub fn flush_staged(&self) {
+        // The writer calls this, and a writer must not wait for a conduit's lock: see
+        // [`Self::flush_open_batch_nowait`].
         #[cfg(feature = "transport-batching")]
-        self.flush_open_batch();
+        self.flush_open_batch_nowait();
     }
 
     /// R311jq — typed chokepoint entries: each hands its per-type body

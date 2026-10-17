@@ -328,3 +328,133 @@ async fn puts_on_a_declared_alias_never_overtake_its_declaration() {
         "every aliased put arrived once"
     );
 }
+
+/// A long stream of kilobyte messages from one thread is delivered whole: the sender and the
+/// link's writer never wait for each other.
+///
+/// The sender holds its conduit's lock across its wait for room on the link, and room is made by
+/// the writer sending what is queued; the writer's idle flush took the same lock to send the
+/// frames the session had open. With frames filling every sixteen messages the two met within
+/// seconds and neither ever moved again (measured with a C publisher against zenoh-c at 1 KiB:
+/// both threads asleep, the connection established and idle). The writer now skips a conduit
+/// whose lock a sender holds and is asked to come back when the sender is done.
+///
+/// The stream is BLOCKING, not droppable: a droppable message that finds no room within
+/// `wait_before_drop` is dropped, which is the congestion policy and not a fault, and a
+/// stream of them delivers fewer than it sent however the locks are taken. A blocking one is
+/// delivered or the session is closed, so "every message arrived" is the claim.
+#[cfg(all(feature = "declare-keyexpr", not(feature = "transport-stats")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_long_kilobyte_stream_is_never_stalled_by_the_writers_flush() {
+    use wz_session_core::qos::CongestionControl;
+    use wz_session_core::sample::QosLevel;
+
+    const STREAM_KEY: &str = "demo/stream/kib";
+    const COUNT: usize = 120_000;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let acc_open = async {
+        let (stream, _peer) = listener.accept().await.expect("accept tcp peer");
+        accept_and_open_session_with_qos(
+            DialedLink::Tcp(stream),
+            fixture_params_with_zid(0x02),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established with qos offered")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        connect_and_open_session_with_qos(
+            locator,
+            fixture_params_with_zid(0x01),
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established with qos offered")
+    };
+    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+
+    let received = Arc::new(AtomicUsize::new(0));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let received = received.clone();
+        observer.subscribers.register(STREAM_KEY, move |_sample| {
+            received.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive_acc = drive_session_until_terminal(
+        &mut opened_acc.inbound,
+        &opened_acc.actions,
+        &mut opened_acc.engine,
+        None,
+        &opened_acc.clock,
+        &timeouts,
+        |event| observer.dispatch_event(event),
+    );
+    let init_actions = opened_init.actions.clone();
+    let drive_init = drive_session_until_terminal(
+        &mut opened_init.inbound,
+        &opened_init.actions,
+        &mut opened_init.engine,
+        None,
+        &opened_init.clock,
+        &timeouts,
+        |_| {},
+    );
+
+    let received_probe = received.clone();
+    let scenario = async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let sender = tokio::task::spawn_blocking(move || {
+            init_actions
+                .send_declare_keyexpr(7, STREAM_KEY)
+                .expect("the stream's key is declared");
+            let block = QosLevel::from_parts(Priority::Data, CongestionControl::Block, false);
+            let payload = vec![0x3cu8; 1024];
+            for _ in 0..COUNT {
+                init_actions
+                    .send_plain_put_qos(7, None, &payload, Some(block), true, false, Priority::Data)
+                    .expect("a stream put routes");
+            }
+        });
+        // Progress is watched, not only the end: a stream that stalls leaves the count where it
+        // was, and that is what fails here, in seconds, instead of at a long deadline.
+        let mut last = 0usize;
+        let mut still_for = 0u32;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = received_probe.load(Ordering::SeqCst);
+            if now >= COUNT {
+                break;
+            }
+            if now == last {
+                still_for += 1;
+                assert!(
+                    still_for < 40,
+                    "the stream stood still for 4 s at {now} of {COUNT}: the sender and the \
+                     writer are waiting for each other"
+                );
+            } else {
+                still_for = 0;
+                last = now;
+            }
+        }
+        sender.await.expect("the publishing thread");
+    };
+
+    tokio::select! {
+        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
+        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+    assert_eq!(received.load(Ordering::SeqCst), COUNT);
+}

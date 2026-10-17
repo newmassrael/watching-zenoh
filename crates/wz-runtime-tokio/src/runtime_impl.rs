@@ -132,6 +132,19 @@ impl Runtime for TokioRuntime {
         f(&mut *guard)
     }
 
+    // The non-waiting twin, with the same poison recovery: a held mutex answers `None`.
+    fn try_with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>
+    where
+        T: Send + 'static,
+    {
+        let mut guard = match mutex.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(f(&mut *guard))
+    }
+
     // R311di-pre-e — construction-side Mutex/RwLock helpers. AP profile
     // forwards to the std primitive's `new` constructor; the type alias
     // `crate::sync::Mutex<T> = std::sync::Mutex<T>` makes the constructor
