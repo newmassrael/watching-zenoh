@@ -235,5 +235,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 # same way for the same reason.
 tempfile = "3"
 
+# `scouting_ttl` reads the IP TTL of a Scout off a receiver joined to the group, which is
+# `IP_RECVTTL` and `recvmsg`: no std spelling, and the test is Linux only. The optional `libc`
+# above is for the SHM arm; this is the dev-only half and is already in `crates/Cargo.lock`.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true
