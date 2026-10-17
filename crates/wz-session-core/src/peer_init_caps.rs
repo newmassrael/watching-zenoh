@@ -93,6 +93,16 @@ pub fn init_ack_exceeds_advertisement(
 }
 
 impl PeerInitCaps {
+    /// The SN resolution both ends use: the smaller of this node's own and the peer's
+    /// advertisement, this node's own while no advertisement has arrived. The one formula
+    /// behind the negotiated SN ring, for a caller that has read the peer's caps already.
+    pub const fn negotiated_seq_num_res(own: u8, peer: Option<Self>) -> u8 {
+        match peer {
+            Some(p) if p.seq_num_res < own => p.seq_num_res,
+            _ => own,
+        }
+    }
+
     /// Decode the INIT-body `sn_res` byte + optional `batch_size`
     /// field per the init_body codec (parent.S=1 carries both,
     /// parent.S=0 falls back to defaults; the layout is shared by

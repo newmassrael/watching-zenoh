@@ -4781,17 +4781,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// runs there: the acceptor's RX SN seed waits for the restore.
     pub fn negotiated_sn_mask(&self) -> u64 {
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
-        self.sn_mask_for(peer)
-    }
-
-    /// [`Self::negotiated_sn_mask`] over a peer's caps already read: the one formula, so a
-    /// caller that needs this and [`Self::negotiated_batch_mtu`] reads the caps once.
-    fn sn_mask_for(&self, peer: Option<PeerInitCaps>) -> u64 {
-        let res = match peer {
-            Some(p) => self.params.seq_num_res.min(p.seq_num_res),
-            None => self.params.seq_num_res,
-        };
-        crate::sn::mask_from_res(res)
+        crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
+            self.params.seq_num_res,
+            peer,
+        ))
     }
 
     /// The negotiated batch budget and SN ring mask together: both of
@@ -4812,7 +4805,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn negotiated_tx_limits(&self) -> (usize, u64) {
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
-        (self.batch_mtu_for(peer), self.sn_mask_for(peer))
+        let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
+        (self.batch_mtu_for(peer), crate::sn::mask_from_res(ring))
     }
 
     /// R311qh — the remote peer's zid as learned at handshake (from the inbound
