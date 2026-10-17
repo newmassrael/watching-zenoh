@@ -393,6 +393,8 @@ enum WriteKeyForm<'a> {
 /// flow, and `for_flow` then installs nothing, so a document that left `flows` out
 /// (the usual form) was honoured by the reader and did nothing at all.
 #[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat"),
     feature = "routing-peer",
     any(feature = "access-quota", feature = "access-downsampling")
 ))]
