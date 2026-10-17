@@ -348,13 +348,25 @@ impl<C: SampleSink> SubscriberTable<C> {
     ) {
         let reliability = Reliability::from_reliable_bool(reliable);
         let spaces = peer.mapping_spaces();
+        // The text of the suffix just read, which the next record of a stream repeats: its
+        // bytes are compared with the last ones instead of being checked as UTF-8 again.
+        let mut last_suffix: Option<(&[u8], &str)> = None;
+        let frame_bytes = frame.as_slice();
         for put in puts {
             let suffix = match put.suffix {
                 Some((from, to)) => {
-                    match core::str::from_utf8(&frame.as_slice()[from as usize..to as usize]) {
-                        Ok(text) => Some(text),
-                        // The reader validated it; a frame that changed under it is dropped.
-                        Err(_) => continue,
+                    let bytes = &frame_bytes[from as usize..to as usize];
+                    match last_suffix {
+                        Some((held, text)) if held == bytes => Some(text),
+                        _ => match core::str::from_utf8(bytes) {
+                            Ok(text) => {
+                                last_suffix = Some((bytes, text));
+                                Some(text)
+                            }
+                            // The reader validated it; a frame that changed under it is
+                            // dropped.
+                            Err(_) => continue,
+                        },
                     }
                 }
                 None => None,

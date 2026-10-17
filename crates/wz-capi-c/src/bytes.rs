@@ -116,18 +116,42 @@ impl BytesState {
     /// A payload as it arrived: ONE slice, whatever holds it, unless what holds it is a list of
     /// slices kept apart (R3124), whose boundaries are those slices'.
     pub(crate) fn of(payload: Payload) -> Self {
-        let bounds = match &payload {
-            Payload::Shared(bytes) => bytes
-                .slices()
-                .scan(0usize, |end, slice| {
-                    *end += slice.len();
-                    Some(*end)
-                })
-                .collect(),
-            _ if payload.is_empty() => Vec::new(),
-            _ => vec![payload.len()],
-        };
+        let mut bounds = Vec::new();
+        Self::fill_bounds(&payload, &mut bounds);
         Self::from_parts(payload, bounds)
+    }
+
+    /// Replace the payload of a state that is kept from one sample to the next, in place:
+    /// the state [`Self::of`] would build, reusing the boundary list's storage, so a
+    /// subscriber's callback that takes a sample per message allocates none per message.
+    pub(crate) fn reset(&mut self, payload: Payload) {
+        Self::fill_bounds(&payload, &mut self.bounds);
+        self.payload = payload;
+        // The loan of shared memory made for the previous payload is not this one's.
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        {
+            self.shm_loan = std::sync::OnceLock::new();
+        }
+    }
+
+    /// The slice boundaries of `payload`, written into `bounds` (emptied first): one per
+    /// slice kept apart, none for an empty payload, one whole otherwise.
+    fn fill_bounds(payload: &Payload, bounds: &mut Vec<usize>) {
+        bounds.clear();
+        match payload {
+            Payload::Shared(bytes) => {
+                let mut end = 0usize;
+                for slice in bytes.slices() {
+                    end += slice.len();
+                    bounds.push(end);
+                }
+            }
+            _ if payload.is_empty() => {}
+            _ => bounds.push(payload.len()),
+        }
     }
 
     /// A payload with its slice boundaries named.

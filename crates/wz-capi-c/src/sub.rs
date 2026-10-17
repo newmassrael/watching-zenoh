@@ -40,7 +40,7 @@ use crate::abi::{
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-use crate::sample::with_marshalled;
+use crate::sample::MarshalCache;
 use crate::session::session_state;
 
 use wz_capi_core::faces::{SharedSession, SubId};
@@ -83,12 +83,16 @@ unsafe impl Sync for CClosure {}
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {
+    // The marshal the callback hands the C side is kept from one sample to the next and
+    // rewritten in place: a stream's every message would otherwise build a whole marshal
+    // (a keyexpr string, a boundary list, the views over them) and drop it again.
+    let mut kept = MarshalCache::new();
     move |view: &dyn SampleView| {
         let Some(call) = closure.call else {
             return;
         };
         let ctx = closure.context.0;
-        with_marshalled(view, |sample| {
+        kept.with_view(view, |sample| {
             // SAFETY: `call` is the C callback and `sample` is valid for exactly
             // this call. A panic unwinding OUT of the C callback across this
             // `extern "C"` boundary is UB and would tear down the drive thread,

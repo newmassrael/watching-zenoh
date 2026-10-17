@@ -253,6 +253,93 @@ impl SampleMarshal {
     pub(crate) fn as_loaned(&self) -> *const z_loaned_sample_t {
         self as *const SampleMarshal as *const z_loaned_sample_t
     }
+
+    /// Make this marshal the copy of `view`, in place: every field [`Self::new`] and
+    /// [`SampleMeta::from_view`] would set, assigned over the previous sample's, with the
+    /// keyexpr's text and the payload's boundary list reusing their storage, and the
+    /// cached views bound again. The marshal must already sit at its final address (it
+    /// was bound once), which is what a kept, boxed one does.
+    ///
+    /// What a subscriber's callback does for every message is this and not a build and a
+    /// drop of a whole marshal.
+    fn reload(&mut self, view: &dyn SampleView) {
+        self.keyexpr.keyexpr.clear();
+        self.keyexpr.keyexpr.push_str(view.keyexpr());
+        self.keyexpr.mapping = None;
+        self.payload.reset(payload_of(view));
+        self.attachment = view
+            .attachment()
+            .map(|bytes| BytesState::whole(bytes.to_vec()));
+        self.kind = sample_kind_of(view.kind());
+        self.timestamp = view
+            .timestamp()
+            .map(crate::timestamp::z_timestamp_t::from_hint);
+        self.source_info = view.source_info().cloned();
+        self.encoding = match view.encoding() {
+            Some(hint) => EncodingState::from_hint(hint),
+            None => EncodingState::default_encoding(),
+        };
+        self.qos = view.qos();
+        self.reliability = Some(view.reliability());
+        self.bind();
+    }
+}
+
+/// The payload a marshal holds for `view`: a second reference to the storage the session
+/// delivered it in when the view has one, a copy of the bytes when it has not.
+fn payload_of(view: &dyn SampleView) -> Payload {
+    match view.payload_shared() {
+        Some(shared) => Payload::Shared(shared.clone()),
+        None => Payload::Owned(view.payload().to_vec()),
+    }
+}
+
+/// The marshal a subscriber's callback keeps from one sample to the next
+/// ([`SampleMarshal::reload`]), made when the first sample arrives and boxed so the
+/// views it points at itself stay where they were bound.
+///
+/// `Send` because the callback that owns it is: it is touched only from inside that
+/// callback, which the subscriber's deferred cell runs one call at a time, and the
+/// pointers in it aim at the box it lives in.
+pub(crate) struct MarshalCache(Option<Box<SampleMarshal>>);
+
+// SAFETY: see the type's note: one owner, one call at a time, pointers into its own box.
+unsafe impl Send for MarshalCache {}
+
+impl MarshalCache {
+    pub(crate) const fn new() -> Self {
+        Self(None)
+    }
+
+    /// [`with_marshalled`] over the kept marshal. The payload is let go when `body` returns,
+    /// so the frame it shares is not held until the next sample arrives (a frame buffer
+    /// that comes back to its pool only when the last reference drops would otherwise
+    /// stay out of it, for as long as the subscription is quiet).
+    pub(crate) fn with_view<R>(
+        &mut self,
+        view: &dyn SampleView,
+        body: impl FnOnce(*const z_loaned_sample_t) -> R,
+    ) -> R {
+        let marshal = match self.0.as_mut() {
+            Some(kept) => {
+                kept.reload(view);
+                kept
+            }
+            None => {
+                let mut fresh = Box::new(SampleMarshal::new(
+                    view.keyexpr().to_owned(),
+                    payload_of(view),
+                    sample_kind_of(view.kind()),
+                    SampleMeta::from_view(view),
+                ));
+                fresh.bind();
+                self.0.insert(fresh)
+            }
+        };
+        let result = body(marshal.as_loaned());
+        marshal.payload.reset(Payload::Owned(Vec::new()));
+        result
+    }
 }
 
 /// Read the marshal behind a loaned sample.
@@ -581,6 +668,10 @@ pub unsafe extern "C" fn z_keyexpr_as_view_string(
 ///
 /// The marshal is a local, so the borrow it hands out ends when this returns —
 /// which is exactly zenoh-c's contract for a callback argument.
+///
+/// The one-shot form of what [`MarshalCache::with_view`] does with a kept marshal; the tests
+/// use it to read a single sample, and the subscriber's callback uses the kept one.
+#[cfg(test)]
 pub(crate) fn with_marshalled<R>(
     view: &dyn SampleView,
     body: impl FnOnce(*const z_loaned_sample_t) -> R,
@@ -594,13 +685,9 @@ pub(crate) fn with_marshalled<R>(
     // a peer sent, for the length of the callback, and a C program that escapes the
     // sample keeps it. Only a view with no shareable payload (a sample the C side
     // built itself, a test's) is copied.
-    let payload = match view.payload_shared() {
-        Some(shared) => Payload::Shared(shared.clone()),
-        None => Payload::Owned(view.payload().to_vec()),
-    };
     let mut marshal = SampleMarshal::new(
         view.keyexpr().to_owned(),
-        payload,
+        payload_of(view),
         sample_kind_of(view.kind()),
         SampleMeta::from_view(view),
     );
@@ -708,6 +795,48 @@ mod tests {
                 assert_eq!(text, b"demo/capic/att");
             }
         });
+    }
+
+    /// A marshal kept from one sample to the next reads as the sample it was last loaded
+    /// with and as nothing of the one before: the key, the payload, the attachment (present
+    /// for one sample, absent for the next, present again) and the kind each follow the
+    /// sample, through the SAME marshal, which is what the subscriber's callback does.
+    #[test]
+    fn a_kept_marshal_reads_as_the_sample_it_was_last_loaded_with() {
+        let samples = [
+            ("a/one", &b"ONE"[..], Some(&b"ATT"[..])),
+            ("b/two/longer", &b"TWO22"[..], None),
+            ("c", &b""[..], None),
+            ("a/one", &b"ONE"[..], Some(&b"ATT"[..])),
+        ];
+        let mut kept = MarshalCache::new();
+        for (key, payload, attachment) in samples {
+            let view = View {
+                keyexpr: key,
+                payload,
+                kind: SampleKind::Put,
+                attachment,
+            };
+            kept.with_view(&view, |sample| {
+                // SAFETY: `sample` is the kept marshal's borrowed view, live for this call.
+                unsafe {
+                    assert_eq!(to_string(z_sample_payload(sample)), payload, "{key}");
+                    let att = z_sample_attachment(sample);
+                    match attachment {
+                        Some(bytes) => assert_eq!(to_string(att), bytes, "{key}"),
+                        None => assert!(att.is_null(), "{key}: a stale attachment"),
+                    }
+                    let mut view_string = crate::abi::z_view_string_t::null_value();
+                    z_keyexpr_as_view_string(z_sample_keyexpr(sample), &mut view_string);
+                    let loaned = z_view_string_loan(&view_string);
+                    let text = std::slice::from_raw_parts(
+                        z_string_data(loaned) as *const u8,
+                        z_string_len(loaned),
+                    );
+                    assert_eq!(text, key.as_bytes());
+                }
+            });
+        }
     }
 
     /// NULL is the absence signal upstream's `z_sub.c` branches on, so a sample

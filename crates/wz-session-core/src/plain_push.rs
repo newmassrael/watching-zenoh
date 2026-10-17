@@ -90,6 +90,19 @@ fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
 /// decides whether it is one.
 #[inline]
 pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
+    read_plain_put_after(buf, at, None)
+}
+
+/// [`read_plain_put`] for a record that follows one whose suffix bytes were `known_utf8`:
+/// a suffix of the same bytes is not checked again. A stream's records carry one key, and
+/// checking it once per frame rather than once per record is what keeps the check off the
+/// per-message cost; the bytes are equal, so the answer is.
+#[inline]
+fn read_plain_put_after(
+    buf: &[u8],
+    at: usize,
+    known_utf8: Option<&[u8]>,
+) -> Option<(PlainPut, usize)> {
     let mut cursor = at;
     let header = *buf.get(cursor)?;
     cursor += 1;
@@ -102,7 +115,9 @@ pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
         let end = cursor.checked_add(length)?;
         let bytes = buf.get(cursor..end)?;
         // The codec refuses a suffix that is not UTF-8; this reader does not accept it.
-        core::str::from_utf8(bytes).ok()?;
+        if known_utf8 != Some(bytes) {
+            core::str::from_utf8(bytes).ok()?;
+        }
         let range = (u32::try_from(cursor).ok()?, u32::try_from(end).ok()?);
         cursor = end;
         Some(range)
@@ -150,8 +165,14 @@ pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
 pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
     let mut puts = alloc::vec::Vec::new();
     let mut at = 0usize;
+    // The suffix of the record just read, which the next one may repeat.
+    let mut previous: Option<&[u8]> = None;
     while at < buf.len() {
-        let (put, end) = read_plain_put(buf, at)?;
+        let (put, end) = read_plain_put_after(buf, at, previous)?;
+        previous = put
+            .suffix
+            .map(|(from, to)| &buf[from as usize..to as usize])
+            .or(previous);
         if puts.capacity() == 0 {
             // Records of the size the first one is: its bytes, and the header around them.
             let width = (end - at).max(1);
