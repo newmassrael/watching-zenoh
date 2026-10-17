@@ -858,6 +858,11 @@ pub mod push_build;
 #[cfg(feature = "codec-push")]
 pub mod lent_push;
 
+/// A strict, allocation-free reader of the one record a data stream is made of (a `Push`
+/// carrying a `Put` with at most the QoS extension): the key's parts and the payload as
+/// ranges of the buffer, `None` for anything else so the generated codec reads it.
+pub mod plain_push;
+
 /// The payload of a Put body and the one rule that picks between its two wire
 /// layouts (a length and bytes, or the slices a shared-memory Put carries).
 /// `MsgPutOwned` holds the four fields of both layouts; every site that builds
