@@ -8629,6 +8629,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             deadline.set(left);
             answer.room == crate::link::LinkRoom::Congested
         };
+        // A control-plane message (a declaration, an OAM) is a BARRIER between the data staged
+        // before it and the data staged after. With the link's writer pulling what the conduits
+        // stage, each conduit's open frame leaves on its own: a data frame that fills leaves at
+        // once, and a Control frame still open leaves only when the writer next has nothing to
+        // write, so a put on an alias could reach the peer before the declaration of that alias
+        // (measured: zenoh-c logs `Route data with unknown scope` and drops every such put), and
+        // an undeclaration could overtake data that still names the alias. So everything staged
+        // earlier leaves first, here, and the control message leaves right after it is staged
+        // (below). Control messages are rare; the data path never reaches this.
+        #[cfg(feature = "transport-batching")]
+        if priority == Priority::Control && self.tx_conduits.is_auto() {
+            self.flush_open_batch();
+        }
         let push = R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
             #[cfg(feature = "transport-batching")]
             if self.tx_conduits.is_active() {
@@ -8941,7 +8954,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // flush takes that lock.
         #[cfg(feature = "transport-batching")]
         if matches!(push, Ok(PushOutcome::Pushed)) && self.tx_conduits.is_auto() {
-            self.own_link().link_driver().tx_staged();
+            if priority == Priority::Control {
+                // The barrier's second half: the control message does not wait for the writer
+                // to go idle, since the data staged after it is owed to follow it.
+                self.flush_open_batch();
+            } else {
+                self.own_link().link_driver().tx_staged();
+            }
         }
         match push {
             // R2923 — upstream's `handle_push_result`

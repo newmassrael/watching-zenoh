@@ -164,6 +164,7 @@ pub fn outbound_channel_with_capacity(
             receiver_gone: false,
         }),
         ready: Notify::new(),
+        frame_ready: Notify::new(),
         room: RoomSignal::new(),
         idle_hook: Mutex::new(None),
         flush_wanted: AtomicBool::new(false),
@@ -266,6 +267,10 @@ struct Lanes {
     state: Mutex<LaneState>,
     /// Wakes the (single) writer when a frame lands or the last sender goes.
     ready: Notify,
+    /// Wakes the writer ONLY for a frame that landed, which is what it waits for while it
+    /// lets producers finish (see `let_producers_finish`): `ready` also carries the request
+    /// to flush what is staged, which is the very thing that wait is for putting off.
+    frame_ready: Notify,
     /// Wakes senders waiting for room when the writer frees some, or the
     /// queue closes.
     room: RoomSignal,
@@ -286,6 +291,15 @@ struct Lanes {
     staged: AtomicU64,
 }
 
+impl Lanes {
+    /// A frame landed in a lane: wake the writer, and tell a writer that is letting producers
+    /// finish that one did.
+    fn frame_landed(&self) {
+        self.ready.notify_one();
+        self.frame_ready.notify_one();
+    }
+}
+
 /// The writer's idle hook.
 type IdleHook = Arc<dyn Fn() + Send + Sync>;
 
@@ -303,11 +317,6 @@ const COALESCE_PROBE: Duration = Duration::from_micros(3);
 /// them, is not about to stop, and the wait that remains is better spent asleep than on the
 /// core.
 const COALESCE_SPIN_PROBES: u32 = 3;
-
-/// How long the writer sleeps between reads once the producers have proved to be a stream.
-/// The kernel's timer slack makes the real sleep somewhat longer; the total stays inside
-/// [`COALESCE_LIMIT`], which bounds the wait whichever way it is spent.
-const COALESCE_SLEEP: Duration = Duration::from_micros(50);
 
 /// The senders' wait for room: a `Condvar` that is notified only while
 /// someone waits on it.
@@ -947,7 +956,7 @@ impl OutboundTx {
         st.occupied[lane] += frame.len();
         st.lanes[lane].push_back(Entry::Heap(priority, frame));
         drop(st);
-        self.shared.ready.notify_one();
+        self.shared.frame_landed();
         Ok(())
     }
 
@@ -1355,7 +1364,7 @@ impl OutboundTx {
                 };
                 st.occupied[lane] += written;
             }
-            self.shared.ready.notify_one();
+            self.shared.frame_landed();
             return Ok(());
         }
     }
@@ -1493,7 +1502,7 @@ impl OutboundTx {
                 (Ok(()), false)
             }
         };
-        self.shared.ready.notify_one();
+        self.shared.frame_landed();
         if freed {
             self.shared.room.notify_all();
         }
@@ -1524,7 +1533,7 @@ impl OutboundTx {
             goes_home
         };
         // The writer may be waiting on this lend.
-        self.shared.ready.notify_one();
+        self.shared.frame_landed();
         if freed {
             self.shared.room.notify_all();
         }
@@ -1835,30 +1844,31 @@ impl OutboundRx {
     ///
     /// The first reads are a spin and not a sleep, because a sleep cannot be as short as the
     /// few microseconds a lone message may wait: the runtime's timer has a millisecond
-    /// granularity and the thread's is tens of microseconds. A producer that is still
-    /// adding after [`COALESCE_SPIN_PROBES`] reads is a stream, and from there the writer
-    /// sleeps between reads ([`COALESCE_SLEEP`]) instead of keeping a core at full speed for
-    /// as long as the stream lasts. It runs on the writer's own thread, so it delays nothing
-    /// the producers do.
-    fn let_producers_finish(&self) {
-        let started = Instant::now();
+    /// granularity. The spin is [`COALESCE_SPIN_PROBES`] reads, microseconds in all, so it
+    /// holds the thread for no longer than a write does. A producer that is still adding
+    /// after them is a stream, and from there the writer WAITS on the runtime, giving the
+    /// thread back: the `tx` runtime has one worker for every link writer of the process, so
+    /// a writer that held it (spinning, or asleep on the thread) for the length of a stream
+    /// would starve every other link's writer for as long. It wakes when a frame lands
+    /// (answered `true`: the producers are filling frames, and a frame is the work to do now,
+    /// not the partial frames that are still open) or when [`COALESCE_LIMIT`] passes
+    /// (`false`: flush what is open).
+    async fn let_producers_finish(&self) -> bool {
         let mut seen = self.shared.staged.load(Ordering::Relaxed);
-        let mut probes = 0u32;
-        loop {
-            if probes < COALESCE_SPIN_PROBES {
-                let probe = Instant::now();
-                while probe.elapsed() < COALESCE_PROBE {
-                    std::hint::spin_loop();
-                }
-            } else {
-                std::thread::park_timeout(COALESCE_SLEEP);
+        for _ in 0..COALESCE_SPIN_PROBES {
+            let probe = Instant::now();
+            while probe.elapsed() < COALESCE_PROBE {
+                std::hint::spin_loop();
             }
-            probes += 1;
             let now = self.shared.staged.load(Ordering::Relaxed);
-            if now == seen || started.elapsed() >= COALESCE_LIMIT {
-                return;
+            if now == seen {
+                return false;
             }
             seen = now;
+        }
+        tokio::select! {
+            _ = self.shared.frame_ready.notified() => true,
+            _ = tokio::time::sleep(COALESCE_LIMIT) => false,
         }
     }
 
@@ -1871,15 +1881,21 @@ impl OutboundRx {
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
-                let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
-                let (taken, freed) = if packed {
-                    let budget = st.batch_bytes.max(1);
-                    st.take_next_packed(budget)
-                } else {
-                    st.take_next()
+                // The lock is held in a block of its own, so that the guard is plainly gone
+                // before the wait below (a `drop` is not enough for the compiler to see that
+                // the future holds no guard across an await, and the writer's future must be
+                // `Send`).
+                let (taken, freed, finished) = {
+                    let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+                    let (taken, freed) = if packed {
+                        let budget = st.batch_bytes.max(1);
+                        st.take_next_packed(budget)
+                    } else {
+                        st.take_next()
+                    };
+                    let finished = matches!(taken, Taken::Empty) && (st.closed || st.senders == 0);
+                    (taken, freed, finished)
                 };
-                let finished = matches!(taken, Taken::Empty) && (st.closed || st.senders == 0);
-                drop(st);
                 if freed {
                     self.shared.room.notify_all();
                 }
@@ -1902,8 +1918,15 @@ impl OutboundRx {
                             // Cleared before the hook runs, and only a flag that stood means
                             // something was staged since the last flush: no wait for a
                             // writer that is merely going to sleep.
-                            if self.shared.flush_wanted.swap(false, Ordering::SeqCst) {
-                                self.let_producers_finish();
+                            if self.shared.flush_wanted.swap(false, Ordering::SeqCst)
+                                && self.let_producers_finish().await
+                            {
+                                // A frame landed while the producers were still staging: take
+                                // it. The open frames stay open for the next idle, which the
+                                // request raised again will coalesce and then flush.
+                                idle_hook_ran = false;
+                                self.shared.flush_wanted.store(true, Ordering::SeqCst);
+                                continue;
                             }
                             hook();
                             continue;

@@ -198,3 +198,133 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
         );
     }
 }
+
+/// A key declaration reaches the peer BEFORE the puts that name its alias, however fast the
+/// puts fill their frames.
+///
+/// With the link's writer pulling what the conduits stage, each priority's open frame leaves
+/// on its own. A declaration is a Control message, so it sat in the Control conduit's open
+/// frame until the writer next had nothing to write, while a data frame that filled left at
+/// once: kilobyte puts on the alias filled their frame within sixteen messages, and the peer
+/// read them before it knew the alias, dropped them, and (zenoh-c) logged `Route data with
+/// unknown scope`. Measured against a zenoh-c subscriber at 1 KiB; this is the same fault
+/// between two wz sessions, where the peer drops the unresolved Push silently.
+#[cfg(feature = "declare-keyexpr")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn puts_on_a_declared_alias_never_overtake_its_declaration() {
+    const ALIAS_KEY: &str = "demo/alias/overtake";
+    const COUNT: u32 = 600;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let acc_open = async {
+        let (stream, _peer) = listener.accept().await.expect("accept tcp peer");
+        accept_and_open_session_with_qos(
+            DialedLink::Tcp(stream),
+            fixture_params_with_zid(0x02),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established with qos offered")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        connect_and_open_session_with_qos(
+            locator,
+            fixture_params_with_zid(0x01),
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established with qos offered")
+    };
+    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    assert!(opened_init.actions.is_qos(), "initiator negotiated qos on");
+
+    let received = Arc::new(AtomicUsize::new(0));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let received = received.clone();
+        observer.subscribers.register(ALIAS_KEY, move |_sample| {
+            received.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive_acc = drive_session_until_terminal(
+        &mut opened_acc.inbound,
+        &opened_acc.actions,
+        &mut opened_acc.engine,
+        None,
+        &opened_acc.clock,
+        &timeouts,
+        |event| observer.dispatch_event(event),
+    );
+    let init_actions = opened_init.actions.clone();
+    let drive_init = drive_session_until_terminal(
+        &mut opened_init.inbound,
+        &opened_init.actions,
+        &mut opened_init.engine,
+        None,
+        &opened_init.clock,
+        &timeouts,
+        |_| {},
+    );
+
+    let received_probe = received.clone();
+    let scenario = async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::spawn_blocking(move || {
+            // The writer must be BUSY when the declaration is staged: a writer that is idle
+            // flushes the declaration on waking, before any data frame can fill, and the
+            // fault never shows. A stream of kilobyte puts on another key keeps it taking
+            // frames, as it is whenever a face comes up (the declarations are replayed) while
+            // traffic already flows.
+            let warm = vec![0x5au8; 1024];
+            for _ in 0..4000 {
+                init_actions
+                    .send_push_literal_qos("demo/alias/warm", &warm, true, Priority::Data)
+                    .expect("a warm-up put routes");
+            }
+            init_actions
+                .send_declare_keyexpr(7, ALIAS_KEY)
+                .expect("the alias is declared");
+            // Kilobyte puts, back to back, straight after the declaration: sixteen of them
+            // fill a frame, so the first frame leaves long before the writer is idle.
+            let payload = vec![0xa5u8; 1024];
+            for _ in 0..COUNT {
+                init_actions
+                    .send_push_aliased(7, None, &payload, true)
+                    .expect("an aliased put routes");
+            }
+        })
+        .await
+        .expect("the publishing thread");
+        for _ in 0..500 {
+            if received_probe.load(Ordering::SeqCst) >= COUNT as usize {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "only {} of {COUNT} aliased puts arrived: the first frames were read before the \
+             declaration of their alias",
+            received_probe.load(Ordering::SeqCst)
+        );
+    };
+
+    tokio::select! {
+        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
+        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        COUNT as usize,
+        "every aliased put arrived once"
+    );
+}
