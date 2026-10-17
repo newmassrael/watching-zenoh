@@ -967,6 +967,13 @@ fn a_frame_extension_chain_is_owned_only_when_an_owned_record_needs_it() {
 
     let (_, payload) = frame_of(0, 2);
     let expected = decoded_puts(&payload);
+    // A frame ahead of the two measured ones. The subscriber table remembers which subscribers
+    // a key matched, and the FIRST frame to carry a key makes that entry (allocations of its
+    // own). Without this frame the plain one was charged for the entry and the chained one was
+    // not, which put the chained frame BELOW the plain one and failed the control for a
+    // reason that has nothing to do with the chain. Both measured frames now find it made.
+    let warm = frame_wire(pair.next_sn(), &[], &payload);
+    let _ = pair.turn(&warm);
     let plain = frame_wire(pair.next_sn(), &[], &payload);
     let (plain_cost, _, got) = pair.turn(&plain);
     assert_eq!(got, expected);

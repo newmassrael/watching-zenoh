@@ -331,10 +331,14 @@ const SHELL: [&str; 4] = [
 /// What still asks for memory in these windows, and is the next step's: the declarations
 /// the node sends and reads are built and decoded as OWNED messages (`Vec`s of
 /// extensions, `HeapStr` keyexprs), which is the codec owned mirrors of
-/// `wz-session-core` and the SCE runtime under them.
-const MIRRORS: [&str; 3] = [
+/// `wz-session-core` and the SCE runtime under them. The runtime is two crates: the text
+/// and byte containers (`HeapStr`, `HeapBytes`) live in `sce-portable-bytes` since SCE moved
+/// them out of the forge runtime, so a keyexpr's copy is asked for there and no longer in
+/// `forge-runtime` (the same four allocations, under another crate's name).
+const MIRRORS: [&str; 4] = [
     "crates/wz-session-core",
     "backends/rust/forge-runtime",
+    "backends/rust/portable-bytes",
     "out/wz-codecs",
 ];
 
