@@ -31,8 +31,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// The document: admin host on, read permission denied.
@@ -54,6 +54,7 @@ struct Observed {
 /// root from a real pico `z_get`, and return what both ends said.
 fn query_the_admin_root_of_a_peer_given(document: &str) -> Observed {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let z_get = zenoh_pico_cli_binary("z_get");
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());

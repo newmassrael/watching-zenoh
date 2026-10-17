@@ -29,8 +29,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, wz_e2e_silent_peer_binary,
-    PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
+    wz_e2e_silent_peer_binary, PortReservation,
 };
 
 /// The document: a 500 ms default query timeout.
@@ -56,6 +56,7 @@ struct Observed {
 /// leg does not (its FINAL line is its own proof of a live session).
 fn query_a_silent_peer_given(document: &str, require_established: bool) -> Observed {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let silent_peer = wz_e2e_silent_peer_binary();
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());

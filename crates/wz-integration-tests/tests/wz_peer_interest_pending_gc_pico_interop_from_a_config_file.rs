@@ -39,8 +39,8 @@ use std::time::{Duration, Instant};
 
 use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
-    graceful_terminate, listen_port, read_captured, wait_for_exit, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, graceful_terminate, listen_port, read_captured,
+    wait_for_exit, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
 /// The keyexpr pico solicits. RESTRICTED (a literal prefix + `**`), because the
@@ -88,7 +88,9 @@ fn spawn_peer(label: &str, connect: Option<u16>, document: Option<&str>) -> Peer
         file
     });
 
-    let mut cmd = Command::new(wz_ap_demo_binary());
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let mut cmd = Command::new(demo);
     cmd.args(["--peer", "127.0.0.1:0"]);
     let dial;
     if let Some(port) = connect {

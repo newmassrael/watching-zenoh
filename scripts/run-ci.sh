@@ -15695,11 +15695,16 @@ layer_e_ap_demo_round_trip() {
     # every fn in the new file carries this token; Layer E16 owns them.
     # `sce_b6` -- the two link-emitter tests (`link_emitter_b6.rs`) drive the
     # vendored sce-codegen, which this job never builds; Layer B owns them.
+    # R3362 -- `from_a_config_file`, for the tests that feed a key from a `--config`
+    # document and so need a demo built with `zenoh-config`, which this job's default
+    # demo is not (and cannot become: its `inert` tests assert absent features). Layer Z
+    # builds the demo they need and runs `wz_ap_demo_query_timeout_from_a_config_file`;
+    # the other files of the family already carry `wz_peer` or `wz_router`.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
-        --skip fs_shared_dir --skip sce_b6)
+        --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────

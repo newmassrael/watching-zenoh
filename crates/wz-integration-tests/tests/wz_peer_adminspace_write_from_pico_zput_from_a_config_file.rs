@@ -34,8 +34,8 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// The document: the write permission granted.
@@ -60,6 +60,7 @@ fn spawn_write_host_from_document(
     tempfile::NamedTempFile,
 ) {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());
 
