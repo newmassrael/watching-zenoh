@@ -160,7 +160,7 @@ fn query_a_silent_peer_given(document: &str, require_established: bool) -> Obser
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features zenoh-config + wz-e2e-silent-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features zenoh-config + wz-e2e-silent-peer); Layer Z runs via --ignored"]
 fn wz_ap_demo_query_timeout_from_a_config_file_fires_final_callback() {
     let seen = query_a_silent_peer_given(DOC_QUERY_TIMEOUT, false);
 
@@ -195,8 +195,8 @@ fn wz_ap_demo_query_timeout_from_a_config_file_fires_final_callback() {
 /// CONTROL, key absent: no deadline reaches the register call, so the silent
 /// peer leaves the pending entry open and no FINAL line appears.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features zenoh-config + wz-e2e-silent-peer); Layer E runs via --ignored"]
-fn wz_ap_demo_query_without_the_timeout_key_in_a_config_file_never_fires_final() {
+#[ignore = "binary-dep e2e (wz-ap-demo --features zenoh-config + wz-e2e-silent-peer); Layer Z runs via --ignored"]
+fn wz_ap_demo_query_without_the_timeout_key_from_a_config_file_never_fires_final() {
     let seen = query_a_silent_peer_given(DOC_WITHOUT_THE_KEY, true);
 
     assert!(
