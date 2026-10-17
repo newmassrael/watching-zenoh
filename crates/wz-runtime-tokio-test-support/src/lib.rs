@@ -661,9 +661,12 @@ pub fn raise_open_file_limit(wanted: u64) -> u64 {
         }
         // `rlim_t` is as wide as the platform makes it (64 bits here, 32 on some), so the
         // numbers are converted rather than cast: a `wanted` too big for it is the largest it
-        // holds, and a limit is always read back as the 64 bits this function answers in.
-        let wide = |value: libc::rlim_t| u64::try_from(value).unwrap_or(u64::MAX);
-        let narrow = |value: u64| libc::rlim_t::try_from(value).unwrap_or(libc::rlim_t::MAX);
+        // holds, and a limit is always read back as the 64 bits this function answers in. Both
+        // go through `u128`, which every width converts into, so that neither is the
+        // conversion of a type into itself on a platform where the two widths agree.
+        let wide = |value: libc::rlim_t| u64::try_from(u128::from(value)).unwrap_or(u64::MAX);
+        let narrow =
+            |value: u64| libc::rlim_t::try_from(u128::from(value)).unwrap_or(libc::rlim_t::MAX);
         let target = narrow(wanted).min(limit.rlim_max);
         if target > limit.rlim_cur {
             let raised = libc::rlimit {
