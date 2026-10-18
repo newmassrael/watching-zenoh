@@ -275598,6 +275598,42 @@
         "There is no instrument for MCU speed against zenoh-pico; Layer Q measures size, stack and boot only."
       ]
     },
+    "Round 3369": {
+      "decision_summary": "Addition to Round 3368, which could not be edited. The local verify-once run of that round went red in Layer C1bn on the packed-writer burst test, in the build with transport-stats: only 4434 of 4500 puts arrived within the budget. That build has no borrowed QoS send, so the test fell back to a droppable put, and a droppable put that finds no room within the default wait is dropped by policy; the note in the test that its host is not run loaded was wrong, the build host is shared. The test now sets the session's own wait_before_drop_us to a patient value and sends the same put in every build, which also removes the per-build branch. It passes in the stats build on a build host and 15 of 15 times with every core busy; no run of the old code under the same load was made, so the load result shows the repair holds, not that it was needed. NOT claimed: the hosted result of this push.",
+      "changes_bullets": [
+        "wz-runtime-tokio packed_writer_e2e.rs: the burst test sets wait_before_drop_us on its initiator and sends with send_push_literal_qos in every build; put_blocking is gone."
+      ],
+      "verification_bullets": [
+        "Read from the Layer C1bn log of the failing run: 4434 of 4500 arrived, in the transport-stats feature set.",
+        "The burst test with the stats feature set on a build host: pass. The same test binary 15 times with every core of the host busy: 15 pass.",
+        "NOT verified: the old code under the same load, the hosted result of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of the previous push first.",
+        "The long kilobyte stream test uses a Block send; if it ever drops, give it the same patient wait instead."
+      ],
+      "publishable_decision_summary": "Addition to Round 3368, which could not be edited. The local verify-once run of that round went red in Layer C1bn on the packed-writer burst test, in the build with transport-stats: only 4434 of 4500 puts arrived within the budget. That build has no borrowed QoS send, so the test fell back to a droppable put, and a droppable put that finds no room within the default wait is dropped by policy; the note in the test that its host is not run loaded was wrong, the build host is shared. The test now sets the session's own wait_before_drop_us to a patient value and sends the same put in every build, which also removes the per-build branch. It passes in the stats build on a build host and 15 of 15 times with every core busy; no run of the old code under the same load was made, so the load result shows the repair holds, not that it was needed. NOT claimed: the hosted result of this push.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio packed_writer_e2e.rs: the burst test sets wait_before_drop_us on its initiator and sends with send_push_literal_qos in every build; put_blocking is gone."
+      ],
+      "publishable_verification_bullets": [
+        "Read from the Layer C1bn log of the failing run: 4434 of 4500 arrived, in the transport-stats feature set.",
+        "The burst test with the stats feature set on a build host: pass. The same test binary 15 times with every core of the host busy: 15 pass.",
+        "NOT verified: the old code under the same load, the hosted result of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of the previous push first.",
+        "The long kilobyte stream test uses a Block send; if it ever drops, give it the same patient wait instead."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
