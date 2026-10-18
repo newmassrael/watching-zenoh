@@ -275506,6 +275506,50 @@
         "The remaining items of Round 3365 stand, except its note on the round-fed gate."
       ]
     },
+    "Round 3367": {
+      "decision_summary": "The hosted run of Round 3365's push went red in three jobs, and all three are repaired. Layer C1h: the QoS composers of lent_push.rs named a type that only a storage profile builds, and now sit behind it. Layer G: the SCE pin compiled queue modules that need read-modify-write atomics for thumbv6m; SCE repaired it, wz moved the pin to ce73a64c59, and behind it the idle-flush hook and the local-subscriber count of Round 3365 named alloc::sync, absent on that target, so they now sit behind pointer atomics. Layer E: a pico reply test failed in 3 of 200 runs because a one-shot z_get closes the session as it exits and the test's select took the ended drive loop over its poll; it now reads pico's output when the drive ends, and passes 200 of 200. C1h and G are in no verify-once lane, so a push that changes session-core features or the pin runs both itself. NOT claimed: the hosted result of this push, or that the 17 other tests with the same select cannot race.",
+      "changes_bullets": [
+        "wz-session-core: lent_push QoS composers behind the storage profile; set_idle_flush and the local-subscriber count behind pointer atomics.",
+        "vendor/sce pinned at ce73a64c59, THIRD_PARTY.md updated, out/ regenerates byte for byte.",
+        "wz-integration-tests: wz_reply_source_info_to_pico_zget judges the reply by pico's output once the drive ends."
+      ],
+      "verification_bullets": [
+        "Layer C1h and Layer G (all targets, 112 steps) run on a build host: pass.",
+        "The pico reply test run 200 times on a machine holding the pico binaries: 200 pass, where 3 of 200 failed before the change.",
+        "Read from the hosted run 39067118783 job by job: three red jobs as in the decision, the other 24 green.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of this push job by job, Layer P and the job-budget margin first.",
+        "The other 17 tests that select between a drive loop and a poll may race the same way when their pico peer is one-shot; read them before they fail.",
+        "SCE's generator does not yet refuse queue rows a target cannot build; wz selects none."
+      ],
+      "publishable_decision_summary": "The hosted run of Round 3365's push went red in three jobs, and all three are repaired. Layer C1h: the QoS composers of lent_push.rs named a type that only a storage profile builds, and now sit behind it. Layer G: the SCE pin compiled queue modules that need read-modify-write atomics for thumbv6m; SCE repaired it, wz moved the pin to ce73a64c59, and behind it the idle-flush hook and the local-subscriber count of Round 3365 named alloc::sync, absent on that target, so they now sit behind pointer atomics. Layer E: a pico reply test failed in 3 of 200 runs because a one-shot z_get closes the session as it exits and the test's select took the ended drive loop over its poll; it now reads pico's output when the drive ends, and passes 200 of 200. C1h and G are in no verify-once lane, so a push that changes session-core features or the pin runs both itself. NOT claimed: the hosted result of this push, or that the 17 other tests with the same select cannot race.",
+      "publishable_changes_bullets": [
+        "wz-session-core: lent_push QoS composers behind the storage profile; set_idle_flush and the local-subscriber count behind pointer atomics.",
+        "vendor/sce pinned at ce73a64c59, THIRD_PARTY.md updated, out/ regenerates byte for byte.",
+        "wz-integration-tests: wz_reply_source_info_to_pico_zget judges the reply by pico's output once the drive ends."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1h and Layer G (all targets, 112 steps) run on a build host: pass.",
+        "The pico reply test run 200 times on a machine holding the pico binaries: 200 pass, where 3 of 200 failed before the change.",
+        "Read from the hosted run 39067118783 job by job: three red jobs as in the decision, the other 24 green.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of this push job by job, Layer P and the job-budget margin first.",
+        "The other 17 tests that select between a drive loop and a poll may race the same way when their pico peer is one-shot; read them before they fail.",
+        "SCE's generator does not yet refuse queue rows a target cannot build; wz selects none."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
