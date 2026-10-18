@@ -81,7 +81,8 @@ pub struct Addressing {
 /// same two things to each, whatever chip is under it.
 #[cfg(not(feature = "fixed-memory"))]
 trait Port {
-    fn poll(&mut self);
+    /// Frames in; how many frames lwIP took.
+    fn poll(&mut self) -> usize;
     fn service(&mut self, now_ms: u64);
 }
 
@@ -90,8 +91,8 @@ struct MacPort<M: BoardMac>(EthernetIf<M>);
 
 #[cfg(not(feature = "fixed-memory"))]
 impl<M: BoardMac> Port for MacPort<M> {
-    fn poll(&mut self) {
-        self.0.poll();
+    fn poll(&mut self) -> usize {
+        self.0.poll()
     }
 
     fn service(&mut self, now_ms: u64) {
@@ -168,18 +169,20 @@ impl NodeNet for LwipMacNet {
         self.zid.clone()
     }
 
-    fn pump(&mut self) {
+    fn pump(&mut self) -> bool {
         // Frames in on every port, then lwIP's timers, then each MAC's own
         // housekeeping: the order the QEMU firmware's loop has, with the link
         // service added.
+        let mut taken = 0;
         for port in &mut self.ports {
-            port.poll();
+            taken += port.poll();
         }
         self.link.check_timeouts();
         let now_ms = ZephyrClock::<TICK_HZ>.now_us() / 1000;
         for port in &mut self.ports {
             port.service(now_ms);
         }
+        taken > 0
     }
 }
 
@@ -202,15 +205,11 @@ pub(crate) enum PortCell {
 
 #[cfg(feature = "fixed-memory")]
 impl PortCell {
-    fn poll(&mut self) {
+    fn poll(&mut self) -> usize {
         match self {
-            PortCell::Onboard(eth) => {
-                eth.poll();
-            }
+            PortCell::Onboard(eth) => eth.poll(),
             #[cfg(feature = "t1s-lan865x")]
-            PortCell::T1s(eth) => {
-                eth.poll();
-            }
+            PortCell::T1s(eth) => eth.poll(),
         }
     }
 
@@ -342,15 +341,18 @@ impl LwipMacNet {
     }
 
     /// One pass of the stack's own work: frames in on every port, then lwIP's timers,
-    /// then each MAC's own housekeeping, in the heap form's order.
-    pub fn pump(&mut self) {
+    /// then each MAC's own housekeeping, in the heap form's order. Whether a frame came
+    /// in, which is the pass that has work for the node's loop to do next.
+    pub fn pump(&mut self) -> bool {
+        let mut taken = 0;
         for port in self.ports.iter_mut() {
-            port.poll();
+            taken += port.poll();
         }
         self.link.check_timeouts();
         let now_ms = ZephyrClock::<TICK_HZ>.now_us() / 1000;
         for port in self.ports.iter_mut() {
             port.service(now_ms);
         }
+        taken > 0
     }
 }

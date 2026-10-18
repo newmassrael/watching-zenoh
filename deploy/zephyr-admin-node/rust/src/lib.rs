@@ -50,7 +50,7 @@ use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
 use wz::runtime_zephyr::glue::{core_clock_hz, log, log_args};
 #[cfg(not(feature = "fixed-memory"))]
-use wz::runtime_zephyr::glue::{log_line, stack_usage, yield_ms};
+use wz::runtime_zephyr::glue::{log_line, stack_usage, yield_us};
 #[cfg(not(feature = "fixed-memory"))]
 use wz::runtime_zephyr::stack::StackWatch;
 #[cfg(any(not(feature = "fixed-memory"), feature = "mac-cyt4bf"))]
@@ -104,6 +104,23 @@ const STACK_CHECK_MS: u64 = 250;
 /// The board's `CONFIG_SYS_CLOCK_TICKS_PER_SEC`, as this build was configured:
 /// the `ZephyrClock` timebase.
 const TICK_HZ: u32 = wz::runtime_zephyr::tick_hz_from_build!();
+
+/// What an idle pass of the loop sleeps: one kernel tick, and no more than a
+/// millisecond. The kernel rounds a sleep up to its tick, so a board that ticks at
+/// 10 kHz is given its 100 microseconds and a board that ticks at 100 Hz is asked for
+/// the millisecond it has always been asked for (and gets its tick, as before).
+const IDLE_SLEEP_US: i32 = {
+    let tick_us = 1_000_000 / TICK_HZ;
+    if tick_us > 1_000 {
+        1_000
+    } else {
+        tick_us as i32
+    }
+};
+
+/// How many passes in a row may skip the sleep because the one before took a frame
+/// in: a stream of frames cannot keep this thread from ever giving the CPU away.
+const BUSY_PASSES_MAX: u32 = 64;
 
 /// The core clock this image was built for: the board's
 /// `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC`, from which the kernel derives every tick and
@@ -169,8 +186,12 @@ pub trait NodeNet {
 
     /// One pass of the stack's own work. A stack that runs on its own threads
     /// (Zephyr's) has none; one polled from this thread (lwIP) moves its input
-    /// and timers here.
-    fn pump(&mut self) {}
+    /// and timers here. True when a frame came in, so the node has work the next pass
+    /// should not wait for; a stack with no pass of its own answers false and the loop
+    /// gives the CPU away every time, as it always did.
+    fn pump(&mut self) -> bool {
+        false
+    }
 }
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
@@ -264,9 +285,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     // counts: a line when the peak grows, which a lane reads the last of.
     let mut stack = StackWatch::new();
     let mut next_stack_check_ms = 0u64;
+    let mut busy_passes = 0u32;
     loop {
         local.run_until_idle();
-        net.pump();
+        let worked = net.pump();
         let now_ms = clock.now_us() / 1000;
         node.tick(now_ms);
         if now_ms >= next_stack_check_ms {
@@ -294,8 +316,15 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
             }
             log_line(format!("zephyr-admin-node: {reported} session(s)"));
         }
-        // The net stack's own threads, and the tick, need this thread's CPU.
-        yield_ms(1);
+        // The net stack's own threads, and the tick, need this thread's CPU. A pass that
+        // took a frame in has work the next pass does at once (the session reads it and
+        // answers), so it does not wait first, for at most BUSY_PASSES_MAX in a row.
+        if worked && busy_passes < BUSY_PASSES_MAX {
+            busy_passes += 1;
+        } else {
+            busy_passes = 0;
+            yield_us(IDLE_SLEEP_US);
+        }
     }
 }
 

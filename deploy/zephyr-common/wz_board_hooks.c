@@ -36,6 +36,14 @@
 #include <zephyr/net/net_ip.h>
 #endif
 
+#if defined(CONFIG_WZ_ENABLE_CORE_CACHES)
+#include <stdbool.h>
+#include <cmsis_core.h>
+#include <zephyr/cache.h>
+#include <zephyr/init.h>
+#include <zephyr/linker/linker-defs.h>
+#endif
+
 /* ---- Rust -> Zephyr seams (non-variadic, non-inline link targets) ---- */
 
 void wz_log(const char *msg)
@@ -47,6 +55,151 @@ void wz_yield_ms(int ms)
 {
 	k_msleep(ms);
 }
+
+/* The same give-away of the CPU at the kernel's tick, for a board whose tick is finer
+ * than a millisecond. The kernel rounds the sleep up to a whole tick. */
+void wz_yield_us(int us)
+{
+	k_usleep(us);
+}
+
+#if defined(CONFIG_WZ_ENABLE_CORE_CACHES)
+
+/* ---- the core's caches ----
+ *
+ * Zephyr's port of some SoCs leaves the Cortex-M7 caches off although CONFIG_ICACHE and
+ * CONFIG_DCACHE are set: other SoC ports call sys_cache_*_enable() in their soc.c and this
+ * one (Infineon CAT1C) does not. Read from the running T2G node, SCB->CCR had bits 17 and
+ * 16 clear, and the 350 MHz core fetched every instruction from flash.
+ *
+ * The instruction cache is safe to enable. The data cache is safe only if no memory a bus
+ * master reads or writes (the MAC's descriptor rings and buffer pools) is cacheable, and
+ * that is a fact about the MPU's regions, not about a Kconfig symbol: so it is read here,
+ * and the data cache stays off, with the reason on the console, when it does not hold. */
+
+#if defined(CONFIG_NOCACHE_MEMORY) && defined(CONFIG_ARM_MPU)
+
+/* Whether an ARMv7-M MPU region's TEX/C/B bits make its memory non-cacheable (Normal
+ * non-cacheable, Device or Strongly-ordered). Anything this does not recognise as such is
+ * reported cacheable. */
+static bool wz_mpu_attr_noncacheable(uint32_t rasr)
+{
+	uint32_t tex = (rasr >> 19) & 0x7;
+	uint32_t c = (rasr >> 17) & 0x1;
+	uint32_t b = (rasr >> 16) & 0x1;
+
+	if (tex == 0) {
+		return c == 0;                  /* Strongly-ordered or shareable Device */
+	}
+	if (tex == 1 || tex == 2) {
+		return c == 0 && b == 0;        /* Normal non-cacheable, non-shareable Device */
+	}
+	if (tex & 0x4) {
+		/* Outer attribute TEX[1:0], inner attribute C:B, both 0 = non-cacheable. */
+		return (tex & 0x3) == 0 && c == 0 && b == 0;
+	}
+	return false;
+}
+
+/* Check that every cache line of [start, end) lies in an enabled MPU region whose
+ * attributes are non-cacheable, the highest-numbered region covering a line deciding as the
+ * hardware does. On failure returns false with the address and the reason. */
+static bool wz_range_noncacheable(uintptr_t start, uintptr_t end, uintptr_t *bad_at,
+				  const char **why)
+{
+	uint32_t regions = (MPU->TYPE >> 8) & 0xFF;
+	uint32_t rbar[32];
+	uint32_t rasr[32];
+	unsigned int key = irq_lock();
+
+	if (regions > 32) {
+		regions = 32;
+	}
+	for (uint32_t i = 0; i < regions; i++) {
+		MPU->RNR = i;
+		rbar[i] = MPU->RBAR;
+		rasr[i] = MPU->RASR;
+	}
+	irq_unlock(key);
+
+	if (!(MPU->CTRL & MPU_CTRL_ENABLE_Msk)) {
+		*bad_at = start;
+		*why = "the MPU is off, so the default map applies and SRAM is cacheable";
+		return false;
+	}
+	for (uintptr_t a = start & ~(uintptr_t)31; a < end; a += 32) {
+		int hit = -1;
+
+		for (uint32_t i = 0; i < regions; i++) {
+			uint32_t size_log;
+			uint64_t size;
+			uint64_t off;
+
+			if (!(rasr[i] & 1)) {
+				continue;
+			}
+			size_log = ((rasr[i] >> 1) & 0x1F) + 1;
+			size = (uint64_t)1 << size_log;
+			off = (uint64_t)a - (uint64_t)(rbar[i] & ~(uint32_t)0x1F);
+			if (off >= size) {
+				continue;
+			}
+			if (size_log >= 8 &&
+			    ((rasr[i] >> 8) & (1u << (off >> (size_log - 3)))) != 0) {
+				continue;       /* a disabled subregion */
+			}
+			hit = (int)i;
+		}
+		if (hit < 0) {
+			*bad_at = a;
+			*why = "no MPU region covers it, so the default map applies and SRAM is cacheable";
+			return false;
+		}
+		if (!wz_mpu_attr_noncacheable(rasr[hit])) {
+			*bad_at = a;
+			*why = "the MPU region covering it is cacheable";
+			return false;
+		}
+	}
+	return true;
+}
+
+#endif /* CONFIG_NOCACHE_MEMORY && CONFIG_ARM_MPU */
+
+static int wz_enable_core_caches(void)
+{
+	const char *data = "data OFF: this build has no non-cacheable section or no MPU";
+
+#if defined(CONFIG_ICACHE)
+	sys_cache_instr_enable();
+#endif
+#if defined(CONFIG_DCACHE) && defined(CONFIG_NOCACHE_MEMORY) && defined(CONFIG_ARM_MPU)
+	{
+		uintptr_t start = (uintptr_t)_nocache_ram_start;
+		uintptr_t end = start + (uintptr_t)_nocache_ram_size;
+		uintptr_t bad = 0;
+		const char *why = "";
+
+		if (wz_range_noncacheable(start, end, &bad, &why)) {
+			sys_cache_data_enable();
+			printk("wz: caches: instruction on, data on; the non-cacheable section "
+			       "0x%08x to 0x%08x is non-cacheable in the MPU\n",
+			       (unsigned int)start, (unsigned int)end);
+			return 0;
+		}
+		printk("wz: caches: instruction on, data OFF: 0x%08x of the non-cacheable "
+		       "section: %s\n", (unsigned int)bad, why);
+		return 0;
+	}
+#endif
+	printk("wz: caches: instruction on, %s\n", data);
+	return 0;
+}
+
+/* After the MPU's own initialisation, which is what makes the section non-cacheable. */
+SYS_INIT(wz_enable_core_caches, PRE_KERNEL_2, 0);
+
+#endif /* CONFIG_WZ_ENABLE_CORE_CACHES */
 
 /* Wait about `us` microseconds. A wait the kernel can sleep through (a tick or
  * more) gives the CPU away; a shorter one is a busy wait, because a sleep would

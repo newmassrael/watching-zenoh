@@ -6,6 +6,25 @@
 
 menu "wz Zephyr profile"
 
+config WZ_ENABLE_CORE_CACHES
+	bool "Enable the core's instruction and data caches at boot"
+	depends on CACHE_MANAGEMENT
+	help
+	  Zephyr's port of some SoCs never enables the Cortex-M7's caches although
+	  CONFIG_ICACHE and CONFIG_DCACHE are set (the Infineon CAT1C port is one: read
+	  from a running T2G node, SCB->CCR had both cache bits clear, and the core ran
+	  every instruction from flash without a cache). Select this on a board whose
+	  port is such a one.
+
+	  The instruction cache is enabled. The data cache is enabled only when the
+	  build has a non-cacheable section (CONFIG_NOCACHE_MEMORY) and the MPU marks
+	  every line of it non-cacheable, which the image reads from the MPU's own
+	  registers at boot, after the MPU is set up: the MAC's descriptor rings and
+	  buffer pools live in that section, and a bus master reading or writing
+	  cacheable memory corrupts frames without any other symptom. When that does
+	  not hold the data cache stays off and the console says why, in the line
+	  `wz: caches: ...`.
+
 config WZ_ENTROPY_BOARD_HOOK
 	bool "The board supplies its own entropy source"
 	help

@@ -39,7 +39,7 @@ use wz::link_lwip::LwipLink;
 use wz::runtime_coop::session_drive::PumpSlots;
 use wz::runtime_coop::session_runtime::SessionHandle;
 use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
-use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_ms};
+use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz::session_lwip::admin_fixed::{
@@ -361,9 +361,10 @@ pub fn run(mut net: LwipMacNet) -> i32 {
     // counts: a line when the peak grows, which a lane reads the last of.
     let mut stack = StackWatch::new();
     let mut next_stack_check_ms = 0u64;
+    let mut busy_passes = 0u32;
     loop {
         local.run_until_idle();
-        net.pump();
+        let worked = net.pump();
         let now_ms = clock.now_us() / 1000;
         node.tick(now_ms);
         if now_ms >= next_stack_check_ms {
@@ -389,7 +390,14 @@ pub fn run(mut net: LwipMacNet) -> i32 {
             reported = sessions;
             log_args(format_args!("zephyr-admin-node: {reported} session(s)"));
         }
-        // The net stack's own threads, and the tick, need this thread's CPU.
-        yield_ms(1);
+        // The net stack's own threads, and the tick, need this thread's CPU. A pass that
+        // took a frame in has work the next pass does at once, so it does not wait first,
+        // for at most BUSY_PASSES_MAX in a row (see the heap node's loop).
+        if worked && busy_passes < crate::BUSY_PASSES_MAX {
+            busy_passes += 1;
+        } else {
+            busy_passes = 0;
+            yield_us(crate::IDLE_SLEEP_US);
+        }
     }
 }

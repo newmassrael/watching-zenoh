@@ -24,6 +24,8 @@ extern "C" {
     fn wz_log(msg: *const c_char);
     /// `k_msleep(ms)`, wrapped C-side because it is `static inline`.
     fn wz_yield_ms(ms: i32);
+    /// `k_usleep(us)`, wrapped C-side.
+    fn wz_yield_us(us: i32);
     /// Wait about `us` microseconds: `k_busy_wait` for a short wait, `k_msleep`
     /// once the wait is long enough for the thread to give the CPU away.
     fn wz_delay_us(us: u32);
@@ -118,6 +120,15 @@ pub fn log_args(args: core::fmt::Arguments<'_>) {
 pub fn yield_ms(ms: i32) {
     // SAFETY: the board's `k_msleep` seam; blocks this thread, no preconditions.
     unsafe { wz_yield_ms(ms) };
+}
+
+/// Sleep this thread for `us` microseconds, which the kernel rounds up to its tick:
+/// the cooperative loop's give-away of the CPU at the grain of a board whose tick is
+/// finer than a millisecond, where [`yield_ms`] would idle a hundred ticks.
+#[inline]
+pub fn yield_us(us: i32) {
+    // SAFETY: the board's `k_usleep` seam; blocks this thread, no preconditions.
+    unsafe { wz_yield_us(us) };
 }
 
 /// Wait about `us` microseconds. A driver polling a peripheral that answers in
