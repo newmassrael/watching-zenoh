@@ -120,6 +120,17 @@ I6. Each invariant above is held by a test that can fail for exactly one reason 
 - A cached route is attached to the key it was computed for. A declaration for key K marks stale the
   cached keys that intersect K, found through the same index. Nothing else is recomputed.
 - The resource test (`names_a_resource`) becomes a lookup in the index rather than a scan.
+- Landed for the client subscriptions, which are the population that grows: `ClientSubStore` indexes
+  them by key (literal keys by hash, keys with a wildcard kept apart), is writable only through methods
+  that record the key they moved, and keeps a bounded log of those keys under the version each produced.
+  `RouteCache::refresh` reads that log and retires the routes the changed keys intersect; a topology
+  move, or a reader the log no longer reaches, retires everything as before. The mesh tables
+  (`LinkstatepeerInterest`) keep the whole-cache invalidation and the linear scan: they hold the
+  router-tier and peer-tier faces, a handful, and their routes also depend on the topology graph, so
+  per-key retirement there needs the graph's own change record first.
+- Not landed: the wildcard trie. A literal key's route is a lookup plus a scan of the wildcard
+  subscriptions only; a trie matters when there are many wildcard subscriptions, which section 7 says
+  to wait for a measurement of.
 
 ### 4.3 Control plane before data (I4)
 
