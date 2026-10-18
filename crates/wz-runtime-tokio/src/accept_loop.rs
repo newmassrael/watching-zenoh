@@ -1473,10 +1473,15 @@ fn schedule_multilink_redial(
 /// [`OpenedSession::drain_to_close`] consumes `opened` — keeps the drop-order +
 /// bounded writer-drain a single typed primitive (the R292 drain contract), not
 /// a hand-ordered sequence re-copied here.
-async fn drive_face(
+///
+/// Generic over the forwarder (`?Sized`, so `&dyn FaceForwarder` still fits) because
+/// the drive of a SPAWNED face holds the forwarder as `dyn FaceForwarder + Send +
+/// Sync`, and the future is `Send` only if the reference it holds is to a `Sync`
+/// type, which a bare `dyn FaceForwarder` is not.
+async fn drive_face<F: FaceForwarder + ?Sized>(
     face: Face,
     mut opened: OpenedSession,
-    forwarder: &dyn FaceForwarder,
+    forwarder: &F,
 ) -> (Face, DriverOutcome) {
     let timeouts = SessionTimeouts::spec_defaults();
     // R311y296 — the forwarder's per-face deadline joins this face's wake
@@ -1556,6 +1561,73 @@ async fn drive_joined_face(
 async fn drain_rejected_face(face: Face, opened: OpenedSession) -> (Face, DriverOutcome) {
     opened.drain_to_close().await;
     (face, DriverOutcome::Terminated)
+}
+
+/// What turns a face's drive into a task of its own: the hook a node uses to put its own
+/// condition around every spawned drive (the C ABI wraps it in its read gate, so a stopped
+/// read task stops a face as it stops the node).
+///
+/// A face's drive normally runs inside the accept loop's single task (see the module
+/// comment). For a node whose forwarder is `Send + Sync` the loop can instead spawn it on
+/// the runtime ([`SpawnedFaces`]), so N links are driven by N tasks and the node's capacity
+/// is not one core.
+pub trait FaceExecutor: Send + Sync {
+    /// The drive of one face, wrapped as this executor wants it polled. The default runs
+    /// it as it is.
+    fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
+        drive
+    }
+}
+
+/// The boxed drive of a spawned face: `Send` (it runs on a worker thread) and `'static`
+/// (it owns its forwarder handle and its session).
+pub type SpawnedDrive = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + Send + 'static>>;
+
+/// The [`FaceExecutor`] that wraps nothing.
+pub struct PlainFaceExecutor;
+
+impl FaceExecutor for PlainFaceExecutor {}
+
+/// The two things a loop needs to spawn faces instead of holding their drives itself.
+pub struct SpawnedFaces {
+    /// The forwarder, shared with every spawned drive. `Sync` because the drives call it
+    /// from different threads at once.
+    pub forwarder: Arc<dyn FaceForwarder + Send + Sync>,
+    /// How each drive is wrapped before it is spawned.
+    pub executor: Arc<dyn FaceExecutor>,
+}
+
+/// [`drive_face`] owning its forwarder handle, as a spawned drive must.
+async fn drive_face_shared(
+    face: Face,
+    opened: OpenedSession,
+    forwarder: Arc<dyn FaceForwarder + Send + Sync>,
+) -> (Face, DriverOutcome) {
+    drive_face(face, opened, &*forwarder).await
+}
+
+/// The next spawned drive to finish, with the face it drove. A drive that PANICKED or was
+/// cancelled has no result to hand back, so its face comes from `faces` (kept by task id
+/// when it was spawned) and its outcome is `Terminated`: the face is gone either way, and
+/// the loop's teardown of a gone face is the same. `None` when nothing is spawned.
+async fn next_spawned(
+    drives: &mut tokio::task::JoinSet<(Face, DriverOutcome)>,
+    faces: &mut BTreeMap<tokio::task::Id, Face>,
+) -> Option<(Face, DriverOutcome)> {
+    match drives.join_next_with_id().await? {
+        Ok((task, driven)) => {
+            faces.remove(&task);
+            Some(driven)
+        }
+        Err(failed) => {
+            let face = faces.remove(&failed.id())?;
+            log::error!(
+                "the drive of face {} ended without a result: {failed}",
+                face.id.0
+            );
+            Some((face, DriverOutcome::Terminated))
+        }
+    }
 }
 
 /// One [`select!`](tokio::select) outcome, decoded so the borrow of each
@@ -2148,6 +2220,7 @@ async fn face_drive_loop<S, F>(
     shutdown: S,
     mut on_event: F,
     forwarder: &dyn FaceForwarder,
+    spawned: Option<SpawnedFaces>,
 ) -> AcceptLoopSummary
 where
     S: Future<Output = ()>,
@@ -2305,6 +2378,12 @@ where
     let mut driving = FuturesUnordered::new();
     #[cfg(feature = "transport-multilink")]
     let mut driving: FuturesUnordered<DriveFuture<'_>> = FuturesUnordered::new();
+    // The drives of faces SPAWNED on the runtime (`spawned` is `Some`), and the face each
+    // task drives, by task id, for the one whose task ends without a result. Empty in a
+    // loop that holds its drives itself.
+    let mut spawned_drives: tokio::task::JoinSet<(Face, DriverOutcome)> =
+        tokio::task::JoinSet::new();
+    let mut spawned_faces: BTreeMap<tokio::task::Id, Face> = BTreeMap::new();
 
     // Arm the forwarder's periodic tick (e.g. the linkstate peer's self-flood
     // cadence — its protocol obligation, now driven by the loop so EVERY caller
@@ -2379,6 +2458,9 @@ where
             _ = &mut shutdown => Step::Shutdown,
             Some(opened) = opening.next() => Step::Opened(Box::new(opened)),
             Some(driven) = driving.next() => Step::Driven(driven),
+            Some(driven) = next_spawned(&mut spawned_drives, &mut spawned_faces) => {
+                Step::Driven(driven)
+            }
             // The fast, non-blocking accept: one raw connection per iteration
             // (ws/tls SERVER handshake deferred to the spawned open future, so a
             // slow handshake never stalls this arm). R311y376 (Stage 3) — was
@@ -2657,11 +2739,26 @@ where
                         // an aggregating build so it shares `driving` with the
                         // joined / rejected drives; unboxed + byte-identical
                         // otherwise.
-                        #[cfg(not(feature = "transport-multilink"))]
-                        driving.push(drive_face(face, opened, forwarder));
-                        #[cfg(feature = "transport-multilink")]
-                        driving
-                            .push(Box::pin(drive_face(face, opened, forwarder)) as DriveFuture<'_>);
+                        //
+                        // A node whose forwarder is `Send + Sync` has the drive spawned
+                        // on the runtime instead, wrapped as its executor wants it
+                        // polled: this face is then driven by a task of its own.
+                        if let Some(spawn) = &spawned {
+                            let drive = spawn.executor.wrap(Box::pin(drive_face_shared(
+                                face.clone(),
+                                opened,
+                                Arc::clone(&spawn.forwarder),
+                            )));
+                            let task = spawned_drives.spawn(drive);
+                            spawned_faces.insert(task.id(), face);
+                        } else {
+                            #[cfg(not(feature = "transport-multilink"))]
+                            driving.push(drive_face(face, opened, forwarder));
+                            #[cfg(feature = "transport-multilink")]
+                            driving
+                                .push(Box::pin(drive_face(face, opened, forwarder))
+                                    as DriveFuture<'_>);
+                        }
                     }
                     Err(cause) => {
                         // R2951 — an accept that never opened leaves no mark behind.
@@ -3194,6 +3291,9 @@ where
     // mark.
     drop(opening);
     drop(driving);
+    // Spawned drives are cancelled AND awaited: a task mid-poll finishes that poll on its
+    // worker, so without the wait a callback could still be running after this returns.
+    spawned_drives.shutdown().await;
     faces.clear();
     summary
 }
@@ -3270,59 +3370,113 @@ where
     F: FnMut(&AcceptEvent),
 {
     face_drive_loop(
-        FaceSources {
-            // accept-only: ONE listener, the one this entry point binds. A node
-            // that binds a whole `listen/endpoints` list reaches `peer_loop`,
-            // which is where R2099 threads the multi-bind.
-            listeners: vec![listener],
-            dial_targets: Vec::new(),
-            // accept-only: this loop opens no outbound link at all, so there is no
-            // dial to carry client trust material for. The default is the honest
-            // value, not a placeholder: it means "no tls / quic client config",
-            // which is exactly true here.
-            dial_config: Arc::new(DialConfig::default()),
-            // accept-only: no static dials and no autoconnect dial-intent stream.
-            dial_intents: None,
-            // accept-only: no multicast ingress plane.
-            mcast_ingress: None,
-            mcast_members: None,
-            mcast_group_subs: None,
-            // accept-only: no runtime connect-list reconcile.
-            reconcile: None,
-            // accept-only: single-link (a multilink node aggregates via `peer_loop`,
-            // the full mesh entry that carries `max_links`); byte-identical to today.
-            #[cfg(feature = "transport-multilink")]
-            max_links: 1,
-            // R2758 — UPSTREAM'S DEFAULT, not "unbounded".
-            //
-            // This entry carries no configuration of its own (see the offer
-            // below), and the honest reading of that is upstream's shipped
-            // value rather than the absence of a bound: zenoh has no unbounded
-            // mode — `unicast.max_sessions` defaults to 1000 and the manager
-            // always compares against it. A caller that needs a different bound
-            // reaches `peer_loop`, which takes the configured `FaceSources`.
-            max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
-            // The caller's: [`accept_loop`] passes the zero offer, an accept-only
-            // node with a configuration of its own passes that configuration's.
-            // A mesh node reaches `peer_loop`, which is where R2095 threads the
-            // configured offer for dials as well.
-            offer,
-            // accept-only: the loop schedules no outbound dial at all, so no
-            // re-dial either. Carried because the field is unconditional; never
-            // read on this path.
-            retry: RetryPolicy::ZENOH_DEFAULT,
-            // accept-only: this entry carries no configuration of its own, and a
-            // node that keeps a stats registry reaches `peer_loop`.
-            stats: None,
-        },
+        accept_only_sources(listener, offer),
         params,
         clock,
         tick_interval_ms,
         shutdown,
         on_event,
         forwarder,
+        None,
     )
     .await
+}
+
+/// [`accept_loop_offering`] with each accepted face's drive SPAWNED on the runtime, one task
+/// per face, instead of held inside the loop's single task: the entry of a node whose
+/// forwarder is `Send + Sync`.
+///
+/// The accept, the handshakes, the `max_sessions` bound, the zid dedup and every forwarder
+/// hook that is not the per-event one still run on THIS task, which is the control plane;
+/// what moves to the workers is the drive of each face, which is the data plane. So N peers
+/// are read, decoded and delivered by up to N threads, and a callback that does real work on
+/// one link no longer holds up the others. `executor` wraps each spawned drive (the C ABI
+/// puts its read gate around it).
+///
+/// The forwarder is called from several threads at once: an implementation keeps its state
+/// behind locks, as the C ABI's does (a registry of `Arc`s and mutexes). The routing
+/// forwarders keep theirs in `Rc`/`RefCell` and so reach only [`accept_loop_offering`].
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_loop_offering_spawned<S, F>(
+    listener: BoundListener,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    shutdown: S,
+    on_event: F,
+    forwarder: Arc<dyn FaceForwarder + Send + Sync>,
+    executor: Arc<dyn FaceExecutor>,
+) -> AcceptLoopSummary
+where
+    S: Future<Output = ()>,
+    F: FnMut(&AcceptEvent),
+{
+    let control: &dyn FaceForwarder = &*forwarder;
+    face_drive_loop(
+        accept_only_sources(listener, offer),
+        params,
+        clock,
+        tick_interval_ms,
+        shutdown,
+        on_event,
+        control,
+        Some(SpawnedFaces {
+            forwarder: Arc::clone(&forwarder),
+            executor,
+        }),
+    )
+    .await
+}
+
+/// What an accept-only node's loop is built from: the one listener it was handed, and the
+/// defaults of everything an accept-only node does not do.
+fn accept_only_sources(listener: BoundListener, offer: SessionOffer) -> FaceSources {
+    FaceSources {
+        // accept-only: ONE listener, the one this entry point binds. A node
+        // that binds a whole `listen/endpoints` list reaches `peer_loop`,
+        // which is where R2099 threads the multi-bind.
+        listeners: vec![listener],
+        dial_targets: Vec::new(),
+        // accept-only: this loop opens no outbound link at all, so there is no
+        // dial to carry client trust material for. The default is the honest
+        // value, not a placeholder: it means "no tls / quic client config",
+        // which is exactly true here.
+        dial_config: Arc::new(DialConfig::default()),
+        // accept-only: no static dials and no autoconnect dial-intent stream.
+        dial_intents: None,
+        // accept-only: no multicast ingress plane.
+        mcast_ingress: None,
+        mcast_members: None,
+        mcast_group_subs: None,
+        // accept-only: no runtime connect-list reconcile.
+        reconcile: None,
+        // accept-only: single-link (a multilink node aggregates via `peer_loop`,
+        // the full mesh entry that carries `max_links`); byte-identical to today.
+        #[cfg(feature = "transport-multilink")]
+        max_links: 1,
+        // R2758 — UPSTREAM'S DEFAULT, not "unbounded".
+        //
+        // This entry carries no configuration of its own (see the offer
+        // below), and the honest reading of that is upstream's shipped
+        // value rather than the absence of a bound: zenoh has no unbounded
+        // mode — `unicast.max_sessions` defaults to 1000 and the manager
+        // always compares against it. A caller that needs a different bound
+        // reaches `peer_loop`, which takes the configured `FaceSources`.
+        max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
+        // The caller's: [`accept_loop`] passes the zero offer, an accept-only
+        // node with a configuration of its own passes that configuration's.
+        // A mesh node reaches `peer_loop`, which is where R2095 threads the
+        // configured offer for dials as well.
+        offer,
+        // accept-only: the loop schedules no outbound dial at all, so no
+        // re-dial either. Carried because the field is unconditional; never
+        // read on this path.
+        retry: RetryPolicy::ZENOH_DEFAULT,
+        // accept-only: this entry carries no configuration of its own, and a
+        // node that keeps a stats registry reaches `peer_loop`.
+        stats: None,
+    }
 }
 
 /// Bind-once, dial-configured-peers, accept-inbound, hold-all: the peer-mesh
@@ -3379,6 +3533,7 @@ where
         shutdown,
         on_event,
         forwarder,
+        None,
     )
     .await
 }
@@ -4201,6 +4356,185 @@ mod tests {
         assert_eq!(
             summary.peak_concurrent, N,
             "held all N faces simultaneously (high-water mark)"
+        );
+    }
+
+    /// A forwarder that measures how many of its per-event calls are inside it at once and
+    /// which threads they run on. `Send + Sync` (atomics and a mutex), so the spawned entry
+    /// takes it; each call holds for a few milliseconds, so two calls overlap if and only
+    /// if two faces' drives run at the same time.
+    #[cfg(feature = "codec-push")]
+    #[derive(Default)]
+    struct OverlapProbe {
+        inside: AtomicUsize,
+        deepest: AtomicUsize,
+        calls: AtomicUsize,
+        threads: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+    }
+
+    #[cfg(feature = "codec-push")]
+    impl FaceForwarder for OverlapProbe {
+        fn register(&self, _id: FaceId, _actions: &Arc<SessionLinkActions>) {}
+        fn deregister(&self, _id: FaceId) {}
+        fn forward(&self, _id: FaceId, event: IterationEvent<'_>) {
+            if !matches!(event, IterationEvent::Poll(_)) {
+                return;
+            }
+            self.calls.fetch_add(1, SeqCst);
+            let now = self.inside.fetch_add(1, SeqCst) + 1;
+            self.deepest.fetch_max(now, SeqCst);
+            self.threads
+                .lock()
+                .expect("probe threads")
+                .insert(std::thread::current().id());
+            std::thread::sleep(Duration::from_millis(3));
+            self.inside.fetch_sub(1, SeqCst);
+        }
+    }
+
+    /// An initiator that dials, opens to Established, then PUTS `messages` small messages
+    /// a millisecond apart, so the acceptor's face for it has frames to drive.
+    #[cfg(feature = "codec-push")]
+    async fn chatty_initiator(
+        addr: SocketAddr,
+        zid: u8,
+        messages: usize,
+        mut go: watch::Receiver<bool>,
+    ) {
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![zid; 4];
+        let mut opened = initiate_and_open_session(
+            DialedLink::Tcp(stream),
+            params,
+            TokioTime::new(),
+            Some(10_000),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established");
+        let actions = opened.actions.clone();
+        let sender = async move {
+            for _ in 0..messages {
+                actions
+                    .send_push_literal("demo/overlap", b"x", true)
+                    .expect("a put routes");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            std::future::pending::<()>().await;
+        };
+        let timeouts = SessionTimeouts::spec_defaults();
+        tokio::select! {
+            _ = go.wait_for(|&v| v) => {}
+            _ = sender => {}
+            _ = drive_session_until_terminal(
+                &mut opened.inbound, &opened.actions, &mut opened.engine,
+                None, &opened.clock, &timeouts, |_e| {},
+            ) => {}
+        }
+        opened.drain_to_close().await;
+    }
+
+    /// Four chatty peers against an accept-only node whose forwarder is the
+    /// [`OverlapProbe`], once with each face's drive SPAWNED and once with the drives held
+    /// in the loop's own task. Returns the loop's summary and the probe.
+    #[cfg(feature = "codec-push")]
+    async fn overlap_run(spawned: bool) -> (AcceptLoopSummary, Arc<OverlapProbe>) {
+        const N: usize = 4;
+        let (listener, addr) = bind_loopback().await;
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let up = up.clone();
+            move |event: &AcceptEvent| {
+                if let AcceptEvent::FaceUp(_) = event {
+                    up.fetch_add(1, SeqCst);
+                }
+            }
+        };
+        let probe = Arc::new(OverlapProbe::default());
+        let acceptor = async {
+            if spawned {
+                accept_loop_offering_spawned(
+                    listener,
+                    acceptor_params(),
+                    SessionOffer::universal(),
+                    TokioTime::new(),
+                    DEFAULT_OPEN_TICK_MS,
+                    shutdown_on(go_rx.clone()),
+                    on_event,
+                    probe.clone(),
+                    Arc::new(PlainFaceExecutor),
+                )
+                .await
+            } else {
+                accept_loop_offering(
+                    listener,
+                    acceptor_params(),
+                    SessionOffer::universal(),
+                    TokioTime::new(),
+                    DEFAULT_OPEN_TICK_MS,
+                    shutdown_on(go_rx.clone()),
+                    on_event,
+                    &*probe,
+                )
+                .await
+            }
+        };
+        let initiators = (0..N).map(|i| chatty_initiator(addr, (i as u8) + 1, 60, go_rx.clone()));
+        // Let the traffic run once every face is up, then end the loop and the peers.
+        let flipper = {
+            let up = up.clone();
+            async move {
+                while up.load(SeqCst) < N {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let _ = go_tx.send(true);
+            }
+        };
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _, _) = tokio::join!(acceptor, join_all(initiators), flipper);
+            summary
+        })
+        .await
+        .expect("the run completes within 20s");
+        (summary, probe)
+    }
+
+    /// With each face's drive spawned, the drives of four peers run AT THE SAME TIME, on
+    /// more than one thread: the forwarder's per-event calls overlap. This is what a node
+    /// of one core cannot do.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn spawned_faces_are_driven_in_parallel() {
+        let (summary, probe) = overlap_run(true).await;
+        assert_eq!(summary.established, 4, "all four peers are held");
+        let calls = probe.calls.load(SeqCst);
+        assert!(calls > 20, "the probe saw the traffic ({calls} calls)");
+        let deepest = probe.deepest.load(SeqCst);
+        assert!(
+            deepest >= 2,
+            "two faces' drives were inside the forwarder at once, deepest was {deepest}"
+        );
+        let threads = probe.threads.lock().expect("probe threads").len();
+        assert!(threads >= 2, "the drives ran on {threads} thread(s)");
+    }
+
+    /// The control of the test above: the same four peers with the drives held in the loop's
+    /// own task are driven ONE AT A TIME, so the calls never overlap. It is what makes the
+    /// parallel result a property of the spawn and not of the probe or the traffic.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn held_faces_are_driven_one_at_a_time() {
+        let (summary, probe) = overlap_run(false).await;
+        assert_eq!(summary.established, 4, "all four peers are held");
+        let calls = probe.calls.load(SeqCst);
+        assert!(calls > 20, "the probe saw the traffic ({calls} calls)");
+        assert_eq!(
+            probe.deepest.load(SeqCst),
+            1,
+            "a loop that holds the drives itself never has two inside the forwarder"
         );
     }
 
