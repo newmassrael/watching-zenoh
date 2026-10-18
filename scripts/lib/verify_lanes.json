@@ -48,6 +48,12 @@
       "why": "reassembly and fragmentation legs, each with a pinned test count"
     },
     {
+      "id": "C1bb",
+      "layer": "C1bb",
+      "triggers": ["crates/wz-session-core/**", "crates/wz-runtime-tokio/**"],
+      "why": "the packed-writer stream tests: ordering of control against data, and a stream that must not stall (hosted red, Round 3370)"
+    },
+    {
       "id": "C1h",
       "layer": "C1h",
       "triggers": ["crates/wz-session-core/**"],
