@@ -670,6 +670,34 @@ pub fn stream_outbound_channel() -> (OutboundTx, crate::writer_queue::OutboundRx
     }
 }
 
+/// A duplicate of a TCP stream's socket that a sender writes through without waiting
+/// ([`crate::writer_queue::InlineWrite`]). A duplicate shares the socket's open file
+/// description, so it is non-blocking as the socket is (tokio made it so), and what is
+/// written through it and through the stream's own write half is one byte stream, ordered
+/// by the role the queue gives whichever thread writes.
+#[cfg(unix)]
+struct DuplicateSocket(std::net::TcpStream);
+
+#[cfg(unix)]
+impl crate::writer_queue::InlineWrite for DuplicateSocket {
+    fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        io::Write::write(&mut &self.0, buf)
+    }
+}
+
+/// The inline write of `stream`, or `None` when its socket cannot be duplicated (the queue
+/// then has none, and every message goes through the writer as it always did).
+#[cfg(unix)]
+pub(crate) fn inline_write_of(
+    stream: &tokio::net::TcpStream,
+) -> Option<Arc<dyn crate::writer_queue::InlineWrite>> {
+    use std::os::fd::AsFd;
+    let duplicate = stream.as_fd().try_clone_to_owned().ok()?;
+    Some(Arc::new(DuplicateSocket(std::net::TcpStream::from(
+        duplicate,
+    ))))
+}
+
 impl StreamWriteDriver {
     /// A write half over `tx`, the sending side of the queue its
     /// [`writer_task`] drains (built by [`stream_outbound_channel`] in every

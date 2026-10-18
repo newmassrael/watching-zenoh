@@ -156,6 +156,7 @@ pub fn outbound_channel_with_capacity(
             closed: false,
             senders: 1,
             spare: Vec::new(),
+            carry: None,
             #[cfg(feature = "runtime-zero-copy")]
             pool: None,
             #[cfg(feature = "runtime-zero-copy")]
@@ -170,6 +171,10 @@ pub fn outbound_channel_with_capacity(
         flush_wanted: AtomicBool::new(false),
         staged: AtomicU64::new(0),
         staged_at_flush: AtomicU64::new(0),
+        epoch: Instant::now(),
+        last_flush_ns: AtomicU64::new(NEVER_FLUSHED),
+        inline: std::sync::OnceLock::new(),
+        role: AtomicBool::new(false),
     });
     (
         OutboundTx {
@@ -294,14 +299,213 @@ struct Lanes {
     /// The difference at the next flush is how many messages the producers staged in between,
     /// which is what tells a stream from a lone message.
     staged_at_flush: AtomicU64,
+    /// The instant this queue was made, which `last_flush_ns` counts from.
+    epoch: Instant,
+    /// When the last flush ran, in nanoseconds from `epoch`: the writer's or a sender's own.
+    /// A sender flushes its own message only when the link has been quiet for a while, which is
+    /// what a request and its reply are and a stream is not: a stream's messages come faster
+    /// than a flush can be written, and a flush per message would turn them into a system
+    /// call each, where the writer coalesces them.
+    last_flush_ns: AtomicU64,
+    /// How a thread other than the writer puts bytes on the link, when the link has a way
+    /// ([`OutboundTx::set_inline_write`]). Set once, before the first frame.
+    inline: std::sync::OnceLock<Arc<dyn InlineWrite>>,
+    /// The right to take frames off the lanes and write them to the link. One thread holds
+    /// it from the take to the end of the write, so what one thread takes is written before
+    /// what another takes after it: the writer, and (on a link with an
+    /// `inline`) a sender that flushes its own message. Held across no wait for
+    /// work: the writer lets it go before it parks.
+    role: AtomicBool,
 }
 
 impl Lanes {
+    /// Nanoseconds since the queue was made.
+    fn now_ns(&self) -> u64 {
+        self.epoch.elapsed().as_nanos() as u64
+    }
+
     /// A frame landed in a lane: wake the writer, and tell a writer that is letting producers
     /// finish that one did.
+    ///
+    /// Not when the thread that did it is the one that writes it: a sender flushing its own
+    /// message (`flush_inline`) takes what lands before it lets go of the role,
+    /// and waking the writer for it is the thread hop that flush exists to save.
     fn frame_landed(&self) {
+        if INLINE_STEP.with(std::cell::Cell::get) {
+            return;
+        }
         self.ready.notify_one();
         self.frame_ready.notify_one();
+    }
+
+    /// Take the role, waiting for the thread that holds it. It is held for the length of a
+    /// non-blocking write, so the wait is a few microseconds, spun and then yielded.
+    fn acquire_role(self: &Arc<Self>) -> RoleGuard {
+        let mut spins = 0u32;
+        while self
+            .role
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spins += 1;
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        RoleGuard(Arc::clone(self))
+    }
+
+    /// Take the role if it is free.
+    fn try_acquire_role(self: &Arc<Self>) -> Option<RoleGuard> {
+        self.role
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| RoleGuard(Arc::clone(self)))
+    }
+
+    /// The handle on what `take_next` took.
+    fn make_wire(self: &Arc<Self>, out: Out) -> WireFrame {
+        match out {
+            Out::Heap(bytes) => WireFrame(Wire::Heap(bytes), None),
+            #[cfg(feature = "runtime-zero-copy")]
+            Out::Slot {
+                class,
+                idx,
+                base,
+                len,
+            } => WireFrame(
+                Wire::Slot(SlotWire {
+                    home: Arc::clone(self),
+                    class,
+                    idx,
+                    base,
+                    len,
+                    started: false,
+                    written: false,
+                }),
+                None,
+            ),
+        }
+    }
+
+    /// Take what is queued, in the writer's order and the writer's packing, and write it
+    /// through `sink` until the queue is empty or the link takes no more. The caller holds the
+    /// role. Answers whether the rest of a frame was left in the carry.
+    fn write_inline(self: &Arc<Self>, sink: &dyn InlineWrite) -> bool {
+        loop {
+            let (carried, taken, freed) = {
+                let mut st = self.state.lock().expect("outbound lanes poisoned");
+                match st.carry.take() {
+                    Some(carried) => (Some(carried), Taken::Empty, false),
+                    None => {
+                        let budget = st.batch_bytes.max(1);
+                        let (taken, freed) = st.take_next_packed(budget);
+                        (None, taken, freed)
+                    }
+                }
+            };
+            if freed {
+                self.room.notify_all();
+            }
+            let (priority, mut wire) = match (carried, taken) {
+                (Some(carried), _) => carried,
+                (None, Taken::Frame(priority, out)) => (priority, self.make_wire(out)),
+                _ => return false,
+            };
+            wire.begin_write();
+            let total = wire.len();
+            let mut at = 0usize;
+            while at < total {
+                match sink.try_write(&wire[at..]) {
+                    Ok(n) if n > 0 => at += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    // The link took none of it now (or failed: the writer will meet the
+                    // same failure and end the link as it does for any write).
+                    _ => {
+                        wire.advance(at);
+                        self.keep_carry(priority, wire);
+                        return true;
+                    }
+                }
+            }
+            self.recycle_wire(wire);
+        }
+    }
+
+    /// Keep the rest of a frame for the next thread that holds the role. Dropped when the
+    /// queue is closed, outside the lock.
+    fn keep_carry(&self, priority: Priority, wire: WireFrame) {
+        let refused = {
+            let mut st = self.state.lock().expect("outbound lanes poisoned");
+            if st.closed {
+                Some(wire)
+            } else {
+                st.carry = Some((priority, wire));
+                None
+            }
+        };
+        drop(refused);
+    }
+
+    /// Whether anything is waiting for a thread that holds the role: a frame on a lane, or the
+    /// rest of one.
+    fn has_queued(&self) -> bool {
+        let st = self.state.lock().expect("outbound lanes poisoned");
+        st.carry.is_some() || st.lanes.iter().any(|lane| !lane.is_empty())
+    }
+
+    /// The thread that wrote `wire` out is done with it: what [`OutboundRx::recycle_wire`] does.
+    fn recycle_wire(&self, wire: WireFrame) {
+        match wire.0 {
+            Wire::Heap(bytes) => self
+                .state
+                .lock()
+                .expect("outbound lanes poisoned")
+                .give_spare(bytes),
+            #[cfg(feature = "runtime-zero-copy")]
+            Wire::Slot(mut slot) => slot.written = true,
+        }
+    }
+}
+
+thread_local! {
+    /// Whether this thread is in the middle of flushing its own message
+    /// (`flush_inline`).
+    static INLINE_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A way to put bytes on a link from any thread, without waiting: what a sender that
+/// flushes its own message writes with.
+pub trait InlineWrite: Send + Sync {
+    /// Write as much of `buf` as the link takes now. `WouldBlock` is "none of it now", and any
+    /// other error is the writer's to find: the bytes are left for it.
+    fn try_write(&self, buf: &[u8]) -> std::io::Result<usize>;
+}
+
+/// This thread is flushing its own message (`flush_inline`) from `enter` to drop.
+struct InlineStep;
+
+impl InlineStep {
+    fn enter() -> Self {
+        INLINE_STEP.with(|step| step.set(true));
+        Self
+    }
+}
+
+impl Drop for InlineStep {
+    fn drop(&mut self) {
+        INLINE_STEP.with(|step| step.set(false));
+    }
+}
+
+/// The role (`Lanes::role`) held; let go on drop.
+struct RoleGuard(Arc<Lanes>);
+
+impl Drop for RoleGuard {
+    fn drop(&mut self) {
+        self.0.role.store(false, Ordering::Release);
     }
 }
 
@@ -332,6 +536,15 @@ const STREAM_STAGED_MIN: u64 = 32;
 /// How many messages staged since the last flush still make a lone message or a pair: the
 /// writer flushes at once, without the probes of `let_producers_finish`.
 const LONE_STAGED_MAX: u64 = 2;
+
+/// How long no flush may have run for a sender to flush its own message (`flush_inline`): a
+/// request and its reply are a round trip apart, tens of microseconds, and a stream's messages
+/// are well inside this.
+const INLINE_MIN_QUIET_NS: u64 = 8_000;
+
+/// `last_flush_ns` of a queue that has not flushed yet: it has been quiet for as long as it has
+/// lived.
+const NEVER_FLUSHED: u64 = u64::MAX;
 
 /// The senders' wait for room: a `Condvar` that is notified only while
 /// someone waits on it.
@@ -429,6 +642,11 @@ struct LaneState {
     /// and in size ([`SPARE_MAX`], [`SPARE_CAPACITY_MAX`]) so a burst of large
     /// frames cannot make a link hoard memory.
     spare: Vec<Vec<u8>>,
+    /// The rest of a frame that a sender flushing its own message could not write all of
+    /// (the link took part and would take no more), with its priority: the next thread
+    /// that holds the role writes it before it takes anything else, so the bytes of the
+    /// stream stay in order. Always `None` on a link with no inline write.
+    carry: Option<(Priority, WireFrame)>,
     /// R3239 — ARCHITECTURE section 9.1 under `runtime-zero-copy`: the link's
     /// transmit pool, on a queue built by [`outbound_channel_pooled`] or
     /// [`outbound_channel_datagram`]. While it is here every frame a sender
@@ -952,13 +1170,85 @@ impl OutboundTx {
     /// asleep or busy: while the flag stands, a sender that stages another message finds it
     /// set and costs one load. The writer clears it just before it runs the hook, so a
     /// message staged after that wakes it again.
+    ///
+    /// On a link with an inline write ([`Self::set_inline_write`]), a lone message is not left
+    /// to the writer: see `flush_inline`.
     pub fn wake_for_flush(&self) {
-        self.shared.staged.fetch_add(1, Ordering::Relaxed);
+        let staged = self
+            .shared
+            .staged
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
         if !self.shared.flush_wanted.load(Ordering::Relaxed)
             && !self.shared.flush_wanted.swap(true, Ordering::SeqCst)
+            && !self.flush_inline(staged)
         {
             self.shared.ready.notify_one();
         }
+    }
+
+    /// Give the queue a way to put bytes on the link from the thread of a sender
+    /// ([`InlineWrite`]). Once, before the first frame; a second call is ignored.
+    pub fn set_inline_write(&self, sink: Arc<dyn InlineWrite>) {
+        let _ = self.shared.inline.set(sink);
+    }
+
+    /// Flush the message this sender has just staged, and write it, on the sender's own
+    /// thread: the writer is a thread asleep in the runtime, and waking it, running its task
+    /// and handing the frame over cost two thread hops and a system call per message in
+    /// the round trip of a request and its reply. Answers whether it did; when it did not, the
+    /// caller wakes the writer as it always did, and nothing has been taken.
+    ///
+    /// Only for a message that is alone: `staged` is the count with this message in it, and
+    /// when more than a couple were staged since the last flush the traffic is a stream, which
+    /// the writer coalesces into large writes and a flush per message would turn into a system
+    /// call per message. Only when the role is free (`Lanes::role`): a writer that is mid-write
+    /// finds the flush request this sender raised when it looks for work. Only on a link that
+    /// has an inline write, which writes without waiting; a write the link takes part of
+    /// leaves the rest in the queue's carry for the writer, who is woken.
+    fn flush_inline(&self, staged: u64) -> bool {
+        let shared = &self.shared;
+        let Some(sink) = shared.inline.get() else {
+            return false;
+        };
+        let since = staged.wrapping_sub(shared.staged_at_flush.load(Ordering::Relaxed));
+        if since > LONE_STAGED_MAX {
+            return false;
+        }
+        // A flush ran a moment ago: messages come faster than a flush is written, which is a
+        // stream, and the writer coalesces them. Counting what was staged is not enough to tell:
+        // one sender of a stream always finds just its own message staged since the last flush.
+        let last = shared.last_flush_ns.load(Ordering::Relaxed);
+        if last != NEVER_FLUSHED && shared.now_ns().saturating_sub(last) < INLINE_MIN_QUIET_NS {
+            return false;
+        }
+        let Some(role) = shared.try_acquire_role() else {
+            return false;
+        };
+        if shared.state.lock().expect("outbound lanes poisoned").closed {
+            return false;
+        }
+        shared.staged_at_flush.store(staged, Ordering::Relaxed);
+        // This flush answers the request that brought us here, and a message staged while it
+        // runs raises the flag again for the writer.
+        shared.flush_wanted.store(false, Ordering::SeqCst);
+        let step = InlineStep::enter();
+        let hook = shared.idle_hook.lock().expect("idle hook poisoned").clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        let left = shared.write_inline(sink.as_ref());
+        drop(step);
+        drop(role);
+        shared
+            .last_flush_ns
+            .store(shared.now_ns(), Ordering::Relaxed);
+        // Work the writer must see: the rest of a frame, a frame a lend completed behind our
+        // take, a request raised while we held the role.
+        if left || shared.has_queued() || shared.flush_wanted.load(Ordering::SeqCst) {
+            shared.ready.notify_one();
+        }
+        true
     }
 
     /// Enqueue `frame` on `priority`'s lane, whatever the lane holds.
@@ -1884,6 +2174,9 @@ impl OutboundRx {
             self.shared.staged.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
+        self.shared
+            .last_flush_ns
+            .store(self.shared.now_ns(), Ordering::Relaxed);
         // A lone message (a request, a reply): the producers staged one or two since the last
         // flush, so there is no stream to wait out and nothing for the probes below to find,
         // and the message would wait for them for nothing. A burst that starts here is
@@ -1914,31 +2207,52 @@ impl OutboundRx {
         // The idle hook runs once per call: if it flushed something the next take finds it,
         // and if it did not there is nothing more to ask before waiting.
         let mut idle_hook_ran = false;
+        // On a link whose senders may write their own messages ([`InlineWrite`]) the writer
+        // takes frames only while it holds the role, which it keeps until the frame it
+        // takes is written (it travels with the frame) and lets go of before it waits.
+        let inline = self.shared.inline.get().is_some();
         loop {
             let notified = self.shared.ready.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            let role = if inline {
+                Some(self.shared.acquire_role())
+            } else {
+                None
+            };
             {
                 // The lock is held in a block of its own, so that the guard is plainly gone
                 // before the wait below (a `drop` is not enough for the compiler to see that
                 // the future holds no guard across an await, and the writer's future must be
                 // `Send`).
-                let (taken, freed, finished) = {
+                let (carried, taken, freed, finished) = {
                     let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
-                    let (taken, freed) = if packed {
-                        let budget = st.batch_bytes.max(1);
-                        st.take_next_packed(budget)
+                    if let Some(carried) = st.carry.take() {
+                        // What a sender left half written goes first: the bytes of the
+                        // stream stay in order.
+                        (Some(carried), Taken::Empty, false, false)
                     } else {
-                        st.take_next()
-                    };
-                    let finished = matches!(taken, Taken::Empty) && (st.closed || st.senders == 0);
-                    (taken, freed, finished)
+                        let (taken, freed) = if packed {
+                            let budget = st.batch_bytes.max(1);
+                            st.take_next_packed(budget)
+                        } else {
+                            st.take_next()
+                        };
+                        let finished =
+                            matches!(taken, Taken::Empty) && (st.closed || st.senders == 0);
+                        (None, taken, freed, finished)
+                    }
                 };
                 if freed {
                     self.shared.room.notify_all();
                 }
+                if let Some((priority, wire)) = carried {
+                    return Some((priority, wire.holding(role)));
+                }
                 match taken {
-                    Taken::Frame(priority, out) => return Some((priority, self.wire(out))),
+                    Taken::Frame(priority, out) => {
+                        return Some((priority, self.wire(out).holding(role)))
+                    }
                     Taken::Empty if finished => return None,
                     // Nothing queued and the writer is about to wait: this is the moment
                     // the session's staged batch frames are owed a write. Cleared BEFORE
@@ -1976,6 +2290,9 @@ impl OutboundRx {
                     _ => {}
                 }
             }
+            // About to wait for work: the role is not held across the wait, so a sender
+            // that stages a lone message can flush it itself.
+            drop(role);
             notified.await;
             // Woken: something was sent, staged or closed, and the hook is owed a run
             // before the writer waits again. Left set, it would let a message staged
@@ -2032,24 +2349,7 @@ impl OutboundRx {
 
     /// The writer's handle on what [`LaneState::take_next`] took.
     fn wire(&self, out: Out) -> WireFrame {
-        match out {
-            Out::Heap(bytes) => WireFrame(Wire::Heap(bytes)),
-            #[cfg(feature = "runtime-zero-copy")]
-            Out::Slot {
-                class,
-                idx,
-                base,
-                len,
-            } => WireFrame(Wire::Slot(SlotWire {
-                home: Arc::clone(&self.shared),
-                class,
-                idx,
-                base,
-                len,
-                started: false,
-                written: false,
-            })),
-        }
+        self.shared.make_wire(out)
     }
 
     /// Stop accepting frames; the ones already queued stay to be received.
@@ -2082,6 +2382,15 @@ impl Drop for OutboundRx {
             }
             self.shared.room.notify_all();
         }
+        // What a sender left half written: dropped outside the lock, because a pooled frame's
+        // drop takes it, and a frame that holds its queue must not be kept by it.
+        let carried = self
+            .shared
+            .state
+            .lock()
+            .ok()
+            .and_then(|mut st| st.carry.take());
+        drop(carried);
     }
 }
 
@@ -2094,7 +2403,10 @@ impl Drop for OutboundRx {
 /// generated pool's completion edge when the frame is handed back with
 /// [`OutboundQueue::recycle_wire`] or dropped, so no path out of a writer can
 /// keep it.
-pub struct WireFrame(Wire);
+///
+/// The second field is the role (`Lanes::role`) the thread that took it holds until it has
+/// written it: dropped with the frame, so no way out of a writer keeps it.
+pub struct WireFrame(Wire, Option<RoleGuard>);
 
 enum Wire {
     Heap(Vec<u8>),
@@ -2190,6 +2502,27 @@ impl WireFrame {
             slot.begin();
         }
     }
+
+    /// The first `n` bytes are written: what is left is the frame. A heap frame moves its tail
+    /// down; a pooled one moves where its bytes start, and goes home whole as it always does.
+    fn advance(&mut self, n: usize) {
+        match &mut self.0 {
+            Wire::Heap(bytes) => {
+                bytes.drain(..n);
+            }
+            #[cfg(feature = "runtime-zero-copy")]
+            Wire::Slot(slot) => {
+                slot.base += n;
+                slot.len -= n;
+            }
+        }
+    }
+
+    /// The same frame, with the role its taker holds (`Lanes::role`) kept until it drops.
+    fn holding(mut self, role: Option<RoleGuard>) -> Self {
+        self.1 = role;
+        self
+    }
 }
 
 impl std::ops::Deref for WireFrame {
@@ -2211,7 +2544,7 @@ impl AsRef<[u8]> for WireFrame {
 
 impl From<Vec<u8>> for WireFrame {
     fn from(bytes: Vec<u8>) -> Self {
-        Self(Wire::Heap(bytes))
+        Self(Wire::Heap(bytes), None)
     }
 }
 
@@ -2607,6 +2940,309 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// A link a test writes through ([`InlineWrite`]): it takes at most `chunk` bytes of a
+    /// write, answers `WouldBlock` to every `block_every`th call (never when that is 0), and
+    /// keeps what it took, in the order it took it.
+    struct FakeLink {
+        taken: Mutex<Vec<u8>>,
+        calls: AtomicUsize,
+        chunk: usize,
+        block_every: usize,
+    }
+
+    impl FakeLink {
+        fn new(chunk: usize, block_every: usize) -> Arc<Self> {
+            Arc::new(Self {
+                taken: Mutex::new(Vec::new()),
+                calls: AtomicUsize::new(0),
+                chunk,
+                block_every,
+            })
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            self.taken.lock().expect("fake link").clone()
+        }
+    }
+
+    impl InlineWrite for FakeLink {
+        fn try_write(&self, buf: &[u8]) -> std::io::Result<usize> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.block_every != 0 && call % self.block_every == 0 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let take = buf.len().min(self.chunk);
+            self.taken
+                .lock()
+                .expect("fake link")
+                .extend_from_slice(&buf[..take]);
+            Ok(take)
+        }
+    }
+
+    /// A lone message staged on a link that can be written from a sender's thread is flushed,
+    /// written and finished by that thread, and the writer is not woken for it: nothing is
+    /// queued and no wake-up is waiting.
+    #[tokio::test]
+    async fn a_lone_message_is_flushed_by_its_sender_and_the_writer_is_not_woken() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+        let hook_tx = tx.clone();
+        tx.set_idle_hook(Arc::new(move || {
+            let _ = hook_tx.send(Priority::DEFAULT, b"frame".to_vec());
+        }));
+
+        tx.wake_for_flush();
+
+        assert_eq!(link.bytes(), b"frame", "the sender wrote its own message");
+        assert!(
+            !rx.shared.has_queued(),
+            "and nothing is left for the writer"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), rx.shared.ready.notified())
+                .await
+                .is_err(),
+            "the writer was not woken: the flush did not hand it a frame"
+        );
+    }
+
+    /// A write the link takes part of leaves the rest in the carry for the writer, who writes
+    /// it before anything staged after it, and is woken to.
+    #[tokio::test]
+    async fn the_rest_of_a_partly_written_frame_goes_to_the_writer_first() {
+        let (tx, mut rx) = outbound_channel();
+        // Three bytes, then the link blocks.
+        let link = FakeLink::new(3, 2);
+        tx.set_inline_write(link.clone());
+        let hook_tx = tx.clone();
+        tx.set_idle_hook(Arc::new(move || {
+            let _ = hook_tx.send(Priority::DEFAULT, b"abcdefgh".to_vec());
+        }));
+
+        tx.wake_for_flush();
+
+        assert_eq!(link.bytes(), b"abc", "the link took three bytes of it");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), rx.shared.ready.notified())
+                .await
+                .is_ok(),
+            "the writer is woken for the rest"
+        );
+        // Staged after the part write, so it must come after the rest.
+        tx.send(Priority::DEFAULT, b"next".to_vec()).expect("send");
+        let rest = rx.recv_wire_packed().await.expect("the carried rest");
+        assert_eq!(
+            &*rest, b"defgh",
+            "the rest comes first, from where the link stopped"
+        );
+        rx.recycle_wire(rest);
+        let next = rx.recv_wire_packed().await.expect("the frame behind it");
+        assert_eq!(&*next, b"next");
+        rx.recycle_wire(next);
+    }
+
+    /// A stream is not flushed message by message by its senders: when many messages were
+    /// staged since the last flush the writer coalesces them, and a sender that wrote its own
+    /// would make a system call of each.
+    #[tokio::test]
+    async fn a_stream_is_left_to_the_writer() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+        tx.shared.staged.fetch_add(10, Ordering::Relaxed);
+
+        tx.wake_for_flush();
+
+        assert!(link.bytes().is_empty(), "no sender wrote anything");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), rx.shared.ready.notified())
+                .await
+                .is_ok(),
+            "the writer is woken to flush, as it always was"
+        );
+    }
+
+    /// A sender that finds a flush has just run does not flush its own message, however few
+    /// were staged since: one sender of a stream always finds only its own, and a flush per
+    /// message would turn the stream into a system call each. The last flush is put in the
+    /// future so that no clock can make this pass by chance.
+    #[tokio::test]
+    async fn a_message_right_after_a_flush_is_left_to_the_writer() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+        let hook_tx = tx.clone();
+        tx.set_idle_hook(Arc::new(move || {
+            let _ = hook_tx.send(Priority::DEFAULT, b"frame".to_vec());
+        }));
+        let in_a_minute = tx.shared.now_ns() + 60_000_000_000;
+        tx.shared
+            .last_flush_ns
+            .store(in_a_minute, Ordering::Relaxed);
+
+        tx.wake_for_flush();
+
+        assert!(link.bytes().is_empty(), "no sender wrote anything");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), rx.shared.ready.notified())
+                .await
+                .is_ok(),
+            "the writer is woken to flush, as it always was"
+        );
+
+        // And the same queue, quiet again, is flushed by its sender.
+        tx.shared
+            .last_flush_ns
+            .store(NEVER_FLUSHED, Ordering::Relaxed);
+        tx.shared.flush_wanted.store(false, Ordering::SeqCst);
+        tx.wake_for_flush();
+        assert_eq!(
+            link.bytes(),
+            b"frame",
+            "a quiet link's message is flushed inline"
+        );
+    }
+
+    /// A queue nothing will read is not written through: its senders flush nothing.
+    #[tokio::test]
+    async fn a_closed_queue_is_not_written_through() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+        let hook_tx = tx.clone();
+        tx.set_idle_hook(Arc::new(move || {
+            let _ = hook_tx.send(Priority::DEFAULT, b"late".to_vec());
+        }));
+        drop(rx);
+
+        tx.wake_for_flush();
+
+        assert!(link.bytes().is_empty(), "a closed queue wrote nothing");
+    }
+
+    /// Several senders flushing their own messages, and a writer, over a link that takes a
+    /// few bytes at a time and sometimes none: whichever thread takes a frame writes it before
+    /// another thread takes the next, and what a sender could not finish the writer does first.
+    /// The bytes that reach the link are every frame, once, in each sender's order, and no
+    /// frame is cut by another's. Run 25 times over fresh queues, since what it looks for
+    /// is a race that one run may not meet.
+    #[test]
+    fn senders_that_write_their_own_messages_and_the_writer_keep_the_stream_in_order() {
+        let mut inline_flushes = 0;
+        for _round in 0..25 {
+            inline_flushes += one_race_of_senders_and_the_writer();
+        }
+        // Most attempts find the role held (four senders and a writer contend for it); a few
+        // hundred that get it are each a flush whose rest the writer must finish.
+        assert!(
+            inline_flushes > 100,
+            "the race must reach the senders' own flush ({inline_flushes} of 150000 tries)"
+        );
+    }
+
+    /// One run of the race described above; how many messages a sender flushed itself.
+    fn one_race_of_senders_and_the_writer() -> usize {
+        const SENDERS: u8 = 4;
+        const EACH: u32 = 3000;
+        const FRAME: usize = 6;
+        let (tx, mut rx) = outbound_channel();
+        // Five bytes at a time, against six-byte frames, with every third write refused.
+        let link = FakeLink::new(5, 3);
+        tx.set_inline_write(link.clone());
+
+        let writer_link = link.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                while let Some(mut wire) = rx.recv_wire_packed().await {
+                    wire.begin_write();
+                    let mut at = 0;
+                    while at < wire.len() {
+                        match writer_link.try_write(&wire[at..]) {
+                            Ok(n) if n > 0 => at += n,
+                            _ => tokio::task::yield_now().await,
+                        }
+                    }
+                    rx.recycle_wire(wire);
+                }
+            });
+            let _ = done_tx.send(());
+        });
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let senders: Vec<_> = (0..SENDERS)
+            .map(|sender| {
+                let tx = tx.clone();
+                let hits = hits.clone();
+                std::thread::spawn(move || {
+                    for seq in 0..EACH {
+                        let s = seq.to_le_bytes();
+                        let frame = vec![sender, s[0], s[1], s[2], s[3], sender ^ s[0] ^ s[3]];
+                        tx.send(Priority::DEFAULT, frame).expect("send");
+                        if seq % 2 == 0 {
+                            // As a sender of a lone message finds the queue: nothing staged
+                            // since the last flush. Asked directly, so that the race does not
+                            // depend on the flush-wanted flag the writer clears.
+                            let staged = tx.shared.staged.fetch_add(1, Ordering::Relaxed) + 1;
+                            tx.shared
+                                .staged_at_flush
+                                .store(staged - 1, Ordering::Relaxed);
+                            tx.shared
+                                .last_flush_ns
+                                .store(NEVER_FLUSHED, Ordering::Relaxed);
+                            if tx.flush_inline(staged) {
+                                hits.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                tx.shared.ready.notify_one();
+                            }
+                        } else {
+                            tx.wake_for_flush();
+                        }
+                    }
+                })
+            })
+            .collect();
+        for sender in senders {
+            sender.join().expect("a sender thread");
+        }
+        drop(tx);
+        done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the writer never finished: a wake-up was lost");
+        writer.join().expect("the writer thread");
+
+        let bytes = link.bytes();
+        assert_eq!(
+            bytes.len(),
+            SENDERS as usize * EACH as usize * FRAME,
+            "every frame arrived once"
+        );
+        let mut next = [0u32; SENDERS as usize];
+        for frame in bytes.chunks_exact(FRAME) {
+            let sender = frame[0] as usize;
+            assert!(
+                sender < SENDERS as usize,
+                "a frame cut by another's: {frame:?}"
+            );
+            assert_eq!(
+                frame[5],
+                frame[0] ^ frame[1] ^ frame[4],
+                "a frame cut by another's: {frame:?}"
+            );
+            let seq = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]);
+            assert_eq!(seq, next[sender], "sender {sender}'s frames out of order");
+            next[sender] += 1;
+        }
+        assert!(next.iter().all(|n| *n == EACH));
+        hits.load(Ordering::Relaxed)
+    }
 
     /// A buffer of exactly `capacity` bytes, its address recorded by the caller.
     fn buffer_of(capacity: usize) -> Vec<u8> {

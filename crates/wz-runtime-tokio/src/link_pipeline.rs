@@ -496,9 +496,17 @@ pub fn wire_tcp_stream_with_lowlatency(
         stream.local_addr().ok(),
         stream.peer_addr().ok(),
     );
+    // A way for a sender to write a lone message of its own without waking the writer: a
+    // duplicate of the socket, taken before the split while the stream still has its socket.
+    #[cfg(unix)]
+    let inline_write = crate::stream_link::inline_write_of(&stream);
     let (reader, writer) = stream.into_split();
     let inbound = StreamReadDriver::new(reader, lowlatency.clone());
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
+    #[cfg(unix)]
+    if let Some(sink) = inline_write {
+        tx.set_inline_write(sink);
+    }
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency, subject, endpoints));
     (inbound, outbound, writer_handle)
