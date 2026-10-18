@@ -70,7 +70,6 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, OpenedSession,
     DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
@@ -138,7 +137,9 @@ async fn query_reaches_remote_queryable_and_reply_returns() {
     //    queryable on KEYEXPR that replies with REPLY_PAYLOAD. The reply is keyed
     //    on the query's own keyexpr (the base `reply`). The `Queryable` handle is
     //    held for the whole test (dropping it would undeclare).
-    let observer_acc = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_acc = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_acc = TokioSession::new(
         opened_acc.actions.clone(),
         observer_acc,
@@ -166,7 +167,9 @@ async fn query_reaches_remote_queryable_and_reply_returns() {
 
     // ── ASKER: a session sharing ONE observer with its drive loop. The query is
     //    issued from the scenario; replies + finals land in shared buffers.
-    let observer_init = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_init = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_init = TokioSession::new(
         opened_init.actions.clone(),
         observer_init,
@@ -278,7 +281,9 @@ async fn a_query_value_and_attachment_reach_the_handler_as_ranges_of_the_frame()
     let timeouts = SessionTimeouts::spec_defaults();
 
     let handled: Arc<StdMutex<Vec<Handled>>> = Arc::new(StdMutex::new(Vec::new()));
-    let observer_acc = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_acc = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_acc = TokioSession::new(
         opened_acc.actions.clone(),
         observer_acc,
@@ -311,7 +316,9 @@ async fn a_query_value_and_attachment_reach_the_handler_as_ranges_of_the_frame()
         move |event| session_acc_drive.dispatch_iteration_event(event),
     );
 
-    let observer_init = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_init = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_init = TokioSession::new(
         opened_init.actions.clone(),
         observer_init,

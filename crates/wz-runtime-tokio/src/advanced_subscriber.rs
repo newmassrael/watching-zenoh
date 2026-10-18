@@ -4493,7 +4493,7 @@ mod tests {
     #[test]
     fn detect_publishers_hears_this_keyexprs_publishers_only() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
         let sub = AdvancedSubscriber::declare(&session, "demo/data", |_s: Sample| {})
@@ -4561,7 +4561,7 @@ mod tests {
     #[test]
     fn two_miss_listeners_each_hear_and_retract_independently() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -4612,7 +4612,7 @@ mod tests {
     #[test]
     fn a_background_listener_stays_and_a_late_drop_is_harmless() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -4730,7 +4730,7 @@ mod tests {
     #[test]
     fn timestamped_samples_are_deduplicated_by_their_own_clock() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -4781,7 +4781,7 @@ mod tests {
     #[test]
     fn sequenced_in_order_gap_miss_and_dedup() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -4818,7 +4818,7 @@ mod tests {
     #[test]
     fn distinct_sources_track_independently() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -4875,7 +4875,7 @@ mod tests {
         };
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -5071,7 +5071,7 @@ mod tests {
     #[test]
     fn history_bounds_of_zero_are_refused_at_construction() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -5123,7 +5123,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -5241,7 +5241,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -5445,7 +5445,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -5846,7 +5846,7 @@ mod tests {
         use wz_session_core::serde_codec::z_serialize;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6062,7 +6062,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6370,7 +6370,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6517,7 +6517,7 @@ mod tests {
     #[test]
     fn history_get_with_no_answerer_is_rescued_by_the_timeout_sweep() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6587,7 +6587,7 @@ mod tests {
     #[test]
     fn declare_with_periodic_off_runtime_declares() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6626,7 +6626,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6693,7 +6693,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6793,7 +6793,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -6960,7 +6960,7 @@ mod tests {
         }
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -7086,7 +7086,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -7279,7 +7279,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -7353,7 +7353,7 @@ mod tests {
         u64,
     ) {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
         // `_driver` is dropped here deliberately: these arms drive the reply
@@ -7457,7 +7457,7 @@ mod tests {
         use crate::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -7637,7 +7637,7 @@ mod tests {
             let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
             params.zid = zid;
             let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
-            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
             let clock = Arc::new(TokioTime::new());
             (TokioSession::new(actions, observer, clock), driver)
         };
@@ -7722,7 +7722,7 @@ mod tests {
         use crate::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -7851,7 +7851,7 @@ mod tests {
         use wz_session_core::query_mode::QueryTarget;
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -7897,7 +7897,7 @@ mod tests {
     #[test]
     fn a_background_advanced_subscriber_keeps_ordering_after_its_handle_is_gone() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
         let base = session.strong_count();
@@ -7952,7 +7952,7 @@ mod tests {
     fn declare_with_options_honours_the_allowed_origin() {
         let delivered_with = |origin: Option<Locality>| {
             let (actions, _driver) = crate::test_fixtures::recording_actions();
-            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
             let clock = Arc::new(TokioTime::new());
             let session = TokioSession::new(actions, observer, clock);
             let mut options = AdvancedSubscriberOptions::new();
@@ -8024,7 +8024,7 @@ mod tests {
     async fn a_buffered_advanced_subscriber_waits_and_keeps_its_ordering() {
         const CAPACITY: usize = 2;
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -8060,7 +8060,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -8124,7 +8124,7 @@ mod tests {
     #[test]
     fn a_fully_configured_background_subscriber_holds_no_session_and_retracts_nothing() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
         let base = session.strong_count();
@@ -8273,7 +8273,7 @@ mod tests {
     ) {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         let forms = RecordingForms::new(identity, &driver);
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
         let sub = AdvancedSubscriber::declare_with_options(

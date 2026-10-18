@@ -110,7 +110,6 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{accept_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::sample::QosLevel;
@@ -206,7 +205,9 @@ async fn wz_put_congestion_express_decoded_by_pico_zsub_attachment() {
     // Arc clone.
     let publisher = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
 

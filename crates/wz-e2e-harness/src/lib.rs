@@ -40,7 +40,6 @@ use wz::runtime_tokio::session_open::{
     accept_and_open_session, initiate_and_open_session, DialedLink, OpenedSessionParts,
     DEFAULT_OPEN_TICK_MS,
 };
-use wz::runtime_tokio::sync::Mutex;
 
 /// Inbound-poll iteration bound for the drive loop (test determinism;
 /// the SIGTERM race is the production stop path). Shared by every
@@ -174,7 +173,9 @@ pub async fn run_acceptor_e2e<H>(
 
     // ── Step 3: plane-specific setup. The observer is the same Arc the
     //           Session registers into and the drive loop dispatches into.
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(clock));
     let opened = OpenedE2e { session, clock };
     let hold = setup(&opened)?;
@@ -295,7 +296,9 @@ pub async fn run_initiator_e2e<H>(
     log::info!("{binary_name}: session Established; entering steady state");
 
     // ── Step 3: plane-specific setup.
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(clock));
     let opened = OpenedE2e { session, clock };
     let hold = setup(&opened)?;

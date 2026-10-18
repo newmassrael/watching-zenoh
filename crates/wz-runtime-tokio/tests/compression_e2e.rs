@@ -45,7 +45,6 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_compression, connect_and_open_session_with_compression,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::{
     establish_capability_pair, fixture_params_with_zid, LifecycleRecordingDriver,
 };
@@ -139,7 +138,9 @@ async fn compression_negotiates_and_delivers_put_over_real_tcp() {
 
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 
@@ -200,7 +201,9 @@ fn publish_and_capture(
 ) -> Vec<u8> {
     let session = TokioSession::new(
         actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(TokioTime::new()),
     );
     session

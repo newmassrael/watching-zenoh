@@ -90,7 +90,7 @@ use std::sync::Arc;
 // (the observer parameter now reads `Arc<<R as Runtime>::Mutex<...>>`,
 // no longer the crate-level `Mutex<...>` alias), production-side code
 // in session.rs stops referring to the `Mutex` alias name. Tests still
-// use it (`Arc::new(Mutex::new(ApplicationLayerObserver::new()))`),
+// use it (`Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()))`),
 // so the import is cfg(test)-gated to keep test compilation working
 // without producing an unused-import lint on the lib build.
 #[cfg(test)]

@@ -72,7 +72,7 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::session_open::{
     dial_endpoint, initiate_and_open_session, DialConfig, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex as WzMutex;
+use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
 const KEYEXPR: &str = "wz/live/peer1";
 const PATTERN: &str = "wz/live/**";

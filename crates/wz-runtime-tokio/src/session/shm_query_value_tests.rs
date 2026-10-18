@@ -47,7 +47,7 @@ fn session(peer_offered: bool) -> (TokioSession, Arc<RecordingLinkDriver>) {
         peer_offered,
         "the session negotiated shared memory exactly when the peer offered it"
     );
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
     (session, driver)
 }

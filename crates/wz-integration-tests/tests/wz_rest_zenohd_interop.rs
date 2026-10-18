@@ -87,7 +87,6 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     connect_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -381,7 +380,9 @@ async fn fixture() -> Fixture {
     // builder the session opened with, rather than restating the literal, so
     // the two can never drift apart.
     let zid = zenohd_interop_session_init_params().zid.clone();
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
 
     // Bind wz's bridge on an ephemeral port and read the concrete address back.

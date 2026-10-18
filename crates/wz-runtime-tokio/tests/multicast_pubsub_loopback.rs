@@ -49,7 +49,6 @@ use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::WhatAmI;
 #[cfg(feature = "transport-qos")]
 use {
-    std::sync::Mutex,
     wz_runtime_tokio::session::{PublishOptions, TokioMulticastSession},
     wz_session_core::qos::Priority,
 };
@@ -244,7 +243,9 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     let clock = Arc::new(TokioTime::new());
     // The direct multicast Session whose `publish_qos` feeds A's drive-loop channel.
     let session_a: TokioMulticastSession = TokioMulticastSession::new_multicast(
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         clock.clone(),
         producer_a.clone(),
     );
@@ -372,7 +373,9 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
 
     let clock = Arc::new(TokioTime::new());
     let session_a: TokioMulticastSession = TokioMulticastSession::new_multicast(
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         clock.clone(),
         producer_a.clone(),
     );

@@ -270,7 +270,7 @@ async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
     use wz_runtime_tokio::declare::LivelinessSampleKind;
     use wz_runtime_tokio::observer::ApplicationLayerObserver;
     use wz_runtime_tokio::session::{LivelinessSubscriberOptions, TokioSession};
-    use wz_runtime_tokio::sync::Mutex as WzMutex;
+    use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
     const KEYEXPR: &str = "wz/live/dialgate";
 
@@ -419,7 +419,7 @@ async fn a_dying_link_takes_its_tokens_out_of_the_admin_introspection_answer() {
     use std::sync::Mutex as StdMutex;
     use wz_runtime_tokio::observer::ApplicationLayerObserver;
     use wz_runtime_tokio::session::{QueryOptions, TokioSession};
-    use wz_runtime_tokio::sync::Mutex as WzMutex;
+    use wz_runtime_tokio::sync::PlainMutex as WzMutex;
     use wz_session_core::locality::Locality;
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
@@ -578,7 +578,7 @@ async fn a_dying_link_flips_the_dialers_matching_listener_to_false() {
     use std::sync::Mutex as StdMutex;
     use wz_runtime_tokio::observer::ApplicationLayerObserver;
     use wz_runtime_tokio::session::{PublishOptions, TokioSession};
-    use wz_runtime_tokio::sync::Mutex as WzMutex;
+    use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
     const KEYEXPR: &str = "wz/decl/dialgate";
 

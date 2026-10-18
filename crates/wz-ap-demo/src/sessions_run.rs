@@ -49,7 +49,6 @@ use wz::runtime_tokio::session_open::{
     accept_and_open_session, accept_bound_on, bind_endpoint, dial_endpoint,
     initiate_and_open_session, DialConfig, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
-use wz::runtime_tokio::sync::Mutex;
 use wz::runtime_tokio::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 
 use crate::args::{resolve_node_zid, session_init_params_for, ScoutSocketArgs, TransportTuning};
@@ -351,7 +350,9 @@ async fn serve_unicast(
     driver: &[DriverEntry],
     mut stop: watch::Receiver<bool>,
 ) -> Option<DriverOutcome> {
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(
         opened.actions.clone(),
         observer.clone(),
@@ -666,7 +667,9 @@ where
     let producer = MulticastTxProducer::new();
     let clock = Arc::new(TokioTime::new());
     let session = TokioMulticastSession::new_multicast(
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         clock.clone(),
         producer.clone(),
     );

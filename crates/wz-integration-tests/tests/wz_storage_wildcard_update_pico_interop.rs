@@ -83,7 +83,6 @@ use wz_runtime_tokio::session::TokioSession;
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{accept_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
 use wz_runtime_tokio::storage_service::StorageService;
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -177,7 +176,9 @@ async fn wz_storage_applies_a_pico_wildcard_update_over_the_wire() {
     // The observer is the crate `sync::Mutex` alias (NOT std/tokio) — the session
     // registers the storage's capture subscriber into it, and the drive loop's
     // `dispatch_iteration_event` dispatches inbound Pushes into the same observer.
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
     let storage = StorageService::declare(
         &session,

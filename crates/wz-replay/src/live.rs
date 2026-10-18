@@ -44,7 +44,6 @@ use wz::runtime_tokio::session_glue::{
 use wz::runtime_tokio::session_open::{
     connect_and_open_session, DialConfig, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
-use wz::runtime_tokio::sync::Mutex;
 use wz::runtime_tokio::Reliability;
 use wz_session_core::locator::parse_any_locator;
 
@@ -172,7 +171,9 @@ async fn play_into_session(
         plan.emissions.len()
     );
 
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(actions.clone(), observer, Arc::new(clock));
 
     // The emission runs OFF the runtime's workers; see this module's header.

@@ -78,7 +78,7 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
     AcceptConfig, DialConfig, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex as WzMutex;
+use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
 const KEYEXPR: &str = "demo/g";
 

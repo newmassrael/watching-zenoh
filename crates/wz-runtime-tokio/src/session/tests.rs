@@ -46,7 +46,7 @@ fn mark_session_established(session: &TokioSession) {
 /// + `fixture_params` duplicate was folded into it.
 fn build_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
     let (actions, driver) = recording_actions();
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     // R311cw — Session::new takes `Arc<T>` clock; R311nf — `TokioSession` alias.
     let clock = Arc::new(TokioTime::new());
     (TokioSession::new(actions, observer, clock), driver)
@@ -1859,7 +1859,7 @@ fn session_new_with_empty_zid_skips_auto_wire() {
     let mut params = fixture_session_init_params();
     params.zid = Vec::new();
     let (actions, _driver) = recording_actions_with_params(params);
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     // R311cw — Session::new gained third `clock: Arc<T>` argument.
     let clock = Arc::new(TokioTime::new());
     // R311da — Session::new lifted to the R-generic block; the
@@ -1892,7 +1892,7 @@ fn session_new_with_overlength_zid_silently_skips_auto_wire() {
     let mut params = fixture_session_init_params();
     params.zid = vec![0u8; 17];
     let (actions, _driver) = recording_actions_with_params(params);
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     // R311cw — Session::new gained third `clock: Arc<T>` argument.
     let clock = Arc::new(TokioTime::new());
     // R311da — Session::new lifted to the R-generic block; the
@@ -2429,7 +2429,7 @@ fn build_router_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
     params.whatami = wz_codecs::whatami::WhatAmI::Router;
     params.zid = vec![0xD1, 0xD2, 0xD3, 0xD4];
     let (actions, driver) = recording_actions_with_params(params);
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
     (TokioSession::new(actions, observer, clock), driver)
 }
@@ -7863,7 +7863,7 @@ fn build_probing_session() -> (
     Arc<crate::test_fixtures::ObserverProbeLinkDriver>,
 ) {
     let (actions, driver) = crate::test_fixtures::probing_actions();
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
     (TokioSession::new(actions, observer, clock), driver)
 }
@@ -9730,7 +9730,7 @@ fn a_retraction_that_cannot_reach_the_wire_is_reported_not_swallowed() {
     use wz_session_core::send_wire_error::SendWireError;
 
     let (actions, driver) = crate::test_fixtures::refusing_actions(LinkDropCause::WriterGone);
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
     let session = TokioSession::new(actions, observer, clock);
 
@@ -11768,7 +11768,7 @@ fn tapped_qos_group_session() -> (
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
     };
     let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&params);
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let clock = Arc::new(TokioTime::new());
     (Session::new_multicast(observer, clock, producer), tap)
 }

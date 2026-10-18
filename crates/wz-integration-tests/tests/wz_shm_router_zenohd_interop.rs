@@ -51,7 +51,6 @@ use wz_runtime_tokio::session_open::{
     connect_and_open_session, connect_and_open_session_with_shm, DialConfig, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::shm_provider::{PosixShmResolver, ShmBackedPayload};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
 use wz_session_core::link::RxBytes;
@@ -200,7 +199,9 @@ async fn wz_publishes_through_router(key: &str, text: &str) -> Option<(bool, Str
     let (mut opened, negotiated) = wz_dials_router(&mut router, 0x04, true).await;
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let timeouts = SessionTimeouts::spec_defaults();
@@ -348,7 +349,9 @@ async fn zenoh_publishes_through_router_to_wz(offer_shm: bool) -> Option<Subscri
     let (mut opened, negotiated) = wz_dials_router(&mut router, 0x05, offer_shm).await;
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let resolved = Arc::new(AtomicUsize::new(0));
@@ -546,7 +549,9 @@ async fn wz_getter_through_router() -> Option<GetterRun> {
     let (mut opened, negotiated) = wz_dials_router(&mut router, 0x06, true).await;
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     session.set_shm_resolver(Box::new(PosixShmResolver));
@@ -1208,7 +1213,9 @@ async fn wz_getter_without_shared_memory_behind(
     );
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let timeouts = SessionTimeouts::spec_defaults();

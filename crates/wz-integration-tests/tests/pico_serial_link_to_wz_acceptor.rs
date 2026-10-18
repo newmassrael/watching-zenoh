@@ -106,7 +106,6 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, bind_endpoint, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::{parse_any_locator, AnyLocator, SerialTarget};
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -342,7 +341,9 @@ async fn serial_interop_over_metadata_span(metadata: &str) {
     let captured = Arc::new(StdMutex::new(Captured::default()));
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     // Named binding (NOT `_`): a `_`-drop would immediately emit

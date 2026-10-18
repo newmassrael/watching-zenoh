@@ -306,9 +306,9 @@ pub(crate) fn refusing_actions(
 /// `drain_declare_replies` reads exactly those registries — under this same
 /// mutex — to answer a peer's Interest. So the pair has to be ONE transition,
 /// and "the retract was emitted while this thread held the observer mutex" is
-/// the property that says so. A same-thread `try_lock` on a `std::sync::Mutex`
-/// reports `WouldBlock`, which is what makes `false` here mean "held" rather
-/// than "contended".
+/// the property that says so. A same-thread `try_with` on the session's
+/// non-reentrant [`crate::sync::PlainMutex`] answers `None`, which is what
+/// makes `false` here mean "held" rather than "contended".
 ///
 /// Deliberately a link driver rather than a probe wired into one handle: the
 /// retract reaches the wire the same way on every plane (subscriber, token,
@@ -332,7 +332,7 @@ pub(crate) struct ObserverProbeLinkDriver {
     /// built before the session it belongs to). `None` = not yet armed, and an
     /// unarmed frame records nothing, which is how set-up emits are kept out
     /// of the population.
-    armed: Mutex<Option<Arc<Mutex<ApplicationLayerObserver>>>>,
+    armed: Mutex<Option<Arc<crate::sync::PlainMutex<ApplicationLayerObserver>>>>,
     /// One entry per frame emitted while armed: `true` = the observer mutex
     /// was free, i.e. the emit was NOT inside the acquisition.
     lockable: Mutex<Vec<bool>>,
@@ -345,7 +345,7 @@ pub(crate) struct ObserverProbeLinkDriver {
 impl ObserverProbeLinkDriver {
     /// Start probing against `observer`. Call after the set-up emits so the
     /// recorded population is exactly the frames under test.
-    pub(crate) fn arm(&self, observer: Arc<Mutex<ApplicationLayerObserver>>) {
+    pub(crate) fn arm(&self, observer: Arc<crate::sync::PlainMutex<ApplicationLayerObserver>>) {
         *self.armed.lock().expect("probe arm mutex poisoned") = Some(observer);
     }
 
@@ -366,9 +366,9 @@ impl BoxedLinkDriver for ObserverProbeLinkDriver {
     fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         let armed = self.armed.lock().expect("probe arm mutex poisoned");
         if let Some(observer) = armed.as_ref() {
-            // `try_lock`'s guard is dropped at the end of this statement, so
-            // the probe never holds the observer past the measurement.
-            let lockable = observer.try_lock().is_ok();
+            // The probe holds the observer only for the closure, so it never
+            // holds it past the measurement.
+            let lockable = observer.try_with(|_| ()).is_some();
             self.lockable
                 .lock()
                 .expect("probe log mutex poisoned")

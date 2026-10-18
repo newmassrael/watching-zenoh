@@ -80,7 +80,6 @@ use wz_runtime_tokio::session_open::{
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use wz_runtime_tokio::session_open::{accept_endpoint, AcceptedLink, AcceptedPeer};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::{
     parse_any_locator, AnyLocator, SerialEndpoint, SerialOptions, SerialTarget,
@@ -390,7 +389,9 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
     //    subscriber, so the proof is the remote serial delivery).
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 
@@ -533,7 +534,9 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
     //    subscriber, so the proof is the remote fragment chain over serial).
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 
@@ -1396,7 +1399,9 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
 
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 

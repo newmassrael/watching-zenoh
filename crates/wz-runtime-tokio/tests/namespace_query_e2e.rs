@@ -35,7 +35,6 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_namespace, connect_and_open_session_with_namespace, DialConfig,
     DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 use wz_session_core::locator::parse_any_locator;
@@ -97,7 +96,9 @@ async fn query_reply_round_trips_under_shared_namespace() {
     let timeouts = SessionTimeouts::spec_defaults();
 
     // ── ANSWERER: a queryable on the BARE keyexpr replies with REPLY_PAYLOAD.
-    let observer_acc = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_acc = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_acc = TokioSession::new(
         opened_acc.actions.clone(),
         observer_acc,
@@ -124,7 +125,9 @@ async fn query_reply_round_trips_under_shared_namespace() {
     );
 
     // ── ASKER.
-    let observer_init = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_init = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_init = TokioSession::new(
         opened_init.actions.clone(),
         observer_init,

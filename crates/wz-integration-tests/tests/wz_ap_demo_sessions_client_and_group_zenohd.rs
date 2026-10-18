@@ -55,7 +55,6 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     initiate_and_open_session, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::UdpDriver;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
@@ -240,12 +239,16 @@ async fn a_sessions_file_runs_a_zenohd_client_and_a_group_peer_in_one_demo() {
     let mut y = client_to(zenohd_port, 0x0d).await;
     let x_session = TokioSession::new(
         x.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(x.clock),
     );
     let y_session = TokioSession::new(
         y.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(y.clock),
     );
     let control_seen = Arc::new(AtomicUsize::new(0));

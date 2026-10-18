@@ -108,7 +108,6 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishError, PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{initiate_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -209,7 +208,9 @@ async fn publish_through_zenohd_with_batch(
 
     let publisher = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let timeouts = SessionTimeouts::spec_defaults();

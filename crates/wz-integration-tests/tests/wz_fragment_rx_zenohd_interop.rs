@@ -125,7 +125,6 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{SubscribeOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{initiate_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -219,7 +218,9 @@ async fn subscribe_through_zenohd_with_batch(batch_size: Option<u16>) -> ArmOutc
 
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
 

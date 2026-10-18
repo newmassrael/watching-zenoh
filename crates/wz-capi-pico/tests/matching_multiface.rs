@@ -567,7 +567,7 @@ fn vanishing_subscriber_peer(
         dial_endpoint, initiate_and_open_session, DialConfig, OpenedSessionParts,
         DEFAULT_OPEN_TICK_MS,
     };
-    use wz_runtime_tokio::sync::Mutex as WzMutex;
+    use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

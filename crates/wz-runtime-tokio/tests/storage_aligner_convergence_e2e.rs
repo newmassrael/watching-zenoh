@@ -66,7 +66,6 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::storage_aligner_service::{spawn_digest_aligner, AlignerService};
 use wz_runtime_tokio::storage_replication_service::DigestPublisher;
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::timestamp_source::wall_clock_ntp64;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
@@ -167,7 +166,9 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
             },
         )
         .expect("the in-memory backend commits");
-    let observer_a = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_a = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_a = TokioSession::new(
         opened_a.actions.clone(),
         observer_a,
@@ -195,7 +196,9 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     let state_b: SharedState = Arc::new(StdMutex::new(
         StorageState::new(MemoryStorage::new()).unwrap(),
     ));
-    let observer_b = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_b = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_b = TokioSession::new(
         opened_b.actions.clone(),
         observer_b,

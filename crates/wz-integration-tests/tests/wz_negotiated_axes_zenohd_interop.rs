@@ -155,7 +155,6 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     initiate_and_open_session_with_staging, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::ext_chain_role::ExtChainRole;
 use wz_session_core::extpatch::{encode_patch_ext_at, CURRENT_PATCH, NO_PATCH};
@@ -470,7 +469,9 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
 
     let publisher = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let timeouts = SessionTimeouts::spec_defaults();

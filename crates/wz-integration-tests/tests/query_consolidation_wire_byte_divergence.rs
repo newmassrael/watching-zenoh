@@ -63,7 +63,6 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{QueryOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{connect_and_open_session, DialConfig, DEFAULT_OPEN_TICK_MS};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::locator::parse_any_locator;
@@ -554,7 +553,9 @@ async fn wz_writes_the_consolidation_byte_a_real_zenohd_writes_for_the_same_get(
         }
     };
 
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
     let timeouts = SessionTimeouts::spec_defaults();
     let drive_session = session.clone();

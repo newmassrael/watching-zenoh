@@ -88,7 +88,6 @@ use wz_runtime_tokio::shm_provider::{
     chunk_position, confirmed_chunks, data_segment_maps, is_invalidated, reference_state,
     AllocPolicy, ChunkHold, PosixShmResolver, ReferenceState, ShmBackedPayload, ShmProvider,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
 use wz_session_core::link::RxBytes;
@@ -404,7 +403,9 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
 
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let resolved = Arc::new(AtomicUsize::new(0));
@@ -910,7 +911,9 @@ where
 
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let timeouts = SessionTimeouts::spec_defaults();

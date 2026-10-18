@@ -862,7 +862,7 @@ mod tests {
 
     fn loopback_session() -> TokioSession {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         // The `_driver` half is bound for the test scope; the loopback
         // dispatch runs over `actions` (the same fixture the advanced pub/sub

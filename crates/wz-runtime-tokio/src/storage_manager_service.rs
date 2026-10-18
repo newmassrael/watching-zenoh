@@ -1034,7 +1034,7 @@ mod tests {
     // TokioTime; the manager's type is inferred from `add_storage(&session, ..)`.
     fn make_session() -> TokioSession {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         TokioSession::new(actions, observer, clock)
     }
@@ -1176,7 +1176,7 @@ mod tests {
         // F2: the transport-availability gate stays closed until Established is
         // re-entered, which is what a released link leaves behind.
         actions.reset_for_reopen();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let dead_tx = TokioSession::new(actions, observer, clock);
 
@@ -1260,7 +1260,7 @@ mod tests {
     fn make_session_over_a_link_it_can_end() -> (TokioSession, impl Fn()) {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let link = Arc::clone(&actions);
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         (TokioSession::new(actions, observer, clock), move || {
             link.reset_for_reopen()

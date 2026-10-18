@@ -58,7 +58,6 @@ use wz_runtime_tokio::session_glue::{
     parse_frame_payload, parse_inbound, InboundFrame, NetworkMessage,
 };
 use wz_runtime_tokio::storage_service::StorageService;
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::establish_capability_pair;
 use wz_session_core::storage_config::StorageConfig;
 
@@ -127,7 +126,9 @@ fn pico_decoded_complete(declaration_bytes: &[u8]) -> bool {
 async fn wire_complete_seen_by_pico(config_complete: bool) -> bool {
     // Established wz session over recording drivers (deterministic, no socket).
     let pair = establish_capability_pair(false, false, |_| {}).await;
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let clock = Arc::new(TokioTime::new());
     let session = TokioSession::new(pair.resp_actions.clone(), observer, clock);
 

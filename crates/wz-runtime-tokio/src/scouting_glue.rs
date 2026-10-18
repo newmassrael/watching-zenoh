@@ -104,7 +104,6 @@ use wz_session_core::scouting::{
 use wz_runtime_core::{Runtime, TimeSource};
 
 use crate::runtime_impl::TokioRuntime;
-use crate::sync::Mutex;
 use crate::LinkDriver;
 
 /// Shared host state for one active-scouting cycle.
@@ -286,11 +285,11 @@ impl ScoutingActions<TokioRuntime> {
         Arc::new(Self {
             params,
             trace: TokioRuntime::new_mutex(ScoutTrace::default()),
-            pending_scout: Mutex::new(None),
-            pending_hello: Mutex::new(None),
-            discovered: Mutex::new(None),
-            hellos: Mutex::new(Vec::new()),
-            ignored: Mutex::new(Vec::new()),
+            pending_scout: TokioRuntime::new_mutex(None),
+            pending_hello: TokioRuntime::new_mutex(None),
+            discovered: TokioRuntime::new_mutex(None),
+            hellos: TokioRuntime::new_mutex(Vec::new()),
+            ignored: TokioRuntime::new_mutex(Vec::new()),
         })
     }
 

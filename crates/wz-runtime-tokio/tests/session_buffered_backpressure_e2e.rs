@@ -29,7 +29,7 @@
     feature = "codec-push"
 ))]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
 use wz_runtime_core::TimeSource;
@@ -85,7 +85,9 @@ fn burst_of_frames() -> Vec<Vec<u8>> {
         .expect("established_at poisoned in fixture") = Some(actions.clock.now_monotonic_ms());
     let session = TokioSession::new(
         actions,
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(TokioTime::new()),
     );
     for i in 0..BURST {
@@ -125,7 +127,9 @@ async fn the_drive_loop_waits_for_a_lagging_buffered_consumer() {
     engine.initialize();
     established(&mut engine);
 
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
     let (_subscriber, mut rx, _drain_stage) = session
         .declare_subscriber_buffered(
@@ -245,7 +249,9 @@ async fn a_parked_drain_does_not_starve_this_sessions_keepalive() {
     engine.initialize();
     established(&mut engine);
 
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
     // Capacity ONE and a receiver that is never read: the second sample fills
     // the queue and the loop parks on it for the rest of the test. `_rx` is
@@ -352,7 +358,9 @@ async fn a_host_that_wires_no_stage_still_delivers_under_backpressure() {
     engine.initialize();
     established(&mut engine);
 
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
     // ⚠ The third value is DROPPED here, deliberately: this test's whole claim
     // is that a host which does nothing with it is still correct.

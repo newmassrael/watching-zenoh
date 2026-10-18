@@ -48,6 +48,89 @@
 /// `Session::observer` field migration as the terminal step.
 pub type Mutex<T> = std::sync::Mutex<T>;
 
+/// The lock the session's own state sits behind (`Runtime::Mutex` of the tokio profile): a mutex
+/// that is NOT poisoned by a panic in a holder.
+///
+/// Every access to that state goes through `Runtime::with_mutex_mut`, which already RECOVERED
+/// from poison and carried on (a panicking holder must not stop a `Drop` from unregistering its
+/// id), so the poison state was never read for anything: what it cost was a check of the
+/// process's panic count when the guard was taken and again when it was released, about a dozen
+/// instructions a lock, on a path that locks four or five times for one put. This lock keeps the
+/// protected value as the panic left it, which is what recovering from the poison did.
+///
+/// `parking_lot`'s, which tokio already links: a guard is one compare-and-swap to take and one to
+/// release, and nothing else on the uncontended path.
+pub struct PlainMutex<T>(parking_lot::Mutex<T>);
+
+impl<T> PlainMutex<T> {
+    /// A lock over `value`.
+    pub const fn new(value: T) -> Self {
+        Self(parking_lot::const_mutex(value))
+    }
+
+    /// Run `f` over the value, waiting for the lock.
+    pub fn with<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
+        f(&mut *self.0.lock())
+    }
+
+    /// Run `f` over the value if the lock is free; `None` when it is held.
+    pub fn try_with<U>(&self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        self.0.try_lock().map(|mut guard| f(&mut *guard))
+    }
+
+    /// The guard, waiting for the lock, in the shape `std::sync::Mutex::lock` answers so that a
+    /// caller that holds the state of a session across several statements (and wrote
+    /// `.lock().unwrap()`, or matched the poisoned arm to recover) reads the same. The error arm
+    /// is never taken: it is a type with no value, so `Result` is the guard and costs nothing.
+    pub fn lock(&self) -> Result<PlainGuard<'_, T>, NeverPoisoned<PlainGuard<'_, T>>> {
+        Ok(self.0.lock())
+    }
+
+    /// [`Self::lock`] without waiting: `None` when the lock is held.
+    pub fn try_lock_guard(&self) -> Option<PlainGuard<'_, T>> {
+        self.0.try_lock()
+    }
+}
+
+/// What [`PlainMutex::lock`] holds the lock with.
+pub type PlainGuard<'a, T> = parking_lot::MutexGuard<'a, T>;
+
+/// The error of a lock that is never poisoned: it cannot be made, so a `match` on it has the one
+/// arm that is ever taken. It carries the guard type only so that `into_inner`, which a caller
+/// that recovered from `std`'s poison calls, answers the guard as `std`'s does.
+pub struct NeverPoisoned<G>(core::convert::Infallible, core::marker::PhantomData<G>);
+
+impl<G> NeverPoisoned<G> {
+    /// What `std::sync::PoisonError::into_inner` answers: the guard.
+    pub fn into_inner(self) -> G {
+        match self.0 {}
+    }
+}
+
+impl<G> core::fmt::Debug for NeverPoisoned<G> {
+    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {}
+    }
+}
+
+impl<G> core::fmt::Display for NeverPoisoned<G> {
+    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {}
+    }
+}
+
+impl<T: Default> Default for PlainMutex<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T> core::fmt::Debug for PlainMutex<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PlainMutex")
+    }
+}
+
 /// Per-runtime reader-writer lock alias (R311w option (a)).
 ///
 /// Tokio profile binds to `std::sync::RwLock<T>` — synchronous,

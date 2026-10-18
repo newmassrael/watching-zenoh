@@ -45,7 +45,6 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::SessionLinkActions;
 use wz_runtime_tokio::shm_provider::ShmBackedPayload;
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::{establish_capability_pair, LifecycleRecordingDriver};
 use wz_session_core::compression::{decompress_batch, BATCH_HEADER_COMPRESSION};
 
@@ -66,7 +65,9 @@ fn publish_shm_and_capture(
     payload.write(&[0xCDu8; 64]);
     let session = TokioSession::new(
         actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(TokioTime::new()),
     );
     session

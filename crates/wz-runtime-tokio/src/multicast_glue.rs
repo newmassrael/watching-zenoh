@@ -5056,7 +5056,7 @@ mod tests {
         // type level; `actions()` does not exist on `TokioMulticastSession` —
         // calling it is a compile error rather than a runtime reject.
         let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
-            Arc::new(crate::sync::Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new())),
             Arc::new(TokioTime::new()),
             producer,
         );

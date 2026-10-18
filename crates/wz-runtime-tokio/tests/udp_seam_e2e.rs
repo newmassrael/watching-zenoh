@@ -52,7 +52,6 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, bind_endpoint, connect_and_open_session, AcceptedPeer, DialConfig,
     DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -158,7 +157,9 @@ async fn wz_accepts_a_session_over_udp_via_the_bind_endpoint_seam() {
 
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 
@@ -412,7 +413,9 @@ async fn udp_stray_new_src_does_not_tear_down_a_one_shot_session() {
     }
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
     let timeouts = SessionTimeouts::spec_defaults();

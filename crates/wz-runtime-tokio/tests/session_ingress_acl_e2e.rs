@@ -103,7 +103,9 @@ fn frame_carrying_put(keyexpr: &str) -> Vec<u8> {
         .expect("established_at poisoned in fixture") = Some(actions.clock.now_monotonic_ms());
     let session = TokioSession::new(
         actions,
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(TokioTime::new()),
     );
     session
@@ -137,7 +139,9 @@ async fn arrivals_and_hits(wire: Vec<u8>, config: Option<InterceptorConfig>) -> 
     engine.initialize();
     established(&mut engine);
 
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
     // The enforcer admits a message it cannot attribute (open-debt item 655), so
     // without a conformant peer zid this fixture would reach no rule and BOTH

@@ -71,7 +71,6 @@ use wz_runtime_tokio::session::{
 };
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, DriverOutcome};
 use wz_runtime_tokio::session_open::{initiate_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
@@ -143,7 +142,9 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
     .expect("session A reaches Established against zenohd");
     let session_a = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
 
@@ -156,7 +157,9 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
     let producer_b = MulticastTxProducer::new();
     let clock = Arc::new(TokioTime::new());
     let session_b = TokioMulticastSession::new_multicast(
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         clock.clone(),
         producer_b.clone(),
     );

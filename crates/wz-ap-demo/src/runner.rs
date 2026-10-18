@@ -1554,7 +1554,7 @@ async fn establish_link(
 /// the drive loop) can compare epoch-compatibly. `timeout_ms == 0`
 /// registers with `None`, preserving pre-R263 behaviour.
 fn install_observer_callbacks(
-    observer: &Arc<Mutex<ApplicationLayerObserver>>,
+    observer: &Arc<wz::runtime_tokio::sync::PlainMutex<ApplicationLayerObserver>>,
     query_spec: Option<&crate::args::QueryEmitSpec>,
     remote_log_spec: &RemoteLogSpec,
     reply_log_spec: &ReplyConsumerSpec,
@@ -3396,7 +3396,9 @@ pub(crate) async fn run_demo(
     // IterationEvent into every registry + drains staged outbound records.
     // R235 — `observer` is `Arc<Mutex<ApplicationLayerObserver>>`; the drive
     // loop and any background `Session::publish` take the lock per dispatch.
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     install_observer_callbacks(
         &observer,
         query_spec.as_ref(),
@@ -8480,7 +8482,9 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         }
         let session = TokioSession::new(
             actions.clone(),
-            Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+                ApplicationLayerObserver::new(),
+            )),
             Arc::new(session_clock),
         );
 

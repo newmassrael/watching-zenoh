@@ -42,7 +42,6 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::encoding::encoding_to_mime;
 use wz_session_core::locator::parse_any_locator;
@@ -159,7 +158,9 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
     //    queryable on QUERY_KEY (replies REPLY_PAYLOAD). Handles held for the
     //    whole test (dropping would undeclare).
     let received: Arc<StdMutex<Vec<Received>>> = Arc::new(StdMutex::new(Vec::new()));
-    let observer_acc = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_acc = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_acc = TokioSession::new(
         opened_acc.actions.clone(),
         observer_acc,
@@ -223,7 +224,9 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
     // ── BRIDGE session: drives HTTP-originated query/publish. serve_on runs the
     //    HTTP accept loop on a spawned task (its per-connection handlers use
     //    Send session clones); the drive loop runs on this task.
-    let observer_bridge = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_bridge = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_bridge = TokioSession::new(
         opened_bridge.actions.clone(),
         observer_bridge,

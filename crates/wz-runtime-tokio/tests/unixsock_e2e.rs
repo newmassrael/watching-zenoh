@@ -47,7 +47,6 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, bind_endpoint, connect_and_open_session, DialConfig, DialedLink,
     DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::unixsock_pipeline::{accept_unixsock_on, bind_unixsock};
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
@@ -148,7 +147,9 @@ async fn wz_to_wz_over_unixsock_reaches_established_and_delivers_put() {
     //    subscriber, so the proof is the remote delivery over the unix link).
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 
@@ -322,7 +323,9 @@ async fn wz_accepts_a_session_over_unixsock_via_the_bind_endpoint_seam() {
 
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 

@@ -98,7 +98,7 @@ use wz_runtime_tokio::session_glue::{
     LinkSendOutcome, SessionLinkActions, WhatAmI,
 };
 use wz_runtime_tokio::sink::SampleView;
-use wz_runtime_tokio::sync::Mutex as WzMutex;
+use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 use wz_runtime_tokio::Reliability;
 
 // R311y498 — NO `use crate::pubsub` / `use crate::query` here, deliberately.

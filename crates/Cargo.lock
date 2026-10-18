@@ -3170,6 +3170,7 @@ dependencies = [
  "log",
  "memmap2",
  "mime_guess",
+ "parking_lot",
  "portable-atomic",
  "quinn",
  "quinn-proto",

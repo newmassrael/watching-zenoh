@@ -68,7 +68,6 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio::shm_provider::{
     reference_state, PosixShmResolver, ReferenceState, ShmBackedPayload,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
 use wz_session_core::locator::parse_any_locator;
@@ -291,7 +290,9 @@ async fn wz_getter_against_shm_queryable(value: GetterValue) -> Option<GetterRun
 
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let resolved = Arc::new(AtomicUsize::new(0));
@@ -688,7 +689,9 @@ async fn shm_get_to_wz_queryable(offer_shm: bool) -> Option<QueryableRun> {
 
     let session = TokioSession::new(
         opened.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened.clock),
     );
     let resolved = Arc::new(AtomicUsize::new(0));

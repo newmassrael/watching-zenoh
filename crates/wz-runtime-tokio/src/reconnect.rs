@@ -536,22 +536,17 @@ impl ReconnectingSession {
                         // dead link there may be no further iteration event ever,
                         // so without this a local admin GET would go on reporting
                         // a departed peer's subscriptions indefinitely.
-                        let flush = |mut o: std::sync::MutexGuard<
-                            '_,
-                            wz_session_core::observer::ApplicationLayerObserver,
-                        >| {
+                        // The session's lock is never poisoned, so there is no recovery arm
+                        // to write: a holder that panicked left the registry as it was.
+                        let declarations = session.observer().with(|o| {
                             let dropped = o.flush_declarations_on_link_loss();
                             #[cfg(all(
                                 feature = "adminspace-introspection-handlers",
                                 feature = "adminspace-core"
                             ))]
-                            session.refresh_admin_declarations(&o);
+                            session.refresh_admin_declarations(o);
                             dropped
-                        };
-                        let declarations = match session.observer().lock() {
-                            Ok(o) => flush(o),
-                            Err(poisoned) => flush(poisoned.into_inner()),
-                        };
+                        });
                         if declarations > 0 {
                             log::info!(
                                 "wz reconnect: link lost; dropped {declarations} remote \
@@ -567,25 +562,18 @@ impl ReconnectingSession {
                         // stops a departed peer's tokens outliving it in the
                         // admin answer — the identical failure the comment above
                         // describes for its own plane.
-                        let flush_liveliness = |mut o: std::sync::MutexGuard<
-                            '_,
-                            wz_session_core::observer::ApplicationLayerObserver,
-                        >| {
+                        // A panicking sink cannot poison the lock, so the whole registry is
+                        // flushed rather than leaked, as every other shutdown path in this
+                        // crate does.
+                        let staged = session.observer().with(|o| {
                             let staged = o.flush_liveliness_on_link_loss();
                             #[cfg(all(
                                 feature = "adminspace-introspection-handlers",
                                 feature = "adminspace-core"
                             ))]
-                            session.refresh_admin_declarations(&o);
+                            session.refresh_admin_declarations(o);
                             staged
-                        };
-                        let staged = match session.observer().lock() {
-                            Ok(o) => flush_liveliness(o),
-                            // A panicking sink poisons the mutex; recover
-                            // rather than leak the whole registry, matching
-                            // every other shutdown path in this crate.
-                            Err(poisoned) => flush_liveliness(poisoned.into_inner()),
-                        };
+                        });
                         // R311y522 — a flush only STAGES on the deferred-fire
                         // queue; the drive loop is what normally drains it,
                         // and it has just returned. Without this the Deletes

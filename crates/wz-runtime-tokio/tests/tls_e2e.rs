@@ -41,7 +41,6 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 // `DialConfig` is used only by the negative `dial_locator_*` test below; the
 // open-path session_open imports moved to `tls_harness`.
 use wz_runtime_tokio::session_open::DialConfig;
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::loopback_tls_configs;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -101,7 +100,9 @@ async fn wz_to_wz_over_tls_reaches_established_and_delivers_put() {
     //    subscriber, so the proof is the remote delivery over the TLS link).
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 

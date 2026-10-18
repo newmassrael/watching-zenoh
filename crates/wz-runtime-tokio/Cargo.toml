@@ -1798,6 +1798,9 @@ wz-plugin-abi = { path = "../wz-plugin-abi", optional = true }
 # unrelated version numbers together.
 wz-volume-abi = { path = "../wz-volume-abi", optional = true }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
+# The session's own lock (`sync::PlainMutex`, `TokioRuntime::Mutex`): a mutex that a panicking
+# holder does not poison. Tokio already links it, so the lock file gains an edge and no package.
+parking_lot = { version = "0.12", default-features = false }
 # R311nv — host tty backend for the SERIAL link, behind the optional
 # `transport-link-serial` feature (`dep:tokio-serial`). `SerialStream`
 # is `AsyncRead + AsyncWrite` (a `tokio::io::unix::AsyncFd` over the tty

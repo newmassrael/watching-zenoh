@@ -1421,7 +1421,7 @@ mod tests {
                 .sum()
         };
 
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let session = TokioSession::new(stream.clone(), observer, Arc::new(TokioTime::new()));
         let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
 

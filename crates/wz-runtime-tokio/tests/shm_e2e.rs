@@ -49,7 +49,6 @@ use wz_runtime_tokio::session_open::{
     DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::shm_provider::{PosixShmResolver, ShmBackedPayload};
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::{establish_capability_pair, fixture_params_with_zid};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -130,7 +129,9 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
 
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
 

@@ -699,7 +699,7 @@ mod tests {
         use wz_session_core::locality::Locality;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -754,7 +754,7 @@ mod tests {
         use wz_session_core::storage_volume::{MemoryVolume, Volume};
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 

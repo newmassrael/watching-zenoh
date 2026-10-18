@@ -1562,7 +1562,7 @@ mod tests {
         use crate::session::TokioSession;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -1638,8 +1638,6 @@ mod tests {
     #[cfg(all(feature = "transport-shm", feature = "session-extshm"))]
     #[test]
     fn an_advanced_put_of_a_chunk_goes_as_the_descriptor_to_a_face_that_negotiated() {
-        use std::sync::Mutex;
-
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
@@ -1654,7 +1652,7 @@ mod tests {
             let (actions, driver) = crate::test_fixtures::recording_actions();
             actions.set_shm_offer(true);
             actions.negotiate_shm_against_peer(negotiated);
-            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
             let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
             let options = AdvancedPublisherOptions {
                 sequencing: Sequencing::SequenceNumber,
@@ -1717,7 +1715,7 @@ mod tests {
         use crate::shm_provider::ShmBackedPayload;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
         let options = AdvancedPublisherOptions {
             sequencing: Sequencing::SequenceNumber,
@@ -1798,7 +1796,7 @@ mod tests {
         use crate::session::TokioSession;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -1917,7 +1915,7 @@ mod tests {
         use wz_session_core::sample::EncodingHint;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -2007,7 +2005,7 @@ mod tests {
         use wz_session_core::sink::SampleView;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -2085,7 +2083,7 @@ mod tests {
         use wz_session_core::sink::SampleView;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -2163,7 +2161,7 @@ mod tests {
         use wz_session_core::sample::Sample;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -2228,14 +2226,12 @@ mod tests {
     /// of no-hang; the retained count is the zenoh-faithful degenerate 1.
     #[test]
     fn cache_max_samples_zero_does_not_hang() {
-        use std::sync::Mutex;
-
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -2292,7 +2288,6 @@ mod tests {
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     #[test]
     fn declare_with_heartbeat_off_runtime_declares_and_beacons() {
-        use std::sync::Mutex;
         use std::time::Duration;
 
         use crate::observer::ApplicationLayerObserver;
@@ -2300,7 +2295,7 @@ mod tests {
         use crate::session::TokioSession;
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -2352,7 +2347,6 @@ mod tests {
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     #[test]
     fn a_miss_detection_request_overrides_the_sequencing_the_caller_named() {
-        use std::sync::Mutex;
         use std::time::Duration;
 
         use crate::observer::ApplicationLayerObserver;
@@ -2360,7 +2354,7 @@ mod tests {
         use crate::session::TokioSession;
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
@@ -2455,7 +2449,6 @@ mod tests {
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     #[tokio::test]
     async fn an_ill_formed_adv_keyexpr_is_refused_at_declare_in_every_configuration() {
-        use std::sync::Mutex;
         use std::time::Duration;
 
         use crate::observer::ApplicationLayerObserver;
@@ -2465,7 +2458,7 @@ mod tests {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let session = TokioSession::new(
             actions,
-            Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new())),
             Arc::new(TokioTime::new()),
         );
 
@@ -2603,8 +2596,6 @@ mod tests {
     /// so the role IS the switch and neither arm has to reach past the public
     /// constructor to set it.
     fn session_with_role(whatami: wz_codecs::whatami::WhatAmI) -> crate::session::TokioSession {
-        use std::sync::Mutex;
-
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
@@ -2614,7 +2605,7 @@ mod tests {
         let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
         TokioSession::new(
             actions,
-            Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new())),
             Arc::new(TokioTime::new()),
         )
     }
@@ -2641,15 +2632,13 @@ mod tests {
     /// the check now has a subject instead of being decoration.
     #[test]
     fn publisher_detection_metadata_rides_the_adv_keyexpr_and_a_bad_chunk_is_refused() {
-        use std::sync::Mutex;
-
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
 
         let new_session = || {
             let (actions, _driver) = crate::test_fixtures::recording_actions();
-            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
             let clock = Arc::new(TokioTime::new());
             (TokioSession::new(actions, observer, clock), _driver)
         };
@@ -2721,14 +2710,12 @@ mod tests {
     /// an accessor.
     #[test]
     fn the_publisher_surface_reports_identity_and_asks_for_matching_declarations() {
-        use std::sync::Mutex;
-
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 

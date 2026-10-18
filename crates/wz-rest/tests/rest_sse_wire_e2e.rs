@@ -38,7 +38,6 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::sample::EncodingHint;
@@ -93,7 +92,9 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
 
     let timeouts = SessionTimeouts::spec_defaults();
 
-    let observer_acc = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_acc = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_acc = TokioSession::new(
         opened_acc.actions.clone(),
         observer_acc,
@@ -110,7 +111,9 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
         move |event| session_acc_drive.dispatch_iteration_event(event),
     );
 
-    let observer_bridge = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer_bridge = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session_bridge = TokioSession::new(
         opened_bridge.actions.clone(),
         observer_bridge,

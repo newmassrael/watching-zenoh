@@ -31,7 +31,6 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_namespace, connect_and_open_session_with_namespace, DialConfig,
     DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_params_with_zid;
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 use wz_session_core::locator::parse_any_locator;
@@ -91,7 +90,9 @@ async fn remote_subscriber_matches(a_ns: &str, b_ns: &str) -> bool {
     //    observer the publisher reads.
     let session_a = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_init.clock),
     );
     let publisher = session_a.declare_publisher(KEYEXPR, PublishOptions::put());
@@ -109,7 +110,9 @@ async fn remote_subscriber_matches(a_ns: &str, b_ns: &str) -> bool {
     // ── B (acceptor): a subscriber whose declare propagates to A.
     let session_b = TokioSession::new(
         opened_acc.actions.clone(),
-        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
         Arc::new(opened_acc.clock),
     );
     let _subscriber = session_b

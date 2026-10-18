@@ -55,7 +55,6 @@ use wz_runtime_tokio::session::TokioSession;
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{accept_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS};
 use wz_runtime_tokio::storage_service::StorageService;
-use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -156,7 +155,9 @@ async fn wz_storage_restores_the_mount_prefix_on_a_pico_zget() {
     // BEFORE the drive runs so the queryable + value are present for pico's query.
     let mut config = StorageConfig::new("kitchen-store", STORAGE_KEYEXPR, "mem");
     config.strip_prefix = Some(STRIP_PREFIX.to_string());
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+        ApplicationLayerObserver::new(),
+    ));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
     let storage = StorageService::declare(&session, &config, vec![0x01])
         .expect("declare the wz strip-prefix storage on home/kitchen/**");

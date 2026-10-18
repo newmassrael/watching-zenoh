@@ -96,7 +96,7 @@ impl Runtime for TokioRuntime {
     // R311as+ leaf-first migration to `R::Mutex<...>` at call sites
     // does not need a parallel binding here.
     type Mutex<T>
-        = crate::sync::Mutex<T>
+        = crate::sync::PlainMutex<T>
     where
         T: Send + 'static;
     type RwLock<T>
@@ -114,49 +114,36 @@ impl Runtime for TokioRuntime {
         }
     }
 
-    // R311ct — closure-scoped mutex access. AP profile poison-recovery
-    // matches every existing `match observer.lock() { Ok | Err(poisoned)
-    // => poisoned.into_inner() }` call site: a panicking observer task
-    // poisons the mutex, recovering via `into_inner()` lets shutdown
-    // paths (Subscriber Drop / Queryable Drop / LivelinessToken Drop /
-    // LivelinessSubscriber Drop) still unregister their ids instead of
-    // leaking.
+    // R311ct — closure-scoped mutex access. The AP profile recovers from a
+    // panicking holder (a panicking observer task must not stop the shutdown
+    // paths -- Subscriber Drop / Queryable Drop / LivelinessToken Drop /
+    // LivelinessSubscriber Drop -- from unregistering their ids, or the ids
+    // leak). The lock is [`crate::sync::PlainMutex`], which is never poisoned
+    // and so has nothing to recover from: the value is as the panic left it,
+    // which is what `poisoned.into_inner()` handed back.
     fn with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U
     where
         T: Send + 'static,
     {
-        let mut guard = match mutex.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        f(&mut *guard)
+        mutex.with(f)
     }
 
-    // The non-waiting twin, with the same poison recovery: a held mutex answers `None`.
+    // The non-waiting twin: a held mutex answers `None`.
     fn try_with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> Option<U>
     where
         T: Send + 'static,
     {
-        let mut guard = match mutex.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
-        };
-        Some(f(&mut *guard))
+        mutex.try_with(f)
     }
 
-    // R311di-pre-e — construction-side Mutex/RwLock helpers. AP profile
-    // forwards to the std primitive's `new` constructor; the type alias
-    // `crate::sync::Mutex<T> = std::sync::Mutex<T>` makes the constructor
-    // call resolve to `std::sync::Mutex::new(value)` directly. No poison
-    // state is materialised at construction time — `std::sync::Mutex`
-    // poisoning is a runtime side-effect of a panicking lock holder, not
-    // a construction-time choice.
+    // R311di-pre-e — construction-side Mutex/RwLock helpers. The mutex is
+    // the session's [`crate::sync::PlainMutex`]; the RwLock stays the std
+    // one, which nothing on the per-message path takes.
     fn new_mutex<T>(value: T) -> Self::Mutex<T>
     where
         T: Send + 'static,
     {
-        crate::sync::Mutex::new(value)
+        crate::sync::PlainMutex::new(value)
     }
 
     fn new_rwlock<T>(value: T) -> Self::RwLock<T>

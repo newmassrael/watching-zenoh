@@ -32,7 +32,7 @@ fn session(peer_offered: bool) -> (TokioSession, Arc<RecordingLinkDriver>) {
     actions.set_shm_offer(true);
     actions.negotiate_shm_against_peer(peer_offered);
     assert_eq!(actions.is_shm(), peer_offered);
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
     (session, driver)
 }
