@@ -275884,6 +275884,50 @@
         "A svd_model and a register-constant gate against the vendor SVD exist on a local branch (not in the push); the T2G image comparison is being measured on the bench."
       ]
     },
+    "Round 3375": {
+      "decision_summary": "The transmit and receive buffer pools of the T2G admin node were measured on silicon for what they do to round-trip time, and no gain that the samples can attribute to them was found. Four images of one source tree (no pool, transmit pool, receive pool, both) were each booted twice; the medians of a REST query round trip are 5.00, 5.04, 4.90 and 4.92 ms, and every difference is about one kernel tick (0.1 ms at 10000 ticks a second) and flips between boots of the same image. This agrees with the August arithmetic that a 1.5 KB copy costs about 4 microseconds at 350 MHz, so the pool is a correctness and substitutability result and not a speed one. NOT claimed: that the pools are slower or faster, any comparison with zenoh-pico on this board (none was ever run there), the node's CPU time per datagram (the firmware has no counter), or the cause of the 5 ms floor of a query round trip (ICMP is 0.75 ms), for which only a hypothesis exists.",
+      "changes_bullets": [
+        "No source change: a hardware measurement. The images were built from the tree at the time with the board's own overlays (the transmit pool, the receive pool, both) and the CM0+ launcher of the same tree, whose bytes equal the launcher an earlier lab recorded.",
+        "The kit's two code-flash regions were read before any write and kept; the CM0+ region held the lab's saved original image and the M7_0 region an OEM image no lab record names.",
+        "Written to the kit, under the owner's permission of 2026-10-10 for every hardware write: the launcher into the CM0+ region, then each image into the M7_0 region, each verified by the programmer; at the end both regions were written back from the saved files."
+      ],
+      "verification_bullets": [
+        "Per boot: 2000 ICMP echoes of 56 B and of 1400 B, and 1500 REST GETs of the status key and of the config key through a stock router that dials the node; every sample kept, none lost, no bad reply, the core clock read 350 MHz and each boot's capture held one boot.",
+        "Medians in ms, base / transmit pool / receive pool / both: ICMP 56 B 0.7495 / 0.7530 / 0.7520 / 0.7820; ICMP 1400 B 1.260 / 1.130 / 1.270 / 1.240; GET status 5.0015 / 5.0413 / 4.9023 / 4.9249; GET config 4.7641 / 4.8193 / 4.7008 / 4.7003. Per boot, the transmit-pool GET status medians are 5.004 and 5.097 and the both-pools ones 4.902 and 4.998, so the boot-to-boot spread equals the differences.",
+        "A bootstrap over the pooled samples gave intervals that call some of these faster or slower; they treat samples as independent and two boots per image is too few for that to hold, so they are not a finding. The 1400 B echo of the transmit-pool image is 130 us under base in both boots although an echo never crosses the transmit pool and the other two images show nothing: not attributable.",
+        "Restore: both regions read back by a separate dump equal the saved originals (CM0+ bee8c20a, M7_0 16c4e4d7), and the restored kit boots the OEM image.",
+        "NOT verified: the node's CPU time per datagram; more than two boots per image; any comparison with the reference stack on this board."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended"
+      ],
+      "carry_forward_bullets": [
+        "The 5 ms floor of a query round trip is not the pools': the node's main loop yields one millisecond at the end of every pass, and a query may take several passes (a hypothesis read off the source, untested). A cycle counter in the firmware, or a loop that does not sleep while a pass had work, would settle it.",
+        "Before the next write to the kit, the saved regions are in the bench directory of the build host; the kit is back to the original CM0+ image and the OEM M7_0 image."
+      ],
+      "publishable_decision_summary": "The transmit and receive buffer pools of the T2G admin node were measured on silicon for what they do to round-trip time, and no gain that the samples can attribute to them was found. Four images of one source tree (no pool, transmit pool, receive pool, both) were each booted twice; the medians of a REST query round trip are 5.00, 5.04, 4.90 and 4.92 ms, and every difference is about one kernel tick (0.1 ms at 10000 ticks a second) and flips between boots of the same image. This agrees with the August arithmetic that a 1.5 KB copy costs about 4 microseconds at 350 MHz, so the pool is a correctness and substitutability result and not a speed one. NOT claimed: that the pools are slower or faster, any comparison with zenoh-pico on this board (none was ever run there), the node's CPU time per datagram (the firmware has no counter), or the cause of the 5 ms floor of a query round trip (ICMP is 0.75 ms), for which only a hypothesis exists.",
+      "publishable_changes_bullets": [
+        "No source change: a hardware measurement. The images were built from the tree at the time with the board's own overlays (the transmit pool, the receive pool, both) and the CM0+ launcher of the same tree, whose bytes equal the launcher an earlier lab recorded.",
+        "The kit's two code-flash regions were read before any write and kept; the CM0+ region held the lab's saved original image and the M7_0 region an OEM image no lab record names.",
+        "Written to the kit, under the owner's permission of 2026-10-10 for every hardware write: the launcher into the CM0+ region, then each image into the M7_0 region, each verified by the programmer; at the end both regions were written back from the saved files."
+      ],
+      "publishable_verification_bullets": [
+        "Per boot: 2000 ICMP echoes of 56 B and of 1400 B, and 1500 REST GETs of the status key and of the config key through a stock router that dials the node; every sample kept, none lost, no bad reply, the core clock read 350 MHz and each boot's capture held one boot.",
+        "Medians in ms, base / transmit pool / receive pool / both: ICMP 56 B 0.7495 / 0.7530 / 0.7520 / 0.7820; ICMP 1400 B 1.260 / 1.130 / 1.270 / 1.240; GET status 5.0015 / 5.0413 / 4.9023 / 4.9249; GET config 4.7641 / 4.8193 / 4.7008 / 4.7003. Per boot, the transmit-pool GET status medians are 5.004 and 5.097 and the both-pools ones 4.902 and 4.998, so the boot-to-boot spread equals the differences.",
+        "A bootstrap over the pooled samples gave intervals that call some of these faster or slower; they treat samples as independent and two boots per image is too few for that to hold, so they are not a finding. The 1400 B echo of the transmit-pool image is 130 us under base in both boots although an echo never crosses the transmit pool and the other two images show nothing: not attributable.",
+        "Restore: both regions read back by a separate dump equal the saved originals (CM0+ bee8c20a, M7_0 16c4e4d7), and the restored kit boots the OEM image.",
+        "NOT verified: the node's CPU time per datagram; more than two boots per image; any comparison with the reference stack on this board."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The 5 ms floor of a query round trip is not the pools': the node's main loop yields one millisecond at the end of every pass, and a query may take several passes (a hypothesis read off the source, untested). A cycle counter in the firmware, or a loop that does not sleep while a pass had work, would settle it.",
+        "Before the next write to the kit, the saved regions are in the bench directory of the build host; the kit is back to the original CM0+ image and the OEM M7_0 image."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
