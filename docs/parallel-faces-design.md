@@ -1,93 +1,114 @@
-# Parallel faces: one task per link for the C ABI node
+# Parallel faces: one thread per link for the C ABI node
 
-Status: design, Stage 0 of 5. Owner decision: cost ignored, the long-term correct shape.
+Status: built (stages 1 and 2, with the model revised in stage 2b), measured. Owner decision: cost
+ignored, the long-term correct shape.
 
 ## 1. Why
 
-A C ABI node (`z_open` with a listener or several dials) drives EVERY connection on one thread
-(`wz-capi-drive`). Measured on a quiet host with the reference subscriber and the same publishers,
-8 B payloads, one P core per side:
+A C ABI node (`z_open` with a listener or several dials) used to drive EVERY connection on one
+thread (`wz-capi-drive`). Measured on a quiet host with the reference subscriber and the same
+publishers, 8 B payloads, one P core per side:
 
-| connections | callback | wz subscriber | reference subscriber |
+| connections | callback | wz subscriber (one thread) | reference subscriber |
 |---|---|---|---|
 | 1 | trivial | 3.57 M/s | 3.65 M/s |
 | 2 and more | trivial | 6.3 to 9.0 M/s | about 3.0 M/s |
 | 2 and more | 1 microsecond of work | 0.88 M/s | 1.33 M/s |
 
-With a trivial callback wz is ahead on one thread (about 9 M/s, where the reference degrades as links
-are added). With a callback that does real work wz is bound to one thread and the reference is not:
-it runs a receive task per link. The node's capacity must not be one core.
+With a trivial callback wz was ahead on one thread. With a callback that does real work wz was bound
+to one thread and the reference is not: it runs a receive task per link. The node's capacity must not
+be one core, and a callback that blocks must hold up its own link and no other.
 
-## 2. Single-thread assumptions the design has to retire
+## 2. Single-thread assumptions retired
 
-Each of these is true today because everything is polled on one thread.
+1. Face drive futures were polled on a `LocalSet` and, for accepted faces, inside ONE future
+   (`face_drive_loop`). The drive of a face is now `Send` and spawned: the SCE `Engine` callbacks are
+   `+ Send` at the pin (the old module comment saying otherwise was stale), and the forwarder of the C
+   ABI (`CApiForwarder`) is `Send + Sync`.
+2. `ReadGate` is a barrier over every gated future of a session (the top-level drive and each face):
+   each registers by its first poll, a stop waits until all are parked or gone, and "inside a
+   callback" is a thread-local stack of the gates whose futures this thread is polling.
+3. The accept loop gained `accept_loop_offering_spawned`, which spawns each face through a
+   `FaceExecutor`; `accept_loop_offering` keeps the single task for forwarders that are not `Sync`
+   (the routing forwarders: `Rc`/`RefCell`, a concurrent routing core is a separate design).
 
-1. Face drive futures are polled on a `LocalSet` (`wz-capi-core/src/drive.rs`, nine `spawn_local`
-   sites) and, for accepted faces, inside ONE future: `face_drive_loop` holds every face's drive in
-   a `FuturesUnordered` (`wz-runtime-tokio/src/accept_loop.rs`). The module comment says a spawned
-   face is impossible because the SCE `Engine` owns callbacks with no `+ Send`. That is stale: the
-   pinned `sce-rust-runtime` declares both with `+ Send` (`engine.rs`), and a probe that replaced
-   every `spawn_local` by `tokio::spawn` left the dial legs compiling. What still is not `Send`:
-   `Rc` state shared by scouted legs, `dyn FaceForwarder` (not `Sync`), and the boxed `dyn Future`
-   of the open set.
-2. `ReadGate` (`zp_start_read_task` / `zp_stop_read_task`) is one switch over one future, and a
-   stop is SYNCHRONOUS as pico's is: it waits until the drive thread has parked, so no callback runs
-   afterwards. A start or stop made from inside a callback is refused by comparing the caller with
-   `drive_thread`. Both need N tasks.
-3. `DeferredListenerCell` gives every listener one total order across all sources (a ticket taken
-   where a call is staged) and runs its callback one call at a time. That is stronger than the
-   reference, which orders per link and may call one subscriber's callback from several links at
-   once.
-4. `MarshalCache` (wz-capi-c) keeps one marshalled sample per subscriber and reloads it in place,
-   which assumes a callback is not running twice at once.
-5. `drive_local_plane` runs on the same thread "so its deliveries cannot overlap a face's"
-   (R311y557).
-6. The drive thread has a 16 MiB stack because the futures polled on it are large in a debug build;
-   a tokio worker has 2 MiB.
-7. One `ApplicationLayerObserver` behind one mutex serves every face; each frame of plain Puts takes
-   it once, so it is a shared cost, not a serial one.
+## 3. Model: a thread per face, not a pool
 
-## 3. Target model
+The first model put each face's drive on the session runtime's workers (`tokio::spawn`). It scaled
+(with a 1 microsecond callback, 1.76 M/s on 2 workers and 3.30 M/s on 4, against 1.31 M/s for the
+reference), and it is wrong: a pool cannot keep a blocked callback from holding the face beside it.
+A test whose two peers' first callbacks wait for each other failed 16 of 20 runs with 2 workers and
+with 4: the drive of both faces ran on one worker thread, one after the other, the second starting
+only when the first callback returned. (Tokio keeps a woken task in its worker's LIFO slot, which
+other workers do not steal; that is read from the behaviour and the source, not shown.)
 
-* A control task per listener (the accept loop as it is): accept, handshake, `max_sessions`, zid
-  dedup, re-dial, ticks. Not a data path.
-* A data task per face, on the node's multi-thread runtime: `drive_face` spawned through a
-  `FaceExecutor` that wraps it in the read gate. The forwarder is `Arc<dyn FaceForwarder + Send +
-  Sync>`; `CApiForwarder` already is (an `Arc<SharedSession>` and mutexes). The routing forwarders
-  (peer and router hats, `Rc`/`RefCell` throughout) keep the single-task loop: a concurrent routing
-  core is a separate design and is not in scope.
-* The runtime's worker count and stack follow the machine, not a constant two.
-* `ReadGate` becomes a barrier over the gated tasks: each registers, a stop waits until every one
-  is parked or gone, and "inside a callback" is a thread-local set while a gated task is polled.
+So each face's drive runs on a thread of its own (`run_on_own_thread`, `drive.rs`):
 
-## 4. Contract
+* a current-thread runtime with a clock and no reactor: the socket belongs to the session runtime,
+  whose workers wake the face thread when it is readable;
+* the drive is polled only while the read task may run (`Pausable`), as before;
+* dropping the waiting task cancels the drive on its own thread and WAITS for the thread, because the
+  C `drop(context)` that follows a `z_close` must not race a callback. The wait is skipped from the
+  face's own thread (a callback that closes its session cannot wait for itself);
+* if a thread cannot be had, the drive runs as a task of the runtime instead.
 
-Per face (link): messages are delivered in the order they arrived, one at a time.
-Across faces: the same subscriber's callback MAY run concurrently, as zenoh's does. A callback must
-therefore be safe to call from two threads, which is what a C closure over a context pointer already
-has to be for the reference library.
+The session runtime's workers keep the reactor, the writers and the control tasks (a dial and its
+waiting); `WZ_CAPI_WORKER_THREADS` (default 2) is no longer the receive parallelism.
 
-Implementation: a cell keeps tickets per SOURCE (face) instead of one sequence, and a concurrent
-cell holds its callback as shared (`Fn + Send + Sync`) instead of taking it out and putting it back.
-The cell that serializes (a Rust `FnMut` listener) stays as it is. `MarshalCache` hands each running
-call its own marshalled sample from a small per-subscriber free list.
+## 4. Contract, per ABI
 
-## 5. Stages
+`FaceDrive` (on `OpenStance`, carried by the `ReadGate`):
 
-0. This note, and the stale comments corrected.
-1. `wz-runtime-tokio`: `drive_face` generic over the forwarder, `FaceExecutor`, and an accept
-   entry that spawns each face's drive (`JoinSet`, task id to face). Exit: a test with N peers shows
-   N drives on distinct threads, `FaceDown` and `deregister` unchanged, shutdown cancels all.
-2. `wz-capi-core`: accept legs through the new entry, dial legs spawned, `Rc` to `Arc`, the gate as
-   a barrier, worker count and stack. Exit: the existing read-task tests (stop is synchronous, a
-   stop from a callback is refused) pass unchanged.
-3. Delivery: per-source tickets and the concurrent cell. Exit: per-face order is preserved under N
-   concurrent faces; undeclare mid-flight suppresses later calls.
-4. `MarshalCache` per running call. Exit: the existing marshal tests and a two-thread test.
-5. Measure: the 1 microsecond callback table above with the new library, and the trivial one. The
-   claim is only what the table then shows.
+* `PerFace`, zenoh-c's: a thread per face. Per face (link) messages arrive in the order they were
+  sent, one at a time; across faces one subscriber's callback MAY run concurrently, as zenoh's
+  does (`CClosure` is `Sync`, and each face has its own callback and `MarshalCache`, so the
+  per-source tickets and per-call marshals of the first plan are not needed for this ABI).
+* `Serial`, zenoh-pico's: every face on the drive thread, one at a time. pico's callbacks all run
+  on the session's one read task and a stop of that task stops every callback; a program written for
+  it shares state between callbacks without a lock. Stage 2 had applied the parallel model to pico as
+  well, which broke that contract for a pico node with more than one peer; this is the repair.
 
-## 6. Not in scope
+## 5. Measured (pc3, pinned cores, 8 B, `z_sub_mt`)
 
-Concurrent routing tables for the router and peer hats; making the open handshakes tasks of their
-own (they are control, and run in the accept task).
+Messages per second at 4 publishers, default 2 workers:
+
+| callback | reference | pool, 2 workers | pool, 4 workers | thread per face |
+|---|---|---|---|---|
+| none | 2.88 M | 12.4 M | 12.6 M | 12.7 M |
+| 1 microsecond | 1.35 M | 1.75 M | 3.30 M | 3.29 M |
+
+One connection is a tie with the reference (3.82 M against 3.93 M, inside the spread).
+
+Round trip of `z_ping` against `z_pong`, median, 3000 samples, pong on cores 0 and 1:
+
+| ping / pong | round trip |
+|---|---|
+| reference / reference | 37.2 to 38.2 us |
+| reference / pool | 34.6 to 35.0 us |
+| reference / thread per face | 38.0 to 38.6 us |
+| thread per face / reference | 40.4 to 40.6 us |
+
+The thread per face costs about 3.5 us of round trip against the pool, which puts it at the
+reference's latency on the receive side and about 9% above it on the send side. It is the price of
+the isolation, and it is the price of a thread hand-off: the reactor wakes the face thread, and the
+callback's put wakes the writer task on a worker. A busy-poll after each wake (30 us) was tried and
+gave 1.8 us on one side and nothing on the other, and was removed.
+
+## 6. Verification
+
+`crates/wz-capi-c/tests/parallel_faces_roundtrip.rs`, through the exported `z_*` symbols: callbacks
+of different peers overlap (the first callback of each of two peers waits for the other's to start);
+each of four peers keeps its put order under load; closing the session while peers put leaves no
+callback running and starts none. 20 runs on the build host, 20 passed. The read-gate unit tests
+(`a_stop_waits_for_every_gated_task`, `a_callback_of_one_session_may_stop_another`) cover the
+barrier.
+
+## 7. Open
+
+* Latency: the hand-off to the writer is the larger part of the 3.5 us. A put that writes the socket
+  from the calling thread when the writer is idle (the pico shape) would remove it for every caller,
+  and is a change of the transmit path, not of this node.
+* A thread per face is a thread per link: a node that holds hundreds of links holds hundreds of
+  threads, each with a reserved 16 MiB stack (virtual until used).
+* Concurrent routing tables for the router and peer hats; the open handshakes as tasks of their own
+  (they are control, and run in the accept task).
