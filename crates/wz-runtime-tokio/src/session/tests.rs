@@ -1626,6 +1626,51 @@ fn a_frame_of_plain_puts_calls_the_callback_once_per_put_in_order() {
     );
 }
 
+/// The callback of a frame of plain Puts is told that a Put's key is the one it was handed in
+/// the call before only when it is: never for the first Put of a frame, and not across a Put
+/// to another key, however many calls the frame makes.
+#[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
+#[test]
+fn a_frame_of_plain_puts_tells_the_callback_when_a_key_repeats_the_one_before() {
+    let (session, _driver) = build_session();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, bool)>::new()));
+    let seen_cb = seen.clone();
+    let _sub = session
+        .declare_subscriber("home/**", SubscribeOptions::default(), move |sample| {
+            seen_cb
+                .lock()
+                .unwrap()
+                .push((sample.keyexpr().to_string(), sample.keyexpr_unchanged()));
+        })
+        .expect("declared");
+
+    let first = plain_puts_frame(&[
+        (0, Some("home/a"), b"1"),
+        (0, Some("home/a"), b"2"),
+        (0, Some("home/b"), b"3"),
+        (0, Some("home/a"), b"4"),
+        (0, Some("home/a"), b"5"),
+    ]);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&first));
+    // The next frame starts on the key the last one ended on, which is not said to repeat.
+    let second = plain_puts_frame(&[(0, Some("home/a"), b"6"), (0, Some("home/a"), b"7")]);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&second));
+
+    let want: Vec<(String, bool)> = [
+        ("home/a", false),
+        ("home/a", true),
+        ("home/b", false),
+        ("home/a", false),
+        ("home/a", true),
+        ("home/a", false),
+        ("home/a", true),
+    ]
+    .iter()
+    .map(|(key, same)| (key.to_string(), *same))
+    .collect();
+    assert_eq!(*seen.lock().unwrap(), want);
+}
+
 /// A callback that undeclares its own subscriber in the middle of a frame is not called for
 /// the Puts after it: the frame's calls are one staged job, and the job looks at the cell
 /// between them.

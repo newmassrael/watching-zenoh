@@ -140,6 +140,13 @@ pub trait SampleView {
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
         None
     }
+    /// Whether this sample's keyexpr is the keyexpr of the sample the caller delivered to the
+    /// same callback in the call just before this one, as the caller says. A callback that
+    /// keeps a copy of the last key may then leave it as it is instead of writing it again. The
+    /// default is `false`, which is always right: a view whose caller does not know says so.
+    fn keyexpr_unchanged(&self) -> bool {
+        false
+    }
 }
 
 /// A [`SampleView`] over loose borrowed bytes — the canonical impl for a
@@ -215,6 +222,7 @@ pub struct PlainSample<'s> {
     qos: Option<crate::sample::QosLevel>,
     shared: core::cell::OnceCell<Option<crate::link::RxBytes>>,
     repeats_previous: bool,
+    key_unchanged: bool,
 }
 
 #[cfg(feature = "alloc")]
@@ -235,7 +243,17 @@ impl<'s> PlainSample<'s> {
             qos,
             shared: core::cell::OnceCell::new(),
             repeats_previous: false,
+            key_unchanged: false,
         }
+    }
+
+    /// Say that this sample's key is the key of the sample the caller handed to the same
+    /// callback in the call just before this one ([`SampleView::keyexpr_unchanged`]). A caller
+    /// sets it only when that is so.
+    #[must_use]
+    pub fn with_unchanged_key(mut self) -> Self {
+        self.key_unchanged = true;
+        self
     }
 
     /// Say that this sample's key is the key of the sample offered just before it in the same
@@ -286,6 +304,9 @@ impl SampleView for PlainSample<'_> {
         self.shared
             .get_or_init(|| self.frame.subslice(self.payload_range()))
             .as_ref()
+    }
+    fn keyexpr_unchanged(&self) -> bool {
+        self.key_unchanged
     }
 }
 

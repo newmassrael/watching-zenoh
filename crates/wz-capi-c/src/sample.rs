@@ -263,9 +263,12 @@ impl SampleMarshal {
     /// What a subscriber's callback does for every message is this and not a build and a
     /// drop of a whole marshal.
     fn reload(&mut self, view: &dyn SampleView) {
-        self.keyexpr.keyexpr.clear();
-        self.keyexpr.keyexpr.push_str(view.keyexpr());
-        self.keyexpr.mapping = None;
+        // The text of the last key stays when the caller says this sample's is the same.
+        if !view.keyexpr_unchanged() {
+            self.keyexpr.keyexpr.clear();
+            self.keyexpr.keyexpr.push_str(view.keyexpr());
+            self.keyexpr.mapping = None;
+        }
         self.payload.reset(payload_of(view));
         // A stream's samples carry no attachment and no source info, and the default encoding,
         // sample after sample, so each of those is written only when this sample differs from
@@ -960,6 +963,63 @@ mod tests {
                         }
                         None => assert!(info.is_null(), "sample {index}: a stale source info"),
                     }
+                }
+            });
+        }
+    }
+
+    /// A view whose caller says whether its key is the last one's. A view that says it is has
+    /// no key to read: a kept marshal that read it anyway would panic here.
+    struct KeyedView {
+        key: &'static str,
+        unchanged: bool,
+    }
+
+    impl SampleView for KeyedView {
+        fn keyexpr(&self) -> &str {
+            assert!(!self.unchanged, "the key of an unchanged sample was read");
+            self.key
+        }
+        fn payload(&self) -> &[u8] {
+            b"p"
+        }
+        fn kind(&self) -> SampleKind {
+            SampleKind::Put
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn keyexpr_unchanged(&self) -> bool {
+            self.unchanged
+        }
+    }
+
+    /// A kept marshal keeps the last key's text when the caller says the next sample has the
+    /// same one, and rewrites it when the caller does not, through every change of key.
+    #[test]
+    fn a_kept_marshal_leaves_the_key_alone_when_the_caller_says_it_is_the_same() {
+        let samples = [
+            ("a", false),
+            ("a", true),
+            ("a", true),
+            ("longer/key", false),
+            ("longer/key", true),
+            ("a", false),
+            ("a", true),
+        ];
+        let mut kept = MarshalCache::new();
+        for (index, (key, unchanged)) in samples.into_iter().enumerate() {
+            kept.with_view(&KeyedView { key, unchanged }, |sample| {
+                // SAFETY: `sample` is the kept marshal's borrowed view, live for this call.
+                unsafe {
+                    let mut view_string = crate::abi::z_view_string_t::null_value();
+                    z_keyexpr_as_view_string(z_sample_keyexpr(sample), &mut view_string);
+                    let loaned = z_view_string_loan(&view_string);
+                    let text = std::slice::from_raw_parts(
+                        z_string_data(loaned) as *const u8,
+                        z_string_len(loaned),
+                    );
+                    assert_eq!(text, key.as_bytes(), "sample {index}");
                 }
             });
         }

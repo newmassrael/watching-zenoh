@@ -297,6 +297,10 @@ impl<R: SessionRuntime> wz_session_core::sink::FrameSink for DeferredSampleSink<
         let cell = self.cell.clone();
         let watched = cell.clone();
         cell.stage(&self.queue, move |cb| {
+            // The entry of the key the callback was handed last in this loop: an item on the
+            // same entry names the same key, which the callback is told so that it need not
+            // read the text to find out.
+            let mut previous = None;
             for item in &batch.items {
                 // A call that undeclared the subscriber stops the calls after it, as the
                 // cell stops a later job: the callback is not started again once its
@@ -304,13 +308,17 @@ impl<R: SessionRuntime> wz_session_core::sink::FrameSink for DeferredSampleSink<
                 if watched.is_dead() {
                     break;
                 }
-                let sample = wz_session_core::sink::PlainSample::new(
+                let mut sample = wz_session_core::sink::PlainSample::new(
                     &batch.keys[item.key as usize],
                     &batch.frame,
                     item.range,
                     batch.reliability,
                     item.qos,
                 );
+                if previous == Some(item.key) {
+                    sample = sample.with_unchanged_key();
+                }
+                previous = Some(item.key);
                 cb(&sample);
             }
         });
