@@ -46,7 +46,7 @@ use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_core::faces::{FilterPlane, MatchId, SharedSession, SubId, WireKey};
+use wz_capi_core::faces::{FilterPlane, FilteredPut, MatchId, SharedSession, SubId, WireKey};
 
 // --- opaque loaned sample --------------------------------------------------
 
@@ -867,21 +867,18 @@ impl PlainPublisher {
     /// put or a face stamps what it sends (`put_plain_declared` answers `None`
     /// then, with nothing sent).
     pub(crate) fn publish_plain(&self, payload: &[u8]) -> ZResult {
-        if self.filter.active() {
-            return Z_OK;
+        let Some((params, mapping)) = &self.plain else {
+            return self.publish(payload, &put_options());
+        };
+        match self
+            .filter
+            .put_plain(self.key.literal(), *mapping, payload, params)
+        {
+            FilteredPut::Suppressed | FilteredPut::Sent(Ok(_)) => Z_OK,
+            FilteredPut::Sent(Err(_)) => Z_ERR_GENERIC,
+            // Nothing was sent, and the filter has already said the put is wanted.
+            FilteredPut::NotPlain => self.publish_filtered(payload, &put_options()),
         }
-        if let Some((params, mapping)) = &self.plain {
-            if let Some(sent) =
-                self.shared
-                    .put_plain_declared(self.key.literal(), *mapping, payload, params)
-            {
-                return match sent {
-                    Ok(_) => Z_OK,
-                    Err(_) => Z_ERR_GENERIC,
-                };
-            }
-        }
-        self.publish_filtered(payload, &put_options())
     }
 
     /// Publish on this publisher's key, in its declared wire form and with the

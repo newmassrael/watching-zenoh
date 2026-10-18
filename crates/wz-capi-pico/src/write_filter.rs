@@ -131,6 +131,19 @@ impl WriteFilter {
     pub(crate) fn active(&self) -> bool {
         self.shared.write_filter_active(self.id)
     }
+
+    /// [`Self::active`] followed by a plain put on a declared key, in one step of the
+    /// registry ([`SharedSession::put_plain_filtered`]).
+    pub(crate) fn put_plain(
+        &self,
+        keyexpr: &str,
+        mapping_id: u64,
+        payload: &[u8],
+        params: &wz_runtime_tokio::session::PlainPutParams,
+    ) -> wz_capi_core::faces::FilteredPut {
+        self.shared
+            .put_plain_filtered(self.id, keyexpr, mapping_id, payload, params)
+    }
 }
 
 impl Drop for WriteFilter {

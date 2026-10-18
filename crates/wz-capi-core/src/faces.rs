@@ -245,6 +245,19 @@ pub enum FanoutError {
     ExceedsCapacity,
 }
 
+/// What [`SharedSession::put_plain_filtered`] did with a put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilteredPut {
+    /// The write filter said nothing matches: nothing was sent, and the put is answered as
+    /// a success, as pico's is.
+    Suppressed,
+    /// The put was sent, with the answer [`SharedSession::put_plain_declared`] gives.
+    Sent(Result<usize, FanoutError>),
+    /// The put is not plain on this node (a local subscriber wants it, or a face stamps what
+    /// it sends): nothing was sent, and the caller takes the general publish.
+    NotPlain,
+}
+
 /// How ONE leg of a publish fan-out ended, which is all [`SharedSession`]'s fan-out needs
 /// to know about a call that is otherwise a bytes publish, an SHM publish or either of
 /// them on a declared key.
@@ -3212,6 +3225,86 @@ impl SharedSession {
             return None;
         }
         let sessions = self.face_set();
+        self.put_plain_to(&sessions, mapping_id, payload, params)
+    }
+
+    /// [`Self::put_plain_declared`] for a publisher that has a write filter
+    /// ([`Self::declare_write_filter`]): the filter's answer and the faces are read in ONE
+    /// step of the registry rather than two, when the filter's kept answer is still the
+    /// current one, which is every put but the first after a declaration changed.
+    ///
+    /// [`FilteredPut::Suppressed`] is the filter saying nothing matches, with nothing sent;
+    /// [`FilteredPut::Sent`] is what [`Self::put_plain_declared`] answered `Some`;
+    /// [`FilteredPut::NotPlain`] is its `None`, and nothing has been sent.
+    ///
+    /// A DEBUG build always asks the filter the long way round
+    /// ([`Self::write_filter_active`] checks its kept answer against the registries'), so
+    /// every test that runs with real faces still tests the counters.
+    pub fn put_plain_filtered(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        mapping_id: u64,
+        payload: &[u8],
+        params: &wz_runtime_tokio::session::PlainPutParams,
+    ) -> FilteredPut {
+        #[cfg(all(target_has_atomic = "64", not(debug_assertions)))]
+        {
+            let kept = {
+                let guard = self.lock();
+                guard
+                    .filters
+                    .iter()
+                    .find(|e| e.id == filter)
+                    .and_then(|entry| {
+                        let token = guard.filter_token(entry.plane)?;
+                        let kept = entry.cache?;
+                        ((kept.generation, kept.epoch_sum) == token)
+                            .then(|| (kept.inactive, guard.face_set.clone()))
+                    })
+            };
+            if let Some((inactive, sessions)) = kept {
+                if inactive {
+                    return FilteredPut::Suppressed;
+                }
+                return self
+                    .put_plain_after_filter(&sessions, keyexpr, mapping_id, payload, params);
+            }
+        }
+        if self.write_filter_active(filter) {
+            return FilteredPut::Suppressed;
+        }
+        let sessions = self.face_set();
+        self.put_plain_after_filter(&sessions, keyexpr, mapping_id, payload, params)
+    }
+
+    /// The part of [`Self::put_plain_declared`] that follows the filter, on faces already read.
+    fn put_plain_after_filter(
+        &self,
+        sessions: &[TokioSession],
+        keyexpr: &str,
+        mapping_id: u64,
+        payload: &[u8],
+        params: &wz_runtime_tokio::session::PlainPutParams,
+    ) -> FilteredPut {
+        if params.destination.allows_local() && self.local.has_local_delivery_for(keyexpr) {
+            return FilteredPut::NotPlain;
+        }
+        match self.put_plain_to(sessions, mapping_id, payload, params) {
+            Some(sent) => FilteredPut::Sent(sent),
+            None => FilteredPut::NotPlain,
+        }
+    }
+
+    /// The wire legs of [`Self::put_plain_declared`], on faces already read: `None` when one
+    /// of them stamps what it sends.
+    fn put_plain_to(
+        &self,
+        sessions: &[TokioSession],
+        mapping_id: u64,
+        payload: &[u8],
+        params: &wz_runtime_tokio::session::PlainPutParams,
+    ) -> Option<Result<usize, FanoutError>> {
         if params.destination.allows_remote() {
             if sessions.iter().any(|session| session.stamps_publishes()) {
                 return None;
@@ -4696,6 +4789,78 @@ mod matching_aggregate_tests {
             Some(Ok(0))
         ));
         assert_eq!(shared.drain_local_plane(), 0);
+    }
+
+    /// The plain lane behind a write filter answers as the filter and the lane answer one
+    /// after the other: a filter nothing matches suppresses the put (every time, the first
+    /// from the registries and the later ones from the kept answer), a put with no filter of
+    /// that id goes on to the lane, and a put this node's own subscriber wants steps aside.
+    #[test]
+    fn a_plain_put_behind_a_write_filter_answers_as_the_filter_and_the_lane_do() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let mapping = shared
+            .declare_keyexpr("wz/plain/filtered".to_owned())
+            .expect("the first alias id is not exhausted");
+        let params = PublishOptions::put()
+            .with_locality(Locality::Remote)
+            .plain_put_params()
+            .expect("this build sends plain puts");
+        let filter = shared.declare_write_filter(
+            FilterPlane::Subscribers,
+            "wz/plain/filtered".to_owned(),
+            None,
+        );
+
+        // No face has said it matches: suppressed, and the same on every later put.
+        for _ in 0..3 {
+            assert_eq!(
+                shared.put_plain_filtered(filter, "wz/plain/filtered", mapping, b"x", &params),
+                FilteredPut::Suppressed
+            );
+        }
+        assert!(shared.write_filter_active(filter));
+
+        // A filter the registry does not hold filters nothing: the lane answers.
+        assert_eq!(
+            shared.put_plain_filtered(
+                filter.wrapping_add(1000),
+                "wz/plain/filtered",
+                mapping,
+                b"x",
+                &params
+            ),
+            FilteredPut::Sent(Ok(0))
+        );
+
+        // A filter that is gone is a filter that is not held.
+        shared.undeclare_write_filter(filter);
+        assert_eq!(
+            shared.put_plain_filtered(filter, "wz/plain/filtered", mapping, b"x", &params),
+            FilteredPut::Sent(Ok(0))
+        );
+
+        // A put this node's own subscriber wants steps aside, sending nothing.
+        let sink: SubscriberSink = Arc::new(|| Box::new(move |_sample: &dyn SampleView| {}));
+        shared.declare_subscriber("wz/plain/filtered".to_owned(), Locality::Any, sink);
+        let local = PublishOptions::put()
+            .with_locality(Locality::Any)
+            .plain_put_params()
+            .expect("this build sends plain puts");
+        assert_eq!(
+            shared.put_plain_filtered(
+                filter.wrapping_add(1000),
+                "wz/plain/filtered",
+                mapping,
+                b"x",
+                &local
+            ),
+            FilteredPut::NotPlain
+        );
+        assert_eq!(
+            shared.drain_local_plane(),
+            0,
+            "stepping aside staged nothing"
+        );
     }
 
     /// R311y557 — an UNDECLARED alias stops delivering in-process.
