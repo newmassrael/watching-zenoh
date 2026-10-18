@@ -361,7 +361,7 @@ impl MarshalCache {
             }
         };
         let result = body(marshal.as_loaned());
-        marshal.payload.reset(Payload::Owned(Vec::new()));
+        marshal.payload.release();
         result
     }
 }

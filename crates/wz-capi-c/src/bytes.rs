@@ -221,6 +221,28 @@ impl BytesState {
         }
     }
 
+    /// Let go of the payload of a state that is kept from one sample to the next, so the frame
+    /// it shares goes back to its pool when the callback returns and not when the next sample
+    /// arrives: [`Self::reset`] to the empty payload, without working out the boundaries of a
+    /// payload that is known to be empty. A copy made for sharing, or a loan of shared memory,
+    /// is let go too, as `reset` lets it go.
+    pub(crate) fn release(&mut self) {
+        self.payload = Payload::Owned(Vec::new());
+        self.bounds.clear();
+        if self.share.get().is_some() {
+            self.share = std::sync::OnceLock::new();
+        }
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        {
+            if self.shm_loan.get().is_some() {
+                self.shm_loan = std::sync::OnceLock::new();
+            }
+        }
+    }
+
     /// This payload's bytes as a payload that SHARES them with it: a reference count, where
     /// copying an owned payload (the clone of a payload that is then consumed by a put, in a
     /// loop) was an allocation, the bytes, and their release. The first call makes the
@@ -1709,6 +1731,42 @@ mod received_slices_tests {
             storage.as_slice().as_ptr()
         );
         assert!(state.slice(1).is_none());
+    }
+
+    /// Releasing a kept state is what resetting it to the empty payload is: nothing left of the
+    /// payload or its boundaries, a copy made for sharing let go, and the frame the payload
+    /// shared no longer held by it, whichever shape the payload had.
+    #[test]
+    fn releasing_a_kept_state_leaves_what_resetting_to_empty_leaves() {
+        let (first, a) = page(b"abc");
+        let (_second, b) = page(b"de");
+        let shapes: [Payload; 3] = [
+            Payload::Shared(RxBytes::sliced(vec![a, b])),
+            Payload::Shared(page(b"fghi").1),
+            Payload::Owned(b"owned".to_vec()),
+        ];
+        let mut released = BytesState::of(Payload::Owned(Vec::new()));
+        let mut reset = BytesState::of(Payload::Owned(Vec::new()));
+        for shape in shapes {
+            released.reset(shape.clone());
+            reset.reset(shape);
+            // A copy for sharing, made while the callback runs, as `z_bytes_clone` makes one.
+            let _ = released.share();
+            released.release();
+            reset.reset(Payload::Owned(Vec::new()));
+            assert_eq!(released.bounds, reset.bounds);
+            assert_eq!(released.bounds.as_slice(), [] as [usize; 0]);
+            assert!(released.payload.is_empty());
+            assert!(
+                released.share.get().is_none(),
+                "a copy for sharing is let go"
+            );
+        }
+        assert_eq!(
+            std::sync::Arc::strong_count(&first),
+            1,
+            "the frame goes back when the state lets go"
+        );
     }
 
     #[test]
