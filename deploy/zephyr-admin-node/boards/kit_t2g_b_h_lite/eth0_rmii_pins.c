@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+/* SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
  * ETH0's pins for RMII on KIT_T2G-B-H_LITE (CYT4BF8CDS, 176-pin package).

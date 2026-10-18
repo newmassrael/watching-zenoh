@@ -1,5 +1,5 @@
 <!--
-SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 
@@ -233,8 +233,8 @@ They carry SCE's header where SCE emits one (the statechart `*_sm.rs`
 files; MIT before the Round 3008 pin, AGPL-3.0-only WITH the SCE
 Linking Exception OR SCE Commercial since) and no SPDX header on the
 codec / pool emits. They are not authored by watching-zenoh and are
-not tracked under the AGPL-3.0 / Commercial license that covers the
-rest of this repo. See `LICENSE-GENERATED.md` in the SCE repo at the
+not tracked under the Non-Commercial / Commercial license that covers
+the rest of this repo. See `LICENSE-GENERATED.md` in the SCE repo at the
 pinned revision for the generation-time policy.
 
 ## How this ledger is maintained

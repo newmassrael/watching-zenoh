@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 """R2098 (no register item) — the LGPL -> AGPL relicense, as a rerunnable
@@ -70,11 +70,18 @@ import tempfile
 # itself, on the relicense commit. Splitting the literal keeps this file IN
 # SCOPE (a real stale header here would still be caught) where a path-based
 # exemption would have carved it out permanently.
-OLD = "LGPL-3.0-or-later" + " OR LicenseRef-watching-zenoh-Commercial"
-NEW = "AGPL-3.0-or-later" + " OR LicenseRef-watching-zenoh-Commercial"
+#
+# The constants carry the SECOND move, AGPL -> the source-available
+# non-commercial licence; the first move (LGPL -> AGPL) used the same file under
+# the same rules, which is what the module docstring above describes.
+OLD = "AGPL-3.0-or-later" + " OR LicenseRef-watching-zenoh-Commercial"
+NEW = "LicenseRef-watching-zenoh-NonCommercial-1.0" + " OR LicenseRef-watching-zenoh-Commercial"
 
-# Skipped by PATH prefix, for the reasons in the module docstring.
-SKIP_PREFIXES = ("out/", "vendor/")
+# Skipped by PATH prefix, for the reasons in the module docstring. The atomic
+# store is skipped because its changelog is a frozen ledger: entries recording
+# the earlier terms state the old expression as history, and a substitution
+# there would rewrite what was decided rather than what is in force.
+SKIP_PREFIXES = ("out/", "vendor/", "docs/.atomic/")
 
 
 def tracked_files() -> list[pathlib.Path]:

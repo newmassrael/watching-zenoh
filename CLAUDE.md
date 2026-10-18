@@ -87,11 +87,13 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
 
 ## License + SPDX header policy
 
-Dual-licensed: `AGPL-3.0-or-later` OR `LicenseRef-watching-zenoh-Commercial`
-(see `LICENSE`). Author-side source files carry this header:
+Source-available, non-commercial or commercial:
+`LicenseRef-watching-zenoh-NonCommercial-1.0` OR
+`LicenseRef-watching-zenoh-Commercial` (see `LICENSE`, `LICENSE-COMMERCIAL.md`).
+The free tier was AGPL-3.0-or-later before 2026-10-18. Author-side source files carry this header:
 
 ```
-SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 ```
 

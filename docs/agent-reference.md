@@ -185,17 +185,21 @@ to add an escape-hatch field.
 
 ## License + SPDX header policy (detail)
 
-This project is **dual-licensed**: `AGPL-3.0-or-later` (free, with
-AGPL-3 obligations -- whole-work copyleft, anti-tivoization, and the
-§13 source offer to remote users of a modified version) OR
-`LicenseRef-watching-zenoh-Commercial` (paid, 6-way exemption). See
-`LICENSE` for the overview, `LICENSE-AGPL-3.0.md` for the verbatim
-free-tier text, and `LICENSE-COMMERCIAL.md` for the commercial
-alternative.
+This project is **source-available**:
+`LicenseRef-watching-zenoh-NonCommercial-1.0` (free for personal
+learning, non-commercial research and an organization's evaluation
+outside production) OR `LicenseRef-watching-zenoh-Commercial` (every
+other use, agreed in writing). `LICENSE` is the verbatim free-tier
+text and `LICENSE-COMMERCIAL.md` states the commercial alternative.
+The shape follows `sce-spec-workbench`.
 
-The free tier was `LGPL-3.0-or-later` until 2026-08-25. Revisions
-published under it keep those terms for the copies they were given
-with; this tree carries the AGPL expression from that commit on. The
+The free tier was `AGPL-3.0-or-later` from 2026-08-25 to 2026-10-18
+and `LGPL-3.0-or-later` before that. Revisions published under them
+keep those terms for the copies they were given with (their texts are
+in the git history; the `LICENSE-*GPL*` files were removed); this tree
+carries the non-commercial expression from the relicense commit on.
+The first move (LGPL to AGPL) and the second (AGPL to this one) used the
+same tool. The
 substitution is rerunnable and gated --
 `scripts/lib/relicense_spdx.py` (exact-literal, `--check` mode FAILs
 when any tracked file still carries the old expression).

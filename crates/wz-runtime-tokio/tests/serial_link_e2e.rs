@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // R2995 (open-debt 852) -- this file is gated on the FEATURE alone. R2973 had to
 // add `unix` because every pair here was an `openpty` pair (`SerialStream::pair`,

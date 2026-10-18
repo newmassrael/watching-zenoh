@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # zephyr-admin-node/rust — the wz Rust STATICLIB of the Zephyr admin-node
@@ -23,7 +23,7 @@ name = "wz-zephyr-admin-node"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
 publish = false
 description = "wz Rust staticlib for the Zephyr admin-node firmware: a node a zenoh host reconfigures through its admin space, over the board's network stack."

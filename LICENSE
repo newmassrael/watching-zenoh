@@ -1,135 +1,161 @@
-watching-zenoh — Dual License
-Copyright (c) 2026 newmassrael
+watching-zenoh Non-Commercial License, Version 1.0
 
-This project is dual licensed — choose either license:
+SPDX identifier: LicenseRef-watching-zenoh-NonCommercial-1.0
 
-================================================================================
-OPTION 1: GNU Affero General Public License version 3 (or later)
-================================================================================
+Copyright (c) 2026 newmassrael. All rights reserved except as granted below.
 
-Use this for:
-- Open source projects (any AGPL-compatible license)
-- Projects willing to comply with AGPL-3 obligations:
-    (a) Any work you convey that is based on watching-zenoh must itself
-        be licensed as a whole under AGPL-3 — the entire combined work,
-        not merely the watching-zenoh portion. Dynamic linking does not
-        avoid this; there is no LGPL-style "relink" carve-out.
-    (b) AGPL-3 §13: if you MODIFY watching-zenoh and let users interact
-        with your modified version REMOTELY over a network, you must
-        offer those users the Corresponding Source of your version, at
-        no charge, from a network server. Running it as a service is
-        not a way around (a) — this is the clause that distinguishes
-        AGPL from plain GPL.
-    (c) For "User Products" (consumer devices, embedded firmware),
-        AGPL-3 §6 ("anti-tivoization") requires providing the user with
-        the Installation Information needed to install a modified
-        watching-zenoh on that device — signing keys, build
-        instructions, install procedure.
-    (d) Modifications to watching-zenoh's own source must be
-        distributed under AGPL-3 (no private modifications under this
-        option once you convey or serve the result).
+This is a source-available license. It is not an open-source license: it does not permit
+commercial use. Read section 4 before using the Software in or for an organization.
 
-If any of (a) through (d) is unacceptable for your product, use
-Option 2 (Commercial License) instead.
 
-Full AGPL-3.0 text:    LICENSE-AGPL-3.0.md
-Official AGPL-3.0:     https://www.gnu.org/licenses/agpl-3.0.html
+1. Definitions
 
-Note on earlier releases. Commits published before this change offered
-the free tier as LGPL-3.0-or-later instead of AGPL-3.0-or-later, with
-the same commercial alternative. A licence already granted cannot be
-withdrawn: anyone who obtained a copy under those terms keeps them for
-that copy. This file governs THIS revision and everything after it.
+"Software" means watching-zenoh: the source code, build files, generated sources kept in this
+repository, documentation and other material in this repository, and any program, library or
+firmware image built from them, excluding the Third-Party Components of section 7.
 
-================================================================================
-OPTION 2: Commercial License
-================================================================================
+"Licensor" means newmassrael, the copyright holder.
 
-Use this for:
-- Proprietary applications (closed source)
-- Network services built on a modified watching-zenoh where you do not
-  wish to publish your modifications (the AGPL-3 §13 waiver)
-- Embedded firmware with secure boot, signed binaries, or locked-down
-  update channels (anti-tivoization waiver)
-- Private modifications to watching-zenoh's own source (keep changes
-  internal — no obligation to upstream or publish)
-- Redistribution of watching-zenoh as part of a derivative SDK, library
-  wrapper, or rebranded product
+"You" means the individual or the Organization exercising rights under this license.
 
-Pricing: contact the Licensor. Terms depend on team size, product,
-and distribution model, so there is no published figure here.
+"Organization" means a company, a public body, or any other legal entity, and anyone acting on
+its behalf or for its benefit, including employees and contractors in the course of their work.
 
-Sponsor:  https://github.com/newmassrael
-Contact:  newmassrael@gmail.com
+"Production Environment" means any setting in which the Software, or anything made with it, is
+used to do the actual work of an Organization or is relied on by anyone outside an evaluation.
+That includes, without limitation: running it as a node, router, gateway, tool or library in a
+network or system that an Organization operates; development of a product or of internal tools;
+firmware or software shipped to a customer; and any service offered to others.
 
-Full terms: LICENSE-COMMERCIAL.md
+"Evaluation" means installing, building and running the Software, including its tests and
+benchmarks, only to decide whether the Organization will obtain a commercial license for it.
 
-================================================================================
-SCE-GENERATED CODE: separately governed
-================================================================================
 
-Code generated by `sce-codegen` from watching-zenoh's SCXML sources
-follows SCE's own LICENSE-GENERATED.md at the revision of `vendor/sce`
-this tree pins (see THIRD_PARTY.md); it is not restated here, so it
-cannot go stale when the pin moves. The author of the input SCXML file
-owns the copyright in the material derived from the input document per
-SCE policy — for watching-zenoh's own sources (`sources/**.scxml`),
-copyright belongs to newmassrael; downstream users authoring their own
-SCXML own the same material in their own generated code. Revisions of
-this repository built against SCE pins before 2026-10-02 shipped
-generated code under SCE's then terms (MIT) for the copies they were
-given with.
+2. Personal learning and non-commercial research: free of charge
 
-================================================================================
-SCE RUNTIME ENGINE: Separately Licensed
-================================================================================
+Subject to section 6, the Licensor grants You a worldwide, royalty-free, non-exclusive,
+non-transferable license to use, copy and modify the Software, free of charge, for either of:
 
-watching-zenoh's `out/` artifacts depend on the SCE Execution Engine
-at runtime. The SCE engine is dual-licensed independently, on the terms
-stated in `LICENSE` at the pinned revision of `vendor/sce` (see
-THIRD_PARTY.md): a free option and an SCE Commercial License (separate
-purchase from SCE). Revisions built against SCE pins before 2026-10-02
-used the free option as LGPL-2.1-or-later WITH Static-Linking-Exception.
+  (a) personal learning: use by an individual, for that individual's own study, and not for or
+      on behalf of an Organization;
 
-See https://github.com/newmassrael/scxml-core-engine for SCE licensing.
-A watching-zenoh Commercial license does NOT automatically grant SCE
-Commercial — they are independent products with independent licensing.
+  (b) non-commercial research: research whose results are not sold, not used to develop a
+      product or a service, and not carried out for the commercial benefit of an Organization.
 
-================================================================================
-ZENOH WIRE PROTOCOL: Interop only (no shared code)
-================================================================================
 
-watching-zenoh is an independent reimplementation of the Zenoh 1.x
-wire protocol (peer + client modes, zenoh-pico parity scope per
-ARCHITECTURE.md §2). No code is shared with the upstream Zenoh
-(Apache-2.0 OR EPL-2.0) or zenoh-pico (Apache-2.0 OR EPL-2.0)
-projects — interoperability is at the wire-format level only, which
-is not a copyrightable artifact.
+3. Evaluation by an Organization: permitted within the evaluation only
 
-================================================================================
-Quick Decision Guide
-================================================================================
+Subject to section 6, the Licensor grants an Organization a worldwide, royalty-free,
+non-exclusive, non-transferable license to install, build, run and modify the Software for
+Evaluation, on these conditions:
 
-| Your Situation                                | License Choice | Cost            |
-|-----------------------------------------------|----------------|-----------------|
-| Open source project, AGPL-compatible          | AGPL-3.0+      | FREE            |
-| Internal use, never conveyed and never served | AGPL-3.0+      | FREE            |
-| Proprietary commercial product                | Commercial     | Contact         |
-| Network service on a modified watching-zenoh  | Commercial     | Contact         |
-| Embedded firmware (signed / locked devices)   | Commercial     | Contact         |
-| Private modifications to watching-zenoh       | Commercial     | Contact         |
-| Redistribute as SDK / rebranded product       | Commercial     | Contact         |
+  (a) the Software is not used in a Production Environment;
 
-"Internal use" is narrow on purpose: AGPL-3 obligations attach when you
-CONVEY a covered work, and — under §13 — when you let users interact
-with a MODIFIED version over a network. Running an unmodified
-watching-zenoh for yourself triggers neither.
+  (b) nothing produced with the Software during the Evaluation (a measurement, a build, a
+      configuration, generated code or any other output) is used in a Production Environment,
+      delivered to a customer, or shipped in a product;
 
-================================================================================
-SPDX IDENTIFIER
-================================================================================
+  (c) the Evaluation ends when the Organization has decided whether to obtain a commercial
+      license. Use that continues after that decision, or that goes beyond what deciding
+      requires, is not Evaluation.
 
-Files covered by this dual license use the following SPDX expression:
 
-    SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
-    SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+4. Commercial use: a separate commercial agreement is required
+
+Any use not granted by section 2 or section 3 requires a separate written commercial agreement
+with the Licensor. That includes, without limitation, use by or for an Organization for any of:
+
+  (a) internal business or development work;
+
+  (b) inclusion of the Software, in whole or in part, in a product, including firmware and
+      including a program that links the Software statically or dynamically;
+
+  (c) delivery to a customer, whether as software, as part of a deliverable, or as the means by
+      which a deliverable is made;
+
+  (d) operation of a service, whether offered to others or run internally.
+
+To obtain a commercial license, contact the Licensor: newmassrael@gmail.com
+
+
+5. Redistribution
+
+You may give copies of the Software, with or without Your modifications, to others only if:
+
+  (a) the copies are given free of charge and under this license, unchanged;
+
+  (b) this license text and every copyright and license notice in the Software are kept;
+
+  (c) modified files say that they were changed.
+
+A recipient gets its rights from the Licensor under this license and gets no commercial rights
+from You.
+
+
+6. Conditions
+
+  (a) You must not remove or alter any copyright, license or attribution notice in the Software.
+
+  (b) You must not sublicense the Software, or offer it under any other terms.
+
+  (c) This license does not grant any right in the names, logos or trademarks of the Licensor or
+      of the Software, except to state truthfully where the Software came from.
+
+  (d) No right is granted except those stated in this license. All other rights are reserved.
+
+
+7. Third-Party Components
+
+This license covers the Software only. Other material that the Software is built with or
+distributed beside is licensed by its own terms, which this license neither changes nor
+replaces. In particular:
+
+  (a) SCE (SCXML Core Engine), which this repository refers to as the `vendor/sce` submodule and
+      which is not part of this repository, is licensed under its own terms (see the LICENSE
+      files in that repository). Code that SCE generates from the SCXML sources of this
+      repository carries the header SCE writes and follows SCE's own terms for generated code;
+      this license does not restate or change them. A commercial license for the Software does
+      not by itself license SCE, and the reverse holds as well;
+
+  (b) the other submodules and vendored sources under `vendor/` (for example zenoh-pico,
+      FreeRTOS, lwIP and Mbed TLS) keep the licenses they carry;
+
+  (c) the libraries named in Cargo.lock are licensed by their own authors;
+
+  (d) the Zenoh protocol: the Software is an independent reimplementation of the Zenoh 1.x wire
+      protocol and shares no code with Eclipse Zenoh or zenoh-pico. Interoperability is at the
+      wire-format level only.
+
+You are responsible for complying with those terms.
+
+
+8. Termination
+
+Your rights under this license end automatically if You do not comply with it. If You come back
+into compliance within 30 days of first learning of the breach, and it is Your first breach,
+Your rights are restored. When Your rights end, You must stop using the Software and destroy
+every copy of it in Your possession.
+
+
+9. Earlier revisions
+
+Revisions of this repository published before this license was adopted were offered under
+AGPL-3.0-or-later, and revisions before that under LGPL-3.0-or-later, each with the same
+commercial alternative (`LicenseRef-watching-zenoh-Commercial`). A license already granted cannot
+be withdrawn: a copy that You obtained under those terms stays under them for that copy. The texts
+of those licenses are kept in the history of this repository. This file governs THIS revision and
+everything after it.
+
+
+10. No warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT.
+
+
+11. Limitation of liability
+
+TO THE EXTENT THE LAW ALLOWS, THE LICENSOR IS NOT LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OF OR OTHER DEALINGS IN THE SOFTWARE.
