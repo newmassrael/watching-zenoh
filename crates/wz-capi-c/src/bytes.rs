@@ -320,6 +320,61 @@ pub(crate) unsafe fn bytes_state<'a>(this_: *const z_loaned_bytes_t) -> Option<&
     Some(unsafe { &*(handle as *const BytesState) })
 }
 
+thread_local! {
+    /// The box a consumer of a payload (a put, a drop) emptied last on this thread, kept for
+    /// the next payload this thread builds. A program that builds a payload and puts it in a
+    /// loop (`z_bytes_clone` or `z_bytes_copy_from_buf`, then a put that consumes it)
+    /// otherwise asks the allocator for a box and gives it back once per message, which was
+    /// a tenth of the instructions of the whole put. One box is the whole of that loop, and
+    /// a slot costs a swap where a list of them cost a borrow, a length check and a push.
+    static SPARE_STATE: core::cell::Cell<Option<Box<BytesState>>> =
+        const { core::cell::Cell::new(None) };
+}
+
+impl BytesState {
+    /// This state behind a handle: in the box this thread emptied last if there is one, in a
+    /// new one if there is not.
+    ///
+    /// A box from the slot already holds an empty share and no loan, and a state built by
+    /// [`Self::of`] or [`Self::whole`] holds the same, so only the two fields that describe
+    /// the payload are written.
+    pub(crate) fn into_handle(self) -> Handle {
+        debug_assert!(
+            self.share.get().is_none(),
+            "a state is boxed before anything clones it"
+        );
+        let spare = SPARE_STATE.try_with(core::cell::Cell::take).ok().flatten();
+        let raw = match spare {
+            Some(mut boxed) => {
+                boxed.payload = self.payload;
+                boxed.bounds = self.bounds;
+                Box::into_raw(boxed)
+            }
+            None => Box::into_raw(Box::new(self)),
+        };
+        raw as Handle
+    }
+
+    /// The payload of a state its consumer reclaimed, the box kept for this thread's next
+    /// payload. Nothing else the box holds outlives the payload it described: the cached
+    /// share is a reference to the very bytes taken here, and a loan of shared memory is the
+    /// previous payload's. A box already waiting in the slot is freed for this one.
+    fn recycle(mut state: Box<Self>) -> Payload {
+        let payload = core::mem::replace(&mut state.payload, Payload::Owned(Vec::new()));
+        state.bounds = Bounds::Empty;
+        state.share = std::sync::OnceLock::new();
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        {
+            state.shm_loan = std::sync::OnceLock::new();
+        }
+        let _ = SPARE_STATE.try_with(move |slot| drop(slot.replace(Some(state))));
+        payload
+    }
+}
+
 /// Take the payload out of a MOVED bytes, leaving a gravestone.
 ///
 /// `z_put` consumes its payload, so this both reads and invalidates — a
@@ -339,7 +394,7 @@ pub(crate) unsafe fn take_payload(moved: *mut z_moved_bytes_t) -> Option<Vec<u8>
     // SAFETY: a live `Box<BytesState>` this crate leaked; reclaimed here.
     let state = unsafe { Box::from_raw(handle as *mut BytesState) };
     unsafe { (*moved)._this = z_owned_bytes_t::null_value() };
-    Some(state.payload.into_vec())
+    Some(BytesState::recycle(state).into_vec())
 }
 
 /// A payload on its way out: the bytes to send, or a chunk of shared memory whose
@@ -391,7 +446,7 @@ pub(crate) unsafe fn take_outbound(moved: *mut z_moved_bytes_t) -> Option<Outbou
     // SAFETY: a live `Box<BytesState>` this crate leaked; reclaimed here.
     let state = unsafe { Box::from_raw(handle as *mut BytesState) };
     unsafe { (*moved)._this = z_owned_bytes_t::null_value() };
-    match state.payload {
+    match BytesState::recycle(state) {
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
@@ -501,7 +556,7 @@ pub unsafe extern "C" fn z_bytes_from_static_str(
         let Ok(text) = (unsafe { CStr::from_ptr(str_) }).to_str() else {
             return Z_EPARSE;
         };
-        let handle = Box::into_raw(Box::new(BytesState::whole(text.as_bytes().to_vec()))) as Handle;
+        let handle = BytesState::whole(text.as_bytes().to_vec()).into_handle();
         unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
         Z_OK
     })
@@ -562,7 +617,7 @@ pub unsafe extern "C" fn z_bytes_from_buf(
             // SAFETY: the caller's contract — `len` readable bytes at `data`.
             unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
         };
-        let handle = Box::into_raw(Box::new(BytesState::whole(payload))) as Handle;
+        let handle = BytesState::whole(payload).into_handle();
         unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
         Z_OK
     });
@@ -603,7 +658,7 @@ pub unsafe extern "C" fn z_bytes_clone(dst: *mut z_owned_bytes_t, this_: *const 
             Some(shared) => BytesState::of(shared),
             None => BytesState::whole(source.payload.to_vec()),
         };
-        let handle = Box::into_raw(Box::new(state)) as Handle;
+        let handle = state.into_handle();
         unsafe { *dst = z_owned_bytes_t::from_handle(handle) };
         Z_OK
     });
@@ -673,7 +728,7 @@ pub unsafe extern "C" fn z_bytes_empty(this_: *mut z_owned_bytes_t) {
     if this_.is_null() {
         return;
     }
-    let handle = Box::into_raw(Box::new(BytesState::whole(Vec::new()))) as Handle;
+    let handle = BytesState::whole(Vec::new()).into_handle();
     // SAFETY: the caller's contract.
     unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
 }
@@ -764,7 +819,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_buf(
             // SAFETY: the caller's contract — `len` readable bytes at `data`.
             unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
         };
-        let handle = Box::into_raw(Box::new(BytesState::whole(payload))) as Handle;
+        let handle = BytesState::whole(payload).into_handle();
         unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
         Z_OK
     })
@@ -789,7 +844,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_buf(
 /// # Safety
 /// `this_` must be non-null, valid and writable.
 unsafe fn install_payload(this_: *mut z_owned_bytes_t, payload: Vec<u8>) {
-    let handle = Box::into_raw(Box::new(BytesState::whole(payload))) as Handle;
+    let handle = BytesState::whole(payload).into_handle();
     // SAFETY: the caller's contract.
     unsafe { *this_ = z_owned_bytes_t::from_handle(handle) };
 }
@@ -1767,6 +1822,108 @@ mod writer_tests {
             assert!(!z_bytes_slice_iterator_next(&mut it, &mut view));
             let mut moved = z_moved_bytes_t { _this: payload };
             z_bytes_drop(&mut moved);
+        }
+    }
+}
+
+#[cfg(test)]
+mod spare_state_tests {
+    use super::*;
+
+    /// A box a put emptied is the next payload's box on that thread, and the payload in it
+    /// carries nothing of the one before: not its bytes, not its slice ends, not the share a
+    /// clone of it made, which would be a reference that keeps the old bytes alive for as
+    /// long as the box waits.
+    #[test]
+    fn a_box_a_put_emptied_carries_nothing_into_the_next_payload() {
+        // SAFETY: every pointer below is a live local this test owns.
+        unsafe {
+            let mut first = z_owned_bytes_t::null_value();
+            assert_eq!(
+                z_bytes_copy_from_buf(&mut first, b"first".as_ptr(), 5),
+                Z_OK
+            );
+            // A clone makes its SOURCE keep a share of the bytes; consuming the source gives
+            // that box back with the share still in it, which is the thing to be cleared.
+            let mut clone = z_owned_bytes_t::null_value();
+            z_bytes_clone(&mut clone, z_bytes_loan(&first));
+            assert!(
+                bytes_state(z_bytes_loan(&first))
+                    .expect("the source")
+                    .share
+                    .get()
+                    .is_some(),
+                "the clone left a share in its source"
+            );
+            let emptied = first.handle;
+            let mut moved = z_moved_bytes_t { _this: first };
+            let outbound = take_outbound(&mut moved).expect("the source's payload");
+            assert_eq!(outbound.bytes(), b"first");
+            drop(outbound);
+
+            // The box waits in the slot holding nothing of it.
+            SPARE_STATE.with(|slot| {
+                let spare = slot.take().expect("the emptied box is kept");
+                assert!(spare.share.get().is_none(), "a kept box holds no share");
+                assert!(spare.bounds.as_slice().is_empty(), "nor slice ends");
+                assert!(spare.payload.is_empty(), "nor bytes");
+                slot.set(Some(spare));
+            });
+
+            // The next payload built on this thread is in that very box.
+            let mut second = z_owned_bytes_t::null_value();
+            assert_eq!(z_bytes_copy_from_buf(&mut second, b"2nd".as_ptr(), 3), Z_OK);
+            assert_eq!(second.handle, emptied, "the emptied box is reused");
+            let state = bytes_state(z_bytes_loan(&second)).expect("a live payload");
+            assert_eq!(&*state.payload, b"2nd");
+            assert_eq!(state.bounds.as_slice(), [3], "its own slice end");
+            assert!(state.share.get().is_none(), "no share carried over");
+
+            // A clone of it reads as it, not as the payload that used the box before.
+            let mut again = z_owned_bytes_t::null_value();
+            z_bytes_clone(&mut again, z_bytes_loan(&second));
+            let mut moved_again = z_moved_bytes_t { _this: again };
+            let outbound = take_outbound(&mut moved_again).expect("the second clone");
+            assert_eq!(outbound.bytes(), b"2nd");
+            drop(outbound);
+
+            let mut moved_clone = z_moved_bytes_t { _this: clone };
+            z_bytes_drop(&mut moved_clone);
+            let mut moved_second = z_moved_bytes_t { _this: second };
+            z_bytes_drop(&mut moved_second);
+        }
+    }
+
+    /// A thread that consumes more payloads than it builds keeps ONE box, the last it
+    /// emptied, and frees the others: the slot is not a list that grows.
+    #[test]
+    fn the_slot_keeps_the_last_box_a_consumer_emptied() {
+        // SAFETY: every pointer below is a live local this test owns.
+        unsafe {
+            let mut held = Vec::new();
+            for _ in 0..8 {
+                let mut payload = z_owned_bytes_t::null_value();
+                assert_eq!(z_bytes_copy_from_buf(&mut payload, b"x".as_ptr(), 1), Z_OK);
+                held.push(payload);
+            }
+            let last = held.last().expect("a payload").handle;
+            for payload in held {
+                let mut moved = z_moved_bytes_t { _this: payload };
+                z_bytes_drop(&mut moved);
+            }
+            let kept = SPARE_STATE.with(|slot| {
+                let boxed = slot.take();
+                let address = boxed
+                    .as_deref()
+                    .map(|state| state as *const BytesState as usize);
+                slot.set(boxed);
+                address
+            });
+            assert_eq!(
+                kept,
+                Some(last as usize),
+                "the last one emptied is the one kept"
+            );
         }
     }
 }
