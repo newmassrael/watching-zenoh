@@ -122,9 +122,12 @@ pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
 struct Read {
     put: PlainPut,
     end: usize,
+    // Read only by the frame reader, which needs `alloc`; a build without it reads one record.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     same_suffix: bool,
     /// Everything up to and including the Put header: the Push header, the key, the QoS
     /// extension. What follows is the payload's length and the payload.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     prefix_end: usize,
 }
 
@@ -199,6 +202,7 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
 /// width its length allows, which is the whole of it without a call to the C library's
 /// `memcmp` (whose call, setup and dispatch cost more than the comparison of fourteen bytes).
 /// A longer slice is the library's.
+#[cfg(feature = "alloc")]
 #[inline(always)]
 fn equal_short(a: &[u8], b: &[u8]) -> bool {
     debug_assert_eq!(a.len(), b.len());

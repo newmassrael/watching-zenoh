@@ -1602,7 +1602,12 @@ mod tests {
     /// undeclaration, the whole table forgotten) and stands still when nothing changed: an
     /// undeclaration of an id nobody declared still moves it (a missed move would keep a
     /// stale answer, an extra one only costs a recomputation), and reading does not.
-    #[cfg(all(feature = "storage-profile", target_has_atomic = "64"))]
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        target_has_atomic = "64"
+    ))]
     #[test]
     fn the_peers_declaration_counter_moves_after_every_change_and_only_then() {
         use core::sync::atomic::Ordering::Acquire;

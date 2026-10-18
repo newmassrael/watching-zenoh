@@ -423,6 +423,10 @@ thread_local! {
     /// publisher's loop clones a payload and puts it, over and over: the box the clone allocates
     /// is the box the put frees, on the same thread, so keeping it for the next clone replaces a
     /// `malloc` and a `free` per message with two thread-local accesses.
+    ///
+    /// The boxes ARE the thing kept (an allocation that a `*mut ByteBuf` already points into
+    /// is handed out again), so a `Vec` of the values themselves is not the same cache.
+    #[allow(clippy::vec_box)]
     static EMPTY_BOXES: std::cell::RefCell<Vec<Box<std::mem::MaybeUninit<ByteBuf>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -433,7 +437,9 @@ fn box_bytes(buf: ByteBuf) -> *mut ByteBuf {
         .try_with(|boxes| boxes.try_borrow_mut().ok().and_then(|mut b| b.pop()))
         .ok()
         .flatten();
-    let mut slot = kept.unwrap_or_else(Box::new_uninit);
+    // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
+    // is the same allocation, and the optimiser writes nothing into it.
+    let mut slot = kept.unwrap_or_else(|| Box::new(std::mem::MaybeUninit::uninit()));
     slot.write(buf);
     Box::into_raw(slot).cast::<ByteBuf>()
 }

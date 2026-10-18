@@ -1198,20 +1198,41 @@ mod tests {
         use wz_runtime_tokio::sink::PlainSample;
         let frame = wz_runtime_tokio::RxBytes::from(b"0123456789abcdef".to_vec());
         let q = |raw: u8| Some(QosLevel::from_raw(raw));
-        // (key, payload range, qos, key unchanged, frame said to be one run)
-        let plain_steps: [(&str, (u32, u32), Option<QosLevel>, bool, bool); 8] = [
-            ("a/b", (0, 4), q(0x1a), false, true),
-            ("a/b", (4, 10), q(0x05), true, true),
-            ("a/b", (10, 10), None, true, true),
-            ("a/b", (10, 16), q(0x1a), true, true),
-            ("cc", (2, 6), None, false, true),
-            ("cc", (6, 12), q(0x01), true, false),
-            ("cc", (0, 1), q(0x01), true, true),
-            ("a/b", (3, 9), None, false, true),
+        /// One plain sample of the frame: its key, its payload range, its QoS, whether the
+        /// key is the one before's, and whether the frame is said to be one run.
+        struct Step {
+            key: &'static str,
+            range: (u32, u32),
+            qos: Option<QosLevel>,
+            unchanged: bool,
+            single: bool,
+        }
+        let step = |key, range, qos, unchanged, single| Step {
+            key,
+            range,
+            qos,
+            unchanged,
+            single,
+        };
+        let plain_steps = [
+            step("a/b", (0, 4), q(0x1a), false, true),
+            step("a/b", (4, 10), q(0x05), true, true),
+            step("a/b", (10, 10), None, true, true),
+            step("a/b", (10, 16), q(0x1a), true, true),
+            step("cc", (2, 6), None, false, true),
+            step("cc", (6, 12), q(0x01), true, false),
+            step("cc", (0, 1), q(0x01), true, true),
+            step("a/b", (3, 9), None, false, true),
         ];
         let mut kept = MarshalCache::new();
-        let mut index = 0;
-        for (key, range, qos, unchanged, single) in plain_steps {
+        for (index, step) in plain_steps.into_iter().enumerate() {
+            let Step {
+                key,
+                range,
+                qos,
+                unchanged,
+                single,
+            } = step;
             // After the fourth, a sample that is not plain comes between.
             if index == 4 {
                 let rich = MixedView {
@@ -1254,7 +1275,6 @@ mod tests {
                 assert!(m.attachment.is_none(), "step {index}: a stale attachment");
                 assert_eq!(m.kind, Z_SAMPLE_KIND_PUT, "step {index}: its kind");
             });
-            index += 1;
         }
     }
 

@@ -1382,7 +1382,12 @@ mod tests {
 
     /// The queryable twin of the subscriber peer's counter test: the counter a reader without
     /// the lock keeps its answers by moves after every change and stands still on a read.
-    #[cfg(all(feature = "storage-profile", target_has_atomic = "64"))]
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        target_has_atomic = "64"
+    ))]
     #[test]
     fn the_peers_declaration_counter_moves_after_every_change_and_only_then() {
         use core::sync::atomic::Ordering::Acquire;
