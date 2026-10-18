@@ -194,6 +194,32 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
     })
 }
 
+/// Whether two slices of one length hold the same bytes, for the few bytes a record's prefix
+/// is: two loads that overlap each compare the first and the last bytes of the slice at the
+/// width its length allows, which is the whole of it without a call to the C library's
+/// `memcmp` (whose call, setup and dispatch cost more than the comparison of fourteen bytes).
+/// A longer slice is the library's.
+#[inline(always)]
+fn equal_short(a: &[u8], b: &[u8]) -> bool {
+    debug_assert_eq!(a.len(), b.len());
+    let len = a.len();
+    let word = |s: &[u8], at: usize| u64::from_ne_bytes(s[at..at + 8].try_into().unwrap());
+    let half = |s: &[u8], at: usize| u32::from_ne_bytes(s[at..at + 4].try_into().unwrap());
+    match len {
+        0 => true,
+        1..=3 => a[0] == b[0] && a[len / 2] == b[len / 2] && a[len - 1] == b[len - 1],
+        4..=7 => half(a, 0) == half(b, 0) && half(a, len - 4) == half(b, len - 4),
+        8..=16 => word(a, 0) == word(b, 0) && word(a, len - 8) == word(b, len - 8),
+        17..=32 => {
+            word(a, 0) == word(b, 0)
+                && word(a, 8) == word(b, 8)
+                && word(a, len - 16) == word(b, len - 16)
+                && word(a, len - 8) == word(b, len - 8)
+        }
+        _ => a == b,
+    }
+}
+
 /// The payload's length and the payload of the record whose fixed prefix ends at `cursor`:
 /// where the record ends and where its payload lies. What [`read_plain_put_after`] does after
 /// the Put header.
@@ -229,7 +255,7 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
             let same_prefix = at
                 .checked_add(prefix_len)
                 .and_then(|to| buf.get(at..to))
-                .is_some_and(|now| now == &buf[start..start + prefix_len]);
+                .is_some_and(|now| equal_short(now, &buf[start..start + prefix_len]));
             if same_prefix {
                 let (end, payload) = read_payload(buf, at + prefix_len)?;
                 // The suffix lies at the same distance from the start of the record.
@@ -595,6 +621,30 @@ mod tests {
             read_plain_puts(&[]).is_none(),
             "an empty batch is the codec's"
         );
+    }
+
+    /// The short comparison says what `==` says: for every length across the width bands, equal
+    /// slices, and slices that differ in any one byte, in any one bit.
+    #[test]
+    fn the_short_comparison_agrees_with_slice_equality() {
+        for len in 0..=40usize {
+            let a: alloc::vec::Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(37) ^ 0x5a)
+                .collect();
+            assert!(equal_short(&a, &a.clone()), "equal, length {len}");
+            for position in 0..len {
+                for bit in 0..8 {
+                    let mut b = a.clone();
+                    b[position] ^= 1 << bit;
+                    assert_eq!(
+                        equal_short(&a, &b),
+                        a == b,
+                        "length {len}, byte {position}, bit {bit}"
+                    );
+                    assert!(!equal_short(&a, &b), "a differing byte is seen");
+                }
+            }
+        }
     }
 
     /// The batch as one record at a time through the reader that has no memory of the record
