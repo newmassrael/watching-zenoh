@@ -88,8 +88,7 @@ I5. What is on the wire does not change: interoperability with the reference rou
 embedded client, ordering per (face, key), reliability and priority handling, and every access-control
 decision stay as they are. These changes are internal to how a route is represented and found.
 
-I6. Each invariant above is held by a test whose budget is a ratio, so that it means the same on every
-host (section 5).
+I6. Each invariant above is held by a test that can fail for exactly one reason (section 5).
 
 ## 4. Design
 
@@ -136,23 +135,34 @@ scaling. A multi-threaded data plane is not planned; section 7 says what would m
 
 ## 5. How each invariant is held
 
-All of these run the real binaries (`wz-ap-demo --router-hat` and `--sessions`), on one host, and
-assert ratios between runs of the same test on the same host, so no threshold is a number of
-microseconds.
+This repository's own record is that a time threshold on a shared runner generates flakes (the
+decode-cost lane in `scripts/run-ci.sh` asserts none, for that reason). So the invariants are held in
+two different ways, and a timing number is never what fails a build.
 
-| Invariant | Test | Budget |
+Structural invariants are asserted on counters, which are exact. A counter is what a router already
+keeps for the same purpose (`client_route_computes` is one) or a new one beside it.
+
+| Invariant | Test | Asserts |
 |---|---|---|
-| I1 | steady cost per message at 1024 subscribers over cost at 256, same offered load | at most 1.25 |
-| I1 | same at 4096 over 256 | at most 1.5 |
-| I3 | cost per message with 16 sessions/s joining and leaving over cost without, at 1024 | at most 1.15 |
-| I4 | offered load at twice the measured capacity for 60 s: faces going DOWN | zero |
-| I4 | the same: delivered messages per second over the measured capacity | at least 0.8 |
+| I1 | a router holding 64 client faces forwards one Push to one subscriber | faces visited equals 1, and no face's zid is derived on the path |
+| I1 | the same with 1024 faces | the same numbers, so the count does not depend on the table |
+| I2 | a literal key's route is computed by a lookup | routes computed equals 1 after one publish and stays 1 after more |
+| I3 | after a subscribe for an unrelated key, a cached route is served | `client_route_computes` unchanged by the next publish to the cached key |
+| I3 | after a subscribe for an intersecting key, that route is recomputed once | `client_route_computes` increases by one |
+| I4 | a router past its queue bound under a data flood | data dropped is counted; faces going DOWN is zero |
 | I5 | the existing interoperability tests against the reference router and the embedded client | unchanged |
 
-The first three fail today (1.74, 5.9 and 1.45) and are expected to pass after sections 4.1 and 4.2.
-They land with the change that makes them pass, so the repository never contains a red gate. The
-harness itself lands first and records the same numbers without asserting a budget, so the starting
-point is a committed measurement and not a remembered one.
+Timing is measured, not asserted. One opt-in lane runs the real binaries (`wz-ap-demo --router-hat`
+and `--sessions`) at the subscriber counts and churn rate of section 1 and prints the table of that
+section. What it does assert is the population, as the decode-cost lane does: every session
+connected, none refused, no face went DOWN in the measurement window, and the router forwarded at
+least 80% of what was offered. A run in which any of that fails measures something other than the data
+plane, and says so.
+
+The structural tests land with the change that makes each of them pass, so the repository never
+contains a red gate; most of them fail today for the reasons in section 2. The measurement lane lands
+first, so the starting point is a number committed with the tool that produced it and not a number
+remembered.
 
 ## 6. Tools
 
