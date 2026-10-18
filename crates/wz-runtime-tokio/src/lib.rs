@@ -99,6 +99,12 @@ pub mod plugin;
 #[cfg(feature = "transport-unicast")]
 pub mod session_glue;
 
+/// The backstop that keeps KEEPALIVE flowing while the drive loop is blocked in
+/// an application callback — the AP realisation of the session FSM's
+/// `start_keepalive_worker` action.
+#[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
+pub(crate) mod keepalive_pacer;
+
 /// SCE-generated AP reassembly buffer-pool config. The emit comes from
 /// `sources/network/reassembly_pool_ap.scxml` (an `sce:kind="buffer-pool"`
 /// document, the SSOT). R311y22b: COMMITTED at

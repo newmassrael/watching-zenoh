@@ -4455,6 +4455,10 @@ pub(crate) async fn drive_open_loop(
         // fresh bundle (the same `Established.onentry` action populates
         // both).
         if actions.is_established() {
+            // The drive loop emits KEEPALIVE itself and runs callbacks inline,
+            // so start the backstop for a loop that a callback has blocked.
+            #[cfg(feature = "transport-keepalive")]
+            crate::keepalive_pacer::spawn_keepalive_pacer(&actions, clock);
             return Ok(OpenedSession {
                 engine,
                 actions,
