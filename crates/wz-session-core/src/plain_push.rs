@@ -69,8 +69,23 @@ pub struct PlainPut {
 /// Read a VLE (zenoh `ZInt`) at `*at`, advancing it. The codec's rule: up to nine bytes,
 /// seven data bits each with the high bit saying another follows, and the ninth byte
 /// carrying eight data bits.
-#[inline]
+///
+/// Nearly every number a record carries (a key id, a length) is one byte, so that case is the
+/// part that is inlined into the reader; the longer ones are the call.
+#[inline(always)]
 fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
+    if let Some(&byte) = buf.get(*at) {
+        if byte & 0x80 == 0 {
+            *at += 1;
+            return Some(u64::from(byte));
+        }
+    }
+    vle_long(buf, at)
+}
+
+/// [`vle`] for a number that is not one byte, or a buffer that ends.
+#[inline(never)]
+fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
     let mut value: u64 = 0;
     let mut shift: u32 = 0;
     for step in 0..9 {
