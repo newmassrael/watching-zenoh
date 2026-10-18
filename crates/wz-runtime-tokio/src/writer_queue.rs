@@ -169,6 +169,7 @@ pub fn outbound_channel_with_capacity(
         idle_hook: Mutex::new(None),
         flush_wanted: AtomicBool::new(false),
         staged: AtomicU64::new(0),
+        staged_at_flush: AtomicU64::new(0),
     });
     (
         OutboundTx {
@@ -289,6 +290,10 @@ struct Lanes {
     /// (`io/zenoh-transport/src/common/pipeline.rs` @ `fn try_pull_deep(`: pull once
     /// "no new bytes have been written on the batch").
     staged: AtomicU64,
+    /// What [`Self::staged`] stood at when the writer last came to flush: the writer's alone.
+    /// The difference at the next flush is how many messages the producers staged in between,
+    /// which is what tells a stream from a lone message.
+    staged_at_flush: AtomicU64,
 }
 
 impl Lanes {
@@ -317,6 +322,12 @@ const COALESCE_PROBE: Duration = Duration::from_micros(3);
 /// them, is not about to stop, and the wait that remains is better spent asleep than on the
 /// core.
 const COALESCE_SPIN_PROBES: u32 = 3;
+
+/// How many messages the producers staged between two flushes for the writer to call it a
+/// stream and give up the CPU once before it flushes (`let_producers_finish`).
+/// A request and its reply are one message per flush, a burst of a few are a few; a producer
+/// that fills the writer's time is hundreds.
+const STREAM_STAGED_MIN: u64 = 32;
 
 /// The senders' wait for room: a `Condvar` that is notified only while
 /// someone waits on it.
@@ -1854,6 +1865,22 @@ impl OutboundRx {
     /// not the partial frames that are still open) or when [`COALESCE_LIMIT`] passes
     /// (`false`: flush what is open).
     async fn let_producers_finish(&self) -> bool {
+        // A stream: the producers staged many messages since the last flush, so the writer is
+        // being woken to write a few hundred bytes at a time. When the producer shares the
+        // writer's CPU the wake preempted it, and the flush now would take the CPU back from
+        // it again and again; give the CPU up once, so that the producer fills what it can
+        // first. With a CPU of its own the producer is not waiting for this, and the call
+        // returns at once. A lone message never comes here with more than a few staged, and
+        // is flushed without the call.
+        let staged = self.shared.staged.load(Ordering::Relaxed);
+        let since_flush = staged.wrapping_sub(self.shared.staged_at_flush.load(Ordering::Relaxed));
+        if since_flush >= STREAM_STAGED_MIN {
+            std::thread::yield_now();
+        }
+        self.shared.staged_at_flush.store(
+            self.shared.staged.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         let mut seen = self.shared.staged.load(Ordering::Relaxed);
         for _ in 0..COALESCE_SPIN_PROBES {
             let probe = Instant::now();
