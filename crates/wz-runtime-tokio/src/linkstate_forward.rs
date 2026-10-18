@@ -1170,7 +1170,7 @@ impl LinkstateForwarder {
             data_routes: DataRoutes::new(),
             query_routes: QueryRoutes::new(),
             tokens: RefCell::new(LinkstatepeerInterest::new()),
-            client_subs: RefCell::new(Versioned::new(HashMap::new())),
+            client_subs: RefCell::new(ClientSubStore::new()),
             client_routes: ClientRoutes::new(),
             client_tokens: RefCell::new(HashMap::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
@@ -1428,11 +1428,7 @@ impl LinkstateForwarder {
         self.subs.borrow().source_count(keyexpr) > 0
             || self.qabls.borrow().source_count(keyexpr) > 0
             || self.tokens.borrow().source_count(keyexpr) > 0
-            || self
-                .client_subs
-                .borrow()
-                .values()
-                .any(|ids| ids.values().any(|k| k == keyexpr))
+            || self.client_subs.borrow().names_key(keyexpr)
             || self
                 .client_tokens
                 .borrow()
@@ -4440,10 +4436,7 @@ impl LinkstateForwarder {
     /// [`local_subscribers`](Self#structfield.local_subscribers)). Exact-string,
     /// matching the per-ke `subs` slot the advertisement keys on.
     fn any_client_subscribes(&self, keyexpr: &str) -> bool {
-        self.client_subs
-            .borrow()
-            .values()
-            .any(|ids| ids.values().any(|ke| ke == keyexpr))
+        self.client_subs.borrow().names_key(keyexpr)
     }
 
     /// R311y163 (D4) — withdraw the SELF-sourced mesh advertisement for `keyexpr`
@@ -4618,9 +4611,7 @@ impl LinkstateForwarder {
         let displaced = self
             .client_subs
             .borrow_mut()
-            .entry(inbound)
-            .or_default()
-            .insert(decl_id, keyexpr.clone());
+            .insert(inbound, decl_id, keyexpr.clone());
         // Advertise into the mesh under SELF's zid. `register` returns `true` only on the
         // union 0->1 transition (no self-native sub and no OTHER client/id already holds
         // this ke) — gate the future-push + sourced flood on it so a duplicate (same id
@@ -4677,14 +4668,7 @@ impl LinkstateForwarder {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.id,
             _ => return,
         };
-        let keyexpr = {
-            let mut cs = self.client_subs.borrow_mut();
-            let removed = cs.get_mut(&inbound).and_then(|ids| ids.remove(&decl_id));
-            if cs.get(&inbound).is_some_and(|ids| ids.is_empty()) {
-                cs.remove(&inbound);
-            }
-            removed
-        };
+        let keyexpr = self.client_subs.borrow_mut().remove_id(inbound, decl_id);
         let Some(keyexpr) = keyexpr else {
             return; // unknown id (never ingested / already gone) — nothing to withdraw
         };
@@ -6888,9 +6872,11 @@ fn data_route(
 
 /// R2909 — the CLIENT faces a node holds, each with its subscribers by decl
 /// id: the leaf-face store both forwarders keep (the peer's co-attached
-/// clients, each router broker hat's). [`Versioned`] for the reason the mesh
-/// tables are: the client leg of a data route is cached against it.
-pub(crate) type ClientSubStore = Versioned<HashMap<FaceId, HashMap<u64, String>>>;
+/// clients, each router broker hat's). Versioned for the reason the mesh
+/// tables are, the client leg of a data route is cached against it, and
+/// indexed and change-logged so that a change retires only the routes its key
+/// reaches (see [`crate::client_sub_store`]).
+pub(crate) use crate::client_sub_store::ClientSubStore;
 
 /// R2909 — the client-leg route cache of one [`ClientSubStore`]: per keyexpr,
 /// the client faces subscribing to it. Keyed by `()` rather than a source,
@@ -6924,21 +6910,22 @@ pub(crate) fn client_route(
         net: 0,
         table: store.version(),
     };
+    // A change of the store retires the routes of the keys it intersects and keeps
+    // the rest, instead of every route in the cache: a client that joins or leaves
+    // costs the keys it subscribes, not the keys in use.
+    cached.routes.refresh(
+        inputs,
+        |since, visit| store.changed_since(since, visit),
+        |changed, cached_key| {
+            let target: Vec<&str> = cached_key.split('/').collect();
+            keyexpr_intersects_target(changed, &target)
+        },
+    );
     let resource = || wire || (cached.names_a_resource)(keyexpr);
     cached
         .routes
         .get_or_compute(inputs, &(), keyexpr, resource, || {
-            let target: Vec<&str> = keyexpr.split('/').collect();
-            let mut faces: Vec<FaceId> = store
-                .iter()
-                .filter(|(_, ids)| {
-                    ids.values()
-                        .any(|sub| keyexpr_intersects_target(sub, &target))
-                })
-                .map(|(face, _)| *face)
-                .collect();
-            faces.sort_unstable();
-            faces.into()
+            store.faces_intersecting(keyexpr).into()
         })
 }
 
@@ -7731,7 +7718,7 @@ impl FaceForwarder for LinkstateForwarder {
         let departed_client_subs = self
             .client_subs
             .borrow_mut()
-            .remove(&id)
+            .remove_face(id)
             .unwrap_or_default();
         // Dedup the kes (a client may hold ONE ke under several ids) so the withdraw +
         // forget flood fires ONCE per unique ke, not once per id (the old keyexpr-SET

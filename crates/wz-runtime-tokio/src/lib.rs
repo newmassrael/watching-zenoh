@@ -2293,6 +2293,11 @@ pub mod interceptor;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_interest;
 
+/// The client faces' subscriptions, indexed by key and changed only through methods that record the
+/// key they moved, so [`route_cache::RouteCache::refresh`] can retire a route and not the whole cache.
+/// Gated on `routing-peer`, with the forwarders that hold it.
+#[cfg(feature = "routing-peer")]
+pub(crate) mod client_sub_store;
 /// R2908 — [`route_cache::RouteCache`]: the per-(source, keyexpr) route both
 /// mesh forwarders compute once and reuse until a table it was read from
 /// changes, upstream's `Routes<T>` on the routing `Resource`. Gated on

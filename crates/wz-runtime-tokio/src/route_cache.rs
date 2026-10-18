@@ -134,6 +134,48 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         route
     }
 
+    /// Bring the cache to `inputs`, keeping the routes that the move cannot have changed.
+    ///
+    /// Without this, a route is dropped whenever ANY input moved, because freshness is one comparison
+    /// of versions; a service whose clients come and go then recomputes every key in use after each
+    /// change. A table that can say which keys moved lets the cache retire only the routes those keys
+    /// reach.
+    ///
+    /// `changes(since, visit)` is asked, when only the declaration table's version moved, to call
+    /// `visit` with every key declared or withdrawn after `since` (the table version the cache was
+    /// fresh at), and to answer `false` when it can no longer say. `reaches(changed, cached)` is
+    /// whether a change of `changed` can alter the route kept for `cached`. A topology move (`net`)
+    /// or a table that cannot answer retires everything, which is what the version comparison did.
+    ///
+    /// Safe by construction: it only ever retires more than it must, never fewer, because the caller
+    /// supplies the keys the table's own mutators recorded and every mutation records its key.
+    pub fn refresh(
+        &self,
+        inputs: RouteInputs,
+        changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
+        reaches: impl Fn(&str, &str) -> bool,
+    ) {
+        let mut fresh = self.fresh.borrow_mut();
+        let Some(was) = fresh.inputs else {
+            fresh.inputs = Some(inputs);
+            return;
+        };
+        if was == inputs {
+            return;
+        }
+        let mut moved: Vec<String> = Vec::new();
+        let answered = was.net == inputs.net
+            && changes(was.table, &mut |keyexpr| moved.push(keyexpr.to_owned()));
+        if answered {
+            fresh
+                .routes
+                .retain(|cached, _| !moved.iter().any(|changed| reaches(changed, cached)));
+        } else {
+            fresh.routes.clear();
+        }
+        fresh.inputs = Some(inputs);
+    }
+
     /// How many routes this cache computed rather than served.
     pub fn computes(&self) -> usize {
         self.computes.get()
@@ -209,6 +251,65 @@ mod tests {
             "a table change must not serve the old route"
         );
         assert_eq!(cache.computes(), 4);
+    }
+
+    /// A cache keyed by `()` with a recorded `["demo/a"]` change, as a client leg sees it.
+    fn refreshed(cache: &RouteCache<Vec<Zid>>, to: RouteInputs, changed: Option<&[&str]>) {
+        cache.refresh(
+            to,
+            |_since, visit| match changed {
+                Some(keys) => {
+                    keys.iter().for_each(|k| visit(k));
+                    true
+                }
+                None => false,
+            },
+            |changed, cached| changed == cached,
+        );
+    }
+
+    #[test]
+    fn a_table_move_retires_only_the_routes_the_changed_key_reaches() {
+        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(9)]);
+        let moved = RouteInputs { table: 2, ..AT };
+        refreshed(&cache, moved, Some(&["demo/a"]));
+        assert_eq!(cache.len(), 1, "only the route of the changed key went");
+        cache.get_or_compute(moved, &zid(1), "demo/b", || true, || unreachable!());
+        assert_eq!(
+            cache.computes(),
+            2,
+            "the other key was served, not computed"
+        );
+        cache.get_or_compute(moved, &zid(1), "demo/a", || true, || vec![zid(5)]);
+        assert_eq!(cache.computes(), 3, "the changed key was computed afresh");
+    }
+
+    #[test]
+    fn a_table_that_cannot_say_what_moved_retires_every_route() {
+        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(9)]);
+        refreshed(&cache, RouteInputs { table: 2, ..AT }, None);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn a_topology_move_retires_every_route_whatever_the_table_says() {
+        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        // The table says nothing relevant moved, but the graph did.
+        refreshed(&cache, RouteInputs { net: 2, ..AT }, Some(&[]));
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn a_refresh_at_the_same_inputs_keeps_everything_and_asks_nothing() {
+        let cache: RouteCache<Vec<Zid>> = RouteCache::new();
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        cache.refresh(AT, |_, _| unreachable!(), |_, _| unreachable!());
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

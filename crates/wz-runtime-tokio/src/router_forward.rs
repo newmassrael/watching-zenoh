@@ -734,7 +734,7 @@ struct BrokerHat {
 impl BrokerHat {
     fn new() -> Self {
         Self {
-            subs: Rc::new(RefCell::new(Versioned::new(HashMap::new()))),
+            subs: Rc::new(RefCell::new(ClientSubStore::new())),
             client_routes: ClientRoutes::new(),
             qabls: Rc::new(RefCell::new(Versioned::new(HashMap::new()))),
             client_query_routes: ClientQueryRoutes::new(),
@@ -1029,6 +1029,14 @@ impl<T> FaceMap for HashMap<FaceId, T> {
 impl<T> FaceMap for Versioned<HashMap<FaceId, T>> {
     type Entry = T;
     fn faces(&self) -> &HashMap<FaceId, T> {
+        self
+    }
+}
+
+#[cfg(feature = "adminspace-introspection-handlers")]
+impl FaceMap for ClientSubStore {
+    type Entry = HashMap<u64, String>;
+    fn faces(&self) -> &HashMap<FaceId, HashMap<u64, String>> {
         self
     }
 }
@@ -3137,10 +3145,7 @@ impl RouterForwarder {
                 || mesh_tokens_name(hat, keyexpr)
         });
         let in_clients = self.broker_hats().any(|hat| {
-            hat.subs
-                .borrow()
-                .values()
-                .any(|ids| ids.values().any(|k| k == keyexpr))
+            hat.subs.borrow().names_key(keyexpr)
                 || hat
                     .qabls
                     .borrow()
@@ -4085,9 +4090,10 @@ impl RouterForwarder {
             Declared::Face(keyexpr) => {
                 let store = &self.owner_broker(region).subs;
                 let mut store = store.borrow_mut();
-                let by_id = store.entry(inbound).or_default();
-                let already = by_id.values().any(|k| k == keyexpr);
-                by_id.insert(decl_id, keyexpr.clone());
+                let already = store
+                    .get(&inbound)
+                    .is_some_and(|by_id| by_id.values().any(|k| k == keyexpr));
+                store.insert(inbound, decl_id, keyexpr.clone());
                 !already
             }
         }
@@ -4147,15 +4153,11 @@ impl RouterForwarder {
                 &self.mesh(region).subs,
                 build_undeclare_subscriber_with_keyexpr,
             ),
-            Declared::Face(keyexpr) => remove_from_face(
-                &mut self.owner_broker(region).subs.borrow_mut(),
-                inbound,
-                |by_id| {
-                    by_id.remove(&decl_id)?;
-                    (!by_id.values().any(|k| k == keyexpr)).then_some(())
-                },
-            )
-            .is_some(),
+            Declared::Face(_) => self
+                .owner_broker(region)
+                .subs
+                .borrow_mut()
+                .remove_id_leaving_key(inbound, decl_id),
         }
     }
 
@@ -8113,7 +8115,7 @@ impl FaceForwarder for RouterForwarder {
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
         if let Some(hat) = owner {
-            hat.subs.borrow_mut().remove(&id);
+            hat.subs.borrow_mut().remove_face(id);
         }
         for snapshot in sub_snapshots {
             self.repropagate(snapshot);
@@ -14457,6 +14459,72 @@ mod tests {
             sink_c2.frame_count(),
             0,
             "the withdrawn client is not sent to"
+        );
+    }
+
+    /// I3 — a client joining, leaving or subscribing retires the cached routes of the keys its
+    /// subscription intersects and no others. Two keys are in use; the count of routes computed is
+    /// exact, so the test fails for one reason, a change that drops routes it did not touch.
+    #[test]
+    fn a_client_change_retires_only_the_cached_routes_its_key_intersects() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (publisher, _sp) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &publisher);
+        let mut keep_alive = Vec::new();
+        let mut join = |n: u64, key: &str| {
+            let (client, sink) = face(Zid::from_slice(&(n as u32).to_be_bytes()), WIRE_CLIENT);
+            fwd.register(FaceId(n), &client);
+            forward_one(&fwd, FaceId(n), declare_sub(key));
+            keep_alive.push((client, sink));
+        };
+        join(1, "demo/a");
+        join(2, "demo/b");
+        let put = |key: &str| {
+            let push =
+                wz_session_core::push_build::build_push_literal(key, b"x").expect("build push");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        };
+        put("demo/a");
+        put("demo/b");
+        let both = fwd.client_route_computes();
+        assert_eq!(both, 2, "one route per key in use");
+
+        join(3, "other/x");
+        put("demo/a");
+        put("demo/b");
+        assert_eq!(
+            fwd.client_route_computes(),
+            both,
+            "a subscription no cached key intersects keeps both routes"
+        );
+
+        join(4, "demo/a");
+        put("demo/a");
+        put("demo/b");
+        assert_eq!(
+            fwd.client_route_computes(),
+            both + 1,
+            "a subscription for demo/a retires demo/a's route and not demo/b's"
+        );
+        let after_join = fwd.client_route_computes();
+
+        fwd.deregister(FaceId(4));
+        put("demo/a");
+        put("demo/b");
+        assert_eq!(
+            fwd.client_route_computes(),
+            after_join + 1,
+            "the face that left retires the route of the key it held"
+        );
+        let after_leave = fwd.client_route_computes();
+
+        join(5, "demo/*");
+        put("demo/a");
+        put("demo/b");
+        assert_eq!(
+            fwd.client_route_computes(),
+            after_leave + 2,
+            "a wildcard subscription intersects both cached keys"
         );
     }
 
