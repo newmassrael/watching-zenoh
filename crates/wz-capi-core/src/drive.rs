@@ -14,20 +14,22 @@
 //! VALUES differ, so returning one ABI's constant from shared code would have
 //! been a latent wrong-code bug the moment the second ABI arrived.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex as StdMutex;
-use std::sync::{Arc, Condvar, OnceLock};
+use std::sync::{Arc, Condvar};
 use std::task::{Context, Poll, Waker};
-use std::thread::{JoinHandle, ThreadId};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio::sync::Notify;
 
 use wz_runtime_tokio::accept_loop::{
-    accept_loop_offering, DialIntent, DialIntentReceiver, DialIntentSender,
+    accept_loop_offering_spawned, DialIntent, DialIntentReceiver, DialIntentSender, FaceExecutor,
+    SpawnedDrive,
 };
 use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
@@ -253,22 +255,44 @@ pub struct ReadGate {
     opened: AtomicBool,
     /// Set by [`SessionState::close`].
     closing: AtomicBool,
-    /// Set when the top-level future is dropped: nobody is left to park.
-    ended: AtomicBool,
     /// Whoever is parked on this gate.
     wakers: StdMutex<Vec<Waker>>,
-    /// The thread the top-level future is polled on, which is the thread every
-    /// callback of the session runs on. Set by its first poll.
-    drive_thread: OnceLock<ThreadId>,
-    /// The top-level future's own waker, refreshed on each poll, so that a stop
-    /// can make the drive thread look at the gate even when it is idle.
-    outer: StdMutex<Option<Waker>>,
+    /// Every gated future that is alive and has been polled: the top-level drive and
+    /// each spawned face. A stop waits for ALL of them (see [`GateTasks`]).
+    tasks: StdMutex<GateTasks>,
     /// How many stops have been asked for.
     stop_epoch: AtomicU64,
-    /// The newest stop the drive thread has parked for.
-    parked_for: StdMutex<u64>,
-    /// Signalled when `parked_for` moves, and when the wait must end.
+    /// Signalled when a task parks or ends, and when the wait must end.
     parked: Condvar,
+}
+
+/// The gated futures of one session, which is what a synchronous stop has to wait for.
+///
+/// A node's callbacks run on more than one thread once each face is a task of its own, so
+/// "the drive thread has parked" became "every task that can run a callback has parked".
+/// A task is registered by its first poll (a future never polled holds nothing) and leaves
+/// when it is dropped, so a stop never waits for one that is gone.
+#[derive(Default)]
+struct GateTasks {
+    next: u64,
+    slots: BTreeMap<u64, TaskSlot>,
+}
+
+/// One gated future's place in the gate.
+struct TaskSlot {
+    /// Its own waker, refreshed on each poll, so a stop can make it look at the gate even
+    /// while it is idle.
+    waker: Option<Waker>,
+    /// The newest stop this task has parked for.
+    parked_for: u64,
+}
+
+thread_local! {
+    /// The gates whose gated futures this thread is polling right now, innermost last. A
+    /// callback of a session runs inside one of those polls, so "this thread is inside the
+    /// gate's poll" is "this is a callback of the session": the test that a stop or a start
+    /// from a callback is refused, which pico does from its executor's thread.
+    static POLLING: core::cell::RefCell<Vec<usize>> = const { core::cell::RefCell::new(Vec::new()) };
 }
 
 /// A start or a stop was made from inside the session's own callbacks. pico
@@ -284,21 +308,19 @@ impl ReadGate {
             running: AtomicBool::new(running),
             opened: AtomicBool::new(false),
             closing: AtomicBool::new(false),
-            ended: AtomicBool::new(false),
             wakers: StdMutex::new(Vec::new()),
-            drive_thread: OnceLock::new(),
-            outer: StdMutex::new(None),
+            tasks: StdMutex::new(GateTasks::default()),
             stop_epoch: AtomicU64::new(0),
-            parked_for: StdMutex::new(0),
             parked: Condvar::new(),
         }
     }
 
-    /// Whether the calling thread is the one the session's callbacks run on.
-    fn on_drive_thread(&self) -> bool {
-        self.drive_thread
-            .get()
-            .is_some_and(|drive| *drive == std::thread::current().id())
+    /// Whether the calling thread is inside a poll of one of THIS gate's futures, which is
+    /// where every callback of the session runs. Another session's gate is not this one:
+    /// a callback of one session may stop another.
+    fn in_callback(&self) -> bool {
+        let this = self as *const ReadGate as usize;
+        POLLING.with(|polling| polling.borrow().contains(&this))
     }
 
     /// The role has reached its ready point: from here a stopped task holds the
@@ -315,9 +337,9 @@ impl ReadGate {
     }
 
     /// Start the task (`zp_start_read_task`); idempotent, as pico's is. Refused
-    /// on the drive thread, where a callback running means the task already does.
+    /// from a callback, where a callback running means the task already does.
     pub fn start(&self) -> Result<(), CalledFromReadTask> {
-        if self.on_drive_thread() {
+        if self.in_callback() {
             return Err(CalledFromReadTask);
         }
         self.running.store(true, Ordering::SeqCst);
@@ -326,79 +348,116 @@ impl ReadGate {
     }
 
     /// Stop the task (`zp_stop_read_task`); idempotent, as pico's is. Returns when
-    /// the drive thread has parked, so no callback is running and none will until
-    /// the task is started (see the type's documentation). Refused on the drive
-    /// thread, which would be waiting for itself.
+    /// EVERY gated future of the session has parked, so no callback is running on any
+    /// thread and none will until the task is started (see the type's documentation).
+    /// Refused from a callback, which would be waiting for itself.
     pub fn stop(&self) -> Result<(), CalledFromReadTask> {
-        if self.on_drive_thread() {
+        if self.in_callback() {
             return Err(CalledFromReadTask);
         }
-        // The epoch first, then the flag: a drive thread that sees the flag sees an
-        // epoch at least this one, which is what it acknowledges.
+        // The epoch first, then the flag: a task that sees the flag sees an epoch at
+        // least this one, which is what it acknowledges.
         let epoch = self.stop_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.running.store(false, Ordering::SeqCst);
-        self.wake_drive();
+        self.wake_tasks();
         self.wait_until_parked(epoch);
         Ok(())
     }
 
-    /// Make the drive thread look at the gate, even when it is idle.
-    fn wake_drive(&self) {
-        let outer = self.outer.lock().ok().and_then(|w| w.clone());
-        if let Some(waker) = outer {
+    /// Make every gated future look at the gate, even one that is idle.
+    fn wake_tasks(&self) {
+        let wakers: Vec<Waker> = match self.tasks.lock() {
+            Ok(tasks) => tasks
+                .slots
+                .values()
+                .filter_map(|slot| slot.waker.clone())
+                .collect(),
+            Err(_) => return,
+        };
+        for waker in wakers {
             waker.wake();
         }
     }
 
-    /// Wait until the drive thread has parked for stop number `epoch`, or no
-    /// longer can (the session is closing or its drive is gone), or someone has
-    /// started the task again meanwhile. A gate whose drive has never been polled
-    /// has nothing to wait for.
+    /// Wait until every gated future has parked for stop number `epoch`, or no longer
+    /// can (the session is closing, or the future is gone), or someone has started the
+    /// task again meanwhile. A gate with no future that has ever been polled, or none
+    /// left, has nothing to wait for.
     fn wait_until_parked(&self, epoch: u64) {
-        if self.drive_thread.get().is_none() {
-            return;
-        }
-        let Ok(mut parked) = self.parked_for.lock() else {
-            return;
-        };
-        while *parked < epoch
-            && !self.closing.load(Ordering::SeqCst)
-            && !self.ended.load(Ordering::SeqCst)
-            && !self.running.load(Ordering::SeqCst)
-        {
-            // Timed, so that a wake-up that raced the checks above is noticed.
-            parked = match self.parked.wait_timeout(parked, Duration::from_millis(50)) {
-                Ok((parked, _)) => parked,
-                Err(_) => return,
-            };
+        loop {
+            {
+                let Ok(tasks) = self.tasks.lock() else {
+                    return;
+                };
+                let all_parked = tasks.slots.values().all(|slot| slot.parked_for >= epoch);
+                if all_parked
+                    || self.closing.load(Ordering::SeqCst)
+                    || self.running.load(Ordering::SeqCst)
+                {
+                    return;
+                }
+                // Timed, so that a wake-up that raced the checks above is noticed.
+                let waited = self.parked.wait_timeout(tasks, Duration::from_millis(50));
+                if waited.is_err() {
+                    return;
+                }
+            }
+            // A task that registered, or went idle, since the last wake is asked again.
+            self.wake_tasks();
         }
     }
 
-    /// The drive thread is about to park because the task is stopped: say so, for
+    /// The gated future `id` is about to park because the task is stopped: say so, for
     /// the newest stop asked for.
-    fn acknowledge_park(&self) {
+    fn acknowledge_park(&self, id: u64) {
         let epoch = self.stop_epoch.load(Ordering::SeqCst);
-        if let Ok(mut parked) = self.parked_for.lock() {
-            if *parked < epoch {
-                *parked = epoch;
+        if let Ok(mut tasks) = self.tasks.lock() {
+            if let Some(slot) = tasks.slots.get_mut(&id) {
+                if slot.parked_for < epoch {
+                    slot.parked_for = epoch;
+                }
             }
         }
         self.parked.notify_all();
     }
 
-    /// Note which thread drives the session, and keep its waker for a stop.
-    fn note_poll(&self, waker: &Waker) {
-        let _ = self.drive_thread.set(std::thread::current().id());
-        if let Ok(mut outer) = self.outer.lock() {
-            if !outer.as_ref().is_some_and(|known| known.will_wake(waker)) {
-                *outer = Some(waker.clone());
+    /// Register the gated future on its first poll (`registered` holds its id from then
+    /// on) and keep its waker for a stop.
+    fn note_poll(&self, registered: &mut Option<u64>, waker: &Waker) -> Option<u64> {
+        let mut tasks = self.tasks.lock().ok()?;
+        let id = match *registered {
+            Some(id) => id,
+            None => {
+                let id = tasks.next;
+                tasks.next += 1;
+                tasks.slots.insert(
+                    id,
+                    TaskSlot {
+                        waker: None,
+                        parked_for: 0,
+                    },
+                );
+                *registered = Some(id);
+                id
+            }
+        };
+        if let Some(slot) = tasks.slots.get_mut(&id) {
+            if !slot
+                .waker
+                .as_ref()
+                .is_some_and(|known| known.will_wake(waker))
+            {
+                slot.waker = Some(waker.clone());
             }
         }
+        Some(id)
     }
 
-    /// The top-level future is gone: a stop has nobody left to wait for.
-    fn drive_ended(&self) {
-        self.ended.store(true, Ordering::SeqCst);
+    /// The gated future `id` is gone: a stop has nobody left to wait for in its place.
+    fn task_ended(&self, id: u64) {
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.slots.remove(&id);
+        }
         self.parked.notify_all();
     }
 
@@ -471,34 +530,89 @@ impl ReadGate {
 /// the local tasks it owns, which is exactly a stopped executor. Its writers are
 /// spawned tasks on the runtime and keep running, as a pico `z_put` writes on the
 /// caller's thread whether or not the executor does.
+///
+/// A session has several: the top-level drive, and each face that is a task of its own
+/// ([`GateFaces`]). Each is registered in the gate by its first poll, and a stop waits for
+/// every one of them to park.
 struct Pausable<F> {
     gate: Arc<ReadGate>,
     inner: Pin<Box<F>>,
+    /// This future's place in the gate, taken by its first poll.
+    registered: Option<u64>,
 }
 
-impl<F: Future<Output = ()>> Future for Pausable<F> {
-    type Output = ();
+impl<F> Pausable<F> {
+    fn new(gate: Arc<ReadGate>, inner: F) -> Self {
+        Self {
+            gate,
+            inner: Box::pin(inner),
+            registered: None,
+        }
+    }
+}
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+/// Marks the calling thread as inside a poll of a gate's future for as long as it lives,
+/// which is what [`ReadGate::in_callback`] reads. Dropped on unwind too, so a panic in a
+/// callback does not leave the thread marked.
+struct PollingGuard;
+
+impl PollingGuard {
+    fn enter(gate: &ReadGate) -> Self {
+        POLLING.with(|polling| polling.borrow_mut().push(gate as *const ReadGate as usize));
+        PollingGuard
+    }
+}
+
+impl Drop for PollingGuard {
+    fn drop(&mut self) {
+        POLLING.with(|polling| {
+            polling.borrow_mut().pop();
+        });
+    }
+}
+
+impl<F: Future> Future for Pausable<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let this = self.get_mut();
-        this.gate.note_poll(cx.waker());
+        let id = this.gate.note_poll(&mut this.registered, cx.waker());
         if !this.gate.drive_may_run() {
             this.gate.park(cx.waker());
             if !this.gate.drive_may_run() {
                 // Parked: the inner future is not polled again until a start, so
-                // no callback of the session is running. A stop waits for this.
-                this.gate.acknowledge_park();
+                // no callback of the session is running on its account. A stop
+                // waits for every future of the session to be here.
+                if let Some(id) = id {
+                    this.gate.acknowledge_park(id);
+                }
                 return Poll::Pending;
             }
         }
+        let _polling = PollingGuard::enter(&this.gate);
         this.inner.as_mut().poll(cx)
     }
 }
 
 impl<F> Drop for Pausable<F> {
     fn drop(&mut self) {
-        self.gate.drive_ended();
+        if let Some(id) = self.registered {
+            self.gate.task_ended(id);
+        }
     }
+}
+
+/// Spawn `future` on the session's runtime as a task of its own, gated like the top-level
+/// drive: it is polled only while the read task may run, and a stop waits for it.
+///
+/// What a face that is not driven by the accept loop (a dialled endpoint's leg) uses to be a
+/// task of its own and not a share of the drive thread.
+fn spawn_gated<F>(gate: &Arc<ReadGate>, future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(Pausable::new(gate.clone(), future))
 }
 
 // --- per-session state -----------------------------------------------------
@@ -1527,11 +1641,7 @@ async fn drive_peer(
                             Some(Ok(session)) => {
                                 let (owed, registered) = FaceOwed::awaited_by_the_walk();
                                 registered_faces.push(registered);
-                                faces.push(tokio::task::spawn_local(leg.run(
-                                    Some(session),
-                                    None,
-                                    owed,
-                                )))
+                                faces.push(spawn_gated(&gate, leg.run(Some(session), None, owed)))
                             }
                             Some(Err(())) if arm.ends_startup() => {
                                 failed = true;
@@ -1553,11 +1663,7 @@ async fn drive_peer(
                             Some(Ok(session)) => {
                                 let (owed, registered) = FaceOwed::awaited_by_the_walk();
                                 registered_faces.push(registered);
-                                faces.push(tokio::task::spawn_local(leg.run(
-                                    Some(session),
-                                    None,
-                                    owed,
-                                )))
+                                faces.push(spawn_gated(&gate, leg.run(Some(session), None, owed)))
                             }
                             // Unbounded, so only the walk's budget ends it.
                             _ => {
@@ -1568,11 +1674,10 @@ async fn drive_peer(
                     }
                     PhaseArm::RetryInBackground => {
                         window.expect_one();
-                        faces.push(tokio::task::spawn_local(leg.run(
-                            None,
-                            Some(schedule),
-                            FaceOwed::none(),
-                        )));
+                        faces.push(spawn_gated(
+                            &gate,
+                            leg.run(None, Some(schedule), FaceOwed::none()),
+                        ));
                     }
                 }
             }
@@ -1715,6 +1820,17 @@ fn scouted_locators_to_dial(configured: &[String], scouted: &[String]) -> Vec<St
         .collect()
 }
 
+/// The zids of the scouted nodes being dialled right now, shared by the connector and its legs.
+type DialingSet = Arc<StdMutex<std::collections::BTreeSet<Vec<u8>>>>;
+
+/// The set under its lock. A holder that panicked left a set that is still a set, so a poisoned
+/// lock is read through.
+fn dialing_zids(
+    set: &DialingSet,
+) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<Vec<u8>>> {
+    set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// What the task that dials the nodes a peer's scouting finds is given.
 struct ScoutedPeers {
     /// The endpoints the config states to connect to: scouting does not dial their locators.
@@ -1753,11 +1869,11 @@ async fn scouted_connector(peers: ScoutedPeers) {
         releases_window,
         mut closing,
     } = peers;
-    let dialing: std::rc::Rc<std::cell::RefCell<std::collections::BTreeSet<Vec<u8>>>> =
-        std::rc::Rc::default();
+    // Shared by the legs, which are tasks of their own on the runtime's workers.
+    let dialing: DialingSet = Arc::default();
     // Already "announced" when the open is not waiting: `one_connected` lowers a count that
     // `expect_one` raised, and lowering one nobody raised would wrap it.
-    let announced = std::rc::Rc::new(std::cell::Cell::new(!releases_window));
+    let announced = Arc::new(AtomicBool::new(!releases_window));
     let mut next_face = first_face;
     let mut legs: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // Each leg waits on its own copy of the signal; the loop's own is borrowed by the wait below.
@@ -1768,7 +1884,7 @@ async fn scouted_connector(peers: ScoutedPeers) {
                 let Some(mut intent) = intent else { break };
                 if wz_runtime_tokio::zid_hex::same_zid(&intent.zid, &own_zid)
                     || shared.holds_peer(&intent.zid)
-                    || dialing.borrow().contains(&intent.zid)
+                    || dialing_zids(&dialing).contains(&intent.zid)
                 {
                     continue;
                 }
@@ -1777,11 +1893,11 @@ async fn scouted_connector(peers: ScoutedPeers) {
                 if intent.locators.is_empty() {
                     continue;
                 }
-                dialing.borrow_mut().insert(intent.zid.clone());
+                dialing_zids(&dialing).insert(intent.zid.clone());
                 let face = next_face;
                 next_face += 1;
                 legs.retain(|leg| !leg.is_finished());
-                legs.push(tokio::task::spawn_local(scouted_leg(
+                legs.push(spawn_gated(&gate, scouted_leg(
                     face,
                     intent,
                     dialer.clone(),
@@ -1812,21 +1928,21 @@ async fn scouted_leg(
     gate: Arc<ReadGate>,
     window: Arc<StartWindow>,
     mut closing: tokio::sync::watch::Receiver<bool>,
-    dialing: std::rc::Rc<std::cell::RefCell<std::collections::BTreeSet<Vec<u8>>>>,
-    announced: std::rc::Rc<std::cell::Cell<bool>>,
+    dialing: DialingSet,
+    announced: Arc<AtomicBool>,
 ) {
     let mut ended = closing.clone();
     let opened = tokio::select! {
         opened = dial_scouted(&dialer, &intent) => opened,
         _ = ended.wait_for(|c| *c) => None,
     };
-    dialing.borrow_mut().remove(&intent.zid);
+    dialing_zids(&dialing).remove(&intent.zid);
     let Some(session) = opened else {
         return;
     };
     // The first scouted connection releases the window, once its face is registered.
     let mut owed = FaceOwed::none();
-    if !announced.replace(true) {
+    if !announced.swap(true, Ordering::SeqCst) {
         owed.window = Some(window);
     }
     drive_face(
@@ -2595,14 +2711,28 @@ async fn bind_listener(
     Some(Listening { listener, params })
 }
 
-/// Accept on a bound listener until `shutdown`, holding every accepted peer as
-/// its own face.
+/// The [`FaceExecutor`] of a C ABI node: every face's drive is polled only while the node's
+/// read task may run, as the top-level drive is ([`Pausable`]), and is one of the futures a
+/// stop waits for.
+struct GateFaces {
+    gate: Arc<ReadGate>,
+}
+
+impl FaceExecutor for GateFaces {
+    fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
+        Box::pin(Pausable::new(self.gate.clone(), drive))
+    }
+}
+
+/// Accept on a bound listener until `shutdown`, driving every accepted peer as a task of its
+/// own.
 ///
-/// The accept loop holds every accepted peer as its own face and drives them
-/// all on this one task; `CApiForwarder` lands each in the registry and
-/// dispatches its inbound events into that face's own session. Shutdown is
-/// a future the loop races, so a `z_close` with NO peer ever connected
-/// unwinds a pending `accept()` cleanly.
+/// The accept loop is the CONTROL plane and runs on this one task: it accepts, runs each
+/// handshake, bounds the sessions and lands each face in the registry through
+/// `CApiForwarder`. The DATA plane is not here: the drive of each face is spawned on the
+/// session's runtime ([`GateFaces`]), so N peers are read, decoded and delivered by up to N
+/// threads and the node's capacity is not one core. Shutdown is a future the loop races, so a
+/// `z_close` with NO peer ever connected unwinds a pending `accept()` cleanly.
 ///
 /// R3076 -- `index` is the listener's place among the session's, and the faces it accepts are
 /// numbered inside its own range of the registry's face ids ([`CApiForwarder::listening`]): each
@@ -2614,16 +2744,16 @@ async fn accept_faces(
     clock: TokioTime,
     shared: Arc<SharedSession>,
     index: u64,
-    gate: &ReadGate,
+    gate: &Arc<ReadGate>,
     shutdown: impl Future<Output = ()>,
 ) {
     // pico accepts in a task of its executor, so a listener opened without the
     // read task is BOUND and accepts nobody until it is started: a peer that
     // dials meanwhile waits in the backlog, and is served once the task starts.
     gate.wait_running().await;
-    let forwarder = CApiForwarder::listening(shared, index);
+    let forwarder = Arc::new(CApiForwarder::listening(shared, index));
     let Listening { listener, params } = listening;
-    let _summary = accept_loop_offering(
+    let _summary = accept_loop_offering_spawned(
         listener,
         params,
         offer,
@@ -2631,7 +2761,8 @@ async fn accept_faces(
         DEFAULT_OPEN_TICK_MS,
         shutdown,
         |_event| {},
-        &forwarder,
+        forwarder,
+        Arc::new(GateFaces { gate: gate.clone() }),
     )
     .await;
 }
@@ -2886,6 +3017,21 @@ impl OpenStance {
 /// session's, the same on every host, and the pages are reserved and not touched until used.
 const DRIVE_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
+/// How many worker threads a session's runtime has, which is how many faces of the node can be
+/// read, decoded and delivered at the same moment (the drive thread itself runs the control
+/// plane and the local plane).
+///
+/// Two by default: the reference's receive runtime has two, and a node of a few links is served
+/// by them; a runtime is made PER session and a program may open many. `WZ_CAPI_WORKER_THREADS`
+/// raises it for a node that holds many links, as `ZENOH_RUNTIME` does for the reference.
+fn drive_workers() -> usize {
+    std::env::var("WZ_CAPI_WORKER_THREADS")
+        .ok()
+        .and_then(|text| text.parse::<usize>().ok())
+        .filter(|workers| *workers >= 1)
+        .unwrap_or(2)
+}
+
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
 /// only the bind.
@@ -2972,19 +3118,23 @@ pub fn open_blocking(
     let drive_gate = read_gate.clone();
 
     // One dedicated multi-thread runtime PER session, owned by its driver
-    // thread: the `block_on` future need not be `Send` (the accept loop's
-    // per-face drive futures are not), while the socket writer tasks and the
-    // I/O reactor run on the runtime's worker threads. Two workers suffice —
-    // the wz reference two-session loopback test drives to Established with
-    // `worker_threads=2`. A shared runtime driven by two `block_on`s starved
-    // the concurrent handshake (the acceptor timed out into a pre-Established
+    // thread: the `block_on` future need not be `Send` (the control plane, the
+    // accept loops and the local plane, stay on it), while the socket writer
+    // tasks, the I/O reactor and the DRIVE OF EACH FACE run on the runtime's
+    // worker threads. A shared runtime driven by two `block_on`s starved the
+    // concurrent handshake (the acceptor timed out into a pre-Established
     // Terminal); per-session isolation lets each session drive its own links.
+    //
+    // The workers carry the stack of the drive thread, because the futures a face
+    // drive polls are the same ones (see [`DRIVE_THREAD_STACK_BYTES`]), and their
+    // number is the node's receive parallelism ([`drive_workers`]).
     let handle = std::thread::Builder::new()
         .name("wz-capi-drive".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
+                .worker_threads(drive_workers())
+                .thread_stack_size(DRIVE_THREAD_STACK_BYTES)
                 .enable_all()
                 .thread_name("wz-capi-rt")
                 .build()
@@ -3020,22 +3170,19 @@ pub fn open_blocking(
             let gossips_with_a_listener = ctx.gossiping && !listen.is_empty();
             // Polled only while the read task may run ([`Pausable`]): a stopped
             // task is a session nobody is driving, which is what pico's is.
-            rt.block_on(Pausable {
-                gate: drive_gate,
-                inner: Box::pin(async move {
-                    if !connect.is_empty() || scouts || gossips_with_a_listener {
-                        drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
-                    } else if !listen.is_empty() {
-                        drive_listen(listen, tls, dial_whatami, ctx).await;
-                    } else {
-                        // R3067 -- no endpoint: a session alone, as zenoh starts one.
-                        // Whether a config MAY open without one is the calling ABI's
-                        // decision (a client may not, and a peer that scouts reaches
-                        // others through it), so it is asked there, not here.
-                        drive_idle(dial_whatami, ctx).await;
-                    }
-                }),
-            });
+            rt.block_on(Pausable::new(drive_gate, async move {
+                if !connect.is_empty() || scouts || gossips_with_a_listener {
+                    drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
+                } else if !listen.is_empty() {
+                    drive_listen(listen, tls, dial_whatami, ctx).await;
+                } else {
+                    // R3067 -- no endpoint: a session alone, as zenoh starts one.
+                    // Whether a config MAY open without one is the calling ABI's
+                    // decision (a client may not, and a peer that scouts reaches
+                    // others through it), so it is asked there, not here.
+                    drive_idle(dial_whatami, ctx).await;
+                }
+            }));
             // `rt` is dropped here, after the drive loop has returned.
         })
         .map_err(|_| OpenError::DriveFailed)?;
@@ -3235,10 +3382,9 @@ mod tests {
         let gate = Arc::new(ReadGate::new(false));
         let ran = Arc::new(AtomicBool::new(false));
         let ran_in = ran.clone();
-        runtime().block_on(Pausable {
-            gate: gate.clone(),
-            inner: Box::pin(async move { ran_in.store(true, Ordering::SeqCst) }),
-        });
+        runtime().block_on(Pausable::new(gate.clone(), async move {
+            ran_in.store(true, Ordering::SeqCst)
+        }));
         assert!(
             ran.load(Ordering::SeqCst),
             "the open was held by a stopped gate"
@@ -3271,12 +3417,9 @@ mod tests {
         runtime().block_on(async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                Pausable {
-                    gate: gate.clone(),
-                    inner: Box::pin(async move {
-                        seen.store(inner_gate.is_running(), Ordering::SeqCst);
-                    }),
-                },
+                Pausable::new(gate.clone(), async move {
+                    seen.store(inner_gate.is_running(), Ordering::SeqCst);
+                }),
             )
             .await
             .expect("a start must resume a stopped read task");
@@ -3303,10 +3446,7 @@ mod tests {
         runtime().block_on(async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                Pausable {
-                    gate: gate.clone(),
-                    inner: Box::pin(async {}),
-                },
+                Pausable::new(gate.clone(), async {}),
             )
             .await
             .expect("a close must wake a stopped read task");
@@ -3385,18 +3525,15 @@ mod tests {
             let (gate, polls, in_flight, done) =
                 (gate.clone(), polls.clone(), in_flight.clone(), done.clone());
             std::thread::spawn(move || {
-                runtime().block_on(Pausable {
-                    gate,
-                    inner: Box::pin(async move {
-                        while !done.load(Ordering::SeqCst) {
-                            in_flight.store(true, Ordering::SeqCst);
-                            std::thread::sleep(std::time::Duration::from_millis(40));
-                            polls.fetch_add(1, Ordering::SeqCst);
-                            in_flight.store(false, Ordering::SeqCst);
-                            tokio::task::yield_now().await;
-                        }
-                    }),
-                });
+                runtime().block_on(Pausable::new(gate, async move {
+                    while !done.load(Ordering::SeqCst) {
+                        in_flight.store(true, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(40));
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        in_flight.store(false, Ordering::SeqCst);
+                        tokio::task::yield_now().await;
+                    }
+                }));
             })
         };
 
@@ -3433,14 +3570,11 @@ mod tests {
         // and that must read as a failed test rather than a hung one.
         let gate_in = gate.clone();
         std::thread::spawn(move || {
-            runtime().block_on(Pausable {
-                gate: gate_in.clone(),
-                inner: Box::pin(async move {
-                    let stop = gate_in.stop();
-                    let start = gate_in.start();
-                    let _ = tx.send((stop, start, gate_in.is_running()));
-                }),
-            });
+            runtime().block_on(Pausable::new(gate_in.clone(), async move {
+                let stop = gate_in.stop();
+                let start = gate_in.start();
+                let _ = tx.send((stop, start, gate_in.is_running()));
+            }));
         });
         let seen = rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -3466,13 +3600,10 @@ mod tests {
         let drive = {
             let gate = gate.clone();
             std::thread::spawn(move || {
-                runtime().block_on(Pausable {
-                    gate,
-                    inner: Box::pin(async move {
-                        polled_in.store(true, Ordering::SeqCst);
-                        release_in.notified().await;
-                    }),
-                });
+                runtime().block_on(Pausable::new(gate, async move {
+                    polled_in.store(true, Ordering::SeqCst);
+                    release_in.notified().await;
+                }));
             })
         };
         wait_until("the drive's first poll", || polled.load(Ordering::SeqCst));
@@ -3491,11 +3622,98 @@ mod tests {
     fn a_stop_does_not_wait_for_a_drive_that_is_gone() {
         let gate = Arc::new(ReadGate::new(true));
         gate.mark_opened();
-        runtime().block_on(Pausable {
-            gate: gate.clone(),
-            inner: Box::pin(async {}),
+        runtime().block_on(Pausable::new(gate.clone(), async {}));
+        stop_within_five_seconds(&gate);
+    }
+
+    /// A stop waits for EVERY gated future of the session, not for one of them: once each
+    /// face is a task of its own, callbacks run on several threads. Two futures on threads
+    /// of their own are each inside a step that blocks, the second for three times as long
+    /// as the first; the stop made while both are in flight returns only when both are over,
+    /// and after it neither runs until a start.
+    #[test]
+    fn a_stop_waits_for_every_gated_task() {
+        let gate = Arc::new(ReadGate::new(true));
+        gate.mark_opened();
+        let done = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let in_flight = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let steps_ms = [40u64, 120];
+        let drives: Vec<_> = (0..2)
+            .map(|i| {
+                let (gate, polls, done, in_flight) = (
+                    gate.clone(),
+                    polls.clone(),
+                    done.clone(),
+                    in_flight[i].clone(),
+                );
+                let step = steps_ms[i];
+                std::thread::spawn(move || {
+                    runtime().block_on(Pausable::new(gate, async move {
+                        while !done.load(Ordering::SeqCst) {
+                            in_flight.store(true, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(step));
+                            polls.fetch_add(1, Ordering::SeqCst);
+                            in_flight.store(false, Ordering::SeqCst);
+                            tokio::task::yield_now().await;
+                        }
+                    }));
+                })
+            })
+            .collect();
+
+        wait_until("both steps in flight", || {
+            in_flight[0].load(Ordering::SeqCst) && in_flight[1].load(Ordering::SeqCst)
         });
         stop_within_five_seconds(&gate);
+        assert!(
+            !in_flight[0].load(Ordering::SeqCst) && !in_flight[1].load(Ordering::SeqCst),
+            "the stop returned while a step of one of the futures was still running"
+        );
+        let frozen = polls.load(Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            frozen,
+            "a future ran after the stop returned"
+        );
+
+        gate.start().expect("a start off a callback");
+        wait_until("the futures to resume", || {
+            polls.load(Ordering::SeqCst) > frozen
+        });
+        done.store(true, Ordering::SeqCst);
+        for drive in drives {
+            drive.join().expect("a drive thread");
+        }
+    }
+
+    /// "Inside a callback" is a property of ONE gate: a callback of one session may stop
+    /// another session, which waits for that session's futures and not for itself.
+    #[test]
+    fn a_callback_of_one_session_may_stop_another() {
+        let first = Arc::new(ReadGate::new(true));
+        first.mark_opened();
+        let second = Arc::new(ReadGate::new(true));
+        second.mark_opened();
+        let (tx, rx) = mpsc::channel();
+        let (first_in, second_in) = (first.clone(), second.clone());
+        std::thread::spawn(move || {
+            runtime().block_on(Pausable::new(first_in, async move {
+                let _ = tx.send((second_in.stop(), second_in.is_running()));
+            }));
+        });
+        let seen = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a stop of another session from a callback did not return");
+        assert_eq!(
+            seen,
+            (Ok(()), false),
+            "a callback of one session is not a callback of the other"
+        );
     }
 
     fn strings(list: &[&str]) -> Vec<String> {
