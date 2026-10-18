@@ -104,6 +104,11 @@ I6. Each invariant above is held by a test that can fail for exactly one reason 
   The client-delivery and tree-forward callers move to the targeted path.
 - A face that has gone is absent from the table, so a cached target that outlives its face is skipped.
   Face removal also bumps the version of the routes that held it (4.2), so it is not skipped for long.
+- Landed: the stored zid, the shared egress helper, and the targeted fan-out for client delivery. The
+  tree-forward path (`forward_push_tier`) still walks the faces of its tier, now reading the stored zid
+  instead of deriving it; its targets are zids, so moving it to the targeted path needs a zid-to-face
+  index, which is not built until a measurement of a router-heavy mesh asks for it. The router tier
+  holds a handful of faces; the clients are the population that grows.
 
 ### 4.2 Subscription index and incremental invalidation (I2, I3)
 
@@ -144,8 +149,10 @@ keeps for the same purpose (`client_route_computes` is one) or a new one beside 
 
 | Invariant | Test | Asserts |
 |---|---|---|
-| I1 | a router holding 64 client faces forwards one Push to one subscriber | faces visited equals 1, and no face's zid is derived on the path |
+| I1 | a router holding 64 client faces forwards one Push to one subscriber | faces visited equals 1; only that subscriber was sent a frame |
 | I1 | the same with 1024 faces | the same numbers, so the count does not depend on the table |
+| I1 | a face's zid after register | the stored zid equals what the session reports, so the path reads it and does not derive it |
+| I1 | a targeted fan-out over a vanished face and a face of another tier | only the target of the tier is asked; every target is counted as visited |
 | I2 | a literal key's route is computed by a lookup | routes computed equals 1 after one publish and stays 1 after more |
 | I3 | after a subscribe for an unrelated key, a cached route is served | `client_route_computes` unchanged by the next publish to the cached key |
 | I3 | after a subscribe for an intersecting key, that route is recomputed once | `client_route_computes` increases by one |

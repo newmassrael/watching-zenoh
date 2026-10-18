@@ -1368,11 +1368,12 @@ struct RouterFaceState {
     /// ⚠ `None` here means the handshake carried no routing zid, which is NOT
     /// what [`link`](Self::link)'s `None` means — see that field.
     ///
-    /// Gated with the consumer that reads it: identity-by-face is a general
-    /// fact, but a field no build reads is dead code, and this tree refuses a
-    /// `pub`-style silencer for that. The one reader today is the `clients`
-    /// bucket of the admin `Sources` body.
-    #[cfg(feature = "adminspace-introspection-handlers")]
+    /// Not gated on a consumer: identity is a fact about a face in every build,
+    /// and the data plane reads it in every build. The fan-outs hand each face's
+    /// zid to their builders, and deriving it per message from the session
+    /// (`peer_zid_routing` takes the session's mutex, copies the bytes and
+    /// converts them) cost every message that work for every face the router
+    /// held. It is fixed once the face is registered, so it is derived once, there.
     peer_zid: Option<Zid>,
     /// The graph link in the face's tier-net, or `None` for a held face (a
     /// Client, or a Router/Peer whose routing zid never surfaced).
@@ -2079,6 +2080,11 @@ pub struct RouterForwarder {
     /// black-hole — only the counter distinguishes "suppressed a duplicate" from
     /// "never had one").
     deferred_client_delivery: Cell<usize>,
+    /// The number of faces the fan-outs have looked at, summed over every message
+    /// — the whole table for a tier-wide fan-out, the targets for a targeted one.
+    /// The witness that the cost of delivering a message follows the faces it is
+    /// delivered to and not the faces the router holds.
+    fan_out_face_visits: Cell<usize>,
     /// I3c loop-safety witnesses (mcast-ingress DR plane). `mcast_ingress_federated`
     /// / `_suppressed` count the two arms of the per-keyexpr DR gate at
     /// [`route_push`](Self::route_push): federated when this router is the group DR
@@ -2416,6 +2422,7 @@ impl RouterForwarder {
             #[cfg(feature = "transport-shm")]
             shm_relay_dropped: Cell::new(0),
             deferred_client_delivery: Cell::new(0),
+            fan_out_face_visits: Cell::new(0),
             #[cfg(feature = "router-multicast-faces")]
             mcast_ingress_federated: Cell::new(0),
             #[cfg(feature = "router-multicast-faces")]
@@ -2822,6 +2829,13 @@ impl RouterForwarder {
     /// observable — a broken guard leaves it at 0 (and double-delivers the client).
     pub fn deferred_client_delivery_seen(&self) -> usize {
         self.deferred_client_delivery.get()
+    }
+
+    /// The faces the fan-outs have looked at so far, summed over every message
+    /// (see the field). A delivery to one subscriber out of a thousand faces
+    /// raises it by one, not by a thousand.
+    pub fn fan_out_face_visits(&self) -> usize {
+        self.fan_out_face_visits.get()
     }
 
     /// I3c — count of mcast-ingress Pushes this router FEDERATED into the mesh as
@@ -3375,39 +3389,102 @@ impl RouterForwarder {
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
         for (id, state) in self.faces.borrow().iter() {
+            self.fan_out_face_visits
+                .set(self.fan_out_face_visits.get() + 1);
             if state.tier != tier {
                 continue;
             }
-            let peer_zid = peer_zid_routing(&state.actions);
-            if let Some(msg) = build(*id, peer_zid)? {
-                // §5.16 EGRESS access control (y113): gate the built message by the
-                // DESTINATION face's subject before it leaves — a denied outbound is
-                // dropped for THIS face (not sent, not counted) and witnessed. The
-                // router twin of `LinkstateForwarder::fan_out`'s `admit_outbound`
-                // gate; empty chain (no ACL) is a no-op fast path.
-                let verdict = self.admit_outbound(*id, state, &msg);
-                if let Some(kind) = verdict.dropped_by() {
-                    self.interceptor_dropped
-                        .set(self.interceptor_dropped.get() + 1);
-                    // R2371 — the router twin of the linkstate forwarder's
-                    // attribution: charge the drop to the DESTINATION face's own
-                    // session on upstream's per-reason counter.
-                    crate::linkstate_forward::charge_interceptor_drop(
-                        &state.actions,
-                        &msg,
-                        kind,
-                        InterceptorFlow::Egress,
-                    );
-                    continue;
-                }
-                let was_push = matches!(msg, NetworkMessage::Push(_));
-                if self.send_to_face_actions(&state.actions, msg, reliable, express, priority) {
+            if let Some(msg) = build(*id, state.peer_zid)? {
+                if self.egress_to_face(*id, state, msg, reliable, express, priority) {
                     sent += 1;
-                    self.note_sent(was_push);
                 }
             }
         }
         Ok(sent)
+    }
+
+    /// Send to each of `targets` that is a held face of `tier` the message `build`
+    /// produces for it, returning the count of faces that accepted one — the
+    /// TARGETED twin of [`fan_out_tier_qos`](Self::fan_out_tier_qos), for a caller
+    /// that already knows which faces a message goes to (a cached client route).
+    ///
+    /// Its cost is the number of targets, not the number of faces the router
+    /// holds: each target is one lookup in the face table, and nothing is asked of
+    /// the faces that are not targets. A target that is no longer held, or that
+    /// belongs to another tier, is skipped, so a route that outlived its face
+    /// costs one failed lookup rather than a wrong send. Every send goes through
+    /// [`egress_to_face`](Self::egress_to_face), the one place the egress access
+    /// control, the send and the accounting are decided.
+    fn fan_out_to_faces_qos(
+        &self,
+        tier: Region,
+        targets: &[FaceId],
+        reliable: bool,
+        priority: Priority,
+        express: bool,
+        mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
+    ) -> Result<usize, CodecError> {
+        let mut sent = 0;
+        let faces = self.faces.borrow();
+        for id in targets {
+            self.fan_out_face_visits
+                .set(self.fan_out_face_visits.get() + 1);
+            let Some(state) = faces.get(id) else {
+                continue;
+            };
+            if state.tier != tier {
+                continue;
+            }
+            if let Some(msg) = build(*id, state.peer_zid)? {
+                if self.egress_to_face(*id, state, msg, reliable, express, priority) {
+                    sent += 1;
+                }
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Send one built message to one held face, through the egress access control
+    /// and the router's accounting — the single egress SSOT that
+    /// [`fan_out_tier_qos`](Self::fan_out_tier_qos),
+    /// [`fan_out_to_faces_qos`](Self::fan_out_to_faces_qos) and
+    /// [`send_to_face`](Self::send_to_face) all send through. Whether the face
+    /// accepted the message.
+    fn egress_to_face(
+        &self,
+        id: FaceId,
+        state: &RouterFaceState,
+        msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
+        // §5.16 EGRESS access control (y113): gate the built message by the
+        // DESTINATION face's subject before it leaves — a denied outbound is
+        // dropped for THIS face (not sent, not counted) and witnessed. The
+        // router twin of `LinkstateForwarder::fan_out`'s `admit_outbound`
+        // gate; empty chain (no ACL) is a no-op fast path.
+        let verdict = self.admit_outbound(id, state, &msg);
+        if let Some(kind) = verdict.dropped_by() {
+            self.interceptor_dropped
+                .set(self.interceptor_dropped.get() + 1);
+            // R2371 — the router twin of the linkstate forwarder's
+            // attribution: charge the drop to the DESTINATION face's own
+            // session on upstream's per-reason counter.
+            crate::linkstate_forward::charge_interceptor_drop(
+                &state.actions,
+                &msg,
+                kind,
+                InterceptorFlow::Egress,
+            );
+            return false;
+        }
+        let was_push = matches!(msg, NetworkMessage::Push(_));
+        let sent = self.send_to_face_actions(&state.actions, msg, reliable, express, priority);
+        if sent {
+            self.note_sent(was_push);
+        }
+        sent
     }
 
     /// Flood self's GAINED-link event within `tier`'s net (the
@@ -3809,7 +3886,7 @@ impl RouterForwarder {
                 InboundFace::SourceOnly | InboundFace::Gone => return None,
             };
             let keyexpr = keyexpr_of(&s.keyexpr_table)?;
-            (peer_zid_routing(&s.actions), s.link, keyexpr)
+            (s.peer_zid, s.link, keyexpr)
         };
         // R2893 — the source is resolved without the graph, and the relay psid
         // is read only if the graph numbers the source (see `Sourced`).
@@ -5262,7 +5339,7 @@ impl RouterForwarder {
         let (inbound_zid, inbound_link) = {
             let faces = self.faces.borrow();
             match classify_inbound(&faces, inbound) {
-                InboundFace::Held(s) => (peer_zid_routing(&s.actions), s.link),
+                InboundFace::Held(s) => (s.peer_zid, s.link),
                 InboundFace::SourceOnly | InboundFace::Gone => return (None, None),
             }
         };
@@ -5391,7 +5468,7 @@ impl RouterForwarder {
             let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
                 return;
             };
-            (peer_zid_routing(&s.actions), s.link, keyexpr)
+            (s.peer_zid, s.link, keyexpr)
         };
         let names = |k: &str| self.names_a_resource(k);
         let Some((carrier, children)) = compute_push_forward(
@@ -5526,10 +5603,18 @@ impl RouterForwarder {
             if clients.is_empty() {
                 continue;
             }
-            let _ = self.fan_out_tier_qos(region, reliable, priority, false, |id, _zid| {
-                let deliver = id != inbound && clients.binary_search(&id).is_ok();
-                Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
-            });
+            // The route IS the target list: only those faces are asked, so the
+            // cost follows the subscribers and not the faces the router holds.
+            let _ = self.fan_out_to_faces_qos(
+                region,
+                &clients,
+                reliable,
+                priority,
+                false,
+                |id, _zid| {
+                    Ok((id != inbound).then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
+                },
+            );
         }
     }
 
@@ -6963,7 +7048,7 @@ impl RouterForwarder {
             // as it does on a zenoh router.
             match classify_inbound(&faces, inbound) {
                 InboundFace::Held(s) => resolve_wireexpr(&request.keyexpr.body, &s.keyexpr_table)
-                    .map(|keyexpr| (peer_zid_routing(&s.actions), s.link, keyexpr)),
+                    .map(|keyexpr| (s.peer_zid, s.link, keyexpr)),
                 // No routing identity and no alias table: literal-only, exactly as
                 // `resolve_inbound_keyexpr` treats the same face for a Push.
                 InboundFace::SourceOnly => {
@@ -7681,7 +7766,7 @@ impl RouterForwarder {
         synthesize_expired_query_returns(
             &reaped,
             |face| match classify_inbound(&self.faces.borrow(), face) {
-                InboundFace::Held(s) => peer_zid_routing(&s.actions),
+                InboundFace::Held(s) => s.peer_zid,
                 InboundFace::SourceOnly | InboundFace::Gone => None,
             },
             |face, msg| self.send_one_to_face(face, msg),
@@ -7719,30 +7804,11 @@ impl RouterForwarder {
         let Some(state) = faces.get(&target) else {
             return false;
         };
-        let msg = build();
-        // §5.16 EGRESS access control (y113): gate the single-target send (a query
+        // §5.16 EGRESS access control (y113) gates the single-target send (a query
         // Response / ResponseFinal / prompt final) by the destination's subject —
-        // a denied reply is dropped and witnessed, not returned. The other egress
-        // seam beside `fan_out_tier`.
-        let verdict = self.admit_outbound(target, state, &msg);
-        if let Some(kind) = verdict.dropped_by() {
-            self.interceptor_dropped
-                .set(self.interceptor_dropped.get() + 1);
-            crate::linkstate_forward::charge_interceptor_drop(
-                &state.actions,
-                &msg,
-                kind,
-                InterceptorFlow::Egress,
-            );
-            return false;
-        }
-        let was_push = matches!(msg, NetworkMessage::Push(_));
-        let sent =
-            self.send_to_face_actions(&state.actions, msg, reliable, false, Priority::DEFAULT);
-        if sent {
-            self.note_sent(was_push);
-        }
-        sent
+        // a denied reply is dropped and witnessed, not returned — in the same
+        // egress SSOT the fan-outs use.
+        self.egress_to_face(target, state, build(), reliable, false, Priority::DEFAULT)
     }
 
     /// [`send_to_face`](Self::send_to_face) for an already-BUILT owned message —
@@ -7945,7 +8011,6 @@ impl FaceForwarder for RouterForwarder {
                 // it from there would keep reproducing the defect: a Client face
                 // would be identity-less because it is a leaf, which conflates
                 // two independent facts.
-                #[cfg(feature = "adminspace-introspection-handlers")]
                 peer_zid: peer_zid_routing(actions),
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
@@ -8563,7 +8628,7 @@ struct RouterFaceContext<'a> {
 
 impl InterceptorContext for RouterFaceContext<'_> {
     fn subject(&self) -> Option<Zid> {
-        peer_zid_routing(&self.face.actions)
+        self.face.peer_zid
     }
 
     // R311y453 — the §5.16 link-derived subject, off the driver this face already
@@ -11688,6 +11753,141 @@ mod tests {
             egress_band(&sink_cb.frame_bytes(0)),
             Priority::DEFAULT,
             "a DEFAULT client egress stays DEFAULT"
+        );
+    }
+
+    /// `held` client faces, each subscribed to a key of its own (`demo/c<i>`), below
+    /// one router that also holds a mesh peer face (`FaceId(0)`) to publish from.
+    /// Face `i + 1` is client `i`. Zids are four big-endian bytes of the index, so
+    /// the population can exceed what a one-byte `zid` helper can name.
+    fn router_holding_clients(
+        held: usize,
+    ) -> (
+        RouterForwarder,
+        Vec<Arc<RecordingLinkDriver>>,
+        Arc<SessionLinkActions>,
+    ) {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (peer, _sink_peer) = face(zid(0xAA), WIRE_PEER);
+        fwd.register(FaceId(0), &peer);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        let mut sinks = Vec::with_capacity(held);
+        for i in 0..held {
+            let client_zid = Zid::from_slice(&(0x1000_0000_u32 + i as u32).to_be_bytes());
+            let (client, sink) = face(client_zid, WIRE_CLIENT);
+            fwd.register(FaceId(1 + i as u64), &client);
+            forward_one(
+                &fwd,
+                FaceId(1 + i as u64),
+                declare_sub(&format!("demo/c{i}")),
+            );
+            sinks.push(sink);
+        }
+        (fwd, sinks, peer)
+    }
+
+    /// I1 — what a message costs follows the faces it is delivered to, not the
+    /// faces the router holds. One subscriber of 64 and one of 1024 are each
+    /// reached by a mesh Put, and the router looks at one face in both: the
+    /// delivery is the target list, and nothing is asked of the others.
+    ///
+    /// The count is exact, so the test fails for exactly one reason — a delivery
+    /// that walks the face table again — and no timing is read.
+    #[test]
+    fn a_push_to_one_client_visits_one_face_whatever_the_router_holds() {
+        for held in [64_usize, 1024] {
+            let (fwd, sinks, _peer) = router_holding_clients(held);
+            for sink in &sinks {
+                sink.reset();
+            }
+            let before = fwd.fan_out_face_visits();
+            forward_one(
+                &fwd,
+                FaceId(0),
+                NetworkMessage::Push(Box::new(
+                    wz_session_core::push_build::build_push_literal("demo/c7", b"x")
+                        .expect("build push"),
+                )),
+            );
+            assert_eq!(
+                sinks[7].frame_count(),
+                1,
+                "{held} held: the subscriber got it"
+            );
+            let others: usize = sinks
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != 7)
+                .map(|(_, s)| s.frame_count())
+                .sum();
+            assert_eq!(others, 0, "{held} held: no other client was sent anything");
+            assert_eq!(
+                fwd.fan_out_face_visits() - before,
+                1,
+                "{held} held: one subscriber, so one face looked at"
+            );
+        }
+    }
+
+    /// A face's routing zid is read once, when it is registered, and every
+    /// consumer reads the stored value: it is the one the session reports.
+    #[test]
+    fn a_face_keeps_the_zid_it_registered_with() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(3), &client);
+        assert_eq!(
+            fwd.faces.borrow().get(&FaceId(3)).map(|f| f.peer_zid),
+            Some(peer_zid_routing(&client)),
+            "stored at register, equal to what the session reports"
+        );
+        assert_eq!(peer_zid_routing(&client), Some(zid(0xCC)));
+    }
+
+    /// The targeted fan-out asks only the targets, skips one that is gone or
+    /// belongs to another tier, and counts what it looked at.
+    #[test]
+    fn a_targeted_fan_out_skips_a_face_that_is_gone_or_in_another_tier() {
+        let (fwd, _sinks, _peer) = router_holding_clients(3);
+        let client_tier = fwd
+            .faces
+            .borrow()
+            .get(&FaceId(2))
+            .map(|f| f.tier)
+            .expect("client face 2 is held");
+        let peer_tier = fwd
+            .faces
+            .borrow()
+            .get(&FaceId(0))
+            .map(|f| f.tier)
+            .expect("the peer face is held");
+        assert_ne!(client_tier, peer_tier, "the fixture spans two tiers");
+        let asked = RefCell::new(Vec::new());
+        let before = fwd.fan_out_face_visits();
+        let sent = fwd
+            .fan_out_to_faces_qos(
+                client_tier,
+                &[FaceId(2), FaceId(0), FaceId(99)],
+                true,
+                Priority::DEFAULT,
+                false,
+                |id, _zid| {
+                    asked.borrow_mut().push(id);
+                    Ok(None)
+                },
+            )
+            .expect("no build error");
+        assert_eq!(sent, 0, "the builder declined every face");
+        assert_eq!(
+            fwd.fan_out_face_visits() - before,
+            3,
+            "every target was looked at, and only the targets"
+        );
+        assert_eq!(
+            *asked.borrow(),
+            vec![FaceId(2)],
+            "the peer face (another tier) and the vanished face were not asked"
         );
     }
 
