@@ -112,8 +112,20 @@ fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
 /// decides whether it is one.
 #[inline]
 pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
-    let (put, end, _same_suffix) = read_plain_put_after(buf, at, None)?;
-    Some((put, end))
+    let read = read_plain_put_after(buf, at, None)?;
+    Some((read.put, read.end))
+}
+
+/// What reading one record gives: the record, where it ends, whether its suffix IS the bytes
+/// of the one it was offered as known, and where the part of it that does not depend on the
+/// payload ends.
+struct Read {
+    put: PlainPut,
+    end: usize,
+    same_suffix: bool,
+    /// Everything up to and including the Put header: the Push header, the key, the QoS
+    /// extension. What follows is the payload's length and the payload.
+    prefix_end: usize,
 }
 
 /// [`read_plain_put`] for a record that follows one whose suffix bytes were `known_utf8`:
@@ -125,11 +137,7 @@ pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
 /// which is the comparison the check above makes, handed on so the caller does not make it
 /// again to tell whether the key repeats.
 #[inline]
-fn read_plain_put_after(
-    buf: &[u8],
-    at: usize,
-    known_utf8: Option<&[u8]>,
-) -> Option<(PlainPut, usize, bool)> {
+fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Option<Read> {
     let mut same_suffix = false;
     let mut cursor = at;
     let header = *buf.get(cursor)?;
@@ -169,12 +177,10 @@ fn read_plain_put_after(
         return None;
     }
     cursor += 1;
-    let length = usize::try_from(vle(buf, &mut cursor)?).ok()?;
-    let end = cursor.checked_add(length)?;
-    buf.get(cursor..end)?;
-    let payload = (u32::try_from(cursor).ok()?, u32::try_from(end).ok()?);
-    Some((
-        PlainPut {
+    let prefix_end = cursor;
+    let (end, payload) = read_payload(buf, cursor)?;
+    Some(Read {
+        put: PlainPut {
             id,
             sender_mapping: header & FLAG_M != 0,
             suffix,
@@ -184,7 +190,19 @@ fn read_plain_put_after(
         },
         end,
         same_suffix,
-    ))
+        prefix_end,
+    })
+}
+
+/// The payload's length and the payload of the record whose fixed prefix ends at `cursor`:
+/// where the record ends and where its payload lies. What [`read_plain_put_after`] does after
+/// the Put header.
+#[inline]
+fn read_payload(buf: &[u8], mut cursor: usize) -> Option<(usize, (u32, u32))> {
+    let length = usize::try_from(vle(buf, &mut cursor)?).ok()?;
+    let end = cursor.checked_add(length)?;
+    buf.get(cursor..end)?;
+    Some((end, (u32::try_from(cursor).ok()?, u32::try_from(end).ok()?)))
 }
 
 /// Every record of a frame's batch as a plain `Put`, or `None` when ANY of them is not
@@ -199,33 +217,71 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
     let mut at = 0usize;
     // The suffix of the record just read, which the next one may repeat.
     let mut previous: Option<&[u8]> = None;
-    // The record just read, whose key the next one may repeat.
-    let mut before: Option<PlainPut> = None;
+    // The record just read, whose key the next one may repeat, and where its fixed prefix
+    // lies: the bytes of the Push header, the key, the QoS extension and the Put header.
+    let mut before: Option<(PlainPut, usize, usize)> = None;
     while at < buf.len() {
-        let (mut put, end, same_suffix) = read_plain_put_after(buf, at, previous)?;
+        // A stream's records differ in their payload and nothing else, so a record that
+        // starts with the same prefix bytes as the one before it is read as that one was:
+        // the reading of those bytes is a function of the bytes alone. What is left to read
+        // is the payload's length.
+        if let Some((last, start, prefix_len)) = before {
+            let same_prefix = at
+                .checked_add(prefix_len)
+                .and_then(|to| buf.get(at..to))
+                .is_some_and(|now| now == &buf[start..start + prefix_len]);
+            if same_prefix {
+                let (end, payload) = read_payload(buf, at + prefix_len)?;
+                // The suffix lies at the same distance from the start of the record.
+                let moved = |range: (u32, u32)| {
+                    let to_at = |position: u32| u32::try_from(position as usize - start + at).ok();
+                    Some((to_at(range.0)?, to_at(range.1)?))
+                };
+                let suffix = match last.suffix {
+                    Some(range) => Some(moved(range)?),
+                    None => None,
+                };
+                let put = PlainPut {
+                    suffix,
+                    payload,
+                    repeats_key: true,
+                    ..last
+                };
+                previous = put
+                    .suffix
+                    .map(|(from, to)| &buf[from as usize..to as usize])
+                    .or(previous);
+                before = Some((put, at, prefix_len));
+                puts.push(put);
+                at = end;
+                continue;
+            }
+        }
+        let read = read_plain_put_after(buf, at, previous)?;
+        let mut put = read.put;
         // With a suffix on both, `previous` is the record before's own suffix, so `same_suffix`
         // is the comparison with it.
-        put.repeats_key = before.is_some_and(|before| {
+        put.repeats_key = before.is_some_and(|(before, _, _)| {
             before.id == put.id
                 && before.sender_mapping == put.sender_mapping
                 && match (before.suffix, put.suffix) {
                     (None, None) => true,
-                    (Some(_), Some(_)) => same_suffix,
+                    (Some(_), Some(_)) => read.same_suffix,
                     _ => false,
                 }
         });
-        before = Some(put);
+        before = Some((put, at, read.prefix_end - at));
         previous = put
             .suffix
             .map(|(from, to)| &buf[from as usize..to as usize])
             .or(previous);
         if puts.capacity() == 0 {
             // Records of the size the first one is: its bytes, and the header around them.
-            let width = (end - at).max(1);
+            let width = (read.end - at).max(1);
             puts.reserve_exact((buf.len() / width).clamp(1, 4096));
         }
         puts.push(put);
-        at = end;
+        at = read.end;
     }
     if puts.is_empty() {
         None
@@ -539,5 +595,103 @@ mod tests {
             read_plain_puts(&[]).is_none(),
             "an empty batch is the codec's"
         );
+    }
+
+    /// The batch as one record at a time through the reader that has no memory of the record
+    /// before it, with `repeats_key` set by comparing the key's bytes: what a batch reader that
+    /// reuses a record's reading must give back, field for field.
+    fn read_one_by_one(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
+        let mut out: alloc::vec::Vec<PlainPut> = alloc::vec::Vec::new();
+        let mut at = 0;
+        while at < buf.len() {
+            let (mut put, end) = read_plain_put(buf, at)?;
+            let key = |p: &PlainPut| p.suffix.map(|(a, b)| buf[a as usize..b as usize].to_vec());
+            put.repeats_key = out.last().is_some_and(|last| {
+                last.id == put.id
+                    && last.sender_mapping == put.sender_mapping
+                    && key(last) == key(&put)
+            });
+            out.push(put);
+            at = end;
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// A batch whose records share a prefix is read as the records one at a time are read,
+    /// whatever sits between the runs of equal prefixes: another key, another id, a suffix of
+    /// the same length and other bytes, another QoS, a QoS where there was none, a payload
+    /// length of one byte and of two, an empty payload; and a record cut short anywhere in a
+    /// run turns the batch over to the codec exactly as it does without the shortcut.
+    #[test]
+    fn a_batch_that_reuses_a_prefix_reads_as_one_record_at_a_time_reads() {
+        let qos = |raw: u8| crate::sample::QosLevel::from_raw(raw);
+        let none = crate::sample::QosLevel::DEFAULT;
+        let one = |id: u64, suffix: Option<&str>, payload: &[u8], q| {
+            encode(&crate::lent_push::put_with_qos(id, suffix, payload, q))
+        };
+        let runs: alloc::vec::Vec<alloc::vec::Vec<alloc::vec::Vec<u8>>> = alloc::vec![
+            // A stream of one literal key with a QoS, then the same key with another QoS.
+            (0..6u8)
+                .map(|i| one(0, Some("test/thr"), &[i; 8], qos(0x1a)))
+                .collect(),
+            (0..3u8)
+                .map(|i| one(0, Some("test/thr"), &[i; 8], qos(0x05)))
+                .collect(),
+            // The same length of suffix, other bytes.
+            (0..3u8)
+                .map(|i| one(0, Some("test/thx"), &[i; 8], qos(0x05)))
+                .collect(),
+            // An aliased key, with and without a suffix.
+            (0..4u8).map(|i| one(7, None, &[i; 3], none)).collect(),
+            (0..4u8)
+                .map(|i| one(7, Some("/s"), &[i; 3], none))
+                .collect(),
+            // Another id, a long payload (a two-byte length), an empty payload.
+            (0..3u8).map(|i| one(300, None, &[i; 200], none)).collect(),
+            (0..3u8).map(|_| one(300, None, &[], none)).collect(),
+            // Back to the first key.
+            (0..2u8)
+                .map(|i| one(0, Some("test/thr"), &[i; 1], qos(0x1a)))
+                .collect(),
+        ];
+        let mut batch = alloc::vec::Vec::new();
+        for run in &runs {
+            for record in run {
+                batch.extend_from_slice(record);
+            }
+        }
+        let expected = read_one_by_one(&batch).expect("every record is plain");
+        let got = read_plain_puts(&batch).expect("every record is plain");
+        assert_eq!(got, expected, "the whole batch");
+        assert!(
+            got.iter().filter(|p| p.repeats_key).count() > 20,
+            "the batch exercised the shortcut"
+        );
+
+        // Cut the batch at every length: the same answer as without the shortcut, and for a
+        // cut inside a record that answer is none.
+        for length in 0..batch.len() {
+            assert_eq!(
+                read_plain_puts(&batch[..length]),
+                read_one_by_one(&batch[..length]),
+                "cut at {length}"
+            );
+        }
+        // A byte of the batch damaged: the same answer as without the shortcut.
+        for position in 0..batch.len() {
+            for value in [0u8, 0x01, 0x1d, 0x21, 0x41, 0x5d, 0x7f, 0x80, 0xff] {
+                let mut damaged = batch.clone();
+                damaged[position] = value;
+                assert_eq!(
+                    read_plain_puts(&damaged),
+                    read_one_by_one(&damaged),
+                    "byte {position} = {value:#04x}"
+                );
+            }
+        }
     }
 }
