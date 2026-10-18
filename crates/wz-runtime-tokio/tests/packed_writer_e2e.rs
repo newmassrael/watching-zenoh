@@ -240,9 +240,14 @@ async fn puts_on_a_declared_alias_never_overtake_its_declaration() {
     };
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        // Patient, so that a put the receiver is slow to take is waited for and not dropped by
+        // policy: this test claims that every ALIASED put arrives, and one dropped for want of
+        // room would read as the declaration having been overtaken.
+        let mut params = fixture_params_with_zid(0x01);
+        params.tx_queue.wait_before_drop_us = PATIENT_WAIT_BEFORE_DROP_US;
         connect_and_open_session_with_qos(
             locator,
-            fixture_params_with_zid(0x01),
+            params,
             &DialConfig::default(),
             TokioTime::new(),
             Some(ITER_CAP),
