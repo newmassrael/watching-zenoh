@@ -1021,7 +1021,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use crate::observer::ApplicationLayerObserver;
     use crate::runtime_impl::TokioTime;
@@ -2126,6 +2126,7 @@ mod tests {
     async fn manager_hosts_two_strip_configured_storages_each_isolated() {
         use crate::reply_sink::ReplyView;
         use crate::session::{PublishOptions, QueryOptions};
+        use std::sync::Mutex;
         use wz_session_core::locality::Locality;
 
         // A real loopback GET over the manager-hosted storages: drive the
@@ -2217,6 +2218,7 @@ mod tests {
     fn loopback_get(session: &TokioSession, keyexpr: &str) -> Vec<(String, Vec<u8>)> {
         use crate::reply_sink::ReplyView;
         use crate::session::QueryOptions;
+        use std::sync::Mutex;
         use wz_session_core::locality::Locality;
 
         let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));

@@ -29,7 +29,7 @@
 #![cfg(feature = "access-acl")]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
 use wz_access_control::{

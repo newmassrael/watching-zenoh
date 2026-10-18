@@ -47,7 +47,7 @@ mod tests {
         };
         let (producer, tap) = MulticastTxTap::attach(&params);
         let session = TokioMulticastSession::new_multicast(
-            Arc::new(wz_runtime_tokio::sync::Mutex::new(
+            Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
                 ApplicationLayerObserver::new(),
             )),
             Arc::new(TokioTime::new()),
@@ -169,7 +169,7 @@ mod tests {
         // No TX side exercised here (a producer no loop ever attaches); the
         // proof is the RX dispatch path into the Session's subscriber registry.
         let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
-            Arc::new(wz_runtime_tokio::sync::Mutex::new(
+            Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
                 ApplicationLayerObserver::new(),
             )),
             Arc::new(TokioTime::new()),

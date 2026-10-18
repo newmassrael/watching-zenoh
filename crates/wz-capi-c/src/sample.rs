@@ -948,20 +948,27 @@ mod tests {
                 // SAFETY: `sample` is the kept marshal's borrowed view, live for this call.
                 unsafe {
                     assert_eq!(encoding_text(sample), want, "sample {index}: its encoding");
-                    let info = z_sample_source_info(sample);
-                    match view.source_info.as_ref() {
-                        Some(expected) => {
-                            assert!(
-                                !info.is_null(),
-                                "sample {index}: source info carried but absent"
-                            );
-                            assert_eq!(
-                                crate::source_info::z_source_info_sn(info),
-                                expected.sn,
-                                "sample {index}: its source sequence number"
-                            );
+                    // The accessor is the unstable API's: without it the source info is kept
+                    // and not readable.
+                    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+                    {
+                        let info = z_sample_source_info(sample);
+                        match view.source_info.as_ref() {
+                            Some(expected) => {
+                                assert!(
+                                    !info.is_null(),
+                                    "sample {index}: source info carried but absent"
+                                );
+                                assert_eq!(
+                                    crate::source_info::z_source_info_sn(info),
+                                    expected.sn,
+                                    "sample {index}: its source sequence number"
+                                );
+                            }
+                            None => {
+                                assert!(info.is_null(), "sample {index}: a stale source info")
+                            }
                         }
-                        None => assert!(info.is_null(), "sample {index}: a stale source info"),
                     }
                 }
             });

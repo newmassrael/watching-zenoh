@@ -422,7 +422,7 @@ async fn a_rel_one_locator_opens_a_session_over_reliable_udp_from_the_strings_al
     }
     let publisher = TokioSession::new(
         opened_init.actions.clone(),
-        Arc::new(wz_runtime_tokio::sync::Mutex::new(
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
             ApplicationLayerObserver::new(),
         )),
         Arc::new(opened_init.clock),
