@@ -415,10 +415,51 @@ impl StringState {
     }
 }
 
+/// How many empty boxes a thread keeps for the next payload it makes.
+const BOX_CACHE: usize = 32;
+
+thread_local! {
+    /// The allocations that held a payload this thread made and then consumed, kept empty. A
+    /// publisher's loop clones a payload and puts it, over and over: the box the clone allocates
+    /// is the box the put frees, on the same thread, so keeping it for the next clone replaces a
+    /// `malloc` and a `free` per message with two thread-local accesses.
+    static EMPTY_BOXES: std::cell::RefCell<Vec<Box<std::mem::MaybeUninit<ByteBuf>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Box `buf`, in a kept allocation when this thread has one.
+fn box_bytes(buf: ByteBuf) -> *mut ByteBuf {
+    let kept = EMPTY_BOXES
+        .try_with(|boxes| boxes.try_borrow_mut().ok().and_then(|mut b| b.pop()))
+        .ok()
+        .flatten();
+    let mut slot = kept.unwrap_or_else(Box::new_uninit);
+    slot.write(buf);
+    Box::into_raw(slot).cast::<ByteBuf>()
+}
+
+/// Take the payload out of a box made by [`box_bytes`] (or by `Box::new`: the two have the same
+/// layout) and keep the allocation, empty, for the next one; past [`BOX_CACHE`] it is freed.
+///
+/// # Safety
+/// `h` must be a live `Box::into_raw::<ByteBuf>` pointer, not used again.
+pub(crate) unsafe fn unbox_bytes(h: *mut ByteBuf) -> ByteBuf {
+    let slot = Box::from_raw(h.cast::<std::mem::MaybeUninit<ByteBuf>>());
+    let buf = slot.assume_init_read();
+    let _ = EMPTY_BOXES.try_with(|boxes| {
+        if let Ok(mut boxes) = boxes.try_borrow_mut() {
+            if boxes.len() < BOX_CACHE {
+                boxes.push(slot);
+            }
+        }
+    });
+    buf
+}
+
 /// # Safety
 /// `h` must be a live `Box::into_raw::<ByteBuf>` pointer.
 unsafe fn free_bytes(h: *mut c_void) {
-    drop(Box::from_raw(h as *mut ByteBuf));
+    drop(unbox_bytes(h as *mut ByteBuf));
 }
 /// # Safety
 /// `h` must be a live `Box::into_raw::<SliceState>` pointer.
@@ -549,7 +590,7 @@ pub unsafe extern "C" fn z_slice_take_from_loaned(
 
 unsafe fn store_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) {
     *dst = z_owned_bytes_t {
-        handle: Box::into_raw(Box::new(buf)) as *mut c_void,
+        handle: box_bytes(buf) as *mut c_void,
         _pad: [std::ptr::null_mut(); 3],
     };
 }
@@ -1599,4 +1640,87 @@ pub unsafe extern "C" fn z_view_string_loan_mut(
     str_in: *mut z_view_string_t,
 ) -> *mut z_loaned_string_t {
     str_in as *mut z_loaned_string_t
+}
+
+#[cfg(test)]
+mod box_cache_tests {
+    use super::*;
+
+    fn kept() -> usize {
+        EMPTY_BOXES.with(|boxes| boxes.borrow().len())
+    }
+
+    /// A box kept for the next payload is reused for it, the payload read back out of a reused box
+    /// is the one stored in it and never the one before, and the list stops at its bound.
+    #[test]
+    fn a_reused_box_holds_exactly_the_payload_put_in_it() {
+        // SAFETY: every pointer below comes from `box_bytes` and is unboxed once.
+        unsafe {
+            let first = box_bytes(ByteBuf::from(b"first".to_vec()));
+            let first_at = first as usize;
+            let got = unbox_bytes(first);
+            assert_eq!(got.to_vec(), b"first");
+            let after_first = kept();
+            assert!(after_first >= 1, "the emptied box is kept");
+
+            let second = box_bytes(ByteBuf::from(b"second payload".to_vec()));
+            assert_eq!(
+                second as usize, first_at,
+                "the kept allocation is the next one used"
+            );
+            assert_eq!(
+                kept(),
+                after_first - 1,
+                "and leaves the list while it holds a payload"
+            );
+            assert_eq!((*second).to_vec(), b"second payload");
+            assert_eq!(unbox_bytes(second).to_vec(), b"second payload");
+
+            // Many at once: the list holds at most BOX_CACHE and the rest are freed.
+            let many: Vec<*mut ByteBuf> = (0..BOX_CACHE * 3)
+                .map(|i| box_bytes(ByteBuf::from(vec![i as u8; i % 7])))
+                .collect();
+            for (i, ptr) in many.into_iter().enumerate() {
+                assert_eq!(
+                    unbox_bytes(ptr).to_vec(),
+                    vec![i as u8; i % 7],
+                    "payload {i}"
+                );
+            }
+            assert!(kept() <= BOX_CACHE, "bounded: {}", kept());
+        }
+    }
+
+    /// A payload boxed on one thread and consumed on another (a publisher thread cloning, an
+    /// application thread putting) is intact, and the other thread's list is its own.
+    #[test]
+    fn a_box_unboxed_on_another_thread_is_intact() {
+        // SAFETY: the pointer is handed to the other thread whole and unboxed once.
+        unsafe {
+            let ptr = box_bytes(ByteBuf::from(b"across".to_vec())) as usize;
+            let seen = std::thread::spawn(move || {
+                let before = kept();
+                let buf = unbox_bytes(ptr as *mut ByteBuf);
+                (buf.to_vec(), before, kept())
+            })
+            .join()
+            .unwrap();
+            assert_eq!(seen.0, b"across");
+            assert_eq!(seen.1, 0, "a thread starts with no kept boxes");
+            assert_eq!(seen.2, 1, "and keeps the one it emptied");
+        }
+    }
+
+    /// Dropping an owned payload through the C ABI frees through the same path.
+    #[test]
+    fn dropping_an_owned_payload_keeps_its_box() {
+        // SAFETY: `owned` is built and dropped by the ABI's own functions.
+        unsafe {
+            let mut owned: z_owned_bytes_t = std::mem::zeroed();
+            assert_eq!(z_bytes_copy_from_str(&mut owned, c"dropped".as_ptr()), Z_OK);
+            let before = kept();
+            free_bytes(owned.handle);
+            assert_eq!(kept(), (before + 1).min(BOX_CACHE));
+        }
+    }
 }

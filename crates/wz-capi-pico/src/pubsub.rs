@@ -1157,7 +1157,7 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<B
     let buf = if crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this) {
         (*(handle as *const ByteBuf)).clone()
     } else {
-        *Box::from_raw(handle as *mut ByteBuf)
+        crate::bytes::unbox_bytes(handle as *mut ByteBuf)
     };
     (*payload)._this = z_owned_bytes_t::null_value();
     Some(buf)
