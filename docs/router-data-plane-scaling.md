@@ -217,7 +217,29 @@ congestion control says may be dropped and counts it (`writer_queue.rs`, `sessio
 router is not one core: the forwarder is single-threaded (F4) but each face's writer task is not, so
 the process used more than one core at 182k/s.
 
-So 4.3 as written (a new priority scheme, per-round fairness, a router-wide shed counter) is not
-built. What would reopen it is a measurement that shows a face going DOWN while the router is
-overloaded, on a host class the service runs on: the micro VM measured before (steal time 33-70%)
-is the first candidate, since the loopback run above has no such constraint.
+The loopback runs above have the router the whole host. The case 4.3 was written for is a router
+that is overloaded AND short of CPU, which is what a burstable micro VM under steal is. The harness
+now reproduces it without a VM: the router is pinned to one core at a lower priority, and three busy
+processes share that core from the moment every session is in (`taskset`, `nice`; the scheduler
+shares a core between threads, and the router has several busy ones, so without the lower priority
+the three hogs left it most of the core and the first attempt measured nothing):
+
+| Condition | Result |
+|---|---|
+| 2048 subscribers, 40k/s offered, router on a shared core at lower priority | forwarded 7.7k/s (19% of offered), 0 faces DOWN over 20 s |
+| the same, and 16 new sessions/s knocking | 161 of 320 attempted admitted within the window |
+
+(`wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu` and
+`wz_router_hat_admission_when_overloaded_and_short_of_cpu`, run by Layer E7s. The first asserts that no
+face goes DOWN; the second prints and asserts nothing.) The window is 20 s and the lease is 10 s, so
+a face whose keepalive was starved would have shown.
+
+So the invariant I4 states holds on this measurement: links are kept while data is shed, and the
+data is shed by the senders' own flow control, not by the router dropping links. What does degrade
+is admission: a starved, overloaded router takes in new sessions at about half the rate they knock.
+That is a trade between serving the faces it has and admitting new ones, and where it should sit is
+a decision about the service (a reconnect storm after an outage is exactly the case where many
+sessions knock at once), not something to fix by default. 4.3 as written (a new priority scheme,
+per-round fairness, a router-wide shed counter) is therefore not built. What would reopen it is a
+face going DOWN under these conditions on the real micro VM, or an admission rate the service cannot
+live with.

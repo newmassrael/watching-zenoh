@@ -47,8 +47,8 @@ use wz_integration_tests::common::{
 
 /// The offered load, in messages per second, held constant across rows.
 const OFFERED_PER_S: u64 = 8_000;
-/// How long after every session is up the publishers are given to all be running.
-const SETTLE: Duration = Duration::from_secs(6);
+/// The niceness a starved router runs at, against hogs at the default.
+const ROUTER_NICE: i32 = 10;
 /// The measurement window.
 const WINDOW: Duration = Duration::from_secs(20);
 /// The client processes the population is split across.
@@ -101,14 +101,49 @@ struct Router {
 /// Run `demo` with `args` under a shell that raises the soft open-files limit to the hard one first
 /// and then `exec`s it, so the process this returns is the demo itself (its `/proc` entry is read).
 /// A router holding two thousand sessions needs more descriptors than a default login shell allows.
-fn command_with_raised_limit(demo: &Path, args: &[&str]) -> Command {
+/// With `pin`, the demo runs on that one core at a lower priority (`taskset` and `nice`, which also
+/// `exec`): the scheduler shares a core between THREADS, and the demo has several busy ones, so
+/// without the lower priority three hogs would still leave it most of the core.
+fn command_with_raised_limit(demo: &Path, args: &[&str], pin: Option<usize>) -> Command {
     let mut command = Command::new("sh");
+    let script = match pin {
+        Some(core) => format!(
+            "ulimit -n \"$(ulimit -Hn)\" 2>/dev/null; \
+             exec nice -n {ROUTER_NICE} taskset -c {core} \"$0\" \"$@\""
+        ),
+        None => "ulimit -n \"$(ulimit -Hn)\" 2>/dev/null; exec \"$0\" \"$@\"".to_string(),
+    };
+    command.arg("-c").arg(script).arg(demo).args(args);
     command
+}
+
+/// The highest core this process may run on, from the kernel's own list (`0-31`, `0,2-5`, ...).
+fn last_allowed_core() -> usize {
+    let status = fs::read_to_string("/proc/self/status").expect("/proc/self/status");
+    let list = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
+        .expect("Cpus_allowed_list")
+        .trim();
+    list.split(',')
+        .filter_map(|part| part.rsplit('-').next()?.parse::<usize>().ok())
+        .max()
+        .expect("a core in the allowed list")
+}
+
+/// A process that burns one core flat out on `core`, to take CPU from whatever else runs there, as a
+/// neighbour does on a shared host.
+fn spawn_cpu_hog(core: usize) -> ChildGuard {
+    let child = Command::new("sh")
         .arg("-c")
-        .arg("ulimit -n \"$(ulimit -Hn)\" 2>/dev/null; exec \"$0\" \"$@\"")
-        .arg(demo)
-        .args(args);
-    command
+        .arg(format!(
+            "exec taskset -c {core} sh -c 'while :; do :; done'"
+        ))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("a CPU hog starts");
+    ChildGuard::wrap("cpu hog", child)
 }
 
 /// The port the router says it listens on, from its log line.
@@ -125,10 +160,11 @@ fn forwarded_pushes(line: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-fn spawn_router(demo: &Path) -> Router {
+fn spawn_router(demo: &Path, pin: Option<usize>) -> Router {
     let mut child = command_with_raised_limit(
         demo,
         &["--router-hat", "127.0.0.1:0", "--max-sessions", "20000"],
+        pin,
     )
     .env("RUST_LOG", "info")
     .stdout(Stdio::null())
@@ -197,6 +233,7 @@ fn steady_document(
     port: u16,
     period_ms: u64,
     publishes: u64,
+    after_ms: u64,
 ) -> String {
     let mut out = String::from("{ sessions: [\n");
     for i in first..first + count {
@@ -206,7 +243,7 @@ fn steady_document(
              \x20   connect: {{ endpoints: [\"tcp/127.0.0.1:{port}\"] }},\n\
              \x20   driver: [ {{ role: \"subscribe\", key: \"mesh/dev_{i}\" }},\n\
              \x20             {{ role: \"publish\", key: \"mesh/dev_{next}\", payload: \"hello-world-0123456789\", \
-             period_ms: {period_ms}, count: {publishes}, after_ms: 2000 }} ] }},\n",
+             period_ms: {period_ms}, count: {publishes}, after_ms: {after_ms} }} ] }},\n",
             0x10_0000 + i,
         ));
     }
@@ -233,6 +270,7 @@ fn spawn_sessions(demo: &Path, document: &Path, label: &str) -> ChildGuard {
     let child = command_with_raised_limit(
         demo,
         &["--sessions", document.to_str().expect("a UTF-8 path")],
+        None,
     )
     .stdout(Stdio::null())
     .stderr(Stdio::null())
@@ -252,12 +290,29 @@ fn cpu_seconds(pid: u32) -> f64 {
     (utime + stime) / USER_HZ
 }
 
+/// What a run holds fixed.
+#[derive(Clone, Copy)]
+struct Scenario {
+    subscribers: usize,
+    /// Short-lived sessions join and leave through the window at 16 a second.
+    churn: bool,
+    /// Messages per second all the publishers offer together.
+    offered: u64,
+    /// The router runs on one core, at a lower priority, shared with this many CPU hogs that start
+    /// once every session is in. `None` leaves it the host.
+    starved_by: Option<usize>,
+}
+
 /// What one window measured.
 struct Window {
     seconds: f64,
     cpu_s: f64,
     forwarded: u64,
     down: usize,
+    offered: u64,
+    /// Sessions that came up during the window, and how many the churn started in it.
+    admitted: usize,
+    attempted: usize,
 }
 
 impl Window {
@@ -268,14 +323,19 @@ impl Window {
         self.forwarded as f64 / self.seconds
     }
     fn delivered_share(&self) -> f64 {
-        self.messages_per_second() / OFFERED_PER_S as f64
+        self.messages_per_second() / self.offered as f64
     }
 }
 
-/// Connect `subscribers` sessions to a fresh router, hold the offered load for a window, and read
-/// the router's CPU and what it forwarded. With `churn`, short-lived sessions join and leave through
-/// the window at 16 a second.
-fn measure(subscribers: usize, churn: bool) -> Window {
+/// Connect the scenario's sessions to a fresh router, hold its offered load for a window, and read
+/// the router's CPU and what it forwarded.
+fn measure(scenario: Scenario) -> Window {
+    let Scenario {
+        subscribers,
+        churn,
+        offered,
+        starved_by,
+    } = scenario;
     assert_eq!(
         subscribers % CLIENT_PROCESSES,
         0,
@@ -283,13 +343,16 @@ fn measure(subscribers: usize, churn: bool) -> Window {
     );
     let demo = release_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
-    let mut router = spawn_router(&demo);
+    let core = starved_by.map(|_| last_allowed_core());
+    let mut router = spawn_router(&demo, core);
     let router_pid = router.guard.child_mut().id();
     let dir = tempfile::tempdir().expect("a directory for the sessions documents");
 
     // Publishing must outlast settle plus window plus a margin, whenever a session came up.
-    let period_ms = subscribers as u64 * 1000 / OFFERED_PER_S;
-    let publishes = (SETTLE + WINDOW + Duration::from_secs(60)).as_millis() as u64 / period_ms;
+    let period_ms = (subscribers as u64 * 1000 / offered).max(1);
+    let after_ms: u64 = 2_000;
+    let settle = Duration::from_millis(after_ms) + Duration::from_secs(4);
+    let publishes = (settle + WINDOW + Duration::from_secs(60)).as_millis() as u64 / period_ms;
     let per_process = subscribers / CLIENT_PROCESSES;
     let mut clients = Vec::new();
     for p in 0..CLIENT_PROCESSES {
@@ -303,6 +366,7 @@ fn measure(subscribers: usize, churn: bool) -> Window {
                 router.port,
                 period_ms,
                 publishes,
+                after_ms,
             ),
         )
         .expect("write the sessions document");
@@ -313,18 +377,28 @@ fn measure(subscribers: usize, churn: bool) -> Window {
     while router.up.load(Ordering::Relaxed) < subscribers {
         assert!(
             Instant::now() < up_deadline,
-            "only {} of {subscribers} sessions came up (refused {})",
+            "only {} of {subscribers} sessions came up (refused {}, went DOWN {})",
             router.up.load(Ordering::Relaxed),
             router.refused.load(Ordering::Relaxed),
+            router.down.load(Ordering::Relaxed),
         );
         thread::sleep(Duration::from_millis(200));
     }
-    thread::sleep(SETTLE);
+    thread::sleep(settle);
 
-    let (cpu_before, pushes_before, down_before) = (
+    // A starved router takes its CPU away only now, after every session is in and the load is
+    // flowing, so what the window measures is the links under overload and not whether a router that
+    // is short of CPU can still admit sessions (which is its own question).
+    let hogs: Vec<ChildGuard> = core
+        .into_iter()
+        .flat_map(|core| (0..starved_by.unwrap_or(0)).map(move |_| spawn_cpu_hog(core)))
+        .collect();
+
+    let (cpu_before, pushes_before, down_before, up_before) = (
         cpu_seconds(router_pid),
         router.pushes.load(Ordering::Relaxed),
         router.down.load(Ordering::Relaxed),
+        router.up.load(Ordering::Relaxed),
     );
     let started = Instant::now();
     let mut waves: VecDeque<(Instant, ChildGuard)> = VecDeque::new();
@@ -353,9 +427,13 @@ fn measure(subscribers: usize, churn: bool) -> Window {
         cpu_s: cpu_seconds(router_pid) - cpu_before,
         forwarded: router.pushes.load(Ordering::Relaxed) - pushes_before,
         down: router.down.load(Ordering::Relaxed) - down_before,
+        offered,
+        admitted: router.up.load(Ordering::Relaxed) - up_before,
+        attempted: generation * CHURN_SESSIONS,
     };
     drop(waves);
     drop(clients);
+    drop(hogs);
 
     // The population: a run that failed any of this measured something other than the data plane.
     assert_eq!(
@@ -370,11 +448,15 @@ fn measure(subscribers: usize, churn: bool) -> Window {
             window.down
         );
     }
-    assert!(
-        window.delivered_share() >= 0.8,
-        "the router forwarded {:.0}% of the offered load; the run measured an overload",
-        100.0 * window.delivered_share()
-    );
+    // A starved router is overloaded on purpose, so how much it forwards is the answer there and
+    // not a precondition; that no face went DOWN is what is asserted, above.
+    if starved_by.is_none() {
+        assert!(
+            window.delivered_share() >= 0.8,
+            "the router forwarded {:.0}% of the offered load; the run measured an overload",
+            100.0 * window.delivered_share()
+        );
+    }
     window
 }
 
@@ -398,7 +480,12 @@ fn wz_router_hat_cost_per_message_against_subscribers_and_churn() {
         "subscribers", "churn (16 sessions/s)", "us/message", "msg/s", "arrived"
     );
     for (subscribers, churn) in rows {
-        let w = measure(subscribers, churn);
+        let w = measure(Scenario {
+            subscribers,
+            churn,
+            offered: OFFERED_PER_S,
+            starved_by: None,
+        });
         eprintln!(
             "{subscribers:>11} {:>22} {:>12.1} {:>10.0} {:>8.0}%",
             if churn { "on" } else { "off" },
@@ -407,4 +494,51 @@ fn wz_router_hat_cost_per_message_against_subscribers_and_churn() {
             100.0 * w.delivered_share(),
         );
     }
+}
+
+/// I4 — a router that is overloaded AND short of CPU keeps its links. It runs on one core, at a lower
+/// priority, with three busy processes sharing that core, and is offered several times what it then
+/// forwards; this is the shape of a burstable micro VM under steal. What is asserted is the count of
+/// faces that went DOWN in the window (zero): the control plane (keepalive, lease) is not starved by
+/// the data it is shedding. How much it forwards is printed, not asserted.
+// wz-proves: none -- a cost measurement of wz against itself; no reference implementation is involved
+#[test]
+#[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router and four CPU hogs, holds 2048 local sessions; run with --ignored --nocapture"]
+fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
+    let offered = 40_000;
+    let w = measure(Scenario {
+        subscribers: 2048,
+        churn: false,
+        offered,
+        starved_by: Some(3),
+    });
+    eprintln!(
+        "\nstarved router (one shared core, lower priority), 2048 subscribers, offered {offered} messages/s: \
+         forwarded {:.0} messages/s ({:.0}% of offered), {} faces went DOWN",
+        w.messages_per_second(),
+        100.0 * w.delivered_share(),
+        w.down,
+    );
+}
+
+/// The same starved, overloaded router asked for something else: whether it still admits sessions that
+/// arrive. Sixteen short-lived sessions a second knock on a router that has a fraction of a core and
+/// 2048 busy faces; the count admitted out of the count attempted is printed, not asserted, because
+/// what a router in that state SHOULD admit is a design question this run puts a number to.
+// wz-proves: none -- a cost measurement of wz against itself; no reference implementation is involved
+#[test]
+#[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router and four CPU hogs, holds 2048 local sessions; run with --ignored --nocapture"]
+fn wz_router_hat_admission_when_overloaded_and_short_of_cpu() {
+    let offered = 40_000;
+    let w = measure(Scenario {
+        subscribers: 2048,
+        churn: true,
+        offered,
+        starved_by: Some(3),
+    });
+    eprintln!(
+        "\nstarved router, 2048 subscribers, offered {offered} messages/s, 16 sessions/s knocking: \
+         admitted {} of {} attempted in {:.0}s",
+        w.admitted, w.attempted, w.seconds,
+    );
 }

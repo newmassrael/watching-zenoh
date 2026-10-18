@@ -20988,12 +20988,19 @@ layer_e6u_peer_unixpipe_forward() {
 # The build is one line, because the feature-closure scan unions the sets of the
 # `cargo build -p wz-ap-demo` lines of this file.
 #
-# The test fn carries the `wz_router_hat_` prefix, so the default Layer E sweep's
-# `--skip wz_router` leaves it to this lane. It holds up to 2048 local sessions
-# and runs about two minutes, which is why it is `#[ignore]`d and its own lane.
+# Three tests: the cost table, and two on a router that is overloaded AND short of
+# CPU (pinned to one core at a lower priority, shared with three busy processes).
+# The first of those asserts that no face goes DOWN, the invariant a starved
+# control plane would break; the second prints how many new sessions such a
+# router still admits, and asserts nothing. The count guard is 3 so that a dropped
+# `#[ignore]` (selecting none) or a renamed test reddens.
+#
+# The test fns carry the `wz_router_hat_` prefix, so the default Layer E sweep's
+# `--skip wz_router` leaves them to this lane. They hold up to 2048 local sessions
+# and run about three minutes, which is why they are `#[ignore]`d and their own lane.
 layer_e7s_router_hat_data_plane_scaling() {
     (cd crates && cargo build --release -p wz-ap-demo --no-default-features --features preset-ap-client,router-hat-router --quiet) || return 1
-    _runci_guarded_test "E7s router data-plane scaling" 1 \
+    _runci_guarded_test "E7s router data-plane scaling" 3 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_data_plane_scaling -- --ignored --nocapture --test-threads=1 --quiet || return 1
 }
