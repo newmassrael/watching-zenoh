@@ -329,6 +329,10 @@ const COALESCE_SPIN_PROBES: u32 = 3;
 /// that fills the writer's time is hundreds.
 const STREAM_STAGED_MIN: u64 = 32;
 
+/// How many messages staged since the last flush still make a lone message or a pair: the
+/// writer flushes at once, without the probes of `let_producers_finish`.
+const LONE_STAGED_MAX: u64 = 2;
+
 /// The senders' wait for room: a `Condvar` that is notified only while
 /// someone waits on it.
 ///
@@ -1870,8 +1874,7 @@ impl OutboundRx {
         // writer's CPU the wake preempted it, and the flush now would take the CPU back from
         // it again and again; give the CPU up once, so that the producer fills what it can
         // first. With a CPU of its own the producer is not waiting for this, and the call
-        // returns at once. A lone message never comes here with more than a few staged, and
-        // is flushed without the call.
+        // returns at once.
         let staged = self.shared.staged.load(Ordering::Relaxed);
         let since_flush = staged.wrapping_sub(self.shared.staged_at_flush.load(Ordering::Relaxed));
         if since_flush >= STREAM_STAGED_MIN {
@@ -1881,6 +1884,14 @@ impl OutboundRx {
             self.shared.staged.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
+        // A lone message (a request, a reply): the producers staged one or two since the last
+        // flush, so there is no stream to wait out and nothing for the probes below to find,
+        // and the message would wait for them for nothing. A burst that starts here is
+        // flushed in its first message and then coalesced from the second flush on, when
+        // what was staged since is more than a few.
+        if since_flush <= LONE_STAGED_MAX {
+            return false;
+        }
         let mut seen = self.shared.staged.load(Ordering::Relaxed);
         for _ in 0..COALESCE_SPIN_PROBES {
             let probe = Instant::now();
