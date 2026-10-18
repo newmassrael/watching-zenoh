@@ -275840,6 +275840,50 @@
         "Board profile: the pool numbers in the MCU buffer-pool documents are written by hand and derived only in comments; a profile in the shape of the deploy's platform section with a gate that holds them to it comes first."
       ]
     },
+    "Round 3374": {
+      "decision_summary": "Two more parts of the zenoh-c subscriber's per-message work were removed, each kept on a measured gain: callgrind on the build host counts 852 instructions per delivered message after Round 3373 and 732 now (14 percent less; 1257 on the branch's base, 42 percent less in all). The end-of-callback release of the kept payload no longer works out the bounds of a payload known to be empty (852 to 806), and a plain Put that follows a plain Put reloads only its QoS and reliability, the other fields being what the general path would write again (806 to 732). NOT claimed: a wall-clock gain, any change on the send side, the hosted result of this push.",
+      "changes_bullets": [
+        "wz-capi-c bytes.rs: BytesState::release lets go of the kept payload, its bounds and any copy made for sharing or loan of shared memory, as reset to the empty payload does, without filling bounds; MarshalCache::with_view calls it where it called reset.",
+        "wz-session-core sink.rs: SampleView::is_plain_put, false by default, true for PlainSample.",
+        "wz-capi-c sample.rs: SampleMarshal keeps a plain flag set only by reload; a plain sample after a plain one writes only its QoS and reliability and returns, any other sample takes the general path and sets the flag from itself; the two struct builders say false."
+      ],
+      "verification_bullets": [
+        "Callgrind on the build host, same setup as Round 3373 (a reference publisher at 8 B into a wz subscriber with a trivial callback; instructions of the drive thread per delivered message): 852 before, 806 after the release, 732 after the plain-Put reload.",
+        "Tests that ran (counted): releasing a kept state leaves what resetting it to empty leaves, for a two-slice, a one-slice and an owned payload, including a copy for sharing let go and the frame's reference count back to one; a kept marshal follows a mixed run of plain Puts (QoS changing, then a Del with an attachment, an encoding and a source info, then plain again) and reads each field as its sample has it (13 tests in the sample module).",
+        "verify-once on the final commit: 14 lanes passed (C0, C0s, C1bb, C1bw, C1bz, C1ch, C1h, C1l, G, count-guard, clippy and tests of wz-capi-c and wz-session-core).",
+        "NOT verified: the hosted run; any wall-clock gain; the send side."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push at the start of the next round.",
+        "Receive residuals per message after this round: read_plain_puts about 84 instructions, the kept sample's reload about 50, payload subslice about 38, bounds about 37, with_view about 26.",
+        "A svd_model and a register-constant gate against the vendor SVD exist on a local branch (not in the push); the T2G image comparison is being measured on the bench."
+      ],
+      "publishable_decision_summary": "Two more parts of the zenoh-c subscriber's per-message work were removed, each kept on a measured gain: callgrind on the build host counts 852 instructions per delivered message after Round 3373 and 732 now (14 percent less; 1257 on the branch's base, 42 percent less in all). The end-of-callback release of the kept payload no longer works out the bounds of a payload known to be empty (852 to 806), and a plain Put that follows a plain Put reloads only its QoS and reliability, the other fields being what the general path would write again (806 to 732). NOT claimed: a wall-clock gain, any change on the send side, the hosted result of this push.",
+      "publishable_changes_bullets": [
+        "wz-capi-c bytes.rs: BytesState::release lets go of the kept payload, its bounds and any copy made for sharing or loan of shared memory, as reset to the empty payload does, without filling bounds; MarshalCache::with_view calls it where it called reset.",
+        "wz-session-core sink.rs: SampleView::is_plain_put, false by default, true for PlainSample.",
+        "wz-capi-c sample.rs: SampleMarshal keeps a plain flag set only by reload; a plain sample after a plain one writes only its QoS and reliability and returns, any other sample takes the general path and sets the flag from itself; the two struct builders say false."
+      ],
+      "publishable_verification_bullets": [
+        "Callgrind on the build host, same setup as Round 3373 (a reference publisher at 8 B into a wz subscriber with a trivial callback; instructions of the drive thread per delivered message): 852 before, 806 after the release, 732 after the plain-Put reload.",
+        "Tests that ran (counted): releasing a kept state leaves what resetting it to empty leaves, for a two-slice, a one-slice and an owned payload, including a copy for sharing let go and the frame's reference count back to one; a kept marshal follows a mixed run of plain Puts (QoS changing, then a Del with an attachment, an encoding and a source info, then plain again) and reads each field as its sample has it (13 tests in the sample module).",
+        "verify-once on the final commit: 14 lanes passed (C0, C0s, C1bb, C1bw, C1bz, C1ch, C1h, C1l, G, count-guard, clippy and tests of wz-capi-c and wz-session-core).",
+        "NOT verified: the hosted run; any wall-clock gain; the send side."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push at the start of the next round.",
+        "Receive residuals per message after this round: read_plain_puts about 84 instructions, the kept sample's reload about 50, payload subslice about 38, bounds about 37, with_view about 26.",
+        "A svd_model and a register-constant gate against the vendor SVD exist on a local branch (not in the push); the T2G image comparison is being measured on the bench."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
