@@ -1646,6 +1646,26 @@ impl RxBytes {
         }
     }
 
+    /// The length of the payload when it is ONE run, which is nearly every payload a peer sends:
+    /// what [`Self::slices`] would hand out as its only slice, without building the iterator and
+    /// walking it. `None` for a payload built by [`Self::sliced`] from several slices, which the
+    /// caller reads through [`Self::slices`].
+    pub fn single_run_len(&self) -> Option<usize> {
+        match &self.0 {
+            RxRepr::Owned(bytes) => Some(bytes.len()),
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Leased { start, end, .. } => Some(end - start),
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Shared { start, end, .. } => {
+                if *start == 0 && self.whole_parts().is_some() {
+                    None
+                } else {
+                    Some(end - start)
+                }
+            }
+        }
+    }
+
     /// R3124 -- how many slices the payload is: more than one only for a payload built by
     /// [`Self::sliced`] from several, and only while it is whole (a range taken of it is one
     /// run); none for an empty payload.
@@ -2041,6 +2061,48 @@ mod tests {
         let nested = RxBytes::sliced(alloc::vec![payload, RxBytes::from(alloc::vec![6])]);
         assert_eq!(nested.slice_count(), 3, "the list inside is spread");
         assert_eq!(nested.as_slice(), &[1, 2, 3, 4, 5, 6]);
+    }
+
+    /// The one-run shortcut answers what walking [`RxBytes::slices`] would, for every shape a
+    /// payload takes: owned (empty or not), a range of a page, a payload of several slices, a
+    /// range taken of that (one run again), and a clone of it.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn the_one_run_shortcut_agrees_with_the_slices_for_every_shape() {
+        let (several, first, _second) = two_pages();
+        let range_of_several = several.subslice(2..4).expect("inside the payload");
+        let from_the_start = several.subslice(0..3).expect("inside the payload");
+        let shapes = [
+            RxBytes::from(alloc::vec::Vec::new()),
+            RxBytes::from(alloc::vec![9, 9, 9, 9]),
+            RxBytes::shared(first.clone(), 1..3).expect("inside the page"),
+            RxBytes::shared(first.clone(), 0..3).expect("the whole page"),
+            several.clone(),
+            range_of_several,
+            from_the_start,
+            RxBytes::sliced(alloc::vec![]),
+        ];
+        for (index, shape) in shapes.iter().enumerate() {
+            let walked: alloc::vec::Vec<usize> = shape.slices().map(<[u8]>::len).collect();
+            match shape.single_run_len() {
+                Some(len) => assert_eq!(
+                    walked.iter().copied().sum::<usize>(),
+                    len,
+                    "shape {index}: the run is what the slices add up to"
+                ),
+                None => assert!(
+                    walked.len() > 1,
+                    "shape {index}: no shortcut means several slices"
+                ),
+            }
+            if walked.len() <= 1 {
+                assert!(
+                    shape.single_run_len().is_some(),
+                    "shape {index}: one slice or none always has the shortcut"
+                );
+            }
+        }
+        assert_eq!(several.single_run_len(), None, "two slices kept apart");
     }
 
     /// R2971 — a shared range is refused when the storage does not hold it,

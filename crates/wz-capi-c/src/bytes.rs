@@ -229,13 +229,19 @@ impl BytesState {
     fn fill_bounds(payload: &Payload, bounds: &mut Bounds) {
         bounds.clear();
         match payload {
-            Payload::Shared(bytes) => {
-                let mut end = 0usize;
-                for slice in bytes.slices() {
-                    end += slice.len();
-                    bounds.push(end);
+            Payload::Shared(bytes) => match bytes.single_run_len() {
+                // One run, as nearly every payload is: its one boundary, with no iterator
+                // built and walked for it (an empty run has none).
+                Some(0) => {}
+                Some(len) => bounds.push(len),
+                None => {
+                    let mut end = 0usize;
+                    for slice in bytes.slices() {
+                        end += slice.len();
+                        bounds.push(end);
+                    }
                 }
-            }
+            },
             _ if payload.is_empty() => {}
             _ => bounds.push(payload.len()),
         }
