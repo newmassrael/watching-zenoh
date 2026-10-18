@@ -50,6 +50,12 @@ crate-type = ["cdylib", "rlib"]
 wz-cdylib-build = { path = "../wz-cdylib-build" }
 
 [features]
+# The serial drive runs the session runtime on its own thread alone (round trip
+# 15 -> 12 us on the loopback ping/pong, no worker-thread hop). Default on;
+# build with `--no-default-features` for the multi-thread runtime, or set
+# WZ_CAPI_WORKER_THREADS at run time (see wz-capi-core's feature of this name).
+default = ["serial-drive-own-thread"]
+serial-drive-own-thread = ["wz-capi-core/serial-drive-own-thread"]
 # R311y391 (CALLER fail-fast, pico half) — off-default `unixpipe/` (Unix
 # named-pipe) ACCEPT transport, forwarding wz-runtime-tokio's
 # `transport-link-unixpipe`. This is a SUPERSET feature, NOT a zenoh-pico-native

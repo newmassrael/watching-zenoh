@@ -587,6 +587,28 @@ impl<R: AsyncRead + Unpin + RingReadable> LinkDriver for StreamReadDriver<R> {
     }
 }
 
+impl StreamReadDriver<crate::link_pipeline::TcpRead> {
+    /// Give the socket to the reactor of the runtime the caller runs in
+    /// ([`crate::link_pipeline::TcpRead::rebind_to_current_runtime`]), for a driver whose reads
+    /// are polled by a thread that has a reactor of its own. A link whose reads go through the
+    /// ring is left as it is: the ring holds the descriptor of the half it was attached to. A
+    /// refusal is logged and the driver keeps reading as it did.
+    #[cfg(unix)]
+    pub fn rebind_to_current_runtime(&mut self) {
+        #[cfg(all(
+            feature = "runtime-tokio-uring",
+            feature = "transport-link-tcp",
+            target_os = "linux"
+        ))]
+        if matches!(self.ring, RingChoice::Ring(_)) {
+            return;
+        }
+        if let Err(e) = self.reader.rebind_to_current_runtime() {
+            log::warn!("wz-runtime-tokio: could not register a link's socket with this thread's reactor ({e}); reads keep their old wake-up");
+        }
+    }
+}
+
 /// Outbound write half of a split byte-stream link — holds an
 /// [`OutboundTx`] (R2919: priority lanes) whose receiver is owned by the
 /// [`writer_task`]. Impls [`BoxedLinkDriver`] so the FSM's

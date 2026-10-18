@@ -58,9 +58,84 @@ use wz_session_core::link::LinkKind;
 /// Inbound read driver of a split `TcpStream` — the TCP instantiation of the
 /// shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl lives
 /// once in [`crate::stream_link`]; this alias just pins the stream half to
-/// TCP's `OwnedReadHalf`. [`crate::tls_pipeline::TlsReadDriver`] is the TLS
+/// TCP's [`TcpRead`]. [`crate::tls_pipeline::TlsReadDriver`] is the TLS
 /// sibling over a `ReadHalf<TlsStream<TcpStream>>`.
-pub type TcpReadDriver = StreamReadDriver<OwnedReadHalf>;
+pub type TcpReadDriver = StreamReadDriver<TcpRead>;
+
+/// The read half of a TCP link: tokio's owned half, until
+/// [`TcpRead::rebind_to_current_runtime`] gives the socket to the reactor of the thread that
+/// reads it.
+///
+/// A stream is registered with the reactor of the runtime it was made in. A reader driven by
+/// another thread (a face's own thread, which polls the read with `block_on`) is then woken
+/// by the reactor's thread, which finds the socket readable and wakes it through a futex:
+/// a thread hop on every message received, about two microseconds measured. A reader that
+/// has its own reactor sleeps in `epoll_wait` itself and reads when the socket is.
+pub struct TcpRead(TcpReadInner);
+
+enum TcpReadInner {
+    /// The half `into_split` made, registered where the link was made.
+    Half(OwnedReadHalf),
+    /// The socket, registered with the reactor of the runtime that rebound it.
+    #[cfg(unix)]
+    Rebound(TcpStream),
+}
+
+impl TcpRead {
+    pub(crate) fn new(half: OwnedReadHalf) -> Self {
+        Self(TcpReadInner::Half(half))
+    }
+
+    /// Register this half's socket with the reactor of the runtime the caller runs in, so
+    /// that a read polled by this thread is woken by this thread's own wait. A duplicate of
+    /// the descriptor is registered and the old registration let go of, so a failure leaves
+    /// the half as it was. Called from inside a runtime with I/O enabled.
+    ///
+    /// What was read and what is waiting in the socket are untouched: the driver's partial
+    /// frame is its own, and the kernel's buffer is the socket's.
+    #[cfg(unix)]
+    pub fn rebind_to_current_runtime(&mut self) -> io::Result<()> {
+        use std::os::fd::AsFd;
+        let owned = match &self.0 {
+            TcpReadInner::Half(half) => half.as_ref().as_fd().try_clone_to_owned()?,
+            TcpReadInner::Rebound(stream) => stream.as_fd().try_clone_to_owned()?,
+        };
+        let std = std::net::TcpStream::from(owned);
+        std.set_nonblocking(true)?;
+        self.0 = TcpReadInner::Rebound(TcpStream::from_std(std)?);
+        Ok(())
+    }
+}
+
+impl tokio::io::AsyncRead for TcpRead {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        match &mut self.get_mut().0 {
+            TcpReadInner::Half(half) => std::pin::Pin::new(half).poll_read(cx, buf),
+            #[cfg(unix)]
+            TcpReadInner::Rebound(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl crate::link_ring_fd::RingReadable for TcpRead {
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
+    fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        let fd = match &self.0 {
+            TcpReadInner::Half(half) => half.as_ref().as_raw_fd(),
+            TcpReadInner::Rebound(stream) => stream.as_raw_fd(),
+        };
+        (fd >= 0).then_some(fd)
+    }
+}
 
 /// Dial an outbound TCP connection to a NUMERIC endpoint — the raw-dial
 /// primitive the mode-agnostic `dial_locator(LinkKind::Tcp)` dispatcher (R311eu)
@@ -501,7 +576,7 @@ pub fn wire_tcp_stream_with_lowlatency(
     #[cfg(unix)]
     let inline_write = crate::stream_link::inline_write_of(&stream);
     let (reader, writer) = stream.into_split();
-    let inbound = StreamReadDriver::new(reader, lowlatency.clone());
+    let inbound = StreamReadDriver::new(TcpRead::new(reader), lowlatency.clone());
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
     #[cfg(unix)]
     if let Some(sink) = inline_write {

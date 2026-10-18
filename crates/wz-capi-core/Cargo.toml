@@ -56,6 +56,13 @@ transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
 # under it. Off by default like its siblings — a C ABI that never dials `tls/`
 # should not pull rustls.
 transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
+# A serial drive (the pico ABI: one thread runs every face and callback) also
+# runs the session's tokio runtime on that thread alone, so a round trip does
+# not cross a worker-thread hop. Off here: the ABI crate decides (wz-capi-pico
+# turns it on by default). Setting WZ_CAPI_WORKER_THREADS at run time still
+# selects the multi-thread runtime, so a node with long blocking callbacks keeps
+# a way to run its timers and spawned tasks beside them.
+serial-drive-own-thread = []
 # R2259 (open-debt item 593) — the QoS ext, named here for the same reason the
 # three link kinds above are: `FaceSnapshot::of` reads `SessionLinkActions::is_qos`,
 # which is `transport-qos`-gated upstream, so the name must EXIST here or the

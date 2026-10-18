@@ -707,8 +707,11 @@ impl Drop for OwnThreadGuard {
 /// worker, and the first callback to block held the second face for as long as it blocked, with
 /// four workers as with two.
 ///
-/// The thread has a runtime of its own with a clock and no reactor: the face's socket belongs to
-/// the session's runtime, whose workers wake this thread when it is readable.
+/// The thread has a runtime of its own with a clock and a reactor, and the face's TCP socket is
+/// given to that reactor before the face is driven ([`drive_face_on`]): the thread sleeps in its
+/// own wait and reads when the socket is readable. Left with the session's runtime, the socket
+/// would be found readable by a worker of that runtime, which would wake this thread through a
+/// futex: a thread hop on every message received.
 ///
 /// Dropping the result before it is ready cancels the future (it is dropped on its own thread)
 /// and waits for the thread. If no thread can be had the future runs as a task of the runtime
@@ -735,6 +738,7 @@ where
             let gate = gate.clone();
             move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
                     .enable_time()
                     .build()
                 {
@@ -806,6 +810,10 @@ async fn drive_face_on(
         FaceDrive::PerFace => {
             let own = gate.clone();
             run_on_own_thread(own, async move {
+                // The thread's own reactor takes the socket, so that its reads are woken by
+                // the socket and not by another thread's reactor.
+                let mut session = session;
+                session.inbound.rebind_to_current_runtime();
                 drive_face(face, session, &shared, closing, on_up, &gate).await
             })
             .await
@@ -3270,12 +3278,23 @@ const DRIVE_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 /// Two by default, which is what the reactor and the writers of a node of a few links need; a
 /// runtime is made PER session and a program may open many. `WZ_CAPI_WORKER_THREADS` raises it
 /// for a node whose writers are the limit.
+///
+/// A session driven serially ([`FaceDrive::Serial`]) has no workers unless that variable is
+/// set: its runtime is the drive thread's alone ([`open_blocking`]).
 fn drive_workers() -> usize {
     std::env::var("WZ_CAPI_WORKER_THREADS")
         .ok()
         .and_then(|text| text.parse::<usize>().ok())
         .filter(|workers| *workers >= 1)
         .unwrap_or(2)
+}
+
+/// Whether a session's runtime is the drive thread's alone: a serial drive, in a build with the
+/// `serial-drive-own-thread` feature, whose node did not ask for workers by name.
+fn drive_runs_on_its_own_thread(drive: FaceDrive, workers_requested: bool) -> bool {
+    cfg!(feature = "serial-drive-own-thread")
+        && matches!(drive, FaceDrive::Serial)
+        && !workers_requested
 }
 
 /// Open a session: spawn the drive thread and wait for the role's open
@@ -3381,13 +3400,30 @@ pub fn open_blocking(
         .name("wz-capi-drive".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(drive_workers())
-                .thread_stack_size(DRIVE_THREAD_STACK_BYTES)
-                .enable_all()
-                .thread_name("wz-capi-rt")
-                .build()
-            {
+            // A serial drive runs every face, and its callbacks, on this thread, and with its
+            // reactor and clock on workers beside it each message is a thread hop (the worker
+            // finds the socket readable and wakes this thread through a futex): a request and
+            // its reply paid two, about 2 µs each, and the idle wake of a sleeping thread
+            // besides. So it gets a runtime of this thread alone, which sleeps in its own
+            // wait and reads when the socket is readable. A node that states how many
+            // workers it wants (`WZ_CAPI_WORKER_THREADS`) gets them.
+            let single = drive_runs_on_its_own_thread(
+                drive_gate.face_drive(),
+                std::env::var_os("WZ_CAPI_WORKER_THREADS").is_some(),
+            );
+            let built = if single {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+            } else {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(drive_workers())
+                    .thread_stack_size(DRIVE_THREAD_STACK_BYTES)
+                    .enable_all()
+                    .thread_name("wz-capi-rt")
+                    .build()
+            };
+            let rt = match built {
                 Ok(rt) => rt,
                 Err(_) => {
                     let _ = tx.send(false);
@@ -3458,6 +3494,21 @@ pub fn open_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The session runtime is the drive thread's alone only for a serial drive,
+    /// in a build that asked for it, whose node did not name workers; a
+    /// per-face drive keeps its multi-thread runtime in every build.
+    #[test]
+    fn a_serial_drive_runs_on_its_own_thread_only_when_built_and_not_overridden() {
+        let built = cfg!(feature = "serial-drive-own-thread");
+        assert_eq!(
+            drive_runs_on_its_own_thread(FaceDrive::Serial, false),
+            built
+        );
+        assert!(!drive_runs_on_its_own_thread(FaceDrive::Serial, true));
+        assert!(!drive_runs_on_its_own_thread(FaceDrive::PerFace, false));
+        assert!(!drive_runs_on_its_own_thread(FaceDrive::PerFace, true));
+    }
 
     /// A configured id is read the way zenoh reads it, in both forms it takes.
     ///

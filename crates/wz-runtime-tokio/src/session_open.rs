@@ -3779,6 +3779,20 @@ pub enum InboundLink {
     QuicDatagram(QuicDatagramReadDriver),
 }
 
+impl InboundLink {
+    /// For a link whose reads are about to be polled by a thread that has a reactor of its own
+    /// (a face's thread): register the link's socket with that reactor, so that the thread
+    /// sleeps in its own wait and is woken by the socket, not by another thread's reactor
+    /// through a futex. Only a TCP link has a socket to give; any other link is left as it is.
+    /// Called from inside a runtime with I/O enabled, before the reads begin.
+    pub fn rebind_to_current_runtime(&mut self) {
+        #[cfg(unix)]
+        if let InboundLink::Tcp(driver) = self {
+            driver.rebind_to_current_runtime();
+        }
+    }
+}
+
 impl LinkDriver for InboundLink {
     async fn open(&mut self) -> io::Result<()> {
         match self {
