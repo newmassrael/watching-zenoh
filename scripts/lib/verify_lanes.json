@@ -48,6 +48,28 @@
       "why": "reassembly and fragmentation legs, each with a pinned test count"
     },
     {
+      "id": "C1h",
+      "layer": "C1h",
+      "triggers": ["crates/wz-session-core/**"],
+      "why": "the arbitrary-subset composability matrix of wz-session-core: an item that names a type another feature builds fails only in a subset (hosted red, Round 3367)"
+    },
+    {
+      "id": "G",
+      "layer": "G",
+      "triggers": [
+        "crates/wz-session-core/**",
+        "crates/wz-codecs/**",
+        "crates/wz-runtime-core/**",
+        "crates/wz-runtime-coop/**",
+        "crates/wz-link-lwip/**",
+        "crates/wz-session-lwip/**",
+        "crates/wz/**",
+        "crates/Cargo.lock",
+        "vendor/sce"
+      ],
+      "why": "the per-triple no_std cross-compile: a SCE pin or an item that needs atomics a target lacks fails only there (hosted red, Round 3367)"
+    },
+    {
       "id": "C1ay",
       "layer": "C1ay",
       "triggers": ["crates/wz-ap-demo/**"],
