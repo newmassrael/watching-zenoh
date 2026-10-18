@@ -215,11 +215,21 @@ async fn wz_multi_storage_host_serves_both_storages_to_a_pico_zget() {
         }
     };
 
+    // z_get is a one-shot querier: it closes the session as it exits, so the drive loop may end
+    // before the poll above has read what pico printed. That is no failure by itself; the
+    // verdict is the scenario's, which is given a short time to read the output after the end.
+    tokio::pin!(scenario);
     let result = tokio::select! {
-        _ = drive => panic!(
-            "wz drive loop reached a terminal state before pico received both storages' values"
-        ),
-        r = scenario => r,
+        outcome = drive => {
+            match tokio::time::timeout(Duration::from_secs(5), &mut scenario).await {
+                Ok(verdict) => verdict,
+                Err(_) => Err(format!(
+                    "wz drive loop reached a terminal state ({outcome:?}) before pico \
+                     received both storages' values"
+                )),
+            }
+        }
+        r = &mut scenario => r,
     };
 
     let _ = z_get_child.child_mut().kill();

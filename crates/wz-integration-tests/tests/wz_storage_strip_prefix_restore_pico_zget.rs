@@ -212,11 +212,21 @@ async fn wz_storage_restores_the_mount_prefix_on_a_pico_zget() {
         }
     };
 
+    // z_get is a one-shot querier: it closes the session as it exits, so the drive loop may end
+    // before the poll above has read what pico printed. That is no failure by itself; the
+    // verdict is the scenario's, which is given a short time to read the output after the end.
+    tokio::pin!(scenario);
     let result = tokio::select! {
-        _ = drive => panic!(
-            "wz drive loop reached a terminal state before pico received the restored key"
-        ),
-        r = scenario => r,
+        outcome = drive => {
+            match tokio::time::timeout(Duration::from_secs(5), &mut scenario).await {
+                Ok(verdict) => verdict,
+                Err(_) => Err(format!(
+                    "wz drive loop reached a terminal state ({outcome:?}) before pico \
+                     received the restored key"
+                )),
+            }
+        }
+        r = &mut scenario => r,
     };
 
     let _ = z_get_child.child_mut().kill();
