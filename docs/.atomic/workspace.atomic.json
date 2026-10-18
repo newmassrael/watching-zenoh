@@ -275634,6 +275634,50 @@
         "The long kilobyte stream test uses a Block send; if it ever drops, give it the same patient wait instead."
       ]
     },
+    "Round 3370": {
+      "decision_summary": "The hosted run of Round 3367's push went red in one job: Layer C1bb, the alias ordering test, 0 of 600 aliased puts arrived. It is not an ordering fault. The test sent its aliased puts droppable, and a put that finds no room within the default wait is dropped by policy when the receiver is slow to take the warm-up burst ahead of it; the message read that as the declaration being overtaken. Reproduced on a build host with every core busy: 2 of 15 runs failed with the same line. The test now sets the session's own wait_before_drop_us to a patient value, as the burst test of Round 3369 does, and passes 30 of 30 under the same load. Layer C1bb joins verify-once, which would not have caught this on an idle host either, so the load run is the evidence. Measured at the same time, on one P core per side so that placement cannot move the figure: against the reference at 8 B, wz spends 22% less CPU per message sent and 34% less per message received. NOT claimed: the hosted result of this push.",
+      "changes_bullets": [
+        "wz-runtime-tokio packed_writer_e2e.rs: the alias ordering test sets wait_before_drop_us on its initiator.",
+        "scripts/lib/verify_lanes.json: Layer C1bb is a verify-once lane for wz-session-core and wz-runtime-tokio."
+      ],
+      "verification_bullets": [
+        "Read from the Layer C1bb log of hosted run 39083477623: 0 of 600 aliased puts arrived, every other job green.",
+        "The lane's feature set on a build host, every core busy, 15 runs of the alias test before the change: 2 failed with the same line; 30 runs after: 30 passed.",
+        "CPU per million messages, 8 B, one P core per side on a quiet host: reference sender 21.00 (sd 0.20) against wz 16.39 (sd 0.47); reference receiver 21.32 (sd 0.38) against wz 14.10 (sd 0.45); 8 runs each, alternating.",
+        "Throughput with the same placement (6 runs per pairing, the library from before the payload slot): wz to reference +2.7% at 8 B (inside the spread), +8.3% at 64 B, +59% at 1 KiB; reference to wz inside the spread at all three; wz to wz +32%, +36%, +114%.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of the previous push first.",
+        "The throughput claims of earlier rounds were taken without pinning the processes to cores on a hybrid machine and overstated the send gain at 8 B; quote the pinned figures.",
+        "Receive speed against the reference shows as a tie in throughput because the reference sender is the limit; quote CPU per message for it."
+      ],
+      "publishable_decision_summary": "The hosted run of Round 3367's push went red in one job: Layer C1bb, the alias ordering test, 0 of 600 aliased puts arrived. It is not an ordering fault. The test sent its aliased puts droppable, and a put that finds no room within the default wait is dropped by policy when the receiver is slow to take the warm-up burst ahead of it; the message read that as the declaration being overtaken. Reproduced on a build host with every core busy: 2 of 15 runs failed with the same line. The test now sets the session's own wait_before_drop_us to a patient value, as the burst test of Round 3369 does, and passes 30 of 30 under the same load. Layer C1bb joins verify-once, which would not have caught this on an idle host either, so the load run is the evidence. Measured at the same time, on one P core per side so that placement cannot move the figure: against the reference at 8 B, wz spends 22% less CPU per message sent and 34% less per message received. NOT claimed: the hosted result of this push.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio packed_writer_e2e.rs: the alias ordering test sets wait_before_drop_us on its initiator.",
+        "scripts/lib/verify_lanes.json: Layer C1bb is a verify-once lane for wz-session-core and wz-runtime-tokio."
+      ],
+      "publishable_verification_bullets": [
+        "Read from the Layer C1bb log of hosted run 39083477623: 0 of 600 aliased puts arrived, every other job green.",
+        "The lane's feature set on a build host, every core busy, 15 runs of the alias test before the change: 2 failed with the same line; 30 runs after: 30 passed.",
+        "CPU per million messages, 8 B, one P core per side on a quiet host: reference sender 21.00 (sd 0.20) against wz 16.39 (sd 0.47); reference receiver 21.32 (sd 0.38) against wz 14.10 (sd 0.45); 8 runs each, alternating.",
+        "Throughput with the same placement (6 runs per pairing, the library from before the payload slot): wz to reference +2.7% at 8 B (inside the spread), +8.3% at 64 B, +59% at 1 KiB; reference to wz inside the spread at all three; wz to wz +32%, +36%, +114%.",
+        "NOT verified: the hosted result of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of the previous push first.",
+        "The throughput claims of earlier rounds were taken without pinning the processes to cores on a hybrid machine and overstated the send gain at 8 B; quote the pinned figures.",
+        "Receive speed against the reference shows as a tie in throughput because the reference sender is the limit; quote CPU per message for it."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
