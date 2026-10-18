@@ -2199,6 +2199,13 @@ pub struct FaceSources {
     pub stats: Option<crate::node_stats::NodeStats>,
 }
 
+/// How [`face_drive_loop`] holds the drive of its faces: through which forwarder, and whether each
+/// drive is spawned on the runtime or held inside the loop's own task.
+struct FaceDriving<'a> {
+    forwarder: &'a dyn FaceForwarder,
+    spawned: Option<SpawnedFaces>,
+}
+
 /// Bind-once, hold-N: the shared multi-face drive core behind both
 /// [`accept_loop`] (accept-only) and [`peer_loop`] (dial + accept). A node's
 /// faces come from the two [`FaceSources`] — dialing each `dial_targets` locator
@@ -2219,13 +2226,13 @@ async fn face_drive_loop<S, F>(
     tick_interval_ms: u64,
     shutdown: S,
     mut on_event: F,
-    forwarder: &dyn FaceForwarder,
-    spawned: Option<SpawnedFaces>,
+    driving: FaceDriving<'_>,
 ) -> AcceptLoopSummary
 where
     S: Future<Output = ()>,
     F: FnMut(&AcceptEvent),
 {
+    let FaceDriving { forwarder, spawned } = driving;
     let FaceSources {
         mut listeners,
         dial_targets,
@@ -3376,8 +3383,10 @@ where
         tick_interval_ms,
         shutdown,
         on_event,
-        forwarder,
-        None,
+        FaceDriving {
+            forwarder,
+            spawned: None,
+        },
     )
     .await
 }
@@ -3420,11 +3429,13 @@ where
         tick_interval_ms,
         shutdown,
         on_event,
-        control,
-        Some(SpawnedFaces {
-            forwarder: Arc::clone(&forwarder),
-            executor,
-        }),
+        FaceDriving {
+            forwarder: control,
+            spawned: Some(SpawnedFaces {
+                forwarder: Arc::clone(&forwarder),
+                executor,
+            }),
+        },
     )
     .await
 }
@@ -3532,8 +3543,10 @@ where
         tick_interval_ms,
         shutdown,
         on_event,
-        forwarder,
-        None,
+        FaceDriving {
+            forwarder,
+            spawned: None,
+        },
     )
     .await
 }

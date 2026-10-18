@@ -646,7 +646,10 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    tokio::spawn(Pausable::new(gate.clone(), future))
+    // Onto the session's OWN runtime, named as a handle and not through the ambient spelling:
+    // this node builds one runtime per session ([`open_blocking`]) and has no part in the
+    // `WZ_RUNTIME` subsystem partition, so there is no subsystem for the task to name.
+    tokio::runtime::Handle::current().spawn(Pausable::new(gate.clone(), future))
 }
 
 /// Spawn the leg of one endpoint (its dial, its re-dials and its face), where the session's
