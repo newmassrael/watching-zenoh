@@ -20968,6 +20968,36 @@ layer_e6u_peer_unixpipe_forward() {
         --test wz_peer_unixpipe_forward -- --ignored --test-threads=1 --quiet || return 1
 }
 
+# ─── Layer E7s — router-hat data-plane cost, MEASURED (docs/router-data-plane-scaling.md) ───
+#
+# What one forwarded message costs a `--router-hat` router, against how many
+# subscribers it holds and how fast they come and go. A MEASUREMENT: the lane
+# prints a table of microseconds of router CPU per message and asserts only the
+# POPULATION behind it (every session connected, none refused, nobody DOWN in a
+# steady window, at least 80% of the offered load forwarded), the same rule the
+# decode-cost lane in C1bn states for a wall-clock figure on a shared runner. A
+# run in which the population failed measured something other than the data
+# plane, and says so instead of printing a confident number. The structural
+# claims about the data plane are held by counters in the router's own tests.
+#
+# THE BUILD IS PART OF THE MEASUREMENT: release profile, and the server feature
+# set `preset-ap-client,router-hat-router` WITHOUT `runtime-tokio-uring`, whose
+# 32 MiB registered buffer region per face would be what a many-connection run
+# measured instead. The test reads the demo's own BUILD FEATURES banner and
+# refuses both a missing `router-hat-router` and a present `runtime-tokio-uring`.
+# The build is one line, because the feature-closure scan unions the sets of the
+# `cargo build -p wz-ap-demo` lines of this file.
+#
+# The test fn carries the `wz_router_hat_` prefix, so the default Layer E sweep's
+# `--skip wz_router` leaves it to this lane. It holds up to 2048 local sessions
+# and runs about two minutes, which is why it is `#[ignore]`d and its own lane.
+layer_e7s_router_hat_data_plane_scaling() {
+    (cd crates && cargo build --release -p wz-ap-demo --no-default-features --features preset-ap-client,router-hat-router --quiet) || return 1
+    _runci_guarded_test "E7s router data-plane scaling" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_hat_data_plane_scaling -- --ignored --nocapture --test-threads=1 --quiet || return 1
+}
+
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
 #
 # The dual-mesh RouterForwarder proven against a FOREIGN zenoh client: a wz
@@ -23254,6 +23284,7 @@ run_layer E7b2 layer_e7b2_router_connect_add_over_the_wire || overall=1
 run_layer E7c layer_e7c_router_adminspace_linkstate || overall=1
 run_layer E7g layer_e7g_router_adminspace_read_deny || overall=1
 run_layer E7u layer_e7u_router_hat_unixpipe_forward || overall=1
+run_layer E7s layer_e7s_router_hat_data_plane_scaling || overall=1
 run_layer E8 layer_e8_router_hat_pico || overall=1
 run_layer E8t layer_e8t_router_hat_hlc_stamp_pico || overall=1
 run_layer E9 layer_e9_apfull_preset_pico || overall=1
