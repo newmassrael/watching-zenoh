@@ -11,8 +11,8 @@
 use std::ffi::c_void;
 
 use wz_capi_core::drive::{
-    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, ListenPhase, OpenError, OpenStance,
-    SessionState, DEFAULT_BATCH_SIZE,
+    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive, ListenPhase, OpenError,
+    OpenStance, SessionState, DEFAULT_BATCH_SIZE,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::scouting_node::ScoutingPlan;
@@ -431,6 +431,10 @@ pub(crate) unsafe fn open_session(
             // reached a third meet. R3075 -- under the policy its config states.
             gossip,
             listen_phase,
+            // zenoh-c's callbacks are concurrent across links (`CClosure` is `Sync`): its
+            // receive runtime serves each link on its own, and a callback that blocks holds
+            // up its link and no other. A face of this session has a thread of its own.
+            face_drive: FaceDrive::PerFace,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

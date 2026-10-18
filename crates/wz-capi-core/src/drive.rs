@@ -28,8 +28,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use wz_runtime_tokio::accept_loop::{
-    accept_loop_offering_spawned, DialIntent, DialIntentReceiver, DialIntentSender, FaceExecutor,
-    SpawnedDrive,
+    accept_loop_offering, accept_loop_offering_spawned, DialIntent, DialIntentReceiver,
+    DialIntentSender, FaceExecutor, SpawnedDrive,
 };
 use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
@@ -264,6 +264,29 @@ pub struct ReadGate {
     stop_epoch: AtomicU64,
     /// Signalled when a task parks or ends, and when the wait must end.
     parked: Condvar,
+    /// Where the faces of the session are driven: see [`FaceDrive`]. The gate is the
+    /// session's executor, which is why the choice lives here and travels with it to every
+    /// place that spawns a face.
+    face_drive: FaceDrive,
+}
+
+/// Where the data plane of each face of a session runs: the read, the decode and the
+/// delivery to the C callbacks.
+///
+/// This is the ABI's contract and not a tuning knob. zenoh-pico's callbacks all run on the
+/// session's one read task, so a program written for it does not lock what its callbacks
+/// share, and a stop of the read task is a stop of every callback ([`ReadGate`]). zenoh-c's
+/// callbacks are documented as concurrent (`CClosure` is `Sync`), and its receive runtime
+/// serves each link on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FaceDrive {
+    /// Every face is driven on the session's drive thread, one at a time: zenoh-pico's.
+    #[default]
+    Serial,
+    /// Every face is driven on a thread of its own, so that a callback that blocks, or just
+    /// runs long, holds up its own link and no other: zenoh-c's. The control plane (the accept
+    /// loop, the handshakes, the dials) stays on the drive thread.
+    PerFace,
 }
 
 /// The gated futures of one session, which is what a synchronous stop has to wait for.
@@ -312,7 +335,18 @@ impl ReadGate {
             tasks: StdMutex::new(GateTasks::default()),
             stop_epoch: AtomicU64::new(0),
             parked: Condvar::new(),
+            face_drive: FaceDrive::Serial,
         }
+    }
+
+    /// The same gate, for a session whose faces are driven as `face_drive` says.
+    fn with_face_drive(mut self, face_drive: FaceDrive) -> Self {
+        self.face_drive = face_drive;
+        self
+    }
+
+    fn face_drive(&self) -> FaceDrive {
+        self.face_drive
     }
 
     /// Whether the calling thread is inside a poll of one of THIS gate's futures, which is
@@ -613,6 +647,167 @@ where
     F::Output: Send + 'static,
 {
     tokio::spawn(Pausable::new(gate.clone(), future))
+}
+
+/// Spawn the leg of one endpoint (its dial, its re-dials and its face), where the session's
+/// [`FaceDrive`] puts it: a local task of the drive thread for [`FaceDrive::Serial`], a task
+/// of the runtime for [`FaceDrive::PerFace`], whose face is then moved to a thread of its own
+/// by [`drive_face_on`] and which is otherwise idle (it dials, and waits).
+///
+/// Called on the drive thread's `LocalSet`, which `Serial` needs.
+fn spawn_leg<F>(gate: &Arc<ReadGate>, future: F) -> tokio::task::JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    match gate.face_drive() {
+        FaceDrive::Serial => tokio::task::spawn_local(future),
+        FaceDrive::PerFace => spawn_gated(gate, future),
+    }
+}
+
+/// What a face's thread reports back to the task that waits for it.
+enum OwnThreadEnd<T> {
+    /// The future ran to its end.
+    Done(T),
+    /// The thread could not run it (no runtime could be built there): the waiter runs it itself.
+    Inline,
+}
+
+/// What stops a face's thread when the task waiting for it goes away, and then waits for it.
+///
+/// The wait is what `z_close` rests on: the callbacks of a face run on this thread, and the C
+/// `drop(context)` that follows a close must not race one. It is skipped when the thread being
+/// dropped from is the face's own (a callback that closes its own session cannot wait for
+/// itself).
+struct OwnThreadGuard {
+    cancel: Arc<Notify>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for OwnThreadGuard {
+    fn drop(&mut self) {
+        self.cancel.notify_one();
+        if let Some(thread) = self.thread.take() {
+            if thread.thread().id() != std::thread::current().id() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+/// Run `future` on a thread of its own, polled only while the read task may run ([`Pausable`]),
+/// and hand its output to whoever awaits the result.
+///
+/// This is what makes a face independent of every other: the face's callbacks run on this
+/// thread, so a callback that blocks stops this face and nothing else. A pool of workers
+/// cannot promise that. Measured on a session with two faces: the drive of both landed on one
+/// worker, and the first callback to block held the second face for as long as it blocked, with
+/// four workers as with two.
+///
+/// The thread has a runtime of its own with a clock and no reactor: the face's socket belongs to
+/// the session's runtime, whose workers wake this thread when it is readable.
+///
+/// Dropping the result before it is ready cancels the future (it is dropped on its own thread)
+/// and waits for the thread. If no thread can be had the future runs as a task of the runtime
+/// instead, which is a worse place for it and not a failure.
+fn run_on_own_thread<F>(
+    gate: Arc<ReadGate>,
+    future: F,
+) -> Pin<Box<dyn Future<Output = F::Output> + Send>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    // Handed to the thread through a slot, so that when no thread starts the future is still
+    // here to be run another way.
+    let slot = Arc::new(StdMutex::new(Some(future)));
+    let cancel = Arc::new(Notify::new());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<OwnThreadEnd<F::Output>>();
+    let started = std::thread::Builder::new()
+        .name("wz-capi-face".to_owned())
+        .stack_size(DRIVE_THREAD_STACK_BYTES)
+        .spawn({
+            let slot = slot.clone();
+            let cancel = cancel.clone();
+            let gate = gate.clone();
+            move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => {
+                        let _ = done_tx.send(OwnThreadEnd::Inline);
+                        return;
+                    }
+                };
+                let Some(future) = slot.lock().ok().and_then(|mut slot| slot.take()) else {
+                    return;
+                };
+                let end = rt.block_on(async {
+                    tokio::select! {
+                        output = Pausable::new(gate, future) => Some(output),
+                        _ = cancel.notified() => None,
+                    }
+                });
+                if let Some(output) = end {
+                    let _ = done_tx.send(OwnThreadEnd::Done(output));
+                }
+            }
+        });
+    let thread = match started {
+        Ok(thread) => thread,
+        Err(_) => {
+            let future = slot.lock().ok().and_then(|mut slot| slot.take());
+            return match future {
+                Some(future) => Box::pin(Pausable::new(gate, future)),
+                None => Box::pin(std::future::pending()),
+            };
+        }
+    };
+    let guard = OwnThreadGuard {
+        cancel,
+        thread: Some(thread),
+    };
+    Box::pin(async move {
+        let _guard = guard;
+        match done_rx.await {
+            Ok(OwnThreadEnd::Done(output)) => output,
+            Ok(OwnThreadEnd::Inline) => {
+                let future = slot.lock().ok().and_then(|mut slot| slot.take());
+                match future {
+                    Some(future) => Pausable::new(gate, future).await,
+                    None => std::future::pending().await,
+                }
+            }
+            // The thread ended with no output and was not cancelled: the face's drive panicked.
+            // The panic is raised again here, where the task that spawned this one reads it as
+            // the drive of that face having failed.
+            Err(_) => panic!("the thread of a face ended without a result"),
+        }
+    })
+}
+
+/// [`drive_face`], where the session's [`FaceDrive`] runs it: inline for `Serial`, on a thread
+/// of its own for `PerFace`.
+async fn drive_face_on(
+    face: u64,
+    session: OpenedSession,
+    shared: Arc<SharedSession>,
+    closing: impl Future<Output = ()> + Send + 'static,
+    on_up: impl FnOnce() + Send + 'static,
+    gate: Arc<ReadGate>,
+) -> bool {
+    match gate.face_drive() {
+        FaceDrive::Serial => drive_face(face, session, &shared, closing, on_up, &gate).await,
+        FaceDrive::PerFace => {
+            let own = gate.clone();
+            run_on_own_thread(own, async move {
+                drive_face(face, session, &shared, closing, on_up, &gate).await
+            })
+            .await
+        }
+    }
 }
 
 // --- per-session state -----------------------------------------------------
@@ -1324,23 +1519,28 @@ async fn drive_client(
         // task while the per-session runtime has two worker threads a spawned
         // task could land on. (R3069: zenoh-c's plane drains on the calling
         // thread, and this arm drains only what a staging path left behind.)
-        let mut abandoned = false;
+        let abandoned = Arc::new(AtomicBool::new(false));
         tokio::select! {
-            _ = drive_face(
+            _ = drive_face_on(
                 DIAL_FACE_ID,
                 session,
-                &shared,
+                shared.clone(),
                 shutdown_future(shutdown.clone(), stop.clone()),
-                || {
-                    if !released {
-                        abandoned = gate.announce_open(&tx);
+                {
+                    let abandoned = abandoned.clone();
+                    let gate = gate.clone();
+                    let tx = tx.clone();
+                    move || {
+                        if !released {
+                            abandoned.store(gate.announce_open(&tx), Ordering::SeqCst);
+                        }
                     }
                 },
-                &gate,
+                gate.clone(),
             ) => {}
             _ = shared.drive_local_plane() => {}
         }
-        if abandoned {
+        if abandoned.load(Ordering::SeqCst) {
             return;
         }
         released = true;
@@ -1641,7 +1841,7 @@ async fn drive_peer(
                             Some(Ok(session)) => {
                                 let (owed, registered) = FaceOwed::awaited_by_the_walk();
                                 registered_faces.push(registered);
-                                faces.push(spawn_gated(&gate, leg.run(Some(session), None, owed)))
+                                faces.push(spawn_leg(&gate, leg.run(Some(session), None, owed)))
                             }
                             Some(Err(())) if arm.ends_startup() => {
                                 failed = true;
@@ -1663,7 +1863,7 @@ async fn drive_peer(
                             Some(Ok(session)) => {
                                 let (owed, registered) = FaceOwed::awaited_by_the_walk();
                                 registered_faces.push(registered);
-                                faces.push(spawn_gated(&gate, leg.run(Some(session), None, owed)))
+                                faces.push(spawn_leg(&gate, leg.run(Some(session), None, owed)))
                             }
                             // Unbounded, so only the walk's budget ends it.
                             _ => {
@@ -1674,7 +1874,7 @@ async fn drive_peer(
                     }
                     PhaseArm::RetryInBackground => {
                         window.expect_one();
-                        faces.push(spawn_gated(
+                        faces.push(spawn_leg(
                             &gate,
                             leg.run(None, Some(schedule), FaceOwed::none()),
                         ));
@@ -1897,7 +2097,7 @@ async fn scouted_connector(peers: ScoutedPeers) {
                 let face = next_face;
                 next_face += 1;
                 legs.retain(|leg| !leg.is_finished());
-                legs.push(spawn_gated(&gate, scouted_leg(
+                legs.push(spawn_leg(&gate, scouted_leg(
                     face,
                     intent,
                     dialer.clone(),
@@ -1945,18 +2145,29 @@ async fn scouted_leg(
     if !announced.swap(true, Ordering::SeqCst) {
         owed.window = Some(window);
     }
-    drive_face(
+    let owed = Arc::new(StdMutex::new(owed));
+    drive_face_on(
         face,
         session,
-        &shared,
+        shared,
         async move {
             let _ = closing.wait_for(|c| *c).await;
         },
-        || owed.pay(),
-        &gate,
+        {
+            let owed = owed.clone();
+            move || pay(&owed)
+        },
+        gate,
     )
     .await;
-    owed.pay();
+    pay(&owed);
+}
+
+/// Pay what a leg owes the open, from wherever its face runs. Idempotent, as [`FaceOwed::pay`].
+fn pay(owed: &StdMutex<FaceOwed>) {
+    if let Ok(mut owed) = owed.lock() {
+        owed.pay();
+    }
 }
 
 /// `fut`, bounded by `deadline` when there is one.
@@ -2119,21 +2330,29 @@ impl FaceLeg {
                 }
             };
             let mut closing = self.closing.clone();
-            drive_face(
+            // `owed` is shared with the face, which may run on a thread of its own.
+            let shared_owed = Arc::new(StdMutex::new(std::mem::replace(
+                &mut owed,
+                FaceOwed::none(),
+            )));
+            drive_face_on(
                 self.face,
                 opened,
-                &self.shared,
+                self.shared.clone(),
                 async move {
                     let _ = closing.wait_for(|c| *c).await;
                 },
                 // After the registration, which is what the open is owed (see
                 // [`FaceOwed`]); a face the registry refused never gets here, and is
                 // paid below.
-                || owed.pay(),
-                &self.gate,
+                {
+                    let shared_owed = shared_owed.clone();
+                    move || pay(&shared_owed)
+                },
+                self.gate.clone(),
             )
             .await;
-            owed.pay();
+            pay(&shared_owed);
             // R2948's rule, per face: a face that ended for any reason but
             // `z_close` has lost its link, and upstream re-dials that endpoint
             // (`closed_link` -> `peer_connector_retry`).
@@ -2711,28 +2930,30 @@ async fn bind_listener(
     Some(Listening { listener, params })
 }
 
-/// The [`FaceExecutor`] of a C ABI node: every face's drive is polled only while the node's
-/// read task may run, as the top-level drive is ([`Pausable`]), and is one of the futures a
-/// stop waits for.
+/// The [`FaceExecutor`] of a [`FaceDrive::PerFace`] node: every face's drive runs on a thread of
+/// its own ([`run_on_own_thread`]), polled only while the node's read task may run, as the
+/// top-level drive is ([`Pausable`]), and is one of the futures a stop waits for.
 struct GateFaces {
     gate: Arc<ReadGate>,
 }
 
 impl FaceExecutor for GateFaces {
     fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
-        Box::pin(Pausable::new(self.gate.clone(), drive))
+        run_on_own_thread(self.gate.clone(), drive)
     }
 }
 
-/// Accept on a bound listener until `shutdown`, driving every accepted peer as a task of its
-/// own.
+/// Accept on a bound listener until `shutdown`, driving every accepted peer as the session's
+/// [`FaceDrive`] says.
 ///
 /// The accept loop is the CONTROL plane and runs on this one task: it accepts, runs each
 /// handshake, bounds the sessions and lands each face in the registry through
-/// `CApiForwarder`. The DATA plane is not here: the drive of each face is spawned on the
-/// session's runtime ([`GateFaces`]), so N peers are read, decoded and delivered by up to N
-/// threads and the node's capacity is not one core. Shutdown is a future the loop races, so a
-/// `z_close` with NO peer ever connected unwinds a pending `accept()` cleanly.
+/// `CApiForwarder`. Under [`FaceDrive::Serial`] it drives the faces too, one after another on
+/// this task, which is zenoh-pico's contract. Under [`FaceDrive::PerFace`] the DATA plane is
+/// not here: the drive of each face runs on a thread of its own ([`GateFaces`]), so N peers
+/// are read, decoded and delivered by N threads, and a callback that blocks holds up its own
+/// peer alone. Shutdown is a future the loop races, so a `z_close` with NO peer ever connected
+/// unwinds a pending `accept()` cleanly.
 ///
 /// R3076 -- `index` is the listener's place among the session's, and the faces it accepts are
 /// numbered inside its own range of the registry's face ids ([`CApiForwarder::listening`]): each
@@ -2753,18 +2974,35 @@ async fn accept_faces(
     gate.wait_running().await;
     let forwarder = Arc::new(CApiForwarder::listening(shared, index));
     let Listening { listener, params } = listening;
-    let _summary = accept_loop_offering_spawned(
-        listener,
-        params,
-        offer,
-        clock,
-        DEFAULT_OPEN_TICK_MS,
-        shutdown,
-        |_event| {},
-        forwarder,
-        Arc::new(GateFaces { gate: gate.clone() }),
-    )
-    .await;
+    match gate.face_drive() {
+        FaceDrive::Serial => {
+            let _summary = accept_loop_offering(
+                listener,
+                params,
+                offer,
+                clock,
+                DEFAULT_OPEN_TICK_MS,
+                shutdown,
+                |_event| {},
+                &*forwarder,
+            )
+            .await;
+        }
+        FaceDrive::PerFace => {
+            let _summary = accept_loop_offering_spawned(
+                listener,
+                params,
+                offer,
+                clock,
+                DEFAULT_OPEN_TICK_MS,
+                shutdown,
+                |_event| {},
+                forwarder,
+                Arc::new(GateFaces { gate: gate.clone() }),
+            )
+            .await;
+        }
+    }
 }
 
 /// The `listen` role: bind, unblock `z_open` immediately, then hold N
@@ -2983,6 +3221,10 @@ pub struct OpenStance {
     /// ABI reads them from its config; zenoh-pico's says [`ListenPhase::SHIPPED`], its listener
     /// being one endpoint whose failure has always failed the open at the first attempt.
     pub listen_phase: ListenPhase,
+    /// Where the faces of the session are driven: zenoh-pico's ABI says [`FaceDrive::Serial`],
+    /// its callbacks all running on its one read task, and zenoh-c's says
+    /// [`FaceDrive::PerFace`], its callbacks being concurrent across links.
+    pub face_drive: FaceDrive,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -3017,13 +3259,14 @@ impl OpenStance {
 /// session's, the same on every host, and the pages are reserved and not touched until used.
 const DRIVE_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-/// How many worker threads a session's runtime has, which is how many faces of the node can be
-/// read, decoded and delivered at the same moment (the drive thread itself runs the control
-/// plane and the local plane).
+/// How many worker threads a session's runtime has. They run the socket reactor, the writers and
+/// the control tasks (a dial and its waiting); a face's own drive, and so its callbacks, runs on
+/// a thread of its own under [`FaceDrive::PerFace`] and not here, so this is not the node's
+/// receive parallelism.
 ///
-/// Two by default: the reference's receive runtime has two, and a node of a few links is served
-/// by them; a runtime is made PER session and a program may open many. `WZ_CAPI_WORKER_THREADS`
-/// raises it for a node that holds many links, as `ZENOH_RUNTIME` does for the reference.
+/// Two by default, which is what the reactor and the writers of a node of a few links need; a
+/// runtime is made PER session and a program may open many. `WZ_CAPI_WORKER_THREADS` raises it
+/// for a node whose writers are the limit.
 fn drive_workers() -> usize {
     std::env::var("WZ_CAPI_WORKER_THREADS")
         .ok()
@@ -3066,6 +3309,7 @@ pub fn open_blocking(
         initial_interest,
         gossip,
         listen_phase,
+        face_drive,
     } = stance;
     let link_tx = LinkTx {
         queue: tx_queue,
@@ -3114,20 +3358,22 @@ pub fn open_blocking(
     let drive_shared = shared.clone();
     let drive_shutdown = shutdown.clone();
     let drive_stop = stop.clone();
-    let read_gate = Arc::new(ReadGate::new(start_read_task));
+    let read_gate = Arc::new(ReadGate::new(start_read_task).with_face_drive(face_drive));
     let drive_gate = read_gate.clone();
 
     // One dedicated multi-thread runtime PER session, owned by its driver
     // thread: the `block_on` future need not be `Send` (the control plane, the
     // accept loops and the local plane, stay on it), while the socket writer
-    // tasks, the I/O reactor and the DRIVE OF EACH FACE run on the runtime's
-    // worker threads. A shared runtime driven by two `block_on`s starved the
-    // concurrent handshake (the acceptor timed out into a pre-Established
-    // Terminal); per-session isolation lets each session drive its own links.
+    // tasks and the I/O reactor run on the runtime's worker threads. The DRIVE OF
+    // EACH FACE runs on the drive thread under `FaceDrive::Serial` and on a thread
+    // of its own under `FaceDrive::PerFace` ([`run_on_own_thread`]), never on a
+    // worker: a pool cannot keep a blocked callback from holding the face beside
+    // it. A shared runtime driven by two `block_on`s starved the concurrent
+    // handshake (the acceptor timed out into a pre-Established Terminal);
+    // per-session isolation lets each session drive its own links.
     //
-    // The workers carry the stack of the drive thread, because the futures a face
-    // drive polls are the same ones (see [`DRIVE_THREAD_STACK_BYTES`]), and their
-    // number is the node's receive parallelism ([`drive_workers`]).
+    // The workers carry the stack of the drive thread, because the control tasks they
+    // run (a dial's handshake) poll the same futures (see [`DRIVE_THREAD_STACK_BYTES`]).
     let handle = std::thread::Builder::new()
         .name("wz-capi-drive".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -3785,6 +4031,7 @@ mod tests {
             initial_interest: true,
             gossip: None,
             listen_phase: ListenPhase::SHIPPED,
+            face_drive: FaceDrive::Serial,
         }
     }
 

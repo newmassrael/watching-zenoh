@@ -364,6 +364,9 @@ pub unsafe extern "C" fn z_open(
                 gossip: None,
                 // Its one listener's bind failing has always failed the open, at the first attempt.
                 listen_phase: wz_capi_core::drive::ListenPhase::SHIPPED,
+                // pico's callbacks all run on the session's one read task, and a program
+                // written for it shares state between them without a lock.
+                face_drive: wz_capi_core::drive::FaceDrive::Serial,
             },
         ) {
             Ok(state) => {
