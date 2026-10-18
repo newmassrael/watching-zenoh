@@ -1096,6 +1096,74 @@ pub type CookieEntropy = Box<dyn EntropySource + Send>;
 #[cfg(feature = "session-slot")]
 pub type CookieEntropy = &'static mut (dyn EntropySource + Send);
 
+/// What every send reads before it takes its conduit's lock, kept where it can be read
+/// without a lock: the negotiated frame budget and SN ring (`SessionLinkActions::negotiated_tx_limits`).
+/// They change when a handshake sets the peer's capabilities and when a reconnect clears
+/// them, and at no other time, so a send that paid a mutex pair to read them paid it for a
+/// value that was the same as the send before it.
+///
+/// The value is kept with a TAG: the number of times the peer's capabilities have been
+/// written, plus one, taken in the same hold of the capabilities' mutex as the value was
+/// computed from. A reader trusts the kept value only when its tag is the current number, so
+/// a value that a writer has since replaced is never used, whatever order the two interleave
+/// in: the worst a race costs is one more trip through the mutex. Writers move the number
+/// while they hold the mutex (`peer_caps_changed`).
+///
+/// Packed in one word, bits 0-7 the negotiated sequence-number resolution, 8-23 the batch
+/// budget (at most 65535: both advertisements are `u16`), 24-55 the tag; zero is empty.
+pub struct TxLimitsCache {
+    writes: AtomicU32,
+    packed: AtomicU64,
+}
+
+impl TxLimitsCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            writes: AtomicU32::new(0),
+            packed: AtomicU64::new(0),
+        }
+    }
+
+    /// The peer's capabilities were just written (or cleared). Called under their mutex.
+    pub(crate) fn peer_caps_changed(&self) {
+        self.writes.fetch_add(1, Ordering::Release);
+    }
+
+    /// The number a value computed NOW would be tagged with. Read under the capabilities'
+    /// mutex, together with the capabilities.
+    // Read by `negotiated_tx_limits`, which exists in a build with a sending codec only.
+    #[allow(dead_code)]
+    pub(crate) fn current_tag(&self) -> u32 {
+        self.writes.load(Ordering::Acquire).wrapping_add(1)
+    }
+
+    /// The kept `(batch budget, ring resolution)`, when it is for the current capabilities.
+    // See `current_tag`.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn get(&self) -> Option<(usize, u8)> {
+        let packed = self.packed.load(Ordering::Acquire);
+        if packed == 0 {
+            return None;
+        }
+        let tag = ((packed >> 24) & 0xFFFF_FFFF) as u32;
+        if tag != self.current_tag() {
+            return None;
+        }
+        Some((((packed >> 8) & 0xFFFF) as usize, (packed & 0xFF) as u8))
+    }
+
+    /// Keep `(mtu, ring)` as computed from the capabilities the tag was read with. `mtu` over
+    /// what 16 bits hold is not kept: the reader then asks the mutex every time, as it did.
+    // See `current_tag`.
+    #[allow(dead_code)]
+    pub(crate) fn keep(&self, tag: u32, mtu: usize, ring: u8) {
+        let Ok(mtu) = u16::try_from(mtu) else { return };
+        let packed = (u64::from(tag) << 24) | (u64::from(mtu) << 8) | u64::from(ring);
+        self.packed.store(packed, Ordering::Release);
+    }
+}
+
 /// R311y205 (transport-multilink IMPL-2a) — the SHARED session kernel: the
 /// ~30 fields that are one-per-logical-session regardless of how many physical
 /// links carry it (SN generators, RX-SN gate, negotiated caps, peer identity,
@@ -1182,11 +1250,14 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// keeps the pre-existing behavior byte for byte. The AP host sets it to
     /// its reassembly pool's slot size; the MCU hosts set theirs.
     ///
-    /// Held behind `R::Mutex` rather than an atomic on purpose: ARMv6-M has
-    /// no `target_has_atomic = "ptr"`, and every other configured-once slot
-    /// on this struct uses the same seam.
+    /// An `AtomicU64`, read by every send and written once: it is the host's own
+    /// bound, so no peer's handshake moves it. This file's `AtomicU64` is the
+    /// native one on the host profiles and `portable-atomic`'s critical-section
+    /// emulation on `no_std` (ARMv6-M has no native 64-bit atomics, which is why
+    /// this slot was a mutex before: on that profile the two cost the same).
+    /// `usize::MAX` is stored as `u64::MAX`.
     #[cfg(feature = "transport-fragmentation")]
-    pub max_reassembly_bytes: R::Mutex<usize>,
+    pub max_reassembly_bytes: AtomicU64,
     /// R2238 (open-debt item 580) — how many more `T_MID_FRAGMENT` messages
     /// this session may put on the wire. Each fragment of a chain draws ONE
     /// credit through `SessionLinkActions::take_fragment_tx_credit` (private,
@@ -1600,6 +1671,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// emit InitAck directly without an inbound parse cycle
     /// (R60, layer3_init_body) continue to work.
     pub inbound_peer_init_caps: R::Mutex<Option<PeerInitCaps>>,
+    /// What the slot above makes of the negotiated send limits, kept so a send reads them
+    /// without its mutex ([`TxLimitsCache`]). Every write of the slot moves it.
+    pub tx_limits_cache: TxLimitsCache,
     /// R121e — outbound Frame sequence-number generator. The
     /// session-FSM Established-side path emits one `Frame`
     /// transport-message per outbound application-layer batch
@@ -2848,7 +2922,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // "No cap" until a host declares one — a profile that never
                 // configures its reassembly bound keeps the prior behavior.
                 #[cfg(feature = "transport-fragmentation")]
-                max_reassembly_bytes: R::new_mutex(usize::MAX),
+                max_reassembly_bytes: AtomicU64::new(u64::MAX),
                 // "Unbounded" until a host declares a budget — a profile that
                 // never configures one fragments exactly as it did before.
                 #[cfg(feature = "transport-fragmentation")]
@@ -2922,6 +2996,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "session-extshm")]
                 shm_auth: R::new_mutex(crate::extshm::ShmAuthDispatch::empty()),
                 inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
+                tx_limits_cache: TxLimitsCache::new(),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
                 tx_conduits: TxConduits::new(),
@@ -4791,6 +4866,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::negotiated_batch_mtu`] and [`Self::negotiated_sn_mask`], with the peer's caps
     /// read under one hold of their mutex instead of two. What every send resolves before it
     /// takes its conduit's lock.
+    ///
+    /// Answered from the kept value when the capabilities have not been written since it was
+    /// computed, so a send pays no mutex for it; the answer is always what
+    /// [`Self::negotiated_batch_mtu`] and [`Self::negotiated_sn_mask`] give.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -4803,10 +4882,36 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn negotiated_tx_limits(&self) -> (usize, u64) {
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+    pub fn negotiated_tx_limits(&self) -> (usize, u64) {
+        // The common case, a session whose handshake is long done: the kept answer, read
+        // without the capabilities' mutex ([`TxLimitsCache`]).
+        if let Some((mtu, ring)) = self.tx_limits_cache.get() {
+            return (mtu, crate::sn::mask_from_res(ring));
+        }
+        // The capabilities and the tag they are the capabilities OF, read in one hold: a
+        // writer moves the tag in the hold that writes them.
+        let (peer, tag) = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
+            (*slot, self.tx_limits_cache.current_tag())
+        });
         let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
-        (self.batch_mtu_for(peer), crate::sn::mask_from_res(ring))
+        let mtu = self.batch_mtu_for(peer);
+        // Before the peer's capabilities arrive the own advertisement applies, and the
+        // next send must see the peer's: that answer is not kept.
+        if peer.is_some() {
+            self.tx_limits_cache.keep(tag, mtu, ring);
+        }
+        (mtu, crate::sn::mask_from_res(ring))
+    }
+
+    /// Write the peer's capabilities ([`SessionCore::inbound_peer_init_caps`]), and tell the
+    /// kept send limits ([`TxLimitsCache`]) that what they were computed from is gone. THE way
+    /// to write the slot: a write that bypassed it would leave a send using limits the slot no
+    /// longer says.
+    pub fn set_peer_init_caps(&self, caps: Option<PeerInitCaps>) {
+        R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
+            *slot = caps;
+            self.tx_limits_cache.peer_caps_changed();
+        });
     }
 
     /// R311qh — the remote peer's zid as learned at handshake (from the inbound
@@ -4899,7 +5004,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// a chain the receiver drops mid-stage.
     #[cfg(feature = "transport-fragmentation")]
     pub fn set_max_reassembly_bytes(&self, bytes: usize) {
-        R::with_mutex_mut(&self.max_reassembly_bytes, |slot| *slot = bytes);
+        self.max_reassembly_bytes
+            .store(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Release);
     }
 
     /// The configured reassembly cap, or `usize::MAX` when the host declared
@@ -4908,7 +5014,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// discipline `negotiated_batch_mtu` / `negotiated_sn_mask` follow.
     #[cfg(feature = "transport-fragmentation")]
     pub fn max_reassembly_bytes(&self) -> usize {
-        R::with_mutex_mut(&self.max_reassembly_bytes, |slot| *slot)
+        usize::try_from(self.max_reassembly_bytes.load(Ordering::Acquire)).unwrap_or(usize::MAX)
     }
 
     /// R2238 (open-debt item 580) — declare how many more `T_MID_FRAGMENT`
@@ -5689,9 +5795,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.inbound_peer_zid, |s| *s = zid.clone());
         R::with_mutex_mut(&self.remote_peer_zid, |s| *s = zid);
         R::with_mutex_mut(&self.peer_whatami, |s| *s = head.map(|h| h.peer_whatami));
-        R::with_mutex_mut(&self.inbound_peer_init_caps, |s| {
-            *s = head.map(|h| PeerInitCaps::from_init_body(Some(h.sn_res), Some(h.batch_size)))
-        });
+        self.set_peer_init_caps(
+            head.map(|h| PeerInitCaps::from_init_body(Some(h.sn_res), Some(h.batch_size))),
+        );
     }
 
     /// R3b — run `f` against the auth dispatch under its mutex. The recv-stage
@@ -8020,9 +8126,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // [`Self::negotiated_sn_mask`] so both roles resolve the
                 // same SN ring; the packed `sn_res` byte is wire-identical
                 // on InitSyn and InitAck, so the decoder is shared.
-                R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
-                    *slot = Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
-                });
+                self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
+                    body.sn_res,
+                    body.batch_size,
+                )));
             }
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
@@ -8056,9 +8163,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // `InitAck.size <= InitSyn.size` rule on the
                 // outbound InitAck (zenoh-pico
                 // unicast/transport.c:123-140 rejection condition).
-                R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
-                    *slot = Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
-                });
+                self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
+                    body.sn_res,
+                    body.batch_size,
+                )));
             }
             #[cfg(feature = "codec-open-body")]
             InboundFrame::Open {
@@ -12797,7 +12905,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // per-handshake state, which is the reason it lives out here.
             #[cfg(feature = "session-extauth")]
             R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = None);
-            R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
+            self.set_peer_init_caps(None);
             // R2774 — the negotiated capabilities are handshake-scoped too,
             // and they were the ones left standing: every merge on them moves
             // one way, so the last link's outcome became the next link's
@@ -13836,5 +13944,118 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // is this one. The carrier's faithfulness is now witnessed where it
         // is used -- the rebuilt head IS what the session runs on.
         carried.nonce == nonce
+    }
+}
+
+#[cfg(test)]
+mod tx_limits_cache_tests {
+    use super::TxLimitsCache;
+
+    /// The protocol, one step at a time: empty until something is kept, kept only for the tag
+    /// it was computed under, gone the moment the capabilities are written, and never revived
+    /// by a value computed before that write.
+    #[test]
+    fn a_kept_value_serves_only_the_capabilities_it_was_computed_from() {
+        let cache = TxLimitsCache::new();
+        assert_eq!(cache.get(), None, "nothing is kept at the start");
+
+        let first = cache.current_tag();
+        cache.keep(first, 2048, 2);
+        assert_eq!(
+            cache.get(),
+            Some((2048, 2)),
+            "kept for the current capabilities"
+        );
+        assert_eq!(cache.get(), Some((2048, 2)), "and served again");
+
+        // A writer replaces the capabilities.
+        cache.peer_caps_changed();
+        assert_eq!(cache.get(), None, "a write ends what was kept");
+
+        // A reader that computed under the OLD tag and stores after the write: harmless.
+        cache.keep(first, 2048, 2);
+        assert_eq!(
+            cache.get(),
+            None,
+            "a value computed before a write is never served after it"
+        );
+
+        // A value computed under the new tag is served.
+        let second = cache.current_tag();
+        assert_ne!(first, second);
+        cache.keep(second, 65_535, 3);
+        assert_eq!(cache.get(), Some((65_535, 3)));
+
+        // Every write ends the value, however many.
+        for _ in 0..5 {
+            cache.peer_caps_changed();
+            assert_eq!(cache.get(), None);
+            cache.keep(cache.current_tag(), 512, 1);
+            assert_eq!(cache.get(), Some((512, 1)));
+        }
+    }
+
+    /// The edges of the packing: a budget over what 16 bits hold is not kept, the largest one
+    /// and a ring resolution of every value survive the round trip.
+    #[test]
+    fn the_packing_round_trips_and_refuses_what_does_not_fit() {
+        let cache = TxLimitsCache::new();
+        for ring in [0u8, 1, 2, 3, 255] {
+            for mtu in [0usize, 1, 2048, 65_535] {
+                cache.keep(cache.current_tag(), mtu, ring);
+                assert_eq!(cache.get(), Some((mtu, ring)), "mtu {mtu}, ring {ring}");
+                cache.peer_caps_changed();
+            }
+        }
+        cache.keep(cache.current_tag(), 65_536, 1);
+        assert_eq!(cache.get(), None, "a budget that does not fit is not kept");
+        cache.keep(cache.current_tag(), usize::MAX, 1);
+        assert_eq!(cache.get(), None, "nor the largest");
+    }
+
+    /// The writer and many readers at once: whatever a reader is handed is a value some
+    /// writer wrote under the tag it was written with, never a mix of two.
+    #[test]
+    fn concurrent_readers_never_see_a_mixed_value() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let cache = Arc::new(TxLimitsCache::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        // The writer alternates two capabilities, each kept under its own tag; the pair
+        // (mtu, ring) is always one of (1000, 1) or (2000, 2).
+        let writer = {
+            let (cache, stop) = (cache.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut flip = false;
+                while !stop.load(Ordering::Relaxed) {
+                    cache.peer_caps_changed();
+                    let (mtu, ring) = if flip { (2000, 2) } else { (1000, 1) };
+                    cache.keep(cache.current_tag(), mtu, ring);
+                    flip = !flip;
+                }
+            })
+        };
+        let readers: std::vec::Vec<_> = (0..4)
+            .map(|_| {
+                let cache = cache.clone();
+                std::thread::spawn(move || {
+                    let mut seen = 0u32;
+                    for _ in 0..200_000 {
+                        if let Some(pair) = cache.get() {
+                            assert!(
+                                pair == (1000, 1) || pair == (2000, 2),
+                                "a mixed value: {pair:?}"
+                            );
+                            seen += 1;
+                        }
+                    }
+                    seen
+                })
+            })
+            .collect();
+        let seen: u32 = readers.into_iter().map(|r| r.join().unwrap()).sum();
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(seen > 0, "the readers saw the value at least once");
     }
 }

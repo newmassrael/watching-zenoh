@@ -1360,15 +1360,63 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     assert_eq!(p.batch_size, 65535);
 
     // Capture peer caps with stricter values across the board.
-    *actions.inbound_peer_init_caps.lock().unwrap() = Some(PeerInitCaps {
+    actions.set_peer_init_caps(Some(PeerInitCaps {
         seq_num_res: 2,
         req_id_res: 1,
         batch_size: 2048,
-    });
+    }));
     let p = actions.init_ack_params();
     assert_eq!(p.seq_num_res, 2, "seq_num_res capped to peer");
     assert_eq!(p.req_id_res, 1, "req_id_res capped to peer");
     assert_eq!(p.batch_size, 2048, "batch_size capped to peer");
+}
+
+/// The send limits a send reads without a lock are, after every write of the peer's
+/// capabilities, what the accessors that read the slot under its mutex say: the first
+/// call after a write recomputes, the second is the kept value, and a write in between
+/// is seen by the very next call. The writes include a reset to `None` (a reconnect) and
+/// the same capabilities twice.
+#[cfg(feature = "codec-push")]
+#[test]
+fn the_send_limits_follow_every_write_of_the_peers_capabilities() {
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let mut params = fixture_session_init_params();
+    params.seq_num_res = 3;
+    params.req_id_res = 3;
+    params.batch_size = 65535;
+    let actions = new_session_actions(driver, params, TokioTime::new());
+
+    let caps = |seq_num_res, batch_size| PeerInitCaps {
+        seq_num_res,
+        req_id_res: 1,
+        batch_size,
+    };
+    let writes = [
+        None,
+        Some(caps(2, 2048)),
+        Some(caps(2, 2048)),
+        Some(caps(0, 512)),
+        Some(caps(3, 65535)),
+        None,
+        Some(caps(1, 1400)),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for write in writes {
+        actions.set_peer_init_caps(write);
+        let want = (actions.negotiated_batch_mtu(), actions.negotiated_sn_mask());
+        for call in ["recomputed", "kept"] {
+            assert_eq!(
+                actions.negotiated_tx_limits(),
+                want,
+                "after writing {write:?}, the {call} limits"
+            );
+        }
+        seen.insert(want);
+    }
+    assert!(
+        seen.len() >= 4,
+        "the writes made the limits differ, so the test would see a stale one: {seen:?}"
+    );
 }
 
 #[test]
@@ -1383,11 +1431,11 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
     params.batch_size = 512;
     let actions = new_session_actions(driver, params, TokioTime::new());
 
-    *actions.inbound_peer_init_caps.lock().unwrap() = Some(PeerInitCaps {
+    actions.set_peer_init_caps(Some(PeerInitCaps {
         seq_num_res: 3,
         req_id_res: 3,
         batch_size: 65535,
-    });
+    }));
     let p = actions.init_ack_params();
     assert_eq!(p.seq_num_res, 1, "own seq_num_res preserved (1 < 3)");
     assert_eq!(p.req_id_res, 1, "own req_id_res preserved (1 < 3)");
