@@ -275780,6 +275780,66 @@
         "The SCE pin may move to ad5bed2e64 or later (the Rust queue refusals); check out/** is unchanged when it does."
       ]
     },
+    "Round 3373": {
+      "decision_summary": "The receive path of a zenoh-c subscriber now does less work per message, each change kept only on a measured gain: callgrind on the build host counts 1257 instructions per delivered message before this branch and 852 after (32 percent less). What went: a stream's key text rewritten on every call, a payload's bounds cleared and pushed again, a metadata block written when unchanged, a one-byte number read through a call, a frame reference cloned twice where once is enough, and the session lock's poisoning check (the tokio profile's lock is a parking_lot mutex that a panic does not poison). NOT claimed: a wall-clock gain (instructions are counted, not time), any change on the send side, the hosted result of this push. The licence push's lane count in Round 3372 was fourteen-odd; it was twenty.",
+      "changes_bullets": [
+        "wz-session-core link.rs: RxBytes::single_run_len gives a one-run payload's length without building the slice iterator.",
+        "wz-capi-c bytes.rs: fill_bounds stores a one-slice bound in place (Bounds::set_single) and reads a received payload through single_run_len; a test refills the bounds through every order of two-slice, one-slice and empty payloads.",
+        "wz-capi-c sample.rs and encoding.rs: a kept sample writes the encoding and the source info only when they change; it leaves the key text alone when the caller says the key is the last call's; the payload reference is taken once.",
+        "wz-session-core plain_push.rs and pubsub.rs: a plain Put says whether its key repeats the one before, and the matcher keeps its last answer for a repeated key; the one-byte VLE is read inline and the longer ones are a call.",
+        "wz-session-core sink.rs: SampleView::keyexpr_unchanged and payload_shared_owned, with PlainSample overriding both.",
+        "wz-runtime-tokio subscriber.rs: a frame's callback is told when a key repeats the one it was handed in the call before.",
+        "wz-runtime-tokio sync.rs: PlainMutex (parking_lot) is the session's Mutex on the tokio profile; about 95 files follow it.",
+        "Test builds of other feature sets repaired: two e2e builders and the multicast tests use PlainMutex, a feature-gated test imports std Mutex where it uses it, and a sample test reads the source info only when the unstable API is built."
+      ],
+      "verification_bullets": [
+        "Callgrind on the build host, a zenoh-c reference publisher at 8 B into a wz subscriber with a trivial callback, instructions of the drive thread per delivered message (the count of the callback's calls): origin/main 1257, the branch before this round's last four changes 1010, after them 852. Steps in the same unit: bounds stored in place 994, key left alone 974, one-byte number inline 914, one frame reference 852.",
+        "Unit tests that ran (counted, not assumed): the refill of bounds through every order of three payload shapes; a kept marshal leaving the key alone for a view that says it is unchanged, with a view that panics if its key is read; a frame of plain Puts telling the callback when a key repeats the one before, never for a frame's first Put; a plain sample's owned payload range before and after the borrowed one is built; the plain-push reader against the generated codec with ids and lengths of one, two and three bytes (4 tests).",
+        "verify-once, first run: three lanes failed (C1ay, C1bn, C1cn), four compile errors in feature sets the default build does not reach: two e2e builders and the multicast tests passed a std Mutex where the session takes PlainMutex, a feature-gated test used an import another feature set leaves unused, and a sample test read the source info with the unstable API off. Repaired, then clippy with all features and all targets of wz-runtime-tokio, wz-capi-c and the multicast tests was clean.",
+        "verify-once, second run on the final commit: 21 lanes passed (C0, C0s, C1ay, C1bb, C1bn, C1bw, C1bz, C1ch, C1cn, C1h, C1l, G, count-guard, clippy of wz-capi-c, wz-runtime-tokio, the multicast tests and wz-session-core, tests of the same four crates). Layer M is hosted-only and was printed as deferred, not passed.",
+        "NOT verified: the hosted run; any wall-clock gain; the send side."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push at the start of the next round.",
+        "Receive residuals by measured cost per message: read_plain_puts about 42 instructions, the kept sample's reload about 34, the payload reset about 25, subslice about 19, a frame reference clone and drop about 12 each.",
+        "Send side, about 1141 instructions per put: the session's link actions 183, the publisher put 70, the bytes clone 56, bounds 42, the lease append and resume 36 each, the handle 32, the recycle 27, thread-local lookups 24. Most of it is the C API's shape (a bytes object built per clone); the negotiated limits cache and a socket write from the calling thread when the writer is idle are the two designs left.",
+        "Tests still owed: a dial-leg or client face under PerFace, and a pico node holding one thread.",
+        "Board profile: the pool numbers in the MCU buffer-pool documents are written by hand and derived only in comments; a profile in the shape of the deploy's platform section with a gate that holds them to it comes first."
+      ],
+      "publishable_decision_summary": "The receive path of a zenoh-c subscriber now does less work per message, each change kept only on a measured gain: callgrind on the build host counts 1257 instructions per delivered message before this branch and 852 after (32 percent less). What went: a stream's key text rewritten on every call, a payload's bounds cleared and pushed again, a metadata block written when unchanged, a one-byte number read through a call, a frame reference cloned twice where once is enough, and the session lock's poisoning check (the tokio profile's lock is a parking_lot mutex that a panic does not poison). NOT claimed: a wall-clock gain (instructions are counted, not time), any change on the send side, the hosted result of this push. The licence push's lane count in Round 3372 was fourteen-odd; it was twenty.",
+      "publishable_changes_bullets": [
+        "wz-session-core link.rs: RxBytes::single_run_len gives a one-run payload's length without building the slice iterator.",
+        "wz-capi-c bytes.rs: fill_bounds stores a one-slice bound in place (Bounds::set_single) and reads a received payload through single_run_len; a test refills the bounds through every order of two-slice, one-slice and empty payloads.",
+        "wz-capi-c sample.rs and encoding.rs: a kept sample writes the encoding and the source info only when they change; it leaves the key text alone when the caller says the key is the last call's; the payload reference is taken once.",
+        "wz-session-core plain_push.rs and pubsub.rs: a plain Put says whether its key repeats the one before, and the matcher keeps its last answer for a repeated key; the one-byte VLE is read inline and the longer ones are a call.",
+        "wz-session-core sink.rs: SampleView::keyexpr_unchanged and payload_shared_owned, with PlainSample overriding both.",
+        "wz-runtime-tokio subscriber.rs: a frame's callback is told when a key repeats the one it was handed in the call before.",
+        "wz-runtime-tokio sync.rs: PlainMutex (parking_lot) is the session's Mutex on the tokio profile; about 95 files follow it.",
+        "Test builds of other feature sets repaired: two e2e builders and the multicast tests use PlainMutex, a feature-gated test imports std Mutex where it uses it, and a sample test reads the source info only when the unstable API is built."
+      ],
+      "publishable_verification_bullets": [
+        "Callgrind on the build host, a zenoh-c reference publisher at 8 B into a wz subscriber with a trivial callback, instructions of the drive thread per delivered message (the count of the callback's calls): origin/main 1257, the branch before this round's last four changes 1010, after them 852. Steps in the same unit: bounds stored in place 994, key left alone 974, one-byte number inline 914, one frame reference 852.",
+        "Unit tests that ran (counted, not assumed): the refill of bounds through every order of three payload shapes; a kept marshal leaving the key alone for a view that says it is unchanged, with a view that panics if its key is read; a frame of plain Puts telling the callback when a key repeats the one before, never for a frame's first Put; a plain sample's owned payload range before and after the borrowed one is built; the plain-push reader against the generated codec with ids and lengths of one, two and three bytes (4 tests).",
+        "verify-once, first run: three lanes failed (C1ay, C1bn, C1cn), four compile errors in feature sets the default build does not reach: two e2e builders and the multicast tests passed a std Mutex where the session takes PlainMutex, a feature-gated test used an import another feature set leaves unused, and a sample test read the source info with the unstable API off. Repaired, then clippy with all features and all targets of wz-runtime-tokio, wz-capi-c and the multicast tests was clean.",
+        "verify-once, second run on the final commit: 21 lanes passed (C0, C0s, C1ay, C1bb, C1bn, C1bw, C1bz, C1ch, C1cn, C1h, C1l, G, count-guard, clippy of wz-capi-c, wz-runtime-tokio, the multicast tests and wz-session-core, tests of the same four crates). Layer M is hosted-only and was printed as deferred, not passed.",
+        "NOT verified: the hosted run; any wall-clock gain; the send side."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push at the start of the next round.",
+        "Receive residuals by measured cost per message: read_plain_puts about 42 instructions, the kept sample's reload about 34, the payload reset about 25, subslice about 19, a frame reference clone and drop about 12 each.",
+        "Send side, about 1141 instructions per put: the session's link actions 183, the publisher put 70, the bytes clone 56, bounds 42, the lease append and resume 36 each, the handle 32, the recycle 27, thread-local lookups 24. Most of it is the C API's shape (a bytes object built per clone); the negotiated limits cache and a socket write from the calling thread when the writer is idle are the two designs left.",
+        "Tests still owed: a dial-leg or client face under PerFace, and a pico node holding one thread.",
+        "Board profile: the pool numbers in the MCU buffer-pool documents are written by hand and derived only in comments; a profile in the shape of the deploy's platform section with a gate that holds them to it comes first."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
