@@ -60,42 +60,12 @@ fn payload_of(index: u32) -> Vec<u8> {
     payload
 }
 
-/// One put of a stream test, BLOCKING where the build can say so: a droppable message that finds
-/// no room within `wait_before_drop` is dropped by policy, which a host loaded enough to delay
-/// the writer by a millisecond turns into a short count, and these tests claim that every
-/// message arrives. The borrowed send takes the congestion control in its QoS byte; a build that
-/// counts or filters the owned message (`transport-stats`) has no borrowed send, and its put goes
-/// the default way: its host is not one these tests are run on loaded.
-fn put_blocking(
-    actions: &wz_runtime_tokio::session_glue::SessionLinkActions,
-    keyexpr: &str,
-    payload: &[u8],
-    priority: Priority,
-) {
-    #[cfg(all(feature = "codec-push", not(feature = "transport-stats")))]
-    {
-        let block = wz_session_core::sample::QosLevel::from_parts(
-            priority,
-            wz_session_core::qos::CongestionControl::Block,
-            false,
-        );
-        actions
-            .send_plain_put_qos(
-                0,
-                Some(keyexpr),
-                payload,
-                Some(block),
-                true,
-                false,
-                priority,
-            )
-            .expect("a stream put routes through the QoS send seam");
-    }
-    #[cfg(not(all(feature = "codec-push", not(feature = "transport-stats"))))]
-    actions
-        .send_push_literal_qos(keyexpr, payload, true, priority)
-        .expect("a stream put routes through the QoS send seam");
-}
+/// How long a droppable message waits for room before it is dropped, for a test that claims
+/// every message arrives: the session's own setting, so the same puts are patient in every
+/// build. At the default a message that finds no room in a millisecond is dropped by policy,
+/// which a host loaded enough to delay the writer by that much turns into a short count (4461
+/// and 4434 of 4500 were measured on build hosts). The drop policy is another test's subject.
+const PATIENT_WAIT_BEFORE_DROP_US: u64 = 60_000_000;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
@@ -116,9 +86,11 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
     };
     let init_open = async {
         let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        let mut params = fixture_params_with_zid(0x01);
+        params.tx_queue.wait_before_drop_us = PATIENT_WAIT_BEFORE_DROP_US;
         connect_and_open_session_with_qos(
             locator,
-            fixture_params_with_zid(0x01),
+            params,
             &DialConfig::default(),
             TokioTime::new(),
             Some(ITER_CAP),
@@ -190,10 +162,9 @@ async fn a_burst_over_a_packing_stream_writer_arrives_whole_and_in_order() {
         tokio::task::spawn_blocking(move || {
             for index in 0..PER_LANE {
                 for (keyexpr, priority) in LANES {
-                    // BLOCKING, not droppable (measured on a build host at load 50: 4461
-                    // of 4500 with the droppable put, five clean runs on an idle one). The
-                    // drop policy is another test's subject.
-                    put_blocking(&init_actions, keyexpr, &payload_of(index), priority);
+                    init_actions
+                        .send_push_literal_qos(keyexpr, &payload_of(index), true, priority)
+                        .expect("a burst publish routes through the QoS send seam");
                 }
             }
         })
