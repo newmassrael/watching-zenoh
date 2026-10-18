@@ -460,7 +460,6 @@ fn measure(scenario: Scenario) -> Window {
     window
 }
 
-// wz-proves: none -- a cost measurement of wz against itself; no reference implementation is involved
 #[test]
 #[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router, holds up to 2048 local sessions; run with --ignored --nocapture"]
 fn wz_router_hat_cost_per_message_against_subscribers_and_churn() {
@@ -501,7 +500,6 @@ fn wz_router_hat_cost_per_message_against_subscribers_and_churn() {
 /// forwards; this is the shape of a burstable micro VM under steal. What is asserted is the count of
 /// faces that went DOWN in the window (zero): the control plane (keepalive, lease) is not starved by
 /// the data it is shedding. How much it forwards is printed, not asserted.
-// wz-proves: none -- a cost measurement of wz against itself; no reference implementation is involved
 #[test]
 #[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router and four CPU hogs, holds 2048 local sessions; run with --ignored --nocapture"]
 fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
@@ -525,7 +523,6 @@ fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
 /// arrive. Sixteen short-lived sessions a second knock on a router that has a fraction of a core and
 /// 2048 busy faces; the count admitted out of the count attempted is printed, not asserted, because
 /// what a router in that state SHOULD admit is a design question this run puts a number to.
-// wz-proves: none -- a cost measurement of wz against itself; no reference implementation is involved
 #[test]
 #[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router and four CPU hogs, holds 2048 local sessions; run with --ignored --nocapture"]
 fn wz_router_hat_admission_when_overloaded_and_short_of_cpu() {
