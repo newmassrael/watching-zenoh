@@ -2459,10 +2459,16 @@ pub struct TcpDriver {
 /// `ReadState<RecycledBuf>` and the state graph below is identical.
 #[cfg(feature = "transport-link-tcp")]
 pub(crate) enum ReadState<B = Vec<u8>> {
-    /// No partial read in flight. Next `poll_event` enters `Length` and begins
-    /// reading the length prefix, whose WIDTH (2-byte u16 universal / 4-byte u32
-    /// lowlatency) is fixed from the link's lowlatency flag at that transition.
+    /// No partial read in flight and nothing read ahead. The next `poll_event`
+    /// reads a frame's first bytes into a `Lead`, whose WIDTH of prefix (2-byte
+    /// u16 universal / 4-byte u32 lowlatency) is fixed from the link's lowlatency
+    /// flag when the bytes are taken.
     Idle,
+    /// Bytes already read from the stream, not yet taken as frames: the lead of
+    /// the frame to read next, which a read ahead brought in beside the frame
+    /// before it. Taken before the stream is read again. Boxed: it is the rare state, and the
+    /// 500 bytes it holds would otherwise be in every link's read state.
+    IdleWith { lead: Box<Lead> },
     /// Length prefix partially read. `prefix[..offset]` holds the bytes consumed
     /// so far; `offset < width` (`width` is 2 or 4). Once `offset == width`, the
     /// prefix is decoded and the state transitions to `Payload` with a sized
@@ -2484,6 +2490,55 @@ pub(crate) enum ReadState<B = Vec<u8>> {
         offset: usize,
         prefix_width: usize,
     },
+}
+
+/// How many bytes one read of a frame's start takes from the stream.
+///
+/// A frame was read as its length prefix, then its payload, then (the next frame's prefix)
+/// a read that found nothing: three system calls for one small frame, where a peer that
+/// sends a request and waits for the reply pays every one of them in its round trip. One
+/// read of this many bytes takes the whole of a frame this small, and the stream's
+/// readiness is cleared by the short read (tokio takes a read that fills less than its
+/// buffer to have drained the socket), so the next call waits without a system call.
+///
+/// A frame larger than this takes its first bytes here and the rest by a read straight
+/// into its own buffer, as before, with one read fewer. The bytes of a following frame
+/// that the read brought in wait in `ReadState::IdleWith`.
+#[cfg(feature = "transport-link-tcp")]
+const LEAD_BYTES: usize = 512;
+
+/// Bytes read from a stream that belong to the frames not yet taken, from `start` to `end`.
+#[cfg(feature = "transport-link-tcp")]
+pub(crate) struct Lead {
+    bytes: [u8; LEAD_BYTES],
+    start: usize,
+    end: usize,
+}
+
+#[cfg(feature = "transport-link-tcp")]
+impl Lead {
+    fn empty() -> Self {
+        Self {
+            bytes: [0; LEAD_BYTES],
+            start: 0,
+            end: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// The next `n` bytes, which are taken: `n` is at most `len`.
+    fn take(&mut self, n: usize) -> &[u8] {
+        let from = self.start;
+        self.start += n;
+        &self.bytes[from..from + n]
+    }
 }
 
 /// Written out rather than derived: `#[derive(Default)]` on a generic enum
@@ -2585,17 +2640,80 @@ where
     // be storage a frame can be a range of.
     A::Buf: RxStorage + 'static,
 {
+    // What a frame that came whole out of a read ahead left behind: the bytes of the frames
+    // after it. Set and used in one call with no await between (the frame completes the
+    // moment it is built), so it is never lost to a cancellation.
+    let mut left_over: Option<Box<Lead>> = None;
     loop {
         match read_state {
-            ReadState::Idle => {
+            ReadState::Idle | ReadState::IdleWith { .. } => {
+                // The start of the next frame: what an earlier read brought beyond the frame
+                // before it, or else one read for it, its prefix and the payload behind it
+                // when the frame is small (see `LEAD_BYTES`). Only the read awaits, and
+                // nothing has been taken out of the state when it does, so a cancellation
+                // loses nothing; what it returns is used at once, with no await after it.
+                let mut lead = match std::mem::replace(read_state, ReadState::Idle) {
+                    ReadState::IdleWith { lead } => *lead,
+                    _ => {
+                        let mut lead = Lead::empty();
+                        match src.read(&mut lead.bytes[..]).await {
+                            Ok(0) => {
+                                // REACHED-BY: a_stream_that_ends_before_the_prefix_loses_the_link (PeerClosed)
+                                return LinkEvent::Lost {
+                                    cause: LostCause::PeerClosed,
+                                };
+                            }
+                            Ok(n) => lead.end = n,
+                            Err(_) => {
+                                // REACHED-BY: an_io_error_reading_the_prefix_loses_the_link (OsError)
+                                return LinkEvent::Lost {
+                                    cause: LostCause::OsError,
+                                };
+                            }
+                        }
+                        lead
+                    }
+                };
                 // The width is fixed HERE, at frame start, so a flag flip
                 // between frames never splits a prefix mid-read. Which width
                 // that is, is `prefix_width`'s to say.
-                let width = prefix_width(lowlatency);
-                *read_state = ReadState::Length {
-                    prefix: [0u8; 4],
-                    offset: 0,
-                    width,
+                let w = prefix_width(lowlatency);
+                let mut prefix = [0u8; 4];
+                if lead.len() < w {
+                    // The prefix is cut by the end of what was read: the rest of it is the
+                    // next read, which the `Length` state makes.
+                    let have = lead.len();
+                    prefix[..have].copy_from_slice(lead.take(have));
+                    *read_state = ReadState::Length {
+                        prefix,
+                        offset: have,
+                        width: w,
+                    };
+                    continue;
+                }
+                prefix[..w].copy_from_slice(lead.take(w));
+                // R2747 — the decode is [`link_rx_window::decode_prefix`], as in the
+                // `Length` arm below, where the bound on it is argued.
+                let payload_len = link_rx_window::decode_prefix(&prefix, w);
+                if payload_len > u16::MAX as usize {
+                    // REACHED-BY: lowlatency_rx_rejects_oversize_u32_prefix (PeerClosed)
+                    return LinkEvent::Lost {
+                        cause: LostCause::PeerClosed,
+                    };
+                }
+                let mut frame = arena.take(w + payload_len);
+                frame.as_mut()[..w].copy_from_slice(&prefix[..w]);
+                // As much of the payload as the read brought: all of it for a small frame,
+                // and then the frame is complete without another read.
+                let have = lead.len().min(payload_len);
+                frame.as_mut()[w..w + have].copy_from_slice(lead.take(have));
+                if !lead.is_empty() {
+                    left_over = Some(Box::new(lead));
+                }
+                *read_state = ReadState::Payload {
+                    frame,
+                    offset: w + have,
+                    prefix_width: w,
                 };
             }
             ReadState::Length {
@@ -2605,7 +2723,7 @@ where
             } => match src.read(&mut prefix[*offset..*width]).await {
                 Ok(0) => {
                     *read_state = ReadState::Idle;
-                    // REACHED-BY: a_stream_that_ends_before_the_prefix_loses_the_link (PeerClosed)
+                    // REACHED-BY: a_stream_that_ends_inside_the_prefix_loses_the_link (PeerClosed)
                     return LinkEvent::Lost {
                         cause: LostCause::PeerClosed,
                     };
@@ -2655,7 +2773,7 @@ where
                 }
                 Err(_) => {
                     *read_state = ReadState::Idle;
-                    // REACHED-BY: an_io_error_reading_the_prefix_loses_the_link (OsError)
+                    // REACHED-BY: an_io_error_inside_the_prefix_loses_the_link (OsError)
                     return LinkEvent::Lost {
                         cause: LostCause::OsError,
                     };
@@ -2768,6 +2886,11 @@ where
                     else {
                         unreachable!("this arm matched `ReadState::Payload`");
                     };
+                    // What the read ahead brought beyond this frame is the lead of the next
+                    // one, whether this frame is returned or skipped as empty.
+                    if let Some(lead) = left_over.take() {
+                        *read_state = ReadState::IdleWith { lead };
+                    }
                     if empty {
                         continue;
                     }
@@ -3892,6 +4015,138 @@ mod poll_framed_lowlatency_tests {
             ),
             "a failed payload read is OsError, got {ev:?}"
         );
+    }
+
+    /// A reader that hands over at most `max` bytes per read, so a prefix or a payload is
+    /// cut wherever the test wants: the shape a stream has when the peer's writes arrive in
+    /// pieces.
+    struct Chunked {
+        bytes: Vec<u8>,
+        cursor: usize,
+        max: usize,
+    }
+
+    impl tokio::io::AsyncRead for Chunked {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let end = (self.cursor + buf.remaining().min(self.max)).min(self.bytes.len());
+            let chunk = &self.bytes[self.cursor..end];
+            buf.put_slice(chunk);
+            self.cursor = end;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The `Ok(0)` refusal INSIDE the length prefix: one byte of a two-byte prefix, then
+    /// EOF. The read of the start of a frame returns the byte, the prefix is cut by it, and
+    /// the read that should complete it finds the stream closed.
+    #[tokio::test]
+    async fn a_stream_that_ends_inside_the_prefix_loses_the_link() {
+        let mut src: &[u8] = &[0x05];
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, false, &mut HeapArena).await;
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::PeerClosed
+                }
+            ),
+            "EOF inside the prefix is PeerClosed, got {ev:?}"
+        );
+        assert!(
+            matches!(st, ReadState::Idle),
+            "a half-read prefix must not survive into the next read"
+        );
+    }
+
+    /// The `Err(_)` refusal INSIDE the length prefix: `failing_after: 1` gives one byte of
+    /// the prefix and fails the read that would have given the other.
+    #[tokio::test]
+    async fn an_io_error_inside_the_prefix_loses_the_link() {
+        let mut src = FailingReader {
+            bytes: vec![0x02, 0x00, 0xAA, 0xBB],
+            cursor: 0,
+            failing_after: 1,
+        };
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, false, &mut HeapArena).await;
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::OsError
+                }
+            ),
+            "a failed read inside the prefix is OsError, got {ev:?}"
+        );
+    }
+
+    /// The u32 prefix of the lowlatency framing cut after its first byte, and over the
+    /// bound once whole: refused before anything is allocated, on the path a prefix takes
+    /// when it arrives in pieces as it does on the path where it arrives whole
+    /// (`lowlatency_rx_rejects_oversize_u32_prefix`).
+    #[tokio::test]
+    async fn an_oversize_prefix_that_arrives_in_pieces_is_refused_too() {
+        let mut src = Chunked {
+            bytes: vec![0x00, 0x00, 0x01, 0x00],
+            cursor: 0,
+            max: 1,
+        };
+        let mut st = ReadState::Idle;
+        let ev = poll_framed(&mut st, &mut src, true, &mut HeapArena).await;
+        assert!(
+            matches!(
+                ev,
+                LinkEvent::Lost {
+                    cause: LostCause::PeerClosed
+                }
+            ),
+            "an over-max prefix is PeerClosed however it arrives, got {ev:?}"
+        );
+    }
+
+    /// The frames of one stream, small ones and an empty batch and one longer than a read
+    /// ahead takes, wherever the stream is cut: whole in one read, and in pieces of one, two,
+    /// three and seven bytes. Every cut must give the same payloads in the same order, and
+    /// then the stream's end. This is the property the read ahead must keep: the bytes it
+    /// takes beyond a frame are the next frame's, not lost and not repeated.
+    #[tokio::test]
+    async fn the_frames_of_a_stream_come_out_the_same_wherever_the_reads_cut_it() {
+        // 0 is the empty batch, which is skipped; 600 is longer than `LEAD_BYTES`.
+        let sizes = [1usize, 3, 0, 5, 600, 2, 511, 1, 510, 2];
+        let mut wire = Vec::new();
+        let mut expected: Vec<Vec<u8>> = Vec::new();
+        for (i, size) in sizes.iter().enumerate() {
+            let payload: Vec<u8> = (0..*size).map(|b| (b + i) as u8).collect();
+            wire.extend_from_slice(&(*size as u16).to_le_bytes());
+            wire.extend_from_slice(&payload);
+            if *size > 0 {
+                expected.push(payload);
+            }
+        }
+        for max in [usize::MAX, 1, 2, 3, 7, 64, 513] {
+            let mut src = Chunked {
+                bytes: wire.clone(),
+                cursor: 0,
+                max,
+            };
+            let mut st = ReadState::Idle;
+            let mut got: Vec<Vec<u8>> = Vec::new();
+            loop {
+                match poll_framed(&mut st, &mut src, false, &mut HeapArena).await {
+                    LinkEvent::Rx(rx) => got.push(rx.bytes.to_vec()),
+                    LinkEvent::Lost {
+                        cause: LostCause::PeerClosed,
+                    } => break,
+                    other => panic!("max {max}: unexpected {other:?}"),
+                }
+            }
+            assert_eq!(got, expected, "max {max}: the frames differ");
+        }
     }
 
     /// R2288 (open-debt item 610) — THE CONTRACT THAT REPLACES THE DEAD ARM.
