@@ -100,6 +100,22 @@ impl EncodingState {
         Self::constant(wz_capi_core::encoding_ids::ENCODING_ID_DEFAULT as usize)
     }
 
+    /// Whether this is the state [`Self::default_encoding`] makes: the table's own `'static`
+    /// label, not a heap state and not a label that merely reads the same.
+    pub(crate) fn is_default(&self) -> bool {
+        match &self.label {
+            Cow::Borrowed(label) => {
+                !self.heap
+                    && std::ptr::eq(
+                        *label,
+                        wz_capi_core::encoding_ids::ENCODING_ID_TO_STR
+                            [wz_capi_core::encoding_ids::ENCODING_ID_DEFAULT as usize],
+                    )
+            }
+            Cow::Owned(_) => false,
+        }
+    }
+
     /// R311y568 — an INDEPENDENT copy for a marshal that outlives its callback.
     ///
     /// Never `heap`, for the same reason [`Self::from_hint`] is not: the copy is

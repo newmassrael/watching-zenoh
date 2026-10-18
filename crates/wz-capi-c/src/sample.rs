@@ -267,21 +267,42 @@ impl SampleMarshal {
         self.keyexpr.keyexpr.push_str(view.keyexpr());
         self.keyexpr.mapping = None;
         self.payload.reset(payload_of(view));
-        self.attachment = view
-            .attachment()
-            .map(|bytes| BytesState::whole(bytes.to_vec()));
+        // A stream's samples carry no attachment and no source info, and the default encoding,
+        // sample after sample, so each of those is written only when this sample differs from
+        // the last: assigning "nothing" over "nothing" was the larger part of this function.
+        // The cached views point at the fields, which do not move, so they are bound again
+        // only when a field's presence or value changed under one of them.
+        let mut rebind = false;
+        match view.attachment() {
+            Some(bytes) => {
+                self.attachment = Some(BytesState::whole(bytes.to_vec()));
+                rebind = true;
+            }
+            None => rebind |= self.attachment.take().is_some(),
+        }
         self.kind = sample_kind_of(view.kind());
         self.timestamp = view
             .timestamp()
             .map(crate::timestamp::z_timestamp_t::from_hint);
-        self.source_info = view.source_info().cloned();
-        self.encoding = match view.encoding() {
-            Some(hint) => EncodingState::from_hint(hint),
-            None => EncodingState::default_encoding(),
-        };
+        match view.source_info() {
+            Some(info) => {
+                self.source_info = Some(info.clone());
+                rebind = true;
+            }
+            None => rebind |= self.source_info.take().is_some(),
+        }
+        match view.encoding() {
+            Some(hint) => self.encoding = EncodingState::from_hint(hint),
+            None if !self.encoding.is_default() => {
+                self.encoding = EncodingState::default_encoding()
+            }
+            None => {}
+        }
         self.qos = view.qos();
         self.reliability = Some(view.reliability());
-        self.bind();
+        if rebind {
+            self.bind();
+        }
     }
 }
 
@@ -834,6 +855,111 @@ mod tests {
                         z_string_len(loaned),
                     );
                     assert_eq!(text, key.as_bytes());
+                }
+            });
+        }
+    }
+
+    /// A view that can carry an encoding and a source info, the two metadata a kept marshal
+    /// now writes only when a sample differs from the one before it.
+    struct RichView<'a> {
+        keyexpr: &'a str,
+        payload: &'a [u8],
+        encoding: Option<EncodingHint>,
+        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    }
+
+    impl SampleView for RichView<'_> {
+        fn keyexpr(&self) -> &str {
+            self.keyexpr
+        }
+        fn payload(&self) -> &[u8] {
+            self.payload
+        }
+        fn kind(&self) -> SampleKind {
+            SampleKind::Put
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn encoding(&self) -> Option<&EncodingHint> {
+            self.encoding.as_ref()
+        }
+        fn source_info(&self) -> Option<&wz_runtime_tokio::sample::SourceInfo> {
+            self.source_info.as_ref()
+        }
+    }
+
+    /// The encoding a sample reports, rendered, as a C program reads it.
+    unsafe fn encoding_text(sample: *const z_loaned_sample_t) -> Vec<u8> {
+        let mut out = crate::abi::z_owned_string_t::null_value();
+        crate::encoding::z_encoding_to_string(z_sample_encoding(sample), &mut out);
+        let loaned = crate::string::z_string_loan(&out);
+        let text =
+            std::slice::from_raw_parts(z_string_data(loaned) as *const u8, z_string_len(loaned))
+                .to_vec();
+        let mut moved = crate::abi::z_moved_string_t { _this: out };
+        z_string_drop(&mut moved);
+        text
+    }
+
+    /// A kept marshal writes the encoding and the source info only when a sample differs from
+    /// the last, and reads as each sample all the same: a sample that has them, one that has
+    /// none after it, the same one again, and a different one. The first sample's absence is
+    /// the default encoding, which is what an absent E-flag means.
+    #[test]
+    fn a_kept_marshal_follows_the_encoding_and_the_source_info_of_each_sample() {
+        use wz_runtime_tokio::sample::SourceInfo;
+        let text = EncodingHint {
+            packed_id: wz_capi_core::encoding_ids::lookup_id("text/plain")
+                .map(|id| (id as u32) << 1)
+                .expect("text/plain is in the table"),
+            schema: None,
+        };
+        let samples = [
+            (None, None),
+            (Some(text.clone()), Some(SourceInfo::new(&[7; 4], 3, 11))),
+            (None, None),
+            (Some(text.clone()), Some(SourceInfo::new(&[7; 4], 3, 12))),
+            (Some(text), None),
+            (None, Some(SourceInfo::new(&[9; 2], 1, 99))),
+            (None, None),
+        ];
+        let mut kept = MarshalCache::new();
+        for (index, (encoding, source_info)) in samples.into_iter().enumerate() {
+            let view = RichView {
+                keyexpr: "k",
+                payload: b"p",
+                encoding: encoding.clone(),
+                source_info,
+            };
+            let want = match encoding.as_ref() {
+                Some(hint) => wz_capi_core::encoding_ids::hint_to_string_in(
+                    hint,
+                    wz_capi_core::encoding_ids::EncodingDialect::ZenohC,
+                )
+                .into_bytes(),
+                None => b"zenoh/bytes".to_vec(),
+            };
+            kept.with_view(&view, |sample| {
+                // SAFETY: `sample` is the kept marshal's borrowed view, live for this call.
+                unsafe {
+                    assert_eq!(encoding_text(sample), want, "sample {index}: its encoding");
+                    let info = z_sample_source_info(sample);
+                    match view.source_info.as_ref() {
+                        Some(expected) => {
+                            assert!(
+                                !info.is_null(),
+                                "sample {index}: source info carried but absent"
+                            );
+                            assert_eq!(
+                                crate::source_info::z_source_info_sn(info),
+                                expected.sn,
+                                "sample {index}: its source sequence number"
+                            );
+                        }
+                        None => assert!(info.is_null(), "sample {index}: a stale source info"),
+                    }
                 }
             });
         }
