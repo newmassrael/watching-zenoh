@@ -155,6 +155,21 @@ impl Bounds {
         }
     }
 
+    /// Make the boundaries the one slice that ends at `end`, as [`Self::clear`] then
+    /// [`Self::push`] leave them, in one step: the payload of nearly every message, whose
+    /// bounds were already one slice's, is a store of one number.
+    #[inline]
+    fn set_single(&mut self, end: usize) {
+        match self {
+            Bounds::One(slot) => slot[0] = end,
+            Bounds::Many(ends) => {
+                ends.clear();
+                ends.push(end);
+            }
+            Bounds::Empty => *self = Bounds::One([end]),
+        }
+    }
+
     /// Append the end of the next slice.
     fn push(&mut self, end: usize) {
         match self {
@@ -227,14 +242,14 @@ impl BytesState {
     /// The slice boundaries of `payload`, written into `bounds` (emptied first): one per
     /// slice kept apart, none for an empty payload, one whole otherwise.
     fn fill_bounds(payload: &Payload, bounds: &mut Bounds) {
-        bounds.clear();
         match payload {
             Payload::Shared(bytes) => match bytes.single_run_len() {
                 // One run, as nearly every payload is: its one boundary, with no iterator
                 // built and walked for it (an empty run has none).
-                Some(0) => {}
-                Some(len) => bounds.push(len),
+                Some(0) => bounds.clear(),
+                Some(len) => bounds.set_single(len),
                 None => {
+                    bounds.clear();
                     let mut end = 0usize;
                     for slice in bytes.slices() {
                         end += slice.len();
@@ -242,8 +257,8 @@ impl BytesState {
                     }
                 }
             },
-            _ if payload.is_empty() => {}
-            _ => bounds.push(payload.len()),
+            _ if payload.is_empty() => bounds.clear(),
+            _ => bounds.set_single(payload.len()),
         }
     }
 
@@ -1694,6 +1709,31 @@ mod received_slices_tests {
             storage.as_slice().as_ptr()
         );
         assert!(state.slice(1).is_none());
+    }
+
+    #[test]
+    fn refilling_bounds_leaves_exactly_the_new_payloads_boundaries() {
+        let (_, a) = page(b"abc");
+        let (_, b) = page(b"de");
+        let two = Payload::Shared(RxBytes::sliced(vec![a, b]));
+        let (_, c) = page(b"fghi");
+        let one = Payload::Shared(c);
+        let empty = Payload::Shared(RxBytes::sliced(Vec::new()));
+
+        // Every order of the three, from every state the boundaries can be in.
+        let mut bounds = Bounds::Empty;
+        for payload in [&two, &one, &empty, &one, &two, &empty, &two, &one, &one] {
+            BytesState::fill_bounds(payload, &mut bounds);
+            let mut expected = Vec::new();
+            let mut end = 0;
+            if let Payload::Shared(bytes) = payload {
+                for slice in bytes.slices() {
+                    end += slice.len();
+                    expected.push(end);
+                }
+            }
+            assert_eq!(bounds.as_slice(), expected.as_slice());
+        }
     }
 }
 
