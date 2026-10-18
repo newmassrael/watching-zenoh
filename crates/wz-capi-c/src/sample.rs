@@ -180,6 +180,10 @@ pub(crate) struct SampleMarshal {
     qos: Option<QosLevel>,
     /// R311y568 — the carrying frame's link-layer reliability.
     reliability: Option<wz_runtime_tokio::Reliability>,
+    /// Whether the fields above are those of a plain Put ([`SampleView::is_plain_put`]): a
+    /// Put with no attachment, timestamp, source info or encoding. Only [`Self::reload`] sets
+    /// it, from the sample it loaded; a marshal that was built, not reloaded, says no.
+    plain: bool,
     loaned_keyexpr: z_loaned_keyexpr_t,
     loaned_payload: z_loaned_bytes_t,
     loaned_attachment: z_loaned_bytes_t,
@@ -212,6 +216,7 @@ impl SampleMarshal {
             },
             qos: meta.qos,
             reliability: meta.reliability,
+            plain: false,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),
@@ -270,6 +275,15 @@ impl SampleMarshal {
             self.keyexpr.mapping = None;
         }
         self.payload.reset(payload_of(view));
+        // A plain Put after a plain Put differs from it in the QoS and the reliability and in
+        // nothing else: the other fields are already what the general path below would write.
+        let plain = view.is_plain_put();
+        if plain && self.plain {
+            self.qos = view.qos();
+            self.reliability = Some(view.reliability());
+            return;
+        }
+        self.plain = plain;
         // A stream's samples carry no attachment and no source info, and the default encoding,
         // sample after sample, so each of those is written only when this sample differs from
         // the last: assigning "nothing" over "nothing" was the larger part of this function.
@@ -1032,6 +1046,129 @@ mod tests {
         }
     }
 
+    /// A view that is a plain Put when `plain` says so, and carries whatever else it was built
+    /// with when it does not, with a QoS of its own.
+    struct MixedView {
+        plain: bool,
+        qos: Option<QosLevel>,
+        delete: bool,
+        attachment: Option<&'static [u8]>,
+        encoding: Option<EncodingHint>,
+        source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    }
+
+    impl SampleView for MixedView {
+        fn keyexpr(&self) -> &str {
+            "k"
+        }
+        fn payload(&self) -> &[u8] {
+            b"p"
+        }
+        fn kind(&self) -> SampleKind {
+            if self.delete {
+                SampleKind::Del
+            } else {
+                SampleKind::Put
+            }
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn qos(&self) -> Option<QosLevel> {
+            self.qos
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            self.attachment
+        }
+        fn encoding(&self) -> Option<&EncodingHint> {
+            self.encoding.as_ref()
+        }
+        fn source_info(&self) -> Option<&wz_runtime_tokio::sample::SourceInfo> {
+            self.source_info.as_ref()
+        }
+        fn is_plain_put(&self) -> bool {
+            self.plain
+        }
+    }
+
+    /// A kept marshal that skips the fields a plain Put does not vary reads, after a plain Put
+    /// that follows a plain Put, a sample that has none of them and its own QoS, and after a
+    /// sample that is not plain follows it, nothing of what that one carried.
+    #[test]
+    fn a_kept_marshal_follows_plain_puts_and_the_samples_between_them() {
+        use wz_runtime_tokio::sample::SourceInfo;
+        let text = EncodingHint {
+            packed_id: wz_capi_core::encoding_ids::lookup_id("text/plain")
+                .map(|id| (id as u32) << 1)
+                .expect("text/plain is in the table"),
+            schema: None,
+        };
+        let plain = |qos| MixedView {
+            plain: true,
+            qos,
+            delete: false,
+            attachment: None,
+            encoding: None,
+            source_info: None,
+        };
+        let rich = |delete, attachment, encoding, source_info| MixedView {
+            plain: false,
+            qos: None,
+            delete,
+            attachment,
+            encoding,
+            source_info,
+        };
+        let views = [
+            plain(Some(QosLevel::from_raw(0x1a))),
+            plain(Some(QosLevel::from_raw(0x05))),
+            plain(None),
+            rich(
+                true,
+                Some(&b"ATT"[..]),
+                Some(text.clone()),
+                Some(SourceInfo::new(&[7; 4], 3, 11)),
+            ),
+            plain(Some(QosLevel::from_raw(0x1a))),
+            plain(Some(QosLevel::from_raw(0x05))),
+            rich(false, None, None, Some(SourceInfo::new(&[9; 2], 1, 2))),
+            plain(None),
+            rich(false, Some(&b"X"[..]), None, None),
+            rich(false, None, Some(text), None),
+            plain(Some(QosLevel::from_raw(0x1a))),
+        ];
+        let mut kept = MarshalCache::new();
+        for (index, view) in views.iter().enumerate() {
+            kept.with_view(view, |sample| {
+                // SAFETY: `sample` is the kept marshal's borrowed view, live for this call.
+                let m = unsafe { marshal(sample) }.expect("a live sample");
+                assert_eq!(m.qos, view.qos, "sample {index}: its QoS");
+                assert_eq!(
+                    m.attachment.is_some(),
+                    view.attachment.is_some(),
+                    "sample {index}: its attachment"
+                );
+                assert_eq!(
+                    m.source_info.is_some(),
+                    view.source_info.is_some(),
+                    "sample {index}: its source info"
+                );
+                assert_eq!(
+                    m.encoding.is_default(),
+                    view.encoding.is_none(),
+                    "sample {index}: its encoding"
+                );
+                let want = if view.delete {
+                    Z_SAMPLE_KIND_DELETE
+                } else {
+                    Z_SAMPLE_KIND_PUT
+                };
+                assert_eq!(m.kind, want, "sample {index}: its kind");
+                assert!(m.timestamp.is_none(), "sample {index}: no timestamp");
+            });
+        }
+    }
+
     /// NULL is the absence signal upstream's `z_sub.c` branches on, so a sample
     /// with no attachment must not hand back an empty-but-present blob. This is
     /// the arm the interop legs DO cover (they publish without attachments), and
@@ -1111,6 +1248,7 @@ impl SampleMarshal {
             encoding: self.encoding.deep_copy(),
             qos: self.qos,
             reliability: self.reliability,
+            plain: false,
             loaned_keyexpr: z_loaned_keyexpr_t::null_value(),
             loaned_payload: z_loaned_bytes_t::null_value(),
             loaned_attachment: z_loaned_bytes_t::null_value(),

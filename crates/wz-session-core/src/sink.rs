@@ -155,6 +155,14 @@ pub trait SampleView {
     fn keyexpr_unchanged(&self) -> bool {
         false
     }
+    /// Whether this sample is a plain Put: kind `Put`, and no attachment, timestamp, source
+    /// info or encoding, so that every accessor of those answers as it does for a sample that
+    /// has none. A callback that kept the fields of the sample before may then read only what
+    /// a plain Put still varies in (its QoS and reliability). The default is `false`, which is
+    /// always right.
+    fn is_plain_put(&self) -> bool {
+        false
+    }
 }
 
 /// A [`SampleView`] over loose borrowed bytes — the canonical impl for a
@@ -323,6 +331,10 @@ impl SampleView for PlainSample<'_> {
     }
     fn keyexpr_unchanged(&self) -> bool {
         self.key_unchanged
+    }
+    fn is_plain_put(&self) -> bool {
+        // A plain `Put` of a frame has nothing else: its accessors are the defaults.
+        true
     }
 }
 
