@@ -352,43 +352,61 @@ impl<C: SampleSink> SubscriberTable<C> {
         // bytes are compared with the last ones instead of being checked as UTF-8 again.
         let mut last_suffix: Option<(&[u8], &str)> = None;
         let frame_bytes = frame.as_slice();
+        // The key of the record just delivered, kept as text. The reader says when a record
+        // names the same key as the one before it ([`PlainPut::repeats_key`]), and then that
+        // text is the key: it is not composed again, and the sample is marked as repeating so
+        // that the match against the subscribers and a sink's list of keys are not redone
+        // either. `current_is_set` is false until a record has been delivered, and after one
+        // that was dropped, so a repeat never rests on a key that was not.
+        let mut current = alloc::string::String::new();
+        let mut current_is_set = false;
         for put in puts {
-            let suffix = match put.suffix {
-                Some((from, to)) => {
-                    let bytes = &frame_bytes[from as usize..to as usize];
-                    match last_suffix {
-                        Some((held, text)) if held == bytes => Some(text),
-                        _ => match core::str::from_utf8(bytes) {
-                            Ok(text) => {
-                                last_suffix = Some((bytes, text));
-                                Some(text)
-                            }
-                            // The reader validated it; a frame that changed under it is
-                            // dropped.
-                            Err(_) => continue,
-                        },
+            let repeats = put.repeats_key && current_is_set;
+            if !repeats {
+                current_is_set = false;
+                let suffix = match put.suffix {
+                    Some((from, to)) => {
+                        let bytes = &frame_bytes[from as usize..to as usize];
+                        match last_suffix {
+                            Some((held, text)) if held == bytes => Some(text),
+                            _ => match core::str::from_utf8(bytes) {
+                                Ok(text) => {
+                                    last_suffix = Some((bytes, text));
+                                    Some(text)
+                                }
+                                // The reader validated it; a frame that changed under it is
+                                // dropped.
+                                Err(_) => continue,
+                            },
+                        }
                     }
-                }
-                None => None,
-            };
-            let mut composed = KeyexprBuf::new();
-            let keyexpr = match crate::wireexpr_resolve::resolve_plain_parts(
-                put.sender_mapping,
-                put.id,
-                suffix,
-                spaces,
-                &mut composed,
-            ) {
-                Ok(Some(keyexpr)) => keyexpr,
-                // Undeclared id or empty key; the growable backing never answers past-bound.
-                Ok(None) | Err(KeyexprPastBound) => continue,
-            };
+                    None => None,
+                };
+                let mut composed = KeyexprBuf::new();
+                let keyexpr = match crate::wireexpr_resolve::resolve_plain_parts(
+                    put.sender_mapping,
+                    put.id,
+                    suffix,
+                    spaces,
+                    &mut composed,
+                ) {
+                    Ok(Some(keyexpr)) => keyexpr,
+                    // Undeclared id or empty key; the growable backing never answers past-bound.
+                    Ok(None) | Err(KeyexprPastBound) => continue,
+                };
+                current.clear();
+                current.push_str(keyexpr);
+                current_is_set = true;
+            }
             #[cfg(feature = "pubsub-qos")]
             let qos = put.qos.map(QosLevel::from_raw);
             #[cfg(not(feature = "pubsub-qos"))]
             let qos: Option<QosLevel> = None;
-            let sample =
-                crate::sink::PlainSample::new(keyexpr, frame, put.payload, reliability, qos);
+            let mut sample =
+                crate::sink::PlainSample::new(&current, frame, put.payload, reliability, qos);
+            if repeats {
+                sample = sample.repeating_the_previous_key();
+            }
             self.fire_plain_to_subscribers(&sample, true);
         }
         // The frame is done with this table: a sink that gathered its samples hands over.

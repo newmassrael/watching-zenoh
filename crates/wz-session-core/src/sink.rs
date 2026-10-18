@@ -214,6 +214,7 @@ pub struct PlainSample<'s> {
     reliability: Reliability,
     qos: Option<crate::sample::QosLevel>,
     shared: core::cell::OnceCell<Option<crate::link::RxBytes>>,
+    repeats_previous: bool,
 }
 
 #[cfg(feature = "alloc")]
@@ -233,7 +234,24 @@ impl<'s> PlainSample<'s> {
             reliability,
             qos,
             shared: core::cell::OnceCell::new(),
+            repeats_previous: false,
         }
+    }
+
+    /// Say that this sample's key is the key of the sample offered just before it in the same
+    /// frame, to every sink of the table alike. A caller sets it only when that is so, and a
+    /// sink that keeps a list of keys may then reuse the entry it used for the sample before
+    /// instead of looking the key up again.
+    #[must_use]
+    pub fn repeating_the_previous_key(mut self) -> Self {
+        self.repeats_previous = true;
+        self
+    }
+
+    /// Whether this sample's key is the previous sample's, as the caller said
+    /// ([`Self::repeating_the_previous_key`]).
+    pub fn repeats_previous_key(&self) -> bool {
+        self.repeats_previous
     }
 
     /// The frame the sample arrived in, whose storage a sink may take a reference to.

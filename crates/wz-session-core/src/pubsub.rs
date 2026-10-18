@@ -1992,6 +1992,7 @@ impl<C: SampleSink> SubscriberTable<C> {
                 self.epoch,
                 view.keyexpr(),
                 is_remote,
+                false,
                 |sink| sink.deliver(view),
             )
         }
@@ -2018,6 +2019,7 @@ impl<C: SampleSink> SubscriberTable<C> {
             self.epoch,
             sample.keyexpr(),
             is_remote,
+            sample.repeats_previous_key(),
             |sink| sink.deliver_plain(sample),
         )
     }
@@ -2053,6 +2055,12 @@ struct MemoSlot {
 #[cfg(feature = "alloc")]
 struct MatchMemo {
     slots: [Option<MemoSlot>; MEMO_SLOTS],
+    /// How many times a slot was written. A repeated key may be answered from the slot the key
+    /// before it was, but only while no slot has been written since.
+    writes: u64,
+    /// The slot the last delivery was answered from, and `writes` as it was then; `None` when
+    /// that delivery was not answered from a slot at all (a key too deep to match).
+    last: Option<(usize, u64)>,
 }
 
 #[cfg(feature = "alloc")]
@@ -2060,6 +2068,8 @@ impl MatchMemo {
     fn new() -> Self {
         Self {
             slots: core::array::from_fn(|_| None),
+            writes: 0,
+            last: None,
         }
     }
 
@@ -2081,6 +2091,12 @@ impl MatchMemo {
 ///
 /// The subscribers fired and the order they fire in are `fire_into`'s: the matched positions
 /// are kept ascending, which is the table's order.
+///
+/// `repeats_previous` is the caller's word that `key` is the key of the delivery just before this
+/// one (the next record of a frame naming the same key). Then, when that delivery was answered
+/// from a slot and no slot has been written nor the table changed since, this one is answered
+/// from the same slot without hashing the key or comparing it again; anything else is looked up
+/// as usual.
 #[cfg(feature = "alloc")]
 fn fire_into_memoized<C: SampleSink>(
     subscribers: &mut BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
@@ -2088,11 +2104,30 @@ fn fire_into_memoized<C: SampleSink>(
     epoch: u64,
     key: &str,
     is_remote: bool,
+    repeats_previous: bool,
     mut deliver: impl FnMut(&mut C),
 ) -> usize {
+    if repeats_previous {
+        if let Some((at, writes)) = memo.last {
+            if writes == memo.writes {
+                if let Some(slot) = &memo.slots[at] {
+                    if slot.epoch == epoch && slot.remote == is_remote {
+                        for position in &slot.hits {
+                            if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
+                                deliver(&mut subscriber.sink);
+                            }
+                        }
+                        return slot.hits.len();
+                    }
+                }
+            }
+        }
+    }
+    memo.last = None;
     let at = MatchMemo::slot_of(key);
     if let Some(slot) = &memo.slots[at] {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
+            memo.last = Some((at, memo.writes));
             for position in &slot.hits {
                 if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
                     deliver(&mut subscriber.sink);
@@ -2132,6 +2167,8 @@ fn fire_into_memoized<C: SampleSink>(
         key: alloc::string::String::from(key),
         hits,
     });
+    memo.writes += 1;
+    memo.last = Some((at, memo.writes));
     fired
 }
 
@@ -5021,6 +5058,104 @@ mod tests {
             );
             assert_eq!(got, want, "reliable={reliable}");
         }
+    }
+
+    /// Records that repeat the key before them are delivered as the owned path delivers
+    /// them: the same sequence of keys and payloads to every subscriber, whatever mix of
+    /// literal keys, aliases, aliases with a suffix and undeclared ids the frame holds, with
+    /// the subscribers' matches differing (one takes everything, one a single key, one an
+    /// alias). A repeated key rests on the record before it having been delivered, so a
+    /// dropped record between two equal ones, an alias that changes meaning and a key that
+    /// returns after another are all in the frame, and the reader's own flag is checked to
+    /// have been set where it should and only there.
+    #[test]
+    fn a_frame_of_repeated_keys_is_delivered_as_the_owned_path_delivers_it() {
+        use crate::driver_loop::IterationEvent;
+        let puts: [(u64, Option<&str>, &[u8]); 16] = [
+            (0, Some("demo/x"), b"1"),
+            (0, Some("demo/x"), b"2"),
+            (0, Some("demo/x"), b"3"),
+            (9, None, b"undeclared"),
+            (9, None, b"undeclared again"),
+            (0, Some("demo/x"), b"4"),
+            (7, None, b"alias"),
+            (7, None, b"alias 2"),
+            (7, Some("/s"), b"alias with a suffix"),
+            (7, Some("/s"), b"alias with a suffix 2"),
+            (0, Some("demo/y"), b"y"),
+            (0, Some("demo/x"), b"x back"),
+            (0, Some("demo/x"), b"x back 2"),
+            (0, Some("other/key"), b"matches nobody"),
+            (0, Some("other/key"), b"matches nobody 2"),
+            (7, None, b"alias last"),
+        ];
+        let mut batch = Vec::new();
+        for (id, suffix, payload) in puts {
+            let push = crate::lent_push::put_with_qos(
+                id,
+                suffix,
+                payload,
+                crate::sample::QosLevel::DEFAULT,
+            );
+            let mut one = Vec::new();
+            push.encode(&mut sce_forge_runtime::codec::VecSink::new(&mut one))
+                .unwrap();
+            batch.extend_from_slice(&one);
+        }
+        let patterns = ["demo/**", "demo/x", "demo/alias"];
+
+        let mut owned = SubscriberRegistry::new();
+        let mut lane = SubscriberRegistry::new();
+        let seen_owned: Vec<_> = patterns
+            .iter()
+            .map(|pattern| record_samples(&mut owned, pattern))
+            .collect();
+        let seen_lane: Vec<_> = patterns
+            .iter()
+            .map(|pattern| record_samples(&mut lane, pattern))
+            .collect();
+        for registry in [&mut owned, &mut lane] {
+            registry.dispatch(
+                &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "demo/alias"))),
+                Reliability::Reliable,
+            );
+        }
+        for message in crate::network_message::parse_frame_payload(&batch).unwrap() {
+            owned.dispatch(&message, Reliability::Reliable);
+        }
+        let frame = crate::link::RxBytes::from(batch.clone());
+        let read = crate::plain_push::read_plain_puts(&frame).expect("every record is plain");
+        assert_eq!(read.len(), puts.len());
+        // Set where the key is the one before it, and only there.
+        let repeats: Vec<bool> = read.iter().map(|put| put.repeats_key).collect();
+        assert_eq!(
+            repeats,
+            [
+                false, true, true, false, true, false, false, true, false, true, false, false,
+                true, false, true, false
+            ]
+        );
+        let outcome = DriverLoopOutcome::FramePlainPuts {
+            reliable: true,
+            sn: 0,
+            priority: crate::qos::Priority::DEFAULT,
+            payload: frame,
+            puts: read,
+        };
+        lane.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+        for (index, pattern) in patterns.iter().enumerate() {
+            let (want, got) = (
+                seen_owned[index].lock().unwrap().clone(),
+                seen_lane[index].lock().unwrap().clone(),
+            );
+            assert!(!want.is_empty(), "{pattern}: the owned path delivers some");
+            assert_eq!(got, want, "{pattern}");
+        }
+        assert_eq!(
+            seen_lane[0].lock().unwrap().len(),
+            12,
+            "demo/** takes the twelve that are under demo/ or the alias, in order"
+        );
     }
 
     #[test]

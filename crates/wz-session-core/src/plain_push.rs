@@ -57,6 +57,13 @@ pub struct PlainPut {
     pub payload: (u32, u32),
     /// The QoS byte, when the record carries the extension.
     pub qos: Option<u8>,
+    /// This record names the SAME key as the record before it in its frame: the same id in the
+    /// same mapping, and either no suffix on both or the same bytes. [`read_plain_puts`] sets it
+    /// from the comparison it already makes of the suffix, so the layers that follow it (the key's
+    /// composition, its match against the subscribers, a subscriber's list of keys) need not
+    /// compare the same text again for every message of a stream. `false` for the first record
+    /// of a frame and for a record read alone.
+    pub repeats_key: bool,
 }
 
 /// Read a VLE (zenoh `ZInt`) at `*at`, advancing it. The codec's rule: up to nine bytes,
@@ -90,19 +97,25 @@ fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
 /// decides whether it is one.
 #[inline]
 pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
-    read_plain_put_after(buf, at, None)
+    let (put, end, _same_suffix) = read_plain_put_after(buf, at, None)?;
+    Some((put, end))
 }
 
 /// [`read_plain_put`] for a record that follows one whose suffix bytes were `known_utf8`:
 /// a suffix of the same bytes is not checked again. A stream's records carry one key, and
 /// checking it once per frame rather than once per record is what keeps the check off the
 /// per-message cost; the bytes are equal, so the answer is.
+///
+/// The third value is whether the record's suffix IS those bytes (false when it has none),
+/// which is the comparison the check above makes, handed on so the caller does not make it
+/// again to tell whether the key repeats.
 #[inline]
 fn read_plain_put_after(
     buf: &[u8],
     at: usize,
     known_utf8: Option<&[u8]>,
-) -> Option<(PlainPut, usize)> {
+) -> Option<(PlainPut, usize, bool)> {
+    let mut same_suffix = false;
     let mut cursor = at;
     let header = *buf.get(cursor)?;
     cursor += 1;
@@ -115,7 +128,9 @@ fn read_plain_put_after(
         let end = cursor.checked_add(length)?;
         let bytes = buf.get(cursor..end)?;
         // The codec refuses a suffix that is not UTF-8; this reader does not accept it.
-        if known_utf8 != Some(bytes) {
+        if known_utf8 == Some(bytes) {
+            same_suffix = true;
+        } else {
             core::str::from_utf8(bytes).ok()?;
         }
         let range = (u32::try_from(cursor).ok()?, u32::try_from(end).ok()?);
@@ -150,8 +165,10 @@ fn read_plain_put_after(
             suffix,
             payload,
             qos,
+            repeats_key: false,
         },
         end,
+        same_suffix,
     ))
 }
 
@@ -167,8 +184,22 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
     let mut at = 0usize;
     // The suffix of the record just read, which the next one may repeat.
     let mut previous: Option<&[u8]> = None;
+    // The record just read, whose key the next one may repeat.
+    let mut before: Option<PlainPut> = None;
     while at < buf.len() {
-        let (put, end) = read_plain_put_after(buf, at, previous)?;
+        let (mut put, end, same_suffix) = read_plain_put_after(buf, at, previous)?;
+        // With a suffix on both, `previous` is the record before's own suffix, so `same_suffix`
+        // is the comparison with it.
+        put.repeats_key = before.is_some_and(|before| {
+            before.id == put.id
+                && before.sender_mapping == put.sender_mapping
+                && match (before.suffix, put.suffix) {
+                    (None, None) => true,
+                    (Some(_), Some(_)) => same_suffix,
+                    _ => false,
+                }
+        });
+        before = Some(put);
         previous = put
             .suffix
             .map(|(from, to)| &buf[from as usize..to as usize])
@@ -473,6 +504,11 @@ mod tests {
             assert_eq!(put.id, 3);
             assert!(put.sender_mapping);
             assert_eq!(batch[put.payload.0 as usize], index as u8);
+            assert_eq!(
+                put.repeats_key,
+                index != 0,
+                "every record of the batch names the key of the one before it, bar the first"
+            );
         }
 
         let mut mixed = batch.clone();

@@ -264,13 +264,23 @@ impl<R: SessionRuntime> wz_session_core::sink::FrameSink for DeferredSampleSink<
             items: Vec::new(),
         });
         let key = sample.keyexpr();
-        // The last key first: consecutive messages of a stream carry the same one.
-        let index = match batch.keys.iter().rposition(|held| held == key) {
+        // A sample that names the key of the one offered before it in this frame, to every sink
+        // alike, was given the entry of that one: no text is compared. Otherwise the last key
+        // first, since consecutive messages of a stream carry the same one.
+        let repeated = if sample.repeats_previous_key() {
+            batch.items.last().map(|last| last.key as usize)
+        } else {
+            None
+        };
+        let index = match repeated {
             Some(index) => index,
-            None => {
-                batch.keys.push(String::from(key));
-                batch.keys.len() - 1
-            }
+            None => match batch.keys.iter().rposition(|held| held == key) {
+                Some(index) => index,
+                None => {
+                    batch.keys.push(String::from(key));
+                    batch.keys.len() - 1
+                }
+            },
         };
         let range = sample.payload_range();
         batch.items.push(PlainItem {
