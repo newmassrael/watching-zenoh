@@ -39,21 +39,25 @@
 //!   [`FaceId`]-keyed map of peer addresses; zid-keyed dedup and per-face
 //!   routing state arrive when forwarding (`routing-routes`) needs them.
 //!
-//! ## Why a single-task `FuturesUnordered`, not spawned tasks
+//! ## Why a single-task `FuturesUnordered` by default
 //!
-//! The session drive future is **not `Send`** — the SCE `Engine` it drives owns
-//! bare `Box<dyn FnMut()>` callback fields (`completion_callback` / `on_http_send`,
-//! sce-rust-runtime `engine.rs:360,368`, with no `+ Send` bound), so the engine
-//! and any future borrowing it are `!Send`. (The outbound sink itself IS `Send`
-//! — an `mpsc::UnboundedSender<Vec<u8>>` in `StreamWriteDriver`; the `RefCell`-
-//! backed sink in `session_glue` is the lwIP/MCU `LocalSwappableLink` twin, NOT
-//! this tokio path.) A `tokio::spawn` / `JoinSet` per face is therefore
-//! impossible. Instead every face's open future and drive future live in two
-//! [`FuturesUnordered`] sets polled on this one task, so N peers are held
-//! concurrently with no `Send` bound and no inter-task races — the same
-//! single-task concurrency the loopback open tests get from `tokio::join!`,
-//! generalised to a dynamic, unbounded set. (The internal `writer_task`s *are*
-//! `Send` and still run on the worker pool.)
+//! Every face's open future and drive future live in two [`FuturesUnordered`]
+//! sets polled on this one task, so N peers are held concurrently with no
+//! `Send` bound on the forwarder and no inter-task races — the same single-task
+//! concurrency the loopback open tests get from `tokio::join!`, generalised to a
+//! dynamic, unbounded set. (The internal `writer_task`s *are* `Send` and run on
+//! the worker pool.)
+//!
+//! The reason this used to give for NOT spawning a face, that the SCE `Engine`
+//! the drive future owns carries callbacks with no `+ Send` bound, no longer
+//! holds: `sce-rust-runtime`'s `completion_callback` and `on_http_send` are both
+//! `+ Send` at the pinned revision, and the drive future of a face is `Send`
+//! when its forwarder is `Sync`. What keeps this the default is the forwarder:
+//! the routing forwarders (`LinkstateForwarder`, `RouterForwarder`) keep their
+//! tables in `Rc`/`RefCell`, so they can only be called from one task. A node
+//! whose forwarder is `Send + Sync` (the C ABI's) is being moved to a task per
+//! face's drive instead; the plan and its stages are in
+//! `docs/parallel-faces-design.md`.
 //!
 //! ## NON-goals (this atom)
 //!
