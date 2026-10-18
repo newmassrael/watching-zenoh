@@ -275550,6 +275550,54 @@
         "SCE's generator does not yet refuse queue rows a target cannot build; wz selects none."
       ]
     },
+    "Round 3368": {
+      "decision_summary": "Three repairs and one measured trim; the other send-path trims were weighed. verify-once now requires C1h and G, the two lanes that went red only hosted. Four pico z_get tests that took a one-shot client's session end for a failure now read what pico printed: 5 of 400 runs failed before, 0 of 800 after. The C ABI keeps the box a put or drop emptied in a per-thread slot for the next payload: 1,088 to 1,045 instructions per put (callgrind), two tests pin what it keeps; wall time is not shown to move (CPU per message differs by less than its spread). Not applied: a list-shaped pool (1,056), a lock-free mirror of the peer caps (at most 4%; a public slot with five writers), TxLease::resume (the driver is asked for the slot memory again on purpose), the poison checks of std Mutex (about 9%, runtime-wide). The put's line profile is flat. Layer Q passes. NOT claimed: wall-time gain, MCU speed against pico (no instrument), the hosted result.",
+      "changes_bullets": [
+        "scripts/lib/verify_lanes.json: lanes C1h and G, triggered by wz-session-core, the no_std crates and the SCE pin.",
+        "Four wz_storage_*_pico_zget tests: the verdict is read from pico's output once the drive loop ends.",
+        "wz-capi-c bytes.rs: BytesState::into_handle and recycle, a per-thread slot for the emptied box, and two tests."
+      ],
+      "verification_bullets": [
+        "The four z_get tests run 200 times each on a machine holding the pico binaries: 800 pass; the baseline was 5 failures in 400.",
+        "callgrind of the publisher: 1,088 instructions per put before, 1,045 after, 1,056 for the list-shaped pool.",
+        "The slot's first test fails with the share reset left out (red-first, on the list-shaped version of the same assertion), passes with it.",
+        "Layer Q run on a build host: pass; the fixed-memory MCU images carry no allocator symbols, the rest hold the counts their rows state.",
+        "NOT verified: wall-time gain, the hosted result of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of the previous push first; it was still queued when this round was written.",
+        "Decide whether the runtime's Mutex stops checking poison: about 9% of a put, but every call site that matches on lock() changes.",
+        "The other tests that select between a drive loop and a poll have a router, not a one-shot client, as their peer; read them if one fails.",
+        "There is no instrument for MCU speed against zenoh-pico; Layer Q measures size, stack and boot only."
+      ],
+      "publishable_decision_summary": "Three repairs and one measured trim; the other send-path trims were weighed. verify-once now requires C1h and G, the two lanes that went red only hosted. Four pico z_get tests that took a one-shot client's session end for a failure now read what pico printed: 5 of 400 runs failed before, 0 of 800 after. The C ABI keeps the box a put or drop emptied in a per-thread slot for the next payload: 1,088 to 1,045 instructions per put (callgrind), two tests pin what it keeps; wall time is not shown to move (CPU per message differs by less than its spread). Not applied: a list-shaped pool (1,056), a lock-free mirror of the peer caps (at most 4%; a public slot with five writers), TxLease::resume (the driver is asked for the slot memory again on purpose), the poison checks of std Mutex (about 9%, runtime-wide). The put's line profile is flat. Layer Q passes. NOT claimed: wall-time gain, MCU speed against pico (no instrument), the hosted result.",
+      "publishable_changes_bullets": [
+        "scripts/lib/verify_lanes.json: lanes C1h and G, triggered by wz-session-core, the no_std crates and the SCE pin.",
+        "Four wz_storage_*_pico_zget tests: the verdict is read from pico's output once the drive loop ends.",
+        "wz-capi-c bytes.rs: BytesState::into_handle and recycle, a per-thread slot for the emptied box, and two tests."
+      ],
+      "publishable_verification_bullets": [
+        "The four z_get tests run 200 times each on a machine holding the pico binaries: 800 pass; the baseline was 5 failures in 400.",
+        "callgrind of the publisher: 1,088 instructions per put before, 1,045 after, 1,056 for the list-shaped pool.",
+        "The slot's first test fails with the share reset left out (red-first, on the list-shaped version of the same assertion), passes with it.",
+        "Layer Q run on a build host: pass; the fixed-memory MCU images carry no allocator symbols, the rest hold the counts their rows state.",
+        "NOT verified: wall-time gain, the hosted result of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of the previous push first; it was still queued when this round was written.",
+        "Decide whether the runtime's Mutex stops checking poison: about 9% of a put, but every call site that matches on lock() changes.",
+        "The other tests that select between a drive loop and a poll have a router, not a one-shot client, as their peer; read them if one fails.",
+        "There is no instrument for MCU speed against zenoh-pico; Layer Q measures size, stack and boot only."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
