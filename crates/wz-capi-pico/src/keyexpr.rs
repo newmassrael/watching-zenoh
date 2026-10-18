@@ -213,6 +213,20 @@ impl DeclaredKeyexpr {
         }
     }
 
+    /// The declaration's id when it covers the WHOLE key on `shared`, which is when
+    /// [`Self::wire`] would answer an alias with no remainder: a put on it names the
+    /// key by this id alone. `None` for a literal key, a prefix declaration (the
+    /// remainder rides the wire) or another session's declaration.
+    ///
+    /// The id is stable for as long as the key is held: the key owns its
+    /// declaration, and the declaration is retracted only when the last key
+    /// holding it lets go, so a publisher asks once at declare rather than per put.
+    pub(crate) fn whole_key_mapping(&self, shared: &Arc<SharedSession>) -> Option<u64> {
+        self.declared_on(shared)
+            .filter(|d| d.prefix_len == self.literal.len())
+            .map(|d| d.id)
+    }
+
     /// What an entity held on this key names when it retracts itself, or `None`
     /// when it retracts by id alone.
     ///

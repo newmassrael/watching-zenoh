@@ -383,6 +383,59 @@ fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_
              QoS: its priority is Z_PRIORITY_DEFAULT and not the enum's zero"
         );
 
+        // ARM 3 - the QoS WITHOUT a declared encoding. A put that brings nothing of
+        // its own is then sent from the facts worked out once at declare, not from
+        // options built per put; the sample must still carry every declared QoS
+        // value, and the put on the same publisher that brings an encoding (the
+        // general path) must carry the same QoS, so the two paths agree.
+        seen.lock().unwrap().clear();
+        let qos_only_ke = view(c"demo/po/qos-only");
+        let mut qos_only_options: z_publisher_options_t = std::mem::zeroed();
+        z_publisher_options_default(&mut qos_only_options);
+        qos_only_options.congestion_control = CONGESTION_BLOCK;
+        qos_only_options.priority = PRIORITY_REAL_TIME;
+        qos_only_options.is_express = true;
+        qos_only_options.reliability = RELIABILITY_BEST_EFFORT;
+        let mut qos_only: z_owned_publisher_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(&dialer),
+                &mut qos_only,
+                z_view_keyexpr_loan(&qos_only_ke),
+                &qos_only_options,
+            ),
+            Z_OK
+        );
+        warm_up(&qos_only, &seen);
+        let mut own = encoding(c"application/json");
+        put(&qos_only, c"fast", None);
+        put(&qos_only, c"general", Some(&mut own));
+        put(&qos_only, c"fast-again", None);
+        let got = wait_for(&seen, 3);
+        let qos_only_seen = |encoding: &str| Seen {
+            kind: wz_capi_pico::Z_SAMPLE_KIND_PUT as c_int,
+            priority: PRIORITY_REAL_TIME,
+            congestion_control: CONGESTION_BLOCK,
+            express: true,
+            reliability: RELIABILITY_BEST_EFFORT,
+            encoding: encoding.to_owned(),
+        };
+        assert_eq!(
+            got[0],
+            qos_only_seen("zenoh/bytes"),
+            "a put that brings nothing of its own carries the publisher's declared QoS"
+        );
+        assert_eq!(
+            got[1],
+            qos_only_seen("application/json"),
+            "a put that brings an encoding carries the same QoS through the general path"
+        );
+        assert_eq!(
+            got[2], got[0],
+            "the put after a general one is sent as the first was"
+        );
+
+        z_undeclare_publisher(z_publisher_move(&mut qos_only));
         z_undeclare_publisher(z_publisher_move(&mut declared));
         z_undeclare_publisher(z_publisher_move(&mut by_null));
         z_undeclare_publisher(z_publisher_move(&mut by_default));

@@ -739,6 +739,12 @@ pub(crate) struct PlainPublisher {
     /// What it was declared with, applied to every put and delete it makes
     /// ([`PublisherQos`]).
     declared: PublisherQos,
+    /// The facts a put that brings nothing of its own is sent from, worked out ONCE
+    /// at declare from the QoS above ([`PublishOptions::plain_put_params`]), and the
+    /// id the key is named by when its declaration covers the whole key. Both
+    /// `Some` is what lets [`PlainPublisher::publish_plain`] skip the per-put clone
+    /// of the options and the per-put look-up of the key's wire form.
+    plain: Option<(wz_runtime_tokio::session::PlainPutParams, u64)>,
 }
 
 /// What a pico publisher is declared with, and sends with on every put and
@@ -841,13 +847,41 @@ impl PlainPublisher {
         // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
         // `_z_write_filter_create`, in `z_declare_publisher`).
         let filter = WriteFilter::declare(session, FilterPlane::Subscribers, &key);
+        let plain = declared
+            .apply(&put_options())
+            .plain_put_params()
+            .zip(key.whole_key_mapping(&session.shared));
         Ok(Self {
             eid: session.shared.next_entity_id(),
             shared: session.shared.clone(),
             filter,
             key,
             declared,
+            plain,
         })
+    }
+
+    /// [`Self::publish`] for a put that brings no options of its own: sent from the
+    /// facts worked out at declare when this publisher has them, and through the
+    /// general path when it has not, or when this node's own subscriber wants the
+    /// put or a face stamps what it sends (`put_plain_declared` answers `None`
+    /// then, with nothing sent).
+    pub(crate) fn publish_plain(&self, payload: &[u8]) -> ZResult {
+        if self.filter.active() {
+            return Z_OK;
+        }
+        if let Some((params, mapping)) = &self.plain {
+            if let Some(sent) =
+                self.shared
+                    .put_plain_declared(self.key.literal(), *mapping, payload, params)
+            {
+                return match sent {
+                    Ok(_) => Z_OK,
+                    Err(_) => Z_ERR_GENERIC,
+                };
+            }
+        }
+        self.publish_filtered(payload, &put_options())
     }
 
     /// Publish on this publisher's key, in its declared wire form and with the
@@ -860,6 +894,11 @@ impl PlainPublisher {
         if self.filter.active() {
             return Z_OK;
         }
+        self.publish_filtered(payload, opts)
+    }
+
+    /// [`Self::publish`] once the write filter has said the put is wanted.
+    fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
         let wire = self.key.wire(&self.shared);
         let opts = self.declared.apply(opts);
         match self
@@ -908,6 +947,11 @@ impl PublisherState {
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
     fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
         self.core.publish(payload, opts)
+    }
+
+    /// [`Self::publish`] for a put that carries nothing of its own — [`PlainPublisher::publish_plain`].
+    fn publish_plain(&self, payload: &[u8]) -> ZResult {
+        self.core.publish_plain(payload)
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
@@ -1176,28 +1220,35 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<B
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
-unsafe fn publisher_put_options(options: *const z_publisher_put_options_t) -> PublishOptions {
+unsafe fn publisher_put_options(
+    options: *const z_publisher_put_options_t,
+) -> (PublishOptions, bool) {
     let mut opts = put_options();
     if options.is_null() {
-        return opts;
+        return (opts, false);
     }
     // The moved values are consumed FIRST, before any early return could skip
     // them — the same consume-on-all-paths discipline `z_get` follows.
     let attachment = take_moved_bytes((*options).attachment);
     let encoding = crate::encoding::take_moved_encoding((*options).encoding);
+    let mut carried = false;
     if let Some(attachment) = attachment {
         opts = opts.with_attachment(attachment.to_vec());
+        carried = true;
     }
     if let Some(hint) = encoding {
         opts = opts.with_encoding(hint);
+        carried = true;
     }
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
+        carried = true;
     }
     if let Some(si) = source_info_hint_of((*options).source_info) {
         opts = opts.with_source_info(si);
+        carried = true;
     }
-    opts
+    (opts, carried)
 }
 
 fn put_options() -> PublishOptions {
@@ -1736,8 +1787,12 @@ pub unsafe extern "C" fn z_publisher_put(
         // subscriber reported `encoding: zenoh/bytes` with no attachment and no
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
-        let opts = publisher_put_options(options);
-        state.publish(&buf, &opts)
+        let (opts, carried) = publisher_put_options(options);
+        if carried {
+            state.publish(&buf, &opts)
+        } else {
+            state.publish_plain(&buf)
+        }
     })
 }
 
