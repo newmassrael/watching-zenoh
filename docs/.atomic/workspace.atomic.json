@@ -275726,6 +275726,60 @@
         "The parallel-faces work waits on z1 and is rebased onto this change next."
       ]
     },
+    "Round 3372": {
+      "decision_summary": "A zenoh-c node now drives each connection on a thread of its own, so a callback that blocks or runs long holds up its own link and no other. A first model put each face's drive on the session runtime's workers and scaled, but a test whose two peers' first callbacks wait for each other failed 16 of 20 runs, with two workers and with four: both faces landed on one worker and the first blocked callback held the second. A thread per face passes 20 of 20. zenoh-pico keeps one read task: its callbacks all run there and a program written for it shares state without a lock, which the first model had broken for a pico node with more than one peer. The price is about 3.5 microseconds of round trip against the worker model. NOT claimed: a latency win over the reference on the send side, or the hosted result of this push.",
+      "changes_bullets": [
+        "wz-runtime-tokio accept_loop.rs: accept_loop_offering_spawned spawns each accepted face's drive through a FaceExecutor; drive_face generic over the forwarder; the loop's forwarder and spawn choice travel as FaceDriving.",
+        "wz-capi-core drive.rs: FaceDrive { Serial, PerFace } on OpenStance and the ReadGate; run_on_own_thread gives each face a thread with a clock-only runtime, cancelled and joined when its waiter drops; ReadGate is a barrier over every gated future; dial, client and scouted faces use drive_face_on.",
+        "wz-capi-c opens PerFace, wz-capi-pico opens Serial.",
+        "wz-capi-c tests/parallel_faces_roundtrip.rs: callbacks of two peers overlap, four peers keep their order, a close under load leaves no callback.",
+        "scripts/run-ci.sh: the C1v and C1y accept_loop guards move by the two new tests, 8 to 10 and 11 to 13.",
+        "docs/parallel-faces-design.md records the model, the contract per ABI and the measurements."
+      ],
+      "verification_bullets": [
+        "The blocking test on the build host: with the worker model 16 of 20 runs failed, and a debug print showed both callbacks on one worker thread, serially; with a thread per face 20 of 20 passed, and the wz-capi-core unit tests passed.",
+        "verify-once: the first run failed seven lanes of the fourteen-odd it ran, all from this change: a clippy too-many-arguments on the loop, an ambient tokio spawn the subsystem-spawn gate refuses, and the two count guards. After the repair the second run passed 14 lanes (C0, C0s, C1bb, C1bw, C1bz, C1cn, C1l, count-guard, clippy of wz-capi-c, wz-capi-core, wz-capi-pico and wz-runtime-tokio, tests of wz-capi-core and wz-runtime-tokio); the lanes that had already passed (C1bn, C1ch, tests of wz-capi-c and wz-capi-pico) were not re-run, their receipts being current.",
+        "Receive throughput on a pinned pc3, 8 B, 4 publishers, default 2 workers: no callback 12.7 M/s against 2.88 M/s for the reference; 1 microsecond callback 3.29 M/s against 1.35 M/s; one connection ties (3.82 M against 3.93 M, inside the spread).",
+        "z_ping against z_pong, median round trip: worker model 34.6 to 35.0 us, thread per face 38.0 to 38.6 us receiving and 40.4 to 40.6 us sending, reference 37.2 to 38.2 us. A 30 us busy-poll after each wake was tried and removed: no gain on one side, 1.8 us on the other.",
+        "NOT verified: the hosted run; the dial, client and scouted faces by a test of their own (they share the code the accepted faces' test covers); that a pico node keeps one thread, by a test."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of the license push and of this one at the start of the next round.",
+        "Round trip is about 3.5 us above the worker model; most of it is the put in a callback waking the writer task on a worker. A put that writes the socket from the calling thread when the writer is idle would remove it and is a change of the transmit path.",
+        "Tests still owed: a dial-leg or client face under PerFace, and a pico node holding one thread.",
+        "The SCE pin may move to ad5bed2e64 or later (the Rust queue refusals); check out/** is unchanged when it does."
+      ],
+      "publishable_decision_summary": "A zenoh-c node now drives each connection on a thread of its own, so a callback that blocks or runs long holds up its own link and no other. A first model put each face's drive on the session runtime's workers and scaled, but a test whose two peers' first callbacks wait for each other failed 16 of 20 runs, with two workers and with four: both faces landed on one worker and the first blocked callback held the second. A thread per face passes 20 of 20. zenoh-pico keeps one read task: its callbacks all run there and a program written for it shares state without a lock, which the first model had broken for a pico node with more than one peer. The price is about 3.5 microseconds of round trip against the worker model. NOT claimed: a latency win over the reference on the send side, or the hosted result of this push.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio accept_loop.rs: accept_loop_offering_spawned spawns each accepted face's drive through a FaceExecutor; drive_face generic over the forwarder; the loop's forwarder and spawn choice travel as FaceDriving.",
+        "wz-capi-core drive.rs: FaceDrive { Serial, PerFace } on OpenStance and the ReadGate; run_on_own_thread gives each face a thread with a clock-only runtime, cancelled and joined when its waiter drops; ReadGate is a barrier over every gated future; dial, client and scouted faces use drive_face_on.",
+        "wz-capi-c opens PerFace, wz-capi-pico opens Serial.",
+        "wz-capi-c tests/parallel_faces_roundtrip.rs: callbacks of two peers overlap, four peers keep their order, a close under load leaves no callback.",
+        "scripts/run-ci.sh: the C1v and C1y accept_loop guards move by the two new tests, 8 to 10 and 11 to 13.",
+        "docs/parallel-faces-design.md records the model, the contract per ABI and the measurements."
+      ],
+      "publishable_verification_bullets": [
+        "The blocking test on the build host: with the worker model 16 of 20 runs failed, and a debug print showed both callbacks on one worker thread, serially; with a thread per face 20 of 20 passed, and the wz-capi-core unit tests passed.",
+        "verify-once: the first run failed seven lanes of the fourteen-odd it ran, all from this change: a clippy too-many-arguments on the loop, an ambient tokio spawn the subsystem-spawn gate refuses, and the two count guards. After the repair the second run passed 14 lanes (C0, C0s, C1bb, C1bw, C1bz, C1cn, C1l, count-guard, clippy of wz-capi-c, wz-capi-core, wz-capi-pico and wz-runtime-tokio, tests of wz-capi-core and wz-runtime-tokio); the lanes that had already passed (C1bn, C1ch, tests of wz-capi-c and wz-capi-pico) were not re-run, their receipts being current.",
+        "Receive throughput on a pinned pc3, 8 B, 4 publishers, default 2 workers: no callback 12.7 M/s against 2.88 M/s for the reference; 1 microsecond callback 3.29 M/s against 1.35 M/s; one connection ties (3.82 M against 3.93 M, inside the spread).",
+        "z_ping against z_pong, median round trip: worker model 34.6 to 35.0 us, thread per face 38.0 to 38.6 us receiving and 40.4 to 40.6 us sending, reference 37.2 to 38.2 us. A 30 us busy-poll after each wake was tried and removed: no gain on one side, 1.8 us on the other.",
+        "NOT verified: the hosted run; the dial, client and scouted faces by a test of their own (they share the code the accepted faces' test covers); that a pico node keeps one thread, by a test."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of the license push and of this one at the start of the next round.",
+        "Round trip is about 3.5 us above the worker model; most of it is the put in a callback waking the writer task on a worker. A put that writes the socket from the calling thread when the writer is idle would remove it and is a change of the transmit path.",
+        "Tests still owed: a dial-leg or client face under PerFace, and a pico node holding one thread.",
+        "The SCE pin may move to ad5bed2e64 or later (the Rust queue refusals); check out/** is unchanged when it does."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
