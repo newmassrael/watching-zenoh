@@ -206,6 +206,14 @@ pub struct RemoteSubscriberPeer {
     /// on the fixed backing). Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// Moves after every change to `declared` ([`crate::declare::DeclEpoch`]).
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        target_has_atomic = "64"
+    ))]
+    epoch: crate::declare::DeclEpoch,
 }
 
 impl Default for RemoteSubscriberPeer {
@@ -233,7 +241,35 @@ impl RemoteSubscriberPeer {
         Self {
             declared: DeclaredKeys::new(),
             oversize: 0,
+            #[cfg(all(feature = "alloc", target_has_atomic = "64"))]
+            epoch: crate::declare::DeclEpoch::default(),
         }
+    }
+
+    /// The counter that moves after every change to what this peer has declared, to be
+    /// read without this table's lock; see [`crate::declare::DeclEpoch`].
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        target_has_atomic = "64"
+    ))]
+    pub fn epoch(&self) -> crate::declare::DeclEpoch {
+        self.epoch.clone()
+    }
+
+    /// Move the counter: what a change to `declared` ends with.
+    #[cfg(feature = "storage-profile")]
+    #[inline]
+    fn changed(&self) {
+        #[cfg(all(
+            feature = "storage-profile",
+            feature = "alloc",
+            not(feature = "bounded-heapless"),
+            target_has_atomic = "64"
+        ))]
+        self.epoch
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
     }
 
     /// R290 — count of currently-declared peer subscribers (those
@@ -295,6 +331,7 @@ impl RemoteSubscriberPeer {
     pub fn forget(&mut self) -> usize {
         let dropped = self.declared.count();
         self.declared.reset();
+        self.changed();
         dropped
     }
 }
@@ -866,6 +903,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
         if peer.declared.bind(id, text).is_err() {
             return;
         }
+        peer.changed();
         // R311gb-3d / Track 2 — fan through the DeclSink seam via
         // the no-heap SSOT: build the `(id, resolved-keyexpr)`
         // view once and hand each observer `&dyn DeclView`.
@@ -900,6 +938,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
         // on_undecl callback chain observes the post-
         // undeclare state.
         peer.declared.unbind(id);
+        peer.changed();
         self.dispatch_undeclared(id);
         // R311kh — see `apply_declared`.
         #[cfg(feature = "session-matching")]
@@ -1556,6 +1595,60 @@ mod tests {
         let undecl2 = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(11));
         reg.dispatch_declare(&undecl2, &HashMap::new());
         assert_eq!(reg.declared_count(), 0);
+    }
+
+    /// The counter a reader without the lock keeps its answers by moves after EVERY change
+    /// to what the peer has declared (a declaration, a replacement under the same id, an
+    /// undeclaration, the whole table forgotten) and stands still when nothing changed: an
+    /// undeclaration of an id nobody declared still moves it (a missed move would keep a
+    /// stale answer, an extra one only costs a recomputation), and reading does not.
+    #[cfg(all(feature = "storage-profile", target_has_atomic = "64"))]
+    #[test]
+    fn the_peers_declaration_counter_moves_after_every_change_and_only_then() {
+        use core::sync::atomic::Ordering::Acquire;
+        let mut reg = RemoteSubscriberRegistry::new();
+        let counter = reg.peer().epoch();
+        let at = |c: &crate::declare::DeclEpoch| c.load(Acquire);
+        let start = at(&counter);
+
+        let _ = reg.has_matching("home/temp");
+        let _ = reg.declared_count();
+        assert_eq!(at(&counter), start, "reading moves nothing");
+
+        let declare = |id, key: &str| {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(id, 0, Some(key)))
+        };
+        reg.dispatch_declare(&declare(1, "home/temp"), &HashMap::new());
+        let after_declare = at(&counter);
+        assert!(after_declare > start, "a declaration moves it");
+
+        reg.dispatch_declare(&declare(1, "home/door"), &HashMap::new());
+        let after_replace = at(&counter);
+        assert!(
+            after_replace > after_declare,
+            "a replacement under the same id moves it"
+        );
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(1)),
+            &HashMap::new(),
+        );
+        let after_undeclare = at(&counter);
+        assert!(after_undeclare > after_replace, "an undeclaration moves it");
+
+        reg.dispatch_declare(&declare(2, "home/a"), &HashMap::new());
+        let before_forget = at(&counter);
+        // `forget` is the peer's own (a link loss).
+        let mut peer = RemoteSubscriberPeer::new();
+        let other = peer.epoch();
+        assert_eq!(other.load(Acquire), 0, "a new peer starts at zero");
+        assert_eq!(peer.forget(), 0);
+        assert!(other.load(Acquire) > 0, "forgetting the table moves it");
+        assert_eq!(
+            at(&counter),
+            before_forget,
+            "and a peer's counter is its own"
+        );
     }
 
     #[test]

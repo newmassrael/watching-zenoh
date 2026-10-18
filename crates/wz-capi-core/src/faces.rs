@@ -196,7 +196,35 @@ struct FilterEntry {
     /// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_add_interest`), and
     /// learns only what peers volunteer.
     ask: Option<InterestForm>,
+    /// The last answer worked out for this filter and what it was worked out from: the
+    /// set of faces and the declarations the faces' peers had made. While neither has
+    /// moved the answer is the same, which is what lets a put skip the work of asking.
+    #[cfg(target_has_atomic = "64")]
+    cache: Option<FilterCache>,
 }
+
+/// A write filter's answer ([`SharedSession::write_filter_active`]) with the state of the
+/// world it was computed from.
+#[cfg(target_has_atomic = "64")]
+#[derive(Clone, Copy)]
+struct FilterCache {
+    /// [`Inner::face_set_generation`] at the time.
+    generation: u64,
+    /// The sum of the faces' counters for the filter's plane at the time. Each only ever
+    /// goes up, so for one generation of the face set a sum that is equal is a sum no
+    /// counter has moved in.
+    epoch_sum: u64,
+    /// The answer: true when nothing matches and the put is dropped.
+    inactive: bool,
+}
+
+/// The two counters of one face's session, subscribers first; `None` for a session that
+/// has none, and a face set with one such face has no cached answers.
+#[cfg(target_has_atomic = "64")]
+type FaceEpochs = Option<(
+    Arc<std::sync::atomic::AtomicU64>,
+    Arc<std::sync::atomic::AtomicU64>,
+)>;
 
 /// Why a fan-out publish could not be delivered to ANY face.
 ///
@@ -1182,6 +1210,14 @@ struct Inner {
     /// [`Self::refresh_face_set`] at each of the three places `faces` changes, under the lock
     /// that changes it, so a reader sees the faces as of a whole step and never a half one.
     face_set: Arc<Vec<TokioSession>>,
+    /// The two counters ([`TokioSession::remote_declaration_epochs`]) of each session of
+    /// [`Self::face_set`], in the same order, and the number of times that set has been
+    /// rebuilt. Together they say whether anything a write filter's answer depends on has
+    /// changed since it was last worked out ([`SharedSession::write_filter_active`]).
+    #[cfg(target_has_atomic = "64")]
+    face_epochs: Arc<Vec<FaceEpochs>>,
+    /// How many times [`Self::face_set`] has been rebuilt.
+    face_set_generation: u64,
     /// R2259 (open-debt item 593) — the face-lifecycle observers the C
     /// link/transport event planes register, keyed by the id
     /// [`SharedSession::watch_faces`] hands back.
@@ -1278,6 +1314,35 @@ impl Inner {
                 .map(|face| face.session.clone())
                 .collect(),
         );
+        #[cfg(target_has_atomic = "64")]
+        {
+            self.face_epochs = Arc::new(
+                self.faces
+                    .values()
+                    .map(|face| face.session.remote_declaration_epochs())
+                    .collect(),
+            );
+        }
+        self.face_set_generation = self.face_set_generation.wrapping_add(1);
+    }
+
+    /// What a write filter's answer on `plane` depends on, as a number to compare: how many
+    /// times the face set has been rebuilt, and the sum of the faces' counters for that
+    /// plane. Two equal tokens are the same world (see [`FilterCache`]); `None` when some
+    /// face has no counters, and then nothing is kept.
+    #[cfg(target_has_atomic = "64")]
+    fn filter_token(&self, plane: FilterPlane) -> Option<(u64, u64)> {
+        use std::sync::atomic::Ordering::Acquire;
+        let mut sum = 0u64;
+        for epochs in self.face_epochs.iter() {
+            let (subscribers, queryables) = epochs.as_ref()?;
+            let counter = match plane {
+                FilterPlane::Subscribers => subscribers,
+                FilterPlane::Queryables { .. } => queryables,
+            };
+            sum = sum.wrapping_add(counter.load(Acquire));
+        }
+        Some((self.face_set_generation, sum))
     }
 
     /// R2580 — EVERY SESSION A DECLARATION REACHES: the live faces, and the
@@ -3449,9 +3514,10 @@ impl SharedSession {
     /// none of them (a pico peer with no router among its peers asks nobody); the
     /// entry is replayed onto every
     /// face that comes up later, as each other declaration here is. The filter
-    /// reads what peers DECLARE, so it needs no callback and has no cached
-    /// state: [`Self::write_filter_active`] asks the registries when it is
-    /// asked, which is why it cannot drift from what the peers said.
+    /// reads what peers DECLARE, so it needs no callback: [`Self::write_filter_active`]
+    /// answers from the registries, and keeps the answer only together with the
+    /// counters that say whether those registries have changed since, which is
+    /// why it cannot drift from what the peers said.
     ///
     /// The local plane is not asked and not counted. zenoh-pico's default build
     /// counts no session-local subscriber (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0),
@@ -3483,6 +3549,8 @@ impl SharedSession {
             plane,
             keyexpr,
             ask,
+            #[cfg(target_has_atomic = "64")]
+            cache: None,
         });
         id
     }
@@ -3521,18 +3589,43 @@ impl SharedSession {
     /// The registries are read OUTSIDE the registry lock: a face's observer
     /// mutex is taken to answer, and holding this one across it would invert
     /// their order against the drive thread.
+    ///
+    /// The answer is kept with what it was worked out from: the set of faces and the
+    /// counters their sessions move after every change to what a peer has declared
+    /// ([`TokioSession::remote_declaration_epochs`]). The counters are read BEFORE the
+    /// answer is worked out and a change moves its counter AFTER the table changes, so a
+    /// kept answer whose counters have not moved is still the answer, and a put that finds
+    /// it costs a lock and a few loads instead of the registries' walk. A stale pairing
+    /// can only err towards working the answer out again.
+    ///
+    /// A DEBUG build checks every kept answer it uses against the answer worked out the
+    /// long way, unless a change landed while it was checking: every test that runs with
+    /// real faces is then a test of the counters.
     pub fn write_filter_active(&self, id: FilterId) -> bool {
+        #[cfg(target_has_atomic = "64")]
+        let mut seen: Option<(u64, u64)> = None;
+        #[cfg(all(target_has_atomic = "64", debug_assertions))]
+        let mut kept_answer: Option<bool> = None;
         let (plane, keyexpr, sessions) = {
             let guard = self.lock();
             let Some(entry) = guard.filters.iter().find(|e| e.id == id) else {
                 return false;
             };
-            let sessions: Vec<TokioSession> = guard
-                .faces
-                .values()
-                .map(|face| face.session.clone())
-                .collect();
-            (entry.plane, entry.keyexpr.clone(), sessions)
+            #[cfg(target_has_atomic = "64")]
+            if let Some(token) = guard.filter_token(entry.plane) {
+                if let Some(kept) = entry.cache {
+                    if (kept.generation, kept.epoch_sum) == token {
+                        #[cfg(not(debug_assertions))]
+                        return kept.inactive;
+                        #[cfg(debug_assertions)]
+                        {
+                            kept_answer = Some(kept.inactive);
+                        }
+                    }
+                }
+                seen = Some(token);
+            }
+            (entry.plane, entry.keyexpr.clone(), guard.face_set.clone())
         };
         // `Remote`: only what a peer declared counts. See `declare_write_filter`.
         let matching = sessions.iter().any(|session| match plane {
@@ -3543,6 +3636,37 @@ impl SharedSession {
                 session.remote_queryables_match(&keyexpr, Locality::Remote, complete_required)
             }
         });
+        #[cfg(target_has_atomic = "64")]
+        if let Some((generation, epoch_sum)) = seen {
+            let mut guard = self.lock();
+            #[cfg(debug_assertions)]
+            if let Some(kept) = kept_answer {
+                // Nothing moved while the long way was walked: then the kept answer and
+                // the answer worked out are the answer of the same world.
+                if guard
+                    .filters
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.plane)
+                    .and_then(|p| guard.filter_token(p))
+                    == Some((generation, epoch_sum))
+                {
+                    assert_eq!(
+                        kept, !matching,
+                        "write filter {id}: the kept answer disagrees with the registries' \
+                         at counters ({generation}, {epoch_sum})"
+                    );
+                }
+                return kept;
+            }
+            if let Some(entry) = guard.filters.iter_mut().find(|e| e.id == id) {
+                entry.cache = Some(FilterCache {
+                    generation,
+                    epoch_sum,
+                    inactive: !matching,
+                });
+            }
+        }
         !matching
     }
 

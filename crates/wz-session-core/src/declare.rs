@@ -94,6 +94,24 @@ pub mod local_token;
 #[cfg(feature = "liveliness-get")]
 pub mod liveliness_get;
 
+/// A counter a peer's table of declarations moves AFTER every change to it (a declaration
+/// bound, one removed, the whole table forgotten), shared out as an `Arc` so a reader that
+/// must not take the session's lock can still ask "has anything changed since I looked".
+/// A reader that read the counter BEFORE it computed an answer from the table, and still
+/// finds the same number, holds an answer that is still true: the bump comes after the
+/// change, so a number that has not moved is a table that has not moved.
+///
+/// Only where it can be had: the growable backing (the fixed one has no heap to share
+/// from) on a target with 64-bit atomics. Elsewhere a table has no counter and a reader
+/// asks the table.
+#[cfg(all(
+    feature = "storage-profile",
+    feature = "alloc",
+    not(feature = "bounded-heapless"),
+    target_has_atomic = "64"
+))]
+pub type DeclEpoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
+
 /// R311kh — the shared membership consult behind the subscriber /
 /// queryable `has_matching` AND the matching-watch re-evaluation: does
 /// any currently-declared peer keyexpr intersect `keyexpr`? A free fn

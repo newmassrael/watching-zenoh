@@ -322,6 +322,14 @@ pub struct RemoteQueryablePeer {
     /// text. Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// Moves after every change to `declared` ([`crate::declare::DeclEpoch`]).
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        target_has_atomic = "64"
+    ))]
+    epoch: crate::declare::DeclEpoch,
 }
 
 impl Default for RemoteQueryablePeer {
@@ -349,7 +357,35 @@ impl RemoteQueryablePeer {
         Self {
             declared: DeclaredQueryables::new(),
             oversize: 0,
+            #[cfg(all(feature = "alloc", target_has_atomic = "64"))]
+            epoch: crate::declare::DeclEpoch::default(),
         }
+    }
+
+    /// The counter that moves after every change to what this peer has declared, to be
+    /// read without this table's lock; see [`crate::declare::DeclEpoch`].
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        target_has_atomic = "64"
+    ))]
+    pub fn epoch(&self) -> crate::declare::DeclEpoch {
+        self.epoch.clone()
+    }
+
+    /// Move the counter: what a change to `declared` ends with.
+    #[cfg(feature = "storage-profile")]
+    #[inline]
+    fn changed(&self) {
+        #[cfg(all(
+            feature = "storage-profile",
+            feature = "alloc",
+            not(feature = "bounded-heapless"),
+            target_has_atomic = "64"
+        ))]
+        self.epoch
+            .fetch_add(1, core::sync::atomic::Ordering::Release);
     }
 
     /// R288 — count of currently-declared peer queryables (those whose
@@ -449,6 +485,7 @@ impl RemoteQueryablePeer {
     pub fn forget(&mut self) -> usize {
         let dropped = self.declared.count();
         self.declared.reset();
+        self.changed();
         dropped
     }
 }
@@ -1001,6 +1038,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
         {
             return;
         }
+        peer.changed();
         let view = BorrowedDecl {
             id,
             keyexpr: resolved,
@@ -1027,6 +1065,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     ) {
         let _ = &local_matching;
         peer.declared.unbind(id);
+        peer.changed();
         self.dispatch_undeclared(id);
         // R311kh — see `apply_declared`.
         #[cfg(feature = "session-matching")]
@@ -1339,6 +1378,50 @@ mod tests {
         let undecl2 = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(11));
         reg.dispatch_declare(&undecl2, &HashMap::new());
         assert_eq!(reg.declared_count(), 0);
+    }
+
+    /// The queryable twin of the subscriber peer's counter test: the counter a reader without
+    /// the lock keeps its answers by moves after every change and stands still on a read.
+    #[cfg(all(feature = "storage-profile", target_has_atomic = "64"))]
+    #[test]
+    fn the_peers_declaration_counter_moves_after_every_change_and_only_then() {
+        use core::sync::atomic::Ordering::Acquire;
+        let mut reg = RemoteQueryableRegistry::new();
+        let counter = reg.peer().epoch();
+        let start = counter.load(Acquire);
+
+        let _ = reg.has_matching("home/temp");
+        let _ = reg.declared_count();
+        assert_eq!(counter.load(Acquire), start, "reading moves nothing");
+
+        let declare = |id, key: &str| {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(id, 0, Some(key)))
+        };
+        reg.dispatch_declare(&declare(1, "home/temp"), &HashMap::new());
+        let after_declare = counter.load(Acquire);
+        assert!(after_declare > start, "a declaration moves it");
+
+        reg.dispatch_declare(&declare(1, "home/door"), &HashMap::new());
+        let after_replace = counter.load(Acquire);
+        assert!(
+            after_replace > after_declare,
+            "a replacement under the same id moves it"
+        );
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(1)),
+            &HashMap::new(),
+        );
+        assert!(
+            counter.load(Acquire) > after_replace,
+            "an undeclaration moves it"
+        );
+
+        let mut peer = RemoteQueryablePeer::new();
+        let other = peer.epoch();
+        assert_eq!(other.load(Acquire), 0, "a new peer starts at zero");
+        assert_eq!(peer.forget(), 0);
+        assert!(other.load(Acquire) > 0, "forgetting the table moves it");
     }
 
     #[test]

@@ -4718,6 +4718,36 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
     }
 
+    /// The two counters that move after every change to what a peer has declared to this
+    /// session, subscribers first and queryables second, to be read without the session's
+    /// lock ([`wz_session_core::declare::DeclEpoch`]). A reader that read both, computed an
+    /// answer from [`Self::remote_subscribers_match`] / [`Self::remote_queryables_match`],
+    /// and later finds both unchanged, holds an answer that is still true.
+    ///
+    /// `None` on a build without the two declaration planes: its reader asks the tables
+    /// every time. The method exists only on a target with 64-bit atomics.
+    #[cfg(target_has_atomic = "64")]
+    pub fn remote_declaration_epochs(
+        &self,
+    ) -> Option<(
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+    )> {
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-queryable"))]
+        {
+            Some(R::with_mutex_mut(&self.observer, |obs| {
+                (
+                    obs.remote_subscribers.peer().epoch(),
+                    obs.remote_queryables.peer().epoch(),
+                )
+            }))
+        }
+        #[cfg(not(all(feature = "declare-subscriber", feature = "declare-queryable")))]
+        {
+            None
+        }
+    }
+
     /// R2577 — the interest id standing for this plane and keyexpr, or `None`
     /// when no handle holds one. Exists so a test can assert against the id the
     /// emit ACTUALLY allocated rather than a literal: an emit that allocated
