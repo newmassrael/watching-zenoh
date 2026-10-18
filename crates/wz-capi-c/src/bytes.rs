@@ -209,15 +209,35 @@ impl BytesState {
     /// subscriber's callback that takes a sample per message allocates none per message.
     pub(crate) fn reset(&mut self, payload: Payload) {
         Self::fill_bounds(&payload, &mut self.bounds);
+        self.install(payload);
+    }
+
+    /// [`Self::reset`] for a payload the caller knows is ONE run of `len` bytes: its boundary
+    /// is that number, with no walk of the payload to find it.
+    pub(crate) fn reset_single(&mut self, payload: Payload, len: usize) {
+        if len == 0 {
+            self.bounds.clear();
+        } else {
+            self.bounds.set_single(len);
+        }
+        self.install(payload);
+    }
+
+    /// Hold `payload`, and let go of what was made for the one before it.
+    fn install(&mut self, payload: Payload) {
         self.payload = payload;
-        self.share = std::sync::OnceLock::new();
+        if self.share.get().is_some() {
+            self.share = std::sync::OnceLock::new();
+        }
         // The loan of shared memory made for the previous payload is not this one's.
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
         {
-            self.shm_loan = std::sync::OnceLock::new();
+            if self.shm_loan.get().is_some() {
+                self.shm_loan = std::sync::OnceLock::new();
+            }
         }
     }
 
@@ -1767,6 +1787,38 @@ mod received_slices_tests {
             1,
             "the frame goes back when the state lets go"
         );
+    }
+
+    /// A payload known to be one run resets a kept state to what a reset that finds the run
+    /// itself gives, for a run of any length and an empty one, from every state before.
+    #[test]
+    fn resetting_a_known_single_run_equals_resetting_and_finding_it() {
+        let mut known = BytesState::of(Payload::Owned(Vec::new()));
+        let mut found = BytesState::of(Payload::Owned(Vec::new()));
+        let two = || {
+            let (_, a) = page(b"abc");
+            let (_, b) = page(b"de");
+            Payload::Shared(RxBytes::sliced(vec![a, b]))
+        };
+        let one = |text: &[u8]| Payload::Shared(page(text).1);
+        let steps: [(Payload, Option<usize>); 6] = [
+            (one(b"fghi"), Some(4)),
+            (one(b""), Some(0)),
+            (two(), None),
+            (one(b"x"), Some(1)),
+            (one(&[7u8; 300]), Some(300)),
+            (one(b"yz"), Some(2)),
+        ];
+        for (payload, single) in steps {
+            match single {
+                Some(len) => known.reset_single(payload.clone(), len),
+                None => known.reset(payload.clone()),
+            }
+            found.reset(payload);
+            assert_eq!(known.bounds, found.bounds);
+            assert_eq!(known.payload.len(), found.payload.len());
+            assert!(known.share.get().is_none());
+        }
     }
 
     #[test]

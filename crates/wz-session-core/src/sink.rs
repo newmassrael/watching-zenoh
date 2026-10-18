@@ -163,6 +163,31 @@ pub trait SampleView {
     fn is_plain_put(&self) -> bool {
         false
     }
+    /// For a plain Put ([`Self::is_plain_put`]), everything a callback that kept the sample
+    /// before needs to take this one, in ONE call: where a callback that reads the view field
+    /// by field asks the view six questions, each a call through the trait object. `None` for
+    /// a view that is not a plain Put, or that cannot give the payload as a shared value, and
+    /// the caller then reads the view as it always did.
+    #[cfg(feature = "alloc")]
+    fn plain_facts(&self) -> Option<PlainFacts> {
+        None
+    }
+}
+
+/// What [`SampleView::plain_facts`] hands over for a plain Put.
+#[cfg(feature = "alloc")]
+pub struct PlainFacts {
+    /// The QoS level the record carried, if any.
+    pub qos: Option<crate::sample::QosLevel>,
+    /// The link-layer reliability of the carrying frame.
+    pub reliability: Reliability,
+    /// The key is the key of the sample delivered just before ([`SampleView::keyexpr_unchanged`]).
+    pub key_unchanged: bool,
+    /// The payload as a value the caller owns ([`SampleView::payload_shared_owned`]).
+    pub payload: crate::link::RxBytes,
+    /// The payload's length when the caller was told it is ONE run, which is what makes its
+    /// slice boundaries a single number; `None` when that is not known.
+    pub single_run_len: Option<usize>,
 }
 
 /// A [`SampleView`] over loose borrowed bytes — the canonical impl for a
@@ -239,6 +264,7 @@ pub struct PlainSample<'s> {
     shared: core::cell::OnceCell<Option<crate::link::RxBytes>>,
     repeats_previous: bool,
     key_unchanged: bool,
+    single_run: bool,
 }
 
 #[cfg(feature = "alloc")]
@@ -260,7 +286,18 @@ impl<'s> PlainSample<'s> {
             shared: core::cell::OnceCell::new(),
             repeats_previous: false,
             key_unchanged: false,
+            single_run: false,
         }
+    }
+
+    /// Say that the frame this sample is a range of is ONE run of bytes
+    /// ([`crate::link::RxBytes::single_run_len`] is `Some` for it), so that the payload, a
+    /// range of it, is one run too and its slice boundaries are its length. A sink that
+    /// delivers a whole frame's samples works it out once for the frame.
+    #[must_use]
+    pub fn with_single_run_frame(mut self) -> Self {
+        self.single_run = true;
+        self
     }
 
     /// Say that this sample's key is the key of the sample the caller handed to the same
@@ -335,6 +372,17 @@ impl SampleView for PlainSample<'_> {
     fn is_plain_put(&self) -> bool {
         // A plain `Put` of a frame has nothing else: its accessors are the defaults.
         true
+    }
+    fn plain_facts(&self) -> Option<PlainFacts> {
+        Some(PlainFacts {
+            qos: self.qos,
+            reliability: self.reliability,
+            key_unchanged: self.key_unchanged,
+            payload: self.payload_shared_owned()?,
+            single_run_len: self
+                .single_run
+                .then(|| (self.range.1 - self.range.0) as usize),
+        })
     }
 }
 
@@ -505,6 +553,39 @@ mod tests {
             reliability: Reliability::Reliable,
         };
         assert!(loose.payload_shared_owned().is_none());
+    }
+
+    /// The one question a plain sample answers for a kept marshal gives what the field-by-field
+    /// questions give, and the payload's length as a single run only when the sample was told
+    /// its frame is one; a view that is not a plain Put answers none.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_plain_sample_answers_its_facts_in_one_call() {
+        let frame = crate::link::RxBytes::from(b"..HELLO..".to_vec());
+        let qos = Some(crate::sample::QosLevel::from_raw(0x1a));
+        let plain = || PlainSample::new("k", &frame, (2, 7), Reliability::Reliable, qos);
+
+        let told = plain().with_unchanged_key().with_single_run_frame();
+        let facts = told.plain_facts().expect("a plain sample has facts");
+        assert_eq!(facts.qos, told.qos());
+        assert_eq!(facts.reliability, told.reliability());
+        assert!(facts.key_unchanged);
+        assert_eq!(facts.payload.as_slice(), b"HELLO");
+        assert_eq!(facts.single_run_len, Some(5));
+
+        let untold = plain();
+        let facts = untold.plain_facts().expect("a plain sample has facts");
+        assert!(!facts.key_unchanged);
+        assert_eq!(facts.single_run_len, None, "not said to be one run");
+        assert_eq!(facts.payload.as_slice(), b"HELLO");
+
+        let loose = BorrowedSample {
+            keyexpr: "k",
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        assert!(loose.plain_facts().is_none());
     }
 
     #[cfg(feature = "alloc")]

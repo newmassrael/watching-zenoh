@@ -235,6 +235,9 @@ struct PlainBatch {
     /// The frame, whose storage the payloads are ranges of; one reference, kept until the
     /// callback has run.
     frame: wz_session_core::link::RxBytes,
+    /// The frame is one run of bytes, which is what a received frame is: found out once here
+    /// and not for every payload, a range of it, the callback is handed.
+    single_run: bool,
     reliability: wz_session_core::reliability::Reliability,
     /// The distinct keys of the frame, in order of first appearance; a stream has one.
     keys: Vec<String>,
@@ -259,6 +262,7 @@ impl<R: SessionRuntime> wz_session_core::sink::FrameSink for DeferredSampleSink<
     fn plain(&mut self, sample: &wz_session_core::sink::PlainSample<'_>) {
         let batch = self.batch.get_or_insert_with(|| PlainBatch {
             frame: sample.frame().clone(),
+            single_run: sample.frame().single_run_len().is_some(),
             reliability: sample.reliability(),
             keys: Vec::new(),
             items: Vec::new(),
@@ -317,6 +321,9 @@ impl<R: SessionRuntime> wz_session_core::sink::FrameSink for DeferredSampleSink<
                 );
                 if previous == Some(item.key) {
                     sample = sample.with_unchanged_key();
+                }
+                if batch.single_run {
+                    sample = sample.with_single_run_frame();
                 }
                 previous = Some(item.key);
                 cb(&sample);

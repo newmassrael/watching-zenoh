@@ -268,6 +268,25 @@ impl SampleMarshal {
     /// What a subscriber's callback does for every message is this and not a build and a
     /// drop of a whole marshal.
     fn reload(&mut self, view: &dyn SampleView) {
+        // The stream's common case, a plain Put after a plain Put, asks the view ONE question
+        // and not six: everything it varies in comes back together.
+        if self.plain {
+            if let Some(facts) = view.plain_facts() {
+                if !facts.key_unchanged {
+                    self.keyexpr.keyexpr.clear();
+                    self.keyexpr.keyexpr.push_str(view.keyexpr());
+                    self.keyexpr.mapping = None;
+                }
+                let payload = Payload::Shared(facts.payload);
+                match facts.single_run_len {
+                    Some(len) => self.payload.reset_single(payload, len),
+                    None => self.payload.reset(payload),
+                }
+                self.qos = facts.qos;
+                self.reliability = Some(facts.reliability);
+                return;
+            }
+        }
         // The text of the last key stays when the caller says this sample's is the same.
         if !view.keyexpr_unchanged() {
             self.keyexpr.keyexpr.clear();
@@ -1166,6 +1185,76 @@ mod tests {
                 assert_eq!(m.kind, want, "sample {index}: its kind");
                 assert!(m.timestamp.is_none(), "sample {index}: no timestamp");
             });
+        }
+    }
+
+    /// Real plain samples of a frame (the kind a subscriber's callback is handed) through a
+    /// kept marshal: the key text, the payload and its one boundary, the QoS and the
+    /// reliability follow each sample through the one-question path, across a change of key,
+    /// an empty payload, a payload the frame was not said to hold as one run, and a sample
+    /// that is not plain between two that are.
+    #[test]
+    fn a_kept_marshal_follows_real_plain_samples_of_a_frame() {
+        use wz_runtime_tokio::sink::PlainSample;
+        let frame = wz_runtime_tokio::RxBytes::from(b"0123456789abcdef".to_vec());
+        let q = |raw: u8| Some(QosLevel::from_raw(raw));
+        // (key, payload range, qos, key unchanged, frame said to be one run)
+        let plain_steps: [(&str, (u32, u32), Option<QosLevel>, bool, bool); 8] = [
+            ("a/b", (0, 4), q(0x1a), false, true),
+            ("a/b", (4, 10), q(0x05), true, true),
+            ("a/b", (10, 10), None, true, true),
+            ("a/b", (10, 16), q(0x1a), true, true),
+            ("cc", (2, 6), None, false, true),
+            ("cc", (6, 12), q(0x01), true, false),
+            ("cc", (0, 1), q(0x01), true, true),
+            ("a/b", (3, 9), None, false, true),
+        ];
+        let mut kept = MarshalCache::new();
+        let mut index = 0;
+        for (key, range, qos, unchanged, single) in plain_steps {
+            // After the fourth, a sample that is not plain comes between.
+            if index == 4 {
+                let rich = MixedView {
+                    plain: false,
+                    qos: None,
+                    delete: false,
+                    attachment: Some(b"ATT"),
+                    encoding: None,
+                    source_info: None,
+                };
+                kept.with_view(&rich, |sample| {
+                    // SAFETY: `sample` is the kept marshal's borrowed view, live for this call.
+                    let m = unsafe { marshal(sample) }.expect("a live sample");
+                    assert!(m.attachment.is_some(), "the rich sample's attachment");
+                });
+            }
+            let mut sample = PlainSample::new(key, &frame, range, Reliability::Reliable, qos);
+            if unchanged && index != 4 {
+                sample = sample.with_unchanged_key();
+            }
+            if single {
+                sample = sample.with_single_run_frame();
+            }
+            kept.with_view(&sample, |loaned| {
+                // SAFETY: `loaned` is the kept marshal's borrowed view, live for this call.
+                let m = unsafe { marshal(loaned) }.expect("a live sample");
+                let want = &frame.as_slice()[range.0 as usize..range.1 as usize];
+                assert_eq!(m.keyexpr.keyexpr, key, "step {index}: its key");
+                assert_eq!(&*m.payload.payload, want, "step {index}: its payload");
+                let bounds: &[usize] = m.payload.bounds.as_slice();
+                if want.is_empty() {
+                    assert!(
+                        bounds.is_empty(),
+                        "step {index}: an empty payload has no slice"
+                    );
+                } else {
+                    assert_eq!(bounds, [want.len()], "step {index}: one slice, its length");
+                }
+                assert_eq!(m.qos, qos, "step {index}: its QoS");
+                assert!(m.attachment.is_none(), "step {index}: a stale attachment");
+                assert_eq!(m.kind, Z_SAMPLE_KIND_PUT, "step {index}: its kind");
+            });
+            index += 1;
         }
     }
 
