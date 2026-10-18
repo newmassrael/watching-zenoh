@@ -312,8 +312,8 @@ impl SampleMarshal {
 /// The payload a marshal holds for `view`: a second reference to the storage the session
 /// delivered it in when the view has one, a copy of the bytes when it has not.
 fn payload_of(view: &dyn SampleView) -> Payload {
-    match view.payload_shared() {
-        Some(shared) => Payload::Shared(shared.clone()),
+    match view.payload_shared_owned() {
+        Some(shared) => Payload::Shared(shared),
         None => Payload::Owned(view.payload().to_vec()),
     }
 }

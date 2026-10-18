@@ -140,6 +140,14 @@ pub trait SampleView {
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
         None
     }
+    /// [`payload_shared`](Self::payload_shared) as a value the caller owns: for a caller that
+    /// keeps it, the one reference it takes, where a borrowed answer is a reference the view
+    /// holds and the caller takes another of. A view that builds the answer on demand builds
+    /// it once, into the caller's hands, and holds none.
+    #[cfg(feature = "alloc")]
+    fn payload_shared_owned(&self) -> Option<crate::link::RxBytes> {
+        self.payload_shared().cloned()
+    }
     /// Whether this sample's keyexpr is the keyexpr of the sample the caller delivered to the
     /// same callback in the call just before this one, as the caller says. A callback that
     /// keeps a copy of the last key may then leave it as it is instead of writing it again. The
@@ -305,6 +313,14 @@ impl SampleView for PlainSample<'_> {
             .get_or_init(|| self.frame.subslice(self.payload_range()))
             .as_ref()
     }
+    fn payload_shared_owned(&self) -> Option<crate::link::RxBytes> {
+        // Read through the borrowed answer when it was already built; otherwise built here,
+        // for the caller alone, and kept nowhere.
+        match self.shared.get() {
+            Some(built) => built.clone(),
+            None => self.frame.subslice(self.payload_range()),
+        }
+    }
     fn keyexpr_unchanged(&self) -> bool {
         self.key_unchanged
     }
@@ -449,6 +465,34 @@ mod tests {
         assert_eq!(sink.last_len, 4);
         assert_eq!(sink.last_key_len, 9);
         assert_eq!(sink.last_kind, SampleKind::Put);
+    }
+
+    /// The owned answer is the payload's own range of the frame whether or not the borrowed one
+    /// was built before it, and a view with nothing shared has none either way.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_plain_sample_hands_out_its_payload_range_as_an_owned_value() {
+        let frame = crate::link::RxBytes::from(b"..HELLO..".to_vec());
+        let sample = PlainSample::new("k", &frame, (2, 7), Reliability::Reliable, None);
+
+        let before = sample.payload_shared_owned().expect("a range of the frame");
+        assert_eq!(before.as_slice(), b"HELLO");
+        assert_eq!(sample.payload(), b"HELLO");
+
+        let borrowed = sample.payload_shared().expect("built on demand");
+        assert_eq!(borrowed.as_slice(), b"HELLO");
+        let after = sample
+            .payload_shared_owned()
+            .expect("the built one, shared");
+        assert_eq!(after.as_slice(), b"HELLO");
+
+        let loose = BorrowedSample {
+            keyexpr: "k",
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        assert!(loose.payload_shared_owned().is_none());
     }
 
     #[cfg(feature = "alloc")]
