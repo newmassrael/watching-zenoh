@@ -275678,6 +275678,54 @@
         "Receive speed against the reference shows as a tie in throughput because the reference sender is the limit; quote CPU per message for it."
       ]
     },
+    "Round 3371": {
+      "decision_summary": "The free tier moves from AGPL-3.0-or-later to a source-available non-commercial license, shaped like the one sce-spec-workbench carries, keeping the commercial alternative. This is an owner decision, recorded because it changes the terms every file in this tree is offered under. Free use is limited to personal learning, non-commercial research and an organization's evaluation outside production; internal work, a product (firmware and linking included), delivery to a customer and a service need the commercial agreement. The AGPL source offer and the whole-work copyleft no longer apply to new revisions. Earlier revisions are unaffected: a license already granted cannot be withdrawn, and LICENSE says so. The AGPL, GPL and LGPL texts leave the tree and stay in the history. NOT claimed: a legal review of the text, or the hosted result of this push.",
+      "changes_bullets": [
+        "SPDX expression rewritten in 1701 tracked files with scripts/lib/relicense_spdx.py, an exact-literal substitution; out/** and vendor/** stay skipped by path.",
+        "relicense_spdx.py now also skips docs/.atomic/, because the frozen changelog states the earlier expression as history; its constants carry the new move.",
+        "LICENSE rewritten as the non-commercial license, with sections on third-party components (SCE, vendored sources, the Zenoh protocol) and on earlier revisions.",
+        "LICENSE-COMMERCIAL.md replaced by the short workbench form: the use that needs a commercial agreement, terms negotiated, SCE licensed separately.",
+        "LICENSE-AGPL-3.0.md, LICENSE-GPL-3.0.md and LICENSE-LGPL-3.0.md removed; README.md, README.ko.md, CLAUDE.md, THIRD_PARTY.md and docs/agent-reference.md follow."
+      ],
+      "verification_bullets": [
+        "relicense_spdx.py --selftest passes 7 of 7 and --check reports no tracked file carrying the old expression; the same --check runs in Layer C0.",
+        "The pre-commit hooks passed on the 1702 staged files: home-paths scan, validate-workspace with 14 orphans before and after (new +0), ledger entries unchanged.",
+        "No Cargo.toml license field still carries the old expression, and out/** carried none to begin with.",
+        "A first commit attempt failed Layer L because a fresh worktree had empty vendor submodules; initialising them fixed it, which is a property of the worktree and not of the change.",
+        "NOT verified: the hosted run of this push, and a legal reading of the license text, which the owner has not had reviewed here."
+      ],
+      "impact_refs": [
+        "watching-zenoh/license"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push at the start of the next round, once.",
+        "Other repositories that consume this one are not changed by this round; a consumer that ships it needs the commercial agreement.",
+        "The parallel-faces work waits on z1 and is rebased onto this change next."
+      ],
+      "publishable_decision_summary": "The free tier moves from AGPL-3.0-or-later to a source-available non-commercial license, shaped like the one sce-spec-workbench carries, keeping the commercial alternative. This is an owner decision, recorded because it changes the terms every file in this tree is offered under. Free use is limited to personal learning, non-commercial research and an organization's evaluation outside production; internal work, a product (firmware and linking included), delivery to a customer and a service need the commercial agreement. The AGPL source offer and the whole-work copyleft no longer apply to new revisions. Earlier revisions are unaffected: a license already granted cannot be withdrawn, and LICENSE says so. The AGPL, GPL and LGPL texts leave the tree and stay in the history. NOT claimed: a legal review of the text, or the hosted result of this push.",
+      "publishable_changes_bullets": [
+        "SPDX expression rewritten in 1701 tracked files with scripts/lib/relicense_spdx.py, an exact-literal substitution; out/** and vendor/** stay skipped by path.",
+        "relicense_spdx.py now also skips docs/.atomic/, because the frozen changelog states the earlier expression as history; its constants carry the new move.",
+        "LICENSE rewritten as the non-commercial license, with sections on third-party components (SCE, vendored sources, the Zenoh protocol) and on earlier revisions.",
+        "LICENSE-COMMERCIAL.md replaced by the short workbench form: the use that needs a commercial agreement, terms negotiated, SCE licensed separately.",
+        "LICENSE-AGPL-3.0.md, LICENSE-GPL-3.0.md and LICENSE-LGPL-3.0.md removed; README.md, README.ko.md, CLAUDE.md, THIRD_PARTY.md and docs/agent-reference.md follow."
+      ],
+      "publishable_verification_bullets": [
+        "relicense_spdx.py --selftest passes 7 of 7 and --check reports no tracked file carrying the old expression; the same --check runs in Layer C0.",
+        "The pre-commit hooks passed on the 1702 staged files: home-paths scan, validate-workspace with 14 orphans before and after (new +0), ledger entries unchanged.",
+        "No Cargo.toml license field still carries the old expression, and out/** carried none to begin with.",
+        "A first commit attempt failed Layer L because a fresh worktree had empty vendor submodules; initialising them fixed it, which is a property of the worktree and not of the change.",
+        "NOT verified: the hosted run of this push, and a legal reading of the license text, which the owner has not had reviewed here."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/license"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push at the start of the next round, once.",
+        "Other repositories that consume this one are not changed by this round; a consumer that ships it needs the commercial agreement.",
+        "The parallel-faces work waits on z1 and is rebased onto this change next."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
