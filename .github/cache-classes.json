@@ -19,7 +19,8 @@
         "ci.yml:transport-modes",
         "ci.yml:capi-c-arms",
         "ci.yml:e2e-demo",
-        "ci.yml:e2e-demo-pico"
+        "ci.yml:e2e-demo-pico",
+        "ci.yml:e2e-router-scale"
       ],
       "budget_mb": 20,
       "measured_mb": 5.4,
@@ -88,6 +89,7 @@
         "ci.yml:capi-c-arms",
         "ci.yml:e2e-demo",
         "ci.yml:e2e-demo-pico",
+        "ci.yml:e2e-router-scale",
         "release.yml:release"
       ],
       "budget_mb": 950,

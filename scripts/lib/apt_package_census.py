@@ -174,7 +174,8 @@ def _add(pkg: str, why: str, jobs: list[str]) -> None:
 for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev", "libbz2-dev"):
     _add(_codec_package, "The cached RocksDB engine's five compression codecs.",
          ["ci", "nondefault", "dissect", "interop", "feature-gates",
-          "transport-modes", "capi-c-arms", "e2e-demo", "e2e-demo-pico"])
+          "transport-modes", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
+          "e2e-router-scale"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
      ["nondefault"])
 
@@ -256,6 +257,7 @@ _add(
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",
+        "e2e-router-scale",
         "dissect",
     ],
 )
@@ -299,6 +301,7 @@ _add(
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",
+        "e2e-router-scale",
         "dissect",
     ],
 )
@@ -341,6 +344,7 @@ _add(
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",
+        "e2e-router-scale",
         "dissect",
     ],
 )
@@ -442,7 +446,7 @@ _add(
     # nondefault gets a separate native-engine row above (R2805).
     ["ci", "validate-codegen", "codegen-verify", "interop", "feature-gates",
      "transport-modes", "isolated-crates", "capi-c-arms", "e2e-demo",
-     "e2e-demo-pico", "dissect", "defaults-off", "gate-provenance"],
+     "e2e-demo-pico", "e2e-router-scale", "dissect", "defaults-off", "gate-provenance"],
 )
 _add(
     "cmake",
@@ -531,6 +535,7 @@ _add(
         "capi-c-arms",
         "e2e-demo",
         "e2e-demo-pico",
+        "e2e-router-scale",
         "dissect",
     ],
 )

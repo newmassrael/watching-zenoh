@@ -5852,6 +5852,68 @@ jobs:
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1080 90 30 '${{ job.status }}'
 
+  # Layer E7s, in a job of its own. It builds the demo in the RELEASE profile (a
+  # measurement of a debug build is a number about something else) and runs about
+  # three minutes of loopback load, so folding it into `e2e-demo`, whose budget was
+  # derived from lanes that finish in seconds, would break that derivation. It
+  # needs the demo and no foreign oracle, so none of the pico or zenohd
+  # provisioning the neighbouring jobs carry.
+  #
+  # NO BUDGET GATE YET, on purpose: a margin gate's floor and alarm are derived
+  # from measured runs and this job has none. The first hosted run is the
+  # measurement; `timeout-minutes` is a generous ceiling until then, and the
+  # margin gate follows with the numbers.
+  e2e-router-scale:
+    name: router-hat data-plane scaling (Layer E7s)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `e2e-demo` copy for why this cache exists and why its RESTORE
+        # and SAVE are split. Keyed per JOB, so this job's first run is cold.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The package list `e2e-demo-pico` carries: the integration tests link the
+        # RocksDB engine, build `zenoh-pico-sys` (cmake, through their
+        # dev-dependency), and bindgen needs clang. No pico CLI is built here.
+        run: |
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
+      - name: Layer E7s — router-hat data-plane cost, and links kept when starved
+        # docs/router-data-plane-scaling.md. A MEASUREMENT: the cost of one
+        # forwarded message against the subscribers a router holds (printed),
+        # asserting only the population behind the number; and a router pinned to
+        # one shared core at lower priority and overloaded, asserting that no
+        # face goes DOWN. Self-contained wz<->wz over loopback.
+        run: bash scripts/run-ci.sh --layer E7s
+
   portability:
     name: portability (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
