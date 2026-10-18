@@ -199,3 +199,25 @@ The measurements used `wz-ap-demo --router-hat <addr> --max-sessions <n>` and
   single-process throughput after those changes, on the host class the service runs on.
 - The queue bounds and the per-round message count of 4.3. They are tuned against the I4 test, not
   chosen in advance.
+
+### 7.1 What was measured about 4.3 after 4.1 and 4.2 landed
+
+The premise of 4.3 was F5: under overload the links expire. It did not reproduce. Same host, same
+build, offered load raised until the router could not forward it all (loopback, four client processes):
+
+| Subscribers | Offered | Forwarded | Faces that went DOWN |
+|---|---|---|---|
+| 256 | 128k/s | 65% (about 83k/s) | 0 |
+| 256 | 256k/s | 48% (about 123k/s) | 0 |
+| 2048 | 200k/s | 91% (182k/s) | 0 |
+
+Two corrections to section 2 follow from reading the code for this check. The per-face outbound queue
+is not unbounded: it has one lane per priority, bounded in bytes at zenoh's defaults, drops what
+congestion control says may be dropped and counts it (`writer_queue.rs`, `session_actions.rs`). And the
+router is not one core: the forwarder is single-threaded (F4) but each face's writer task is not, so
+the process used more than one core at 182k/s.
+
+So 4.3 as written (a new priority scheme, per-round fairness, a router-wide shed counter) is not
+built. What would reopen it is a measurement that shows a face going DOWN while the router is
+overloaded, on a host class the service runs on: the micro VM measured before (steal time 33-70%)
+is the first candidate, since the loopback run above has no such constraint.
