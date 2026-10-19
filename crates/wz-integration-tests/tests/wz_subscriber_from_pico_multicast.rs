@@ -69,7 +69,9 @@ use wz_integration_tests::common::{
     default_route_iface, read_captured, zenoh_pico_cli_binary, ChildGuard,
     PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
 };
-use wz_runtime_tokio::multicast_glue::{drive_multicast_session, MulticastDriveConfig};
+use wz_runtime_tokio::multicast_glue::{
+    drive_multicast_session, open_multicast_session, MulticastDriveConfig, MulticastLink,
+};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
@@ -125,10 +127,14 @@ async fn wz_subscriber_admits_pico_multicast_push() {
     // Bind + join the group FIRST so wz is listening when pico emits its
     // initial JOIN. The REUSEADDR/REUSEPORT bind (R311no) is what lets wz
     // co-bind the host group port that pico's peer also binds.
-    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+    // The session is brought up here, which binds its link, rather than when
+    // the drive below is first polled.
+    let mut link =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default()));
+    let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    open_multicast_session(&mut dispatcher, &mut link)
         .await
         .expect("bind wz multicast subscriber link (REUSE co-bind)");
-    let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = wz_mc_params();
 
     let fired = Arc::new(AtomicUsize::new(0));
@@ -154,7 +160,7 @@ async fn wz_subscriber_admits_pico_multicast_push() {
             // production path: no iteration budget, select! bounds the run
             max_iters: None,
         },
-        &mut driver,
+        &mut link,
         &clock,
         |event| observer.dispatch_event(event),
         &producer,

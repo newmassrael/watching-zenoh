@@ -46,7 +46,8 @@ use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, spawn_zenohd_on_ephemeral_tcp, wz_ap_demo_binary,
 };
 use wz_runtime_tokio::multicast_glue::{
-    drive_multicast_session, multicast_put_literal, MulticastDriveConfig, MulticastTxProducer,
+    drive_multicast_session, multicast_put_literal, MulticastDriveConfig, MulticastLink,
+    MulticastTxProducer,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -122,10 +123,14 @@ fn group_member(zid_byte: u8) -> (impl std::future::Future<Output = ()>, Multica
     let producer = MulticastTxProducer::new();
     let tx = producer.clone();
     let run = async move {
-        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .expect("bind a member's ephemeral socket");
-        let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, PORT)));
+        // The member's ephemeral socket, bound when its session opens its link.
+        let mut link = MulticastLink::new(|| async {
+            let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+            Ok::<_, std::io::Error>(UdpDriver::from_socket(
+                sock,
+                SocketAddr::from((GROUP, PORT)),
+            ))
+        });
         let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
         let params = MulticastParams {
             whatami: WhatAmI::Peer,
@@ -146,7 +151,7 @@ fn group_member(zid_byte: u8) -> (impl std::future::Future<Output = ()>, Multica
                 tick_ms: 10,
                 max_iters: None,
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &producer,

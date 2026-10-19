@@ -6045,7 +6045,10 @@ layer_c1ax_cargo_test_routing_namespace() {
     # `transport-qos`. Printed numbers; the label moves with the value.
     # R2938: 34 -> 35, `a_router_group_face_takes_the_operators_transmission_queue`
     # (gated on `transport-link-udp`, a default feature). Printed number.
-    _runci_guarded_test "C1AX multicast_glue 36" 36 \
+    # Session duties made causal: 36 -> 38, the two ungated link-open cases (see
+    # C1q), over the version JOIN that took it 35 -> 36. Each half was printed
+    # by its own run; the sum is derived. The label moves with the value.
+    _runci_guarded_test "C1AX multicast_glue 38" 38 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     # Item 900 follow-up — the `--sessions` group session's RE-JOIN loop, which
     # shares the router face's schedule and wait above. The demo compiles it
@@ -6056,7 +6059,9 @@ layer_c1ax_cargo_test_routing_namespace() {
     # Round 3339: 3 -> 5, the two cases of `stop_order_tests` (ungated): a stop
     # wins over an end that is ready with it, and an end with no stop is reported
     # with its outcome. Printed number; the label moves with the value.
-    _runci_guarded_test "C1AX sessions_run group 5" 5 \
+    # Session duties made causal: 5 -> 6, `a_group_whose_first_join_fails_ends_failed`
+    # (the first join's bind now runs in the session). Derived, not printed.
+    _runci_guarded_test "C1AX sessions_run group 6" 6 \
         cargo test -p wz-ap-demo --features transport-multicast --bin wz-ap-demo sessions_run --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
@@ -10923,7 +10928,10 @@ layer_c1p_multicast() {
     # R2930 — both +1 again, from outside the multicast modules: the filter is a
     # substring, so `stats_registry::tests::a_multicast_congestion_drop_...`
     # matches it (the same case moves C1ak's registry guard). Printed numbers.
-    _runci_guarded_test C1p 48 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    # Session duties made causal -- both +1, DERIVED and not printed (the agent
+    # that wrote it builds nothing): `multicast_dispatch`'s ungated
+    # `link_duties_follow_the_session_machine`.
+    _runci_guarded_test C1p 49 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
     # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
     # only the no-room case compiles here; the rest need `codec-response-final`
@@ -10941,7 +10949,10 @@ layer_c1p_multicast() {
     # ("running 76 tests", 76 passed, 627 filtered out). The count moved with the
     # tests of the lent walks that landed after R3299; the number is what the
     # command prints and nothing here derives it.
-    _runci_guarded_test C1p 77 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # 76 -> 77, the version JOIN (8a458be76, printed); then 77 -> 78, session
+    # duties made causal, the same ungated case as the arm above (printed 77
+    # on its own run before the version JOIN landed). The sum is derived.
+    _runci_guarded_test C1p 78 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -11025,11 +11036,16 @@ layer_c1q_multicast_glue() {
     # C1AX); printed numbers.
     # R2938: 31/35/37 -> 32/36/38, the router group face's queue witness (see
     # C1AX); printed numbers.
-    _runci_guarded_test C1q 33 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    # 32/36/38 -> 33/37/39, the version JOIN (8a458be76, printed). Then
+    # 33/37/39 -> 35/39/41, session duties made causal, and the C1AX sibling
+    # 36 -> 38: two ungated cases, a link that cannot open sends no JOIN and
+    # ends lost, and a Running session handed an unopened link ends lost.
+    # Each half was printed by its own run; the sum is derived.
+    _runci_guarded_test C1q 35 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 37 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 39 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 39 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 41 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
     # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
     # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg
@@ -11240,23 +11256,28 @@ layer_c1m_session_lwip() {
     # the real lwIP driver and a transmit pool (`session_drive`'s window test)
     # needs only `codec-push`. Each number is the one its own run PRINTED
     # (21/24/22, and 25 below).
-    _runci_guarded_test "C1m multicast" 18 \
+    #
+    # The session duties made causal moved the same seven, and the two-session
+    # leg below, by ONE: `a_group_transport_that_cannot_open_sends_nothing_and_ends_lost`
+    # carries no `#[cfg]` of its own inside the module `transport-multicast`
+    # gates. DERIVED, not printed: the agent that wrote it builds nothing.
+    _runci_guarded_test "C1m multicast" 19 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 21 \
+    _runci_guarded_test "C1m multicast+push" 22 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 20 \
+    _runci_guarded_test "C1m multicast+liveliness" 21 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 19 \
+    _runci_guarded_test "C1m multicast+queryable" 20 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 24 \
+    _runci_guarded_test "C1m multicast maximal" 25 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 18 \
+    _runci_guarded_test "C1m multicast+reassembly" 19 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 22 \
+    _runci_guarded_test "C1m multicast+fragmentation" 23 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     # Open-debt item 900 — ONE program, TWO sessions: a client session to a
@@ -11264,8 +11285,9 @@ layer_c1m_session_lwip() {
     # fault-isolation tests (`two_session_tests`). It is its own leg because
     # it is the only combination that compiles both handshake halves beside
     # the multicast loop. 25 = the multicast+push leg's 21 + those four, the
-    # number this command PRINTED.
-    _runci_guarded_test "C1m two sessions" 25 \
+    # number this command PRINTED. 26 since the session duties were made causal
+    # (the +1 above), derived.
+    _runci_guarded_test "C1m two sessions" 26 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
         --quiet || return 1

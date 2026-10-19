@@ -77,7 +77,7 @@ use wz_integration_tests::common::{
     PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP, Z_SUB_INIT_TIMEOUT,
 };
 use wz_runtime_tokio::multicast_glue::{
-    drive_multicast_session_with_shutdown, MulticastDriveConfig,
+    drive_multicast_session_with_shutdown, MulticastDriveConfig, MulticastLink,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::UdpDriver;
@@ -241,10 +241,14 @@ async fn pico_witnesses_a_wz_multicast_departure() {
     // ── wz multicast node, driven until we ask it to leave ───────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let drive = tokio::spawn(async move {
-        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .expect("bind ephemeral wz multicast socket");
-        let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, PORT)));
+        // The ephemeral wz socket, bound when the session opens its link.
+        let mut link = MulticastLink::new(|| async {
+            let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+            Ok::<_, std::io::Error>(UdpDriver::from_socket(
+                sock,
+                SocketAddr::from((GROUP, PORT)),
+            ))
+        });
         let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(30_000));
         let params = wz_mc_params(vec![0xD1, 0xD2, 0xD3, 0xD4], ANNOUNCED_LEASE_MS);
         let producer = wz_runtime_tokio::multicast_glue::MulticastTxProducer::new();
@@ -257,7 +261,7 @@ async fn pico_witnesses_a_wz_multicast_departure() {
                 tick_ms: 10,
                 max_iters: None,
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &producer,
@@ -419,10 +423,14 @@ async fn pico_infers_a_wz_multicast_departure_from_silence() {
 
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let drive = tokio::spawn(async move {
-        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .expect("bind ephemeral wz multicast socket");
-        let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, LEASE_PORT)));
+        // The ephemeral wz socket, bound when the session opens its link.
+        let mut link = MulticastLink::new(|| async {
+            let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+            Ok::<_, std::io::Error>(UdpDriver::from_socket(
+                sock,
+                SocketAddr::from((GROUP, LEASE_PORT)),
+            ))
+        });
         let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(30_000));
         let params = wz_mc_params(vec![0xE1, 0xE2, 0xE3, 0xE4], INFERRED_LEASE_MS);
         let producer = wz_runtime_tokio::multicast_glue::MulticastTxProducer::new();
@@ -435,7 +443,7 @@ async fn pico_infers_a_wz_multicast_departure_from_silence() {
                 tick_ms: 10,
                 max_iters: None,
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &producer,

@@ -62,7 +62,8 @@ use tokio::net::{TcpStream, UdpSocket};
 
 use wz_integration_tests::common::spawn_zenohd_on_ephemeral_tcp;
 use wz_runtime_tokio::multicast_glue::{
-    drive_multicast_session, multicast_put_literal, MulticastDriveConfig, MulticastTxProducer,
+    drive_multicast_session, multicast_put_literal, open_multicast_session, MulticastDriveConfig,
+    MulticastLink, MulticastTxProducer,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -148,10 +149,12 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
     );
 
     // Session B — PEER, joined to the group, with its own observer.
-    let mut driver_b = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default()));
+    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    open_multicast_session(&mut dispatcher_b, &mut link_b)
         .await
         .expect("session B joins the group");
-    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = group_params(0xBB);
     let producer_b = MulticastTxProducer::new();
     let clock = Arc::new(TokioTime::new());
@@ -173,10 +176,13 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
     };
 
     // Node C — the group's publisher, TX-only.
-    let sock_c = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind node C's ephemeral socket");
-    let mut driver_c = UdpDriver::from_socket(sock_c, SocketAddr::from((GROUP, PORT)));
+    let mut link_c = MulticastLink::new(|| async {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        Ok::<_, std::io::Error>(UdpDriver::from_socket(
+            sock,
+            SocketAddr::from((GROUP, PORT)),
+        ))
+    });
     let mut dispatcher_c = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_c = group_params(0xCC);
     let producer_c = MulticastTxProducer::new();
@@ -201,7 +207,7 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_b,
+        &mut link_b,
         clock.as_ref(),
         |event| session_b.dispatch_multicast_iteration_event(event),
         &producer_b,
@@ -213,7 +219,7 @@ async fn a_client_session_to_zenohd_and_a_multicast_peer_session_run_in_one_proc
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_c,
+        &mut link_c,
         clock.as_ref(),
         |_| {},
         &producer_c,

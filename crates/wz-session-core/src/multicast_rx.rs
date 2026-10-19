@@ -931,8 +931,10 @@ mod batch_walk_tests {
 
     fn running<const N: usize>() -> MulticastDispatcher<N> {
         let mut d = MulticastDispatcher::<N>::new(MulticastConfig::new(5_000));
-        d.create();
-        d.notify_link_ready();
+        // A dispatcher alone holds no link: the open it is asked for is the
+        // test's to answer, and there is nothing to bind.
+        assert!(d.create().open());
+        assert!(!d.notify_link_ready().release());
         d
     }
 

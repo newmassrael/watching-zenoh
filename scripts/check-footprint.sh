@@ -656,6 +656,7 @@ declare -A BASELINE_MC_TEXT=(
     #    +168  multicast_dispatch::PeerSlot::new              (NEW)
     #     +98  reassembly_dispatch::apply_chain_boundary_markers (NEW)
     #     +82  multicast_dispatch::MulticastDispatcher::clear_peers_if_stopped
+    #          (the peer-table release it was is `session_duties` today)
     #     +62  multicast_tx::multicast_tx_emit
     #     +60  inbound::decode_oam
     #     +50  handshake_encode::encode_close -- R2450's `#[inline(never)]`,

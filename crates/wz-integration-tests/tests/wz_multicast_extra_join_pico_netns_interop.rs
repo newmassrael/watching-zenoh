@@ -55,7 +55,9 @@ use wz_integration_tests::common::{
     read_captured, zenoh_pico_cli_binary, ChildGuard, NetnsPair, PICO_BATCH_MULTICAST_SIZE,
     PICO_SN_RESOLUTION,
 };
-use wz_runtime_tokio::multicast_glue::{drive_multicast_session, MulticastDriveConfig};
+use wz_runtime_tokio::multicast_glue::{
+    drive_multicast_session, MulticastDriveConfig, MulticastLink,
+};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
@@ -99,9 +101,9 @@ fn wz_mc_params() -> MulticastParams {
 /// Bind wz for [`OWN_GROUP`] with `cfg`, drive the multicast session for up to
 /// `budget`, and report `(pushes decoded, peers admitted)`.
 async fn receive(cfg: McastSocketConfig<'_>, budget: Duration) -> (usize, usize) {
-    let mut driver = UdpDriver::bind_multicast(OWN_GROUP, PORT, cfg)
-        .await
-        .expect("bind the wz multicast socket");
+    // Bound when the session opens its link; a bind that fails ends the drive,
+    // which the select below reports.
+    let mut link = MulticastLink::new(|| UdpDriver::bind_multicast(OWN_GROUP, PORT, cfg));
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = wz_mc_params();
     let fired = Arc::new(AtomicUsize::new(0));
@@ -125,7 +127,7 @@ async fn receive(cfg: McastSocketConfig<'_>, budget: Duration) -> (usize, usize)
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver,
+        &mut link,
         &clock,
         |event| observer.dispatch_event(event),
         &producer,

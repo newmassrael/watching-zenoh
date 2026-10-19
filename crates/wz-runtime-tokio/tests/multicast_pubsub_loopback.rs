@@ -39,7 +39,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use wz_runtime_tokio::multicast_glue::{
     drive_multicast_session, multicast_put_literal, spawn_router_mcast_egress,
-    MulticastDriveConfig, MulticastOutcome, MulticastTxProducer,
+    MulticastDriveConfig, MulticastLink, MulticastOutcome, MulticastTxProducer,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::{McastGroupOptions, McastSocketConfig, UdpDriver};
@@ -70,6 +70,16 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
     }
 }
 
+/// A TX-only publisher's group link: an ephemeral-bound socket targeting the
+/// group on `port`, bound when its session opens it.
+async fn bind_publisher(port: u16) -> std::io::Result<UdpDriver> {
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    Ok(UdpDriver::from_socket(
+        sock,
+        SocketAddr::from((GROUP, port)),
+    ))
+}
+
 fn mc_params(zid_byte: u8) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
@@ -87,10 +97,11 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn publisher_push_reaches_group_subscriber() {
-    // Subscriber node B: group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
-        .await
-        .expect("bind multicast subscriber link");
+    // Subscriber node B: group-joined socket + observer-backed drive loop. The
+    // socket is bound when B's session opens its link; a bind that fails ends
+    // B's drive, which the select below reports.
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
 
@@ -108,10 +119,7 @@ async fn publisher_push_reaches_group_subscriber() {
     // Publisher node A: ephemeral-bound socket targeting the group (TX-only
     // publisher; its own RX sees no group traffic, which is fine — the SN
     // gate under test is B's).
-    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral publisher socket");
-    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, PORT)));
+    let mut link_a = MulticastLink::new(|| bind_publisher(PORT));
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = mc_params(0xAA);
 
@@ -127,7 +135,7 @@ async fn publisher_push_reaches_group_subscriber() {
             // production path: no iteration budget, select! bounds the run
             max_iters: None,
         },
-        &mut driver_b,
+        &mut link_b,
         &clock,
         |event| observer.dispatch_event(event),
         &producer_b,
@@ -139,7 +147,7 @@ async fn publisher_push_reaches_group_subscriber() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_a,
+        &mut link_a,
         &clock,
         |_| {},
         &producer_a,
@@ -209,9 +217,9 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     };
 
     // Subscriber node B: qos group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast(GROUP, QOS_PORT, McastSocketConfig::default())
-        .await
-        .expect("bind qos multicast subscriber link");
+    let mut link_b = MulticastLink::new(|| {
+        UdpDriver::bind_multicast(GROUP, QOS_PORT, McastSocketConfig::default())
+    });
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = qos_params(0xBB);
 
@@ -229,10 +237,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     // Publisher node A: ephemeral-bound socket targeting the group, DRIVEN through a
     // direct multicast Session so `publish_qos` (not a hand-built tx item) is the
     // originator under test.
-    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral publisher socket");
-    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, QOS_PORT)));
+    let mut link_a = MulticastLink::new(|| bind_publisher(QOS_PORT));
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = qos_params(0xAA);
 
@@ -256,7 +261,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_b,
+        &mut link_b,
         clock.as_ref(),
         |event| observer_b.dispatch_event(event),
         &producer_b,
@@ -268,7 +273,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_a,
+        &mut link_a,
         clock.as_ref(),
         |_| {},
         &producer_a,
@@ -337,9 +342,9 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     const REFUSE_PORT: u16 = 7454;
 
     // Subscriber node B is NON-qos (the mc_params default is_qos=false).
-    let mut driver_b = UdpDriver::bind_multicast(GROUP, REFUSE_PORT, McastSocketConfig::default())
-        .await
-        .expect("bind non-qos multicast subscriber link");
+    let mut link_b = MulticastLink::new(|| {
+        UdpDriver::bind_multicast(GROUP, REFUSE_PORT, McastSocketConfig::default())
+    });
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
     assert!(
@@ -357,10 +362,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     }
 
     // Publisher node A is qos, driven through a direct Session::publish_qos.
-    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral publisher socket");
-    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, REFUSE_PORT)));
+    let mut link_a = MulticastLink::new(|| bind_publisher(REFUSE_PORT));
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = MulticastParams {
         is_qos: true,
@@ -386,7 +388,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_b,
+        &mut link_b,
         clock.as_ref(),
         |event| observer_b.dispatch_event(event),
         &producer_b,
@@ -398,7 +400,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_a,
+        &mut link_a,
         clock.as_ref(),
         |_| {},
         &producer_a,
@@ -460,9 +462,9 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         ..mc_params(zid_byte)
     };
 
-    let mut driver_b = UdpDriver::bind_multicast(GROUP, FRAG_PORT, McastSocketConfig::default())
-        .await
-        .expect("bind multicast subscriber link");
+    let mut link_b = MulticastLink::new(|| {
+        UdpDriver::bind_multicast(GROUP, FRAG_PORT, McastSocketConfig::default())
+    });
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = frag_params(0xBB);
 
@@ -478,10 +480,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         });
     }
 
-    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral publisher socket");
-    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, FRAG_PORT)));
+    let mut link_a = MulticastLink::new(|| bind_publisher(FRAG_PORT));
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = frag_params(0xAA);
 
@@ -496,7 +495,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_b,
+        &mut link_b,
         &clock,
         |event| observer.dispatch_event(event),
         &producer_b,
@@ -508,7 +507,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_a,
+        &mut link_a,
         &clock,
         |_| {},
         &producer_a,
@@ -586,9 +585,9 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     };
 
     // ── Subscriber B: joins the group, collects every delivered payload.
-    let mut driver_b = UdpDriver::bind_multicast(GROUP, CONC_PORT, McastSocketConfig::default())
-        .await
-        .expect("bind multicast subscriber link");
+    let mut link_b = MulticastLink::new(|| {
+        UdpDriver::bind_multicast(GROUP, CONC_PORT, McastSocketConfig::default())
+    });
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = conc_params(0xBB);
 
@@ -605,17 +604,11 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
 
     // ── Publishers A and C: distinct ephemeral sockets -> distinct source
     //    addresses -> distinct source-keyed chains in B's pool.
-    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral publisher A socket");
-    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, CONC_PORT)));
+    let mut link_a = MulticastLink::new(|| bind_publisher(CONC_PORT));
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = conc_params(0xAA);
 
-    let sock_c = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral publisher C socket");
-    let mut driver_c = UdpDriver::from_socket(sock_c, SocketAddr::from((GROUP, CONC_PORT)));
+    let mut link_c = MulticastLink::new(|| bind_publisher(CONC_PORT));
     let mut dispatcher_c = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_c = conc_params(0xCC);
 
@@ -631,7 +624,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_b,
+        &mut link_b,
         &clock,
         |event| observer.dispatch_event(event),
         &producer_b,
@@ -643,7 +636,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_a,
+        &mut link_a,
         &clock,
         |_| {},
         &producer_a,
@@ -655,7 +648,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_c,
+        &mut link_c,
         &clock,
         |_| {},
         &producer_c,
@@ -743,9 +736,9 @@ async fn router_egress_helper_reaches_group_subscriber() {
     const HELPER_PORT: u16 = 7452;
 
     // Subscriber node: group-joined socket + observer-backed drive loop.
-    let mut driver_b = UdpDriver::bind_multicast(GROUP, HELPER_PORT, McastSocketConfig::default())
-        .await
-        .expect("bind multicast subscriber link");
+    let mut link_b = MulticastLink::new(|| {
+        UdpDriver::bind_multicast(GROUP, HELPER_PORT, McastSocketConfig::default())
+    });
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
 
@@ -769,7 +762,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
             tick_ms: 10,
             max_iters: None,
         },
-        &mut driver_b,
+        &mut link_b,
         &clock,
         |event| observer.dispatch_event(event),
         &producer_b,
@@ -1226,9 +1219,9 @@ async fn a_router_group_face_receives_what_a_member_publishes() {
 
     // The member: a peer loop on its own send socket, publishing one Put once
     // its beacons have had time to admit it into the face's peer table.
-    let mut member = UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
-        .await
-        .expect("bind the publishing member");
+    let mut member = MulticastLink::new(|| {
+        UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
+    });
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = mc_params(0xAE);
     let tx = MulticastTxProducer::new();
@@ -1314,9 +1307,9 @@ async fn a_router_group_face_counts_its_traffic_in_the_node_registry() {
         Some(node.clone()),
     );
 
-    let mut member = UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
-        .await
-        .expect("bind the publishing member");
+    let mut member = MulticastLink::new(|| {
+        UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
+    });
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = mc_params(0xB0);
     let tx = MulticastTxProducer::new();

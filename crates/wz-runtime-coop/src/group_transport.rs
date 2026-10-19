@@ -18,6 +18,10 @@
 //! two differ where it counts: a unicast link retargets its replies to whoever
 //! spoke last and a group never does, and the group's receive carries the source
 //! address the §3.2 peer table is keyed by.
+//!
+//! Two more are the session machine's: `open` and `close` are how the loop
+//! performs its `open_multicast_link` and `release_multicast_link` duties, so a
+//! transport is the session's link only between the two.
 
 use core::net::SocketAddr;
 
@@ -27,6 +31,22 @@ use core::net::SocketAddr;
 /// The loop owns it exclusively for the life of the session (single task, one
 /// consumer), which is why the sending and receiving halves take `&mut self`.
 pub trait GroupTransport {
+    /// Take this transport as the session's group link: the session machine's
+    /// `open_multicast_link` duty. `false` when it cannot carry the group (its
+    /// socket was released); the session then ends as a lost link before
+    /// anything is sent.
+    ///
+    /// The socket is bound and joined to the group by whoever built the
+    /// transport, out of the image's own socket pool, so opening does not bind:
+    /// it is what makes that socket the session's link from here on.
+    fn open(&mut self) -> bool;
+
+    /// Release the group link: the session machine's `release_multicast_link`
+    /// duty. A transport that owns its socket gives it back; one that borrows
+    /// it lets the borrow go. Either way it sends and receives nothing after,
+    /// and a later `open` fails.
+    fn close(&mut self);
+
     /// Advance the stack's input path and timers by one pass. A stack the loop
     /// must pump (lwIP `NO_SYS`, polled from this thread) does its work here;
     /// one whose input runs on its own thread or ISR does nothing.

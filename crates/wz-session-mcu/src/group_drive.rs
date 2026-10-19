@@ -158,7 +158,7 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
 use wz_session_core::link::LostCause;
-use wz_session_core::multicast_dispatch::MulticastDispatcher;
+use wz_session_core::multicast_dispatch::{MulticastDispatcher, MulticastLinkDuties};
 use wz_session_core::multicast_join::{encode_join_into_slice, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
 // R311mf/R311mh — multicast Fragment RX reassembly. The reassembly-divergent
@@ -193,7 +193,6 @@ use wz_session_core::multicast_rx::{
 ))]
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::multicast_tx::{multicast_tx_emit_offer, MulticastTxOffer};
-use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, MulticastTxConduits};
 // R311ma/R311mb/R311md — the no_std multicast reply backing (MulticastReplyQueue,
 // below): the observer drains its staged replies through the shared generic
@@ -691,7 +690,9 @@ where
         if !outcome.warrants_rejoin() {
             return outcome;
         }
-        // Release the port BEFORE asking for it again — see the doc above.
+        // The session's `release_multicast_link` closed the transport, which
+        // gave an owned socket back; the spent transport goes too, BEFORE the
+        // port is asked for again — see the doc above.
         drop(transport);
         let deadline = clock.now_monotonic_ms().saturating_add(rejoin_delay_ms);
         while clock.now_monotonic_ms() < deadline {
@@ -744,6 +745,33 @@ where
         if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, should_stop.as_deref_mut()) {
             return outcome;
         }
+    }
+}
+
+/// Perform the link duties one lifecycle call of `dispatcher` returned: a
+/// release closes `transport`, and an open opens it and answers the machine
+/// with `link.ready` or `link.lost`, whose own duties are performed in turn.
+/// `false` when an open failed (the machine has heard `link.lost` and released
+/// the link).
+fn perform_link_duties<T: GroupTransport, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    transport: &mut T,
+    mut duties: MulticastLinkDuties,
+) -> bool {
+    let mut opened = true;
+    loop {
+        if duties.release() {
+            transport.close();
+        }
+        if !duties.open() {
+            return opened;
+        }
+        duties = if transport.open() {
+            dispatcher.notify_link_ready()
+        } else {
+            opened = false;
+            dispatcher.notify_link_lost()
+        };
     }
 }
 
@@ -810,6 +838,9 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     next_join_ms: u64,
     next_sweep_ms: u64,
     iter: usize,
+    // The transport could not be opened as the session's link: the session went
+    // LinkOpening -> Stopped at bring-up, and the first step reports the loss.
+    lost_at_open: bool,
     // R311mf — the per-(slot, channel) reassembly Router for inbound multicast
     // Fragment chains, dimensioned to the MCU pool (mcu_reassembly =
     // ReassemblyDispatcher<4, 4096>, the same Router run_session owns). Only
@@ -821,10 +852,12 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
 impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     MulticastPump<'a, C, T, MAX_PEERS>
 {
-    /// Bring the dispatcher up (Idle -> Running) and arm the JOIN and sweep
-    /// cadences — everything the synchronous loop does before its first
-    /// iteration. The step of the pump this returns does NOT take the executor
-    /// pass (see [`MulticastPump`]).
+    /// Bring the dispatcher up (Idle -> LinkOpening, whose `open_multicast_link`
+    /// opens `transport` as the session's link, -> Running) and arm the JOIN and
+    /// sweep cadences — everything the synchronous loop does before its first
+    /// iteration. A transport that cannot be opened sends nothing: the first
+    /// step reports [`MulticastOutcome::LinkLost`]. The step of the pump this
+    /// returns does NOT take the executor pass (see [`MulticastPump`]).
     pub fn new(
         dispatcher: &'a mut MulticastDispatcher<MAX_PEERS>,
         cfg: MulticastDriveConfig<'a>,
@@ -853,9 +886,12 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         // external epoch to match (contrast the unicast run_session's R263 clock).
         let clock = CoopTime::new(runtime);
 
-        // Idle -> LinkOpening -> Running.
-        dispatcher.create();
-        dispatcher.notify_link_ready();
+        // Idle -> LinkOpening, whose `open_multicast_link` takes the transport as
+        // the session's link, and the machine hears whether it could. A
+        // dispatcher already Running (a second drive of the same session) asks
+        // for nothing and keeps the link it has.
+        let created = dispatcher.create();
+        let lost_at_open = !perform_link_duties(dispatcher, transport, created);
 
         let tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
         // Emit the first JOIN beacon immediately, then every join_interval_ms;
@@ -877,6 +913,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             next_join_ms,
             next_sweep_ms,
             iter: 0,
+            lost_at_open,
             #[cfg(feature = "reassembly")]
             reasm: mcu_reassembly(),
         }
@@ -905,6 +942,11 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         F: FnMut(IterationEvent<'_>),
         G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
+        if core::mem::take(&mut self.lost_at_open) {
+            // The open failed at bring-up and the session is already Stopped:
+            // reported once, as the lost link it is, with nothing sent.
+            return Some(MulticastOutcome::LinkLost(LostCause::OsError));
+        }
         // The body below is the synchronous loop's, verbatim but for these
         // names: each is a disjoint borrow of one field.
         let pass = self.pass;
@@ -923,7 +965,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         #[cfg(feature = "reassembly")]
         let reasm = &mut self.reasm;
 
-        if dispatcher.session_state() != SessionFsmMulticastState::Running {
+        if !dispatcher.is_running() {
             return Some(MulticastOutcome::Stopped);
         }
         // R2375 — GRACEFUL STOP: the §3.1 Running -> Stopped event, the MCU twin
@@ -969,11 +1011,13 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             if pass == ExecutorPass::Inline {
                 runtime.run_until_idle();
             }
-            // Drive the transition rather than just returning: `stop()` releases
-            // the multicast link and clears the peer table, exactly as the
-            // link-loss path does through the dispatcher. Returning the outcome
-            // without it would leave a Stopped session still holding peers.
-            dispatcher.stop();
+            // Drive the transition rather than just returning: its
+            // `release_multicast_link` clears the peer table and closes the
+            // transport, after the Close above has left, exactly as the
+            // link-loss path does. Returning the outcome without it would leave
+            // a Stopped session still holding peers and its socket.
+            let stopped = dispatcher.stop();
+            perform_link_duties(dispatcher, transport, stopped);
             return Some(MulticastOutcome::Stopped);
         }
         // R2390 — LINK LOSS: the third way out, and the one this loop did not
@@ -1000,7 +1044,8 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         // the test guard `IterationLimit` because the budget happened to run
         // out on the same iteration.
         if !transport.carrier_up() {
-            dispatcher.notify_link_lost();
+            let lost = dispatcher.notify_link_lost();
+            perform_link_duties(dispatcher, transport, lost);
             // `OsError` is the AP's cause for a socket that stopped working
             // (`udp_pipeline.rs:596`), which is what a dropped carrier is here:
             // not a peer's announced departure (`PeerClosed`) and not a lease

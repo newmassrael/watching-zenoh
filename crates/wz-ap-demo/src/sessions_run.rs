@@ -564,7 +564,8 @@ async fn run_group(
         return SessionEnd::Failed;
     };
     // One bind for the first join and every re-join, so a re-join installs
-    // exactly the membership the first one did.
+    // exactly the membership the first one did. Each join's session binds it
+    // when it asks for its link.
     let bind = || {
         UdpDriver::bind_multicast(
             group,
@@ -575,18 +576,10 @@ async fn run_group(
             },
         )
     };
-    let driver = match bind().await {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("wz-ap-demo session {name}: failed: cannot join {endpoint}: {e}");
-            return SessionEnd::Failed;
-        }
-    };
     serve_group(
         endpoint,
         &group_params(zid, join_interval_ms, lease_ms),
         bind,
-        driver,
         &mut stop,
         |line| eprintln!("wz-ap-demo session {name}: {line}"),
     )
@@ -615,8 +608,10 @@ fn group_params(
     }
 }
 
-/// Serve a joined group until the process stops, re-joining after every lost
-/// link. `driver` is the first join's link and `bind` makes each later one.
+/// Join a group and serve it until the process stops, re-joining after every
+/// lost link. `bind` makes each join's link, and runs when that join's session
+/// asks for it. The FIRST join's failure is the session's (`failed: cannot
+/// join`), as a router face reports a first bind that fails.
 ///
 /// # Why this loops
 ///
@@ -626,7 +621,7 @@ fn group_params(
 /// pico re-arms the same reopen task from a multicast lease failure that its
 /// unicast one arms, and a wz router face re-joins too. This session re-joins
 /// on the router face's own schedule and wait (`GroupRejoin`,
-/// `rejoin_group_driver`), shared rather than copied, so the two cannot drift:
+/// `rejoin_group_session`), shared rather than copied, so the two cannot drift:
 /// zenoh's 1000 / 4000 / x2 retry period, the wait and the re-bind both raced
 /// against the stop.
 ///
@@ -646,8 +641,7 @@ fn group_params(
 async fn serve_group<D, B, Fut>(
     endpoint: &str,
     params: &wz::runtime_tokio::multicast_glue::MulticastParams,
-    mut bind: B,
-    mut driver: D,
+    bind: B,
     stop: &mut watch::Receiver<bool>,
     mut say: impl FnMut(&str),
 ) -> SessionEnd
@@ -657,8 +651,9 @@ where
     Fut: std::future::Future<Output = io::Result<D>>,
 {
     use wz::runtime_tokio::multicast_glue::{
-        drive_multicast_session_with_shutdown, rejoin_group_driver, GroupRejoin, MulticastConfig,
-        MulticastDispatcher, MulticastDriveConfig, MulticastOutcome, MulticastTxProducer,
+        drive_multicast_session_with_shutdown, open_multicast_session, rejoin_group_session,
+        GroupRejoin, MulticastConfig, MulticastDispatcher, MulticastDriveConfig, MulticastLink,
+        MulticastOutcome, MulticastTxProducer,
     };
     use wz::runtime_tokio::session::TokioMulticastSession;
     use wz::runtime_tokio::session_glue::IterationEvent;
@@ -673,11 +668,16 @@ where
         producer.clone(),
     );
     let mut rejoin = GroupRejoin::new();
+    let new_dispatcher =
+        || MulticastDispatcher::<GROUP_PEER_TABLE>::new(MulticastConfig::new(params.lease_ms));
+    let mut dispatcher = Box::new(new_dispatcher());
+    let mut link = MulticastLink::new(bind);
+    if let Err(e) = open_multicast_session(&mut dispatcher, &mut link).await {
+        say(&format!("failed: cannot join {endpoint}: {e}"));
+        return SessionEnd::Failed;
+    }
     say(&format!("READY peer multicast joined {endpoint}"));
     loop {
-        let mut dispatcher = Box::new(MulticastDispatcher::<GROUP_PEER_TABLE>::new(
-            MulticastConfig::new(params.lease_ms),
-        ));
         let outcome = drive_multicast_session_with_shutdown(
             &mut dispatcher,
             MulticastDriveConfig {
@@ -685,7 +685,7 @@ where
                 tick_ms: 10,
                 max_iters: None,
             },
-            &mut driver,
+            &mut link,
             clock.as_ref(),
             |event| {
                 match &event {
@@ -721,21 +721,22 @@ where
             }
             outcome => say(&format!("link lost ({outcome:?}); re-joining in {delay}ms")),
         }
-        driver = match rejoin_group_driver(
-            &mut bind,
+        let rejoined = rejoin_group_session(
+            &mut dispatcher,
+            &new_dispatcher,
+            &mut link,
             clock.as_ref(),
             &mut rejoin,
             stop,
             delay,
             |err, retry| say(&format!("re-join failed ({err}); retrying in {retry}ms")),
         )
-        .await
-        {
-            Some(driver) => driver,
+        .await;
+        if !rejoined {
             // Told to stop while the group was down: there is no link to
             // announce a departure on, and the process is closing.
-            None => return SessionEnd::Closed,
-        };
+            return SessionEnd::Closed;
+        }
         say(&format!("rejoined {endpoint}"));
     }
 }
@@ -1004,13 +1005,11 @@ mod group_rejoin_tests {
         let a = {
             let mut stop = stop_rx.clone();
             let lines = a_lines.clone();
-            let first = bind_a().await.unwrap();
             async move {
                 serve_group(
                     ENDPOINT,
                     &group_params(zid_a, 100, 1_000),
                     bind_a,
-                    first,
                     &mut stop,
                     |line| lines.borrow_mut().push(line.to_string()),
                 )
@@ -1020,15 +1019,20 @@ mod group_rejoin_tests {
         let b = {
             let mut stop = stop_rx.clone();
             let lines = b_lines.clone();
-            let first = bus.attach(addr(2_000), Arc::new(Notify::new()));
-            let bind_b =
-                || std::future::ready(Err::<BusLink, _>(io::Error::other("b never re-binds")));
+            // B's first join binds; it never re-binds, and is never cut.
+            let mut first = Some(bus.attach(addr(2_000), Arc::new(Notify::new())));
+            let bind_b = move || {
+                std::future::ready(
+                    first
+                        .take()
+                        .ok_or_else(|| io::Error::other("b never re-binds")),
+                )
+            };
             async move {
                 serve_group(
                     ENDPOINT,
                     &group_params(zid_b, 100, 1_000),
                     bind_b,
-                    first,
                     &mut stop,
                     |line| lines.borrow_mut().push(line.to_string()),
                 )
@@ -1086,9 +1090,15 @@ mod group_rejoin_tests {
         let (stop_tx, stop_rx) = watch::channel(false);
         let carrier = Arc::new(Notify::new());
         let lines = Lines::default();
-        let first = bus.attach(addr(3_000), carrier.clone());
-        let bind =
-            || std::future::ready(Err::<BusLink, _>(io::Error::other("the interface is down")));
+        // The first join binds; every re-bind after the link drops fails.
+        let mut first = Some(bus.attach(addr(3_000), carrier.clone()));
+        let bind = move || {
+            std::future::ready(
+                first
+                    .take()
+                    .ok_or_else(|| io::Error::other("the interface is down")),
+            )
+        };
         let signalled_at = Cell::new(None);
 
         let a = {
@@ -1099,7 +1109,6 @@ mod group_rejoin_tests {
                     ENDPOINT,
                     &group_params(vec![0xC3], 100, 1_000),
                     bind,
-                    first,
                     &mut stop,
                     |line| lines.borrow_mut().push(line.to_string()),
                 )
@@ -1129,5 +1138,33 @@ mod group_rejoin_tests {
             "{said:#?}"
         );
         assert_eq!(count(&lines, "rejoined"), 0);
+    }
+
+    /// The FIRST join's failure is the session's: its session asked for the
+    /// link, the bind failed, nothing is served or re-joined, and the line says
+    /// why.
+    #[tokio::test(start_paused = true)]
+    async fn a_group_whose_first_join_fails_ends_failed() {
+        let (_stop_tx, mut stop) = watch::channel(false);
+        let lines = Lines::default();
+        let binds = Cell::new(0u16);
+        let end = serve_group(
+            ENDPOINT,
+            &group_params(vec![0xD4], 100, 1_000),
+            || {
+                binds.set(binds.get() + 1);
+                std::future::ready(Err::<BusLink, _>(io::Error::other("no such interface")))
+            },
+            &mut stop,
+            |line| lines.borrow_mut().push(line.to_string()),
+        )
+        .await;
+
+        assert_eq!(end, SessionEnd::Failed);
+        assert_eq!(binds.get(), 1, "a first join that fails is not retried");
+        assert_eq!(
+            *lines.borrow(),
+            [format!("failed: cannot join {ENDPOINT}: no such interface")]
+        );
     }
 }

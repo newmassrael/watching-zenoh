@@ -73,9 +73,19 @@
 //!   admitted peer's RX SN conduits and lease from its JOIN.
 //! - `emit_peer_lost` (a peer entering Expired) — the Router hands the
 //!   departure ([`MulticastPeerLost`]) to the eviction's observer.
+//! - `enter_running` (the session entering Running) — the Router admits
+//!   peers, frames and fragments and sweeps leases from then on
+//!   ([`MulticastDispatcher::is_running`]).
+//! - `release_multicast_link` (the session entering Stopped) — the Router
+//!   empties the peer table, and hands the host the link to close.
+//! - `open_multicast_link` (the session entering LinkOpening) — the Router
+//!   hands the host the link to open; the host answers with
+//!   [`notify_link_ready`](MulticastDispatcher::notify_link_ready) or
+//!   [`notify_link_lost`](MulticastDispatcher::notify_link_lost).
 //!
-//! The session binding's three duties are still realised by the Router
-//! observing the session state, with empty bodies.
+//! The two link duties are the host's because the link is: each lifecycle
+//! call returns them as [`MulticastLinkDuties`], which the drive loops of
+//! both runtimes perform before they do anything else.
 
 // The observer event surface is alloc-gated (FramePayload carries Vec),
 // so the full ingest pipeline gates on alloc too; the chain-key + eviction
@@ -335,29 +345,69 @@ pub enum JoinOutcome {
     SessionNotRunning,
 }
 
-/// Host binding for the generated [`SessionFsmMulticastActions`]. The three
-/// `<sce:action>` effect points (`open_multicast_link` / `enter_running` /
-/// `release_multicast_link`) are realised by the Router OUTSIDE the FSM —
-/// the engine-free split: a binding buried in the generated `Policy` cannot
-/// reach the Router-owned link / peer table, so the Router does the work by
-/// observing the FSM state (e.g. [`MulticastDispatcher::clear_peers_if_stopped`]
-/// clears the table on Stopped). These bodies are therefore deliberate
-/// no-ops: the `<sce:action>` is the SPEC's effect-point marker (SSOT with
-/// §3.1), the Router is its realisation. Zero-field — the generated
-/// `Policy.actions` is private so any per-action counter would be unreadable
-/// (behaviour is verified through the FSM state, not dispatch counts), and a
-/// dead counter is worse than an honest no-op.
-struct SessionBinding;
+/// What the session machine asked of the host's group link on one lifecycle
+/// call of [`MulticastDispatcher`]: its `open_multicast_link` and
+/// `release_multicast_link` duties, which the dispatcher cannot perform
+/// because it holds no link.
+///
+/// Every lifecycle call returns one, and a drive loop performs it before it
+/// does anything else: an open is answered with
+/// [`notify_link_ready`](MulticastDispatcher::notify_link_ready) or
+/// [`notify_link_lost`](MulticastDispatcher::notify_link_lost), whose own
+/// duties are performed in turn.
+#[must_use = "the session machine asked the host to open or to release its link"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MulticastLinkDuties {
+    open: bool,
+    release: bool,
+}
+
+impl MulticastLinkDuties {
+    /// `open_multicast_link`: bring the group link up (bind the session's
+    /// socket and join the group), then report whether it came up.
+    pub fn open(self) -> bool {
+        self.open
+    }
+
+    /// `release_multicast_link`: close the group link. The dispatcher has
+    /// already emptied its peer table.
+    pub fn release(self) -> bool {
+        self.release
+    }
+}
+
+/// Host binding for the generated [`SessionFsmMulticastActions`]. Each body
+/// records its duty, and the dispatcher performs it right after the
+/// lifecycle event that ran the body (`MulticastDispatcher::session_duties`):
+/// `enter_running` and the peer-table half of `release_multicast_link` it
+/// performs itself, and the two link duties it returns to the host as
+/// [`MulticastLinkDuties`].
+#[derive(Default)]
+struct SessionBinding {
+    duties: DutyOutbox,
+}
+
+impl SessionBinding {
+    const OPEN_LINK: u8 = 0b001;
+    const ENTER_RUNNING: u8 = 0b010;
+    const RELEASE_LINK: u8 = 0b100;
+}
 
 impl SessionFsmMulticastActions for SessionBinding {
-    // docs/adr/0038: the Router performs these duties from the FSM state
-    // (see above), so the host performs them although its bodies are empty.
     const REALIZATION: ::sce_rust_runtime::ActionRealization =
         ::sce_rust_runtime::ActionRealization::Performs;
 
-    fn open_multicast_link(&mut self) {}
-    fn enter_running(&mut self) {}
-    fn release_multicast_link(&mut self) {}
+    fn open_multicast_link(&mut self) {
+        self.duties.record(Self::OPEN_LINK);
+    }
+
+    fn enter_running(&mut self) {
+        self.duties.record(Self::ENTER_RUNNING);
+    }
+
+    fn release_multicast_link(&mut self) {
+        self.duties.record(Self::RELEASE_LINK);
+    }
 }
 
 /// The duties a machine's action bodies recorded and the Router has not yet
@@ -744,6 +794,10 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     session: Engine<SessionFsmMulticastPolicy<SessionBinding>>,
     peers: [PeerSlot; MAX_PEERS],
     config: MulticastConfig,
+    /// Set by the session machine's `enter_running` duty and cleared by its
+    /// `release_multicast_link`: whether peers, frames and fragments are
+    /// admitted and leases swept.
+    running: bool,
     /// §5.21 routing-namespace — the per-session EGRESS prefix (the master
     /// namespace value). `None` until [`Self::set_namespace`] installs it at
     /// bring-up (mirrors the unicast `SessionLinkActions::set_namespace`
@@ -760,13 +814,14 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Build a Router with an Idle session and `MAX_PEERS` free slots over
     /// `config`.
     pub fn new(config: MulticastConfig) -> Self {
-        let mut session = Engine::new(SessionFsmMulticastPolicy::new(SessionBinding));
+        let mut session = Engine::new(SessionFsmMulticastPolicy::new(SessionBinding::default()));
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
         session.initialize();
         Self {
             session,
             peers: core::array::from_fn(|_| PeerSlot::new()),
             config,
+            running: false,
             #[cfg(feature = "routing-namespace")]
             namespace: None,
         }
@@ -1099,54 +1154,69 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         set.into_iter().collect()
     }
 
-    /// Bring the multicast session up: Idle -> LinkOpening
-    /// (`open_multicast_link`). Returns the resulting session state. A
-    /// `create` outside Idle is a no-op (the FSM has no `multicast.create`
-    /// transition elsewhere).
-    pub fn create(&mut self) -> SessionFsmMulticastState {
+    /// Whether the session machine has entered Running (its `enter_running`
+    /// duty) and not since been released: the gate every admission and the
+    /// lease sweep read, and the one a drive loop runs while.
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    /// Bring the multicast session up: Idle -> LinkOpening, whose
+    /// `open_multicast_link` the returned duties carry for the host to
+    /// perform. A `create` outside Idle is a no-op and asks for nothing (the
+    /// FSM has no `multicast.create` transition elsewhere).
+    pub fn create(&mut self) -> MulticastLinkDuties {
         self.session
             .process_event(SessionFsmMulticastEvent::MulticastCreate);
-        self.session_state()
+        self.session_duties()
     }
 
-    /// The host completed the multicast link bring-up: LinkOpening ->
-    /// Running (`enter_running`). Returns the resulting session state.
-    pub fn notify_link_ready(&mut self) -> SessionFsmMulticastState {
+    /// The host's link came up: LinkOpening -> Running, whose `enter_running`
+    /// the dispatcher performs itself.
+    pub fn notify_link_ready(&mut self) -> MulticastLinkDuties {
         self.session
             .process_event(SessionFsmMulticastEvent::LinkReady);
-        self.session_state()
+        self.session_duties()
     }
 
-    /// The multicast link dropped: -> Stopped (`release_multicast_link`).
-    /// Reachable from LinkOpening or Running (§3.1). On reaching Stopped the
-    /// peer table is cleared (the peers belonged to the now-dead session).
-    /// Returns the resulting session state.
-    pub fn notify_link_lost(&mut self) -> SessionFsmMulticastState {
+    /// The host's link dropped, or never came up: -> Stopped, from
+    /// LinkOpening or Running (§3.1), whose `release_multicast_link` empties
+    /// the peer table here and asks the host to close its link.
+    pub fn notify_link_lost(&mut self) -> MulticastLinkDuties {
         self.session
             .process_event(SessionFsmMulticastEvent::LinkLost);
-        self.clear_peers_if_stopped();
-        self.session_state()
+        self.session_duties()
     }
 
-    /// Tear the multicast session down: Running -> Stopped
-    /// (`release_multicast_link`, §3.3 — no close handshake). On reaching
-    /// Stopped the peer table is cleared. Returns the resulting session
-    /// state.
-    pub fn stop(&mut self) -> SessionFsmMulticastState {
+    /// Tear the multicast session down: Running -> Stopped (§3.3 — no close
+    /// handshake), whose `release_multicast_link` empties the peer table here
+    /// and asks the host to close its link.
+    pub fn stop(&mut self) -> MulticastLinkDuties {
         self.session
             .process_event(SessionFsmMulticastEvent::MulticastStop);
-        self.clear_peers_if_stopped();
-        self.session_state()
+        self.session_duties()
     }
 
-    /// When the session reaches Stopped, `release_multicast_link` clears the
-    /// peer table (§3.1). The peers belonged to a now-dead session, so the
-    /// fixed pool is reset wholesale — a session-level teardown, not N
-    /// per-peer `peer.lost` events (those are the per-peer FSM's Close /
-    /// lease paths, which do not apply once the whole link is gone).
-    fn clear_peers_if_stopped(&mut self) {
-        if self.session_state() == SessionFsmMulticastState::Stopped {
+    /// Perform what the session machine's duty bodies recorded during the
+    /// event just processed, and return the link duties that are the host's.
+    ///
+    /// The release resets the whole peer pool: the peers belonged to the
+    /// session being released, and the machine states no per-peer departure
+    /// for it (`peer.lost` is the Close and lease paths), so no peer's
+    /// `emit_peer_lost` runs and no departure is reported.
+    fn session_duties(&mut self) -> MulticastLinkDuties {
+        let duties = self.session.policy().actions().duties.take();
+        if duties.has(SessionBinding::ENTER_RUNNING) {
+            self.running = true;
+        }
+        let release = duties.has(SessionBinding::RELEASE_LINK);
+        if release {
+            self.running = false;
             self.peers = core::array::from_fn(|_| PeerSlot::new());
+        }
+        MulticastLinkDuties {
+            open: duties.has(SessionBinding::OPEN_LINK),
+            release,
         }
     }
 
@@ -1173,7 +1243,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         qos_next_sns: Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]>,
         now_ms: u64,
     ) -> JoinOutcome {
-        if self.session_state() != SessionFsmMulticastState::Running {
+        if !self.running {
             return JoinOutcome::SessionNotRunning;
         }
         if let Some(idx) = self.find_by_src(src) {
@@ -1343,7 +1413,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         frame_sn: u64,
         now_ms: u64,
     ) -> FrameIngest {
-        if self.session_state() != SessionFsmMulticastState::Running {
+        if !self.running {
             return FrameIngest::SessionNotRunning;
         }
         let Some(idx) = self.find_by_src(src) else {
@@ -1408,7 +1478,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         frame_sn: u64,
         now_ms: u64,
     ) -> FragmentIngest {
-        if self.session_state() != SessionFsmMulticastState::Running {
+        if !self.running {
             return FragmentIngest::SessionNotRunning;
         }
         let Some(idx) = self.find_by_src(src) else {
@@ -1547,12 +1617,17 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// identity and the inferred reason: what an observer can act on and what
     /// both upstreams hand up. It is where the peer machine's `emit_peer_lost`
     /// duty hands the departure as the peer enters Expired.
+    ///
+    /// A session that is not running sweeps nothing (see [`Self::is_running`]).
     pub fn sweep_with(
         &mut self,
         now_ms: u64,
         mut on_evict: impl FnMut(usize),
         mut on_lost: impl FnMut(MulticastPeerLost),
     ) -> usize {
+        if !self.running {
+            return 0;
+        }
         let cap = self.config.lease_ms;
         let mut expired = 0;
         for (idx, slot) in self.peers.iter_mut().enumerate() {
@@ -2041,10 +2116,24 @@ mod tests {
     const SRC_B: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 2);
     const SRC_C: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3);
 
+    const NO_LINK_DUTY: MulticastLinkDuties = MulticastLinkDuties {
+        open: false,
+        release: false,
+    };
+    const OPEN_LINK: MulticastLinkDuties = MulticastLinkDuties {
+        open: true,
+        release: false,
+    };
+    const RELEASE_LINK: MulticastLinkDuties = MulticastLinkDuties {
+        open: false,
+        release: true,
+    };
+
     fn running_dispatcher<const N: usize>(lease_ms: u64) -> MulticastDispatcher<N> {
         let mut d = MulticastDispatcher::<N>::new(MulticastConfig::new(lease_ms));
-        assert_eq!(d.create(), SessionFsmMulticastState::LinkOpening);
-        assert_eq!(d.notify_link_ready(), SessionFsmMulticastState::Running);
+        assert_eq!(d.create(), OPEN_LINK);
+        assert_eq!(d.notify_link_ready(), NO_LINK_DUTY);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::Running);
         d
     }
 
@@ -2129,24 +2218,78 @@ mod tests {
     fn session_lifecycle_idle_to_running_to_stopped() {
         let mut d = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         assert_eq!(d.session_state(), SessionFsmMulticastState::Idle);
-        assert_eq!(d.create(), SessionFsmMulticastState::LinkOpening);
-        assert_eq!(d.notify_link_ready(), SessionFsmMulticastState::Running);
-        assert_eq!(d.stop(), SessionFsmMulticastState::Stopped);
+        assert_eq!(d.create(), OPEN_LINK);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::LinkOpening);
+        assert_eq!(d.notify_link_ready(), NO_LINK_DUTY);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::Running);
+        assert_eq!(d.stop(), RELEASE_LINK);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::Stopped);
     }
 
-    /// A link loss during LinkOpening goes straight to Stopped (§3.1).
+    /// Each session duty is performed by the call whose event ran it, and only
+    /// by that call: `create` asks the host to open the link and nothing else,
+    /// `link.ready` asks nothing of the link and starts admitting, the release
+    /// asks the host to close the link and stops admitting, and a lifecycle
+    /// event the machine has no transition for runs no duty at all.
+    #[test]
+    fn link_duties_follow_the_session_machine() {
+        let mut d = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        assert!(!d.is_running(), "an Idle session admits nothing");
+        assert_eq!(
+            d.stop(),
+            NO_LINK_DUTY,
+            "Idle has no multicast.stop transition, so nothing is released"
+        );
+
+        let created = d.create();
+        assert!(created.open(), "LinkOpening entry asks for the link");
+        assert!(!created.release());
+        assert!(!d.is_running(), "a link being opened admits nothing yet");
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0(), 0),
+            JoinOutcome::SessionNotRunning
+        );
+        assert_eq!(d.create(), NO_LINK_DUTY, "a second create opens nothing");
+
+        assert_eq!(d.notify_link_ready(), NO_LINK_DUTY);
+        assert!(d.is_running(), "enter_running starts the admissions");
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+
+        let released = d.notify_link_lost();
+        assert!(
+            released.release(),
+            "Stopped entry asks for the link's close"
+        );
+        assert!(!released.open());
+        assert!(!d.is_running(), "a released session admits nothing");
+        assert_eq!(
+            d.ingest_join(ZID_B, SRC_B, sn0(), 0),
+            JoinOutcome::SessionNotRunning
+        );
+        assert_eq!(d.sweep(u64::MAX), 0, "and sweeps nothing");
+        assert_eq!(
+            d.notify_link_lost(),
+            NO_LINK_DUTY,
+            "Stopped is final: a second loss releases nothing twice"
+        );
+    }
+
+    /// A link loss during LinkOpening goes straight to Stopped (§3.1), and
+    /// the link the open was asked for is released.
     #[test]
     fn link_lost_during_opening_goes_stopped() {
         let mut d = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        assert_eq!(d.create(), SessionFsmMulticastState::LinkOpening);
-        assert_eq!(d.notify_link_lost(), SessionFsmMulticastState::Stopped);
+        assert_eq!(d.create(), OPEN_LINK);
+        assert_eq!(d.notify_link_lost(), RELEASE_LINK);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::Stopped);
     }
 
     /// A link loss while Running goes to Stopped (§3.1).
     #[test]
     fn link_lost_while_running_goes_stopped() {
         let mut d = running_dispatcher::<4>(5_000);
-        assert_eq!(d.notify_link_lost(), SessionFsmMulticastState::Stopped);
+        assert_eq!(d.notify_link_lost(), RELEASE_LINK);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::Stopped);
     }
 
     /// Stopping a running session clears the peer table (§3.1
@@ -2157,7 +2300,8 @@ mod tests {
         d.ingest_join(ZID_A, SRC_A, sn0(), 0);
         d.ingest_join(ZID_B, SRC_B, sn0(), 0);
         assert_eq!(d.active_peers(), 2);
-        assert_eq!(d.stop(), SessionFsmMulticastState::Stopped);
+        assert_eq!(d.stop(), RELEASE_LINK);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::Stopped);
         assert_eq!(d.active_peers(), 0);
     }
 
@@ -2168,7 +2312,8 @@ mod tests {
         let mut d = running_dispatcher::<4>(5_000);
         d.ingest_join(ZID_A, SRC_A, sn0(), 0);
         assert_eq!(d.active_peers(), 1);
-        assert_eq!(d.notify_link_lost(), SessionFsmMulticastState::Stopped);
+        assert_eq!(d.notify_link_lost(), RELEASE_LINK);
+        assert_eq!(d.session_state(), SessionFsmMulticastState::Stopped);
         assert_eq!(d.active_peers(), 0);
     }
 
@@ -2533,7 +2678,7 @@ mod tests {
             JoinOutcome::SessionNotRunning
         );
         // LinkOpening: still not running.
-        d.create();
+        assert_eq!(d.create(), OPEN_LINK);
         assert_eq!(
             d.ingest_join(ZID_A, SRC_A, sn0(), 0),
             JoinOutcome::SessionNotRunning

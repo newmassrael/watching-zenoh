@@ -74,7 +74,8 @@ use wz_integration_tests::common::{
     PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP, Z_SUB_INIT_TIMEOUT,
 };
 use wz_runtime_tokio::multicast_glue::{
-    drive_multicast_session, multicast_put_literal, MulticastDriveConfig, MulticastTxProducer,
+    drive_multicast_session, multicast_put_literal, MulticastDriveConfig, MulticastLink,
+    MulticastTxProducer,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::UdpDriver;
@@ -163,10 +164,14 @@ async fn wz_publisher_reaches_pico_multicast_zsub() {
     }
 
     // ── wz multicast publisher (in-library, ephemeral TX-only) ───────
-    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral wz publisher socket");
-    let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, PORT)));
+    // Bound when the session opens its link.
+    let mut link = MulticastLink::new(|| async {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        Ok::<_, std::io::Error>(UdpDriver::from_socket(
+            sock,
+            SocketAddr::from((GROUP, PORT)),
+        ))
+    });
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = wz_mc_params();
     let producer = MulticastTxProducer::new();
@@ -181,7 +186,7 @@ async fn wz_publisher_reaches_pico_multicast_zsub() {
             // production path: no iteration budget, select! bounds the run
             max_iters: None,
         },
-        &mut driver,
+        &mut link,
         &clock,
         |_| {},
         &producer,

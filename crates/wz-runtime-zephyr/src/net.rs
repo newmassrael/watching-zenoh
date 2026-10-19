@@ -507,7 +507,8 @@ impl SessionDatagramLink for ZephyrUdpDriver {
 /// has not run against a real IGMP exchange, which needs a board and a switch
 /// that forwards the group. The firmware turns on `CONFIG_NET_IPV4_IGMP`.
 pub struct ZephyrGroupTransport<const RX: usize> {
-    socket: ZephyrUdpSocket,
+    /// `None` once the session has released its link.
+    socket: Option<ZephyrUdpSocket>,
     group: ([u8; 4], u16),
     interface: [u8; 4],
     rx: [u8; RX],
@@ -521,7 +522,7 @@ impl<const RX: usize> ZephyrGroupTransport<RX> {
         let socket = ZephyrUdpSocket::bind([0; 4], port)?;
         socket.join_group(group, interface)?;
         Ok(Self {
-            socket,
+            socket: Some(socket),
             group: (group, port),
             interface,
             rx: [0; RX],
@@ -535,9 +536,27 @@ impl<const RX: usize> ZephyrGroupTransport<RX> {
     pub fn rx_error(&self) -> Option<ZephyrNetError> {
         self.rx_error
     }
+
+    /// Leave the group and close the socket. The membership is the
+    /// interface's, not the socket's: closing the socket alone would leave the
+    /// interface in the group, and a re-join after a lost link would join a
+    /// second time. Best-effort: a failed leave leaves nothing to do.
+    fn leave(&mut self) {
+        if let Some(socket) = self.socket.take() {
+            let _ = socket.leave_group(self.group.0, self.interface);
+        }
+    }
 }
 
 impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
+    fn open(&mut self) -> bool {
+        self.socket.is_some()
+    }
+
+    fn close(&mut self) {
+        self.leave();
+    }
+
     fn service(&self) {
         // Zephyr's net stack runs its own threads: all this thread owes it is
         // the CPU, as for the unicast link.
@@ -557,11 +576,16 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
     fn send_to_group(&mut self, datagram: &[u8]) {
         // Best-effort, as the trait says: multicast UDP has no acknowledgement
         // and the next cadence retries.
-        let _ = self.socket.send_to(self.group.0, self.group.1, datagram);
+        if let Some(socket) = &self.socket {
+            let _ = socket.send_to(self.group.0, self.group.1, datagram);
+        }
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        match self.socket.try_recv(&mut self.rx) {
+        let Some(socket) = &self.socket else {
+            return false;
+        };
+        match socket.try_recv(&mut self.rx) {
             Ok(Some((len, addr, port))) => {
                 f(
                     &self.rx[..len],
@@ -580,10 +604,7 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
 
 impl<const RX: usize> Drop for ZephyrGroupTransport<RX> {
     fn drop(&mut self) {
-        // The membership is the interface's, not the socket's: closing the
-        // socket alone would leave the interface in the group, and a re-join
-        // after a lost link would join a second time. Best-effort: a failed
-        // leave leaves nothing to do.
-        let _ = self.socket.leave_group(self.group.0, self.interface);
+        // A transport dropped while its session still held it leaves too.
+        self.leave();
     }
 }

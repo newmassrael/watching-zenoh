@@ -104,24 +104,37 @@ fn peer_key(src_addr: u32, src_port: u16) -> SocketAddr {
 /// shares the link (`Rc<LwipLink>`, or a `&'static LwipLink` on the slot profile).
 /// A `Deref<Target = LwipLink>` bound on the link and a `BorrowMut` on the driver
 /// admit all of them at no runtime cost, as `LwipSessionLink` does for the unicast
-/// loop. A transport that OWNS its driver releases the group socket when it drops,
-/// which the rejoining entry point relies on.
+/// loop. A transport that OWNS its driver gives the group socket back (its PCB
+/// returns to the pool) when the session releases its link, which the rejoining
+/// entry point relies on before it binds the same port again.
 pub struct LwipGroupTransport<L: Deref<Target = LwipLink>, D: BorrowMut<LwipMulticastDriver>> {
     link: L,
-    driver: D,
+    /// `None` once the session has released its link.
+    driver: Option<D>,
 }
 
 impl<L: Deref<Target = LwipLink>, D: BorrowMut<LwipMulticastDriver>> LwipGroupTransport<L, D> {
     /// Pair the lwIP link whose input path is pumped with the driver whose
     /// socket carries the group.
     pub fn new(link: L, driver: D) -> Self {
-        Self { link, driver }
+        Self {
+            link,
+            driver: Some(driver),
+        }
     }
 }
 
 impl<L: Deref<Target = LwipLink>, D: BorrowMut<LwipMulticastDriver>> GroupTransport
     for LwipGroupTransport<L, D>
 {
+    fn open(&mut self) -> bool {
+        self.driver.is_some()
+    }
+
+    fn close(&mut self) {
+        self.driver = None;
+    }
+
     fn service(&self) {
         // Drive the lwIP input path (loopback / QEMU shape). Real-NIC deploys
         // drive netif input from the RX ISR instead of poll_loopback.
@@ -134,11 +147,16 @@ impl<L: Deref<Target = LwipLink>, D: BorrowMut<LwipMulticastDriver>> GroupTransp
     }
 
     fn send_to_group(&mut self, datagram: &[u8]) {
-        self.driver.borrow_mut().send_to_group(datagram);
+        if let Some(driver) = &mut self.driver {
+            driver.borrow_mut().send_to_group(datagram);
+        }
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        match self.driver.borrow_mut().try_recv() {
+        let Some(driver) = &mut self.driver else {
+            return false;
+        };
+        match driver.borrow_mut().try_recv() {
             Some(dg) => {
                 f(dg.data.as_slice(), peer_key(dg.src_addr, dg.src_port));
                 true
@@ -1732,6 +1750,76 @@ mod tests {
             MulticastOutcome::Stopped,
             "the stop poll is read before the carrier, so a caller that asked \
              to leave is not told its link failed"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// The session machine's `open_multicast_link` is what makes the transport
+    /// the session's link: a transport that cannot be opened (here one already
+    /// released) ends the session as a lost link at bring-up, and NOTHING is
+    /// sent, not even the first JOIN beacon a running session emits at once.
+    ///
+    /// The beacon assertion is the discriminator: a loop that brought the
+    /// session up without performing the open would reach Running, beacon on
+    /// its first iteration, and only then find out. The carrier is up, so the
+    /// loss cannot come from the per-iteration carrier read. A distinct port
+    /// (7462).
+    #[test]
+    fn a_group_transport_that_cannot_open_sends_nothing_and_ends_lost() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7462;
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        std::assert!(link.any_link_is_up(), "the carrier is not the cause");
+
+        let mut released = LwipGroupTransport::new(&link, &mut driver);
+        released.close();
+        let outcome = group::run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &runtime,
+            &mut released,
+            |_event| {},
+            || None,
+        );
+        drop(released);
+
+        std::assert_eq!(
+            outcome,
+            MulticastOutcome::LinkLost(LostCause::OsError),
+            "a link that could not be opened is a lost link, not a budget"
+        );
+        std::assert_eq!(
+            dispatcher.session_state(),
+            SessionFsmMulticastState::Stopped
+        );
+        std::assert!(!dispatcher.is_running());
+        let mut beacons = 0usize;
+        for _ in 0..32 {
+            link.poll_loopback();
+            link.check_timeouts();
+            runtime.run_until_idle();
+            while let Some(dg) = driver.try_recv() {
+                if dg.data.as_slice().first().map(|h| h & 0x1f)
+                    == Some(wz_session_core::wire_const::T_MID_JOIN)
+                {
+                    beacons += 1;
+                }
+            }
+        }
+        std::assert_eq!(
+            beacons,
+            0,
+            "a session whose link never opened beacons nothing"
         );
 
         link.leave_multicast_group(group).expect("leave group");

@@ -76,6 +76,19 @@
 //! The `RxFrame.src` field carries the address; a non-multicast link leaves
 //! it `None` and such messages are ignored here.
 //!
+//! ## The link is the session machine's to open and release
+//!
+//! The loop does not take a bound socket. It takes a [`MulticastLink`], which
+//! holds the BIND, and the session machine decides when it runs: entering
+//! LinkOpening (`open_multicast_link`) binds and opens the link, and the loop
+//! answers the machine with `link.ready` or `link.lost`; entering Stopped
+//! (`release_multicast_link`, on a stop or a lost link) closes it. A link that
+//! cannot be bound therefore ends the session as
+//! [`MulticastOutcome::LinkLost`] before anything is sent. A host that needs
+//! the bound link before the loop runs (a group face labels its counters and
+//! its member view by it) brings the session up with
+//! [`open_multicast_session`] first.
+//!
 //! ## Stop
 //!
 //! Three ways out: the link is lost (`LinkEvent::Lost` ->
@@ -118,7 +131,8 @@ use wz_session_core::driver_loop::IterationEvent;
 // longer names them (it contributes only the `TokioReplyBacking`). The Frame
 // encoders + the egress splitter likewise live in the shared
 // `wz_session_core::multicast_tx` SSOT (R311lx).
-use wz_session_core::link::LinkEvent;
+use wz_session_core::link::{LinkEvent, LostCause};
+use wz_session_core::multicast_dispatch::MulticastLinkDuties;
 /// Open-debt item 900 — the group session's own state, re-exported so a host
 /// that reaches wz only through this crate (the demo's `--sessions` group
 /// session is one) can build the dispatcher and the profile that
@@ -146,7 +160,6 @@ pub use wz_session_core::multicast_stats::MulticastStatsRecorder;
 #[cfg(feature = "codec-push")]
 pub use wz_session_core::multicast_tx::multicast_put_literal;
 pub use wz_session_core::multicast_tx::MulticastTxItem;
-use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 #[cfg(test)]
 use wz_session_core::sn::{self, MulticastTxConduits};
 
@@ -468,9 +481,150 @@ impl MulticastDatagramSender for crate::UdpGroupSender {
     }
 }
 
+/// The group link one multicast session runs over, and the bind that makes it.
+///
+/// The session machine opens and releases it: entering LinkOpening
+/// (`open_multicast_link`) calls `bind` and opens what it returns
+/// ([`LinkDriver::open`]); entering Stopped (`release_multicast_link`, on a
+/// stop or a lost link) closes it ([`LinkDriver::close`]) and lets it go.
+/// Between the two it is the link the drive loop reads and the transmit task
+/// writes. A link released and opened again binds again, which is what a
+/// re-join is.
+///
+/// `bind` returns the link bound and joined to the group: for UDP,
+/// [`UdpDriver::bind_multicast_link`](crate::UdpDriver::bind_multicast_link) or
+/// one of its siblings. The transmit task holds its own handle on the socket
+/// datagrams leave from, so a departing Close queued before the release still
+/// leaves after it.
+pub struct MulticastLink<D, B> {
+    bind: B,
+    open: Option<D>,
+}
+
+impl<D, B, Fut> MulticastLink<D, B>
+where
+    D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
+{
+    /// A link no session has opened yet, bound by `bind` when one does.
+    pub fn new(bind: B) -> Self {
+        Self { bind, open: None }
+    }
+
+    /// The open link: `None` before a session opened it and after a session
+    /// released it.
+    pub fn driver(&self) -> Option<&D> {
+        self.open.as_ref()
+    }
+
+    /// `open_multicast_link`: bind, then open what the bind returned.
+    async fn open(&mut self) -> std::io::Result<()> {
+        let mut driver = (self.bind)().await?;
+        driver.open().await?;
+        self.open = Some(driver);
+        Ok(())
+    }
+
+    /// `release_multicast_link`: close the open link and let it go.
+    async fn release(&mut self) {
+        if let Some(mut driver) = self.open.take() {
+            // The link is let go whether or not the close reports an error:
+            // there is nothing a session being released could do about one.
+            let _ = driver.close().await;
+        }
+    }
+
+    /// The next event of the open link. A link that is not open reads as a
+    /// closed one, as a UDP link whose socket is gone does.
+    async fn poll_event(&mut self) -> LinkEvent {
+        match self.open.as_mut() {
+            Some(driver) => driver.poll_event().await,
+            None => LinkEvent::Lost {
+                cause: LostCause::PeerClosed,
+            },
+        }
+    }
+}
+
+/// Perform the link duties one lifecycle call of `dispatcher` returned: a
+/// release closes `link`, and an open binds and opens it and answers the
+/// machine with `link.ready` or `link.lost`, whose own duties are performed in
+/// turn. An open's failure is returned after the machine has heard
+/// `link.lost`.
+async fn perform_link_duties<D, B, Fut, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    link: &mut MulticastLink<D, B>,
+    mut duties: MulticastLinkDuties,
+) -> std::io::Result<()>
+where
+    D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
+{
+    let mut failure = None;
+    loop {
+        if duties.release() {
+            link.release().await;
+        }
+        if !duties.open() {
+            return match failure {
+                Some(e) => Err(e),
+                None => Ok(()),
+            };
+        }
+        duties = match link.open().await {
+            Ok(()) => dispatcher.notify_link_ready(),
+            Err(e) => {
+                failure = Some(e);
+                dispatcher.notify_link_lost()
+            }
+        };
+    }
+}
+
+/// Bring `dispatcher`'s session up over `link` without running it: drive
+/// `multicast.create`, whose `open_multicast_link` binds and opens the link,
+/// and tell the machine whether it came up. Returns the open link.
+///
+/// What a host calls when it needs the bound link before the session runs: a
+/// group face labels its counters and its member view by it. The drive loops
+/// then run the session they find Running over the link they find open. A
+/// session already brought up asks for nothing, and the link it holds is
+/// returned as it is.
+///
+/// # Errors
+///
+/// The bind's or the open's error, after the machine has heard `link.lost`
+/// (the session is then Stopped and admits nothing); `NotConnected` when the
+/// session asked for no link and `link` holds none.
+pub async fn open_multicast_session<'l, D, B, Fut, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    link: &'l mut MulticastLink<D, B>,
+) -> std::io::Result<&'l D>
+where
+    D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
+{
+    let created = dispatcher.create();
+    perform_link_duties(dispatcher, link, created).await?;
+    link.driver().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "the session holds no open group link",
+        )
+    })
+}
+
 /// Drive a multicast session: bring the link up, then own the §3.1 Running
 /// concerns (periodic JOIN emit, RX classify -> dispatch + the A1b data
 /// plane, lease sweep) until the link is lost or `cfg.max_iters` is reached.
+///
+/// `link` is the session's [`MulticastLink`]: an Idle session's
+/// `multicast.create` binds and opens it, and a bind that fails ends the
+/// session as [`MulticastOutcome::LinkLost`] with nothing sent. A session
+/// already Running is driven over the link it holds open.
 ///
 /// `cfg` ([`MulticastDriveConfig`]) bundles the loop's static configuration
 /// — the protocol `params`, the scheduler `tick_ms` cadence, and the
@@ -495,16 +649,18 @@ impl MulticastDatagramSender for crate::UdpGroupSender {
 /// multicast to the group, and a frame past the group batch budget leaves as a
 /// `T_MID_FRAGMENT` chain (R311ko). A publish-free caller passes a producer
 /// nobody else holds.
-pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
+pub async fn drive_multicast_session<D, B, Fut, T, F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
-    driver: &mut D,
+    link: &mut MulticastLink<D, B>,
     clock: &T,
     on_event: F,
     producer: &MulticastTxProducer,
 ) -> MulticastOutcome
 where
     D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
 {
@@ -515,7 +671,7 @@ where
     drive_multicast_session_with_membership(
         dispatcher,
         cfg,
-        driver,
+        link,
         clock,
         on_event,
         producer,
@@ -546,12 +702,12 @@ where
 /// dropped it meant.
 ///
 /// On stop the dispatcher's `stop()` runs before the return, so the peer table
-/// is cleared exactly as it is on the link-loss path — a `Stopped` outcome
-/// never leaves peers behind.
-pub async fn drive_multicast_session_with_shutdown<D, T, F, const MAX_PEERS: usize>(
+/// is cleared and the link closed exactly as on the link-loss path — a
+/// `Stopped` outcome never leaves peers or an open link behind.
+pub async fn drive_multicast_session_with_shutdown<D, B, Fut, T, F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
-    driver: &mut D,
+    link: &mut MulticastLink<D, B>,
     clock: &T,
     on_event: F,
     producer: &MulticastTxProducer,
@@ -559,13 +715,15 @@ pub async fn drive_multicast_session_with_shutdown<D, T, F, const MAX_PEERS: usi
 ) -> MulticastOutcome
 where
     D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
 {
     drive_multicast_session_inner(
         dispatcher,
         cfg,
-        driver,
+        link,
         clock,
         on_event,
         producer,
@@ -657,10 +815,20 @@ impl McastFaceStop {
 /// `shared_nodes` master election carries (recomputed at every topology event).
 /// Startup damping (promote-slow / demote-fast) is a named follow-up.
 #[allow(clippy::too_many_arguments)]
-pub async fn drive_multicast_session_with_membership<D, T, F, G, H, R, const MAX_PEERS: usize>(
+pub async fn drive_multicast_session_with_membership<
+    D,
+    B,
+    Fut,
+    T,
+    F,
+    G,
+    H,
+    R,
+    const MAX_PEERS: usize,
+>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
-    driver: &mut D,
+    link: &mut MulticastLink<D, B>,
     clock: &T,
     on_event: F,
     producer: &MulticastTxProducer,
@@ -672,6 +840,8 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, R, const MAX
 ) -> MulticastOutcome
 where
     D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
@@ -698,7 +868,7 @@ where
     drive_multicast_session_inner(
         dispatcher,
         cfg,
-        driver,
+        link,
         clock,
         on_event,
         producer,
@@ -722,10 +892,10 @@ where
 /// so what the loop queued — a departing Close included — is written before
 /// the outcome is reported.
 #[allow(clippy::too_many_arguments)]
-async fn drive_multicast_session_inner<D, T, F, G, H, R, const MAX_PEERS: usize>(
+async fn drive_multicast_session_inner<D, B, Fut, T, F, G, H, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
-    driver: &mut D,
+    link: &mut MulticastLink<D, B>,
     clock: &T,
     on_event: F,
     producer: &MulticastTxProducer,
@@ -737,12 +907,35 @@ async fn drive_multicast_session_inner<D, T, F, G, H, R, const MAX_PEERS: usize>
 ) -> MulticastOutcome
 where
     D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
     R: MulticastStatsRecorder + Sync + ?Sized,
 {
+    // Idle -> LinkOpening: the session machine's `open_multicast_link` binds
+    // and opens the link here, so a link that cannot be bound ends the session
+    // before anything is sent. A session already brought up (by
+    // `open_multicast_session`, or by an earlier drive) asks for nothing.
+    let created = dispatcher.create();
+    if perform_link_duties(dispatcher, link, created)
+        .await
+        .is_err()
+    {
+        return MulticastOutcome::LinkLost(LostCause::OsError);
+    }
+    if !dispatcher.is_running() {
+        return MulticastOutcome::Stopped;
+    }
+    let Some(driver) = link.driver() else {
+        // A Running session handed a link it never opened has no link: read
+        // as a closed one reads, and released like any lost link.
+        let lost = dispatcher.notify_link_lost();
+        let _ = perform_link_duties(dispatcher, link, lost).await;
+        return MulticastOutcome::LinkLost(LostCause::PeerClosed);
+    };
     // R2937 — the pipeline is attached to `producer` for as long as the link
     // runs; the egress namespace is the dispatcher's, installed before
     // bring-up, so egress and ingress still come from one value.
@@ -756,7 +949,7 @@ where
     let outcome = drive_multicast_session_running(
         dispatcher,
         cfg,
-        driver,
+        link,
         clock,
         on_event,
         on_members,
@@ -773,10 +966,10 @@ where
 
 /// The loop itself: receive, beacon, sweep, and queue what goes out on `tx`.
 #[allow(clippy::too_many_arguments)]
-async fn drive_multicast_session_running<D, T, F, G, H, R, const MAX_PEERS: usize>(
+async fn drive_multicast_session_running<D, B, Fut, T, F, G, H, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
-    driver: &mut D,
+    link: &mut MulticastLink<D, B>,
     clock: &T,
     on_event: F,
     #[cfg_attr(
@@ -812,6 +1005,8 @@ async fn drive_multicast_session_running<D, T, F, G, H, R, const MAX_PEERS: usiz
 ) -> MulticastOutcome
 where
     D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
@@ -840,9 +1035,6 @@ where
         tick_ms,
         max_iters,
     } = cfg;
-    // Idle -> LinkOpening -> Running.
-    dispatcher.create();
-    dispatcher.notify_link_ready();
 
     // Emit the first JOIN beacon immediately, then every join_interval_ms.
     let mut next_join_ms = clock.now_monotonic_ms();
@@ -879,7 +1071,7 @@ where
 
     let mut iter: usize = 0;
     loop {
-        if dispatcher.session_state() != SessionFsmMulticastState::Running {
+        if !dispatcher.is_running() {
             return MulticastOutcome::Stopped;
         }
         if let Some(limit) = max_iters {
@@ -919,7 +1111,7 @@ where
             // attached pipeline themselves (`MulticastTxProducer::push`), and
             // the transmit task writes it, so nothing a producer sends waits
             // on this loop's turn.
-            event = driver.poll_event() => match event {
+            event = link.poll_event() => match event {
                 LinkEvent::Rx(rx) => {
                     // R2848 — the link received these bytes whether or not
                     // anything in them can be attributed, so they are counted
@@ -982,7 +1174,10 @@ where
                     }
                 }
                 LinkEvent::Lost { cause } => {
-                    dispatcher.notify_link_lost();
+                    // `release_multicast_link` empties the peer table and
+                    // closes the link that was lost.
+                    let lost = dispatcher.notify_link_lost();
+                    let _ = perform_link_duties(dispatcher, link, lost).await;
                     return MulticastOutcome::LinkLost(cause);
                 }
                 LinkEvent::Ready => {}
@@ -1037,11 +1232,15 @@ where
                 // written first.
                 let dgram = wz_session_core::handshake_encode::encode_multicast_close();
                 tx.enqueue_control(dgram);
-                // Drive the transition rather than just returning: the peer table
-                // must be cleared on the way out, exactly as the link-loss arm
-                // above does through `notify_link_lost`. Returning the outcome
-                // without it would leave a Stopped session still holding peers.
-                dispatcher.stop();
+                // Drive the transition rather than just returning: its
+                // `release_multicast_link` clears the peer table and closes the
+                // link on the way out, exactly as the link-loss arm above does.
+                // Returning the outcome without it would leave a Stopped
+                // session still holding peers and its socket. The Close queued
+                // above still leaves: the transmit task writes through a handle
+                // of its own on the sending socket.
+                let stopped = dispatcher.stop();
+                let _ = perform_link_duties(dispatcher, link, stopped).await;
                 return MulticastOutcome::Stopped;
             }
             _ = clock.sleep(tick_ms) => {
@@ -1308,6 +1507,10 @@ type GroupBind<'a> = core::pin::Pin<
 /// is the one place a face's traffic can reach the registry — and the one
 /// place it can fail to.
 ///
+/// The bind runs when a join's session asks for its link
+/// ([`open_multicast_session`]), before the join's loop, because the counters
+/// and the member view are labelled by the bound link.
+///
 /// Returns the stop handle. The task yields `None` when the FIRST bind fails —
 /// no loop ran, so no departure was announced and a host must not report one —
 /// and the loop's outcome otherwise.
@@ -1349,22 +1552,26 @@ where
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
     let task = pool.spawn(async move {
         let clock = TokioTime::new();
-        // R2376 — the FIRST bind is the host's own call and its failure is
-        // reported as it always was; every LATER one is a re-join. A face that
-        // never came up is a deploy error the operator must see, while a face
-        // that came up and lost its link is the transient this loop rides out.
+        let new_dispatcher =
+            || MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
         let mut rejoin = GroupRejoin::new();
-        let mut driver = match bind(&opts).await {
-            Ok(driver) => driver,
-            Err(e) => {
-                log::error!("{label}: group bind failed ({e}); face absent");
-                return None;
-            }
-        };
+        let mut link = MulticastLink::new(|| bind(&opts));
+        let mut dispatcher = new_dispatcher();
         loop {
-            let mut dispatcher =
-                MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
-            let recorder = GroupFaceRecorder::open(node_stats.as_ref(), &driver, label);
+            // R2376 — the FIRST open is the host's own bring-up and its failure
+            // is reported as it always was; every LATER one is a re-join, which
+            // `rejoin_group_session` has already opened, and this finds it open.
+            // A face that never came up is a deploy error the operator must see,
+            // while a face that came up and lost its link is the transient this
+            // loop rides out.
+            let driver = match open_multicast_session(&mut dispatcher, &mut link).await {
+                Ok(driver) => driver,
+                Err(e) => {
+                    log::error!("{label}: group bind failed ({e}); face absent");
+                    return None;
+                }
+            };
+            let recorder = GroupFaceRecorder::open(node_stats.as_ref(), driver, label);
             // R2859 — this join's member view, labelled by the bound link as
             // upstream labels a multicast transport's link. A link whose
             // addresses cannot be read keeps no view, and says so, rather than
@@ -1372,7 +1579,7 @@ where
             let membership_join =
                 membership
                     .as_ref()
-                    .and_then(|membership| match group_link_locators(&driver) {
+                    .and_then(|membership| match group_link_locators(driver) {
                         Ok((src, group)) => Some(membership.open(src, group)),
                         Err(e) => {
                             log::warn!(
@@ -1390,7 +1597,7 @@ where
                     // host stops it (R2333) or the link is lost.
                     max_iters: None,
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 &mut on_event,
                 &producer,
@@ -1409,8 +1616,10 @@ where
                 return Some(outcome);
             };
             log::warn!("{label}: group face lost ({outcome:?}); re-joining in {delay}ms");
-            driver = match rejoin_group_driver(
-                || bind(&opts),
+            let rejoined = rejoin_group_session(
+                &mut dispatcher,
+                &new_dispatcher,
+                &mut link,
                 &clock,
                 &mut rejoin,
                 &mut shutdown,
@@ -1419,17 +1628,14 @@ where
                     log::warn!("{label}: group re-join failed ({err}); retrying in {retry}ms")
                 },
             )
-            .await
-            {
-                Some(driver) => {
-                    log::info!("{label}: group face re-joined");
-                    driver
-                }
+            .await;
+            if !rejoined {
                 // The host stopped the face while it was down. Report the loss
                 // that took it down, not a synthetic stop: nothing re-joined, so
                 // no departure was announced on the wire.
-                None => return Some(outcome),
-            };
+                return Some(outcome);
+            }
+            log::info!("{label}: group face re-joined");
         }
     });
     McastFaceStop { signal, task }
@@ -1716,7 +1922,7 @@ impl Drop for McastGroupMembershipJoin {
 /// demo's `--sessions` group session is one — has the same obligation to
 /// re-join, and a private copy of this schedule there would be the second
 /// transcription R311y786 exists to prevent. So the type and its wait
-/// ([`rejoin_group_driver`]) are public, and neither reports anything: a face
+/// ([`rejoin_group_session`]) are public, and neither reports anything: a face
 /// writes `log` lines, a demo session writes the lines a harness waits on,
 /// and the schedule must not choose between them.
 #[derive(Debug)]
@@ -1771,40 +1977,49 @@ impl GroupRejoin {
     }
 }
 
-/// R2376 — wait out `first_delay`, then re-bind the group face, retrying until
-/// it comes back or the host stops it.
+/// R2376 — wait out `first_delay`, then bring a FRESH session of the group face
+/// up over `link`, retrying until it comes back or the host stops it.
 ///
-/// `bind` is the CALLER's own bind, handed in as a closure rather than selected
-/// from an enum here. The two faces bind differently — RX installs the group
-/// membership, TX takes an ephemeral port and pins `IP_MULTICAST_IF` — and the
-/// first shape of this helper named the halves in an enum, which cost a variant
-/// that no build using only the egress face could construct. Taking the bind
-/// itself is both smaller and open: a third kind of face needs no arm added.
+/// Each attempt replaces `dispatcher` with `new_dispatcher()` and opens it as
+/// the first join was opened ([`open_multicast_session`]): its
+/// `multicast.create` asks for the link, `link` binds again, and the machine
+/// hears whether it came up. A fresh session because the previous one is in
+/// its final Stopped state, and its peer table described members reached over
+/// the link that died. The bind is the CALLER's own, carried by `link`: the
+/// faces bind differently (RX installs the group membership, TX takes an
+/// ephemeral port and pins `IP_MULTICAST_IF`), and a third kind of face needs
+/// no arm added here.
 ///
-/// Returns `None` when the host stopped the face while it was down, which is
+/// Returns `false` when the host stopped the face while it was down, which is
 /// the caller's signal to report the ORIGINAL loss rather than a re-join it
-/// never made. Sleeping is RACED against the stop signal rather than serialized
+/// never made; `true` when `dispatcher` is a Running session over the open
+/// `link`. Sleeping is RACED against the stop signal rather than serialized
 /// after it, so a shutdown during a long outage is observed at the signal
 /// instead of one backoff later — a face that ignores its stop until its next
 /// retry is a host that cannot shut down promptly, and the delay grows. The
-/// re-bind is raced the same way: the wait is the long half, but a stop that a
+/// re-open is raced the same way: the wait is the long half, but a stop that a
 /// slow bind could hold off is still a stop the host asked for and did not get.
 ///
 /// The link type is the caller's (`D`), so a host whose group runs over
 /// something other than the UDP group link — a test's in-memory link, for one
-/// — re-joins through this same wait. `on_bind_failure` hears each failed
-/// re-bind with the wait before the next try; it is where a caller reports it.
-pub async fn rejoin_group_driver<D, F, Fut, T, R>(
-    mut bind: F,
+/// — re-joins through this same wait. `on_open_failure` hears each failed
+/// re-open with the wait before the next try; it is where a caller reports it.
+#[allow(clippy::too_many_arguments)]
+pub async fn rejoin_group_session<D, B, Fut, N, T, R, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    mut new_dispatcher: N,
+    link: &mut MulticastLink<D, B>,
     clock: &T,
     rejoin: &mut GroupRejoin,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     first_delay: u64,
-    mut on_bind_failure: R,
-) -> Option<D>
+    mut on_open_failure: R,
+) -> bool
 where
-    F: FnMut() -> Fut,
+    D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
     Fut: core::future::Future<Output = std::io::Result<D>>,
+    N: FnMut() -> MulticastDispatcher<MAX_PEERS>,
     T: TimeSource,
     R: FnMut(&std::io::Error, u64),
 {
@@ -1815,17 +2030,18 @@ where
             // `changed()` errors only when every sender is gone, which is the
             // host dropping the face's stop handle — the RAII half of
             // `McastFaceStop`, and just as much a stop as a signalled one.
-            _ = shutdown.changed() => return None,
+            _ = shutdown.changed() => return false,
         }
-        let bound = tokio::select! {
-            bound = bind() => bound,
-            _ = shutdown.changed() => return None,
+        *dispatcher = new_dispatcher();
+        let opened = tokio::select! {
+            opened = open_multicast_session(dispatcher, link) => opened.map(|_| ()),
+            _ = shutdown.changed() => return false,
         };
-        match bound {
-            Ok(driver) => return Some(driver),
+        match opened {
+            Ok(()) => return true,
             Err(e) => {
                 delay = rejoin.wait_for_bind_failure();
-                on_bind_failure(&e, delay);
+                on_open_failure(&e, delay);
             }
         }
     }
@@ -2069,6 +2285,7 @@ mod tests {
     use wz_session_core::link::{LostCause, RxFrame, TxFrame};
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::reliability::Reliability;
+    use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
     // `decode_join` is asserted only in the `codec-push`-gated next-SN test and
     // the fragment-TX block (which also requires `codec-push`).
     #[cfg(feature = "codec-push")]
@@ -2127,6 +2344,9 @@ mod tests {
         /// on the loop's transmit task.
         log: SentLog,
         lost: bool,
+        /// Refuse [`LinkDriver::open`]: a link that was bound but cannot be
+        /// brought up.
+        refuses_open: bool,
     }
 
     /// The written datagrams, shared between a [`FakeDriver`] and its send
@@ -2156,6 +2376,11 @@ mod tests {
                 .expect("sent log")
                 .push(datagram.to_vec());
         }
+
+        /// What has been written so far, in the order it was written.
+        fn sent(&self) -> Vec<Vec<u8>> {
+            self.written.lock().expect("sent log").clone()
+        }
     }
 
     impl MulticastDatagramSender for SentLog {
@@ -2181,14 +2406,37 @@ mod tests {
                 inbound: inbound.into_iter().collect(),
                 log: SentLog::default(),
                 lost: false,
+                refuses_open: false,
             }
         }
 
-        /// What has been written so far, in the order it was written.
-        fn sent(&self) -> Vec<Vec<u8>> {
-            self.log.written.lock().expect("sent log").clone()
+        /// This fake as a session's [`MulticastLink`], and the log of what it
+        /// writes, which outlives the link's release. Its bind yields this
+        /// driver to the first open and refuses every later one, as a port
+        /// already bound would.
+        fn into_link(self) -> (FakeLink, SentLog) {
+            let log = self.log.clone();
+            let mut unbound = Some(self);
+            let bind: FakeBind = Box::new(move || {
+                core::future::ready(unbound.take().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::AddrInUse, "a fake link binds once")
+                }))
+            });
+            (MulticastLink::new(bind), log)
+        }
+
+        /// [`Self::with`] as a session's link, for a test that reads nothing
+        /// of what the link writes.
+        fn link_with(inbound: impl IntoIterator<Item = (Vec<u8>, SocketAddr)>) -> FakeLink {
+            Self::with(inbound).into_link().0
         }
     }
+
+    /// The bind of a fake link, boxed so the link's type has a name.
+    type FakeBind = Box<dyn FnMut() -> core::future::Ready<std::io::Result<FakeDriver>> + Send>;
+
+    /// A session's link over a [`FakeDriver`].
+    type FakeLink = MulticastLink<FakeDriver, FakeBind>;
 
     impl MulticastLinkDriver for FakeDriver {
         type Sender = SentLog;
@@ -2200,6 +2448,12 @@ mod tests {
 
     impl LinkDriver for FakeDriver {
         async fn open(&mut self) -> std::io::Result<()> {
+            if self.refuses_open {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "the group cannot be joined",
+                ));
+            }
             Ok(())
         }
         async fn send(
@@ -2307,7 +2561,7 @@ mod tests {
     #[tokio::test]
     async fn drive_loop_admits_join_peer_and_emits_beacon() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let (mut link, sent) = FakeDriver::with([(join0(&params(&peer_b)), src(2))]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -2319,7 +2573,7 @@ mod tests {
                 max_iters: Some(5),
             },
             // self
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2339,8 +2593,12 @@ mod tests {
         );
         // At least one self JOIN beacon was multicast, MID-framed correctly
         // (the non-default fixture batch advertises S=1, masked out here).
-        assert!(!driver.sent().is_empty(), "expected >= 1 JOIN beacon");
-        assert_eq!(driver.sent()[0][0] & 0x1f, wire_const::T_MID_JOIN);
+        assert!(!sent.sent().is_empty(), "expected >= 1 JOIN beacon");
+        assert_eq!(sent.sent()[0][0] & 0x1f, wire_const::T_MID_JOIN);
+        assert!(
+            link.driver().is_some(),
+            "a session that is still Running keeps its link open"
+        );
     }
 
     /// An inbound Close (attributed by source address) evicts the peer.
@@ -2350,10 +2608,11 @@ mod tests {
         // First a JOIN from peer B's address admits it, then a Close from the
         // SAME address evicts it — the Close carries no zid, so it is keyed
         // by source address.
-        let mut driver = FakeDriver::with([
+        let (mut link, _sent) = FakeDriver::with([
             (join0(&params(&peer_b)), src(2)),
             (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
-        ]);
+        ])
+        .into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -2364,7 +2623,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2375,14 +2634,17 @@ mod tests {
         assert_eq!(dispatcher.active_peers(), 0, "Close must evict the peer");
     }
 
-    /// A lost link returns `LinkLost` and clears the peer table (§3.1).
+    /// A lost link returns `LinkLost`, clears the peer table and releases the
+    /// link (§3.1 `release_multicast_link`).
     #[tokio::test]
     async fn drive_loop_returns_link_lost() {
-        let mut driver = FakeDriver {
+        let (mut link, _sent) = FakeDriver {
             inbound: VecDeque::new(),
             log: SentLog::default(),
             lost: true,
-        };
+            refuses_open: false,
+        }
+        .into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -2393,7 +2655,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2406,6 +2668,110 @@ mod tests {
             SessionFsmMulticastState::Stopped
         );
         assert_eq!(dispatcher.active_peers(), 0);
+        assert!(
+            link.driver().is_none(),
+            "the session released the link it lost"
+        );
+    }
+
+    /// The session machine's `open_multicast_link` is what binds and opens the
+    /// link: a link that is bound but cannot be opened ends the session as a
+    /// lost link before anything is sent, the machine is Stopped, so it admits
+    /// nothing, and the link it could not open is not kept.
+    ///
+    /// The beacon assertion is the discriminator. A loop that ran a session it
+    /// had not opened would reach Running and multicast its first JOIN at once
+    /// on the link it was given, which writes into the same log this reads.
+    #[tokio::test]
+    async fn a_link_that_cannot_open_sends_no_join_and_ends_lost() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let (mut link, sent) = FakeDriver {
+            inbound: [(join0(&params(&peer_b)), src(2))].into_iter().collect(),
+            log: SentLog::default(),
+            lost: false,
+            refuses_open: true,
+        }
+        .into_link();
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            &mut link,
+            &TokioTime::new(),
+            |_| {},
+            &MulticastTxProducer::new(),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            MulticastOutcome::LinkLost(LostCause::OsError),
+            "a link that never came up is a lost link, not a stop or a budget"
+        );
+        assert!(
+            sent.sent().is_empty(),
+            "a session whose link never opened sends nothing, not even a JOIN"
+        );
+        assert_eq!(
+            dispatcher.session_state(),
+            SessionFsmMulticastState::Stopped
+        );
+        assert!(
+            !dispatcher.is_running(),
+            "a session never opened admits nothing"
+        );
+        assert_eq!(
+            dispatcher.active_peers(),
+            0,
+            "the queued JOIN was never read"
+        );
+        assert!(
+            link.driver().is_none(),
+            "a link that did not open is not kept"
+        );
+    }
+
+    /// A session already Running that is handed a link it never opened has
+    /// no link to run over: it ends as a lost link, the way a closed socket
+    /// reads, and the machine hears `link.lost` and releases.
+    #[tokio::test]
+    async fn a_running_session_without_an_open_link_ends_lost() {
+        let (mut opened, _sent) = FakeDriver::with([]).into_link();
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        open_multicast_session(&mut dispatcher, &mut opened)
+            .await
+            .expect("the fake link opens");
+        assert!(dispatcher.is_running());
+
+        let (mut never_opened, _other) = FakeDriver::with([]).into_link();
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            &mut never_opened,
+            &TokioTime::new(),
+            |_| {},
+            &MulticastTxProducer::new(),
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::LinkLost(LostCause::PeerClosed));
+        assert_eq!(
+            dispatcher.session_state(),
+            SessionFsmMulticastState::Stopped
+        );
+        assert!(
+            never_opened.driver().is_none(),
+            "a Running session asks for no open, so nothing bound it"
+        );
     }
 
     // ── R311y772 — the graceful stop the module header carried as a residual ──
@@ -2422,7 +2788,7 @@ mod tests {
     #[tokio::test]
     async fn a_shutdown_signal_stops_the_loop_and_clears_the_peer_table() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let (mut link, _sent) = FakeDriver::with([(join0(&params(&peer_b)), src(2))]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -2436,7 +2802,7 @@ mod tests {
         let admitted = drive_multicast_session(
             &mut dispatcher,
             cfg(),
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2455,7 +2821,7 @@ mod tests {
         let stopped = drive_multicast_session_with_shutdown(
             &mut dispatcher,
             cfg(),
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2478,6 +2844,10 @@ mod tests {
             "stop() must run on the way out -- a Stopped session holding peers \
              is the defect the link-loss arm already avoids",
         );
+        assert!(
+            link.driver().is_none(),
+            "and its release must close the link the session held"
+        );
     }
 
     /// ANTI-VACUITY. The identical fixture WITHOUT a signal runs to its budget
@@ -2486,7 +2856,7 @@ mod tests {
     #[tokio::test]
     async fn the_same_fixture_without_a_signal_still_runs_to_its_budget() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let (mut link, _sent) = FakeDriver::with([(join0(&params(&peer_b)), src(2))]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -2501,7 +2871,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2534,7 +2904,7 @@ mod tests {
     #[tokio::test]
     async fn the_membership_entry_point_also_stops_on_a_signal() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let (mut link, _sent) = FakeDriver::with([(join0(&params(&peer_b)), src(2))]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -2549,7 +2919,7 @@ mod tests {
         let admitted = drive_multicast_session_with_membership(
             &mut dispatcher,
             cfg(),
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2573,7 +2943,7 @@ mod tests {
         let stopped = drive_multicast_session_with_membership(
             &mut dispatcher,
             cfg(),
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2629,11 +2999,11 @@ mod tests {
             max_iters: Some(5),
         };
 
-        let mut driver = FakeDriver::with([(join0(&params(&peer)), src(2))]);
+        let (mut link, _sent) = FakeDriver::with([(join0(&params(&peer)), src(2))]).into_link();
         drive_multicast_session_with_membership(
             &mut dispatcher,
             cfg(),
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2658,14 +3028,20 @@ mod tests {
             "the admitted member is a row"
         );
 
-        let mut driver = FakeDriver::with([(
-            wz_session_core::handshake_encode::encode_multicast_close(),
-            src(2),
-        )]);
+        // The second run is the same session over the link it still holds open,
+        // which now carries the member's departing Close.
+        link.open
+            .as_mut()
+            .expect("a Running session keeps its link open")
+            .inbound
+            .push_back((
+                wz_session_core::handshake_encode::encode_multicast_close(),
+                src(2),
+            ));
         drive_multicast_session_with_membership(
             &mut dispatcher,
             cfg(),
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2710,11 +3086,7 @@ mod tests {
     async fn dropping_every_sender_stops_the_loop() {
         // No inbound traffic at all: the loop parks on the sweep tick, so the
         // ONLY thing that can end it early is the stop arm.
-        let mut driver = FakeDriver {
-            inbound: VecDeque::new(),
-            log: SentLog::default(),
-            lost: false,
-        };
+        let (mut link, _sent) = FakeDriver::with([]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -2727,7 +3099,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -2793,7 +3165,7 @@ mod tests {
         let mut changed = params(&peer_b);
         changed.batch_size = good.batch_size / 2;
 
-        let mut driver = FakeDriver::with([(join0(&good), src(2)), (join0(&changed), src(2))]);
+        let mut link = FakeDriver::link_with([(join0(&good), src(2)), (join0(&changed), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
         let (seen, sink) = departure_sink();
@@ -2805,7 +3177,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -2845,7 +3217,7 @@ mod tests {
     async fn a_rejoin_announcing_another_version_drops_the_admitted_peer() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
         let good = params(&peer_b);
-        let mut driver = FakeDriver::with([
+        let mut link = FakeDriver::link_with([
             (join0(&good), src(2)),
             (join_of_version(&good, 0x08), src(2)),
         ]);
@@ -2860,7 +3232,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -2889,7 +3261,7 @@ mod tests {
     async fn a_matching_rejoin_keeps_the_peer_and_reports_nothing() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
         let good = params(&peer_b);
-        let mut driver = FakeDriver::with([(join0(&good), src(2)), (join0(&good), src(2))]);
+        let mut link = FakeDriver::link_with([(join0(&good), src(2)), (join0(&good), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
         let (seen, sink) = departure_sink();
@@ -2901,7 +3273,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -2933,7 +3305,7 @@ mod tests {
         let mut changed = params(&peer_b);
         changed.batch_size /= 2;
 
-        let mut driver = FakeDriver::with([(join0(&changed), src(2))]);
+        let mut link = FakeDriver::link_with([(join0(&changed), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
         let (seen, sink) = departure_sink();
@@ -2945,7 +3317,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -2970,7 +3342,7 @@ mod tests {
     #[tokio::test]
     async fn an_inbound_close_reports_the_departing_peer_by_zid() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver::with([
+        let mut link = FakeDriver::link_with([
             (join0(&params(&peer_b)), src(2)),
             (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
         ]);
@@ -2985,7 +3357,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -3017,7 +3389,7 @@ mod tests {
         // Nothing but the JOIN: the peer goes silent immediately, so only the
         // sweep can end it. A 1 ms config cap bounds the hold window whatever
         // the JOIN advertised (`min(advertised, cap)`).
-        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let mut link = FakeDriver::link_with([(join0(&params(&peer_b)), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(1));
         let clock = TokioTime::new();
         let (seen, sink) = departure_sink();
@@ -3029,7 +3401,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -3055,7 +3427,7 @@ mod tests {
     #[tokio::test]
     async fn a_live_peer_is_never_reported_lost() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
+        let mut link = FakeDriver::link_with([(join0(&params(&peer_b)), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(60_000));
         let clock = TokioTime::new();
         let (seen, sink) = departure_sink();
@@ -3067,7 +3439,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -3090,7 +3462,7 @@ mod tests {
     async fn only_the_peer_that_left_is_named() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
         let peer_c = [0x0A, 0x0B, 0x0C, 0x0D];
-        let mut driver = FakeDriver::with([
+        let mut link = FakeDriver::link_with([
             (join0(&params(&peer_b)), src(2)),
             (join0(&params(&peer_c)), src(3)),
             // Only C leaves.
@@ -3107,7 +3479,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(10),
             },
-            &mut driver,
+            &mut link,
             &clock,
             sink,
             &MulticastTxProducer::new(),
@@ -3131,9 +3503,8 @@ mod tests {
     /// the discriminator on purpose: the loop also beacons JOINs, so "the
     /// driver sent something" is true on EVERY run and would make the test
     /// below pass without an emit.
-    fn closes_sent(driver: &FakeDriver) -> Vec<Vec<u8>> {
-        driver
-            .sent()
+    fn closes_sent(sent: &SentLog) -> Vec<Vec<u8>> {
+        sent.sent()
             .into_iter()
             .filter(|dg| dg.first().map(|h| h & 0x1f) == Some(wire_const::T_MID_CLOSE))
             .collect()
@@ -3149,11 +3520,7 @@ mod tests {
     /// and would not notice the day someone flipped it to the other one.
     #[tokio::test]
     async fn a_graceful_stop_multicasts_a_close_to_the_group() {
-        let mut driver = FakeDriver {
-            inbound: VecDeque::new(),
-            log: SentLog::default(),
-            lost: false,
-        };
+        let (mut link, sent) = FakeDriver::with([]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -3166,7 +3533,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -3174,13 +3541,17 @@ mod tests {
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::Stopped);
+        assert!(
+            link.driver().is_none(),
+            "the stop released the link, and the Close below still left"
+        );
 
-        let closes = closes_sent(&driver);
+        let closes = closes_sent(&sent);
         assert_eq!(
             closes.len(),
             1,
             "a departing member announces itself exactly once; sent = {:?}",
-            driver.sent(),
+            sent.sent(),
         );
         assert_eq!(
             closes[0].as_slice(),
@@ -3267,11 +3638,13 @@ mod tests {
             } else {
                 SentLog::default()
             };
-            let mut driver = FakeDriver {
+            let (mut link, _sent) = FakeDriver {
                 inbound: VecDeque::new(),
                 log: log.clone(),
                 lost: false,
-            };
+                refuses_open: false,
+            }
+            .into_link();
             let producer = MulticastTxProducer::new();
             let count = std::sync::Arc::new(OutcomeCount::default());
             let recorder = count.clone();
@@ -3287,7 +3660,7 @@ mod tests {
                         tick_ms: 1,
                         max_iters: None,
                     },
-                    &mut driver,
+                    &mut link,
                     &clock,
                     |_| {},
                     &loop_producer,
@@ -3473,11 +3846,7 @@ mod tests {
     /// to be the Close and not "the driver was used".
     #[tokio::test]
     async fn the_same_fixture_without_a_signal_announces_nothing() {
-        let mut driver = FakeDriver {
-            inbound: VecDeque::new(),
-            log: SentLog::default(),
-            lost: false,
-        };
+        let (mut link, sent) = FakeDriver::with([]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -3489,7 +3858,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -3499,15 +3868,15 @@ mod tests {
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         assert!(
-            !driver.sent().is_empty(),
+            !sent.sent().is_empty(),
             "the fixture must have EXERCISED the send path (JOIN beacons), or \
              the empty Close set below proves nothing",
         );
         assert_eq!(
-            closes_sent(&driver).len(),
+            closes_sent(&sent).len(),
             0,
             "only a stop announces a departure; sent = {:?}",
-            driver.sent(),
+            sent.sent(),
         );
     }
 
@@ -3519,11 +3888,13 @@ mod tests {
     /// confront this case rather than silently start writing to a dead socket.
     #[tokio::test]
     async fn a_lost_link_announces_nothing() {
-        let mut driver = FakeDriver {
+        let (mut link, sent) = FakeDriver {
             inbound: VecDeque::new(),
             log: SentLog::default(),
             lost: true,
-        };
+            refuses_open: false,
+        }
+        .into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -3535,7 +3906,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -3547,7 +3918,7 @@ mod tests {
             "fixture must exit through the link-loss door, not the stop door",
         );
         assert_eq!(
-            closes_sent(&driver).len(),
+            closes_sent(&sent).len(),
             0,
             "a dead link is not a departure announcement channel",
         );
@@ -3563,10 +3934,11 @@ mod tests {
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         // The RX SSOT admits only into a RUNNING session; the drive loop does
-        // this pair at its top. Driven here explicitly because this test calls
-        // the dispatch SSOT directly rather than through the loop.
-        dispatcher.create();
-        dispatcher.notify_link_ready();
+        // this pair at its top, opening the link `create` asks for. Driven here
+        // explicitly because this test calls the dispatch SSOT directly rather
+        // than through the loop, with no link to open.
+        assert!(dispatcher.create().open());
+        assert!(!dispatcher.notify_link_ready().release());
         assert_eq!(
             dispatcher.session_state(),
             SessionFsmMulticastState::Running,
@@ -3648,7 +4020,7 @@ mod tests {
     #[tokio::test]
     async fn drive_loop_ignores_join_with_version_mismatch() {
         let peer = params(&[0x01, 0x02, 0x03, 0x04]);
-        let mut driver = FakeDriver::with([(join_of_version(&peer, 0x08), src(2))]);
+        let mut link = FakeDriver::link_with([(join_of_version(&peer, 0x08), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -3659,7 +4031,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -3687,7 +4059,7 @@ mod tests {
         let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
         dgram.extend_from_slice(&body);
 
-        let mut driver = FakeDriver::with([(dgram, src(2))]);
+        let mut link = FakeDriver::link_with([(dgram, src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -3698,7 +4070,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
@@ -3730,8 +4102,8 @@ mod tests {
 
         // JOIN admits the peer, the first frame is delivered, the replayed
         // frame is SN-stale and dropped.
-        let mut driver =
-            FakeDriver::with([(join, src(2)), (frame.clone(), src(2)), (frame, src(2))]);
+        let mut link =
+            FakeDriver::link_with([(join, src(2)), (frame.clone(), src(2)), (frame, src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -3753,7 +4125,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |event| observer.dispatch_event(event),
             &MulticastTxProducer::new(),
@@ -3816,7 +4188,7 @@ mod tests {
         ));
         let close = wz_session_core::handshake_encode::encode_multicast_close();
         let received = (batch.len() + close.len()) as u64;
-        let mut driver = FakeDriver::with([(batch, src(2)), (close, src(2))]);
+        let (mut link, log) = FakeDriver::with([(batch, src(2)), (close, src(2))]).into_link();
 
         let producer = MulticastTxProducer::new();
         let group = "udp/224.0.0.224:7446";
@@ -3832,7 +4204,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(8),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |_| {},
                 &producer,
@@ -3877,7 +4249,7 @@ mod tests {
         registry.encode_metrics(&mut doc, MetricsQuery::default());
 
         let group_part = "remote_zid=\"\"";
-        let sent: u64 = driver.sent().iter().map(|d| d.len() as u64).sum();
+        let sent: u64 = log.sent().iter().map(|d| d.len() as u64).sum();
         // RX: every byte the link read, and one per message the walk decoded.
         assert_eq!(
             sample(&doc, "zenoh_rx_per_transport_bytes_total", &[group_part]),
@@ -3904,7 +4276,7 @@ mod tests {
                 "zenoh_tx_transport_message_per_transport_total",
                 &[group_part]
             ),
-            driver.sent().len() as u64
+            log.sent().len() as u64
         );
         assert_eq!(
             sample(
@@ -3971,7 +4343,7 @@ mod tests {
             true,
         );
 
-        let mut driver = FakeDriver::with([(join, src(2)), (in_ns, src(2)), (out_ns, src(2))]);
+        let mut link = FakeDriver::link_with([(join, src(2)), (in_ns, src(2)), (out_ns, src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         // The session's per-participant namespace, installed at bring-up.
         dispatcher.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
@@ -3996,7 +4368,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(8),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |event| observer.dispatch_event(event),
             &MulticastTxProducer::new(),
@@ -4041,7 +4413,7 @@ mod tests {
             /*reliable=*/ true,
         );
 
-        let mut driver = FakeDriver::with([(join, src(2)), (query, src(2))]);
+        let (mut link, sent) = FakeDriver::with([(join, src(2)), (query, src(2))]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -4065,7 +4437,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |event| {
                 observer.dispatch_event(event);
@@ -4085,7 +4457,7 @@ mod tests {
         // decode each Frame payload, and tally the reply-chain messages.
         let mut responses = 0usize;
         let mut finals = 0usize;
-        for dg in &driver.sent() {
+        for dg in &sent.sent() {
             if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
                 if let Ok(messages) = parse_frame_payload(&payload) {
                     for m in &messages {
@@ -4143,7 +4515,7 @@ mod tests {
             true,
         );
 
-        let mut driver = FakeDriver::with([(join, src(2)), (query, src(2))]);
+        let (mut link, sent) = FakeDriver::with([(join, src(2)), (query, src(2))]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         dispatcher.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
         let clock = TokioTime::new();
@@ -4167,7 +4539,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |event| {
                 observer.dispatch_event(event);
@@ -4182,7 +4554,7 @@ mod tests {
         // The emitted Response carries the ABSOLUTE myns/demo/mc (the relative
         // reply re-prefixed at the egress dequeue).
         let mut responses = 0usize;
-        for dg in &driver.sent() {
+        for dg in &sent.sent() {
             if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
                 if let Ok(messages) = parse_frame_payload(&payload) {
                     for m in &messages {
@@ -4244,7 +4616,7 @@ mod tests {
             /*reliable=*/ true,
         );
 
-        let mut driver = FakeDriver::with([(join, src(2)), (interest, src(2))]);
+        let (mut link, sent) = FakeDriver::with([(join, src(2)), (interest, src(2))]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -4269,7 +4641,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(12),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |event| {
                 observer.dispatch_event(event);
@@ -4288,7 +4660,7 @@ mod tests {
         // interest_id (9) — the correlation the querier matches on.
         let mut tokens = 0usize;
         let mut finals = 0usize;
-        for dg in &driver.sent() {
+        for dg in &sent.sent() {
             if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
                 if let Ok(messages) = parse_frame_payload(&payload) {
                     for m in &messages {
@@ -4337,7 +4709,7 @@ mod tests {
 
         let push = build_push_literal("demo/mc", b"orphan").expect("push fixture");
         let frame = encode_frame_with_push(0, push, true);
-        let mut driver = FakeDriver::with([(frame, src(7))]); // no prior JOIN
+        let mut link = FakeDriver::link_with([(frame, src(7))]); // no prior JOIN
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -4357,7 +4729,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |event| observer.dispatch_event(event),
             &MulticastTxProducer::new(),
@@ -4385,7 +4757,7 @@ mod tests {
         use wz_session_core::network_message::NetworkMessage;
 
         let producer = MulticastTxProducer::new();
-        let mut driver = FakeDriver::with([]);
+        let (mut link, sent) = FakeDriver::with([]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -4398,7 +4770,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(8),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |_| {},
                 &producer,
@@ -4413,7 +4785,7 @@ mod tests {
         // Exactly one data frame went out, on the reliable channel
         // (R flag set — the pico put default), carrying SN 0 and the
         // Push payload.
-        let frames: Vec<Vec<u8>> = driver
+        let frames: Vec<Vec<u8>> = sent
             .sent()
             .into_iter()
             .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
@@ -4438,7 +4810,7 @@ mod tests {
 
         // The JOIN beacons emitted AFTER the publish advertise the
         // advanced reliable next_sn (init_rx_seq stays truthful).
-        let last_join = driver
+        let last_join = sent
             .sent()
             .into_iter()
             .rev()
@@ -4468,7 +4840,7 @@ mod tests {
         use wz_session_core::network_message::NetworkMessage;
 
         let producer = MulticastTxProducer::new();
-        let mut driver = FakeDriver::with([]);
+        let (mut link, sent) = FakeDriver::with([]).into_link();
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         dispatcher.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
         let clock = TokioTime::new();
@@ -4482,7 +4854,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(8),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |_| {},
                 &producer,
@@ -4496,7 +4868,7 @@ mod tests {
         );
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
-        let frames: Vec<Vec<u8>> = driver
+        let frames: Vec<Vec<u8>> = sent
             .sent()
             .into_iter()
             .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
@@ -4606,7 +4978,7 @@ mod tests {
             let batch = push_batch_bytes("demo/mc", b"frag-over-multicast");
             let (head, tail) = batch.split_at(batch.len() / 2);
 
-            let mut driver = FakeDriver::with([
+            let mut link = FakeDriver::link_with([
                 (join, src(2)),
                 (fragment_dgram(0, true, true, head), src(2)),
                 (fragment_dgram(1, false, false, tail), src(2)),
@@ -4622,7 +4994,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(8),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |event| observer.dispatch_event(event),
                 &MulticastTxProducer::new(),
@@ -4649,7 +5021,7 @@ mod tests {
             let peer = [0x01, 0x02, 0x03, 0x04];
             let batch = push_batch_bytes("demo/mc", b"frag-over-multicast");
             let (head, tail) = batch.split_at(batch.len() / 2);
-            let mut driver = FakeDriver::with([
+            let mut link = FakeDriver::link_with([
                 (join0(&params(&peer)), src(2)),
                 (fragment_dgram(0, true, true, head), src(2)),
                 (fragment_dgram(1, false, false, tail), src(2)),
@@ -4664,7 +5036,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(8),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |_| {},
                 &MulticastTxProducer::new(),
@@ -4715,7 +5087,7 @@ mod tests {
         async fn drive_loop_drops_fragments_from_unknown_peer() {
             let batch = push_batch_bytes("demo/mc", b"orphan");
             let (head, tail) = batch.split_at(batch.len() / 2);
-            let mut driver = FakeDriver::with([
+            let mut link = FakeDriver::link_with([
                 (fragment_dgram(0, true, true, head), src(7)), // no prior JOIN
                 (fragment_dgram(1, false, false, tail), src(7)),
             ]);
@@ -4730,7 +5102,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(6),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |event| observer.dispatch_event(event),
                 &MulticastTxProducer::new(),
@@ -4762,7 +5134,7 @@ mod tests {
                 true,
             );
 
-            let mut driver = FakeDriver::with([
+            let mut link = FakeDriver::link_with([
                 (join, src(2)),
                 (fragment_dgram(0, true, true, head), src(2)),
                 (stale_frame, src(2)),
@@ -4779,7 +5151,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(10),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |event| observer.dispatch_event(event),
                 &MulticastTxProducer::new(),
@@ -4817,7 +5189,7 @@ mod tests {
             }
             let join_b_dgram = encode_join(&join_b, &b_tx);
 
-            let mut driver = FakeDriver::with([
+            let mut link = FakeDriver::link_with([
                 (join_b_dgram, src(2)),
                 (fragment_dgram(5, true, true, b"poison-head"), src(2)),
                 (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
@@ -4836,7 +5208,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(12),
                 },
-                &mut driver,
+                &mut link,
                 &clock,
                 |event| observer.dispatch_event(event),
                 &MulticastTxProducer::new(),
@@ -4906,7 +5278,7 @@ mod tests {
         async fn drive_loop_publishes_oversize_put_as_fragment_chain() {
             let p = small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]);
             let producer = MulticastTxProducer::new();
-            let mut driver = FakeDriver::with([]);
+            let (mut link, sent) = FakeDriver::with([]).into_link();
             let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
             tokio::join!(
@@ -4917,7 +5289,7 @@ mod tests {
                         tick_ms: 5,
                         max_iters: Some(8),
                     },
-                    &mut driver,
+                    &mut link,
                     &clock,
                     |_| {},
                     &producer,
@@ -4929,13 +5301,13 @@ mod tests {
             );
 
             assert!(
-                !driver
+                !sent
                     .sent()
                     .into_iter()
                     .any(|d| d[0] & 0x1f == wire_const::T_MID_FRAME),
                 "an oversize publish must never leave as a whole frame"
             );
-            let frags: Vec<Vec<u8>> = driver
+            let frags: Vec<Vec<u8>> = sent
                 .sent()
                 .into_iter()
                 .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAGMENT)
@@ -4960,7 +5332,7 @@ mod tests {
 
             // The JOIN beacons emitted AFTER the chain advertise the
             // post-chain next_sn (the chain consumed count SNs total).
-            let last_join = driver
+            let last_join = sent
                 .sent()
                 .into_iter()
                 .rev()
@@ -4983,7 +5355,7 @@ mod tests {
         async fn drive_loop_oversize_put_round_trips_through_peer_loop() {
             let payload = oversize_payload();
             let producer = MulticastTxProducer::new();
-            let mut driver_a = FakeDriver::with([]);
+            let (mut link_a, sent_a) = FakeDriver::with([]).into_link();
             let mut dispatcher_a = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
             let own = small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -4995,7 +5367,7 @@ mod tests {
                         tick_ms: 5,
                         max_iters: Some(8),
                     },
-                    &mut driver_a,
+                    &mut link_a,
                     &clock,
                     |_| {},
                     &producer,
@@ -5007,13 +5379,10 @@ mod tests {
             );
 
             // Node B ingests A's wire output in emit order.
-            let inbound: Vec<(Vec<u8>, SocketAddr)> = driver_a
-                .sent()
-                .iter()
-                .map(|d| (d.clone(), src(7)))
-                .collect();
+            let inbound: Vec<(Vec<u8>, SocketAddr)> =
+                sent_a.sent().iter().map(|d| (d.clone(), src(7))).collect();
             let budget = inbound.len() + 6;
-            let mut driver_b = FakeDriver::with(inbound);
+            let mut link_b = FakeDriver::link_with(inbound);
             let mut dispatcher_b = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
 
             let fired = Arc::new(AtomicUsize::new(0));
@@ -5034,7 +5403,7 @@ mod tests {
                     tick_ms: 5,
                     max_iters: Some(budget),
                 },
-                &mut driver_b,
+                &mut link_b,
                 &clock,
                 |event| observer.dispatch_event(event),
                 &MulticastTxProducer::new(),
@@ -5056,7 +5425,7 @@ mod tests {
     async fn drive_loop_filters_own_join_echo() {
         let self_zid = [0xAA, 0xBB, 0xCC, 0xDD];
         // The inbound JOIN carries OUR zid (the loopback echo of our beacon).
-        let mut driver = FakeDriver::with([(join0(&params(&self_zid)), src(9))]);
+        let mut link = FakeDriver::link_with([(join0(&params(&self_zid)), src(9))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -5067,7 +5436,7 @@ mod tests {
                 tick_ms: 5,
                 max_iters: Some(5),
             },
-            &mut driver,
+            &mut link,
             &clock,
             |_| {},
             &MulticastTxProducer::new(),
