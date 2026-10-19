@@ -1791,7 +1791,6 @@ mod tests {
             |_event| {},
             || None,
         );
-        drop(released);
 
         std::assert_eq!(
             outcome,
