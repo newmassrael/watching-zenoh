@@ -171,6 +171,16 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "visible item; it appears only as `cfg!(feature = ..)` in a test, "
             "which the census re-derives every run"
         ),
+        # The selector's `matches`. It gates the private `pattern` module's
+        # engine field and arms, never a public item: what it changes is what
+        # `Filter::parse` ACCEPTS (`matches` refused at the operator without it)
+        # and what the field list reports (`matches`), both of which exist in
+        # every build.
+        "filter-regex": (
+            "no `#[cfg]` in this package attaches this feature to a publicly "
+            "visible item; it gates the private pattern engine, and the public "
+            "parser and field list exist in every build and say whether it is on"
+        ),
     },
     # R2207 — the thirty of this package's ninety-five non-default features
     # that attach to no publicly visible item at all.

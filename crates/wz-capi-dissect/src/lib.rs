@@ -406,6 +406,11 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // `caps` group of every document that carries `dropped_by_limits` gained
     // `frames_total` on the same step, and each of those documents moved one
     // revision.
+    // 44, for `wz_dissect_selector_fields`: every field a selector can name,
+    // the paths into a record's dissection among them, with operators and
+    // closed words. The selector verdict moved to revision 5 on the same step
+    // (a word that is no field is a path; `in`, `matches`, `len()`; two token
+    // classes), which moves no symbol.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -423,7 +428,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 43;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 44;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -3099,6 +3104,30 @@ pub unsafe extern "C" fn wz_dissect_selector_bind(
         }
     };
     write_string(wz_capture::filter::bind_json(expr, names), out)
+}
+
+/// ABI 44 -- every field a selector can name, the operators each admits and,
+/// where its values are a closed set, the words.
+///
+/// The document is `selector_fields` (`wz_capture::filter::selector_fields_json`):
+/// the fixed fields under `fields`, and under `paths` every declared path into
+/// a record's dissection, from its message root, with its kind, its operators,
+/// whether `len()` reads it, and a label's closed words. `matches` says whether
+/// this build compiles `matches` patterns; where it does not, no operator list
+/// offers it. A consumer completes a selector and checks it against this one
+/// list instead of keeping a copy of the vocabulary that would go stale, and
+/// the unknown-field refusal names only the names nearest the one typed.
+///
+/// It takes no input: the list is the build's, not a capture's.
+///
+/// # Safety
+/// `out` must be a writable pointer to a `*mut c_char`. It may not be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_selector_fields(out: *mut *mut c_char) -> c_int {
+    if out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    write_string(wz_capture::filter::selector_fields_json(), out)
 }
 
 // ── R2102 (ABI 11, open-debt item 524) — THE LIVE DOOR ──────────────────────
@@ -7815,10 +7844,11 @@ mod tests {
         // into `key == demo/**`. Revision 3 moved the position of an
         // unfinished selector and the candidates of an unknown field, and
         // neither is on this success branch. Nor is revision 4's, which
-        // added two fields and the escapes of a quoted value.
+        // added two fields and the escapes of a quoted value, nor revision 5's
+        // (paths, the list operators, the braces of a list).
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":4},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":5},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\"}]}"
@@ -7838,7 +7868,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":4},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":5},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
@@ -8363,7 +8393,9 @@ mod tests {
         // 43, for `wz_dissect_live_open_bounded`: one symbol, two integers in and
         // the handle written through a pointer the caller owns, released by
         // `wz_dissect_live_close`; no string, no struct.
-        assert_eq!(wz_dissect_abi_version(), 43);
+        // 44, for `wz_dissect_selector_fields`: one symbol, a `char*` released
+        // by `wz_dissect_string_free`; no input, no struct, no state.
+        assert_eq!(wz_dissect_abi_version(), 44);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -9107,6 +9139,8 @@ mod tests {
             // The binder's verdict over every shape it writes: a success and a
             // refusal of each of its four words, whose keys differ by word.
             (rev::SELECTOR_BIND, bind_documents()),
+            // The field list has one shape: it takes no input.
+            (rev::SELECTOR_FIELDS, vec![call_selector_fields()]),
             (rev::DECLARATIONS_DIAGNOSE, decl),
             (rev::KEYEXPR_DIAGNOSE, keyexpr),
             // Every shape the `.proto` door writes: the success, a place in a
@@ -9282,6 +9316,8 @@ mod tests {
                 rev::SELECTOR_BIND,
                 bind_documents().into_iter().next().expect("a document"),
             ),
+            // Declares no plane either.
+            (rev::SELECTOR_FIELDS, call_selector_fields()),
             (rev::DECLARATIONS_DIAGNOSE, call_declarations_diagnose("")),
             (rev::KEYEXPR_DIAGNOSE, call_keyexpr_diagnose("demo/**")),
             // Declares no plane either.
@@ -9503,6 +9539,8 @@ mod tests {
             // Every shape the binder writes: no refusal writes a `null`, the
             // position keys are simply absent where the word has none.
             (rev::SELECTOR_BIND, bind_documents()),
+            // One shape, no input: `words` is absent, never null, off a label.
+            (rev::SELECTOR_FIELDS, vec![call_selector_fields()]),
             (
                 rev::DECLARATIONS_DIAGNOSE,
                 vec![
@@ -9736,6 +9774,19 @@ mod tests {
             rc, WZ_DISSECT_OK,
             "a refused selector is a successful DIAGNOSIS, not an error"
         );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
+    /// Drive the field list door the way C does.
+    fn call_selector_fields() -> String {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_selector_fields(&mut out) };
+        assert_eq!(rc, WZ_DISSECT_OK, "the field list takes no input to refuse");
         let s = unsafe { std::ffi::CStr::from_ptr(out) }
             .to_str()
             .expect("utf8")

@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 43
+EXPECTED_VERSION = 44
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -394,6 +394,12 @@ EXPECTED_SYMBOLS = {
     # comes out, and a null pointer clears the hook. A stopped call answers
     # `WZ_DISSECT_ERR_CANCELLED` (-11) from the doors it covers.
     "wz_dissect_live_set_progress",
+    # (ABI 44) -- EVERY FIELD a selector can name, the paths into a record's
+    # dissection among them, with operators and closed words: the list a UI
+    # completes against. One symbol and one document; it takes no input. The
+    # memory rule does not move: the list is a `char*` released by
+    # `wz_dissect_string_free`, nothing is retained, and no callback runs.
+    "wz_dissect_selector_fields",
     # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
     # sets: how many one flow keeps, and how many the handle keeps in all. One
     # symbol: two integers in and the handle through a pointer the CALLER owns,

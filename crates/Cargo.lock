@@ -2846,6 +2846,7 @@ dependencies = [
 name = "wz-capture"
 version = "0.1.0"
 dependencies = [
+ "regex-automata",
  "wz-codecs",
  "wz-packet-fixtures",
  "wz-session-core",

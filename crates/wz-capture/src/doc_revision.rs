@@ -3103,6 +3103,48 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_BIND_R1_CARRIES,
     },
+    // A RECORD'S DISSECTION JOINS THE LANGUAGE, and two token classes join the
+    // verdict. No key moves.
+    //
+    // * A word that is not a fixed field is now a PATH into the record's
+    //   dissection tree (`qos.priority`, `Push.put.encoding.id`), resolved
+    //   against the declared shape, and a path alone is a presence test. A word
+    //   that names neither is refused as an unknown field, and the `message`
+    //   now offers the few names NEAREST it rather than the whole list (with
+    //   paths the list is hundreds long; it is `selector_fields`' document).
+    // * `in {…}`, `not in {…}`, `matches "…"` and `len(path)` now read
+    //   `ok:true`; `key contains …` too. A selector of one unknown word alone,
+    //   `demo`, is refused at the word (`at` 0) as an unknown field: it used to
+    //   be refused at its end as unfinished, because it could only have been a
+    //   field missing its operator, and it can now be a whole presence test.
+    // * `tokens` gains `open_brace` and `close_brace`, the `{` and `}` of a
+    //   list, which used to be refused as unexpected characters.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 5,
+        keys: SELECTOR_DIAGNOSE_R5_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R5_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R2_CARRIES,
+    },
+    // THE FIELD LIST, first revision.
+    //
+    // Every field a selector can name, the operators each admits and the
+    // closed words of the ones that have them: the fixed fields under
+    // `fields`, and every declared path into a record's dissection under
+    // `paths`. A path's `kind` DECIDES its object's keys: a `label` carries its
+    // `words`, and no other kind does, so `words` is never a `null` and never
+    // an empty list standing for "no closed set".
+    DocumentShape {
+        document: SELECTOR_FIELDS,
+        revision: 1,
+        keys: SELECTOR_FIELDS_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_FIELDS_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_FIELDS_R1_CARRIES,
+    },
     // A `zid` PREFIX IS READ AGAINST THE CAPTURE, and an ambiguous one is
     // reported on the verdict document.
     //
@@ -3310,6 +3352,9 @@ pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
 /// (`wz_dissect_selector_bind`): the selector to hand the doors, or the typed
 /// refusal that says which term could not be resolved and why.
 pub const SELECTOR_BIND: &str = "selector_bind";
+/// Every field a selector can name, with its operators and closed words
+/// (`wz_dissect_selector_fields`).
+pub const SELECTOR_FIELDS: &str = "selector_fields";
 /// A declaration block's verdict (`wz_dissect_declarations_diagnose`).
 pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
 /// One key expression's verdict (`wz_dissect_keyexpr_diagnose`).
@@ -9689,6 +9734,104 @@ pub const SELECTOR_DIAGNOSE_R3_KEYS: &[&str] = SELECTOR_DIAGNOSE_R2_KEYS;
 /// the reason revision 3 aliased revision 2's -- values moved under stationary
 /// keys and the row on [`DocumentShape`] is the notice.
 pub const SELECTOR_DIAGNOSE_R4_KEYS: &[&str] = SELECTOR_DIAGNOSE_R3_KEYS;
+
+/// The selector verdict's key set at revision 5: revision 4's, by name. The
+/// paths, the list operators and two token classes arrived as VALUES; see the
+/// [`DocumentShape`] row.
+pub const SELECTOR_DIAGNOSE_R5_KEYS: &[&str] = SELECTOR_DIAGNOSE_R4_KEYS;
+
+/// What a token's `kind` says at selector-verdict revision 5: revision 2's
+/// words and the two braces of a list.
+pub const TOKEN_CLASS_R5: &[&str] = &[
+    "and",
+    "close",
+    "close_brace",
+    "not",
+    "open",
+    "open_brace",
+    "operator",
+    "or",
+    "quoted",
+    "word",
+];
+
+/// The selector verdict's value families at revision 5: the token class.
+pub const SELECTOR_DIAGNOSE_R5_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "kind",
+    values: TOKEN_CLASS_R5,
+}];
+
+/// The field list's key set at revision 1: the envelope, `matches`, the two
+/// lists, and the keys of their objects.
+pub const SELECTOR_FIELDS_R1_KEYS: &[&str] = &[
+    "document",
+    "fields",
+    "kind",
+    "len",
+    "matches",
+    "name",
+    "operators",
+    "path",
+    "paths",
+    "revision",
+    "words",
+];
+
+/// What a path's `kind` says at field-list revision 1: the kind words of the
+/// dissection's values, `wz_session_core::dissect::FieldValue::kind_words`.
+pub const PATH_KIND_R1: &[&str] = &[
+    "bits", "bytes", "flag", "label", "nested", "opaque", "text", "uint", "zid",
+];
+
+/// The field list's value families at revision 1: a path's kind.
+pub const SELECTOR_FIELDS_R1_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "kind",
+    values: PATH_KIND_R1,
+}];
+
+/// A path's `kind` is a DISCRIMINANT: a `label` carries the `words` it is one
+/// of, and every other kind carries no `words` at all.
+pub const SELECTOR_FIELDS_R1_CARRIES: &[KeyCarries] = &[KeyCarries {
+    key: "kind",
+    shape: CarriesShape::Discriminant(&[
+        WordCarries {
+            word: "bits",
+            shapes: &[&["len", "operators", "path"]],
+        },
+        WordCarries {
+            word: "bytes",
+            shapes: &[&["len", "operators", "path"]],
+        },
+        WordCarries {
+            word: "flag",
+            shapes: &[&["len", "operators", "path"]],
+        },
+        WordCarries {
+            word: "label",
+            shapes: &[&["len", "operators", "path", "words"]],
+        },
+        WordCarries {
+            word: "nested",
+            shapes: &[&["len", "operators", "path"]],
+        },
+        WordCarries {
+            word: "opaque",
+            shapes: &[&["len", "operators", "path"]],
+        },
+        WordCarries {
+            word: "text",
+            shapes: &[&["len", "operators", "path"]],
+        },
+        WordCarries {
+            word: "uint",
+            shapes: &[&["len", "operators", "path"]],
+        },
+        WordCarries {
+            word: "zid",
+            shapes: &[&["len", "operators", "path"]],
+        },
+    ]),
+}];
 
 /// The binder verdict's key set at revision 1, over EVERY shape it takes: the
 /// success (`selector`) and the four refusals (`refusal`, `message`, and the
@@ -17099,10 +17242,15 @@ mod tests {
             // values under stationary keys, so this entry is the notice.
             // To 4 when `value` and `node` joined the field list and a
             // quoted value gained escapes: again values under stationary keys.
-            (SELECTOR_DIAGNOSE, 4),
+            // To 5 when a word became a path into the record's dissection,
+            // `in`, `matches` and `len()` joined, and the verdict's tokens
+            // gained the braces of a list.
+            (SELECTOR_DIAGNOSE, 5),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),
+            // Every field a selector can name.
+            (SELECTOR_FIELDS, 1),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             (DECLARATIONS_DIAGNOSE, 2),

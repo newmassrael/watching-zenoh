@@ -241,11 +241,19 @@ use exit::ExitingFlow as _;
 /// unconditionally. A build without the network codecs has fewer records to
 /// judge and judges them by the same rules.
 pub mod filter;
+
+/// The selector's terms over a record's dissection tree, named by path, and
+/// the field list a consumer completes against. Ungated with [`filter`]: in a
+/// build without `dissect` it declares no path and every path term is refused.
+pub mod field_path;
+
 /// R311y606 — IP fragment reassembly. Its own module rather than part of
 /// [`link`] because it holds STATE across packets and `link` is deliberately a
 /// pure decapsulator; the same division `passive`'s chain reassembly is under.
 pub mod frag;
 pub mod link;
+/// The `matches` operator's pattern (`filter-regex`).
+mod pattern;
 /// R311y669 (§1.2a) — RECOGNISING QUIC, so a QUIC capture stops being read as
 /// zenoh.
 ///
@@ -255,6 +263,8 @@ pub mod link;
 /// short header's first byte IS a flagged zenoh MID, so the module's whole
 /// design question is what may decide — see its own note.
 pub mod quic;
+#[cfg(all(test, feature = "dissect"))]
+mod selector_path_tests;
 // R311y724 — DELIBERATELY UNDOCUMENTED HERE, and the reason is a trap this
 // round paid for. An outer `///` on a `mod` declaration is CONCATENATED with
 // the module's own `//!` docs, and the merged block then resolves its

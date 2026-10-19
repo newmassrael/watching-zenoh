@@ -1650,7 +1650,14 @@ impl ThroughputTable {
         // because a record it rejects must leave no trace in the totals. An
         // undecidable record leaves no trace either, except in the one counter
         // whose whole job is to say the totals are not the whole answer.
+        // Walked only for a selector that names a path: see `Filter::reads_tree`.
+        let tree = if filter.reads_tree() {
+            crate::field_path::record_tree(frame, span)
+        } else {
+            None
+        };
         let view = RecordView {
+            tree: tree.as_ref(),
             direction,
             keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
             kind,

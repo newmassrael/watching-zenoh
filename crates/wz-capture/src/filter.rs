@@ -60,9 +60,50 @@
 //! | `node` | the name of the node that sent the record | `==` `!=` | never judged: the name is bound to a `zid` term before any record is asked (see below) |
 //!
 //! The table is the language's field list as it is WRITTEN. The list the
-//! parser reads and the one an unknown-field refusal prints are one
+//! parser reads and the one the field list document prints are one
 //! declaration (`selector_fields!`), and a test holds this table to it by
 //! offering the parser every name here.
+//!
+//! ## Any other word is a PATH into the record's dissection
+//!
+//! A word that is not one of the fields above names a field of the record's
+//! dissection tree by its dotted path: `qos.priority == Data`,
+//! `put.encoding.id == 5`, `source_info.zid == a1b2c3d4…`,
+//! `Push.put.payload contains "x"`. The names are the walker's own, the path
+//! may be written from the message or as any tail of it, and it is resolved
+//! when the selector is parsed, so a typo is refused at its first byte with
+//! the names nearest it. [`crate::field_path`] has the rules: what a path
+//! names, why a tail that ends fields of two kinds is refused, and why a field
+//! a walked message does not carry is a decided `no` (`!=` is `yes`) while a
+//! record whose message this plane did not walk is undecided.
+//!
+//! A path's KIND decides what it admits: integers (`uint`, `bits`) take the
+//! six comparisons; a `flag` takes `yes` / `no`; a `label` takes one of its
+//! closed words and refuses any other; a `text` and a `label` take a word or a
+//! quoted text, and `bytes` the `value` field's literals; a `zid` takes a zid
+//! as `zid` does; a group (`nested`) and an `opaque` field take only the
+//! presence test and `len()`.
+//!
+//! The operators the paths brought are open to the fixed fields as well:
+//!
+//! ```text
+//! term := field op value
+//!       | field ("in" | "not" "in") "{" value ("," value)* "}"
+//!       | field ("contains" | "matches") value
+//!       | path                                  -- presence
+//!       | "len" "(" path ")" op integer
+//! ```
+//!
+//! * `in {a, b}` is `== a or == b`, term by term, and `not in` its negation.
+//!   Values are separated by commas, spaces or both; a value that holds a
+//!   comma is quoted. `node` refuses it: the binder replaces a `node` term
+//!   whole, one name per term.
+//! * `contains` is a byte substring test, now of `key` (its resolved text) too.
+//! * `matches` searches a regular expression in a `key`, a `value`, or a
+//!   text, label or byte path (`crate::pattern`); a build without
+//!   `filter-regex` refuses it at the operator.
+//! * `len(p)` is the field's width on the wire in bytes, a text's UTF-8 bytes
+//!   and not its characters.
 //!
 //! ## `value` is the payload AS THE PUBLISHER PUT IT
 //!
@@ -223,6 +264,9 @@ use core::fmt;
 
 use wz_session_core::keyexpr_match::keyexpr_pattern_matches;
 use wz_session_core::passive::Direction;
+
+use crate::field_path::{FieldPath, PathKind, PathRefusal, PathTest};
+use crate::pattern::{Pattern, PatternRefusal};
 
 /// Which counter a record moves — the record's kind as a filter can ask about
 /// it.
@@ -419,6 +463,17 @@ pub struct RecordView<'a> {
     /// one would put an identity on the wire that nobody sent, which is the
     /// line the consumer's own half-row rule draws from the other side.
     pub zid: Option<&'a [u8]>,
+    /// The record's message as the dissection walked it, for the terms that
+    /// name a field by its path ([`crate::field_path`]); `None` where this
+    /// plane did not walk it.
+    ///
+    /// `None` is the plane's to answer for and never a statement about the
+    /// message: the bytes were not kept whole (a batch this reader could not
+    /// open), the message did not walk, or the selector holds no path term and
+    /// the walk was not worth making ([`Filter::reads_tree`]). A path term over
+    /// it is undecidable, which is the rule every other optional field here
+    /// keeps; a tree that was walked and lacks the field is the decided `no`.
+    pub tree: Option<&'a crate::field_path::TreeNode>,
 }
 
 /// What a record's payload is, as the `value` term reads it.
@@ -481,7 +536,7 @@ impl Truth {
 
 /// How the six comparisons are spelled, once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Op {
+pub(crate) enum Op {
     Eq,
     Ne,
     Lt,
@@ -491,7 +546,7 @@ enum Op {
 }
 
 impl Op {
-    fn apply(self, lhs: u64, rhs: u64) -> bool {
+    pub(crate) fn apply(self, lhs: u64, rhs: u64) -> bool {
         match self {
             Self::Eq => lhs == rhs,
             Self::Ne => lhs != rhs,
@@ -502,7 +557,7 @@ impl Op {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Eq => "==",
             Self::Ne => "!=",
@@ -583,6 +638,127 @@ impl Field {
 /// refusal's sentence is built from, so the two cannot differ.
 pub fn field_names() -> Vec<&'static str> {
     Field::ALL.iter().map(|f| f.name()).collect()
+}
+
+impl Field {
+    /// The operators a term over this field admits, as the field list prints
+    /// them. `not in` is `in`'s negation and is not listed apart.
+    ///
+    /// A table beside the parser, and held to it by
+    /// `the_field_list_names_the_operators_the_parser_admits`, which offers
+    /// every operator to every field and compares what is refused.
+    const fn operators(self) -> &'static [&'static str] {
+        const ORDERED: &[&str] = &["==", "!=", "<", "<=", ">", ">=", "in"];
+        const EQUALITY: &[&str] = &["==", "!=", "in"];
+        const TEXT: &[&str] = &["==", "!=", "in", "contains", "matches"];
+        match self {
+            Self::Key | Self::Value => TEXT,
+            Self::Dir | Self::Kind | Self::Zid | Self::Closed => EQUALITY,
+            // The binder replaces a `node` term whole, one name per term.
+            Self::Node => &["==", "!="],
+            Self::Bytes
+            | Self::Time
+            | Self::Elapsed
+            | Self::Offset
+            | Self::Delay
+            | Self::Replies
+            | Self::Errs
+            | Self::FirstReply
+            | Self::Completion => ORDERED,
+        }
+    }
+
+    /// The closed set of words this field's value is one of, where it has one.
+    fn words(self) -> Option<Vec<&'static str>> {
+        match self {
+            Self::Dir => Some(alloc::vec!["a", "b"]),
+            Self::Kind => Some(RecordKind::names()),
+            Self::Closed => Some(alloc::vec!["yes", "no"]),
+            _ => None,
+        }
+    }
+}
+
+/// THE FIELD LIST, `wz_dissect_selector_fields`'s document: every field a
+/// selector can name, the operators each admits and, where its values are a
+/// closed set, the words, rendered HERE for the reason [`diagnose_json`] is.
+///
+/// `{envelope,"matches":B,"fields":[…],"paths":[…]}`:
+///
+/// * `matches` -- whether this build compiles `matches` patterns (feature
+///   `filter-regex`). Where it does not, no `operators` list carries
+///   `matches`, so a consumer that offers what the lists offer offers nothing
+///   the parser refuses.
+/// * `fields` -- the fixed fields, `{"name","operators"}` and `words` for the
+///   three whose values are a closed set (`dir`, `kind`, `closed`).
+/// * `paths` -- every declared path into a record's dissection, from its
+///   message root (`Push.qos.priority`), `{"path","kind","operators","len"}`
+///   and `words` for a `label`. A selector may write any TAIL of a path; see
+///   [`crate::field_path`]. `len` says whether `len()` reads the field, which
+///   is its WIRE width in bytes (a text's UTF-8 bytes, not its characters).
+///
+/// The list is what a consumer completes against and checks a selector
+/// against before it is sent, and the unknown-field refusal names only the few
+/// names nearest the one typed: this is where the whole list is.
+pub fn selector_fields_json() -> String {
+    let patterns = crate::field_path::patterns_supported();
+    let operators = |out: &mut String, ops: &[&str]| {
+        out.push_str(",\"operators\":[");
+        let mut first = true;
+        for op in ops.iter().filter(|op| patterns || **op != "matches") {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            wz_session_core::json::escape_into(op, out);
+        }
+        out.push(']');
+    };
+    let words = |out: &mut String, words: &[&str]| {
+        out.push_str(",\"words\":[");
+        for (i, w) in words.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            wz_session_core::json::escape_into(w, out);
+        }
+        out.push(']');
+    };
+    let mut out = String::from("{");
+    crate::doc_revision::envelope_into(crate::doc_revision::SELECTOR_FIELDS, &mut out);
+    let _ = fmt::Write::write_fmt(&mut out, format_args!(",\"matches\":{patterns}"));
+    out.push_str(",\"fields\":[");
+    for (i, field) in Field::ALL.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        wz_session_core::json::escape_into(field.name(), &mut out);
+        operators(&mut out, field.operators());
+        if let Some(w) = field.words() {
+            words(&mut out, &w);
+        }
+        out.push('}');
+    }
+    out.push_str("],\"paths\":[");
+    for (i, path) in crate::field_path::catalog().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"path\":");
+        wz_session_core::json::escape_into(&path.path, &mut out);
+        let _ = fmt::Write::write_fmt(
+            &mut out,
+            format_args!(",\"kind\":\"{}\",\"len\":{}", path.kind, path.has_width),
+        );
+        operators(&mut out, path.operators);
+        if let Some(w) = &path.words {
+            words(&mut out, w);
+        }
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
 }
 
 /// One comparison, already validated against its field's admissible operators.
@@ -692,6 +868,17 @@ enum Term {
         /// binder replaces and what a refusal points at.
         span: (usize, usize),
         negated: bool,
+    },
+    /// The resolved keyexpr holding a run of text.
+    KeyContains(String),
+    /// The resolved keyexpr the pattern is found in.
+    KeyMatches(Pattern),
+    /// The payload's bytes the pattern is found in.
+    ValueMatches(Pattern),
+    /// A field of the record's dissection, named by its path.
+    Path {
+        path: FieldPath,
+        test: PathTest,
     },
 }
 
@@ -831,13 +1018,35 @@ impl Term {
             // node name at parse. If a future path builds one anyway, the
             // honest answer is that it was not judged, and never a miss.
             Self::Node { .. } => Truth::Unknown,
+            // The keyexpr as TEXT, for the reader who does not know the
+            // pattern: undecidable where the reference did not resolve, as
+            // `key ==` is.
+            Self::KeyContains(needle) => match record.keyexpr {
+                None => Truth::Unknown,
+                Some(target) => Truth::of(target.contains(needle.as_str())),
+            },
+            Self::KeyMatches(pattern) => match record.keyexpr {
+                None => Truth::Unknown,
+                Some(target) => Truth::of(pattern.is_match(target.as_bytes())),
+            },
+            Self::ValueMatches(pattern) => match record.value {
+                Content::Unavailable => Truth::Unknown,
+                Content::Whole(bytes) => Truth::of(pattern.is_match(bytes)),
+            },
+            // The seventh undecidable case: a plane that did not walk the
+            // record's message cannot say what is in it. A tree that WAS
+            // walked answers for every path, the absent ones included.
+            Self::Path { path, test } => match record.tree {
+                None => Truth::Unknown,
+                Some(tree) => Truth::of(crate::field_path::judge(tree, path, test)),
+            },
         }
     }
 }
 
 /// Whether `haystack` holds `needle` as a run of bytes. The empty needle is in
 /// every payload, the empty one included, as it is for a string.
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+pub(crate) fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
 }
 
@@ -1054,6 +1263,16 @@ impl Filter {
     /// the sake of a term nobody wrote.
     pub fn reads_value(&self) -> bool {
         self.root.reads_value()
+    }
+
+    /// `true` when some term names a field of the record's dissection by its
+    /// path.
+    ///
+    /// For a plane to walk a record's message into a tree only when a
+    /// selector will read it: the walk is the dearest thing a plane can do per
+    /// record, and a selector of the fixed fields alone needs none of it.
+    pub fn reads_tree(&self) -> bool {
+        self.root.reads_tree()
     }
 
     /// Read this selector against the zids ONE capture names, and say what its
@@ -1286,11 +1505,20 @@ impl Node {
 
     /// Whether any term asks for the payload's bytes.
     fn reads_value(&self) -> bool {
+        self.any_term(&|term| matches!(term, Term::Value { .. } | Term::ValueMatches(_)))
+    }
+
+    /// Whether any term names a field of the record's dissection.
+    fn reads_tree(&self) -> bool {
+        self.any_term(&|term| matches!(term, Term::Path { .. }))
+    }
+
+    fn any_term(&self, which: &dyn Fn(&Term) -> bool) -> bool {
         match self {
             Self::Any | Self::Ambiguous => false,
-            Self::Or(nodes) | Self::And(nodes) => nodes.iter().any(Node::reads_value),
-            Self::Not(inner) => inner.reads_value(),
-            Self::Term(term) => matches!(term, Term::Value { .. }),
+            Self::Or(nodes) | Self::And(nodes) => nodes.iter().any(|n| n.any_term(which)),
+            Self::Not(inner) => inner.any_term(which),
+            Self::Term(term) => which(term),
         }
     }
 
@@ -1633,6 +1861,37 @@ pub enum FilterErrorKind {
     /// is not a thing a record carries, so the term cannot be judged; the
     /// refusal is at the term, and [`bind_nodes`] is what resolves it.
     UnboundNode { name: String },
+    /// A path that ends fields of more than one kind, so what it compares is
+    /// not settled. `tails` are the longer paths that tell them apart, each
+    /// with its kind word.
+    AmbiguousPath {
+        path: String,
+        tails: Vec<(String, &'static str)>,
+    },
+    /// A path in a build that walks no dissection tree (feature `dissect`).
+    PathsUnsupported,
+    /// A value a path's kind does not admit (`qos.priority == Fast`).
+    PathValue {
+        path: String,
+        kind: &'static str,
+        value: String,
+    },
+    /// An operator a path's kind does not admit (`put.encoding == 3`, a group).
+    PathOperator {
+        path: String,
+        kind: &'static str,
+        op: &'static str,
+    },
+    /// `matches` in a build with no pattern engine (feature `filter-regex`).
+    PatternUnsupported,
+    /// A `matches` pattern the engine refused; its own words.
+    BadPattern(String),
+    /// `in` with something other than `{` after it.
+    ExpectedList,
+    /// A `{` with no `}`, or something inside it that is not a value.
+    UnclosedList,
+    /// `in {}`: a list with nothing to be in.
+    EmptyList,
 }
 
 impl fmt::Display for FilterError {
@@ -1641,18 +1900,54 @@ impl fmt::Display for FilterError {
         match &self.kind {
             FilterErrorKind::UnexpectedChar(c) => write!(f, "unexpected character {c:?}"),
             FilterErrorKind::UnterminatedQuote => write!(f, "unterminated quoted value"),
-            // The candidates are the table the parser reads, walked, and not a
-            // sentence kept beside it: see `selector_fields!`.
+            // The candidates are the NEAREST names, out of the fixed table the
+            // parser reads and the declared tree paths, and not every name:
+            // with paths the language has hundreds, and a sentence that lists
+            // them all is one nobody reads. The whole list is the field list
+            // document's (`selector_fields_json`).
             FilterErrorKind::UnknownField(name) => {
-                write!(f, "unknown field {name:?} (known: ")?;
-                for (i, field) in Field::ALL.iter().enumerate() {
+                write!(f, "unknown field {name:?}")?;
+                let near = crate::field_path::nearest(name, &field_names());
+                if near.is_empty() {
+                    return f.write_str("; no field is near it");
+                }
+                f.write_str(" (nearest: ")?;
+                f.write_str(&near.join(", "))?;
+                f.write_str(")")
+            }
+            FilterErrorKind::AmbiguousPath { path, tails } => {
+                write!(f, "{path} ends fields of more than one kind (")?;
+                for (i, (tail, kind)) in tails.iter().enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    f.write_str(field.name())?;
+                    write!(f, "{tail}: {kind}")?;
                 }
-                f.write_str(")")
+                f.write_str("); write one of the longer paths")
             }
+            FilterErrorKind::PathsUnsupported => write!(
+                f,
+                "this build walks no dissection tree, so a field path cannot be answered \
+                 (feature `dissect`)"
+            ),
+            FilterErrorKind::PathValue { path, kind, value } => {
+                write!(
+                    f,
+                    "{path} is a {kind} field and does not admit the value {value:?}"
+                )
+            }
+            FilterErrorKind::PathOperator { path, kind, op } => {
+                write!(f, "{path} is a {kind} field and does not admit {op}")
+            }
+            FilterErrorKind::PatternUnsupported => write!(
+                f,
+                "this build has no pattern engine, so `matches` cannot be answered \
+                 (feature `filter-regex`)"
+            ),
+            FilterErrorKind::BadPattern(why) => write!(f, "the pattern does not compile: {why}"),
+            FilterErrorKind::ExpectedList => write!(f, "`in` takes a list: {{a, b}}"),
+            FilterErrorKind::UnclosedList => write!(f, "a list that is not closed by }}"),
+            FilterErrorKind::EmptyList => write!(f, "`in` over an empty list"),
             FilterErrorKind::UnknownValue { field, value } => {
                 write!(f, "{field} does not admit the value {value:?}")
             }
@@ -1720,6 +2015,10 @@ pub enum TokenClass {
     Open,
     /// `)`.
     Close,
+    /// `{`, which opens the list of an `in`.
+    OpenBrace,
+    /// `}`.
+    CloseBrace,
 }
 
 impl TokenClass {
@@ -1734,6 +2033,8 @@ impl TokenClass {
             Self::Or => "or",
             Self::Open => "open",
             Self::Close => "close",
+            Self::OpenBrace => "open_brace",
+            Self::CloseBrace => "close_brace",
         }
     }
 
@@ -1750,6 +2051,8 @@ impl TokenClass {
             Self::Or,
             Self::Open,
             Self::Close,
+            Self::OpenBrace,
+            Self::CloseBrace,
         ]
         .into_iter()
         .map(Self::word)
@@ -1766,6 +2069,8 @@ impl TokenClass {
             TokenKind::Or => Self::Or,
             TokenKind::Open => Self::Open,
             TokenKind::Close => Self::Close,
+            TokenKind::OpenBrace => Self::OpenBrace,
+            TokenKind::CloseBrace => Self::CloseBrace,
         }
     }
 }
@@ -1993,6 +2298,8 @@ enum TokenKind {
     Or,
     Open,
     Close,
+    OpenBrace,
+    CloseBrace,
 }
 
 /// Characters that may appear unquoted in a word.
@@ -2076,6 +2383,18 @@ fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), FilterError> {
                     at,
                     end: at + clen,
                     kind: TokenKind::Close,
+                });
+                i += clen;
+            }
+            '{' | '}' => {
+                tokens.push(Token {
+                    at,
+                    end: at + clen,
+                    kind: if c == '{' {
+                        TokenKind::OpenBrace
+                    } else {
+                        TokenKind::CloseBrace
+                    },
                 });
                 i += clen;
             }
@@ -2299,6 +2618,28 @@ impl<'a> Parser<'a> {
     }
 
     fn term(&mut self) -> Result<Node, FilterError> {
+        // `len(path)`: the one form a term opens with something other than a
+        // field. A field named `len` (a slice's) is still `len == 3`, because
+        // the call is told apart by the `(` after the word.
+        if let (
+            Some(Token {
+                at,
+                kind: TokenKind::Word(w),
+                ..
+            }),
+            Some(Token {
+                kind: TokenKind::Open,
+                ..
+            }),
+        ) = (self.tokens.get(self.at), self.tokens.get(self.at + 1))
+        {
+            if w == "len" {
+                let at = *at;
+                self.at += 2;
+                return self.len_term(at);
+            }
+        }
+
         let (field_at, field) = match self.next() {
             Some(Token {
                 at,
@@ -2319,21 +2660,72 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let (op_at, cmp) = match self.next() {
+        // The ONE place text becomes a field. A word the fixed table holds is
+        // that field; any other word is a path into the record's tree,
+        // resolved against the declared shape HERE, so a word that names
+        // neither is refused at its own byte with the names nearest it.
+        let subject = match Field::from_name(&field) {
+            Some(known) => Subject::Fixed(known),
+            None => Subject::Path(resolve_path(&field, field_at)?),
+        };
+
+        let (op_at, cmp) = match self.peek() {
             Some(Token {
                 at,
                 kind: TokenKind::Op(op),
                 ..
             }) => (*at, Cmp::Plain(*op)),
-            // `contains` is a WORD, not a lexical operator: it is only an
-            // operator in the place one stands, so `key == contains` still
-            // names the chunk. The lexer's token classes (and the diagnosis
-            // that publishes them) are unchanged by it.
+            // `contains`, `matches` and `in` are WORDS, not lexical operators:
+            // each is an operator only in the place one stands, so `key ==
+            // contains` still names the chunk. The lexer's token classes (and
+            // the diagnosis that publishes them) are unchanged by them.
             Some(Token {
                 at,
                 kind: TokenKind::Word(w),
                 ..
             }) if w == "contains" => (*at, Cmp::Contains),
+            Some(Token {
+                at,
+                kind: TokenKind::Word(w),
+                ..
+            }) if w == "matches" => (*at, Cmp::Matches),
+            Some(Token {
+                at,
+                kind: TokenKind::Word(w),
+                ..
+            }) if w == "in" => (*at, Cmp::In),
+            Some(Token {
+                at,
+                kind: TokenKind::Not,
+                ..
+            }) if matches!(
+                self.tokens.get(self.at + 1).map(|t| &t.kind),
+                Some(TokenKind::Word(w)) if w == "in"
+            ) =>
+            {
+                self.at += 1;
+                (*at, Cmp::NotIn)
+            }
+            // A path with nothing after it that could be an operator is a
+            // PRESENCE test: the selector asks whether the record carries the
+            // field at all. Only where a term may end: before `and`, `or`, `)`
+            // or the end of the selector.
+            None
+            | Some(Token {
+                kind: TokenKind::And | TokenKind::Or | TokenKind::Close,
+                ..
+            }) if matches!(subject, Subject::Path(_)) => {
+                let Subject::Path(path) = subject else {
+                    return Err(FilterError {
+                        at: field_at,
+                        kind: FilterErrorKind::ExpectedOperator,
+                    });
+                };
+                return Ok(Node::Term(Term::Path {
+                    path,
+                    test: PathTest::Present,
+                }));
+            }
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
@@ -2347,25 +2739,101 @@ impl<'a> Parser<'a> {
                 })
             }
         };
+        self.at += 1;
 
-        let (value_at, value_end, literal) = match self.next() {
+        match cmp {
+            // `f in {a, b}` IS `f == a or f == b`, built term by term so every
+            // value is read and refused exactly as `==` reads it, and the
+            // three-valued disjunction is the one `or` already is. `not in` is
+            // its negation.
+            Cmp::In | Cmp::NotIn => {
+                let items = self.literal_list(&subject, op_at)?;
+                let mut alternatives = Vec::with_capacity(items.len());
+                for item in items {
+                    alternatives.push(build_term(
+                        &subject,
+                        field_at,
+                        op_at,
+                        Cmp::Plain(Op::Eq),
+                        cmp.word(),
+                        item,
+                    )?);
+                }
+                // One value is that value's term; several are their `or`.
+                let any = match <[Node; 1]>::try_from(alternatives) {
+                    Ok([one]) => one,
+                    Err(several) => Node::Or(several),
+                };
+                Ok(if cmp == Cmp::NotIn {
+                    Node::Not(alloc::boxed::Box::new(any))
+                } else {
+                    any
+                })
+            }
+            _ => {
+                let value = self.literal(&subject)?;
+                build_term(&subject, field_at, op_at, cmp, cmp.word(), value)
+            }
+        }
+    }
+
+    /// One value token: a word or a quoted run.
+    fn literal(&mut self, subject: &Subject) -> Result<Value, FilterError> {
+        match self.next() {
             Some(Token {
                 at,
                 end,
                 kind: TokenKind::Word(w),
-            }) => (*at, *end, Literal::Word(w.clone())),
+            }) => Ok(Value {
+                at: *at,
+                end: *end,
+                literal: Literal::Word(w.clone()),
+            }),
             Some(Token {
                 at,
                 end,
                 kind: TokenKind::Quoted(bytes),
-            }) => (*at, *end, Literal::Quoted(bytes.clone())),
+            }) => Ok(Value {
+                at: *at,
+                end: *end,
+                literal: Literal::Quoted(bytes.clone()),
+            }),
+            Some(t) => Err(FilterError {
+                at: t.at,
+                kind: match subject {
+                    Subject::Fixed(known) => FilterErrorKind::UnknownValue {
+                        field: known.name(),
+                        value: describe_token(&t.kind),
+                    },
+                    Subject::Path(path) => FilterErrorKind::PathValue {
+                        path: path.written(),
+                        kind: path.kind().word(),
+                        value: describe_token(&t.kind),
+                    },
+                },
+            }),
+            None => Err(FilterError {
+                at: self.end_offset(),
+                kind: FilterErrorKind::UnexpectedEnd,
+            }),
+        }
+    }
+
+    /// The `{ … }` of an `in`: words and quoted runs, separated by commas,
+    /// whitespace or both. A comma is a word character elsewhere (a keyexpr
+    /// chunk may hold one), so an unquoted word is SPLIT at its commas here
+    /// and a value that holds a comma is written quoted.
+    fn literal_list(&mut self, subject: &Subject, op_at: usize) -> Result<Vec<Value>, FilterError> {
+        let open_at = match self.next() {
+            Some(Token {
+                at,
+                kind: TokenKind::OpenBrace,
+                ..
+            }) => *at,
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
-                    kind: FilterErrorKind::UnknownValue {
-                        field: Field::from_name(&field).map_or("value", Field::name),
-                        value: describe_token(&t.kind),
-                    },
+                    kind: FilterErrorKind::ExpectedList,
                 })
             }
             None => {
@@ -2375,192 +2843,557 @@ impl<'a> Parser<'a> {
                 })
             }
         };
-
-        // The ONE place text becomes a field: a word the table does not hold is
-        // refused here, so the `match` below can only ever see a field the
-        // refusal's list names. An arm added to it for a word the table lacks
-        // would be unreachable rather than a field the message omits.
-        let Some(known) = Field::from_name(&field) else {
+        let mut items = Vec::new();
+        loop {
+            match self.peek() {
+                Some(Token {
+                    kind: TokenKind::CloseBrace,
+                    ..
+                }) => {
+                    self.at += 1;
+                    break;
+                }
+                Some(Token {
+                    at,
+                    kind: TokenKind::Word(w),
+                    ..
+                }) => {
+                    let mut offset = *at;
+                    for piece in w.split(',') {
+                        if !piece.is_empty() {
+                            items.push(Value {
+                                at: offset,
+                                end: offset + piece.len(),
+                                literal: Literal::Word(piece.to_string()),
+                            });
+                        }
+                        offset += piece.len() + 1;
+                    }
+                    self.at += 1;
+                }
+                Some(Token {
+                    kind: TokenKind::Quoted(_),
+                    ..
+                }) => items.push(self.literal(subject)?),
+                Some(t) => {
+                    return Err(FilterError {
+                        at: t.at,
+                        kind: FilterErrorKind::UnclosedList,
+                    })
+                }
+                None => {
+                    return Err(FilterError {
+                        at: open_at,
+                        kind: FilterErrorKind::UnclosedList,
+                    })
+                }
+            }
+        }
+        if items.is_empty() {
             return Err(FilterError {
-                at: field_at,
-                kind: FilterErrorKind::UnknownField(field),
+                at: op_at,
+                kind: FilterErrorKind::EmptyList,
             });
-        };
-        let op = match cmp {
-            Cmp::Plain(op) => op,
-            // `contains` is the `value` field's own operator. Every other
-            // field is refused it here, so the `Op` the `Value` arm is handed
-            // is never read: that arm reads `cmp`.
-            Cmp::Contains if known == Field::Value => Op::Eq,
-            Cmp::Contains => {
+        }
+        Ok(items)
+    }
+
+    /// `len(path) op integer`, after `len (` has been read.
+    fn len_term(&mut self, len_at: usize) -> Result<Node, FilterError> {
+        let (path_at, written) = match self.next() {
+            Some(Token {
+                at,
+                kind: TokenKind::Word(w),
+                ..
+            }) => (*at, w.clone()),
+            Some(t) => {
                 return Err(FilterError {
-                    at: op_at,
-                    kind: FilterErrorKind::OperatorNotAdmitted {
-                        field: known.name(),
-                        op: "contains",
-                    },
+                    at: t.at,
+                    kind: FilterErrorKind::UnknownField(describe_token(&t.kind)),
+                })
+            }
+            None => {
+                return Err(FilterError {
+                    at: self.end_offset(),
+                    kind: FilterErrorKind::UnexpectedEnd,
                 })
             }
         };
-        // The `value` field is the one whose literal is BYTES, and reads it as
-        // it was lexed. Every other field reads TEXT, and a quoted value that
-        // is not UTF-8 is a value that field does not admit.
-        let value = match known {
-            Field::Value => String::new(),
-            _ => literal.text(known.name(), value_at)?,
-        };
-        let term = match known {
-            Field::Value => {
-                let op = match cmp {
-                    Cmp::Contains => ValueOp::Contains,
-                    Cmp::Plain(Op::Eq) => ValueOp::Eq,
-                    Cmp::Plain(Op::Ne) => ValueOp::Ne,
-                    Cmp::Plain(other) => {
-                        return Err(FilterError {
-                            at: op_at,
-                            kind: FilterErrorKind::OperatorNotAdmitted {
-                                field: known.name(),
-                                op: other.as_str(),
-                            },
-                        })
-                    }
-                };
-                Term::Value {
-                    op,
-                    needle: literal.value_bytes(value_at)?,
-                }
+        let path = resolve_path(&written, path_at)?;
+        if !matches!(
+            self.next(),
+            Some(Token {
+                kind: TokenKind::Close,
+                ..
+            })
+        ) {
+            return Err(FilterError {
+                at: len_at,
+                kind: FilterErrorKind::UnclosedGroup,
+            });
+        }
+        if !path.kind().has_width() {
+            return Err(FilterError {
+                at: len_at,
+                kind: FilterErrorKind::PathOperator {
+                    path: path.written(),
+                    kind: path.kind().word(),
+                    op: "len",
+                },
+            });
+        }
+        let op = match self.next() {
+            Some(Token {
+                kind: TokenKind::Op(op),
+                ..
+            }) => *op,
+            Some(t) => {
+                return Err(FilterError {
+                    at: t.at,
+                    kind: FilterErrorKind::ExpectedOperator,
+                })
             }
-            // The node axis: a NAME, bound to a zid before any record is asked.
-            Field::Node => {
-                let negated = equality_negation(op, known.name(), op_at)?;
-                Term::Node {
-                    name: value,
-                    span: (field_at, value_end),
-                    negated,
-                }
-            }
-            Field::Key => {
-                let negated = equality_negation(op, known.name(), op_at)?;
-                Term::Key {
-                    chunks: compile_pattern(&value, value_at)?,
-                    negated,
-                }
-            }
-            // R2757 (open debt 790) — the node axis the consumer asked for.
-            //
-            // The notation is BARE HEX with no prefix and no separators, and
-            // that is a measurement rather than a preference: the consuming
-            // viewer renders a zid as exactly these characters, so a reader can
-            // lift one off a row and drop it into a selector without
-            // re-typing it. A `0x` prefix or a colon-separated form would have
-            // made the two surfaces disagree about one value.
-            //
-            // "these characters" is ZENOH'S spelling now, and was the
-            // wire order until a consumer found the census and the zenohd log
-            // naming one node two ways. See `parse_zid` for what changed.
-            //
-            // The value is kept as the digits typed (lower case) beside the
-            // bytes it parses to, because a value of eight digits or more may
-            // be a PREFIX, and which zid a prefix names is the capture's to
-            // say: see `Filter::resolved_against`.
-            Field::Zid => {
-                let negated = equality_negation(op, known.name(), op_at)?;
-                Term::Zid {
-                    want: parse_zid(&value, value_at)?,
-                    written: value.to_ascii_lowercase(),
-                    span: (value_at, value_end),
-                    negated,
-                }
-            }
-            Field::Dir => {
-                let negated = equality_negation(op, known.name(), op_at)?;
-                let want = match value.as_str() {
-                    "a" | "A" => Direction::A,
-                    "b" | "B" => Direction::B,
-                    _ => {
-                        return Err(FilterError {
-                            at: value_at,
-                            kind: FilterErrorKind::UnknownValue {
-                                field: known.name(),
-                                value,
-                            },
-                        })
-                    }
-                };
-                Term::Dir { want, negated }
-            }
-            Field::Kind => {
-                let negated = equality_negation(op, known.name(), op_at)?;
-                let want = RecordKind::parse(&value).ok_or(FilterError {
-                    at: value_at,
-                    kind: FilterErrorKind::UnknownValue {
-                        field: known.name(),
-                        value: value.clone(),
-                    },
-                })?;
-                Term::Kind { want, negated }
-            }
-            Field::Bytes => Term::Bytes {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Time => Term::Time {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Elapsed => Term::Elapsed {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Offset => Term::Offset {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Delay => Term::Delay {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Replies => Term::Replies {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Errs => Term::Errs {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::FirstReply => Term::FirstReply {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Completion => Term::Completion {
-                op,
-                value: integer(&value, value_at)?,
-            },
-            Field::Closed => {
-                let negated = equality_negation(op, known.name(), op_at)?;
-                // `yes` / `no` and not `true` / `false`: the reader is asking
-                // about what the capture showed, and this crate's own vocabulary
-                // for a three-valued answer already spends `true`. A bare
-                // `closed` with no value would have been shorter and would have
-                // made `closed` the one field with a second grammar.
-                let want = match value.as_str() {
-                    "yes" | "y" => true,
-                    "no" | "n" => false,
-                    _ => {
-                        return Err(FilterError {
-                            at: value_at,
-                            kind: FilterErrorKind::UnknownValue {
-                                field: known.name(),
-                                value,
-                            },
-                        })
-                    }
-                };
-                Term::Closed { want, negated }
+            None => {
+                return Err(FilterError {
+                    at: self.end_offset(),
+                    kind: FilterErrorKind::UnexpectedEnd,
+                })
             }
         };
-        Ok(Node::Term(term))
+        let value = match self.next() {
+            Some(Token {
+                at,
+                kind: TokenKind::Word(w),
+                ..
+            }) => path_integer(w, *at)?,
+            Some(t) => {
+                return Err(FilterError {
+                    at: t.at,
+                    kind: FilterErrorKind::NotAnInteger(describe_token(&t.kind)),
+                })
+            }
+            None => {
+                return Err(FilterError {
+                    at: self.end_offset(),
+                    kind: FilterErrorKind::UnexpectedEnd,
+                })
+            }
+        };
+        // `!=` is the negation of `==`, as on every path: a field absent from
+        // the tree has no width, so it is not "of another width" either.
+        Ok(match op {
+            Op::Ne => Node::Not(alloc::boxed::Box::new(Node::Term(Term::Path {
+                path,
+                test: PathTest::Len { op: Op::Eq, value },
+            }))),
+            op => Node::Term(Term::Path {
+                path,
+                test: PathTest::Len { op, value },
+            }),
+        })
     }
+}
+
+/// What a term's field is: one of the fixed fields, or a path into the tree.
+enum Subject {
+    Fixed(Field),
+    Path(FieldPath),
+}
+
+/// One value of a term as written, and where.
+struct Value {
+    at: usize,
+    end: usize,
+    literal: Literal,
+}
+
+/// A written path resolved against the declared shape, or the refusal at its
+/// first byte.
+fn resolve_path(written: &str, at: usize) -> Result<FieldPath, FilterError> {
+    FieldPath::resolve(written).map_err(|why| FilterError {
+        at,
+        kind: match why {
+            PathRefusal::Unsupported => FilterErrorKind::PathsUnsupported,
+            PathRefusal::Unknown => FilterErrorKind::UnknownField(written.to_string()),
+            PathRefusal::Ambiguous(tails) => FilterErrorKind::AmbiguousPath {
+                path: written.to_string(),
+                tails,
+            },
+        },
+    })
+}
+
+/// A `matches` pattern compiled, or refused: at the operator when the build
+/// has no engine, at the value when the engine refuses the text.
+fn compile_matches(
+    literal: &Literal,
+    op_at: usize,
+    value_at: usize,
+) -> Result<Pattern, FilterError> {
+    let source = literal.text("matches", value_at)?;
+    Pattern::compile(&source).map_err(|why| match why {
+        PatternRefusal::Unsupported => FilterError {
+            at: op_at,
+            kind: FilterErrorKind::PatternUnsupported,
+        },
+        PatternRefusal::Invalid(message) => FilterError {
+            at: value_at,
+            kind: FilterErrorKind::BadPattern(message),
+        },
+    })
+}
+
+/// One comparison, built from its field, operator and value.
+fn build_term(
+    subject: &Subject,
+    field_at: usize,
+    op_at: usize,
+    cmp: Cmp,
+    op_word: &'static str,
+    value: Value,
+) -> Result<Node, FilterError> {
+    match subject {
+        Subject::Fixed(known) => build_fixed(*known, field_at, op_at, cmp, op_word, value),
+        Subject::Path(path) => build_path(path, op_at, cmp, op_word, value),
+    }
+}
+
+/// A comparison over a PATH, typed by the kind the declared shape gives it.
+///
+/// `!=` is built as the negation of `==` on every kind, so a field the record
+/// does not carry is `yes` under `!=`: see [`crate::field_path`].
+fn build_path(
+    path: &FieldPath,
+    op_at: usize,
+    cmp: Cmp,
+    op_word: &'static str,
+    value: Value,
+) -> Result<Node, FilterError> {
+    let kind = path.kind();
+    let refuse_op = |op: &'static str| FilterError {
+        at: op_at,
+        kind: FilterErrorKind::PathOperator {
+            path: path.written(),
+            kind: kind.word(),
+            op,
+        },
+    };
+    let refuse_value = |shown: String| FilterError {
+        at: value.at,
+        kind: FilterErrorKind::PathValue {
+            path: path.written(),
+            kind: kind.word(),
+            value: shown,
+        },
+    };
+    let text = |literal: &Literal| match literal {
+        Literal::Word(w) => Ok(w.clone()),
+        Literal::Quoted(bytes) => String::from_utf8(bytes.clone())
+            .map_err(|_| refuse_value(String::from_utf8_lossy(bytes).into_owned())),
+    };
+    let raw = |literal: &Literal| match literal {
+        Literal::Word(w) => w.as_bytes().to_vec(),
+        Literal::Quoted(bytes) => bytes.clone(),
+    };
+    let readable = matches!(kind, PathKind::Label | PathKind::Text | PathKind::Bytes);
+    let test = match cmp {
+        Cmp::Matches if readable => {
+            PathTest::Matches(compile_matches(&value.literal, op_at, value.at)?)
+        }
+        Cmp::Contains if readable => PathTest::Contains(match kind {
+            PathKind::Bytes => value
+                .literal
+                .value_bytes(value.at)
+                .map_err(|_| refuse_value(describe_literal(&value.literal)))?,
+            _ => raw(&value.literal),
+        }),
+        Cmp::Plain(op) => match kind {
+            PathKind::Bits | PathKind::Uint => {
+                let Literal::Word(w) = &value.literal else {
+                    return Err(refuse_value(describe_literal(&value.literal)));
+                };
+                let wanted = path_integer(w, value.at)?;
+                if op == Op::Ne {
+                    return Ok(negated(Term::Path {
+                        path: path.clone(),
+                        test: PathTest::Int {
+                            op: Op::Eq,
+                            value: wanted,
+                        },
+                    }));
+                }
+                PathTest::Int { op, value: wanted }
+            }
+            PathKind::Nested | PathKind::Opaque => return Err(refuse_op(op_word)),
+            _ if !matches!(op, Op::Eq | Op::Ne) => return Err(refuse_op(op.as_str())),
+            PathKind::Flag => match text(&value.literal)?.as_str() {
+                "yes" | "y" => PathTest::Flag(true),
+                "no" | "n" => PathTest::Flag(false),
+                other => return Err(refuse_value(other.to_string())),
+            },
+            PathKind::Label => {
+                let word = text(&value.literal)?;
+                // A closed set refuses a word outside it, as `kind` refuses a
+                // kind it does not have: `qos.priority == Fast` names no band,
+                // and answering `no` for every record would be a silent empty
+                // table.
+                if path
+                    .words()
+                    .is_some_and(|words| !words.contains(&word.as_str()))
+                {
+                    return Err(refuse_value(word));
+                }
+                PathTest::Word(word)
+            }
+            PathKind::Text => PathTest::Word(text(&value.literal)?),
+            PathKind::Bytes => PathTest::Bytes(
+                value
+                    .literal
+                    .value_bytes(value.at)
+                    .map_err(|_| refuse_value(describe_literal(&value.literal)))?,
+            ),
+            PathKind::Zid => {
+                let written = text(&value.literal)?;
+                PathTest::Zid(parse_zid(&written, value.at).map_err(|_| refuse_value(written))?)
+            }
+        },
+        _ => return Err(refuse_op(op_word)),
+    };
+    let term = Term::Path {
+        path: path.clone(),
+        test,
+    };
+    Ok(match cmp {
+        Cmp::Plain(Op::Ne) => negated(term),
+        _ => Node::Term(term),
+    })
+}
+
+fn negated(term: Term) -> Node {
+    Node::Not(alloc::boxed::Box::new(Node::Term(term)))
+}
+
+/// A path's integer: decimal, or `0x` and hex, as a display filter takes it.
+fn path_integer(word: &str, at: usize) -> Result<u64, FilterError> {
+    let parsed = match word.strip_prefix("0x").or_else(|| word.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => word.parse::<u64>().ok(),
+    };
+    parsed.ok_or_else(|| FilterError {
+        at,
+        kind: FilterErrorKind::NotAnInteger(word.to_string()),
+    })
+}
+
+fn describe_literal(literal: &Literal) -> String {
+    match literal {
+        Literal::Word(w) => w.clone(),
+        Literal::Quoted(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// A comparison over one of the FIXED fields.
+fn build_fixed(
+    known: Field,
+    field_at: usize,
+    op_at: usize,
+    cmp: Cmp,
+    op_word: &'static str,
+    value: Value,
+) -> Result<Node, FilterError> {
+    let Value {
+        at: value_at,
+        end: value_end,
+        literal,
+    } = value;
+    let refuse_op = |op: &'static str| FilterError {
+        at: op_at,
+        kind: FilterErrorKind::OperatorNotAdmitted {
+            field: known.name(),
+            op,
+        },
+    };
+    // A `node` term is replaced whole by the binder, span for span; a list of
+    // names would need one span per name, and a node is named once.
+    if known == Field::Node && matches!(op_word, "in" | "not in") {
+        return Err(refuse_op(op_word));
+    }
+    match (cmp, known) {
+        (Cmp::Matches, Field::Key) => {
+            return Ok(Node::Term(Term::KeyMatches(compile_matches(
+                &literal, op_at, value_at,
+            )?)))
+        }
+        (Cmp::Matches, Field::Value) => {
+            return Ok(Node::Term(Term::ValueMatches(compile_matches(
+                &literal, op_at, value_at,
+            )?)))
+        }
+        (Cmp::Contains, Field::Key) => {
+            return Ok(Node::Term(Term::KeyContains(
+                literal.text(known.name(), value_at)?,
+            )))
+        }
+        _ => {}
+    }
+    let op = match cmp {
+        Cmp::Plain(op) => op,
+        // `contains` is the `value` field's own operator (and `key`'s, above).
+        // Every other field is refused it here, so the `Op` the `Value` arm is
+        // handed is never read: that arm reads `cmp`.
+        Cmp::Contains if known == Field::Value => Op::Eq,
+        other => return Err(refuse_op(other.word())),
+    };
+    // The `value` field is the one whose literal is BYTES, and reads it as
+    // it was lexed. Every other field reads TEXT, and a quoted value that
+    // is not UTF-8 is a value that field does not admit.
+    let value = match known {
+        Field::Value => String::new(),
+        _ => literal.text(known.name(), value_at)?,
+    };
+    let term = match known {
+        Field::Value => {
+            let op = match cmp {
+                Cmp::Contains => ValueOp::Contains,
+                Cmp::Plain(Op::Eq) => ValueOp::Eq,
+                Cmp::Plain(Op::Ne) => ValueOp::Ne,
+                other => return Err(refuse_op(other.word())),
+            };
+            Term::Value {
+                op,
+                needle: literal.value_bytes(value_at)?,
+            }
+        }
+        // The node axis: a NAME, bound to a zid before any record is asked.
+        Field::Node => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            Term::Node {
+                name: value,
+                span: (field_at, value_end),
+                negated,
+            }
+        }
+        Field::Key => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            Term::Key {
+                chunks: compile_pattern(&value, value_at)?,
+                negated,
+            }
+        }
+        // R2757 (open debt 790) — the node axis the consumer asked for.
+        //
+        // The notation is BARE HEX with no prefix and no separators, and
+        // that is a measurement rather than a preference: the consuming
+        // viewer renders a zid as exactly these characters, so a reader can
+        // lift one off a row and drop it into a selector without
+        // re-typing it. A `0x` prefix or a colon-separated form would have
+        // made the two surfaces disagree about one value.
+        //
+        // "these characters" is ZENOH'S spelling now, and was the
+        // wire order until a consumer found the census and the zenohd log
+        // naming one node two ways. See `parse_zid` for what changed.
+        //
+        // The value is kept as the digits typed (lower case) beside the
+        // bytes it parses to, because a value of eight digits or more may
+        // be a PREFIX, and which zid a prefix names is the capture's to
+        // say: see `Filter::resolved_against`.
+        Field::Zid => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            Term::Zid {
+                want: parse_zid(&value, value_at)?,
+                written: value.to_ascii_lowercase(),
+                span: (value_at, value_end),
+                negated,
+            }
+        }
+        Field::Dir => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            let want = match value.as_str() {
+                "a" | "A" => Direction::A,
+                "b" | "B" => Direction::B,
+                _ => {
+                    return Err(FilterError {
+                        at: value_at,
+                        kind: FilterErrorKind::UnknownValue {
+                            field: known.name(),
+                            value,
+                        },
+                    })
+                }
+            };
+            Term::Dir { want, negated }
+        }
+        Field::Kind => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            let want = RecordKind::parse(&value).ok_or(FilterError {
+                at: value_at,
+                kind: FilterErrorKind::UnknownValue {
+                    field: known.name(),
+                    value: value.clone(),
+                },
+            })?;
+            Term::Kind { want, negated }
+        }
+        Field::Bytes => Term::Bytes {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Time => Term::Time {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Elapsed => Term::Elapsed {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Offset => Term::Offset {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Delay => Term::Delay {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Replies => Term::Replies {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Errs => Term::Errs {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::FirstReply => Term::FirstReply {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Completion => Term::Completion {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Closed => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            // `yes` / `no` and not `true` / `false`: the reader is asking
+            // about what the capture showed, and this crate's own vocabulary
+            // for a three-valued answer already spends `true`. A bare
+            // `closed` with no value would have been shorter and would have
+            // made `closed` the one field with a second grammar.
+            let want = match value.as_str() {
+                "yes" | "y" => true,
+                "no" | "n" => false,
+                _ => {
+                    return Err(FilterError {
+                        at: value_at,
+                        kind: FilterErrorKind::UnknownValue {
+                            field: known.name(),
+                            value,
+                        },
+                    })
+                }
+            };
+            Term::Closed { want, negated }
+        }
+    };
+    Ok(Node::Term(term))
 }
 
 /// `==` / `!=` only, answering whether the term is negated.
@@ -2584,6 +3417,25 @@ fn equality_negation(op: Op, field: &'static str, at: usize) -> Result<bool, Fil
 enum Cmp {
     Plain(Op),
     Contains,
+    /// A pattern searched for (`filter-regex`).
+    Matches,
+    /// One of a list: `f in {a, b}`.
+    In,
+    /// None of a list: `f not in {a, b}`.
+    NotIn,
+}
+
+impl Cmp {
+    /// The operator as written, for a refusal to name.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Plain(op) => op.as_str(),
+            Self::Contains => "contains",
+            Self::Matches => "matches",
+            Self::In => "in",
+            Self::NotIn => "not in",
+        }
+    }
 }
 
 /// The value of a term as the lexer produced it, before a field decides how to
@@ -2684,6 +3536,8 @@ fn describe_token(kind: &TokenKind) -> String {
         TokenKind::Or => "or".to_string(),
         TokenKind::Open => "(".to_string(),
         TokenKind::Close => ")".to_string(),
+        TokenKind::OpenBrace => "{".to_string(),
+        TokenKind::CloseBrace => "}".to_string(),
     }
 }
 
@@ -2723,6 +3577,9 @@ mod tests {
             // The default is the NON-correlating plane, so every pre-existing
             // test below drives the view the throughput plane builds.
             outcome: None,
+            // No tree, on the `zid` line's rule: a path term over the default
+            // view is undecidable, and a test that drives the tree axis says so.
+            tree: None,
         }
     }
 
@@ -3307,8 +4164,6 @@ mod tests {
         );
         let err = Filter::parse("replies > two").expect_err("not an integer");
         assert!(matches!(err.kind, FilterErrorKind::NotAnInteger(_)));
-        // The unknown-field message names the whole vocabulary, so a reader who
-        // guessed `latency` is told what this language calls it.
         let err = Filter::parse("elapsed == maybe").expect_err("not an integer");
         assert!(matches!(err.kind, FilterErrorKind::NotAnInteger(_)));
         let err = Filter::parse("latency > 100").expect_err("no such field");
@@ -3316,18 +4171,22 @@ mod tests {
             err.kind,
             FilterErrorKind::UnknownField("latency".to_string())
         );
-        let rendered = err.to_string();
-        for field in [
-            "elapsed",
-            "replies",
-            "errs",
-            "first_reply",
-            "completion",
-            "closed",
+        // The unknown-field message names the fields NEAREST the word typed,
+        // so a reader one letter off an outcome field is told its name. The
+        // whole vocabulary is the field list document's.
+        for (typed, meant) in [
+            ("elapsd", "elapsed"),
+            ("replys", "replies"),
+            ("first_repl", "first_reply"),
+            ("completon", "completion"),
+            ("closd", "closed"),
         ] {
+            let rendered = Filter::parse(&alloc::format!("{typed} > 1"))
+                .expect_err(typed)
+                .to_string();
             assert!(
-                rendered.contains(field),
-                "{field} missing from {rendered:?}"
+                rendered.contains(meant),
+                "{meant} missing from {rendered:?}"
             );
         }
     }
@@ -3581,7 +4440,8 @@ mod tests {
     /// wrong substring rather than as a number.
     #[test]
     fn tokens_carry_the_byte_span_and_class_the_lexer_saw() {
-        let src = "(key == 'a b') && not size>=3 || !x != \"로봇\" and y < 1 or z > 2";
+        let src =
+            "(key == 'a b') && not size>=3 || !x != \"로봇\" and y < 1 or z > 2 or k in {p,q}";
         let got: Vec<(&str, &str)> = tokens(src)
             .into_iter()
             .map(|t| (&src[t.start..t.end], t.class.word()))
@@ -3612,6 +4472,15 @@ mod tests {
                 ("z", "word"),
                 (">", "operator"),
                 ("2", "word"),
+                ("or", "or"),
+                ("k", "word"),
+                // `in` is a word, as `contains` is: an operator only where
+                // one stands.
+                ("in", "word"),
+                ("{", "open_brace"),
+                // The comma is a word character; the list splits it.
+                ("p,q", "word"),
+                ("}", "close_brace"),
             ]
         );
         // Every class the family declares was reached, so the table above is
@@ -3661,7 +4530,6 @@ mod tests {
     #[test]
     fn an_unfinished_selector_is_refused_at_the_end_of_its_input() {
         for (source, at) in [
-            ("demo", 4),
             ("kind", 4),
             ("kind ==", 7),
             ("kind == ", 8),
@@ -3690,6 +4558,12 @@ mod tests {
                 "{source:?}: the rendering carries the same position"
             );
         }
+        // A word that is no fixed field is no longer a field waiting for its
+        // operator: alone it is a whole presence test of a path, so a word that
+        // names no path is refused AT the word, as an unknown field.
+        let err = Filter::parse("demo").expect_err("no field and no path is named demo");
+        assert_eq!(err.kind, FilterErrorKind::UnknownField("demo".to_string()));
+        assert_eq!(err.at, 0);
     }
 
     /// Every refusal that is NOT an end of input keeps the position it had.
@@ -3759,7 +4633,7 @@ mod tests {
     /// one word spanning `0..4`.
     #[test]
     fn the_diagnosis_places_an_unfinished_selector_past_its_last_token() {
-        let doc = diagnose_json("demo");
+        let doc = diagnose_json("kind");
         assert!(doc.contains("\"ok\":false,\"at\":4,"), "{doc}");
         assert!(
             doc.ends_with(",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\"}]}"),
@@ -3776,18 +4650,12 @@ mod tests {
         );
     }
 
-    /// The names the unknown-field refusal lists, read back out of its
-    /// message.
+    /// The fixed fields the field list names: [`field_names`], the walk the
+    /// list document and the refusal's nearest names are built from. (The
+    /// refusal used to print the whole list and was read back here; it now
+    /// prints the few nearest names, and the list is the document's.)
     fn fields_the_refusal_names() -> Vec<String> {
-        let message = Filter::parse("no_such_field == 1")
-            .expect_err("an unknown field is refused")
-            .to_string();
-        let list = message
-            .split("(known: ")
-            .nth(1)
-            .and_then(|rest| rest.strip_suffix(')'))
-            .unwrap_or_else(|| panic!("the refusal lists its candidates: {message:?}"));
-        list.split(", ").map(str::to_string).collect()
+        field_names().into_iter().map(str::to_string).collect()
     }
 
     /// The fields the module's own table documents, read out of this file's
@@ -3872,16 +4740,24 @@ mod tests {
         offered.sort();
         offered.dedup();
 
+        // A FIXED field is one the parser takes without reading it as a path:
+        // a selector that compiled and reads no tree, or a refusal that is
+        // about the field's value or operator rather than about the word or a
+        // path. Since the paths arrived, `qos == 1` is no longer an unknown
+        // field (it is a group and refuses `==`), and that is a path's
+        // refusal, which this measurement must not count as a fixed field.
         let mut accepted: Vec<String> = offered
             .iter()
-            .filter(|name| {
-                !matches!(
-                    Filter::parse(&alloc::format!("{name} == 1")),
-                    Err(FilterError {
-                        kind: FilterErrorKind::UnknownField(_),
-                        ..
-                    })
-                )
+            .filter(|name| match Filter::parse(&alloc::format!("{name} == 1")) {
+                Ok(filter) => !filter.reads_tree(),
+                Err(FilterError { kind, .. }) => !matches!(
+                    kind,
+                    FilterErrorKind::UnknownField(_)
+                        | FilterErrorKind::AmbiguousPath { .. }
+                        | FilterErrorKind::PathValue { .. }
+                        | FilterErrorKind::PathOperator { .. }
+                        | FilterErrorKind::PathsUnsupported
+                ),
             })
             .cloned()
             .collect();
@@ -4032,19 +4908,20 @@ mod tests {
         assert!(Filter::parse("value == 0x00ff").is_ok());
     }
 
-    /// `contains` is the `value` field's operator and nobody else's, and it is
-    /// an operator only where one stands.
+    /// `contains` is an operator of the fields that hold text or bytes (`value`
+    /// and, since the paths arrived, `key`) and of no other, and it is an
+    /// operator only where one stands.
     #[test]
     fn contains_is_an_operator_only_of_the_value_field() {
-        let e = Filter::parse("key contains demo").expect_err("key has no contains");
+        let e = Filter::parse("kind contains put").expect_err("kind has no contains");
         assert_eq!(
             e.kind,
             FilterErrorKind::OperatorNotAdmitted {
-                field: "key",
+                field: "kind",
                 op: "contains"
             }
         );
-        assert_eq!(e.at, 4);
+        assert_eq!(e.at, 5);
         let e = Filter::parse(r#"value < "a""#).expect_err("no ordering of payloads");
         assert_eq!(
             e.kind,
@@ -4059,9 +4936,18 @@ mod tests {
         assert!(Filter::parse("key == contains/x").is_ok());
         // An unknown field is refused as an unknown field, not as a missing
         // operator, now that the operator position can hold a word.
-        let e = Filter::parse(r#"payload contains "x""#).expect_err("no such field");
+        let e = Filter::parse(r#"payloads contains "x""#).expect_err("no such field");
         assert!(matches!(e.kind, FilterErrorKind::UnknownField(_)));
         assert_eq!(e.at, 0);
+        // (`payload` alone is a path where the dissection exists, and an
+        // unsettled one: it ends a byte field under `put` and a group under
+        // `Frame`, and is refused as such. Without it, it is an unknown field.)
+        let e = Filter::parse(r#"payload contains "x""#).expect_err("refused either way");
+        if cfg!(feature = "dissect") {
+            assert!(matches!(e.kind, FilterErrorKind::AmbiguousPath { .. }));
+        } else {
+            assert!(matches!(e.kind, FilterErrorKind::UnknownField(_)));
+        }
         // The diagnosis' token classes are unchanged by the new word.
         let classes: Vec<_> = tokens(r#"value contains "x""#)
             .into_iter()

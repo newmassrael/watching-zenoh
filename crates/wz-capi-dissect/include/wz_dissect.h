@@ -1566,7 +1566,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 43
+#define WZ_DISSECT_ABI_REVISION 44
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1832,10 +1832,10 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * Every door that takes a selector takes this language, and
  * wz_dissect_selector_diagnose says where a text goes wrong. A term is
  * `field op value`; terms join with and / or / not and parentheses. These are
- * the fields, written once, in the order an unknown field's refusal lists them.
- * That list is built from the table the parser reads, so the refusal cannot
- * name a field the parser refuses or omit one it accepts, and a test holds
- * this table to the same one:
+ * the FIXED fields, written once, in the order wz_dissect_selector_fields lists
+ * them. That list is built from the table the parser reads, so it cannot name
+ * a field the parser refuses or omit one it accepts, and a test holds this
+ * table to the same one:
  *
  *   key          a keyexpr pattern                           == !=
  *   dir          a or b, either case                         == !=
@@ -1883,6 +1883,62 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * wz_dissect_selector_bind BEFORE any door is asked, and a selector that still
  * holds a `node` term is refused by every other door as a selector that does not
  * compile (the diagnosis puts `at` on the term and says the name is unbound).
+ *
+ * (ABI 44) ANY OTHER WORD IS A PATH into the record's DISSECTION, the tree the
+ * field document shows: `qos.priority == Data`, `put.encoding.id == 5`,
+ * `source_info.zid == a1b2c3d4...`, `Push.put.payload contains "x"`. The names
+ * are the dissection's own, joined by dots, and three of the tree's levels are
+ * read the way a person asks rather than the way the wire is laid out: an
+ * extension is named by what it is (`qos`, `source_info`, `attachment`, not
+ * `ext`), the extension chain is not a level, and a NAMED extension's own
+ * header fields stand under `ext` (`qos.ext.encoding` is the extension's
+ * two-bit body encoding). A path may be written from its message
+ * (`Push.qos.priority`) or as any tail of one (`qos.priority`), and a tail names
+ * every field it ends. wz_dissect_selector_fields lists every path, from its
+ * message, with its kind.
+ *
+ *     - A path is resolved when the selector is parsed. A word that names no
+ *       fixed field and no path is refused at its first byte, and the message
+ *       names at most five names NEAREST it. A tail that ends fields of more
+ *       than one KIND is refused (`encoding` alone ends a group and a two-bit
+ *       field) and the message names the longer tails that tell them apart.
+ *     - A path ALONE is a presence test: `qos and kind == put`.
+ *     - A path's kind decides what it takes. `uint` and `bits`: the six
+ *       comparisons over an integer, decimal or 0x hex. `flag`: == != yes / no.
+ *       `label`: == != one of its words, and a word it cannot carry is refused
+ *       (`qos.priority == Fast`). `text`: == != a word or quoted text. `bytes`:
+ *       == != what `value` takes. `zid`: == != what `zid` takes, whole.
+ *       `nested` and `opaque`: only the presence test and len().
+ *     - ABSENT IS DECIDED, NOT UNDECIDED. A message this library walked whole
+ *       and that does not carry the field answers `no` to ==, and `yes` to !=,
+ *       which is the negation of ==. Write `p and p != v` for "present and
+ *       different". A record whose message the plane could not walk (its bytes
+ *       not held whole) is UNDECIDED for every path, as for any fact the
+ *       capture does not carry.
+ *     - A path that occurs more than once in a message (a repeated extension,
+ *       a slice) answers `yes` when ANY occurrence satisfies the term.
+ *     - The planes judge a record by ITS OWN message's tree. A Request and the
+ *       ResponseFinal that closes it answer every record term as the request
+ *       does, a path included: the tree is the Request's.
+ *
+ * (ABI 44) FOUR OPERATORS MORE, on paths and fixed fields alike:
+ *
+ *     - `f in {a, b}` is `f == a or f == b`, and `f not in {a, b}` its
+ *       negation. Values are separated by commas, spaces or both; a value that
+ *       holds a comma is quoted. Every field takes it but `node`.
+ *     - `contains`: a byte substring, of `value`, of `key` (its resolved text)
+ *       and of a text, label or bytes path.
+ *     - `matches "re"`: a regular expression SEARCHED for (unanchored; write ^
+ *       and $ to anchor) in `key`, `value` or a text, label or bytes path,
+ *       over bytes. The syntax is the Rust `regex` crate's. It exists only in
+ *       a build with the library's `filter-regex` feature, and the field list
+ *       says whether this one has it (`matches`); a build without it refuses
+ *       `matches` at the operator, never answering it.
+ *     - `len(p) op n`: the WIRE width of path p in bytes. For a text that is
+ *       its UTF-8 BYTE count, which is also what a display filter's len()
+ *       counts, and not its characters. A bits, flag or label field has no
+ *       width of its own (it is read out of a byte another field owns) and is
+ *       refused.
  *
  * `zid` is read against THE CAPTURE the selector is judged in. A value of
  * eight or more hexadecimal digits that does not spell, in full, a zid that
@@ -2216,6 +2272,11 @@ int wz_dissect_pcap_session_table(const unsigned char *bytes, size_t len,
  *     `or`        `or` or `||`
  *     `open`      (
  *     `close`     )
+ *     `open_brace`   {   the list of an `in`   (since revision 5)
+ *     `close_brace`  }
+ *
+ * `in`, `contains` and `matches` are `word`s: each is an operator only where
+ * one stands, so `key == in` still names the chunk.
  *
  * @values selector_diagnose kind
  * @carries selector_diagnose kind passenger */
@@ -2283,6 +2344,53 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * @carries selector_bind refusal discriminant */
 int wz_dissect_selector_bind(const char *selector, const char *names_json,
                              char **out);
+
+/* (ABI 44) -- EVERY FIELD A SELECTOR CAN NAME, with the operators each one
+ * admits and, where its values are a closed set, the words.
+ *
+ * Complete against this list and check a selector against it before you send
+ * it; do not keep your own copy of the vocabulary, which ages the moment the
+ * dissection learns a field. The unknown-field refusal names only the few names
+ * nearest the one typed: the whole list is here. It takes no input (the list is
+ * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
+ * with wz_dissect_string_free:
+ *
+ *     {"document":{"name":"selector_fields","revision":1},
+ *      "matches":true,
+ *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
+ *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
+ *                ...],
+ *      "paths":[{"path":"Push.qos.priority","kind":"label","len":false,
+ *                "operators":["==","!=","in","contains","matches"],
+ *                "words":["Control","RealTime",...,"Background"]},
+ *               {"path":"Push.put.payload","kind":"bytes","len":true,
+ *                "operators":["==","!=","in","contains","matches"]},
+ *               ...]}
+ *
+ *   `matches`    whether this build compiles `matches` patterns (the library's
+ *                `filter-regex` feature). Where it is false, NO operator list
+ *                carries `matches`, so offering what the lists offer offers
+ *                nothing the parser refuses.
+ *   `fields`     the fixed fields of THE SELECTOR LANGUAGE's table, in its
+ *                order. `words` only for the three with a closed set: `dir`,
+ *                `kind`, `closed`.
+ *   `paths`      every path into a record's dissection, written from its
+ *                message root. A selector may write any tail of one. `kind` is
+ *                the dissection's own kind word and DECIDES the object: a
+ *                `label` carries `words`, the closed set it is one of, and no
+ *                other kind carries `words` at all. `len` says whether len()
+ *                reads the field (its wire width in bytes; for a text, UTF-8
+ *                bytes and not characters). `operators` never lists `not in`,
+ *                which every `in` admits, nor the presence test, which every
+ *                path admits.
+ *
+ * The same network message appears under its own root (`Push...`) and under a
+ * Frame's batch (`Frame.payload.Push...`); a record term reads the first, and
+ * both are listed because a tail matches either.
+ *
+ * @values selector_fields kind
+ * @carries selector_fields kind discriminant */
+int wz_dissect_selector_fields(char **out);
 
 /* R311y855 (ABI 5) — THE FIELD LAYER: every message in the capture,
  * dissected into the byte ranges it was decoded from.

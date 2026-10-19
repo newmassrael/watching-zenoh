@@ -407,6 +407,17 @@ ONLY_CAPI = {
         "it is being TYPED. A command line finds that out by running.",
         (11,),
     ),
+    # (ABI 44) -- filed in the round that added the symbol.
+    "the list of every field a selector can name": (
+        "wz_dissect_selector_fields",
+        "DELIBERATE, on the row above's argument. The list exists for a UI that "
+        "COMPLETES a selector while it is typed and checks it before it is sent, "
+        "so it must not keep its own copy of a vocabulary the dissection widens. "
+        "A person at the command line types a selector and is told, at the word, "
+        "the names nearest the one that was refused; the same refusal and the "
+        "same nearest names reach `--select` through the one parser.",
+        (11,),
+    ),
     "diagnosing a declaration text without a capture": (
         "wz_dissect_declarations_diagnose",
         "DELIBERATE, on exactly the argument the row above makes, arriving for the "

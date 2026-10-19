@@ -8075,7 +8075,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 64] = [
+        let live: [(&str, &str, Vec<&'static str>); 65] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -8219,6 +8219,14 @@ mod tests {
                 rev::SELECTOR_BIND,
                 "refusal",
                 crate::filter::bind_refusal_words(),
+            ),
+            // A path's kind on the field list: the dissection's own kind words,
+            // walked by `FieldValue::kind_words`, which a test holds to every
+            // variant the type has.
+            (
+                rev::SELECTOR_FIELDS,
+                "kind",
+                wz_session_core::dissect::FieldValue::kind_words(),
             ),
             // The declaration verdict's two families and the key-expression
             // verdict's one. The kinds are `DeclarationKind::word` over its
@@ -9113,7 +9121,8 @@ mod tests {
         // and syntax, and one of each shape of refusal.
         let describe_docs = crate::proto_describe_tests::documents_for_the_carries_gate();
         let since_docs = crate::selection_json::tests::since_documents_for_the_gates();
-        let docs: [(&str, Vec<&String>); 15] = [
+        let field_list = crate::filter::selector_fields_json();
+        let docs: [(&str, Vec<&String>); 16] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -9121,6 +9130,7 @@ mod tests {
             ),
             (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
             (rev::SELECTOR_BIND, bind_verdicts.iter().collect()),
+            (rev::SELECTOR_FIELDS, alloc::vec![&field_list]),
             (rev::SELECTION, verdict_docs.iter().collect()),
             (rev::SELECTION_SINCE, since_docs.iter().collect()),
             (

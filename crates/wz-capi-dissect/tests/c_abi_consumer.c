@@ -2893,11 +2893,14 @@ int main(void) {
      * Revision 3 moves the position of an unfinished selector to its byte
      * length and lists `zid` among an unknown field's candidates. Revision 4
      * adds `value` and `node` to those candidates and reads the escapes of a
-     * quoted value; none of it is on this success branch.
+     * quoted value; none of it is on this success branch. Revision 5 reads a
+     * word that is no field as a PATH into the record's dissection, adds the
+     * list operators and two token classes for a list's braces; again none of
+     * it is on this branch.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":4},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":5},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\"},"
@@ -3119,7 +3122,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[19];
+    } revisioned[20];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -3628,6 +3631,38 @@ int main(void) {
                                              &revisioned[18].doc);
         CHECK(rc == WZ_DISSECT_OK, "selection_since document rc=%d", rc);
         wz_dissect_live_close(quiet);
+    }
+    /* (ABI 44) -- the field list, at 1. It takes no input at all. */
+    revisioned[19].name = "selector_fields";
+    revisioned[19].revision = 1;
+    revisioned[19].doc = NULL;
+    rc = wz_dissect_selector_fields(&revisioned[19].doc);
+    CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);
+    /* What a consumer completes against is IN it: a fixed field with its
+     * words, and a label path with its kind and closed words. This library is
+     * built with the pattern engine, so the list says so and the text fields
+     * offer `matches`. */
+    CHECK(strstr(revisioned[19].doc, "\"matches\":true") != NULL,
+          "the build's pattern engine is not reported: %.200s",
+          revisioned[19].doc);
+    CHECK(strstr(revisioned[19].doc,
+                 "{\"name\":\"kind\",\"operators\":[\"==\",\"!=\",\"in\"],"
+                 "\"words\":[\"put\",\"del\",\"query\",\"reply\",\"err\"]}") != NULL,
+          "the kind field and its words are missing");
+    CHECK(strstr(revisioned[19].doc,
+                 "{\"path\":\"Push.qos.priority\",\"kind\":\"label\",\"len\":false,"
+                 "\"operators\":[\"==\",\"!=\",\"in\",\"contains\",\"matches\"],"
+                 "\"words\":[\"Control\",") != NULL,
+          "the QoS priority path and its words are missing");
+    {
+        /* A path the list names is a selector the doors take. */
+        char *taken = NULL;
+        rc = wz_dissect_selector_diagnose("qos.priority in {Data, DataHigh}",
+                                          &taken);
+        CHECK(rc == WZ_DISSECT_OK && taken != NULL &&
+                  strstr(taken, "\"ok\":true") != NULL,
+              "a listed path is refused: %s", taken ? taken : "(null)");
+        wz_dissect_string_free(taken);
     }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop

@@ -14,6 +14,9 @@
 # ZERO third-party dependencies. Every format below is a fixed-layout header
 # read out of a byte slice; pulling a parsing crate in would trade an
 # afternoon of struct reading for a supply-chain surface on a dogfood tool.
+# The one exception is OPT-IN and off by default: `filter-regex` (below) borrows
+# a regular expression engine for the selector's `matches`, which is not a
+# format and not something to write a second time.
 [package]
 name = "wz-capture"
 version = "0.1.0"
@@ -135,6 +138,17 @@ filter-wildcards = [
     "wz-session-core/keyexpr-dollar-star",
 ]
 
+# The selector's `matches` operator: a regular expression searched for in a
+# keyexpr, a payload or a text field of the dissection. OFF by default, because
+# it is the one third-party dependency this crate takes (see the header): the
+# MCU profiles and every build that does not read a selector a person typed
+# keep the zero-dependency graph. Off, `matches` is a PARSE REFUSAL
+# (`FilterErrorKind::PatternUnsupported`), on `filter-wildcards`' rule. The
+# engine runs with `alloc` only, so the crate stays `no_std`. The consumer
+# surfaces that take a typed selector (`wz-capi-dissect`, `wz-analyze`) turn it
+# on, and the field list document says whether a build has it.
+filter-regex = ["dep:regex-automata"]
+
 # R311y614 — the network codec selection, and it is a FEATURE rather than an
 # unconditional dependency line for a reason that was measured the hard way.
 #
@@ -232,6 +246,15 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     # `network-codecs` feature above — see its comment: naming them here made
     # them unconditional for every crate that carries wz-capture anywhere in its
     # graph, including as a dev-dependency.
+] }
+
+# `filter-regex`'s engine, and only it: see that feature. `alloc` without `std`,
+# the meta engine and the Unicode tables a pattern's classes read.
+regex-automata = { version = "0.4", default-features = false, optional = true, features = [
+    "alloc",
+    "meta",
+    "syntax",
+    "unicode",
 ] }
 
 # R311y886 (open-debt item 357) — the RFC 1071 fills this crate's own packet

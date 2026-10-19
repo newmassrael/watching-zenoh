@@ -1163,6 +1163,11 @@ pub mod passive_messages;
 #[cfg(feature = "dissect")]
 pub mod dissect;
 
+/// The field tree as a selector's path sees it, and the declared shape of every
+/// tree [`dissect`] can produce.
+#[cfg(feature = "dissect")]
+pub mod dissect_schema;
+
 /// R311y585 (A4) — the OBSERVER's per-direction key-expression tables.
 ///
 /// A participant keeps one table per link (the peer's ids) because the other

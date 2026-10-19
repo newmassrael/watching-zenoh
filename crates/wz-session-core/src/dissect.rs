@@ -1438,14 +1438,13 @@ fn read_transport_qos_z64(value: u64, span: Span) -> Option<Vec<Field>> {
 /// rejected. A reading that invented a fourth target would describe a query
 /// no peer would run.
 fn read_target_z64(value: u64, span: Span) -> Option<Vec<Field>> {
-    let named = match value {
-        0 => "BestMatching",
-        1 => "All",
-        2 => "AllComplete",
-        _ => return None,
-    };
+    let named = TARGET_WORDS.get(usize::try_from(value).ok()?)?;
     Some(alloc::vec![label("target", span, named)])
 }
+
+/// The `target` label's words, indexed by the wire value, written once: the
+/// walker reads them and [`crate::dissect_schema`] declares them.
+pub(crate) const TARGET_WORDS: [&str; 3] = ["BestMatching", "All", "AllComplete"];
 
 /// A `DeclareQueryable`'s `queryable_info`: the complete flag at bit 0 and the
 /// hop distance at bits 8..24, which is exactly what
@@ -3667,13 +3666,12 @@ fn transport_carrier(mid: u8) -> crate::ext_name::ExtCarrier {
 /// human-readable form loses nothing -- and `bits` children would have repeated
 /// the complaint this closes, `0..3` being no more readable than `10`.
 fn sn_res_word(code: u8) -> &'static str {
-    match code & 0b11 {
-        0b00 => "8bit",
-        0b01 => "16bit",
-        0b10 => "32bit",
-        _ => "64bit",
-    }
+    SN_RES_WORDS[usize::from(code & 0b11)]
 }
+
+/// The resolution words, indexed by the two-bit code, written once: the walker
+/// reads them and [`crate::dissect_schema`] declares them.
+pub(crate) const SN_RES_WORDS: [&str; 4] = ["8bit", "16bit", "32bit", "64bit"];
 
 /// The body INIT and JOIN both carry behind the `S` flag: `sn_res`, the two
 /// resolutions it codes, then a little-endian `batch_size`.

@@ -1366,8 +1366,15 @@ impl PayloadCensus {
         }
         let keyexpr = spaces.resolve(direction, keyexpr_body).ok();
         let payload_bytes = crate::agg::sized_payload(&counts);
+        // Walked only for a selector that names a path: see `Filter::reads_tree`.
+        let tree = if filter.reads_tree() {
+            crate::field_path::record_tree(frame, span)
+        } else {
+            None
+        };
         // R311y618 — asked after resolution and before the bytes are inspected.
         let truth = filter.matches(&crate::filter::RecordView {
+            tree: tree.as_ref(),
             direction,
             keyexpr: keyexpr.as_deref(),
             kind,

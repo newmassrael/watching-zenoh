@@ -30,7 +30,10 @@ path = "src/main.rs"
 # module reads a walked field tree. Naming the feature is what lets this crate
 # and `wz-capi-dissect` share ONE implementation instead of the command line
 # owning it and the C ABI having none.
-wz-capture = { path = "../wz-capture", features = ["dissect"] }
+#
+# And `filter-regex`, so `--select` takes `matches` as the ABI does: one
+# language behind both surfaces.
+wz-capture = { path = "../wz-capture", features = ["dissect", "filter-regex"] }
 wz-tls-record = { path = "../wz-tls-record" }
 # Round 1999 (item 470) — the live AF_PACKET tap, reachable from argv at last.
 # The dependency is payable because Round 1998 moved the tap out of

@@ -43,7 +43,11 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 # library. Selected through `wz-capture` rather than on the `wz-session-core`
 # line below, because `wz-capture` is the crate whose reader it switches on and
 # whose tests grade it.
-wz-capture = { path = "../wz-capture", features = ["dissect", "compression"] }
+#
+# And `filter-regex`, the selector's `matches`: a linking product hands this
+# library a selector a person typed, which is the case that feature exists for
+# (see `wz-capture`'s manifest). The field list reports it (`matches`).
+wz-capture = { path = "../wz-capture", features = ["dissect", "compression", "filter-regex"] }
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
     "dissect",

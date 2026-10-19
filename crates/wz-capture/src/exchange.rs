@@ -366,6 +366,14 @@ pub struct OpenExchange {
     /// told, or was not kept because no term of the selector reads it
     /// ([`Filter::reads_value`]), in which case nothing asks.
     value: Option<alloc::vec::Vec<u8>>,
+    /// The request's dissection, for a path term at close, and OWNED for the
+    /// reason `value` is. `None` when no term of the selector names a path
+    /// ([`Filter::reads_tree`]) or the request's bytes did not walk.
+    ///
+    /// The REQUEST's tree, and the close's row answers with it: a
+    /// `ResponseFinal` answers every record term as the request it closes, and
+    /// a path into the record is a record term.
+    tree: Option<crate::field_path::TreeNode>,
     /// The capture instant of the request, in nanoseconds: the packet that
     /// carried its first byte. Every instant this plane holds is in nanoseconds
     /// and is divided down only where a millisecond is wanted, so the two
@@ -688,6 +696,11 @@ impl ExchangeTable {
                         }
                         _ => None,
                     },
+                    tree: if filter.reads_tree() {
+                        crate::field_path::record_tree(frame, span)
+                    } else {
+                        None
+                    },
                     requested_at_ns: at,
                     requested_unit_offset: crate::agg::record_unit_offset(frame, span),
                     requested_delay_ms: crate::agg::source_delay_ms(
@@ -833,6 +846,7 @@ impl ExchangeTable {
             // rather than the close's delay standing in for the request's.
             source_delay_ms: entry.requested_delay_ms,
             observed_at_ms: requested_at_ms,
+            tree: entry.tree.as_ref(),
             // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
             // instant `time` is, so the two fields cannot name different
             // moments of one exchange.
