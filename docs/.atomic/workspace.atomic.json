@@ -276342,6 +276342,58 @@
         "Hosted verdict of 4edd121ee (run 39265381257) was not read before this push; read it at the next round start."
       ]
     },
+    "Round 3384": {
+      "decision_summary": "The protocol version is the protocol's, not a parameter, and an acceptor refuses any other. zenoh refuses an InitSyn of another version before reading anything else and closes INVALID; its own version is VERSION, which no builder moves. pico checks none; wz takes zenoh's rule, since the byte decides how the rest is laid out. SessionInitParams, MulticastParams, ScoutParams and the responder identity lose their version; every Init, Join, Scout and Hello writes 0x09; a Join of another version is ignored, and a known peer's change drops it. The 0x05 test profile is gone. Running session-core's tests with every feature on, which no lane did, found two latent defects: bounded-heapless made a passive session's reassembly slots inline (0.5 MiB) and a debug build overflowed a stack building one, so the passive router stages on the heap in every build; and a reply test assumed a stage larger than the fixed one. Layer C1g now runs that suite.",
+      "changes_bullets": [
+        "wz-session-core: drive.rs refuses an InitSyn of another version in AwaitingInitSyn after the admission gate (FramingError, Close INVALID); DriverLoopOutcome::InitSynVersionRejected { version }; handshake_encode, multicast_join, scout_responder write PROTOCOL_VERSION; validate_join compares against it; version removed from SessionInitParams, MulticastParams, ScoutParams, ResponderIdentity.",
+        "wz-session-core: chain_staging VecStaging (heap in every build); passive PassiveRouter uses it; a test pins PassiveSession under 64 KiB; query test gives each keyed arm its own stage.",
+        "wz-runtime-tokio: tests/init_syn_version.rs (five foreign versions refused INVALID, 0x09 answered, wz's InitSyn carries 0x09, an InitAck of another version is not refused); multicast_glue foreign Join written on the wire and a known peer's version change drops it.",
+        "About a hundred call sites across the workspace and deploy lose the version field; 0x05 test bytes and asserts move to 0x09; DEMO/SCOUT/PICO version constants removed.",
+        "scripts/run-ci.sh: C1g runs cargo test -p wz-session-core --all-features; five multicast count guards moved to printed counts."
+      ],
+      "verification_bullets": [
+        "pc2, on the tree rebased onto the SCE pin and FSM change: tests of every changed crate (session-core default and all features, runtime-tokio, session-lwip default and session-slot, session-mcu, runtime-coop, the MCU e2e harnesses, mesh-client, replay, the multicast test crate, test-support, ap-demo, capi-core, capi-c, capi-pico, integration-tests, capture all features); the mcu-admin-node heap and fixed-memory images and the mcu-freertos-demo image built for thumbv7m; clippy -D warnings on session-core (both feature sets) and runtime-tokio.",
+        "The stack overflow reproduced on origin/main (3 of 3) before the fix and fits at 8 MiB, fails at 4 MiB; after it, session-core all features: 2407 passed.",
+        "Local: guarded_count_gate --range rc 0 after the five guards moved; lane_reach and test_discipline --check, upstream_citation_anchor_gate, shellcheck, hook_script_reference_gate, validate-workspace rc 0.",
+        "NOT verified: zephyr-admin-node (west build, hosted Qza); any hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A known multicast peer whose re-Join changes its version is dropped (CapabilitiesChanged), following pico; zenoh ignores the Join instead. Unchanged by this round, now witnessed for the version too.",
+        "Other crates' tests have never run with every feature on; this round measured only wz-session-core's.",
+        "The earlier Layer E red of 8968869ff (wz_reply_del_source_info_to_pico_zget) is still unattributed."
+      ],
+      "publishable_decision_summary": "The protocol version is the protocol's, not a parameter, and an acceptor refuses any other. zenoh refuses an InitSyn of another version before reading anything else and closes INVALID; its own version is VERSION, which no builder moves. pico checks none; wz takes zenoh's rule, since the byte decides how the rest is laid out. SessionInitParams, MulticastParams, ScoutParams and the responder identity lose their version; every Init, Join, Scout and Hello writes 0x09; a Join of another version is ignored, and a known peer's change drops it. The 0x05 test profile is gone. Running session-core's tests with every feature on, which no lane did, found two latent defects: bounded-heapless made a passive session's reassembly slots inline (0.5 MiB) and a debug build overflowed a stack building one, so the passive router stages on the heap in every build; and a reply test assumed a stage larger than the fixed one. Layer C1g now runs that suite.",
+      "publishable_changes_bullets": [
+        "wz-session-core: drive.rs refuses an InitSyn of another version in AwaitingInitSyn after the admission gate (FramingError, Close INVALID); DriverLoopOutcome::InitSynVersionRejected { version }; handshake_encode, multicast_join, scout_responder write PROTOCOL_VERSION; validate_join compares against it; version removed from SessionInitParams, MulticastParams, ScoutParams, ResponderIdentity.",
+        "wz-session-core: chain_staging VecStaging (heap in every build); passive PassiveRouter uses it; a test pins PassiveSession under 64 KiB; query test gives each keyed arm its own stage.",
+        "wz-runtime-tokio: tests/init_syn_version.rs (five foreign versions refused INVALID, 0x09 answered, wz's InitSyn carries 0x09, an InitAck of another version is not refused); multicast_glue foreign Join written on the wire and a known peer's version change drops it.",
+        "About a hundred call sites across the workspace and deploy lose the version field; 0x05 test bytes and asserts move to 0x09; DEMO/SCOUT/PICO version constants removed.",
+        "scripts/run-ci.sh: C1g runs cargo test -p wz-session-core --all-features; five multicast count guards moved to printed counts."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, on the tree rebased onto the SCE pin and FSM change: tests of every changed crate (session-core default and all features, runtime-tokio, session-lwip default and session-slot, session-mcu, runtime-coop, the MCU e2e harnesses, mesh-client, replay, the multicast test crate, test-support, ap-demo, capi-core, capi-c, capi-pico, integration-tests, capture all features); the mcu-admin-node heap and fixed-memory images and the mcu-freertos-demo image built for thumbv7m; clippy -D warnings on session-core (both feature sets) and runtime-tokio.",
+        "The stack overflow reproduced on origin/main (3 of 3) before the fix and fits at 8 MiB, fails at 4 MiB; after it, session-core all features: 2407 passed.",
+        "Local: guarded_count_gate --range rc 0 after the five guards moved; lane_reach and test_discipline --check, upstream_citation_anchor_gate, shellcheck, hook_script_reference_gate, validate-workspace rc 0.",
+        "NOT verified: zephyr-admin-node (west build, hosted Qza); any hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A known multicast peer whose re-Join changes its version is dropped (CapabilitiesChanged), following pico; zenoh ignores the Join instead. Unchanged by this round, now witnessed for the version too.",
+        "Other crates' tests have never run with every feature on; this round measured only wz-session-core's.",
+        "The earlier Layer E red of 8968869ff (wz_reply_del_source_info_to_pico_zget) is still unattributed."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
