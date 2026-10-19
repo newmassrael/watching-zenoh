@@ -2582,7 +2582,7 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, |session, leg| {
+        self.fan_out(opts, Some(keyexpr), |session, leg| {
             Leg::of_publish(session.publish(keyexpr, payload, leg))
         })
     }
@@ -2605,6 +2605,7 @@ impl SharedSession {
     ) -> Result<usize, FanoutError> {
         self.fan_out_with(
             opts,
+            Some(keyexpr),
             payload,
             |session, leg, payload| Leg::of_publish(session.publish_shm(keyexpr, payload, leg)),
             |session, leg, payload| {
@@ -2626,6 +2627,7 @@ impl SharedSession {
     ) -> Result<usize, FanoutError> {
         self.fan_out_with(
             opts,
+            None,
             payload,
             |session, leg, payload| {
                 Leg::of_alias(session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg))
@@ -2654,12 +2656,18 @@ impl SharedSession {
     /// R311y555 -- WAKE THE DRAIN. Staging a fire does not make a drive loop iterate;
     /// without the notification the delivery rides the next inbound message or the keepalive
     /// tick, MEASURED at 3.334 s.
-    fn fan_out<F>(&self, opts: &PublishOptions, send: F) -> Result<usize, FanoutError>
+    fn fan_out<F>(
+        &self,
+        opts: &PublishOptions,
+        key: Option<&str>,
+        send: F,
+    ) -> Result<usize, FanoutError>
     where
         F: Fn(&TokioSession, PublishOptions) -> Leg,
     {
         self.fan_out_with(
             opts,
+            key,
             (),
             |session, leg, ()| send(session, leg),
             |session, leg, ()| send(session, leg),
@@ -2674,6 +2682,7 @@ impl SharedSession {
     fn fan_out_with<P, R, L>(
         &self,
         opts: &PublishOptions,
+        key: Option<&str>,
         payload: P,
         remote_leg: R,
         local_leg: L,
@@ -2687,6 +2696,12 @@ impl SharedSession {
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
             for session in sessions.iter() {
+                // A peer that has said it wants nothing this key reaches is not written to (see
+                // `Session::peer_wants_no_put_on`); a put with no literal key in hand, an alias
+                // alone, is written to every face as before.
+                if key.is_some_and(|key| session.peer_wants_no_put_on(key)) {
+                    continue;
+                }
                 match remote_leg(session, remote.clone(), &payload) {
                     Leg::Delivered(n) => delivered += n,
                     Leg::Skipped => {}
@@ -2729,7 +2744,13 @@ impl SharedSession {
         if wire.is_literal() {
             self.publish_all(keyexpr, payload, opts)
         } else {
-            self.publish_aliased_all(wire.mapping_id, wire.suffix.as_deref(), payload, opts)
+            self.publish_aliased_all_for(
+                Some(keyexpr),
+                wire.mapping_id,
+                wire.suffix.as_deref(),
+                payload,
+                opts,
+            )
         }
     }
 
@@ -2761,6 +2782,20 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        self.publish_aliased_all_for(None, mapping_id, suffix, payload, opts)
+    }
+
+    /// [`Self::publish_aliased_all`] for a caller that also holds the literal key the alias
+    /// stands for, which is what lets a peer that wants nothing the key reaches be left
+    /// unwritten; without it every face is written to.
+    fn publish_aliased_all_for(
+        &self,
+        key: Option<&str>,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
         // R311y554 / R311y557 — the same one-local-leg split as
         // [`Self::publish_all`]; see that function for why N faces must not each
         // deliver the sample to the one C callback. The aliased local leg needs
@@ -2772,7 +2807,7 @@ impl SharedSession {
         // (`declare_keyexpr` announces to both, and `undeclare_keyexpr` retracts from
         // both), so an unknown mapping is the caller publishing on an alias it never
         // declared, and is skipped on every leg (see [`Leg::of_alias`]).
-        self.fan_out(opts, |session, leg| {
+        self.fan_out(opts, key, |session, leg| {
             Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
         })
     }
@@ -2793,7 +2828,7 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, |session, leg| {
+        self.fan_out(opts, Some(keyexpr), |session, leg| {
             Leg::of_alias(
                 session
                     .publish_aliased(mapping_id, None, keyexpr, payload, leg)
@@ -3290,7 +3325,7 @@ impl SharedSession {
             return None;
         }
         let sessions = self.face_set();
-        self.put_plain_to(&sessions, mapping_id, payload, params)
+        self.put_plain_to(&sessions, keyexpr, mapping_id, payload, params)
     }
 
     /// [`Self::put_plain_declared`] for a publisher that has a write filter
@@ -3355,7 +3390,7 @@ impl SharedSession {
         if params.destination.allows_local() && self.local.has_local_delivery_for(keyexpr) {
             return FilteredPut::NotPlain;
         }
-        match self.put_plain_to(sessions, mapping_id, payload, params) {
+        match self.put_plain_to(sessions, keyexpr, mapping_id, payload, params) {
             Some(sent) => FilteredPut::Sent(sent),
             None => FilteredPut::NotPlain,
         }
@@ -3366,6 +3401,7 @@ impl SharedSession {
     fn put_plain_to(
         &self,
         sessions: &[TokioSession],
+        keyexpr: &str,
         mapping_id: u64,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
@@ -3383,6 +3419,9 @@ impl SharedSession {
                 return None;
             }
             for session in sessions.iter() {
+                if session.peer_wants_no_put_on(keyexpr) {
+                    continue;
+                }
                 match session.publish_plain_declared(mapping_id, payload, params) {
                     Ok(()) => {}
                     // Per-face and transient, as in the general fan-out: the surviving faces
