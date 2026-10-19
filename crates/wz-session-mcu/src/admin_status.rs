@@ -318,10 +318,10 @@ pub fn host_admin_queryable(
     );
     let config_key = alloc::format!("{root_key}/config");
     let answer = BoxedQuerySink::new(move |query, out| {
-        let wants_root =
-            wz_session_core::adminspace::key_intersects_query(query.keyexpr(), &root_key);
-        let wants_config =
-            wz_session_core::adminspace::key_intersects_query(query.keyexpr(), &config_key);
+        // The GET's keyexpr is looked at once for the three keys this closure asks about.
+        let asked = wz_session_core::adminspace::PreparedQuery::new(query.keyexpr());
+        let wants_root = asked.intersects(&root_key);
+        let wants_config = asked.intersects(&config_key);
         let (read, sessions) = if wants_root {
             status.snapshot()
         } else {
@@ -329,7 +329,7 @@ pub fn host_admin_queryable(
         };
         if read {
             if let Some(source) = connect {
-                if wz_session_core::adminspace::key_intersects_query(query.keyexpr(), &status_key) {
+                if asked.intersects(&status_key) {
                     let mut body = String::new();
                     connect_status_json(source, &status.endpoints(), &mut body);
                     // A reply that cannot be sent is what upstream logs and
@@ -604,5 +604,142 @@ mod tests {
         std::assert!(!wire_has(b"\"sessions\""), "a denied read answers nothing");
         on_event(IterationEvent::Poll(&get("@/b2a1/peer/status/connect", 10)));
         std::assert!(!wire_has(b"multi_link_group"), "nor the status leg");
+    }
+
+    /// The rig the two tests below share: a node with one session and one dialled endpoint, its
+    /// admin queryable registered, a peer on the other end of an in-memory link.
+    fn rig(
+        status: &'static NodeStatus,
+    ) -> (impl FnMut(IterationEvent<'_>), Rc<crate::memory::MemoryEnd>) {
+        static CONFIG: FixedConfig = FixedConfig;
+        static WRITES_OFF: WritesOff = WritesOff;
+        let net = MemoryNetwork::new();
+        let node_at = UdpPeer {
+            addr: [10, 0, 0, 1],
+            port: 7491,
+        };
+        let peer_at = UdpPeer {
+            addr: [10, 0, 0, 2],
+            port: 7492,
+        };
+        let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
+        let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
+        let runtime = CoopRuntime::new(FrozenClock);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+        let actions =
+            SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
+                sink,
+                SessionInitParams {
+                    version: 0x05,
+                    whatami: WhatAmI::Peer,
+                    zid: vec![0xa1, 0xb2],
+                    seq_num_res: 2,
+                    req_id_res: 2,
+                    batch_size: 1024,
+                    lease_ms: 10_000,
+                    initial_sn: 0,
+                    cookie: vec![0u8; 16],
+                    tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+                    cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
+                },
+                clock,
+            );
+        let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
+        let on_event = dispatch_to(observer.clone(), actions.clone());
+        status.set_sessions(vec![AdminSession {
+            peer_zid_hex: String::from("c3d4"),
+            whatami: Some(String::from("router")),
+            ..AdminSession::default()
+        }]);
+        host_admin_queryable(
+            &mut observer.borrow_mut(),
+            NodeIdentity {
+                zid_hex: String::from("b2a1"),
+                whatami: "peer",
+                version: String::from("wz-test"),
+                locators: vec![String::from("udp/127.0.0.1:7491")],
+            },
+            status,
+            Some(&CONFIG),
+            Some(&WRITES_OFF),
+        )
+        .expect("a fresh observer takes the admin queryable");
+        // Keep the runtime and the actions alive for as long as the rig is used.
+        core::mem::forget(runtime);
+        core::mem::forget(actions);
+        (on_event, peer)
+    }
+
+    /// What a GET names is what it is answered with, and nothing is prepared for a leg it does
+    /// not name: the `**` GET reaches every leg (the sessions, the config, the status), a GET of
+    /// the config key reaches the config and not the sessions, and a GET of the status key
+    /// reaches neither. The lazy preparation of the sessions and the config must not take a
+    /// document from a GET that asks for it.
+    #[test]
+    fn a_get_is_answered_with_exactly_the_legs_it_names() {
+        static STATUS: NodeStatus = NodeStatus::new(true);
+        let (mut on_event, peer) = rig(&STATUS);
+        let mut wire = |key: &str, rid: u64| {
+            on_event(IterationEvent::Poll(&get(key, rid)));
+            let mut seen = Vec::new();
+            while let Some(frame) = peer.try_recv() {
+                seen.extend_from_slice(&frame.bytes);
+            }
+            let has = |needle: &[u8]| seen.windows(needle.len()).any(|w| w == needle);
+            (
+                has(b"c3d4"),
+                has(b"tcp/10.0.0.9:7447"),
+                has(b"\"write\":false"),
+            )
+        };
+        // (sessions, config, status): the status leg's `permissions` document.
+        std::assert_eq!(
+            wire("@/b2a1/peer/**", 1),
+            (true, true, true),
+            "** names every leg"
+        );
+        std::assert_eq!(
+            wire("@/b2a1/peer", 2),
+            (true, false, false),
+            "the root names sessions"
+        );
+        std::assert_eq!(
+            wire("@/b2a1/peer/config", 3),
+            (false, true, false),
+            "config names config"
+        );
+        std::assert_eq!(
+            wire("@/b2a1/peer/status/connect", 4),
+            (false, false, true),
+            "status names the status"
+        );
+        std::assert_eq!(
+            wire("@/b2a1/peer/*", 5),
+            (false, true, false),
+            "one chunk: config only"
+        );
+    }
+
+    /// The admin GET the node answers most, repeated, for a profiler to run under: `valgrind
+    /// --tool=callgrind` of this test says where the instructions of one answered GET go. It
+    /// asserts that every GET was answered, which is what keeps it from profiling a no-op.
+    #[test]
+    #[ignore = "a profiling harness, not a check; run it with --ignored under callgrind"]
+    fn profile_the_status_get_loop() {
+        static STATUS: NodeStatus = NodeStatus::new(true);
+        let (mut on_event, peer) = rig(&STATUS);
+        let mut answered = 0u32;
+        for rid in 0..2000u64 {
+            on_event(IterationEvent::Poll(&get(
+                "@/b2a1/peer/status/connect",
+                rid,
+            )));
+            while peer.try_recv().is_some() {
+                answered += 1;
+            }
+        }
+        // Two datagrams a GET: the reply, and the marker that ends the query.
+        std::assert_eq!(answered, 4000);
     }
 }

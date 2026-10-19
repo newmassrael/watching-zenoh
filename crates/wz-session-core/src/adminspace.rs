@@ -2043,41 +2043,127 @@ fn reply_leg(
 /// writes (the MCU admin node's `status/connect`), so that they ask the same question the same way
 /// and do not split the key into a vector of their own for every GET.
 pub fn key_intersects_query(query: &str, key: &str) -> bool {
-    if is_plain_key(key) && !has_wildcard(query) {
-        return query == key;
+    PreparedQuery::new(query).intersects(key)
+}
+
+/// A GET's keyexpr, prepared ONCE for the legs of its answer.
+///
+/// An admin answer tries the GET against the key of each leg it can serve (the root document,
+/// the config, the status, the plugins, the per-entity documents), and a query that was looked at
+/// anew for each of them was scanned for wildcards, and for the ones whose keys hold a wildcard
+/// split into chunks, once per leg: about a quarter of the instructions of an answered GET, in a
+/// profile of the MCU node's `status/connect`. Prepared here, the query is scanned once, and its
+/// chunks are made at most once and only if a leg needs them.
+pub struct PreparedQuery<'a> {
+    text: &'a str,
+    /// No wildcard, no empty chunk and no deeper than the scans accept: against a plain key
+    /// such a query intersects exactly when the two are the same text.
+    plain: bool,
+    chunks: core::cell::OnceCell<Option<crate::keyexpr_match::KeyChunks<'a>>>,
+}
+
+impl<'a> PreparedQuery<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            plain: is_plain_key(text),
+            chunks: core::cell::OnceCell::new(),
+        }
     }
-    key_intersects_query_by_chunks(query, key)
+
+    /// Whether the GET intersects the admin key `key`: [`key_intersects_query`]'s question,
+    /// answered with what was prepared.
+    pub fn intersects(&self, key: &str) -> bool {
+        if self.plain {
+            match scan_key(key) {
+                KeyShape::Plain => return self.text == key,
+                // A plain query holds no wildcard, so it can only meet a key whose chunks BEFORE
+                // its first wildcard chunk are the query's own: a key of the form `a/b/**` needs
+                // the query to be `a/b` or to continue it, and one that does not is refused
+                // here, by text, without splitting either side. This only refuses what the
+                // chunk rule would refuse; a key that passes is decided by the rule below.
+                KeyShape::Wild { literal_end } if literal_end > 0 => {
+                    if !starts_with_chunks(self.text, &key[..literal_end]) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(key_chunks) = crate::keyexpr_match::KeyChunks::split(key) else {
+            return false;
+        };
+        let query_chunks = self
+            .chunks
+            .get_or_init(|| crate::keyexpr_match::KeyChunks::split(self.text));
+        match query_chunks {
+            Some(query_chunks) => {
+                crate::keyexpr_match::keyexpr_intersects_chunks(query_chunks, &key_chunks)
+            }
+            None => false,
+        }
+    }
 }
 
-/// Whether `text` has a wildcard in it: `*` (a chunk, or `**`) or `$` (`$*`, inside a chunk).
-fn has_wildcard(text: &str) -> bool {
-    text.bytes().any(|b| b == b'*' || b == b'$')
+/// What one scan of a keyexpr's text says about it.
+enum KeyShape {
+    /// No wildcard, no empty chunk, and no deeper than the chunk scans accept. For two such keys
+    /// intersection is equality, which is the one fact [`PreparedQuery::intersects`]'s shortcut
+    /// rests on.
+    Plain,
+    /// It has a wildcard. `literal_end` is where the text of the chunks before the first
+    /// wildcard chunk ends (the byte of the `/` that closes them), 0 when there are none.
+    Wild { literal_end: usize },
+    /// An empty chunk, or deeper than the chunk scans accept: left to the general rule.
+    Irregular,
 }
 
-/// Whether `key` is a plain keyexpr the chunk scans would take whole: no wildcard, no empty
-/// chunk, and no deeper than they accept. For such a key, and a query with no wildcard,
-/// intersection is equality, which is the one fact [`key_intersects_query`]'s shortcut rests on.
-fn is_plain_key(key: &str) -> bool {
+/// Read `key` once: [`KeyShape`].
+fn scan_key(key: &str) -> KeyShape {
     let mut chunks = 0usize;
     let mut chunk_len = 0usize;
-    for b in key.bytes() {
+    let mut last_slash = 0usize;
+    for (at, b) in key.bytes().enumerate() {
         match b {
-            b'*' | b'$' => return false,
+            b'*' | b'$' => {
+                return KeyShape::Wild {
+                    literal_end: last_slash,
+                }
+            }
             b'/' => {
                 if chunk_len == 0 {
-                    return false;
+                    return KeyShape::Irregular;
                 }
                 chunks += 1;
                 chunk_len = 0;
+                last_slash = at;
             }
             _ => chunk_len += 1,
         }
     }
-    chunk_len > 0 && chunks < crate::keyexpr_match::MAX_KEYEXPR_CHUNKS
+    if chunk_len > 0 && chunks < crate::keyexpr_match::MAX_KEYEXPR_CHUNKS {
+        KeyShape::Plain
+    } else {
+        KeyShape::Irregular
+    }
 }
 
-/// [`key_intersects_query`] by the general rule: both keys split into chunks and intersected
-/// chunk by chunk, which is what answers a query that holds a wildcard.
+/// Whether `key` is [`KeyShape::Plain`].
+fn is_plain_key(key: &str) -> bool {
+    matches!(scan_key(key), KeyShape::Plain)
+}
+
+/// Whether `query` is `prefix`, or continues it past a chunk boundary: the chunks of `prefix`
+/// are the first chunks of `query`.
+fn starts_with_chunks(query: &str, prefix: &str) -> bool {
+    query.starts_with(prefix)
+        && (query.len() == prefix.len() || query.as_bytes()[prefix.len()] == b'/')
+}
+
+/// [`key_intersects_query`] by the general rule alone: both keys split into chunks and
+/// intersected chunk by chunk, with none of the preparation. The reference the tests hold
+/// [`PreparedQuery`] to, over every pair they build.
+#[cfg(test)]
 fn key_intersects_query_by_chunks(query: &str, key: &str) -> bool {
     let Some(chunks) = crate::keyexpr_match::KeyChunks::split(key) else {
         return false;
@@ -2192,7 +2278,7 @@ struct LegRun<'r, K: AdminBuffer, B: AdminBuffer> {
     key: &'r mut K,
     body: &'r mut B,
     out: &'r mut dyn crate::query_sink::ReplyOut,
-    query: &'r str,
+    query: PreparedQuery<'r>,
     report: AdminAnswer,
 }
 
@@ -2213,7 +2299,7 @@ impl<K: AdminBuffer, B: AdminBuffer> LegRun<'_, K, B> {
         self.key.reset();
         write_key(self.key);
         match self.key.contents() {
-            Ok(key) if !key_intersects_query(self.query, key) => return,
+            Ok(key) if !self.query.intersects(key) => return,
             Ok(_) => {}
             Err(overflow) => {
                 self.report.note(AdminReplyError::KeyTooLong(overflow));
@@ -2269,7 +2355,7 @@ impl<K: AdminBuffer, B: AdminBuffer> LegRun<'_, K, B> {
         self.key.reset();
         write_key(self.key);
         match (self.key.contents(), body) {
-            (Ok(key), _) if !key_intersects_query(self.query, key) => {}
+            (Ok(key), _) if !self.query.intersects(key) => {}
             (Ok(key), Ok(body)) => {
                 if let Err(e) = reply_leg(self.out, key, body, encoding) {
                     self.report.note(AdminReplyError::Refused(e));
@@ -2305,7 +2391,7 @@ pub(crate) fn serve_one_leg<K: AdminBuffer, B: AdminBuffer>(
         key,
         body,
         out,
-        query: view.keyexpr(),
+        query: PreparedQuery::new(view.keyexpr()),
         report: AdminAnswer::served(),
     };
     run.serve(
@@ -2356,7 +2442,7 @@ where
         key,
         body,
         out,
-        query: view.keyexpr(),
+        query: PreparedQuery::new(view.keyexpr()),
         report: AdminAnswer::served(),
     };
     if !node.read {
@@ -2757,7 +2843,7 @@ pub fn answer_router_admin_query_in<K: AdminBuffer, B: AdminBuffer>(
         key,
         body,
         out,
-        query: view.keyexpr(),
+        query: PreparedQuery::new(view.keyexpr()),
         report: AdminAnswer::served(),
     };
     if !ctx.read {
@@ -3772,13 +3858,21 @@ mod tests {
         }
         let mut shortcut_taken = 0usize;
         for query in &texts {
+            // One preparation, asked of every key, as an answer's legs ask it: what the first
+            // key caused to be prepared must serve the others as the rule would.
+            let prepared = PreparedQuery::new(query);
             for key in &texts {
                 assert_eq!(
-                    key_intersects_query(query, key),
+                    prepared.intersects(key),
                     key_intersects_query_by_chunks(query, key),
                     "query {query:?}, key {key:?}"
                 );
-                if is_plain_key(key) && !has_wildcard(query) {
+                assert_eq!(
+                    key_intersects_query(query, key),
+                    key_intersects_query_by_chunks(query, key),
+                    "query {query:?}, key {key:?} (a fresh preparation)"
+                );
+                if prepared.plain && is_plain_key(key) {
                     shortcut_taken += 1;
                 }
             }

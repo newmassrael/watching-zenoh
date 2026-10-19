@@ -101,13 +101,28 @@ impl<'a> KeyChunks<'a> {
         let mut inline = [""; STACK_KEY_CHUNKS];
         let mut len = 0usize;
         let mut fits = true;
-        for chunk in text.split('/') {
-            if len == STACK_KEY_CHUNKS {
-                fits = false;
-                break;
+        // By a scan of the bytes, not `str::split('/')`: the searcher behind that has a fixed
+        // cost per chunk that a key of a few short chunks never earns back (4 of these splits
+        // were 12% of the instructions of an answered admin GET), and `/` is ASCII, so a byte
+        // of it is always a character boundary of the text around it.
+        let mut start = 0usize;
+        let bytes = text.as_bytes();
+        let mut at = 0usize;
+        loop {
+            let end_of_chunk = at == bytes.len();
+            if end_of_chunk || bytes[at] == b'/' {
+                if len == STACK_KEY_CHUNKS {
+                    fits = false;
+                    break;
+                }
+                inline[len] = &text[start..at];
+                len += 1;
+                if end_of_chunk {
+                    break;
+                }
+                start = at + 1;
             }
-            inline[len] = chunk;
-            len += 1;
+            at += 1;
         }
         if fits {
             return Some(Self {
@@ -522,6 +537,16 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
         return false;
     };
     keyexpr_intersect_patterns(&candidate_chunks, target_chunks)
+}
+
+/// [`keyexpr_intersects_target`] for a candidate that is already split: the same question, the
+/// same refusal of a malformed target, for a caller that asks it of the same candidate many
+/// times (every leg of an admin answer) and splits the candidate once.
+pub fn keyexpr_intersects_chunks(candidate_chunks: &[&str], target_chunks: &[&str]) -> bool {
+    if !target_chunks_well_formed(target_chunks) {
+        return false;
+    }
+    keyexpr_intersect_patterns(candidate_chunks, target_chunks)
 }
 
 /// Whether the rule keyexpr `superset` INCLUDES a message target already split
