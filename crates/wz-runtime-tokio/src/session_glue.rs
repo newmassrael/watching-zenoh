@@ -836,7 +836,7 @@ use crate::reassembly::{reassembly_config, TokioReassembly};
 // drive loop passes its `TokioReassembly` dims (the `Fragment` type is now
 // named only inside that shared helper).
 #[cfg(feature = "reassembly")]
-use wz_session_core::drive::report_outcome_reassembling;
+use wz_session_core::drive::report_outcome_reassembling_with;
 // R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
 // helper, not a unicast-drive one).
 #[cfg(feature = "reassembly")]
@@ -1500,12 +1500,15 @@ where
                         // an enforcer must see the stripped form, which is also
                         // the form this session's own alias table holds.
                         ingress(&mut outcome);
+                        // The same decorator again for a chain that completes inside this
+                        // call: that outcome is made there, not here, and skipped it.
                         #[cfg(feature = "reassembly")]
-                        report_outcome_reassembling(
+                        report_outcome_reassembling_with(
                             &outcome,
                             &mut reasm,
                             actions,
                             clock.now_monotonic_ms(),
+                            &mut ingress,
                             &mut on_event,
                         );
                         #[cfg(not(feature = "reassembly"))]
@@ -1637,11 +1640,12 @@ where
                 // R2702 — same order as the select arm; see there.
                 ingress(&mut outcome);
                 #[cfg(feature = "reassembly")]
-                report_outcome_reassembling(
+                report_outcome_reassembling_with(
                     &outcome,
                     &mut reasm,
                     actions,
                     clock.now_monotonic_ms(),
+                    &mut ingress,
                     &mut on_event,
                 );
                 #[cfg(not(feature = "reassembly"))]

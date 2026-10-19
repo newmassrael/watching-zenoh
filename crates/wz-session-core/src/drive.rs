@@ -2675,6 +2675,35 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>) + ?Sized,
 {
+    report_outcome_reassembling_with(outcome, reasm, actions, now_ms, &mut |_| {}, on_event);
+}
+
+/// [`report_outcome_reassembling`] for a loop that has an INGRESS decorator (the §5.16 policy of
+/// a session that enforces one): `ingress` runs on the `FramePayload` a completed fragment chain
+/// is turned into, before it is reported.
+///
+/// That outcome is the SECOND place an owned `FramePayload` is made. The first is the loop's own
+/// decode of a whole frame, which the loop hands to its decorator; this one is made in here, from
+/// the chain, and without this parameter it reached the application having skipped the
+/// decorator, so a policy that denied a key, or capped a payload, held for every put that fit one
+/// frame and for none that did not. A size cap is the policy a big payload most needs, and a big
+/// payload is the one that is fragmented. The namespace strip right above it in the body is the
+/// same shape of obligation, and has been paid here since it was written.
+#[cfg(feature = "reassembly")]
+pub fn report_outcome_reassembling_with<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
+    outcome: &DriverLoopOutcome,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    actions: &SessionLinkActions<R, T>,
+    now_ms: u64,
+    ingress: &mut H,
+    on_event: &mut F,
+) where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_>) + ?Sized,
+    H: FnMut(&mut DriverLoopOutcome) + ?Sized,
+{
     on_event(IterationEvent::Poll(outcome));
     // R311ke — a channel-gate rejection clears that channel's in-progress
     // reassembly chain (pico clears the dbuf + state on an out-of-order
@@ -2693,25 +2722,27 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
         return;
     }
     #[cfg(not(feature = "alloc"))]
-    let _ = now_ms;
+    let _ = (now_ms, ingress);
     #[cfg(feature = "alloc")]
-    report_fragment_outcome(outcome, reasm, actions, now_ms, on_event);
+    report_fragment_outcome(outcome, reasm, actions, now_ms, ingress, on_event);
 }
 
 /// The `Fragment` half of [`report_outcome_reassembling`]: drive the pool with the
 /// fragment an owned outcome carries, and report what completed or was dropped.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
-fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F>(
+fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     outcome: &DriverLoopOutcome,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     actions: &SessionLinkActions<R, T>,
     now_ms: u64,
+    ingress: &mut H,
     on_event: &mut F,
 ) where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>) + ?Sized,
+    H: FnMut(&mut DriverLoopOutcome) + ?Sized,
 {
     let DriverLoopOutcome::Fragment {
         reliable,
@@ -2780,10 +2811,12 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F>(
         // `drive_session_until_terminal`. A whole-frame FramePayload is stripped
         // by the caller; a fragment chain completes here, so its synthesized
         // FramePayload would otherwise reach the app un-stripped.
-        #[cfg(feature = "routing-namespace")]
         let mut o = o;
         #[cfg(feature = "routing-namespace")]
         actions.apply_namespace_ingress(&mut o);
+        // Then the loop's ingress decorator, in the order the loop applies the two to a whole
+        // frame: a policy governs the keyexpr the namespace strip produced.
+        ingress(&mut o);
         on_event(IterationEvent::Poll(&o));
     }
     // A terminal non-completion ingest — an out-of-order / capacity-overflow

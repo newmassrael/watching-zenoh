@@ -770,6 +770,19 @@ pub trait FaceForwarder {
         None
     }
 
+    /// The §5.16 INGRESS admission of the owned frame the face `id` just decoded, run before it
+    /// is reported: `outcome` may be edited in place (a denied message is dropped from the
+    /// batch). Called for a whole frame and again for a fragment chain that completes, so a
+    /// policy cannot be stepped around by sending something too big for one frame.
+    ///
+    /// The default does nothing, and that is a scope statement about the routing forwarders:
+    /// they admit inbound at the top of [`Self::forward`] (`admit_inbound`) on the message they
+    /// route, and running a chain here as well would run it twice. A forwarder that has no
+    /// admission of its own, like the C API's, which hands a message to a subscriber and
+    /// routes nothing, implements this instead.
+    fn ingress(&self, _id: FaceId, _outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome) {
+    }
+
     /// R3067 -- whether the forwarder ALREADY holds a face to the peer `zid`
     /// that this loop does not hold: a link the node's DIAL role made.
     ///
@@ -1555,9 +1568,12 @@ async fn drive_face<F: FaceForwarder + ?Sized>(
         // routing node, whose §5.16 ingress admission already happens at the
         // forwarder (`admit_inbound`, consulted at the top of `forward`), and
         // whose samples go to the routing tables rather than to a buffered
-        // subscription. Adding the decorator here would run the chain twice.
+        // subscription. Adding the decorator here would run the chain twice, which is why the
+        // forwarder is ASKED ([`FaceForwarder::ingress`]) and the routing ones answer nothing.
         crate::session_glue::LoopStages {
-            ingress: |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
+            ingress: |outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome| {
+                forwarder.ingress(face.id, outcome)
+            },
             after_dispatch: || core::future::ready(()),
         },
     )
