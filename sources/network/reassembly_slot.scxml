@@ -40,9 +40,11 @@
 
     First-vs-Continue is the source state, not a guard: the dispatcher
     routes a chain-starting fragment to a free (Empty) slot and an
-    in-order continuation to that chain's Receiving slot. Duplicate-First
-    and unmatched-Continue are refused at the Router and never reach a
-    slot.
+    in-order continuation to that chain's Receiving slot. An unmatched
+    Continue is refused at the Router and never reaches a slot. A
+    duplicate First (a `0x2 First` marker on a key whose chain is open;
+    negotiated patch >= 1) evicts the open chain through `slot.evict`
+    before the new First is admitted (reassembly-fsm §2.4.6).
 
   Timeout ownership (design decision; prose-sketch §4):
     The reassembly deadline is the buffer-pool reassembly-variant's
@@ -55,21 +57,27 @@
 
   Slot reuse: the three terminal states (Complete / TimedOut / Aborted)
   are not `<final>` — each funnels back to Empty on the dispatcher's
-  `slot.release` (raised after the buffer-pool slot is reclaimed,
-  cpu-mut/cpu-ref -> free, §6), so one Engine serves successive messages.
+  `slot.release`, raised once the chain is delivered, aborted or timed
+  out. `reset_slot` on that edge returns the chain's staging to the arena
+  (cpu-mut/cpu-ref -> free, §6) and clears the chain state, so one Engine
+  serves successive messages.
 
   Host actions (the generated ReassemblySlotActions trait, one method per
-  distinct `<sce:action name>`). R311in — these are pure transition
-  SIGNALS: the body is NOT passed through the FSM (the Router stages it in
-  its BoundedVec, see fragment_chunk_schema.scxml), so none takes a
-  payload arg:
-    begin_chain                     — chain start (Empty -> Receiving)
-    append_fragment_payload         — in-order continuation (stay Receiving)
-    finalize_message                — final fragment (Receiving -> Complete)
+  distinct `<sce:action name>`). R311in — none takes a payload argument:
+  the body is not passed through the FSM (the Router stages it in its
+  arena, see fragment_chunk_schema.scxml). Each duty is the one cause of
+  its effect: the dispatcher drains what the transition posted and
+  performs it (docs/adr/0038 of SCE).
+    begin_chain             — bind the reserved staging, arm the chain key,
+                              SN and deadline, stage the first payload
+    append_fragment_payload — stage an in-order continuation's payload
+    finalize_message        — stage the final payload (unless begin_chain of
+                              the same transition did), deliver the message
     abort_ooo / abort_peer_drop / abort_evicted / abort_codec
-                                    — record the abort reason + signal
-    record_timeout                  — record the deadline expiry
-    reset_slot                      — clear chain state for reuse
+                            — end the chain; the dispatcher raises slot.release
+    record_timeout          — notice: the sweep that raised the timeout
+                              raises slot.release itself
+    reset_slot              — return the staging to the arena, clear the chain
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
@@ -156,8 +164,8 @@
     </transition>
   </state>
 
-  <!-- Chain aborted; the abort reason was recorded by the triggering
-       transition's action. Await pool-slot reclamation. -->
+  <!-- Chain aborted; the abort reason is the dispatcher's classification
+       of the event it raised. Await pool-slot reclamation. -->
   <state id="Aborted">
     <transition event="slot.release" target="Empty">
       <sce:action name="reset_slot" effect="duty"/>

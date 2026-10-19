@@ -55,16 +55,18 @@
 
   Host actions (the generated `SessionFsmMulticastActions` trait, one
   method per distinct `<sce:action name>`; impl'd by the Router):
-    open_multicast_link    — request the host bring up the multicast link
-                             (bind the session multicast socket + join the
-                             group). The real socket lands in the
-                             transport-multicast round; today a Router-side
-                             binding records the request.
-    enter_running          — the link is ready; the Router arms the
-                             periodic Join cadence + the lease-sweep timer
-                             (the two host-owned Running concerns).
-    release_multicast_link — tear the multicast link down and clear the
-                             peer table (Stopped is terminal).
+    open_multicast_link    — bring the multicast link up: the host binds the
+                             session multicast socket and joins the group
+                             (AP: the MulticastLink's bind; MCU: the
+                             GroupTransport's open), then raises link.ready,
+                             or link.lost when it cannot.
+    enter_running          — the link is ready; the Router starts admitting
+                             peers, frames and fragments and sweeping leases,
+                             and the host loop starts the periodic Join
+                             cadence (the two host-owned Running concerns).
+    release_multicast_link — tear the multicast link down (the host closes
+                             it) and clear the peer table (Stopped is
+                             terminal).
 
   Events fed by the host Router:
     multicast.create — the deploy asks to bring up a multicast session.
@@ -86,10 +88,10 @@
     <transition event="multicast.create" target="LinkOpening"/>
   </state>
 
-  <!-- Bring up the multicast link (bind socket + join group). The host
-       owns the actual I/O; open_multicast_link records the request and the
-       host raises link.ready when the link is up (or link.lost on
-       failure). §3.1 Idle->LinkOpening on create(multicast_link);
+  <!-- Bring up the multicast link (bind socket + join group).
+       open_multicast_link is the host binding the socket and joining the
+       group; the host then raises link.ready when the link is up (or
+       link.lost on failure). §3.1 Idle->LinkOpening on create(multicast_link);
        LinkOpening->Running on link.ready. -->
   <state id="LinkOpening">
     <onentry>
@@ -101,8 +103,9 @@
 
   <!-- The multicast session is live. Leaf state: the host Router owns the
        three §3.1 parallel concerns (JoinEmit / RxDispatch / PeerSweep) —
-       see the header "Running is a LEAF". enter_running arms the periodic
-       Join cadence + the lease-sweep timer. No close handshake (§3.3):
+       see the header "Running is a LEAF". enter_running starts admission
+       and the lease sweep, and the host loop's periodic Join cadence. No
+       close handshake (§3.3):
        Stopped is reached directly on stop or link loss. -->
   <state id="Running">
     <onentry>
