@@ -101,6 +101,9 @@ impl TcpRead {
     /// stream is and what it reads is the stream's own bytes in order.
     // LINK-SOCKET-SEAM-NOT-APPLICABLE: the descriptor duplicated is the one the link was
     // wired with, whose options the seam already applied; a duplicate shares the socket.
+    // TCP-TUNING-NOT-A-LINK: a second descriptor of the link's own socket, read from the thread
+    // that polls it. It carries TCP_NODELAY and the buffer sizes the link's dial or accept set,
+    // because they belong to the socket, and it is no link of its own.
     #[cfg(unix)]
     fn poll_fd(&mut self) -> Option<&std::net::TcpStream> {
         use std::os::fd::AsFd;
