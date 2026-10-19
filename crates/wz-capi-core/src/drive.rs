@@ -42,7 +42,7 @@ use wz_runtime_tokio::session_glue::{
     WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
-    bind_endpoint_with_config, dial_endpoint, initiate_and_open_session_with_offer,
+    bind_endpoint_with_config, dial_endpoint, initiate_and_open_session_with_staging,
     offer_for_connect, AcceptConfig, BoundListener, DialConfig, OpenedSession, OpenedSessionParts,
     SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
@@ -147,6 +147,9 @@ struct Dialer {
     /// R3070 -- the trust material every dial is built from, kept so a locator the session
     /// FINDS (one no `dial_cfgs` entry was built for) is dialled the way a configured one is.
     tls: CapiTlsConfig,
+    /// What the node presents to a peer it dials (`transport/auth/usrpwd/{user,password}`),
+    /// installed on every session this dialer opens before its first wire byte.
+    auth: Option<crate::node_auth::NodeAuth>,
 }
 
 impl Dialer {
@@ -183,10 +186,24 @@ impl Dialer {
         // opener reads it off the endpoint it dials.
         let offer = offer_for_connect(self.offer, endpoint).map_err(|_| ())?;
         let dialed = dial_endpoint(endpoint, dial_cfg).await.map_err(|_| ())?;
-        initiate_and_open_session_with_offer(
+        // What the node presents is installed before any wire byte, so the InitSyn carries the
+        // authentication offer. A node that states no credential installs nothing and dials as
+        // it always did.
+        let auth = self.auth.clone();
+        let stage = move |actions: &Arc<wz_runtime_tokio::session_glue::SessionLinkActions>| {
+            #[cfg(feature = "access-extauth-usrpwd")]
+            if let Some(dispatch) = auth.as_ref().and_then(|auth| auth.dial_dispatch()) {
+                actions.install_auth_dispatch(dispatch);
+            }
+            #[cfg(not(feature = "access-extauth-usrpwd"))]
+            let _ = (&auth, actions);
+            Ok(())
+        };
+        initiate_and_open_session_with_staging(
             dialed,
             self.params.clone(),
             offer,
+            stage,
             self.clock,
             None,
             DEFAULT_OPEN_TICK_MS,
@@ -1288,6 +1305,7 @@ async fn drive_dial(
         offer,
         clock,
         tls: tls.clone(),
+        auth: shared.node_auth().cloned(),
     });
     // R2950 — the two ROLES connect differently upstream, and each is built
     // here as upstream builds it. A client connects through

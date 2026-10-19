@@ -262,6 +262,8 @@ pub unsafe extern "C" fn z_open(
 ///
 ///   * `transport/auth/usrpwd/dictionary_file` makes the node a responder over that dictionary;
 ///     a file that cannot be read, or that holds no user, fails the open.
+///   * `transport/auth/usrpwd/user` and `password` make the node an initiator that presents
+///     them when it dials; one stated without the other fails the open.
 ///   * `transport/auth/pubkey/*` is not enforced by this surface yet, so a config that states any
 ///     of its four keys fails the open.
 ///   * `access_control` with `enabled: true` is not enforced yet either: a C session's receive
@@ -278,12 +280,12 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<Option<NodeAuth>, ()> {
     {
         return Err(());
     }
-    match node.usrpwd_dictionary_file.as_deref() {
-        None => Ok(None),
-        Some(path) => NodeAuth::from_dictionary_file(path)
-            .map(Some)
-            .map_err(|_| ()),
-    }
+    NodeAuth::from_usrpwd_config(
+        node.usrpwd_dictionary_file.as_deref(),
+        node.usrpwd_user.as_deref(),
+        node.usrpwd_password.as_ref(),
+    )
+    .map_err(|_| ())
 }
 
 /// The open `z_open` and `z_open_with_custom_shm_clients` both are: the same config, the same

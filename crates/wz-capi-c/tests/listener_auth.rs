@@ -230,6 +230,111 @@ fn a_config_that_states_pubkey_keys_fails_the_open_until_they_are_enforced() {
     );
 }
 
+/// The count of non-router peers `session` holds a link to, which is how a C program reads
+/// whether a peer was admitted.
+unsafe fn peers_held(session: &z_owned_session_t) -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wz_capi_c::session::z_session_loan;
+    use wz_capi_c::zid::{
+        z_closure_zid, z_id_t, z_info_peers_zid, z_moved_closure_zid_t, z_owned_closure_zid_t,
+    };
+    unsafe extern "C" fn count(_zid: *const z_id_t, ctx: *mut std::ffi::c_void) {
+        (*(ctx as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+    }
+    let held = AtomicUsize::new(0);
+    let mut closure: z_owned_closure_zid_t = std::mem::zeroed();
+    z_closure_zid(
+        &mut closure,
+        Some(count),
+        None,
+        (&held as *const AtomicUsize).cast_mut().cast(),
+    );
+    let rc = z_info_peers_zid(
+        z_session_loan(session),
+        (&mut closure as *mut z_owned_closure_zid_t).cast::<z_moved_closure_zid_t>(),
+    );
+    assert_eq!(rc, Z_OK);
+    held.load(Ordering::SeqCst)
+}
+
+/// A client config that dials `port`, stating `user` and `password` when given, and giving up
+/// after three seconds rather than retrying for as long as the test runs.
+fn client_entries(port: u16, credential: Option<(&str, &str)>) -> Vec<(&'static str, String)> {
+    let mut entries = vec![
+        ("scouting/multicast/enabled", "false".to_owned()),
+        ("mode", "\"client\"".to_owned()),
+        ("connect/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
+        ("connect/timeout_ms", "3000".to_owned()),
+    ];
+    if let Some((user, password)) = credential {
+        entries.push(("transport/auth/usrpwd/user", format!("\"{user}\"")));
+        entries.push(("transport/auth/usrpwd/password", format!("\"{password}\"")));
+    }
+    entries
+}
+
+/// The credentials a node's own config states are what it presents when it dials. A client whose
+/// config names the right user and password reaches a listener that demands them; one whose
+/// password is wrong, or that states none, does not. The first leg is the control for the other
+/// two: it is what shows the listener admits a client at all.
+#[test]
+fn a_client_presents_the_credential_its_own_config_states() {
+    let dictionary = dictionary();
+    let port = free_port();
+    // SAFETY: a fresh config and session.
+    let (rc, listener) = unsafe {
+        open_with(&listener_entries(
+            port,
+            dictionary.path().to_str().expect("a utf-8 path"),
+        ))
+    };
+    assert_eq!(rc, Z_OK, "the listener opens");
+
+    // SAFETY: fresh configs and sessions.
+    let (rc, good) = unsafe { open_with(&client_entries(port, Some((USER, PASSWORD)))) };
+    assert_eq!(
+        rc, Z_OK,
+        "a client stating the right user and password was not admitted"
+    );
+    // SAFETY: the listener is live.
+    assert_eq!(
+        unsafe { peers_held(&listener) },
+        1,
+        "the listener holds the admitted client"
+    );
+    // SAFETY: the client is live and owned here.
+    unsafe { close_session(good) };
+
+    // SAFETY: fresh configs and sessions.
+    let (rc, bad) = unsafe { open_with(&client_entries(port, Some((USER, "not-the-password")))) };
+    // SAFETY: a gravestone drops as a no-op.
+    unsafe { close_session(bad) };
+    assert_ne!(rc, Z_OK, "a client stating the wrong password was admitted");
+
+    // SAFETY: fresh configs and sessions.
+    let (rc, none) = unsafe { open_with(&client_entries(port, None)) };
+    // SAFETY: a gravestone drops as a no-op.
+    unsafe { close_session(none) };
+    assert_ne!(rc, Z_OK, "a client stating no credential was admitted");
+
+    // SAFETY: the listener is live and owned here.
+    unsafe { close_session(listener) };
+}
+
+/// A config that states only half of a credential is a mistake, and the open refuses it rather
+/// than dialling with half.
+#[test]
+fn a_config_that_states_a_user_without_a_password_fails_the_open() {
+    let port = free_port();
+    let mut entries = client_entries(port, None);
+    entries.push(("transport/auth/usrpwd/user", format!("\"{USER}\"")));
+    // SAFETY: a fresh config and session.
+    let (rc, session) = unsafe { open_with(&entries) };
+    // SAFETY: a gravestone drops as a no-op.
+    unsafe { close_session(session) };
+    assert_eq!(rc, Z_EINVAL, "a user with no password opened a session");
+}
+
 /// A listener config that states `access_control/enabled` as `enabled`.
 fn access_control_entries(port: u16, enabled: bool) -> Vec<(&'static str, String)> {
     vec![
