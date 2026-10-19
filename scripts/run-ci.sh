@@ -12984,6 +12984,18 @@ layer_c1bz_docs_resolve() {
     # rewritten paragraph. The links the new modules' `//!` docs make are full
     # paths, because lib.rs also documents each module from outside and the
     # merged text resolves against the crate root.
+    # Duty bodies made causal -- wz-session-core 505 -> 499, by removal, DIFFED:
+    # the sorted `error` lines of this lane's command at `4d27b4de` (505) and
+    # on the tree (499) differ by six removals and no addition. The multicast
+    # and reassembly module docs that called the binding bodies no-ops went
+    # with the no-ops (`SessionBinding`, `PeerBinding`, `peer_state`,
+    # `session_state`, the private `SlotBinding`, `BoundedVec`); the links the
+    # rewritten `//!` docs make are full paths. wz-runtime-tokio is NOT moved:
+    # the same diff reads 482 at `4d27b4de` against the budget of 478, four
+    # findings that landed after the budget was last set (c1ff1427d) and are
+    # not this change's; this change's own `//!` links are full paths, and the
+    # three `MulticastOutcome` links of the same module doc went with them, so
+    # the tree reads 479.
     budget="
         wz:2
         wz-ap-demo:25
@@ -12995,7 +13007,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:5
         wz-runtime-coop:7
         wz-runtime-tokio:478
-        wz-session-core:505
+        wz-session-core:499
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "

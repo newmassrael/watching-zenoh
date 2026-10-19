@@ -72,20 +72,25 @@
 //! - `init_rx_seq` (a peer entering Discovered) — the Router seeds the
 //!   admitted peer's RX SN conduits and lease from its JOIN.
 //! - `emit_peer_lost` (a peer entering Expired) — the Router hands the
-//!   departure ([`MulticastPeerLost`]) to the eviction's observer.
+//!   departure
+//!   ([`MulticastPeerLost`](crate::multicast_peer_lost::MulticastPeerLost))
+//!   to the eviction's observer.
 //! - `enter_running` (the session entering Running) — the Router admits
 //!   peers, frames and fragments and sweeps leases from then on
-//!   ([`MulticastDispatcher::is_running`]).
+//!   ([`MulticastDispatcher::is_running`](crate::multicast_dispatch::MulticastDispatcher::is_running)).
 //! - `release_multicast_link` (the session entering Stopped) — the Router
 //!   empties the peer table, and hands the host the link to close.
 //! - `open_multicast_link` (the session entering LinkOpening) — the Router
 //!   hands the host the link to open; the host answers with
-//!   [`notify_link_ready`](MulticastDispatcher::notify_link_ready) or
-//!   [`notify_link_lost`](MulticastDispatcher::notify_link_lost).
+//!   [`notify_link_ready`](crate::multicast_dispatch::MulticastDispatcher::notify_link_ready)
+//!   or
+//!   [`notify_link_lost`](crate::multicast_dispatch::MulticastDispatcher::notify_link_lost).
 //!
 //! The two link duties are the host's because the link is: each lifecycle
-//! call returns them as [`MulticastLinkDuties`], which the drive loops of
-//! both runtimes perform before they do anything else.
+//! call returns them as
+//! [`MulticastLinkDuties`](crate::multicast_dispatch::MulticastLinkDuties),
+//! which the drive loops of both runtimes perform before they do anything
+//! else.
 
 // The observer event surface is alloc-gated (FramePayload carries Vec),
 // so the full ingest pipeline gates on alloc too; the chain-key + eviction

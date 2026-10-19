@@ -45,8 +45,10 @@
 //!
 //! The Router still needs the verdict BEFORE it stages: whether the bytes fit
 //! decides which event the slot machine is sent, and the machine's own duty is
-//! what then stages them. [`ChainStaging::fits`] is that question asked of the
-//! arena, on the same rule as `append`, so the answer stays the trait's.
+//! what then stages them.
+//! [`ChainStaging::fits`](crate::chain_staging::ChainStaging::fits) is that
+//! question asked of the arena, on the same rule as `append`, so the answer
+//! stays the trait's.
 
 /// Why an arena refused bytes.
 ///

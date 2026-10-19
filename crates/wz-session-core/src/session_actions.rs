@@ -12735,9 +12735,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `close_scope_is_session`.
     /// Rust-side counterpart of the Lua-bound
     /// `send_close_frame_with_reason` action, taking `reason`
-    /// explicitly rather than reading it from
-    /// [`ActionTrace::close_reason`] — the caller is outside the
-    /// scxml FSM and the trace slot would not have been pre-set by
+    /// explicitly rather than reading it from the link
+    /// ([`Self::close_reason`]) — the caller is outside the scxml FSM
+    /// and the link's slot would not have been pre-set by
     /// `set_close_reason_*` actions.
     ///
     /// Use case: signal-cancellation paths (SIGTERM / SIGINT) that

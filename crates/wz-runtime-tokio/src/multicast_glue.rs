@@ -78,24 +78,29 @@
 //!
 //! ## The link is the session machine's to open and release
 //!
-//! The loop does not take a bound socket. It takes a [`MulticastLink`], which
-//! holds the BIND, and the session machine decides when it runs: entering
-//! LinkOpening (`open_multicast_link`) binds and opens the link, and the loop
-//! answers the machine with `link.ready` or `link.lost`; entering Stopped
+//! The loop does not take a bound socket. It takes a
+//! [`MulticastLink`](crate::multicast_glue::MulticastLink), which holds the
+//! BIND, and the session machine decides when it runs: entering LinkOpening
+//! (`open_multicast_link`) binds and opens the link, and the loop answers the
+//! machine with `link.ready` or `link.lost`; entering Stopped
 //! (`release_multicast_link`, on a stop or a lost link) closes it. A link that
 //! cannot be bound therefore ends the session as
-//! [`MulticastOutcome::LinkLost`] before anything is sent. A host that needs
-//! the bound link before the loop runs (a group face labels its counters and
-//! its member view by it) brings the session up with
-//! [`open_multicast_session`] first.
+//! [`MulticastOutcome::LinkLost`](crate::multicast_glue::MulticastOutcome::LinkLost)
+//! before anything is sent. A host that needs the bound link before the loop
+//! runs (a group face labels its counters and its member view by it) brings
+//! the session up with
+//! [`open_multicast_session`](crate::multicast_glue::open_multicast_session)
+//! first.
 //!
 //! ## Stop
 //!
 //! Three ways out: the link is lost (`LinkEvent::Lost` ->
-//! [`MulticastOutcome::LinkLost`]), the test iteration budget is reached
-//! ([`MulticastOutcome::IterationLimit`]), or the caller asks for a graceful
-//! `multicast.stop` — the §3.1 Running -> Stopped event —
-//! ([`MulticastOutcome::Stopped`]).
+//! [`MulticastOutcome::LinkLost`](crate::multicast_glue::MulticastOutcome::LinkLost)),
+//! the test iteration budget is reached
+//! ([`MulticastOutcome::IterationLimit`](crate::multicast_glue::MulticastOutcome::IterationLimit)),
+//! or the caller asks for a graceful `multicast.stop` — the §3.1 Running ->
+//! Stopped event —
+//! ([`MulticastOutcome::Stopped`](crate::multicast_glue::MulticastOutcome::Stopped)).
 //!
 //! R311y772 built that third door. The FSM half already existed
 //! (`MulticastDispatcher::stop`, which clears the peer table); what was
