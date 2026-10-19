@@ -10023,6 +10023,13 @@ layer_c1g_cargo_test_observer() {
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-compression,transport-keepalive,tx-lend-only --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-init-body,session-unicast-accept,transport-tx-lend --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --lib --no-default-features --features alloc,codec-push,transport-batching,transport-fragmentation,transport-tx-lend --quiet -- -D warnings) || return 1
+    # The crate's whole suite with EVERY feature on: the one build where the MCU
+    # backing switches (`bounded-heapless`, via `session-slot` too) meet the
+    # host-only modules. The clippy line above compiled it and nothing ran it,
+    # and two defects sat there unseen: a passive session built about half a
+    # mebibyte of inline reassembly slots and ran a test thread's stack out, and
+    # a reply test staged nine rows into a stage the fixed backing caps at eight.
+    _runci_guarded_test C1g + cargo test -p wz-session-core --all-features --quiet || return 1
     # Round 3278 -- the generated session-slot table says what the deploy file
     # says: the validator's report of deploy/mcu_client_and_group.yaml is read by
     # running it (python3 with PyYAML) and each number is held equal to the
