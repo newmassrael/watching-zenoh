@@ -276,7 +276,7 @@ pub fn selection_json_where_coordinated(
     // No question, no walk: an empty selector is the identity and judges nothing,
     // so it pays nothing either. The rule lives in `judged_by`, which the field
     // document asks too.
-    let verdicts = judged_by(d, filter, &grouping);
+    let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTION, &mut out);
     out.push_str(",\"rows\":[");
@@ -467,7 +467,7 @@ pub fn selection_since_json_coordinated(
     memory: &mut SelectionMemory,
 ) -> String {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = judged_by(d, filter, &grouping);
+    let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
     let mut said_now: BTreeMap<u64, RowVerdict> = BTreeMap::new();
     let mut fresh: Vec<Row> = Vec::new();
     let mut revised: Vec<(Row, RowVerdict)> = Vec::new();
@@ -1158,8 +1158,10 @@ pub(crate) mod tests {
     ///
     /// Each line is one selector over the one capture above, and each letter is
     /// the packet of the same position in [`packets`]: the first six are the
-    /// transport and the declaration, which carry no kind and stay `U` under
-    /// every selector, and the last is the `Close`.
+    /// transport and the declaration and the last is the `Close`, which carry
+    /// no record and so answer every term about one as an absent field (`N`,
+    /// and `Y` under its negation), and `final-99` is a close whose request the
+    /// capture does not hold, so every record term over it is `?`.
     ///
     /// The consumer's defect is the `Y` at `query-7`: the row was `U`, with every
     /// request and every close of a query, a `Push` carrying a del, and a `Reply`
@@ -1170,11 +1172,11 @@ pub(crate) mod tests {
     fn a_request_a_response_final_and_every_reply_are_judged_by_the_kind_they_carry() {
         let (d, _) = mixed_session_with_file();
         for (selector, expected) in [
-            ("kind == query", "UUUUUUYNYNNNNYNNYYNYNUYNU"),
-            ("kind == put", "UUUUUUNNNYNYYNYYNNYNYUNNU"),
-            ("kind == del", "UUUUUUNNNNYNNNNNNNNNNUNNU"),
-            ("not kind == put", "UUUUUUYYYNYNNYNNYYNYNUYYU"),
-            ("kind == reply", "UUUUUUNYNNNNNNNNNNNNNUNYU"),
+            ("kind == query", "NNNNNNYNYNNNNYNNYYNYN?YNN"),
+            ("kind == put", "NNNNNNNNNYNYYNYYNNYNY?NNN"),
+            ("kind == del", "NNNNNNNNNNYNNNNNNNNNN?NNN"),
+            ("not kind == put", "YYYYYYYYYNYNNYNNYYNYN?YYY"),
+            ("kind == reply", "NNNNNNNYNNNNNNNNNNNNN?NYN"),
         ] {
             assert_rows(selector, expected, &letters(&d, selector));
         }
@@ -1194,12 +1196,12 @@ pub(crate) mod tests {
     fn a_response_final_answers_every_field_as_the_exchange_it_terminates() {
         let (d, _) = mixed_session_with_file();
         for (selector, expected) in [
-            ("key == demo/p", "UUUUUUNNNYYYYNYYNNYNYUNNU"),
-            ("dir == a", "UUUUUUYNYYYYYYYYYYYYYUYNU"),
-            ("kind == query or kind == del", "UUUUUUYNYNYNNYNNYYNYNUYNU"),
+            ("key == demo/p", "NNNNNNNNNYYYYNYYNNYNY?NNN"),
+            ("dir == a", "YNYNYYYNYYYYYYYYYYYYYYYNY"),
+            ("kind == query or kind == del", "NNNNNNYNYNYNNYNNYYNYN?YNN"),
             (
                 "kind == query and key == demo/p",
-                "UUUUUUNNNNNNNNNNNNNNNUNNU",
+                "NNNNNNNNNNNNNNNNNNNNN?NNN",
             ),
         ] {
             assert_rows(selector, expected, &letters(&d, selector));
@@ -1218,11 +1220,11 @@ pub(crate) mod tests {
     fn the_outcome_terms_decide_on_the_rows_of_an_exchange_and_nowhere_else() {
         let (d, _) = mixed_session_with_file();
         for (selector, expected) in [
-            ("replies == 0", "UUUUUUN?N??YYYYYYYYYYUN?U"),
-            ("closed == no", "UUUUUUN?N??NNNNNNNNNNUY?U"),
+            ("replies == 0", "NNNNNNN?N??YYYYYYYYYY?N?N"),
+            ("closed == no", "NNNNNNN?N??NNNNNNNNNN?Y?N"),
             (
                 "kind == query and replies == 0",
-                "UUUUUUNNNNNNNYNNYYNYNUNNU",
+                "NNNNNNNNNNNNNYNNYYNYN?NNN",
             ),
         ] {
             assert_rows(selector, expected, &letters(&d, selector));
@@ -1416,15 +1418,28 @@ pub(crate) mod tests {
                     table.completed(),
                     "seed {seed}, {selector}: yes close rows against exchanges completed"
                 );
+                // An orphan close is JUDGED, and every term about its record is
+                // undecided: it answers as the request it closes, which the
+                // capture does not hold. `dir` is the one record fact it names
+                // (the requester is the end it travels back to), so a `dir`
+                // selector decides it.
+                let orphans = roles.iter().filter(|r| **r == Role::Orphan).count();
                 assert_eq!(
                     count(Role::Orphan, 'U'),
-                    roles.iter().filter(|r| **r == Role::Orphan).count(),
-                    "seed {seed}, {selector}: an orphan close is unjudged under every selector"
+                    0,
+                    "seed {seed}, {selector}: an orphan close is judged"
                 );
+                if !selector.starts_with("dir") {
+                    assert_eq!(
+                        count(Role::Orphan, '?'),
+                        orphans,
+                        "seed {seed}, {selector}: an orphan close's record terms are undecided"
+                    );
+                }
                 closes_counted += table.completed();
                 unclosed_counted += table.unclosed();
                 undecided_counted += table.selection().undecided;
-                orphans_seen += count(Role::Orphan, 'U');
+                orphans_seen += orphans;
             }
         }
         // Anti-vacuity: the population exercised closed exchanges, exchanges the

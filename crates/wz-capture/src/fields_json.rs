@@ -144,7 +144,7 @@ pub fn fields_json_where(
     filter: &crate::filter::Filter,
 ) -> String {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = judged_by(d, filter, &grouping);
+    let verdicts = judged_by(d, filter, &grouping, None);
     fields_json_selected(
         d,
         capture,
@@ -164,12 +164,29 @@ pub fn fields_json_where(
 /// One function for every renderer that takes a selector, so the rule that an
 /// empty selector is the identity is written in one place and cannot be kept
 /// by one of them and forgotten by the other.
+///
+/// `coordinates` are the numbers the document prints for its lists. A `flow`
+/// term compares those numbers, so where a document numbers its lists itself
+/// (a live handle) the term is read against them first
+/// ([`crate::filter::Filter::numbered_by`]); without them a list's number is
+/// its position, which is what every plane hands a row already.
 pub(crate) fn judged_by(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
     grouping: &crate::node::SessionGrouping,
+    coordinates: Option<&dyn RowCoordinates>,
 ) -> Option<RowJudgement> {
-    (!filter.is_any()).then(|| RowJudgement::of(d, filter, grouping))
+    if filter.is_any() {
+        return None;
+    }
+    Some(match coordinates {
+        Some(c) => {
+            let lists = d.message_lists_with_origin().count();
+            let numbered = filter.numbered_by(lists, &|list| c.list_id(list));
+            RowJudgement::of(d, &numbered, grouping)
+        }
+        None => RowJudgement::of(d, filter, grouping),
+    })
 }
 
 /// The selector's document, with each row carrying the
@@ -224,7 +241,7 @@ pub fn fields_json_where_coordinated_progress(
     progress: Option<&crate::Progress<'_>>,
 ) -> Option<String> {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = judged_by(d, filter, &grouping);
+    let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
     let document = fields_json_selected(
         d,
         capture,
@@ -1321,6 +1338,7 @@ fn fields_json_selected(
                 // Keyed by the SAME list index, for the same
                 // reason: the index is what names this list unambiguously.
                 list_id: coordinates.and_then(|c| c.list_id(*lists.stream.get(i)?)),
+                flow_id: flow_number(coordinates, lists.stream.get(i).copied()),
                 scouting_list_id: None,
                 numbering: coordinates.map(|coordinates| RowNumbering {
                     coordinates,
@@ -1368,6 +1386,7 @@ fn fields_json_selected(
             RowTags {
                 selection: RowSelection::of(verdicts, lists.datagram.get(i).copied()),
                 list_id: coordinates.and_then(|c| c.list_id(*lists.datagram.get(i)?)),
+                flow_id: flow_number(coordinates, lists.datagram.get(i).copied()),
                 scouting_list_id: coordinates.and_then(|c| c.scouting_list_id(&flow.flow)),
                 numbering: coordinates.map(|coordinates| RowNumbering {
                     coordinates,
@@ -1582,6 +1601,7 @@ fn push_stream_flow(
 ) {
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
+    push_flow_number(tags.flow_id, out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
@@ -1871,6 +1891,7 @@ fn push_datagram_flow(
 ) {
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
+    push_flow_number(tags.flow_id, out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
@@ -3937,6 +3958,11 @@ impl<'a> RowSelection<'a> {
 struct RowTags<'a> {
     selection: Option<RowSelection<'a>>,
     list_id: Option<u64>,
+    /// The number this document gives the flow's list, printed on the flow
+    /// object as `list_id` and what a selector's `flow` term compares: the
+    /// caller's numbering where it numbers lists, the list's position where it
+    /// does not. `None` only for a flow with no list.
+    flow_id: Option<u64>,
     scouting_list_id: Option<u64>,
     /// The caller's row numbering and the position of THIS flow's list
     /// in it, so a row can ask what sequence number the handle gave it. `None`
@@ -4339,6 +4365,25 @@ impl RowTags<'_> {
 /// written LAST so the text up to `batch_index` is what it has been since
 /// revision 15, and it is a SEPARATE key from the three because it is not part
 /// of the join: a row and its record still meet on the same four values.
+/// The number a document gives the list at `list`: the caller's, where the
+/// caller numbers lists (a live handle), and otherwise the list's position,
+/// which is what the census planes hand a row as its `flow`.
+fn flow_number(coordinates: Option<&dyn RowCoordinates>, list: Option<usize>) -> Option<u64> {
+    let list = list?;
+    match coordinates {
+        Some(c) => c.list_id(list),
+        None => Some(list as u64),
+    }
+}
+
+/// The flow object's `list_id`: the number a selector's `flow` term names it
+/// by, and the one its rows carry as `list_id` where they carry coordinates.
+fn push_flow_number(flow_id: Option<u64>, out: &mut String) {
+    if let Some(id) = flow_id {
+        let _ = write!(out, ",\"list_id\":{id}");
+    }
+}
+
 fn push_coordinates(
     list_id: Option<u64>,
     anchor: u64,
@@ -4445,11 +4490,14 @@ pub(crate) struct RowJudgement {
     ambiguities: Vec<crate::filter::ZidAmbiguity>,
 }
 
-/// The two planes' verdicts, over one selector, over one capture.
+/// The three planes' verdicts, over one selector, over one capture: the two
+/// census planes that judge records, and the row plane that judges what they
+/// leave ([`crate::row_plane`]).
 #[cfg(feature = "network-codecs")]
 struct PlaneVerdicts {
     payloads: crate::payload::PayloadCensus,
     exchanges: crate::exchange::ExchangeTable,
+    rows: crate::row_plane::RowPlane,
 }
 
 #[cfg(feature = "network-codecs")]
@@ -4466,10 +4514,13 @@ impl RowJudgement {
                 ambiguities: resolved.into_ambiguities(),
             };
         }
+        let exchanges = crate::exchange::exchanges_grouped(d, filter, grouping);
+        let rows = crate::row_plane::RowPlane::of(d, resolved.filter(), grouping, &exchanges);
         Self {
             walk: Some(PlaneVerdicts {
                 payloads: crate::payload::payloads_grouped(d, filter, grouping),
-                exchanges: crate::exchange::exchanges_grouped(d, filter, grouping),
+                exchanges,
+                rows,
             }),
             ambiguities: Vec::new(),
         }
@@ -4501,9 +4552,12 @@ impl RowJudgement {
         let PlaneVerdicts {
             payloads,
             exchanges,
+            rows,
         } = self.walk.as_ref()?;
         crate::payload::fold_records(
-            records(payloads.row_verdict(key)).chain(records(exchanges.row_verdict(key))),
+            records(payloads.row_verdict(key))
+                .chain(records(exchanges.row_verdict(key)))
+                .chain(records(rows.row_verdict(key))),
         )
     }
 }
@@ -5243,9 +5297,14 @@ mod tests {
     /// row carries, so the objects nested inside a row's tree never join them.
     #[cfg(feature = "network-codecs")]
     fn coordinate_rows(doc: &str) -> Vec<(String, String, String, String, String)> {
+        // A ROW is an object with coordinates: `list_id` AND `anchor`. A flow
+        // object carries `list_id` too since revision 40, and is not a row.
         crate::doc_revision::object_scopes(doc)
             .into_iter()
-            .filter(|scope| scope.iter().any(|(key, _)| *key == "list_id"))
+            .filter(|scope| {
+                scope.iter().any(|(key, _)| *key == "list_id")
+                    && scope.iter().any(|(key, _)| *key == "anchor")
+            })
             .map(|scope| {
                 let get = |key: &str| {
                     scope
@@ -5636,11 +5695,19 @@ mod tests {
             "a row whose keyexpr never bound was ASKED and could not answer: \
              {by_key}"
         );
+        // A row that carries no record (the Inits, the Declare) is judged since
+        // the row plane: a term about a record is a field it does not carry,
+        // which is the DECIDED `no`, and must not be the `undecided` a row whose
+        // keyexpr never bound reads. Folding the two is the collapse this test
+        // forbids, from the other side now.
         assert!(
-            count(&by_key, "unjudged") > 0,
-            "and a row the record plane never walked was not asked at all -- \
-             folding this into `undecided` is the collapse this test forbids: \
-             {by_key}"
+            count(&by_key, "no") > 0,
+            "a row with no record answers a record term as absent: {by_key}"
+        );
+        assert_eq!(
+            count(&by_key, "unjudged"),
+            0,
+            "every row of this capture decodes, so every row is judged: {by_key}"
         );
 
         // A `bytes` selector reaches the same rows on an axis that does not
@@ -8977,17 +9044,26 @@ mod tests {
         through.push((&chain_d, &chain_file[..], None));
         #[cfg(feature = "reassembly")]
         through.push((&midsession_d, &midsession_file[..], None));
+        // And a selector a record cannot decide on a plane that does not
+        // correlate exchanges (`replies == 0` over a Push), since the row plane
+        // judges the rows with no record: `bytes >= 0` decides those rows now,
+        // so without this one `undecided` reached only the stream rows its
+        // unresolved keyexprs leave, and the population read a word the
+        // fixtures happen to keep apart as a word that decides the shape.
+        let undecidable = crate::filter::Filter::parse("replies == 0").expect("parses");
         let mut widened: Vec<String> = Vec::new();
         for &(dissection, capture, decl) in &through {
-            widened.push(fields_json_where(dissection, capture, None, decl, &every));
-            widened.push(fields_json_where_coordinated(
-                dissection,
-                capture,
-                None,
-                decl,
-                &every,
-                &EveryListNumbered,
-            ));
+            for selector in [&every, &undecidable] {
+                widened.push(fields_json_where(dissection, capture, None, decl, selector));
+                widened.push(fields_json_where_coordinated(
+                    dissection,
+                    capture,
+                    None,
+                    decl,
+                    selector,
+                    &EveryListNumbered,
+                ));
+            }
         }
         fields_docs.extend(widened.iter());
         // THE VERDICT DOCUMENT, over every capture the field document

@@ -582,7 +582,7 @@ static int check_selection_since_door(void) {
     /* From zero: every row, numbered, with the window to ask next. */
     rc = wz_dissect_live_selection_since(h, "bytes >= 0", 0, &doc);
     CHECK(rc == WZ_DISSECT_OK && doc != NULL, "since from 0 rc=%d", rc);
-    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":3") !=
+    CHECK(strstr(doc, "\"document\":{\"name\":\"selection_since\",\"revision\":4") !=
               NULL,
           "the since document must open with its name and revision: %s", doc);
     CHECK(strstr(doc, "\"continued\":false") != NULL,
@@ -2896,11 +2896,11 @@ int main(void) {
      * quoted value; none of it is on this success branch. Revision 5 reads a
      * word that is no field as a PATH into the record's dissection, adds the
      * list operators and two token classes for a list's braces; again none of
-     * it is on this branch.
+     * it is on this branch. Nor is revision 6's, the row's facts as fields.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":5},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":6},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\"},"
@@ -3416,8 +3416,11 @@ int main(void) {
      * list EVER held, so a front trim renumbers nothing. A value moves; no key
      * arrives and nothing retires.
      * 39: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
-     * flow. A key arrives; nothing retires. */
-    revisioned[2].revision = 39;
+     * flow. A key arrives; nothing retires.
+     * 40: every row is judged (a row with no record answers a record term as an
+     * absent field) and every flow object carries `list_id`. Values move; no
+     * key arrives and nothing retires. */
+    revisioned[2].revision = 40;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -3619,9 +3622,10 @@ int main(void) {
      * 2: its `window` gains `continued`, whether the call found the selector's
      * memory or began it. A key arrives; nothing retires.
      * 3: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
-     * flow. A key arrives; nothing retires. */
+     * flow. A key arrives; nothing retires.
+     * 4: every row is judged. Values move; no key arrives. */
     revisioned[18].name = "selection_since";
-    revisioned[18].revision = 3;
+    revisioned[18].revision = 4;
     revisioned[18].doc = NULL;
     {
         wz_dissect_live *quiet = NULL;
@@ -3632,9 +3636,10 @@ int main(void) {
         CHECK(rc == WZ_DISSECT_OK, "selection_since document rc=%d", rc);
         wz_dissect_live_close(quiet);
     }
-    /* (ABI 44) -- the field list, at 1. It takes no input at all. */
+    /* (ABI 44) -- the field list, at 2: it takes no input at all. 2: the row's
+     * facts join the fixed fields. */
     revisioned[19].name = "selector_fields";
-    revisioned[19].revision = 1;
+    revisioned[19].revision = 2;
     revisioned[19].doc = NULL;
     rc = wz_dissect_selector_fields(&revisioned[19].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);

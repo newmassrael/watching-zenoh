@@ -30,7 +30,7 @@ fn record(tree: Option<&Field>) -> RecordView<'_> {
     RecordView {
         direction: Direction::A,
         keyexpr: Some("demo/a"),
-        kind: RecordKind::Put,
+        kind: crate::filter::Record::Is(RecordKind::Put),
         payload_bytes: Some(2),
         value: Content::Whole(b"hi"),
         observed_at_ms: None,
@@ -40,6 +40,7 @@ fn record(tree: Option<&Field>) -> RecordView<'_> {
         outcome: None,
         zid: None,
         tree,
+        row: None,
     }
 }
 

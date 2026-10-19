@@ -263,8 +263,14 @@ mod pattern;
 /// short header's first byte IS a flagged zenoh MID, so the module's whole
 /// design question is what may decide — see its own note.
 pub mod quic;
+/// What a selector says about the messages no census plane judges, so every
+/// row of a document is judged: see the module's own note.
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+mod row_plane;
 #[cfg(all(test, feature = "dissect"))]
 mod selector_path_tests;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod selector_row_tests;
 // R311y724 — DELIBERATELY UNDOCUMENTED HERE, and the reason is a trap this
 // round paid for. An outer `///` on a `mod` declaration is CONCATENATED with
 // the module's own `//!` docs, and the merged block then resolves its

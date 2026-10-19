@@ -335,8 +335,46 @@ impl ExchangeGaps {
 /// `crate::interest::InterestCorrelation` records, and neither round answers it.
 pub type OpenExchanges = BTreeMap<(usize, usize, u64), OpenExchange>;
 
+/// Where one end of an exchange was carried, kept past its frame so the row it
+/// sits on can be judged with its own row facts when the exchange is.
+#[derive(Debug, Clone, Copy)]
+struct RowPlace {
+    names: crate::filter::MessageNames,
+    place: Option<(crate::link::FlowKey, Option<usize>)>,
+    list: usize,
+    direction: Direction,
+}
+
+impl RowPlace {
+    fn of(
+        ctx: crate::node::ListContext<'_>,
+        frame: &PassiveFrame,
+        message: &NetworkMessage,
+    ) -> Self {
+        Self {
+            names: crate::filter::MessageNames::of(frame, Some(message.name())),
+            place: ctx.place(),
+            list: ctx.list(),
+            direction: frame.direction,
+        }
+    }
+
+    fn facts(&self) -> Option<crate::filter::RowFacts<'_>> {
+        let (flow, packet) = self.place?;
+        Some(crate::filter::RowFacts::of(
+            self.names.as_slice(),
+            packet,
+            self.list,
+            &flow,
+            self.direction,
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenExchange {
+    /// The request's row, for the row terms of a selector judged at close.
+    place: RowPlace,
     /// `None` when the request's keyexpr did not resolve — the exchange is
     /// still correlated and still timed, it just has no row to land in.
     keyexpr: Option<String>,
@@ -414,6 +452,8 @@ enum Ending {
         row: crate::payload::RowKey,
         /// Which of that row's batched records the `ResponseFinal` was.
         record: usize,
+        /// The close's row, whose row terms are its own.
+        place: RowPlace,
     },
     /// The capture never showed a close: the flow's frames ran out, or the rid
     /// was reused before one arrived.
@@ -685,6 +725,7 @@ impl ExchangeTable {
                 // exchange is opened whatever the selector will say about it,
                 // and `finish` is the single place that judges and commits.
                 let entry = OpenExchange {
+                    place: RowPlace::of(ctx, frame, message),
                     keyexpr: resolved.ok(),
                     direction,
                     zid: ctx.zid(direction).map(<[u8]>::to_vec),
@@ -745,7 +786,17 @@ impl ExchangeTable {
                     return;
                 };
                 let row = crate::payload::RowKey::of(list, frame);
-                self.finish(entry, Ending::Closed { at, row, record }, filter);
+                let place = RowPlace::of(ctx, frame, message);
+                self.finish(
+                    entry,
+                    Ending::Closed {
+                        at,
+                        row,
+                        record,
+                        place,
+                    },
+                    filter,
+                );
             }
             _ => {}
         }
@@ -824,12 +875,14 @@ impl ExchangeTable {
         };
 
         let view = RecordView {
+            // The REQUEST's row: the exchange's own verdict, and its row's.
+            row: entry.place.facts(),
             direction: entry.direction,
             // R2757 (open debt 790) — the requester's, kept since the rid was
             // minted; see `OpenExchange::zid` for why it is that end.
             zid: entry.zid.as_deref(),
             keyexpr: entry.keyexpr.as_deref(),
-            kind: entry.kind,
+            kind: crate::filter::Record::Is(entry.kind),
             payload_bytes: entry.payload_bytes,
             value: entry.value.as_deref().map_or(
                 crate::filter::Content::Unavailable,
@@ -871,8 +924,24 @@ impl ExchangeTable {
         // The close's row exists only for an exchange that was closed, and a
         // close the capture never saw leaves the request's row the only one.
         self.row_verdicts.entry_or_default(entry.row).record(truth);
-        if let Ending::Closed { row, record, .. } = ending {
-            self.row_verdicts.entry_or_default(row).record(truth);
+        if let Ending::Closed {
+            row, record, place, ..
+        } = ending
+        {
+            // The close's row answers every record term as the request does,
+            // and its ROW terms as itself: `msg == ResponseFinal` and its own
+            // packet are facts of the close, not of the request. A selector
+            // with no row term reads the two views alike and the verdict is the
+            // exchange's.
+            let close_truth = if filter.reads_row() {
+                filter.matches(&RecordView {
+                    row: place.facts(),
+                    ..view
+                })
+            } else {
+                truth
+            };
+            self.row_verdicts.entry_or_default(row).record(close_truth);
             // Before the early return below as well: the pairing does not depend
             // on what a selector thought of the exchange.
             *self.closings.entry_or_default((row, record)) = Some(Closing {
@@ -1204,7 +1273,7 @@ impl ExchangeFold {
 impl crate::ordered_fold::OrderedFold for ExchangeFold {
     fn feed(
         &mut self,
-        _flow: &crate::link::FlowKey,
+        flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
         frame: &wz_session_core::passive::PassiveFrame,
@@ -1216,7 +1285,8 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
         self.table.observe_frame_where(
             frame,
             &self.filter,
-            grouping.context(list),
+            // Placed: see `crate::payload`'s fold.
+            grouping.context(list).placed(*flow, Some(packet)),
             &mut self.open,
             &mut self.spaces,
         );

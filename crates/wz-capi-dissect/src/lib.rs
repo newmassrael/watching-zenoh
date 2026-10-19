@@ -1491,10 +1491,11 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_limited(
 ///   makes the row a match; all misses make it a miss.
 /// * `"undecided"` — records were judged and this capture does not carry what
 ///   deciding needs (an unresolved keyexpr, an absent clock).
-/// * `"unjudged"` — the row carries no record a selector can speak of: `Init`,
-///   `Open`, `Close`, `KeepAlive`, `Declare` and `Interest`, which carry no
-///   kind, no keyexpr and no payload, and a `ResponseFinal` whose request the
-///   capture does not hold. The word is the same under every selector.
+/// * `"unjudged"` — the row's message did not decode, or the selector is
+///   ambiguous in this capture. Every other row is judged: a row that carries
+///   no record (`Init`, `Declare`, ...) answers a term about a record as a field
+///   it does not carry, and a `ResponseFinal` whose request the capture does not
+///   hold answers one `undecided` (the header's THE SELECTOR LANGUAGE).
 ///
 /// A caller chasing "why did my selector miss this" must be able to tell the
 /// last two apart, because only `"undecided"` is about the selector.
@@ -7845,10 +7846,11 @@ mod tests {
         // unfinished selector and the candidates of an unknown field, and
         // neither is on this success branch. Nor is revision 4's, which
         // added two fields and the escapes of a quoted value, nor revision 5's
-        // (paths, the list operators, the braces of a list).
+        // (paths, the list operators, the braces of a list), nor revision 6's
+        // (the row's facts as fields).
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":5},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":6},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\"}]}"
@@ -7868,7 +7870,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":5},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":6},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
@@ -12982,8 +12984,10 @@ mod tests {
                 "record {r:?} must join exactly one row by {needle}: {doc}"
             );
         }
+        // Counted by `anchor`, which only a ROW carries: a flow object carries
+        // its `list_id` too since field-document revision 40.
         assert_eq!(
-            doc.matches("\"list_id\":").count(),
+            doc.matches("\"anchor\":").count(),
             records.len(),
             "and no row may carry a coordinate no record has"
         );
@@ -12998,9 +13002,11 @@ mod tests {
         // A second call after the drain renders the same rows under the same
         // ids: the door settles ids and never re-mints them.
         assert_eq!(live_fields(handle, &capture), doc);
-        // The capture door has no handle, so it writes no coordinate at all.
+        // The capture door has no handle, so it writes no ROW coordinate at all;
+        // its flow objects carry their position as `list_id` (revision 40).
         let plain = call_fields(&capture, 0).expect("the capture door reads it");
-        assert!(!plain.contains("\"list_id\""), "{plain}");
+        assert!(!plain.contains("\"anchor\""), "{plain}");
+        assert!(plain.contains("\"list_id\":0,"), "{plain}");
         unsafe { wz_dissect_live_close(handle) };
     }
 
@@ -13014,7 +13020,7 @@ mod tests {
         let doc = live_fields(handle, &[]);
         assert!(doc.contains("\"capture_reread\":false"), "{doc}");
         assert!(
-            !doc.contains("\"list_id\""),
+            !doc.contains("\"anchor\""),
             "no datagram row was rendered: {doc}"
         );
         assert_eq!(drain_live(handle, 8).len(), 1, "and the drain is untouched");
@@ -13156,7 +13162,7 @@ mod tests {
             3,
             "the three requests are open: {first}"
         );
-        assert!(first.contains("\"revision\":3"), "{first}");
+        assert!(first.contains("\"revision\":4"), "{first}");
         let cursor = through_seq_of(&first);
         assert!(cursor > 3, "{first}");
 
@@ -13637,9 +13643,8 @@ mod tests {
         assert_eq!(scouting, 1, "one scout");
         assert_eq!(frames + scouting, records.len(), "held == records drained");
         assert_eq!(
-            live_fields(handle, &capture)
-                .matches("\"list_id\":")
-                .count(),
+            // `anchor` and not `list_id`: a flow object carries the second.
+            live_fields(handle, &capture).matches("\"anchor\":").count(),
             frames + scouting,
             "and a row of the field document for each"
         );
@@ -13905,9 +13910,14 @@ mod tests {
     /// One row of a document that carries the record coordinates, as
     /// `(direction, list_id, anchor, batch_index, selected)` raw JSON values.
     fn coordinate_rows(doc: &str) -> Vec<(String, String, String, String, String)> {
+        // A ROW carries `list_id` AND `anchor`; a flow object carries only the
+        // first (field-document revision 40).
         wz_capture::doc_revision::object_scopes(doc)
             .into_iter()
-            .filter(|scope| scope.iter().any(|(key, _)| *key == "list_id"))
+            .filter(|scope| {
+                scope.iter().any(|(key, _)| *key == "list_id")
+                    && scope.iter().any(|(key, _)| *key == "anchor")
+            })
             .map(|scope| {
                 let get = |key: &str| {
                     scope
@@ -13959,7 +13969,7 @@ mod tests {
             );
         }
         assert_eq!(
-            doc.matches("\"list_id\":").count(),
+            doc.matches("\"anchor\":").count(),
             records.len(),
             "and no row may carry a coordinate no record has: {doc}"
         );
@@ -14020,13 +14030,15 @@ mod tests {
         push_live(handle, 1_000_000, &packet);
 
         assert!(
-            !live_fields_under(handle, &[], "bytes >= 0").contains("\"list_id\""),
+            !live_fields_under(handle, &[], "bytes >= 0").contains("\"anchor\""),
             "anti-vacuity: the field document has no datagram row here"
         );
         let doc = live_selection(handle, "bytes >= 0").expect("the door answers");
         let rows = coordinate_rows(&doc);
         assert_eq!(rows.len(), 1, "the datagram's row: {doc}");
-        assert_eq!(rows[0].4, "\"unjudged\"", "{doc}");
+        // A keepalive carries no record, so `bytes` is a field it does not carry:
+        // judged `no` since field-document revision 40, where it was unjudged.
+        assert_eq!(rows[0].4, "\"no\"", "{doc}");
         assert_eq!(drain_live(handle, 8).len(), 1, "and the drain is untouched");
         unsafe { wz_dissect_live_close(handle) };
     }
@@ -14204,9 +14216,11 @@ mod tests {
     /// the `yes` rows are the exchange plane's `requests` and `completed` plus the
     /// pushes of that kind, and nothing is `undecided`.
     ///
-    /// The orphan close (`99`), the two handshake messages, the keepalive, the
-    /// declaration, the interest and the `Close` are the rows no selector speaks
-    /// of, and they are the same seven under all three.
+    /// The two handshake messages, the keepalive, the declaration, the interest
+    /// and the `Close` carry no record: since field-document revision 40 they
+    /// are JUDGED, and a `kind` term over each is `no`. The orphan close (`99`)
+    /// is judged too, and its record terms are `undecided`: it answers as the
+    /// request it closes, which the capture does not hold. No row is unjudged.
     #[test]
     fn the_rows_and_the_census_count_the_same_queries_through_the_c_doors() {
         let capture = selector_capture();
@@ -14229,7 +14243,7 @@ mod tests {
                 "{selector}: yes rows against the exchange plane's requests {requests} and \
                  completed {completed}: {doc}"
             );
-            assert_eq!(word("undecided"), 0, "{selector}: {doc}");
+            assert_eq!(word("undecided"), 1, "{selector}: the orphan close: {doc}");
             // The field document, through its own door, says the same word on the
             // same row: one function decides it for both.
             let field = live_fields_under(handle, &capture, selector);
@@ -14244,15 +14258,16 @@ mod tests {
                 assert_eq!(word("yes"), 6, "{doc}");
                 assert_eq!(
                     word("no"),
-                    4,
-                    "the put, the del and the two replies are judged and are not queries: {doc}"
+                    10,
+                    "the put, the del and the two replies are judged and are not queries, \
+                     and so are the six rows with no record: {doc}"
                 );
             }
         }
         assert_eq!(
             unjudged_rows,
-            [7, 7, 7],
-            "the rows no selector speaks of are the same under every one"
+            [0, 0, 0],
+            "every row of this capture decodes, so every row is judged"
         );
         unsafe { wz_dissect_live_close(handle) };
     }

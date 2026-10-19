@@ -249,12 +249,46 @@ pub struct ObservedNode {
 pub struct ListContext<'a> {
     list: usize,
     zids: Option<&'a [alloc::vec::Vec<u8>; 2]>,
+    /// The flow the list was read off and the packet the frame being walked
+    /// began in, where the walk knows them: what a selector's row terms
+    /// (`addr`, `port`, `link`, `packet`, ...) read.
+    place: Option<(crate::link::FlowKey, Option<usize>)>,
 }
 
 impl<'a> ListContext<'a> {
     /// The list index, which is what `Dissection::message_lists` is keyed by.
     pub fn list(self) -> usize {
         self.list
+    }
+
+    /// This context, for a frame of `flow` whose first byte the packet
+    /// `packet` carried. A walk in capture order knows both; one that does not
+    /// leaves the row terms undecidable rather than guessing.
+    pub fn placed(self, flow: crate::link::FlowKey, packet: Option<usize>) -> Self {
+        Self {
+            place: Some((flow, packet)),
+            ..self
+        }
+    }
+
+    /// The flow and packet [`Self::placed`] gave, for a plane that must keep
+    /// them past the frame (the exchange plane judges a request at its close).
+    pub fn place(self) -> Option<(crate::link::FlowKey, Option<usize>)> {
+        self.place
+    }
+
+    /// The facts a selector's row terms read about a record of this list that
+    /// travelled in `direction` inside the messages `messages`, or `None` for a
+    /// context that was not [`Self::placed`].
+    pub fn row_facts<'m>(
+        self,
+        messages: &'m [&'m str],
+        direction: wz_session_core::passive::Direction,
+    ) -> Option<crate::filter::RowFacts<'m>> {
+        let (flow, packet) = self.place?;
+        Some(crate::filter::RowFacts::of(
+            messages, packet, self.list, &flow, direction,
+        ))
     }
 
     /// The zid the given direction announced, or `None` where this capture
@@ -270,7 +304,11 @@ impl<'a> ListContext<'a> {
     /// NOT a fallback for one that has a grouping: see [`SessionGrouping::context`],
     /// which answers this for a list the grouping could not attribute.
     pub fn unattributed(list: usize) -> Self {
-        Self { list, zids: None }
+        Self {
+            list,
+            zids: None,
+            place: None,
+        }
     }
 }
 
@@ -1282,6 +1320,7 @@ impl SessionGrouping {
         ListContext {
             list,
             zids: self.zids(list),
+            place: None,
         }
     }
 

@@ -1656,11 +1656,13 @@ impl ThroughputTable {
         } else {
             None
         };
+        let names = crate::filter::MessageNames::of(frame, Some(message.name()));
         let view = RecordView {
             tree: tree.as_ref(),
+            row: ctx.row_facts(names.as_slice(), direction),
             direction,
             keyexpr: resolved.as_ref().ok().map(|k| k.as_str()),
-            kind,
+            kind: crate::filter::Record::Is(kind),
             payload_bytes: sized_payload(&counts),
             value: payload_content(message),
             unit_offset: record_unit_offset(frame, span),
@@ -2647,7 +2649,7 @@ impl AggFold {
 impl crate::ordered_fold::OrderedFold for AggFold {
     fn feed(
         &mut self,
-        _flow: &crate::link::FlowKey,
+        flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
         frame: &wz_session_core::passive::PassiveFrame,
@@ -2665,7 +2667,8 @@ impl crate::ordered_fold::OrderedFold for AggFold {
         self.table.observe_frame_where(
             frame,
             &self.filter,
-            grouping.context(list),
+            // Placed: see `crate::payload`'s fold.
+            grouping.context(list).placed(*flow, Some(packet)),
             &mut self.spaces,
         );
     }

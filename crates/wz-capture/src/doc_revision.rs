@@ -2120,6 +2120,30 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R37_CARRIES,
     },
+    // Revision 40: EVERY ROW IS JUDGED, and no key arrives or leaves, so this row
+    // is the notice of values that moved.
+    //
+    // * A row's `selected` was `unjudged` on every `Init`, `Open`, `Close`,
+    //   `KeepAlive`, `Declare`, `Interest` and network `Oam`, on a transport
+    //   message with no batch, and on a `ResponseFinal` whose request the
+    //   capture does not hold. The row plane judges them now: a row with no
+    //   record answers a term about a record as a field it does not carry (`no`,
+    //   and `yes` under its negation), and the orphan close answers every record
+    //   term `undecided`. `unjudged` is left to a row whose message did not
+    //   decode and to every row under an ambiguous `zid` prefix.
+    // * A batch whose walk stopped adds an `undecided` record to its row.
+    // * Every flow object carries `list_id`, the number a selector's `flow` term
+    //   names it by: the caller's numbering where it numbers lists, the list's
+    //   position otherwise. The key was already the rows' own name for it.
+    DocumentShape {
+        document: FIELDS,
+        revision: 40,
+        keys: FIELDS_R39_KEYS,
+        retiring: &[],
+        families: FIELDS_R37_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R37_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3145,6 +3169,31 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_FIELDS_R1_CARRIES,
     },
+    // THE ROW'S FACTS JOIN THE LANGUAGE, and no key moves on either document.
+    //
+    // * Ten fixed fields arrive: `msg`, `src`, `dst`, `addr`, `sport`, `dport`,
+    //   `port`, `link`, `flow`, `packet`. The verdict's unknown-field refusal
+    //   may now offer them among its nearest names, and they read `ok:true`.
+    // * The field list carries them under `fields`, with `words` for `msg` and
+    //   `link`, whose values are closed sets.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 6,
+        keys: SELECTOR_DIAGNOSE_R5_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R5_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R2_CARRIES,
+    },
+    DocumentShape {
+        document: SELECTOR_FIELDS,
+        revision: 2,
+        keys: SELECTOR_FIELDS_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_FIELDS_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_FIELDS_R1_CARRIES,
+    },
     // A `zid` PREFIX IS READ AGAINST THE CAPTURE, and an ambiguous one is
     // reported on the verdict document.
     //
@@ -3181,6 +3230,17 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: SELECTION,
         revision: 5,
+        keys: SELECTION_R5_KEYS,
+        retiring: &[],
+        families: SELECTION_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_R1_CARRIES,
+    },
+    // Revision 6: every row is judged, on field-document revision 40's rule,
+    // and no key moves: the rows' `selected` words are the values that moved.
+    DocumentShape {
+        document: SELECTION,
+        revision: 6,
         keys: SELECTION_R5_KEYS,
         retiring: &[],
         families: SELECTION_R1_FAMILIES,
@@ -3244,6 +3304,19 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: SELECTION_SINCE,
         revision: 3,
+        keys: SELECTION_SINCE_R3_KEYS,
+        retiring: &[],
+        families: SELECTION_SINCE_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_SINCE_R1_CARRIES,
+    },
+    // Revision 4: every row is judged, on field-document revision 40's rule,
+    // and no key moves. A consumer holding words a revision-3 handle gave its
+    // rows asks the selector again from 0: an `unjudged` it holds may now be a
+    // decided word.
+    DocumentShape {
+        document: SELECTION_SINCE,
+        revision: 4,
         keys: SELECTION_SINCE_R3_KEYS,
         retiring: &[],
         families: SELECTION_SINCE_R1_FAMILIES,
@@ -17212,7 +17285,9 @@ mod tests {
             // retires.
             // To 39 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
-            (FIELDS, 39),
+            // To 40 when every row was judged and every flow carried its
+            // `list_id`: values only.
+            (FIELDS, 40),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -17245,12 +17320,14 @@ mod tests {
             // To 5 when a word became a path into the record's dissection,
             // `in`, `matches` and `len()` joined, and the verdict's tokens
             // gained the braces of a list.
-            (SELECTOR_DIAGNOSE, 5),
+            // To 6 when the row's facts (`msg`, the endpoints, the ports, the
+            // link, the flow, the packet) joined the fields.
+            (SELECTOR_DIAGNOSE, 6),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),
-            // Every field a selector can name.
-            (SELECTOR_FIELDS, 1),
+            // Every field a selector can name. To 2 when the row's facts joined.
+            (SELECTOR_FIELDS, 2),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             (DECLARATIONS_DIAGNOSE, 2),
@@ -17303,7 +17380,8 @@ mod tests {
             // capture's zids, and then every row reads `unjudged`).
             // To 5 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
-            (SELECTION, 5),
+            // To 6 when every row was judged: values only.
+            (SELECTION, 6),
             // The same verdicts for the rows after a cursor, and the earlier
             // rows whose word moved.
             // To 2 when its `window` gained `continued`: whether the call found
@@ -17311,7 +17389,8 @@ mod tests {
             // nothing retires.
             // To 3 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
-            (SELECTION_SINCE, 3),
+            // To 4 when every row was judged: values only.
+            (SELECTION_SINCE, 4),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.

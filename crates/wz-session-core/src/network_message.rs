@@ -254,6 +254,32 @@ pub enum NetworkMessage {
     Unknown { mid: u8, body: Vec<u8> },
 }
 
+#[cfg(feature = "alloc")]
+impl NetworkMessage {
+    /// The word the documents print for this message: the dissection's
+    /// `MessageName` word for each decoded arm, and `Unknown` for a MID this
+    /// build has no envelope for, which is the word the transport walker gives
+    /// a transport MID it does not know. Exhaustive, so an arm added later
+    /// names itself or fails to compile.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "codec-request")]
+            Self::Request(_) => "Request",
+            #[cfg(feature = "codec-push")]
+            Self::Push(_) => "Push",
+            #[cfg(feature = "codec-response-final")]
+            Self::ResponseFinal(_) => "ResponseFinal",
+            Self::Oam(_) => "Oam",
+            Self::Interest(_) => "Interest",
+            #[cfg(feature = "codec-response")]
+            Self::Response(_) => "Response",
+            #[cfg(feature = "codec-declare")]
+            Self::Declare(_) => "Declare",
+            Self::Unknown { .. } => "Unknown",
+        }
+    }
+}
+
 /// The verdict on one chain, or
 /// [`ExtAdmission::Admissible`](crate::ext_admit::ExtAdmission::Admissible) for a
 /// message that has none.

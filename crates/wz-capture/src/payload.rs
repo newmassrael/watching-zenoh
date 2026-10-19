@@ -1372,12 +1372,14 @@ impl PayloadCensus {
         } else {
             None
         };
+        let names = crate::filter::MessageNames::of(frame, Some(message.name()));
         // R311y618 — asked after resolution and before the bytes are inspected.
         let truth = filter.matches(&crate::filter::RecordView {
             tree: tree.as_ref(),
+            row: ctx.row_facts(names.as_slice(), direction),
             direction,
             keyexpr: keyexpr.as_deref(),
-            kind,
+            kind: crate::filter::Record::Is(kind),
             payload_bytes,
             // The bytes the `bytes` term counted, from the same classifier
             // module, so the two terms cannot disagree about a record.
@@ -1679,7 +1681,7 @@ impl PayloadFold {
 impl crate::ordered_fold::OrderedFold for PayloadFold {
     fn feed(
         &mut self,
-        _flow: &crate::link::FlowKey,
+        flow: &crate::link::FlowKey,
         list: usize,
         packet: usize,
         frame: &wz_session_core::passive::PassiveFrame,
@@ -1691,7 +1693,9 @@ impl crate::ordered_fold::OrderedFold for PayloadFold {
         self.census.observe_frame_where(
             frame,
             &self.filter,
-            grouping.context(list),
+            // Placed, so the selector's row terms read this frame's flow and
+            // packet: the walk is in capture order and holds both.
+            grouping.context(list).placed(*flow, Some(packet)),
             &mut self.spaces,
         );
     }

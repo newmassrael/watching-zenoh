@@ -1199,7 +1199,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":39,"key":"kind","values":[...],
+ *     {"name":"fields","revision":40,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1853,6 +1853,33 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   closed       yes or no (y or n)                          == !=
  *   value        the payload's bytes: "text" or 0x and bytes contains == !=
  *   node         the sender's name, bound before the doors   == !=
+ *   msg          a message name the row rode in              == !=
+ *   src          the sending end's address                   == !=
+ *   dst          the receiving end's address                 == !=
+ *   addr         either end's address                        == !=
+ *   sport        an integer, the sending end's port          == != < <= > >=
+ *   dport        an integer, the receiving end's port        == != < <= > >=
+ *   port         an integer, either end's port               == != < <= > >=
+ *   link         tcp udp raweth serial vsock                 == !=
+ *   flow         an integer, the flow's list_id              == != < <= > >=
+ *   packet       an integer, the row's packet                == != < <= > >=
+ *
+ * (ABI 44, the document revisions named below) THE ROW'S OWN FACTS. `msg` is
+ * every message the row rode in, so a Push in a Frame answers `yes` to
+ * `msg == Frame` and to `msg == Push`: the words are the field document's own
+ * message names (Init Open Close KeepAlive Frame Fragment Join Oam Push Request
+ * Response ResponseFinal Interest Declare Scout Hello Unknown). An address is
+ * an IPv4 or IPv6 address with an optional /prefix (10.0.0.0/8), a MAC as six
+ * hex pairs, or a vsock context id in decimal; it names an end only on a link
+ * of its family, and a serial line has no address and no port, so an address
+ * or a port term is `no` there. `src` and `sport` are the end that SENT the
+ * row. `addr`, `port` and `msg` name more than one thing on one row, and `!=`
+ * on them is the negation of `==`: `addr != 10.0.0.1` is `no` on every row
+ * with 10.0.0.1 at either end. `flow` is the number the document gives the
+ * row's flow, printed as `list_id` on the flow object (a live handle's own
+ * numbering; a file's flows are numbered by position, stream flows first).
+ * `packet` is the packet the document numbers the row by: a datagram row's
+ * `packet`, a stream row's `first_byte.packet`, from 0.
  *
  * `value` compares the application payload of a Put, a Reply or an Err as the
  * publisher put it: after the transport has decompressed and reassembled the
@@ -2355,7 +2382,7 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":1},
+ *     {"document":{"name":"selector_fields","revision":2},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
@@ -2730,14 +2757,26 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  *   `undecided`   records were judged and this capture does not carry what
  *                 deciding needs -- a keyexpr that never bound, an absent
  *                 clock.
- *   `unjudged`    the row carries no record a selector can speak of: Init,
- *                 Open, Close, KeepAlive, Declare and Interest, which carry no
- *                 kind, no keyexpr and no payload, so the word is the same
- *                 under every selector; and a ResponseFinal whose request the
- *                 capture does not hold; and EVERY row, whatever it carries,
- *                 when the selector is AMBIGUOUS in this capture (see THE
- *                 SELECTOR LANGUAGE): a `zid` prefix that begins two or more
- *                 of its zids has no meaning to judge a row by.
+ *   `unjudged`    the row's message did not decode, so it carries nothing a
+ *                 term can read; and EVERY row, whatever it carries, when the
+ *                 selector is AMBIGUOUS in this capture (see THE SELECTOR
+ *                 LANGUAGE): a `zid` prefix that begins two or more of its zids
+ *                 has no meaning to judge a row by.
+ *
+ * EVERY OTHER ROW IS JUDGED (since field-document revision 40, selection
+ * revision 6, selection_since revision 4; before them the rows below read
+ * `unjudged` under every selector). A row that carries NO RECORD -- Init, Open,
+ * Close, KeepAlive, Join, a Fragment, a transport Oam, and inside a Frame a
+ * Declare, an Interest or a network Oam -- answers its own facts (dir, zid,
+ * time, elapsed, offset, msg, the endpoints, the ports, link, flow, packet, and
+ * the paths into its own dissection) as a record does, and a term ABOUT A
+ * RECORD (key, kind, bytes, value, delay, the outcome terms) as a field it does
+ * not carry: `no`, and `yes` under `!=` or `not`. So `kind == put` is `no` on a
+ * Declare's row and `msg == Declare` is `yes` there. A batch whose walk stopped
+ * part way adds one undecided record to its row: the bytes after the stop may
+ * hold the record asked for. A path into the dissection of a transport message
+ * on a DATAGRAM flow (an Init over UDP) is undecided: this library does not
+ * keep a datagram's bytes, the caller does.
  *
  * A caller asking "why did my selector miss this" must be able to tell the
  * last two apart, because only "undecided" is about the selector. The one
@@ -2763,9 +2802,12 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  *                  as that Request does: `kind == query` is `yes` and
  *                  `kind == put` is `no` when the request was a query, and
  *                  every record term (key, dir, zid, bytes, time, elapsed,
- *                  offset, delay) is the request's, not the close's.
+ *                  offset, delay) is the request's, not the close's. Its ROW
+ *                  facts (msg, packet, the endpoints) are its own.
  *                  When the capture does not hold the request (it began
- *                  mid-exchange) the row is `unjudged`, never `no`.
+ *                  mid-exchange) every record term is `undecided`, never
+ *                  `no`, and `dir` is the requester's, the end it travels back
+ *                  to (unjudged before the revisions above).
  *
  * A Request and its ResponseFinal are judged as the EXCHANGE they are, once, at
  * its close: the outcome terms (replies, errs, first_reply, completion, closed)
@@ -4527,7 +4569,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":39,"key":"state",
+ *     "value_families":[{"name":"fields","revision":40,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -5791,7 +5833,7 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * had issued) and, from revision 2, whether this call CONTINUED the selector's
  * memory (true) or BEGAN it (false); see WHAT THE HANDLE REMEMBERS.
  *
- *     {"document":{"name":"selection_since","revision":3},
+ *     {"document":{"name":"selection_since","revision":4},
  *      "window":{"after_seq":7,"through_seq":9,"continued":true},
  *      "rows":[{"seq":8,"direction":"b","list_id":3,"anchor":7,"batch_index":0,
  *               "selected":"undecided"}, ...],
