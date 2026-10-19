@@ -93,6 +93,10 @@ impl TcpRead {
     ///
     /// What was read and what is waiting in the socket are untouched: the driver's partial
     /// frame is its own, and the kernel's buffer is the socket's.
+    // LINK-SOCKET-SEAM-NOT-APPLICABLE: the descriptor duplicated is the one the link was
+    // wired with, whose options the seam already applied. A duplicate shares the socket,
+    // and a socket option belongs to the socket, so every option is set on the copy and
+    // there is nothing left to apply.
     #[cfg(unix)]
     pub fn rebind_to_current_runtime(&mut self) -> io::Result<()> {
         use std::os::fd::AsFd;

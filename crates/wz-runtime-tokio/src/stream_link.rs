@@ -709,6 +709,10 @@ impl crate::writer_queue::InlineWrite for DuplicateSocket {
 
 /// The inline write of `stream`, or `None` when its socket cannot be duplicated (the queue
 /// then has none, and every message goes through the writer as it always did).
+// LINK-SOCKET-SEAM-NOT-APPLICABLE: `stream` is the socket the link was wired with, whose
+// options the seam already applied. A duplicate shares the socket, and a socket option
+// belongs to the socket, so every option is set on the copy and there is nothing left to
+// apply.
 #[cfg(unix)]
 pub(crate) fn inline_write_of(
     stream: &tokio::net::TcpStream,

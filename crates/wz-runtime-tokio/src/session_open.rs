@@ -3786,9 +3786,14 @@ impl InboundLink {
     /// through a futex. Only a TCP link has a socket to give; any other link is left as it is.
     /// Called from inside a runtime with I/O enabled, before the reads begin.
     pub fn rebind_to_current_runtime(&mut self) {
-        #[cfg(unix)]
-        if let InboundLink::Tcp(driver) = self {
-            driver.rebind_to_current_runtime();
+        // `match` and not `if let`: a build with no other link feature has TCP as the
+        // enum's only variant, where the pattern is irrefutable and the wildcard is
+        // unreachable, and each of those is an error under `-D warnings`.
+        match self {
+            #[cfg(unix)]
+            InboundLink::Tcp(driver) => driver.rebind_to_current_runtime(),
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 }
