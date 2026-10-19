@@ -64,7 +64,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TABLE = "scripts/lib/verify_lanes.json"
-REMOTE_ZC = "/home/developer/zc"
+# Where the lane script is staged and the lanes' logs are written, on the build host. Two
+# accounts use it: the one the ssh alias logs in as (stages the script, reads the logs back)
+# and the fleet's run account (runs the script, writes the logs). A home directory is
+# private to one of them, so this is the host's /tmp, which both reach; `verify-once.sh`
+# creates it sticky and world-writable (mode 1777), as /tmp itself is, so neither can
+# replace the other's files. The shell script reads this constant rather than repeating it.
+REMOTE_ZC = "/tmp/wz-verify-once"
 
 
 # ---------------------------------------------------------------------------

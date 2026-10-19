@@ -79,7 +79,9 @@ fi
 expect="$(python3 -I -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))))' "$work/ids.json")"
 echo "verify-once: running ${expect//,/ } on $host in one invocation"
 
-remote="/home/developer/zc/verify-$tag.sh"
+zc="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import verify_plan; print(verify_plan.REMOTE_ZC)' "$repo_root/scripts/lib")"
+remote="$zc/verify-$tag.sh"
+ssh "$host" "install -d -m 1777 '$zc'"
 scp -q "$work/remote.sh" "$host:$remote"
 
 bx_rc=0
@@ -102,9 +104,9 @@ if [[ -n "$failed" ]]; then
     while IFS= read -r lane; do
         [[ -n "$lane" ]] || continue
         safe="$(printf %s "$lane" | tr -c 'A-Za-z0-9_.-' _)"
-        scp -q "$host:/home/developer/zc/$tag-$safe.log" "target/verify-once/$tag/$safe.log" \
+        scp -q "$host:$zc/$tag-$safe.log" "target/verify-once/$tag/$safe.log" \
             && echo "verify-once: $lane failed; its log: target/verify-once/$tag/$safe.log" \
-            || echo "verify-once: $lane failed; its log is $host:/home/developer/zc/$tag-$safe.log" >&2
+            || echo "verify-once: $lane failed; its log is $host:$zc/$tag-$safe.log" >&2
     done <<<"$failed"
 fi
 echo "verify-once: bx log $log"
