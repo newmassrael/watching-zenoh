@@ -1512,6 +1512,9 @@ pub struct SharedSession {
     /// R3074 -- the gossip plane, for a node that gossips: what introduces the nodes that
     /// each hold a face to this one. See [`SessionResources::gossip`].
     gossip: Option<Arc<GossipPlane>>,
+    /// The authentication the node's config asks for, installed on every session the node opens
+    /// before its first wire byte. See [`SessionResources::auth`].
+    auth: Option<crate::node_auth::NodeAuth>,
 }
 
 /// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
@@ -1573,6 +1576,10 @@ pub struct SessionResources {
     /// zenoh-pico's ABI (its peers are introduced by scouting alone) and any role that is a
     /// client.
     pub gossip: Option<GossipSetup>,
+    /// The authentication the node's config asks for (`transport/auth/usrpwd/dictionary_file`):
+    /// a listener that holds one admits only the peers that hold a user of it. `None` is a node
+    /// that authenticates nobody, which every node was until the config's key reached a session.
+    pub auth: Option<crate::node_auth::NodeAuth>,
 }
 
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
@@ -1595,6 +1602,7 @@ impl Default for SessionResources {
             local_delivery: LocalDeliveryDrain::DriveTask,
             initial_interest: false,
             gossip: None,
+            auth: None,
         }
     }
 }
@@ -1678,6 +1686,7 @@ impl SharedSession {
             local_delivery,
             initial_interest,
             gossip,
+            auth,
         } = resources;
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
@@ -1766,7 +1775,13 @@ impl SharedSession {
             shm_clients,
             initial_interest,
             gossip,
+            auth,
         })
+    }
+
+    /// The authentication the node holds, for the sessions it dials and accepts.
+    pub fn node_auth(&self) -> Option<&crate::node_auth::NodeAuth> {
+        self.auth.as_ref()
     }
 
     /// Where this node can be reached, for the entries gossip sends about it: the locators of
@@ -4503,6 +4518,14 @@ impl FaceForwarder for CApiForwarder {
     /// One face per remote node, across BOTH roles: see [`SharedSession::face_up`].
     fn dedups_faces_by_zid(&self) -> bool {
         true
+    }
+
+    /// What the node's config asks of the peers its listener accepts.
+    #[cfg(feature = "access-extauth-usrpwd")]
+    fn session_auth(&self) -> Option<wz_runtime_tokio::accept_loop::SessionAuth> {
+        self.shared
+            .node_auth()
+            .map(crate::node_auth::NodeAuth::session_auth)
     }
 
     /// A node the DIAL role already holds a face to.

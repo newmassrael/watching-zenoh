@@ -56,6 +56,15 @@ transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
 # under it. Off by default like its siblings — a C ABI that never dials `tls/`
 # should not pull rustls.
 transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
+# The usrpwd authentication a node's config asks for: a listener that names a
+# `transport/auth/usrpwd/dictionary_file` admits only the peers that hold a user of it
+# (`NodeAuth`). Off by default for the reason the TLS feature is: the pico ABI has no such
+# key and carries none of the credential machinery. The zenoh-c ABI turns it on.
+access-extauth-usrpwd = [
+    "wz-runtime-tokio/access-extauth-usrpwd",
+    "dep:wz-session-core",
+    "wz-session-core/access-extauth-usrpwd",
+]
 # A serial drive (the pico ABI: one thread runs every face and callback) also
 # runs the session's tokio runtime on that thread alone, so a round trip does
 # not cross a worker-thread hop. Off here: the ABI crate decides (wz-capi-pico
@@ -189,6 +198,11 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # features named: the table and its lookup are ungated, and naming a feature
 # here would make it every dependent's (R311y614).
 wz-codecs = { path = "../wz-codecs", default-features = false }
+# The `AuthDispatch` and `UsrPwdMethod` a node's authentication is built from
+# (`node_auth`), which the runtime does not re-export. Optional, and only for the credential
+# feature; `default-features = false` and nothing named here, for the rule the line above
+# states: a feature named here would become every dependent's.
+wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
@@ -201,6 +215,9 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 # registries hosted Platform run 38013268899 counted. Already in the graph of both C ABI crates'
 # tests; it adds no new crate and no wz-runtime-tokio feature to `cargo test -p wz-capi-core`.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# `node_auth`'s tests write the dictionary files a config names. Already in `crates/Cargo.lock`
+# through the C ABI crate's tests.
+tempfile = "3"
 
 [lints]
 workspace = true

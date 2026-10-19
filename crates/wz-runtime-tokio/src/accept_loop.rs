@@ -755,6 +755,21 @@ pub trait FaceForwarder {
         wz_session_core::region_partition::SouthPartition::Auto
     }
 
+    /// The authentication this node asks of the peers it accepts and answers to the peers it
+    /// dials, which the loop installs on every session it opens before the first wire byte
+    /// ([`SessionAuth`]). `None`, the default, is a node that authenticates nobody and offers
+    /// nothing, which is every session the loop opened before this existed.
+    ///
+    /// Asked of the forwarder for the reason [`Self::south_partition`] is: the forwarder is the
+    /// node's one owner of the policy its sessions are opened by, and a loop that took the
+    /// authentication as a parameter beside it could be handed one that its node's forwarder
+    /// does not hold. Read once, when the loop starts; the factory it returns is called for each
+    /// session, so a handshake's state is never shared between two links.
+    #[cfg(feature = "session-extauth")]
+    fn session_auth(&self) -> Option<SessionAuth> {
+        None
+    }
+
     /// R3067 -- whether the forwarder ALREADY holds a face to the peer `zid`
     /// that this loop does not hold: a link the node's DIAL role made.
     ///
@@ -904,20 +919,52 @@ type DriveFuture<'f> = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + 'f>>
 struct FaceTemplate {
     params: SessionInitParams,
     partition: Arc<SouthPartition>,
+    /// The node's authentication ([`FaceForwarder::session_auth`]), installed on each session
+    /// beside the partition.
+    #[cfg(feature = "session-extauth")]
+    auth: Option<SessionAuth>,
 }
 
+/// Which side of a handshake a session is opened on: the authentication a node holds is
+/// different for the peers it accepts (it verifies their credentials) and for the peers it
+/// dials (it presents its own).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthRole {
+    /// The session was accepted: this node is the responder.
+    Accept,
+    /// The session was dialled: this node is the initiator.
+    Dial,
+}
+
+/// How a node builds the authentication of one session: called for each session, on the side
+/// ([`AuthRole`]) it is opened from, so every handshake starts from its own state. `None` is
+/// "this node asks nothing of, and offers nothing to, a session opened on that side".
+#[cfg(feature = "session-extauth")]
+pub type SessionAuth =
+    Arc<dyn Fn(AuthRole) -> Option<wz_session_core::auth_dispatch::AuthDispatch> + Send + Sync>;
+
 impl FaceTemplate {
-    /// The template and the staging that installs the partition on a session
-    /// before its first wire byte, split for one open call.
+    /// The template and the staging that installs the partition and the node's authentication
+    /// on a session before its first wire byte, split for one open call. `role` is the side the
+    /// session is opened from.
     fn into_parts(
         self,
+        role: AuthRole,
     ) -> (
         SessionInitParams,
         impl FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
     ) {
         let partition = self.partition;
+        #[cfg(feature = "session-extauth")]
+        let auth = self.auth;
+        #[cfg(not(feature = "session-extauth"))]
+        let _ = role;
         (self.params, move |actions: &Arc<SessionLinkActions>| {
             actions.set_south_partition((*partition).clone());
+            #[cfg(feature = "session-extauth")]
+            if let Some(dispatch) = auth.as_ref().and_then(|build| build(role)) {
+                actions.install_auth_dispatch(dispatch);
+            }
             Ok(())
         })
     }
@@ -942,7 +989,7 @@ async fn open_face(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let (params, stage) = template.into_parts();
+    let (params, stage) = template.into_parts(AuthRole::Accept);
     let result = match accepted.handshake().await {
         // R2095 — the loop's WHOLE capability offer rides the accept open, the
         // same value its dials carry. A declared QoS band still arms the
@@ -1006,7 +1053,7 @@ async fn dial_face(
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
-    let (params, stage) = template.into_parts();
+    let (params, stage) = template.into_parts(AuthRole::Dial);
     // R2944 — the link's QoS metadata is its endpoint's, read before the dial.
     let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
         Ok(offer) => offer,
@@ -1079,7 +1126,7 @@ async fn open_face_multilink(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let (params, stage) = template.into_parts();
+    let (params, stage) = template.into_parts(AuthRole::Accept);
     // The deferred transport handshake runs here in the spawned future (never the
     // loop's `select!` arm), same as the single-link [`open_face`] — a failed
     // ws/tls handshake is an isolated `FaceFailed`, not a loop stall.
@@ -1122,7 +1169,7 @@ async fn dial_face_multilink(
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
-    let (params, stage) = template.into_parts();
+    let (params, stage) = template.into_parts(AuthRole::Dial);
     // R2944 — the link's QoS metadata is its endpoint's, read before the dial;
     // `band` stands in only where the endpoint declares none.
     let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
@@ -2271,6 +2318,8 @@ where
     let params = FaceTemplate {
         params,
         partition: Arc::new(forwarder.south_partition()),
+        #[cfg(feature = "session-extauth")]
+        auth: forwarder.session_auth(),
     };
 
     // R2233 (open-debt item 585) — fold the configured dial targets into their

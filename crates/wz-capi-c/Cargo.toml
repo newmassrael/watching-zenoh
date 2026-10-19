@@ -151,7 +151,7 @@ libc = { version = "0.2", optional = true }
 # R2970 — `transport-qos` so its transport snapshot reports what a zenoh-c
 # session now negotiates: QoS is on by default upstream, and `z_transport_is_qos`
 # read `false` for every session because the ext was not built here at all.
-wz-capi-core = { path = "../wz-capi-core", features = ["transport-qos"] }
+wz-capi-core = { path = "../wz-capi-core", features = ["transport-qos", "access-extauth-usrpwd"] }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and
@@ -197,6 +197,10 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "session-extqos",
     "transport-lowlatency",
     "session-extcompression",
+    # A node that states `transport/auth/usrpwd/dictionary_file` demands credentials of the
+    # peers it accepts; upstream compiles the method into every build, and a config key that
+    # names a security mechanism is not one a build may leave out and ignore.
+    "access-extauth-usrpwd",
 ] }
 # The frame writer behind `e2e_sender`, the sending side of an end-to-end
 # protected message. `default-features = false` and nothing named, for the rule
@@ -227,6 +231,9 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 # itself, and two rows there use one; the stand-in stays for the rows that need a node whose zid
 # and locator are the test's to choose.) Dev-only; both are already in the graph.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["scouting-responder"] }
+# `listener_auth` dials a listener with a usrpwd initiator (`UsrPwdMethod`, `AuthDispatch`),
+# which the runtime does not re-export. Dev-only; the crate is already in the graph.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["access-extauth-usrpwd"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 # R2300 (open-debt item 631) — for `config_verdict_zenohd_interop`, which has to
 # hand a real zenohd a config FILE: zenoh dispatches its parser on the file

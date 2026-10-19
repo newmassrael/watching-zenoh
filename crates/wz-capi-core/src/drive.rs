@@ -3288,6 +3288,10 @@ pub struct OpenStance {
     /// its callbacks all running on its one read task, and zenoh-c's says
     /// [`FaceDrive::PerFace`], its callbacks being concurrent across links.
     pub face_drive: FaceDrive,
+    /// What the node's config asks of the peers it accepts ([`SessionResources::auth`]):
+    /// zenoh-c's ABI resolves it from `transport/auth/usrpwd/dictionary_file`, and `None` is a
+    /// node that authenticates nobody. zenoh-pico's ABI carries no such key and says `None`.
+    pub auth: Option<crate::node_auth::NodeAuth>,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -3405,6 +3409,7 @@ pub fn open_blocking(
         gossip,
         listen_phase,
         face_drive,
+        auth,
     } = stance;
     let link_tx = LinkTx {
         queue: tx_queue,
@@ -3442,6 +3447,7 @@ pub fn open_blocking(
                     policy,
                     dials: dial_tx.clone(),
                 }),
+                auth,
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,
@@ -4237,6 +4243,7 @@ mod tests {
             gossip: None,
             listen_phase: ListenPhase::SHIPPED,
             face_drive: FaceDrive::Serial,
+            auth: None,
         }
     }
 

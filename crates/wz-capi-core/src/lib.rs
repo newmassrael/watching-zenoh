@@ -60,5 +60,6 @@ pub mod encoding_ids;
 pub mod faces;
 pub mod group;
 pub mod listeners;
+pub mod node_auth;
 pub mod scouting;
 pub mod scouting_node;

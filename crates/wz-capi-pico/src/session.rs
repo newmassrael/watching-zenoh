@@ -367,6 +367,9 @@ pub unsafe extern "C" fn z_open(
                 // pico's callbacks all run on the session's one read task, and a program
                 // written for it shares state between them without a lock.
                 face_drive: wz_capi_core::drive::FaceDrive::Serial,
+                // pico's config carries no `transport/auth` keys this ABI reads, so its node
+                // authenticates nobody, as it always has.
+                auth: None,
             },
         ) {
             Ok(state) => {

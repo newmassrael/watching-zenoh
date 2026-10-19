@@ -15,6 +15,7 @@ use wz_capi_core::drive::{
     OpenStance, SessionState, DEFAULT_BATCH_SIZE,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
+use wz_capi_core::node_auth::NodeAuth;
 use wz_capi_core::scouting_node::ScoutingPlan;
 use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
@@ -252,6 +253,33 @@ pub unsafe extern "C" fn z_open(
     guarded(|| unsafe { open_session(this_, config, no_shm_clients()) })
 }
 
+/// The authentication a config asks the node to hold, or `Err(())` for a config whose
+/// authentication this surface cannot hold.
+///
+/// A config that names a security mechanism is never opened as if it did not: a node told to
+/// demand credentials that starts and admits everyone is worse than one that does not start,
+/// because its operator believes it protected.
+///
+///   * `transport/auth/usrpwd/dictionary_file` makes the node a responder over that dictionary;
+///     a file that cannot be read, or that holds no user, fails the open.
+///   * `transport/auth/pubkey/*` is not enforced by this surface yet, so a config that states any
+///     of its four keys fails the open.
+fn node_auth_of(node: &ZenohNodeConfig) -> Result<Option<NodeAuth>, ()> {
+    if node.pubkey_public_key_pem.is_some()
+        || node.pubkey_private_key_pem.is_some()
+        || node.pubkey_public_key_file.is_some()
+        || node.pubkey_private_key_file.is_some()
+    {
+        return Err(());
+    }
+    match node.usrpwd_dictionary_file.as_deref() {
+        None => Ok(None),
+        Some(path) => NodeAuth::from_dictionary_file(path)
+            .map(Some)
+            .map_err(|_| ()),
+    }
+}
+
 /// The open `z_open` and `z_open_with_custom_shm_clients` both are: the same config, the same
 /// refusals and the same session, over `shm_clients` as its shared-memory reader (R3065). The
 /// default is the reader every session had before this crate could be given one, POSIX alone.
@@ -310,6 +338,14 @@ pub(crate) unsafe fn open_session(
         // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
         unsafe { (*config)._this = crate::abi::z_owned_config_t::null_value() };
+
+        // The authentication the config asks the node to hold. Decided before anything is bound
+        // or dialled: a config that names a security mechanism this open cannot hold must not
+        // become a node that runs without it.
+        let auth = match node.as_ref().map(node_auth_of).transpose() {
+            Ok(auth) => auth.flatten(),
+            Err(()) => return Z_EINVAL,
+        };
 
         // The id this config STATES for its session, if it states one. Read off
         // the node the reader already parsed, so a config's `id` is one value
@@ -435,6 +471,7 @@ pub(crate) unsafe fn open_session(
             // receive runtime serves each link on its own, and a callback that blocks holds
             // up its link and no other. A face of this session has a thread of its own.
             face_drive: FaceDrive::PerFace,
+            auth,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

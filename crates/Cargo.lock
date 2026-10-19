@@ -2793,6 +2793,7 @@ dependencies = [
  "wz-cdylib-build",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
+ "wz-session-core",
 ]
 
 [[package]]
@@ -2800,12 +2801,14 @@ name = "wz-capi-core"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "tempfile",
  "tokio",
  "wz-codecs",
  "wz-routing-graph",
  "wz-runtime-core",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
+ "wz-session-core",
 ]
 
 [[package]]
