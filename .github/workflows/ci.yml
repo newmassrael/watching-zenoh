@@ -5863,8 +5863,14 @@ jobs:
   # from measured runs and this job has none. The first hosted run is the
   # measurement; `timeout-minutes` is a generous ceiling until then, and the
   # margin gate follows with the numbers.
+  #
+  # Layer E7m shares this job: the wz client of SCE Mesh's Zenoh binding, held to SCE's
+  # conformance kit against a real router. It needs the same provisioning (the demo and no
+  # foreign oracle), runs for seconds once its debug build is done, and builds the demo as a
+  # router WITH the liveliness plane, which E7s's measured build must not carry, so it is a second
+  # step with a build of its own and not a change to the first.
   e2e-router-scale:
-    name: router-hat data-plane scaling (Layer E7s)
+    name: router-hat data-plane scaling and the wz mesh client (Layers E7s, E7m)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -5913,6 +5919,13 @@ jobs:
         # one shared core at lower priority and overloaded, asserting that no
         # face goes DOWN. Self-contained wz<->wz over loopback.
         run: bash scripts/run-ci.sh --layer E7s
+
+      - name: Layer E7m — the wz client of SCE Mesh's Zenoh binding, through SCE's conformance kit
+        # SCE Mesh's Zenoh binding asks its client for four operations and SCE publishes the kit a
+        # client must pass; `wz-mesh-client` is this repository's client. The kit's functions run
+        # against a `--router-hat` router, and so does the check of the one thing the kit cannot
+        # see, the congestion control a put leaves with. Self-contained wz<->wz over loopback.
+        run: bash scripts/run-ci.sh --layer E7m
 
   portability:
     name: portability (${{ matrix.os }})
