@@ -93,7 +93,7 @@
        LinkOpening->Running on link.ready. -->
   <state id="LinkOpening">
     <onentry>
-      <sce:action name="open_multicast_link"/>
+      <sce:action name="open_multicast_link" effect="duty"/>
     </onentry>
     <transition event="link.ready" target="Running"/>
     <transition event="link.lost" target="Stopped"/>
@@ -106,7 +106,7 @@
        Stopped is reached directly on stop or link loss. -->
   <state id="Running">
     <onentry>
-      <sce:action name="enter_running"/>
+      <sce:action name="enter_running" effect="duty"/>
     </onentry>
     <transition event="multicast.stop" target="Stopped"/>
     <transition event="link.lost" target="Stopped"/>
@@ -115,7 +115,7 @@
   <!-- Terminal. Release the multicast link and clear the peer table. -->
   <final id="Stopped">
     <onentry>
-      <sce:action name="release_multicast_link"/>
+      <sce:action name="release_multicast_link" effect="duty"/>
     </onentry>
   </final>
 

@@ -179,7 +179,7 @@ pub struct SensorMonitorPolicy {
 }
 
 impl SensorMonitorPolicy {
-    pub fn new() -> Self {
+pub fn new() -> Self {
         Self {
             pending_payload: SensorMonitorPayload::default(),
             session_id: None,

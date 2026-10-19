@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 517970ca5f8fd39c7778b83a8f86ea6f7f79244fc52275594c8d1e8923941265
+// source-hash: 6733a005471ec3ed45ae4f71c9f09b52f2966cde93e1d86d04cd99143a488cb1
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -127,6 +127,7 @@ impl SessionFsmMulticastEvent {
 /// The host supplies the side effects while the statechart keeps each
 /// operation symbolic. No runtime script engine is involved.
 pub trait SessionFsmMulticastActions {
+    const REALIZATION: ::sce_rust_runtime::ActionRealization;
     fn enter_running(&mut self);
     fn open_multicast_link(&mut self);
     fn release_multicast_link(&mut self);
@@ -144,10 +145,33 @@ pub struct SessionFsmMulticastPolicy<A: SessionFsmMulticastActions + 'static> {
 }
 
 impl<A: SessionFsmMulticastActions + 'static> SessionFsmMulticastPolicy<A> {
-    pub fn new(actions: A) -> Self {
+fn construct(actions: A) -> Self {
         Self {
             actions,
         }
+    }
+
+    /// docs/adr/0038: the compile-time refusal of a host that only simulates the
+    /// duties this machine states. Evaluated where a machine is built with a
+    /// host type, so a recorder or a test double does not reach production
+    /// by accident; build one on purpose with [`Self::new_simulated`].
+    const HOST_PERFORMS_DUTIES: () = assert!(
+        A::REALIZATION.is_performing(),
+        "this machine states a duty and its host declares REALIZATION = Simulates: \
+         build it with `new_simulated` to run it on a test double on purpose"
+    );
+
+    /// Build the machine with a host that performs its duties. A host whose
+    /// `REALIZATION` is `Simulates` does not compile here.
+    pub fn new(actions: A) -> Self {
+        let () = Self::HOST_PERFORMS_DUTIES;
+        Self::construct(actions)
+    }
+
+    /// Build the machine with a host that only simulates its duties — a
+    /// recorder, a test double — as the caller's statement that it means to.
+    pub fn new_simulated(actions: A) -> Self {
+        Self::construct(actions)
     }
 
     /// W3C SCXML G.7: the host the `<sce:action>` operations are dispatched

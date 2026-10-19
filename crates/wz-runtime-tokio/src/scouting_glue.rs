@@ -377,6 +377,12 @@ pub struct ScoutActionsBinding<R: Runtime = TokioRuntime> {
 // AP-only feature (it implies `transport-link-udp`), so the single
 // concrete impl matches `ScoutingActions<TokioRuntime>`'s inherent impl.
 impl ScoutingActionsTrait for ScoutActionsBinding<TokioRuntime> {
+    // docs/adr/0038: this host performs the machine's duties. `scout_emit`
+    // stages the datagram the drive loop sends, `record_hello_and_emit` and
+    // `emit_scout_timeout` write the staging slots the caller reads back.
+    const REALIZATION: ::sce_rust_runtime::ActionRealization =
+        ::sce_rust_runtime::ActionRealization::Performs;
+
     /// Idle -> Sending entering transition — encode one Scout frame and
     /// stage the datagram for the drive loop to transmit. Pure: no socket
     /// access. Mirrors zenoh-pico scout.c:57 `_z_link_send_wbuf`, except

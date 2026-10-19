@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 9aa0699487294f28c0a653e5f019984c3e06131be723eb281d8a8bc001e5d84c
+// source-hash: 5ab49fefd75acd639a73557ffe2a46e5c9e734321bfb31c0ed6aae758b1d3d07
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -165,6 +165,7 @@ impl<A: ReassemblySlotActions + 'static> ReassemblySlotInject for ::sce_rust_run
 /// The host supplies the side effects while the statechart keeps each
 /// operation symbolic. No runtime script engine is involved.
 pub trait ReassemblySlotActions {
+    const REALIZATION: ::sce_rust_runtime::ActionRealization;
     fn abort_codec(&mut self);
     fn abort_evicted(&mut self);
     fn abort_ooo(&mut self);
@@ -192,11 +193,34 @@ pub struct ReassemblySlotPolicy<A: ReassemblySlotActions + 'static> {
 }
 
 impl<A: ReassemblySlotActions + 'static> ReassemblySlotPolicy<A> {
-    pub fn new(actions: A) -> Self {
+fn construct(actions: A) -> Self {
         Self {
             actions,
             pending_payload: ReassemblySlotPayload::default(),
         }
+    }
+
+    /// docs/adr/0038: the compile-time refusal of a host that only simulates the
+    /// duties this machine states. Evaluated where a machine is built with a
+    /// host type, so a recorder or a test double does not reach production
+    /// by accident; build one on purpose with [`Self::new_simulated`].
+    const HOST_PERFORMS_DUTIES: () = assert!(
+        A::REALIZATION.is_performing(),
+        "this machine states a duty and its host declares REALIZATION = Simulates: \
+         build it with `new_simulated` to run it on a test double on purpose"
+    );
+
+    /// Build the machine with a host that performs its duties. A host whose
+    /// `REALIZATION` is `Simulates` does not compile here.
+    pub fn new(actions: A) -> Self {
+        let () = Self::HOST_PERFORMS_DUTIES;
+        Self::construct(actions)
+    }
+
+    /// Build the machine with a host that only simulates its duties — a
+    /// recorder, a test double — as the caller's statement that it means to.
+    pub fn new_simulated(actions: A) -> Self {
+        Self::construct(actions)
     }
 
     /// W3C SCXML G.7: the host the `<sce:action>` operations are dispatched

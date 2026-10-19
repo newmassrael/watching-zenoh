@@ -373,6 +373,13 @@ struct SlotBinding {
 }
 
 impl ReassemblySlotActions for SlotBinding {
+    // docs/adr/0038: the dispatcher performs these duties from the FSM
+    // outcome (`complete` delivers the message, the abort paths drop the
+    // chain, `release` and `sweep` reclaim the slot), so the host performs
+    // them although the bodies only count.
+    const REALIZATION: ::sce_rust_runtime::ActionRealization =
+        ::sce_rust_runtime::ActionRealization::Performs;
+
     fn begin_chain(&mut self) {
         self.begins = self.begins.saturating_add(1);
     }

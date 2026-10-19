@@ -346,6 +346,11 @@ pub enum JoinOutcome {
 struct SessionBinding;
 
 impl SessionFsmMulticastActions for SessionBinding {
+    // docs/adr/0038: the Router performs these duties from the FSM state
+    // (see above), so the host performs them although its bodies are empty.
+    const REALIZATION: ::sce_rust_runtime::ActionRealization =
+        ::sce_rust_runtime::ActionRealization::Performs;
+
     fn open_multicast_link(&mut self) {}
     fn enter_running(&mut self) {}
     fn release_multicast_link(&mut self) {}
@@ -364,6 +369,14 @@ impl SessionFsmMulticastActions for SessionBinding {
 struct PeerBinding;
 
 impl MulticastPeerActions for PeerBinding {
+    // docs/adr/0038: `init_rx_seq` is performed (`PeerSlot::seed_from_join`),
+    // `emit_peer_lost` is not: the upward peer-lost surface is deferred. The
+    // host therefore declares what is true, and the machine is built with
+    // `new_simulated` where the peer slot is created. Declare `Performs` and
+    // build with `new` once the surface exists.
+    const REALIZATION: ::sce_rust_runtime::ActionRealization =
+        ::sce_rust_runtime::ActionRealization::Simulates;
+
     fn init_rx_seq(&mut self) {}
     fn emit_peer_lost(&mut self) {}
 }
@@ -495,7 +508,7 @@ struct PeerSlot {
 
 impl PeerSlot {
     fn new() -> Self {
-        let mut engine = Engine::new(MulticastPeerPolicy::new(PeerBinding));
+        let mut engine = Engine::new(MulticastPeerPolicy::new_simulated(PeerBinding));
         // W3C SCXML 3.3: enter the initial `Free` leaf.
         engine.initialize();
         Self {

@@ -121,7 +121,7 @@
        transition action is the exact equivalent of an onentry action. -->
   <state id="Idle">
     <transition event="session_open.requested" target="Sending">
-      <sce:action name="scout_emit"/>
+      <sce:action name="scout_emit" effect="duty"/>
     </transition>
   </state>
 
@@ -131,7 +131,7 @@
   <state id="Sending">
     <transition event="scout.tx.done" target="AwaitingHello"/>
     <transition event="link.tx_failed" target="Idle">
-      <sce:action name="diag_scout_tx_failed"/>
+      <sce:action name="diag_scout_tx_failed" effect="notice"/>
     </transition>
   </state>
 
@@ -158,13 +158,13 @@
        whether the loop keeps going, never whether the peer is recorded. -->
   <state id="AwaitingHello">
     <transition event="hello.received" cond="_event.data.exit_on_first !== 0" target="Idle">
-      <sce:action name="record_hello_and_emit"/>
+      <sce:action name="record_hello_and_emit" effect="duty"/>
     </transition>
     <transition event="hello.received" cond="_event.data.exit_on_first === 0" target="AwaitingHello">
-      <sce:action name="record_hello_and_emit"/>
+      <sce:action name="record_hello_and_emit" effect="duty"/>
     </transition>
     <transition event="scout.timer.elapsed" target="Idle">
-      <sce:action name="emit_scout_timeout"/>
+      <sce:action name="emit_scout_timeout" effect="duty"/>
     </transition>
   </state>
 

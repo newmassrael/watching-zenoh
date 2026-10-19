@@ -105,11 +105,11 @@
        — exactly pico's outcome. -->
   <state id="Empty">
     <transition event="fragment.chunk" cond="_event.data.more !== 0" target="Receiving">
-      <sce:action name="begin_chain"/>
+      <sce:action name="begin_chain" effect="duty"/>
     </transition>
     <transition event="fragment.chunk" cond="_event.data.more === 0" target="Complete">
-      <sce:action name="begin_chain"/>
-      <sce:action name="finalize_message"/>
+      <sce:action name="begin_chain" effect="duty"/>
+      <sce:action name="finalize_message" effect="duty"/>
     </transition>
   </state>
 
@@ -119,25 +119,25 @@
        fragment (more == 0). Strict in-order parity (§2.5, OQ-W21). -->
   <state id="Receiving">
     <transition event="fragment.chunk" cond="_event.data.more !== 0" target="Receiving">
-      <sce:action name="append_fragment_payload"/>
+      <sce:action name="append_fragment_payload" effect="duty"/>
     </transition>
     <transition event="fragment.chunk" cond="_event.data.more === 0" target="Complete">
-      <sce:action name="finalize_message"/>
+      <sce:action name="finalize_message" effect="duty"/>
     </transition>
     <transition event="fragment.ooo" target="Aborted">
-      <sce:action name="abort_ooo"/>
+      <sce:action name="abort_ooo" effect="duty"/>
     </transition>
     <transition event="fragment.drop" target="Aborted">
-      <sce:action name="abort_peer_drop"/>
+      <sce:action name="abort_peer_drop" effect="duty"/>
     </transition>
     <transition event="slot.evict" target="Aborted">
-      <sce:action name="abort_evicted"/>
+      <sce:action name="abort_evicted" effect="duty"/>
     </transition>
     <transition event="codec.error" target="Aborted">
-      <sce:action name="abort_codec"/>
+      <sce:action name="abort_codec" effect="duty"/>
     </transition>
     <transition event="reassembly.timeout" target="TimedOut">
-      <sce:action name="record_timeout"/>
+      <sce:action name="record_timeout" effect="notice"/>
     </transition>
   </state>
 
@@ -145,14 +145,14 @@
        reassembled message upstream. Await pool-slot reclamation. -->
   <state id="Complete">
     <transition event="slot.release" target="Empty">
-      <sce:action name="reset_slot"/>
+      <sce:action name="reset_slot" effect="duty"/>
     </transition>
   </state>
 
   <!-- Deadline expired (dispatcher-raised reassembly.timeout). -->
   <state id="TimedOut">
     <transition event="slot.release" target="Empty">
-      <sce:action name="reset_slot"/>
+      <sce:action name="reset_slot" effect="duty"/>
     </transition>
   </state>
 
@@ -160,7 +160,7 @@
        transition's action. Await pool-slot reclamation. -->
   <state id="Aborted">
     <transition event="slot.release" target="Empty">
-      <sce:action name="reset_slot"/>
+      <sce:action name="reset_slot" effect="duty"/>
     </transition>
   </state>
 

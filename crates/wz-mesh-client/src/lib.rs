@@ -23,13 +23,18 @@
 //! when a lease runs out) and waits for the thread to finish, so that when the drop returns the
 //! other machines have been or are about to be told.
 //!
-//! ## What it does not do yet
+//! ## When the session ends
 //!
-//! It does not reconnect. A session whose link to the router ends is over: every later call
-//! answers that it ended, and a put is refused as terminal. A caller that wants a machine back
-//! opens a new client, which is what a device that is on only while its user presses sync does
-//! anyway. Upstream's client reconnects by itself, and a long-lived machine on a changing network
-//! would need the same here before this client replaces it.
+//! A client is one session and does not reconnect by itself. A session whose link to the router
+//! ends is over: every later call answers that it ended, and a put is refused as terminal. What
+//! the binding asks of a client in that case is to say so ([`ZenohClient::on_session_end`]): the
+//! session thread knows the moment the drive loop returns, because the session machine reached its
+//! final state (the router closed it, the lease ran out, the link failed, or a put found no room
+//! and the session closed as unresponsive), so no thread has to look for it. The notice is made
+//! after what the session held has been let go of, so no sample or presence change is delivered
+//! after it. A machine that is to come back opens a new client, which `sce_rust_mesh::reconnect`
+//! does for a long-lived one; a device that is on only while its user presses sync opens one each
+//! time anyway.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -83,8 +88,16 @@ type SampleCallback = Box<dyn FnMut(&str, &[u8]) + Send>;
 /// What the binding hands over to hear presence change: the key of a token and what happened to it.
 type PresenceCallback = Box<dyn FnMut(&str, PresenceKind) + Send>;
 
+/// What the binding hands over to hear the session end: the client's own words for why.
+type EndCallback = Box<dyn FnOnce(String) + Send>;
+
 /// What the caller asks the session thread to do.
 enum Command {
+    /// Call `on_end` once the session has ended.
+    OnSessionEnd {
+        on_end: EndCallback,
+        reply: Reply<Result<(), ClientError>>,
+    },
     Subscribe {
         filter: String,
         on_sample: SampleCallback,
@@ -187,7 +200,11 @@ impl Drop for WzClient {
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Close);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // A notice that drops the client runs on the session thread, which cannot wait for
+            // itself to finish; it is on its way out already.
+            if thread.thread().id() != std::thread::current().id() {
+                let _ = thread.join();
+            }
         }
     }
 }
@@ -240,6 +257,22 @@ impl ZenohClient for WzClient {
         answer
             .recv()
             .map_err(|_| PutError::terminal(SESSION_ENDED))?
+    }
+
+    fn on_session_end<F>(&mut self, on_end: F) -> Result<(), ClientError>
+    where
+        F: FnOnce(String) + Send + 'static,
+    {
+        let (reply, answer) = std_mpsc::sync_channel(1);
+        // A session that ended before this was asked has no thread to answer: that is an error,
+        // and the binding fails its open on it, which is the same as the end being told.
+        self.commands
+            .send(Command::OnSessionEnd {
+                on_end: Box::new(on_end),
+                reply,
+            })
+            .map_err(|_| ClientError::new(SESSION_ENDED))?;
+        answer.recv().map_err(|_| ClientError::new(SESSION_ENDED))?
     }
 }
 
@@ -338,6 +371,7 @@ async fn serve(
 
     let mut held: HashMap<u64, Box<dyn Any>> = HashMap::new();
     let mut next_id = 0u64;
+    let mut on_end: Option<EndCallback> = None;
     let timeouts = SessionTimeouts::spec_defaults();
     let router_ended = {
         let drive = drive_session_until_terminal(
@@ -360,7 +394,7 @@ async fn serve(
                 _ = &mut drive => break true,
                 command = commands.recv() => match command {
                     None | Some(Command::Close) => break false,
-                    Some(command) => handle(&session, &mut held, &mut next_id, command),
+                    Some(command) => handle(&session, &mut held, &mut next_id, &mut on_end, command),
                 },
             }
         }
@@ -370,7 +404,14 @@ async fn serve(
     // goodbye. The handles hold clones of the session, so they go first.
     held.clear();
     drop(session);
-    if !router_ended {
+    if router_ended {
+        // Only a session that ended without the client asking is told: a client that was dropped
+        // is not one whose binding wants to be told. Nothing the session held can call back after
+        // this.
+        if let Some(on_end) = on_end.take() {
+            on_end(SESSION_ENDED.to_string());
+        }
+    } else {
         opened.actions.send_close_with_reason(CloseReason::Generic);
     }
     opened.drain_to_close().await;
@@ -389,9 +430,23 @@ fn handle(
     session: &TokioSession,
     held: &mut HashMap<u64, Box<dyn Any>>,
     next_id: &mut u64,
+    on_end: &mut Option<EndCallback>,
     command: Command,
 ) {
     match command {
+        Command::OnSessionEnd {
+            on_end: notice,
+            reply,
+        } => {
+            let _ = reply.send(if on_end.is_some() {
+                Err(ClientError::new(
+                    "the end of this session is already being watched",
+                ))
+            } else {
+                *on_end = Some(notice);
+                Ok(())
+            });
+        }
         Command::Subscribe {
             filter,
             mut on_sample,

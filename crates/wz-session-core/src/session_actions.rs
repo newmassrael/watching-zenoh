@@ -13250,6 +13250,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     for SessionActionsBinding<R, T>
 {
+    // docs/adr/0038: this host performs the machine's duties. The wire emits,
+    // the link open and release, the close reason and the established stamp
+    // are done by the bodies below. The keepalive worker and the lease monitor
+    // are performed by the drive loop that owns the clock, not by
+    // `start_*`/`stop_*` (those only count): `check_keepalive_deadline` emits
+    // the KeepAlive (the tokio keepalive pacer backs it up) and
+    // `check_lease_deadline` raises `lease.expired`.
+    const REALIZATION: ::sce_rust_runtime::ActionRealization =
+        ::sce_rust_runtime::ActionRealization::Performs;
+
     #[inline(never)]
     fn link_driver_open(&mut self) {
         let a = &self.inner;

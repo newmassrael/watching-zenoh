@@ -88,7 +88,7 @@
        activation (Close / lease) still goes Expired via peer.lost. -->
   <state id="Discovered">
     <onentry>
-      <sce:action name="init_rx_seq"/>
+      <sce:action name="init_rx_seq" effect="duty"/>
     </onentry>
     <transition event="peer.activated" target="Active"/>
     <transition event="peer.lost" target="Expired"/>
@@ -107,7 +107,7 @@
        so the entry is reusable for a future peer. -->
   <state id="Expired">
     <onentry>
-      <sce:action name="emit_peer_lost"/>
+      <sce:action name="emit_peer_lost" effect="duty"/>
     </onentry>
     <transition event="peer.recycle" target="Free"/>
   </state>

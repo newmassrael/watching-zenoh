@@ -117,11 +117,11 @@
 
   <state id="LinkOpening">
     <onentry>
-      <sce:action name="link_driver_open"/>
+      <sce:action name="link_driver_open" effect="duty"/>
     </onentry>
     <transition event="link.opened" target="Opening"/>
     <transition event="link.open_timeout" target="Closing">
-      <sce:action name="set_close_reason_generic"/>
+      <sce:action name="set_close_reason_generic" effect="duty"/>
     </transition>
     <transition event="link.lost" target="Closed"/>
   </state>
@@ -135,27 +135,27 @@
   <state id="Opening" initial="SentInitSyn">
     <state id="SentInitSyn">
       <onentry>
-        <sce:action name="send_init_syn"/>
+        <sce:action name="send_init_syn" effect="duty"/>
       </onentry>
       <transition event="init_ack.received" target="GotInitAck"/>
       <transition event="init_ack.timeout" target="Closing">
-        <sce:action name="set_close_reason_generic"/>
+        <sce:action name="set_close_reason_generic" effect="duty"/>
       </transition>
     </state>
     <state id="GotInitAck">
       <onentry>
-        <sce:action name="send_open_syn"/>
+        <sce:action name="send_open_syn" effect="duty"/>
       </onentry>
       <transition event="open_ack.received" target="Established"/>
       <transition event="open_ack.timeout" target="Closing">
-        <sce:action name="set_close_reason_generic"/>
+        <sce:action name="set_close_reason_generic" effect="duty"/>
       </transition>
     </state>
     <transition event="framing.error" target="Closing">
-      <sce:action name="set_close_reason_invalid"/>
+      <sce:action name="set_close_reason_invalid" effect="duty"/>
     </transition>
     <transition event="establishment.ext_rejected" target="Closing">
-      <sce:action name="set_close_reason_generic"/>
+      <sce:action name="set_close_reason_generic" effect="duty"/>
     </transition>
     <transition event="peer.close" target="Closed"/>
     <transition event="link.lost" target="Closed"/>
@@ -175,22 +175,22 @@
     </state>
     <state id="SentInitAck">
       <onentry>
-        <sce:action name="send_init_ack_with_cookie"/>
+        <sce:action name="send_init_ack_with_cookie" effect="duty"/>
       </onentry>
       <transition event="open_syn.received" target="SentOpenAck"/>
     </state>
     <state id="SentOpenAck">
       <onentry>
-        <sce:action name="send_open_ack"/>
+        <sce:action name="send_open_ack" effect="duty"/>
       </onentry>
       <transition target="Established"/>
     </state>
     <transition event="accepting.inactivity_timeout" target="Closed"/>
     <transition event="framing.error" target="Closing">
-      <sce:action name="set_close_reason_invalid"/>
+      <sce:action name="set_close_reason_invalid" effect="duty"/>
     </transition>
     <transition event="establishment.ext_rejected" target="Closing">
-      <sce:action name="set_close_reason_generic"/>
+      <sce:action name="set_close_reason_generic" effect="duty"/>
     </transition>
     <transition event="peer.close" target="Closed"/>
     <transition event="link.lost" target="Closed"/>
@@ -198,26 +198,26 @@
 
   <state id="Established">
     <onentry>
-      <sce:action name="enable_rx_tx_regions"/>
-      <sce:action name="record_established_at"/>
-      <sce:action name="start_lease_monitor"/>
-      <sce:action name="start_keepalive_worker"/>
+      <sce:action name="enable_rx_tx_regions" effect="notice"/>
+      <sce:action name="record_established_at" effect="duty"/>
+      <sce:action name="start_lease_monitor" effect="duty" released-by="stop_lease_monitor"/>
+      <sce:action name="start_keepalive_worker" effect="duty" released-by="stop_keepalive_worker"/>
     </onentry>
     <onexit>
-      <sce:action name="stop_keepalive_worker"/>
-      <sce:action name="stop_lease_monitor"/>
+      <sce:action name="stop_keepalive_worker" effect="duty"/>
+      <sce:action name="stop_lease_monitor" effect="duty"/>
     </onexit>
     <transition event="session.close" target="Closing">
-      <sce:action name="set_close_reason_generic"/>
+      <sce:action name="set_close_reason_generic" effect="duty"/>
     </transition>
     <transition event="lease.expired" target="Closing">
-      <sce:action name="set_close_reason_expired"/>
+      <sce:action name="set_close_reason_expired" effect="duty"/>
     </transition>
     <transition event="framing.error" target="Closing">
-      <sce:action name="set_close_reason_invalid"/>
+      <sce:action name="set_close_reason_invalid" effect="duty"/>
     </transition>
     <transition event="tx.congestion.exhaust" target="Closing">
-      <sce:action name="set_close_reason_unresponsive"/>
+      <sce:action name="set_close_reason_unresponsive" effect="duty"/>
     </transition>
     <transition event="peer.close" target="Closed"/>
     <transition event="link.lost" target="Closed"/>
@@ -225,7 +225,7 @@
 
   <state id="Closing">
     <onentry>
-      <sce:action name="send_close_frame_with_reason"/>
+      <sce:action name="send_close_frame_with_reason" effect="duty"/>
     </onentry>
     <transition event="closing.timeout" target="Closed"/>
     <transition event="link.lost" target="Closed"/>
@@ -233,8 +233,8 @@
 
   <final id="Closed">
     <onentry>
-      <sce:action name="release_link"/>
-      <sce:action name="free_pool_slots"/>
+      <sce:action name="release_link" effect="duty"/>
+      <sce:action name="free_pool_slots" effect="notice"/>
     </onentry>
   </final>
 

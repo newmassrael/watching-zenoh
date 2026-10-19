@@ -159,7 +159,7 @@ pub struct ThermostatPolicy {
 }
 
 impl ThermostatPolicy {
-    pub fn new() -> Self {
+pub fn new() -> Self {
         Self {
             pending_payload: ThermostatPayload::default(),
         }
