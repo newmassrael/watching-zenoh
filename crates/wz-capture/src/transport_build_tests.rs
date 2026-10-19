@@ -374,7 +374,7 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
     };
     same(
         "initsyn",
-        r#"{"message":"init_syn","version":5,"whatami":"peer","zid":"b0b1b2b3",
+        r#"{"message":"init_syn","version":9,"whatami":"peer","zid":"b0b1b2b3",
            "resolution":{"frame_sn":"8bit","request_id":"8bit"},"batch_size":0}"#
             .into(),
         oracle::craft_initsyn_wire(),
@@ -382,7 +382,7 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
     same(
         "initack",
         format!(
-            r#"{{"message":"init_ack","version":5,"whatami":"peer","zid":"a0a1a2a3",
+            r#"{{"message":"init_ack","version":9,"whatami":"peer","zid":"a0a1a2a3",
                "resolution":{{"frame_sn":"8bit","request_id":"8bit"}},"batch_size":0,
                "cookie":"{}"}}"#,
             hex(&cookie)
@@ -395,7 +395,7 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
         same(
             "initack with caps",
             format!(
-                r#"{{"message":"init_ack","version":5,"whatami":"peer","zid":"a0a1a2a3",
+                r#"{{"message":"init_ack","version":9,"whatami":"peer","zid":"a0a1a2a3",
                    "resolution":{{"frame_sn":"{}","request_id":"{}"}},"batch_size":4660,
                    "cookie":"{}"}}"#,
                 word(sn_res),
@@ -409,7 +409,7 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
         same(
             "initack with patch",
             format!(
-                r#"{{"message":"init_ack","version":5,"whatami":"peer","zid":"a0a1a2a3",
+                r#"{{"message":"init_ack","version":9,"whatami":"peer","zid":"a0a1a2a3",
                    "resolution":{{"frame_sn":"8bit","request_id":"8bit"}},"batch_size":0,
                    "cookie":"{}","extensions":[{{"id":7,"z64":{level}}}]}}"#,
                 hex(&cookie)
@@ -419,7 +419,7 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
         same(
             "initsyn with patch",
             format!(
-                r#"{{"message":"init_syn","version":5,"whatami":"peer","zid":"b0b1b2b3",
+                r#"{{"message":"init_syn","version":9,"whatami":"peer","zid":"b0b1b2b3",
                    "resolution":{{"frame_sn":"8bit","request_id":"8bit"}},"batch_size":0,
                    "extensions":[{{"id":7,"z64":{level}}}]}}"#
             ),
@@ -430,7 +430,7 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
         same(
             "initsyn with region",
             format!(
-                r#"{{"message":"init_syn","version":5,"whatami":"peer","zid":"b0b1b2b3",
+                r#"{{"message":"init_syn","version":9,"whatami":"peer","zid":"b0b1b2b3",
                    "resolution":{{"frame_sn":"8bit","request_id":"8bit"}},"batch_size":0,
                    "extensions":[{{"id":8,"zbuf":"{}"}}]}}"#,
                 hex(region)
@@ -440,7 +440,7 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
     }
     same(
         "initsyn as client",
-        r#"{"message":"init_syn","version":5,"whatami":"client","zid":"b0b1b2b3",
+        r#"{"message":"init_syn","version":9,"whatami":"client","zid":"b0b1b2b3",
            "resolution":{"frame_sn":"8bit","request_id":"8bit"},"batch_size":0}"#
             .into(),
         oracle::craft_initsyn_wire_as_client(),

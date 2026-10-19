@@ -60,6 +60,13 @@ pub const FLAG_T_INIT_A: u8 = 0x20;
 /// `_Z_FLAG_T_FRAME_R` — reliable Frame.
 pub const FLAG_T_FRAME_R: u8 = 0x20;
 
+/// The protocol version every crafted Init announces: zenoh's own
+/// (`commons/zenoh-protocol/src/lib.rs` @ `pub const VERSION: u8 = 0x09;`;
+/// zenoh-pico's `Z_PROTO_VERSION`). A passive reader refuses an Init of any
+/// other version, so a fixture announcing another one is not zenoh wire and
+/// cannot stand in front of that reader.
+pub const PROTOCOL_VERSION: u8 = 0x09;
+
 /// The Initiator zid the crafted `InitSyn` advertises (cbyte high nibble = 3
 /// => 4-byte zid). The Accepting side binds its minted cookie to these bytes
 /// (R86), so a test computing the expected cookie passes THIS to the HMAC.
@@ -76,7 +83,7 @@ pub const FIXTURE_LISTENER_ZID: [u8; 4] = [0xA0, 0xA1, 0xA2, 0xA3];
 pub fn craft_initsyn_wire() -> Vec<u8> {
     let mut wire = vec![
         FLAG_T_INIT_S | T_MID_INIT,
-        0x05, // version
+        PROTOCOL_VERSION,
         0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
     ];
     wire.extend_from_slice(&FIXTURE_PEER_ZID);
@@ -98,7 +105,7 @@ pub fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
     );
     let mut wire = vec![
         FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT,
-        0x05, // version
+        PROTOCOL_VERSION,
         0x31, // cbyte: whatami=Peer, zid_len=4
     ];
     wire.extend_from_slice(&FIXTURE_LISTENER_ZID);
@@ -128,7 +135,7 @@ pub fn craft_initack_wire_with_caps(cookie: &[u8], sn_res_byte: u8, batch_size: 
     );
     let mut wire = vec![
         FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT,
-        0x05, // version
+        PROTOCOL_VERSION,
         0x31, // cbyte: whatami=Peer, zid_len=4
     ];
     wire.extend_from_slice(&FIXTURE_LISTENER_ZID);
@@ -197,7 +204,7 @@ fn region_ext_chain(value: &[u8]) -> Vec<u8> {
 pub fn craft_initsyn_wire_with_region(value: &[u8]) -> Vec<u8> {
     let mut wire = vec![
         FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT,
-        0x05, // version
+        PROTOCOL_VERSION,
         0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
     ];
     wire.extend_from_slice(&FIXTURE_PEER_ZID);
@@ -227,7 +234,7 @@ pub fn craft_initack_wire_with_patch(cookie: &[u8], patch_level: u8) -> Vec<u8> 
     );
     let mut wire = vec![
         FLAG_T_Z | FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT,
-        0x05, // version
+        PROTOCOL_VERSION,
         0x31, // cbyte: whatami=Peer, zid_len=4
     ];
     wire.extend_from_slice(&FIXTURE_LISTENER_ZID);
@@ -253,7 +260,7 @@ pub fn craft_initack_wire_with_patch(cookie: &[u8], patch_level: u8) -> Vec<u8> 
 pub fn craft_initsyn_wire_with_patch(patch_level: u8) -> Vec<u8> {
     let mut wire = vec![
         FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT,
-        0x05, // version
+        PROTOCOL_VERSION,
         0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
     ];
     wire.extend_from_slice(&FIXTURE_PEER_ZID);

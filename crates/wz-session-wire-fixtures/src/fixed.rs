@@ -15,7 +15,7 @@
 
 use crate::{
     FIXTURE_PEER_ZID, FLAG_T_FRAGMENT_M, FLAG_T_FRAGMENT_R, FLAG_T_FRAME_R, FLAG_T_INIT_S,
-    T_MID_FRAGMENT, T_MID_FRAME, T_MID_INIT, T_MID_OPEN,
+    PROTOCOL_VERSION, T_MID_FRAGMENT, T_MID_FRAME, T_MID_INIT, T_MID_OPEN,
 };
 
 /// The bytes of one crafted frame, in an array of `N` that the frame must fit: a
@@ -73,7 +73,7 @@ pub const FRAGMENT_BYTES: usize = 64;
 pub fn initsyn() -> Wire<INITSYN_BYTES> {
     let mut wire = Wire::new();
     wire.push(FLAG_T_INIT_S | T_MID_INIT);
-    wire.push(0x05); // version
+    wire.push(PROTOCOL_VERSION);
     wire.push(0x31); // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
     wire.extend_from_slice(&FIXTURE_PEER_ZID);
     wire.extend_from_slice(&[

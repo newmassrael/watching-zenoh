@@ -28,15 +28,23 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session_glue::{SessionInitParams, WhatAmI};
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::passive::{Direction, PassiveSession, SessionPhase, PREFIX_WIDTH_UNIVERSAL};
 
 const ITER_CAP: usize = 64;
+
+/// One end of the tapped link, speaking zenoh's own wire shape. The observer
+/// under test refuses an Init of any version but zenoh's, so the wz-internal
+/// fixture profile (version `0x05`) would hand it a handshake it must not read.
+fn peer_params(zid: u8) -> SessionInitParams {
+    zenoh_interop_session_init_params(WhatAmI::Peer, vec![zid; 4])
+}
 
 /// A byte stream recorded off one direction of a live link.
 type Tap = Arc<Mutex<Vec<u8>>>;
@@ -119,8 +127,7 @@ async fn a_tapped_handshake_replays_through_the_passive_tracker() {
 
     let acc = tokio::spawn(async move {
         let (stream, _peer) = acceptor_listener.accept().await.expect("accept");
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        let params = peer_params(0x02);
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -133,8 +140,7 @@ async fn a_tapped_handshake_replays_through_the_passive_tracker() {
     });
 
     let locator = parse_any_locator(&format!("tcp/{proxy_addr}")).expect("parse proxy locator");
-    let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    let params = peer_params(0x01);
     let opened_init = connect_and_open_session(
         locator,
         params,
@@ -283,8 +289,7 @@ async fn a_one_sided_capture_does_not_claim_a_negotiation() {
     });
     let acc = tokio::spawn(async move {
         let (stream, _peer) = acceptor_listener.accept().await.expect("accept");
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        let params = peer_params(0x02);
         accept_and_open_session(
             DialedLink::Tcp(stream),
             params,
@@ -296,8 +301,7 @@ async fn a_one_sided_capture_does_not_claim_a_negotiation() {
         .expect("acceptor reaches Established")
     });
     let locator = parse_any_locator(&format!("tcp/{proxy_addr}")).expect("parse proxy locator");
-    let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
+    let params = peer_params(0x01);
     let opened_init = connect_and_open_session(
         locator,
         params,

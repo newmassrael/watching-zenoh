@@ -9049,22 +9049,27 @@ pub mod wire_tap {
         /// reader is checksum-clean by construction, so `pcap_rejected` is
         /// structurally zero and `no_flow` with it. The premise was plausible
         /// and is false, and pinning the zeros is what keeps it answered.
+        ///
+        /// One position per half moved from `still_clean` to `yielded_err` when
+        /// the reader began refusing an Init of a version other than zenoh's:
+        /// each half carries one Init, so one version byte, and a flipped
+        /// version byte had read clean because nothing judged it.
         const DIALER_SPLIT: DamageSweep = DamageSweep {
             swept: 22,
-            yielded_err: 4,
+            yielded_err: 5,
             pcap_rejected: 0,
             no_flow: 0,
             direction_lost: 3,
-            still_clean: 15,
+            still_clean: 14,
         };
         /// The measured split for the listener's half. See [`DIALER_SPLIT`].
         const LISTENER_SPLIT: DamageSweep = DamageSweep {
             swept: 17,
-            yielded_err: 2,
+            yielded_err: 3,
             pcap_rejected: 0,
             no_flow: 0,
             direction_lost: 3,
-            still_clean: 12,
+            still_clean: 11,
         };
 
         /// R311y888 (open-debt item 363) — THE PCAP THIS MODULE SYNTHESISES IS
