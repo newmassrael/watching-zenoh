@@ -206,6 +206,12 @@ pub struct RemoteSubscriberPeer {
     /// on the fixed backing). Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// Whether the peer has ended its initial declarations: it sent the `DeclareFinal` of
+    /// the initial interest ([`crate::extbound::INITIAL_INTEREST_ID`]). Until then `declared`
+    /// is what has ARRIVED, not what the peer holds, and a sender must not read an absent
+    /// subscriber as no subscriber. Cleared with the table when the link is lost.
+    #[cfg(feature = "storage-profile")]
+    initial_final: bool,
     /// Moves after every change to `declared` ([`crate::declare::DeclEpoch`]).
     #[cfg(all(
         feature = "storage-profile",
@@ -232,6 +238,8 @@ impl RemoteSubscriberPeer {
             declared: DeclaredKeys::new(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            initial_final: false,
         }
     }
 
@@ -241,6 +249,7 @@ impl RemoteSubscriberPeer {
         Self {
             declared: DeclaredKeys::new(),
             oversize: 0,
+            initial_final: false,
             #[cfg(all(feature = "alloc", target_has_atomic = "64"))]
             epoch: crate::declare::DeclEpoch::default(),
         }
@@ -256,6 +265,23 @@ impl RemoteSubscriberPeer {
     ))]
     pub fn epoch(&self) -> crate::declare::DeclEpoch {
         self.epoch.clone()
+    }
+
+    /// Whether the peer has ended its initial declarations, which is what makes an absent
+    /// subscriber mean no subscriber: before it, a declaration may simply not have arrived.
+    #[cfg(feature = "storage-profile")]
+    pub fn initial_declarations_final(&self) -> bool {
+        self.initial_final
+    }
+
+    /// The peer's `DeclareFinal` of the initial interest arrived. The counter moves, because
+    /// an answer kept against it (a write filter's) changes with this.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
+    fn mark_initial_final(&mut self) {
+        if !self.initial_final {
+            self.initial_final = true;
+            self.changed();
+        }
     }
 
     /// Move the counter: what a change to `declared` ends with.
@@ -331,6 +357,8 @@ impl RemoteSubscriberPeer {
     pub fn forget(&mut self) -> usize {
         let dropped = self.declared.count();
         self.declared.reset();
+        // A reconnected peer declares again from the start and ends it again.
+        self.initial_final = false;
         self.changed();
         dropped
     }
@@ -975,6 +1003,13 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
+                // The `DeclareFinal` of the initial interest ends the peer's first burst of
+                // declarations; any other interest's final is some other plane's answer.
+                if matches!(decl.body, DeclareOwnedVariant::CodecZenohDeclFinal(_))
+                    && decl.interest_id == Some(crate::extbound::INITIAL_INTEREST_ID)
+                {
+                    peer.mark_initial_final();
+                }
                 self.dispatch_declare_with_local(
                     peer,
                     &decl.body,
@@ -1561,6 +1596,42 @@ mod tests {
         reg.dispatch_messages(&messages, &HashMap::new());
         assert_eq!(decl_count.load(Ordering::SeqCst), 2);
         assert_eq!(undecl_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// A sender may read an absent subscriber as no subscriber only after the peer has ended
+    /// its first declarations, and only the `DeclareFinal` of the INITIAL interest does that:
+    /// another interest's final answers some other question, and an unsolicited one ends
+    /// nothing.
+    #[cfg(feature = "declare-final")]
+    #[test]
+    fn only_the_initial_interests_final_ends_the_peers_first_declarations() {
+        use crate::declare_build::{build_declare_final, build_declare_final_reply};
+        let mut reg = RemoteSubscriberRegistry::new();
+        assert!(!reg.peer().initial_declarations_final());
+
+        let others =
+            vec![
+                NetworkMessage::Declare(Box::new(build_declare_final_reply(7))),
+                NetworkMessage::Declare(Box::new(build_declare_final())),
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(1, 0, Some("a")),
+                ))),
+            ];
+        reg.dispatch_messages(&others, &HashMap::new());
+        assert!(
+            !reg.peer().initial_declarations_final(),
+            "a final of another interest, an unsolicited one and a declaration end nothing"
+        );
+
+        let initial = vec![NetworkMessage::Declare(Box::new(
+            build_declare_final_reply(crate::extbound::INITIAL_INTEREST_ID),
+        ))];
+        reg.dispatch_messages(&initial, &HashMap::new());
+        assert!(reg.peer().initial_declarations_final());
+
+        // The peer's link was lost: it declares again from the start, and ends it again.
+        reg.flush_declarations_on_link_loss(&|_| false);
+        assert!(!reg.peer().initial_declarations_final());
     }
 
     // ── R290 declared / has_matching membership surface ──
