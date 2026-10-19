@@ -5041,25 +5041,50 @@ mod tests {
         );
     }
 
-    /// Every keyed staging method of the `ReplyOut` seam, driven once with the
-    /// key given — the population the refusal has to cover, since each of them
-    /// can name a key outside the query and each one reaches the wire.
-    fn stage_every_keyed_arm(out: &mut dyn ReplyOut, key: &str) -> Vec<Result<(), ReplyError>> {
+    /// How many keyed staging methods the `ReplyOut` seam has.
+    const KEYED_ARMS: usize = 9;
+
+    /// Keyed staging method `arm` of the `ReplyOut` seam, driven once with the
+    /// key given — together the population the refusal has to cover, since
+    /// each of them can name a key outside the query and each one reaches the
+    /// wire.
+    fn stage_keyed_arm(out: &mut dyn ReplyOut, key: &str, arm: usize) -> Result<(), ReplyError> {
         let ts = TimestampHint {
             time: 1,
             zid: vec![0x0a],
         };
-        vec![
-            out.reply_keyed(key, b"p"),
-            out.reply_keyed_stamped(key, b"p", None, &ts),
-            out.reply_keyed_encoded(key, b"p", None),
-            out.reply_keyed_attached(key, b"p", None, b"a"),
-            out.reply_keyed_sourced(key, b"p", None, &ts, None),
-            out.reply_keyed_meta(key, b"p", ReplyMeta::new()),
-            out.reply_keyed_del(key),
-            out.reply_keyed_del_sourced(key, &ts, None),
-            out.reply_keyed_del_meta(key, ReplyMeta::new()),
-        ]
+        match arm {
+            0 => out.reply_keyed(key, b"p"),
+            1 => out.reply_keyed_stamped(key, b"p", None, &ts),
+            2 => out.reply_keyed_encoded(key, b"p", None),
+            3 => out.reply_keyed_attached(key, b"p", None, b"a"),
+            4 => out.reply_keyed_sourced(key, b"p", None, &ts, None),
+            5 => out.reply_keyed_meta(key, b"p", ReplyMeta::new()),
+            6 => out.reply_keyed_del(key),
+            7 => out.reply_keyed_del_sourced(key, &ts, None),
+            8 => out.reply_keyed_del_meta(key, ReplyMeta::new()),
+            _ => unreachable!("there are {KEYED_ARMS} keyed arms"),
+        }
+    }
+
+    /// Arm `arm` staged with `key` into a stage of its own, and how many rows
+    /// that stage then holds. One stage per arm, so the verdict is the gate's
+    /// and never the stage's room: the fixed stage holds
+    /// `caps::MAX_PENDING_REPLIES` rows, fewer than the arms, and a ninth row
+    /// in a shared stage was refused as `StagingFull`.
+    fn keyed_arm_alone(key: &str, arm: usize) -> (Result<(), ReplyError>, usize) {
+        let mut replies = ReplyStage::new();
+        let result = {
+            let mut responder = QueryResponder::new(
+                7,
+                "demo/**".to_string(),
+                ReplyKeyExpr::MatchingQuery,
+                QosLevel::DEFAULT,
+                &mut replies,
+            );
+            stage_keyed_arm(&mut responder, key, arm)
+        };
+        (result, replies.len())
     }
 
     /// R311y834 kept a COUNT of refusals on the responder, because the seam
@@ -5070,30 +5095,18 @@ mod tests {
     /// trait object a handler holds, outside the query and inside it.
     #[test]
     fn every_keyed_reply_arm_returns_its_refusal_to_the_caller() {
-        let mut replies = ReplyStage::new();
-        let mut responder = QueryResponder::new(
-            7,
-            "demo/**".to_string(),
-            ReplyKeyExpr::MatchingQuery,
-            QosLevel::DEFAULT,
-            &mut replies,
-        );
-
-        let outside = stage_every_keyed_arm(&mut responder, "other/outside");
-        assert_eq!(outside.len(), 9, "the population is the nine keyed arms");
-        assert!(
-            outside
-                .iter()
-                .all(|r| *r == Err(ReplyError::KeyExprNotMatch)),
-            "every arm refuses a key outside the query: {outside:?}"
-        );
-
-        let inside = stage_every_keyed_arm(&mut responder, "demo/inside");
-        assert!(
-            inside.iter().all(Result::is_ok),
-            "every arm admits a key inside the query: {inside:?}"
-        );
-        assert_eq!(replies.len(), 9, "only the admitted nine were staged");
+        for arm in 0..KEYED_ARMS {
+            assert_eq!(
+                keyed_arm_alone("other/outside", arm),
+                (Err(ReplyError::KeyExprNotMatch), 0),
+                "arm {arm} refuses a key outside the query and stages nothing"
+            );
+            assert_eq!(
+                keyed_arm_alone("demo/inside", arm),
+                (Ok(()), 1),
+                "arm {arm} admits a key inside the query and stages it"
+            );
+        }
     }
 
     /// The opt-out, on the responder side, and it is the SAME `_anyke` token the
