@@ -27,9 +27,10 @@ use wz::runtime_core::EthernetMac;
 use wz::runtime_zephyr::glue::{delay_us, log, log_args};
 use wz::runtime_zephyr::ZephyrClock;
 use wz_eth_mac_cyt4bf::{
-    Config, Cyt4bfBoard, Cyt4bfMac, DmaArea, LinkError, LinkEvent, LinkMode, RefClock,
+    Config, Cyt4bfBoard, Cyt4bfMac, DmaArea, LinkError, LinkEvent, LinkMode, LinkState, RefClock,
 };
 
+#[cfg(feature = "net-lwip-mac")]
 use crate::net_lwip::BoardMac;
 use crate::TICK_HZ;
 
@@ -224,8 +225,12 @@ impl EthernetMac for T2gMac {
     }
 }
 
-impl BoardMac for T2gMac {
-    fn service(&mut self, now_ms: u64) {
+impl T2gMac {
+    /// The link service every owner of the MAC runs from its loop: the PHY's state is read
+    /// and a change is told on the console, and the pool counters are reported when they
+    /// moved. The lwIP backend's loop and the Zephyr Ethernet driver's receive thread
+    /// both call it, so the MAC behaves the same under either.
+    pub fn poll_link(&mut self, now_ms: u64) {
         match self.inner.service_link(now_ms) {
             LinkEvent::Steady => {}
             LinkEvent::Up(mode) => log_args(format_args!(
@@ -238,6 +243,21 @@ impl BoardMac for T2gMac {
         self.report_tx(now_ms);
         #[cfg(feature = "rx-pool")]
         self.report_rx(now_ms);
+    }
+}
+
+impl T2gMac {
+    /// Whether the link was up at the last service pass. A stack that has a carrier state of
+    /// its own (Zephyr's Ethernet L2) is told it from here.
+    pub fn link_is_up(&self) -> bool {
+        matches!(self.inner.link_state(), LinkState::Up(_))
+    }
+}
+
+#[cfg(feature = "net-lwip-mac")]
+impl BoardMac for T2gMac {
+    fn service(&mut self, now_ms: u64) {
+        self.poll_link(now_ms);
     }
 }
 

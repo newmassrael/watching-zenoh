@@ -87,6 +87,11 @@ mod net_lwip;
 mod net_zephyr;
 #[cfg(any(feature = "spi-probe", feature = "t1s-lan865x"))]
 mod spi_cyt4bf;
+// The C ABI of the Zephyr Ethernet driver over the CYT4BF's MAC (`wz_zeth_driver.c`): the
+// source is the component's, shared with every application that links the driver.
+#[cfg(feature = "zeth-driver")]
+#[path = "../../../zephyr-eth-wzmac/zeth_exports.rs"]
+mod zeth_exports;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
 #[cfg(feature = "heap")]

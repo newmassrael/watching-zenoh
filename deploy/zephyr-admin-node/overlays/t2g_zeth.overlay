@@ -1,0 +1,30 @@
+/* SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+ * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+ *
+ * The T2G kit's Ethernet and entropy source as Zephyr devices, for the admin node under
+ * Zephyr's own network stack (overlays/t2g_zeth.conf). Zephyr has no node for either:
+ * these two are what turn the drivers of deploy/zephyr-eth-wzmac on.
+ *
+ *   west build ... -- -DEXTRA_CONF_FILE="overlays/t2g_zeth.conf" \
+ *                     -DEXTRA_DTC_OVERLAY_FILE="overlays/t2g_zeth.overlay"
+ */
+
+/ {
+	chosen {
+		zephyr,entropy = &wz_trng;
+	};
+
+	wz_trng: wz-trng {
+		compatible = "wz,cyt4bf-trng";
+	};
+
+	/* The PHY of this kit drives the RMII reference clock (`ref-clock-divider` stays 0).
+	 * The station address is drawn at every boot: this chip has no MAC EEPROM and nothing
+	 * in the HAL names a unit, and a value every build shared would be one two boards on a
+	 * network both answered to.
+	 */
+	wz_eth: wz-eth {
+		compatible = "wz,cyt4bf-eth";
+		zephyr,random-mac-address;
+	};
+};

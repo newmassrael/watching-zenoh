@@ -66,6 +66,10 @@ net-zephyr-sockets = []
 net-lwip-mac = ["wz/session-lwip-fixed", "wz/transport-tx-lend", "dep:wz-session-lwip"]
 # The MAC (`CONFIG_WZ_MAC_*`): the Infineon CYT4BF family's ETH0.
 mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
+# The same MAC under Zephyr's own network stack: the C ABI of the Zephyr Ethernet driver
+# (`deploy/zephyr-eth-wzmac`) over the MAC, in place of lwIP (`CONFIG_WZ_ZETH`, which
+# deploy/zephyr-admin-node/CMakeLists.txt turns on beside `net-zephyr-sockets`).
+zeth-driver = ["mac-cyt4bf"]
 # The node's datagrams are encoded into slots of a transmit pool placed in the
 # non-cacheable section, and the MAC reads each frame out of its slot in place
 # (`CONFIG_WZ_CYT4BF_TX_POOL`, ARCHITECTURE section 9.1). The lwIP link crate is

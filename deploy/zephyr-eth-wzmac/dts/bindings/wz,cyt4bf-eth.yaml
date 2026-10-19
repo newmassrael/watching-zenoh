@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+description: |
+  ETH0 of the Infineon CYT4BF (T2G) family, RMII, driven by wz's `wz-eth-mac-cyt4bf`
+  crate through the Zephyr Ethernet driver in wz_zeth_driver.c. Zephyr has no driver
+  for this controller; the node is what lets a Zephyr network stack (and an
+  application written against it) sit on the MAC the wz crates already drive.
+
+  The station address is the standard Ethernet controller's: `local-mac-address`
+  when the board has one of its own, or `zephyr,random-mac-address` for one drawn at
+  every boot. There is no default, and the driver refuses to start without one.
+
+compatible: "wz,cyt4bf-eth"
+
+include: ethernet-controller.yaml
+
+properties:
+  ref-clock-divider:
+    type: int
+    default: 0
+    description: |
+      0 when the PHY drives the RMII reference clock; otherwise the divider (1 to 256)
+      of the internal PLL the MAC supplies it from.
+
+  link-wait-ms:
+    type: int
+    default: 5000
+    description: |
+      How long the bring-up waits for a link, in milliseconds. A link that comes later
+      is picked up by the driver's link service.

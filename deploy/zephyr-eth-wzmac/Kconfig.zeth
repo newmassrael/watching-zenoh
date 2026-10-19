@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The Zephyr drivers over the wz CYT4BF crates: an Ethernet driver for ETH0 and an entropy
+# device for the CRYPTO block's TRNG. An application sources this file from its own
+# Kconfig, adds this directory to DTS_ROOT (zeth.cmake does), and states the two devices in
+# an overlay; a node in the devicetree is what turns each driver on.
+
+config WZ_ZETH
+	bool "Ethernet driver for the CYT4BF's ETH0, over the wz MAC crate"
+	default y
+	depends on DT_HAS_WZ_CYT4BF_ETH_ENABLED
+	depends on NETWORKING
+	select NET_L2_ETHERNET
+	select WZ_CORE_CLOCK_BOARD_HOOK
+	help
+	  Zephyr has no Ethernet driver for this controller. This one is an
+	  `ethernet_api` implementation whose frames go through `wz-eth-mac-cyt4bf`, the
+	  same crate and the same bring-up the lwIP backend of the wz admin node uses, so
+	  the controller is driven by one piece of code whichever network stack is above
+	  it. The MAC is polled (the crate takes no interrupt); a thread of the driver
+	  polls it.
+
+	  The DMA rings are in the non-cacheable section, so the application needs
+	  CONFIG_NOCACHE_MEMORY=y.
+
+if WZ_ZETH
+
+config WZ_ZETH_RX_STACK_SIZE
+	int "Stack of the driver's receive thread, in bytes"
+	default 2048
+
+config WZ_ZETH_RX_PRIORITY
+	int "Priority of the driver's receive thread"
+	default 14
+	help
+	  A preemptible priority below the network stack's own receive threads, so a frame
+	  the driver hands up is processed before the next one is taken.
+
+config WZ_ZETH_RX_POLL_INTERVAL_US
+	int "How long the receive thread sleeps when the MAC has no frame, in microseconds"
+	default 1000
+	help
+	  The MAC is polled, so this is a floor on a frame's wait to be taken, rounded up to
+	  the kernel's tick (k_usleep). 0 does not sleep: the thread yields and polls again,
+	  which is the lowest latency and keeps the CPU out of idle, for a measurement or a
+	  node that has nothing else to do with it.
+
+endif # WZ_ZETH
+
+if WZ_ZETH || WZ_MAC_CYT4BF
+
+choice WZ_CYT4BF_PINS
+	prompt "ETH0 pin routing"
+
+config WZ_CYT4BF_PINS_T2G_LITE
+	bool "KIT_T2G-B-H_LITE (176-pin package, DP83825I over RMII)"
+	help
+	  REF_CLK P18_0, TX_EN P18_1, TXD0/1 P18_4/P18_5, RXD0/1 P19_0/P19_1, CRS_DV
+	  P21_5, MDIO P3_0, MDC P3_1: the 176-pin package's ETH0 functions, which the
+	  PDL's pin table lists, on the pins that kit's schematic uses.
+
+endchoice
+
+endif # WZ_ZETH || WZ_MAC_CYT4BF
+
+config WZ_ZETH_TRNG
+	bool "Entropy device over the CYT4BF CRYPTO block's TRNG"
+	default y
+	depends on DT_HAS_WZ_CYT4BF_TRNG_ENABLED
+	select ENTROPY_GENERATOR
+	select ENTROPY_HAS_DRIVER
+	help
+	  The board's `wz_board_entropy_fill` (the PDL's TRNG driver) as the entropy device
+	  the devicetree names with `zephyr,entropy`.

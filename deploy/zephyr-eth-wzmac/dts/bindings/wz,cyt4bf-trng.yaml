@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+description: |
+  The true random number generator in the CRYPTO block of the Infineon CYT4BF (T2G)
+  family, as a Zephyr entropy device. Zephyr has no entropy driver for these chips, so a
+  Zephyr network stack (its random MAC address, its sequence numbers) and zenoh-pico's
+  random source would otherwise have nothing to draw from. The driver is a thin shell
+  over the board's `wz_board_entropy_fill` (the PDL's TRNG driver), which fails the whole
+  fill when the TRNG reports an error rather than return what the buffer held.
+
+compatible: "wz,cyt4bf-trng"
+
+include: base.yaml

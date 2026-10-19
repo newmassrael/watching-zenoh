@@ -14,6 +14,9 @@
 # only one board needs is in boards/<board>.conf.
 
 cmake_minimum_required(VERSION 3.20.0)
+# The CYT4BF's Zephyr drivers over the wz crates: their devicetree bindings must be on the
+# search path before Zephyr reads the devicetree.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../zephyr-eth-wzmac/zeth.cmake)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(wz_zephyr_admin_node C)
 
@@ -31,6 +34,28 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   set(backend_undefined
     socket bind getsockname sendto recvfrom poll close
     wzApplicationGetIpv4Address wzApplicationGetZid)
+
+  # The CYT4BF's ETH0 under Zephyr's own stack: the Ethernet driver over the wz MAC crate
+  # and the TRNG as the entropy device (overlays/t2g_zeth.overlay states both). The
+  # board's pieces they call are the ones the lwIP backend compiles below.
+  if(CONFIG_WZ_ZETH)
+    wz_zeth_driver()
+    list(APPEND backend_feature mac-cyt4bf zeth-driver)
+    set(pdl_src ${ZEPHYR_HAL_INFINEON_MODULE_DIR}/mtb-pdl-cat1/drivers/source)
+    target_sources(app PRIVATE
+      src/trng_cat1c.c
+      ${pdl_src}/cy_crypto_core_trng.c
+      ${pdl_src}/cy_crypto_core_hw.c
+      src/clock_cat1c.c)
+    if(CONFIG_WZ_CYT4BF_PINS_T2G_LITE)
+      target_sources(app PRIVATE boards/kit_t2g_b_h_lite/eth0_rmii_pins.c)
+    else()
+      message(FATAL_ERROR "wz: CONFIG_WZ_ZETH needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
+    endif()
+    list(APPEND backend_undefined
+      wz_board_eth_pins_init wz_board_entropy_fill
+      wz_zeth_open wz_zeth_transmit wz_zeth_receive wz_zeth_poll_link wz_zeth_link_up)
+  endif()
 
 elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
   set(backend_feature net-lwip-mac)
