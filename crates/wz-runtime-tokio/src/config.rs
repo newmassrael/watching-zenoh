@@ -3631,7 +3631,14 @@ mod tests {
     // ACL-only build — and with every arm excluded, `router_config()` itself was
     // dead code. A build that can now enforce deserves its admin shape pinned,
     // which is the same conclusion as removing the stale clause.
+    //
+    // ⚠ The clause was not free, only free of the CONDITION it named: the live ACL view
+    // (`acl_default`, `acl_deny`, `acl_rules`) reads `WzConfig::interceptors`, a field
+    // that exists only with `routing-peer`. A build with `access-acl` and no router (the
+    // C ABI's `interceptors` feature selects exactly that) therefore emits the base
+    // shape, which `to_admin_json_acl_without_routing_is_the_base_shape` pins.
     #[cfg(all(
+        feature = "routing-peer",
         feature = "access-acl",
         not(feature = "access-downsampling"),
         not(feature = "access-quota"),
@@ -3649,6 +3656,25 @@ mod tests {
         assert_eq!(
             router_config().to_admin_json(),
             r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"whatami":"router"}"#
+        );
+    }
+
+    #[cfg(all(
+        not(feature = "routing-peer"),
+        feature = "access-acl",
+        not(feature = "access-downsampling"),
+        not(feature = "access-quota"),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos"),
+        not(feature = "adminspace-core")
+    ))]
+    #[test]
+    fn to_admin_json_acl_without_routing_is_the_base_shape() {
+        // The ACL is enforced by the session, but the admin view of it is the router's
+        // config store, which this build does not have: no `acl_*` field is invented.
+        assert_eq!(
+            router_config().to_admin_json(),
+            r#"{"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"whatami":"router"}"#
         );
     }
 
