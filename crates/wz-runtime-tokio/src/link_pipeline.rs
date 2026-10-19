@@ -190,11 +190,14 @@ pub fn rx_busy_poll() -> std::time::Duration {
 /// read (bytes, end of stream or an error), `None` is a budget spent with nothing to read:
 /// the caller then waits on the reactor, which it registered with before this ran.
 #[cfg(unix)]
-fn busy_read(
-    raw: &std::net::TcpStream,
+fn busy_read<R>(
+    raw: &R,
     buf: &mut tokio::io::ReadBuf<'_>,
     budget: std::time::Duration,
-) -> Option<io::Result<()>> {
+) -> Option<io::Result<()>>
+where
+    for<'a> &'a R: io::Read,
+{
     // An empty buffer would read zero bytes, which a caller takes for the end of the stream.
     if buf.remaining() == 0 {
         return None;
@@ -687,14 +690,15 @@ pub fn wire_tcp_stream_with_lowlatency(
 mod tests {
     use super::*;
 
-    /// A non-blocking loopback pair of `std` streams: the reader (as `busy_read` is handed it)
-    /// and the writer.
+    /// A non-blocking connected pair: the reader (as `busy_read` is handed it) and the writer.
+    /// A socket pair of the OS, not a TCP connection: the read is the same `read(2)` on a
+    /// stream socket, and no port number is picked, held or released.
     #[cfg(unix)]
-    fn loopback_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let writer =
-            std::net::TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
-        let (reader, _) = listener.accept().expect("accept");
+    fn loopback_pair() -> (
+        std::os::unix::net::UnixStream,
+        std::os::unix::net::UnixStream,
+    ) {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         reader.set_nonblocking(true).expect("non-blocking");
         (reader, writer)
     }
