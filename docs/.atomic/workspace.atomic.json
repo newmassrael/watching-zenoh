@@ -276300,6 +276300,48 @@
         "wz's active acceptor still takes an Init of any version, where zenoh closes on a mismatch; the wz-internal 0x05 test profile depends on that. Whether the active side should refuse too is an open parity question, not decided here."
       ]
     },
+    "Round 3383": {
+      "decision_summary": "The selector verdict (selector_diagnose 7) gives each token the role the parser read it as: field, path, operator, value, function, logic or group, a family closed by @values. The lexer's kind cannot say it: in, contains and matches are words that fill an operator's slot, a list's values are words, len is a word naming a function, and the not of not in is half an operator. A consumer colouring a selector would otherwise rebuild the parser. A role is written when the parser reads a token into its slot, so it is ABSENT where the parser did not reach: past a refusal, over a selector the lexer refused, and on a word in a field's slot that names neither a field nor a path, since the lookup decides which and refused both. A value the field then refuses keeps role value. Brackets are all group. kind does not move.",
+      "changes_bullets": [
+        "crates/wz-capture/src/filter.rs: TokenRole and its words; LexedToken.role; Filter::parse_read returns the parse and a role per token; the Parser marks each slot as it reads it; diagnose_json writes role only where it is known; tests for the roles, for len and paths (dissect), and for the tokens the parser did not reach.",
+        "crates/wz-capture/src/doc_revision.rs: selector_diagnose revision 7 (key role, family TOKEN_ROLE_R7, both families passengers); the pinned current revision.",
+        "crates/wz-capture/src/fields_json.rs: the live walk table walks TokenRole::names; the carries population adds a selector holding every class read and the same lexed and never parsed.",
+        "crates/wz-capi-dissect: header contract and @values/@carries markers for role; Rust and C consumer literals at revision 7, and a C check of a list's roles."
+      ],
+      "verification_bullets": [
+        "pc2: wz-capture tests with all features (1525) and default (1212), including the role tests (the len and path one under dissect), the live walk table at 68, the carries axis over the widened selector population and the pinned current revisions; wz-capi-dissect tests; run-ci Layer C1bo pass with the C consumer checking a list's roles; doc_revision_consumer_pin.py rc 0; clippy -D warnings on wz-capture (both feature sets) and wz-capi-dissect.",
+        "The first pass was red in two tests (the pinned revision table at 6, a path the default build cannot resolve); both fixed and re-run.",
+        "NOT verified: any hosted run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The role of a token inside a list is per lexed token: `put,` is one value token though the list splits it into one value and a comma.",
+        "Hosted verdict of 4edd121ee (run 39265381257) was not read before this push; read it at the next round start."
+      ],
+      "publishable_decision_summary": "The selector verdict (selector_diagnose 7) gives each token the role the parser read it as: field, path, operator, value, function, logic or group, a family closed by @values. The lexer's kind cannot say it: in, contains and matches are words that fill an operator's slot, a list's values are words, len is a word naming a function, and the not of not in is half an operator. A consumer colouring a selector would otherwise rebuild the parser. A role is written when the parser reads a token into its slot, so it is ABSENT where the parser did not reach: past a refusal, over a selector the lexer refused, and on a word in a field's slot that names neither a field nor a path, since the lookup decides which and refused both. A value the field then refuses keeps role value. Brackets are all group. kind does not move.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/filter.rs: TokenRole and its words; LexedToken.role; Filter::parse_read returns the parse and a role per token; the Parser marks each slot as it reads it; diagnose_json writes role only where it is known; tests for the roles, for len and paths (dissect), and for the tokens the parser did not reach.",
+        "crates/wz-capture/src/doc_revision.rs: selector_diagnose revision 7 (key role, family TOKEN_ROLE_R7, both families passengers); the pinned current revision.",
+        "crates/wz-capture/src/fields_json.rs: the live walk table walks TokenRole::names; the carries population adds a selector holding every class read and the same lexed and never parsed.",
+        "crates/wz-capi-dissect: header contract and @values/@carries markers for role; Rust and C consumer literals at revision 7, and a C check of a list's roles."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: wz-capture tests with all features (1525) and default (1212), including the role tests (the len and path one under dissect), the live walk table at 68, the carries axis over the widened selector population and the pinned current revisions; wz-capi-dissect tests; run-ci Layer C1bo pass with the C consumer checking a list's roles; doc_revision_consumer_pin.py rc 0; clippy -D warnings on wz-capture (both feature sets) and wz-capi-dissect.",
+        "The first pass was red in two tests (the pinned revision table at 6, a path the default build cannot resolve); both fixed and re-run.",
+        "NOT verified: any hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The role of a token inside a list is per lexed token: `put,` is one value token though the list splits it into one value and a comma.",
+        "Hosted verdict of 4edd121ee (run 39265381257) was not read before this push; read it at the next round start."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
