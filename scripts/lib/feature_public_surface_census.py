@@ -279,15 +279,22 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # `publish_shm_aliased_all`, the model's shared-memory publish, which exists only where
     # the runtime's own `transport-shm` does. The row is PROSE and sits in `PROSE_ONLY`
     # while it is: the claim is about who consumes the crate, not about what the feature
-    # gates, and `wz-capi-core`'s other non-default features gate no public item.
+    # gates. The node-config features join it: `access-extauth-usrpwd` gates `NodeAuth` (the
+    # credentials a node's config states) and `interceptors` gates `NodePolicy` (its
+    # `access_control`, `low_pass_filter` and `downsampling`). The zenoh-c ABI crate turns both
+    # on unconditionally and the pico ABI crate neither, so what a program reaches is that
+    # crate's symbols, and the items are exercised through `z_open` by its `listener_auth` and
+    # `interceptors*` legs, with a control beside every refusal.
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
-        "consumers are the two C ABI crates, and the one of them that turns this "
-        "feature on does it from its own shared-memory arm (`wz-capi-c`'s "
-        "`zenoh-c-shared-memory`). What a C program can reach is that crate's "
-        "symbol set, graded against upstream's own library, and the gated methods "
-        "are exercised by that arm's legs against upstream's own subscriber",
-        frozenset({"transport-shm"}),
+        "consumers are the two C ABI crates, and the one of them that turns the "
+        "shared-memory feature on does it from its own shared-memory arm "
+        "(`wz-capi-c`'s `zenoh-c-shared-memory`). What a C program can reach is "
+        "that crate's symbol set, graded against upstream's own library, and the "
+        "gated methods are exercised by that arm's legs against upstream's own "
+        "subscriber; the node-config features are turned on by `wz-capi-c` alone "
+        "and driven through `z_open` by its own legs",
+        frozenset({"transport-shm", "access-extauth-usrpwd", "interceptors"}),
     ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
