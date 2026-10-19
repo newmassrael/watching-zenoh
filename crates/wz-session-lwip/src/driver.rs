@@ -339,6 +339,17 @@ impl BoxedLinkDriver for LwipUdpDriver {
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
         self.endpoints.get()
     }
+
+    // The widest datagram this socket carries, either way: it receives at most
+    // `SESSION_RX_SLOT_SIZE` bytes per datagram and lends at most that much to
+    // send (`alloc_tx_payload` caps `want` at it). Declaring it bounds the
+    // session's send budget (`min(link mtu, negotiated batch)`), so a message
+    // past it fragments, or is refused as oversize, instead of being encoded
+    // into a lend too short to hold it. Under `buffer-pool-session-rx-slim` it
+    // is 256 bytes, below any batch size a handshake negotiates.
+    fn link_mtu(&self) -> usize {
+        SESSION_RX_SLOT_SIZE
+    }
 }
 
 // The driver's tests share sockets and drivers by `Rc`, the form every profile

@@ -55,7 +55,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use wz_link_lwip::rx_sockets::SessionRxSocket;
+use wz_link_lwip::rx_sockets::{SessionRxSocket, SESSION_RX_SLOT_SIZE};
 // The binder of `test_bind`: the constructor itself by default, and with
 // `static-link-storage` also on (the two selectors compose, and `--all-features`
 // turns both on) a socket claimed from a pool of one cell that the test leaks. Every
@@ -75,8 +75,12 @@ use wz_runtime_coop::{
 use wz_runtime_core::TimeSource;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
+#[cfg(not(feature = "transport-fragmentation"))]
+use wz_session_core::link::LinkDropCause;
 use wz_session_core::locality::Locality;
 use wz_session_core::observer::ApplicationLayerObserver;
+#[cfg(not(feature = "transport-fragmentation"))]
+use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -706,8 +710,26 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
     for _ in 0..4 {
         pass(&local);
     }
-    let payload = [0x5au8; 512];
-    for len in [1usize, 8, 64, 512] {
+    // The sizes a Put is sent at are the ones the link carries whole: the send budget
+    // is `min(link mtu, negotiated batch)`, 1024 on the default pool and 256 on the
+    // slim one, and half of it leaves room for the frame's header and the Put's key.
+    let budget = initiator_actions.negotiated_batch_mtu();
+    assert_eq!(
+        budget,
+        acceptor_actions.negotiated_batch_mtu(),
+        "both ends send on the same budget"
+    );
+    assert!(
+        budget <= SESSION_RX_SLOT_SIZE,
+        "the send budget {budget} is past the {SESSION_RX_SLOT_SIZE} bytes the link carries"
+    );
+    // As wide as the link, so on the slim pool it is past the link while inside any
+    // batch a handshake negotiates: the case that tells the link's bound from none.
+    let payload = vec![0x5au8; budget.max(SESSION_RX_SLOT_SIZE)];
+    for len in [1usize, 8, 64, 512]
+        .into_iter()
+        .filter(|&len| len <= budget / 2)
+    {
         let (a_before, i_before) = (
             acceptor_seen.puts.load(Ordering::SeqCst),
             initiator_seen.puts.load(Ordering::SeqCst),
@@ -724,6 +746,27 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
         costs.check(&format!("a Put of {len} bytes each way"), n);
         assert_eq!(acceptor_seen.puts.load(Ordering::SeqCst), a_before + 1);
         assert_eq!(initiator_seen.puts.load(Ordering::SeqCst), i_before + 1);
+    }
+    // A Put the link cannot carry whole, with no fragmentation to split it, is refused
+    // as OVERSIZE before anything is encoded: it is not a lend too short to hold it
+    // (`NoTxSlot`, which says the pool ran dry and the next send may find room).
+    #[cfg(not(feature = "transport-fragmentation"))]
+    {
+        let (refused, n) = m.count("a Put past the link", || {
+            initiator_actions.send_push_literal(KEY, &payload, true)
+        });
+        assert_eq!(
+            refused,
+            Err(SendWireError::LinkRefused(LinkDropCause::Oversize)),
+            "a Put of {} bytes on a link whose budget is {budget}",
+            payload.len()
+        );
+        // The refusal is free of the heap where nothing may allocate; on the heap
+        // profile it is only printed, since nothing requires that profile to spend.
+        #[cfg(feature = "session-slot")]
+        costs.check_free("a Put refused as past the link", n);
+        #[cfg(not(feature = "session-slot"))]
+        println!("a Put refused as past the link: {n} allocation(s)");
     }
     let ((), n) = m.count("a keep-alive each way", || {
         initiator_actions.send_keep_alive();
