@@ -1588,13 +1588,29 @@ pub struct PlainFaceExecutor;
 
 impl FaceExecutor for PlainFaceExecutor {}
 
-/// The two things a loop needs to spawn faces instead of holding their drives itself.
+/// Where a spawned face's drive runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnOn {
+    /// On the runtime's workers: N faces are driven by up to N threads at once.
+    Workers,
+    /// As a local task of the thread the loop itself runs on (inside a `LocalSet`): the faces
+    /// are still driven one thread at a time, which is the contract of a node whose callbacks
+    /// are serial, but each face is woken by its own socket instead of through the loop's
+    /// task. That saves, for every frame, the loop polling each of its other arms (the
+    /// listeners, the dial and multicast channels, the opens in flight) to find the one drive
+    /// that was ready.
+    LocalSet,
+}
+
+/// The things a loop needs to spawn faces instead of holding their drives itself.
 pub struct SpawnedFaces {
-    /// The forwarder, shared with every spawned drive. `Sync` because the drives call it
-    /// from different threads at once.
+    /// The forwarder, shared with every spawned drive. `Sync` because, on [`SpawnOn::Workers`],
+    /// the drives call it from different threads at once.
     pub forwarder: Arc<dyn FaceForwarder + Send + Sync>,
     /// How each drive is wrapped before it is spawned.
     pub executor: Arc<dyn FaceExecutor>,
+    /// Where each drive runs.
+    pub on: SpawnOn,
 }
 
 /// [`drive_face`] owning its forwarder handle, as a spawned drive must.
@@ -2756,7 +2772,10 @@ where
                                 opened,
                                 Arc::clone(&spawn.forwarder),
                             )));
-                            let task = spawned_drives.spawn(drive);
+                            let task = match spawn.on {
+                                SpawnOn::Workers => spawned_drives.spawn(drive),
+                                SpawnOn::LocalSet => spawned_drives.spawn_local(drive),
+                            };
                             spawned_faces.insert(task.id(), face);
                         } else {
                             #[cfg(not(feature = "transport-multilink"))]
@@ -3421,6 +3440,72 @@ where
     S: Future<Output = ()>,
     F: FnMut(&AcceptEvent),
 {
+    accept_loop_spawned_on(
+        SpawnOn::Workers,
+        listener,
+        params,
+        offer,
+        clock,
+        tick_interval_ms,
+        shutdown,
+        on_event,
+        forwarder,
+        executor,
+    )
+    .await
+}
+
+/// [`accept_loop_offering_spawned`] with each face's drive a LOCAL task of the thread the loop
+/// runs on ([`SpawnOn::LocalSet`]): one thread drives every face, as in [`accept_loop_offering`],
+/// and each face is woken on its own. Must run inside a `LocalSet`.
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_loop_offering_spawned_local<S, F>(
+    listener: BoundListener,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    shutdown: S,
+    on_event: F,
+    forwarder: Arc<dyn FaceForwarder + Send + Sync>,
+    executor: Arc<dyn FaceExecutor>,
+) -> AcceptLoopSummary
+where
+    S: Future<Output = ()>,
+    F: FnMut(&AcceptEvent),
+{
+    accept_loop_spawned_on(
+        SpawnOn::LocalSet,
+        listener,
+        params,
+        offer,
+        clock,
+        tick_interval_ms,
+        shutdown,
+        on_event,
+        forwarder,
+        executor,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn accept_loop_spawned_on<S, F>(
+    on: SpawnOn,
+    listener: BoundListener,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    shutdown: S,
+    on_event: F,
+    forwarder: Arc<dyn FaceForwarder + Send + Sync>,
+    executor: Arc<dyn FaceExecutor>,
+) -> AcceptLoopSummary
+where
+    S: Future<Output = ()>,
+    F: FnMut(&AcceptEvent),
+{
     let control: &dyn FaceForwarder = &*forwarder;
     face_drive_loop(
         accept_only_sources(listener, offer),
@@ -3434,6 +3519,7 @@ where
             spawned: Some(SpawnedFaces {
                 forwarder: Arc::clone(&forwarder),
                 executor,
+                on,
             }),
         },
     )
@@ -4448,11 +4534,23 @@ mod tests {
         opened.drain_to_close().await;
     }
 
-    /// Four chatty peers against an accept-only node whose forwarder is the
-    /// [`OverlapProbe`], once with each face's drive SPAWNED and once with the drives held
-    /// in the loop's own task. Returns the loop's summary and the probe.
+    /// How the accept-only node of [`overlap_run`] drives its faces.
     #[cfg(feature = "codec-push")]
-    async fn overlap_run(spawned: bool) -> (AcceptLoopSummary, Arc<OverlapProbe>) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Drive {
+        /// Held inside the loop's own task.
+        Held,
+        /// Spawned on the runtime's workers.
+        Workers,
+        /// Spawned as local tasks of the loop's own thread (inside a `LocalSet`).
+        Local,
+    }
+
+    /// Four chatty peers against an accept-only node whose forwarder is the
+    /// [`OverlapProbe`], with each face's drive driven as `drive` says. Returns the loop's
+    /// summary and the probe.
+    #[cfg(feature = "codec-push")]
+    async fn overlap_run(drive: Drive) -> (AcceptLoopSummary, Arc<OverlapProbe>) {
         const N: usize = 4;
         let (listener, addr) = bind_loopback().await;
         let (go_tx, go_rx) = watch::channel(false);
@@ -4467,31 +4565,48 @@ mod tests {
         };
         let probe = Arc::new(OverlapProbe::default());
         let acceptor = async {
-            if spawned {
-                accept_loop_offering_spawned(
-                    listener,
-                    acceptor_params(),
-                    SessionOffer::universal(),
-                    TokioTime::new(),
-                    DEFAULT_OPEN_TICK_MS,
-                    shutdown_on(go_rx.clone()),
-                    on_event,
-                    probe.clone(),
-                    Arc::new(PlainFaceExecutor),
-                )
-                .await
-            } else {
-                accept_loop_offering(
-                    listener,
-                    acceptor_params(),
-                    SessionOffer::universal(),
-                    TokioTime::new(),
-                    DEFAULT_OPEN_TICK_MS,
-                    shutdown_on(go_rx.clone()),
-                    on_event,
-                    &*probe,
-                )
-                .await
+            match drive {
+                Drive::Workers => {
+                    accept_loop_offering_spawned(
+                        listener,
+                        acceptor_params(),
+                        SessionOffer::universal(),
+                        TokioTime::new(),
+                        DEFAULT_OPEN_TICK_MS,
+                        shutdown_on(go_rx.clone()),
+                        on_event,
+                        probe.clone(),
+                        Arc::new(PlainFaceExecutor),
+                    )
+                    .await
+                }
+                Drive::Local => {
+                    accept_loop_offering_spawned_local(
+                        listener,
+                        acceptor_params(),
+                        SessionOffer::universal(),
+                        TokioTime::new(),
+                        DEFAULT_OPEN_TICK_MS,
+                        shutdown_on(go_rx.clone()),
+                        on_event,
+                        probe.clone(),
+                        Arc::new(PlainFaceExecutor),
+                    )
+                    .await
+                }
+                Drive::Held => {
+                    accept_loop_offering(
+                        listener,
+                        acceptor_params(),
+                        SessionOffer::universal(),
+                        TokioTime::new(),
+                        DEFAULT_OPEN_TICK_MS,
+                        shutdown_on(go_rx.clone()),
+                        on_event,
+                        &*probe,
+                    )
+                    .await
+                }
             }
         };
         let initiators = (0..N).map(|i| chatty_initiator(addr, (i as u8) + 1, 60, go_rx.clone()));
@@ -4521,7 +4636,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn spawned_faces_are_driven_in_parallel() {
-        let (summary, probe) = overlap_run(true).await;
+        let (summary, probe) = overlap_run(Drive::Workers).await;
         assert_eq!(summary.established, 4, "all four peers are held");
         let calls = probe.calls.load(SeqCst);
         assert!(calls > 20, "the probe saw the traffic ({calls} calls)");
@@ -4540,7 +4655,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn held_faces_are_driven_one_at_a_time() {
-        let (summary, probe) = overlap_run(false).await;
+        let (summary, probe) = overlap_run(Drive::Held).await;
         assert_eq!(summary.established, 4, "all four peers are held");
         let calls = probe.calls.load(SeqCst);
         assert!(calls > 20, "the probe saw the traffic ({calls} calls)");
@@ -4548,6 +4663,31 @@ mod tests {
             probe.deepest.load(SeqCst),
             1,
             "a loop that holds the drives itself never has two inside the forwarder"
+        );
+    }
+
+    /// With each face's drive a LOCAL task, all four peers are held and driven, and the
+    /// forwarder is still entered by one call at a time on ONE thread: the drives are separate
+    /// tasks, but they share the thread, which is the contract of a node with serial
+    /// callbacks. It is the control of [`spawned_faces_are_driven_in_parallel`] on the other
+    /// side: what the local spawn keeps is what the worker spawn gives up.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_faces_are_driven_one_at_a_time_on_one_thread() {
+        let local = tokio::task::LocalSet::new();
+        let (summary, probe) = local.run_until(overlap_run(Drive::Local)).await;
+        assert_eq!(summary.established, 4, "all four peers are held");
+        let calls = probe.calls.load(SeqCst);
+        assert!(calls > 20, "the probe saw the traffic ({calls} calls)");
+        assert_eq!(
+            probe.deepest.load(SeqCst),
+            1,
+            "local tasks of one thread never have two inside the forwarder"
+        );
+        assert_eq!(
+            probe.threads.lock().expect("probe threads").len(),
+            1,
+            "every face's drive ran on the one thread"
         );
     }
 

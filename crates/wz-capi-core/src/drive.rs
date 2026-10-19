@@ -28,8 +28,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use wz_runtime_tokio::accept_loop::{
-    accept_loop_offering, accept_loop_offering_spawned, DialIntent, DialIntentReceiver,
-    DialIntentSender, FaceExecutor, SpawnedDrive,
+    accept_loop_offering_spawned, accept_loop_offering_spawned_local, DialIntent,
+    DialIntentReceiver, DialIntentSender, FaceExecutor, SpawnedDrive,
 };
 use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
@@ -2954,6 +2954,22 @@ impl FaceExecutor for GateFaces {
     }
 }
 
+/// The [`FaceExecutor`] of a [`FaceDrive::Serial`] node: every face's drive is a local task of
+/// the drive thread, polled only while the node's read task may run, as the top-level drive is
+/// ([`Pausable`]), and is one of the futures a stop waits for. The thread is the same one that
+/// runs every callback, so a program's callbacks stay serial; what each face no longer shares
+/// is the accept loop's task, which would otherwise be polled again, with all its arms, for
+/// every frame of every face.
+struct SerialFaces {
+    gate: Arc<ReadGate>,
+}
+
+impl FaceExecutor for SerialFaces {
+    fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
+        Box::pin(Pausable::new(self.gate.clone(), drive))
+    }
+}
+
 /// Accept on a bound listener until `shutdown`, driving every accepted peer as the session's
 /// [`FaceDrive`] says.
 ///
@@ -2987,7 +3003,7 @@ async fn accept_faces(
     let Listening { listener, params } = listening;
     match gate.face_drive() {
         FaceDrive::Serial => {
-            let _summary = accept_loop_offering(
+            let _summary = accept_loop_offering_spawned_local(
                 listener,
                 params,
                 offer,
@@ -2995,7 +3011,8 @@ async fn accept_faces(
                 DEFAULT_OPEN_TICK_MS,
                 shutdown,
                 |_event| {},
-                &*forwarder,
+                forwarder,
+                Arc::new(SerialFaces { gate: gate.clone() }),
             )
             .await;
         }
