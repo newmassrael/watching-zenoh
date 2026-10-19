@@ -15,7 +15,7 @@ changelog that authorized the bump.
 ## vendor/sce — SCXML Core Engine
 
 - **Origin**: https://github.com/newmassrael/scxml-core-engine
-- **Commit pin**: `ce73a64c59` (2026-10-18)
+- **Commit pin**: `4fca48a61e` (2026-10-19)
 - **License**: dual-licensed — AGPL-3.0-only WITH SCE Linking
   Exception OR LicenseRef-SCE-Commercial. See
   `vendor/sce/LICENSE` for the full text. Before the Round 3008 pin
@@ -38,8 +38,18 @@ changelog that authorized the bump.
   `sce-codegen` generation-time policy (see `LICENSE-GENERATED.md` in
   the SCE repo at the pinned revision, which states the two
   conditions: an unmodified generator, and a work that is not a
-  competing product).
-- **Upstream-tracking**: the 2026-10-18 pin moved from `c24887ceb9` to
+  competing product). Two crates of this repository do link SCE crates at
+  build time, as path dependencies on the unmodified submodule:
+  `wz-statechart-bridge` links `sce-rust-runtime`, and `wz-mesh-client`
+  links `sce-rust-mesh` for the trait its Zenoh binding asks a client to
+  implement.
+- **Upstream-tracking**: the 2026-10-19 pin moved from `ce73a64c59` to
+  `4fca48a61e` (57 commits on) for the client trait and the conformance
+  kit that `sce-rust-mesh` gained for its Zenoh binding, which
+  `wz-mesh-client` implements and is held to. The range changes four
+  files of the runtime and template directories this tree builds from,
+  and SCE's license files do not differ across it. The 2026-10-18 pin
+  moved from `c24887ceb9` to
   `ce73a64c59` (11 commits on) for one repair: the queue runtime no longer
   compiled the modules that need read-modify-write atomics on a target
   that lacks them, so `sce-forge-runtime` built again for
