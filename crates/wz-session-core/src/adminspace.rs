@@ -2171,6 +2171,12 @@ fn key_intersects_query_by_chunks(query: &str, key: &str) -> bool {
     crate::keyexpr_match::keyexpr_intersects_target(query, &chunks)
 }
 
+/// The bytes reserved for the key buffer of one admin answer: `@/<zid>/<whatami>/` is 17 bytes
+/// of a 12-hex-digit MCU node and the longest fixed leg tail is `status/connect`; a key past it
+/// (a 32-digit zid, a per-entity key) grows the buffer as before.
+#[cfg(feature = "alloc")]
+const ADMIN_KEY_RESERVE: usize = 64;
+
 /// What a node tells in its admin replies, for [`answer_admin_query_in`]: its
 /// identity and the rows it holds, each as a borrowed view or an iterator over
 /// them. Nothing here is copied into an owned record, so a node that keeps its
@@ -2691,7 +2697,11 @@ pub fn answer_admin_query(
     plugins: &[AdminPlugin],
     config_json: &str,
 ) -> AdminAnswerOutcome {
-    let mut key = String::new();
+    // The key buffer is written for every leg the GET is tried against (its intersection with the
+    // query is what decides whether the leg answers), so it is always used and starts at the size
+    // of a node's longest leg key; grown from empty it was three allocations for a key of 40
+    // bytes. The body buffer is used only by a leg that answers, so it stays lazy.
+    let mut key = String::with_capacity(ADMIN_KEY_RESERVE);
     let mut body = String::new();
     // On the AP no refusal is possible (`String` buffers do not fill and the
     // growable stage takes every reply), and a stage refusal has been logged.

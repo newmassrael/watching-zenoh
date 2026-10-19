@@ -277,6 +277,11 @@ impl NodeStatus {
     }
 }
 
+/// The bytes of stack a `status/connect` document is first written into: the document of a node
+/// with a handful of endpoints (about 65 bytes, and 80 for each endpoint) fits.
+#[cfg(not(feature = "session-slot"))]
+const STATUS_DOC_STACK: usize = 512;
+
 /// Register the node's admin queryable on `observer`.
 ///
 /// Every GET under `@/<zid>/<whatami>` is answered by `answer_admin_query`
@@ -330,8 +335,23 @@ pub fn host_admin_queryable(
         if read {
             if let Some(source) = connect {
                 if asked.intersects(&status_key) {
-                    let mut body = String::new();
-                    connect_status_json(source, &status.endpoints(), &mut body);
+                    let endpoints = status.endpoints();
+                    // The document is written into a buffer on the stack; one that does not
+                    // fit it (a node dialling many endpoints) is written again into a
+                    // `String`, so no document is cut and the common one allocates nothing.
+                    let mut stack: wz_session_core::text_out::FixedText<STATUS_DOC_STACK> =
+                        wz_session_core::text_out::FixedText::new();
+                    connect_status_json(source, &endpoints, &mut stack);
+                    let heap;
+                    let body: &str = match stack.finish() {
+                        Ok(text) => text,
+                        Err(_) => {
+                            let mut grown = String::new();
+                            connect_status_json(source, &endpoints, &mut grown);
+                            heap = grown;
+                            &heap
+                        }
+                    };
                     // A reply that cannot be sent is what upstream logs and
                     // moves past; this crate has no log channel, and there is
                     // nothing else to do with it, so it is dropped here.
@@ -719,6 +739,46 @@ mod tests {
             (false, true, false),
             "one chunk: config only"
         );
+    }
+
+    /// The `status/connect` document is written on the stack when it fits and into a `String`
+    /// when it does not, and the two are the same document: a node dialling enough endpoints that
+    /// the document passes the stack buffer still answers it whole, the last endpoint included.
+    #[test]
+    fn a_status_document_larger_than_the_stack_buffer_is_answered_whole() {
+        static STATUS: NodeStatus = NodeStatus::new(true);
+        let (mut on_event, peer) = rig(&STATUS);
+        let rows = |count: usize| {
+            (0..count)
+                .map(|i| EndpointStatus {
+                    endpoint: alloc::format!("udp/10.0.{}.{}:7447", i / 200, i % 200 + 1),
+                    status: DialStatus::Waiting { retry_in_ms: 2000 },
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut document_of = |rid: u64| {
+            on_event(IterationEvent::Poll(&get(
+                "@/b2a1/peer/status/connect",
+                rid,
+            )));
+            let mut seen = Vec::new();
+            while let Some(frame) = peer.try_recv() {
+                seen.extend_from_slice(&frame.bytes);
+            }
+            seen
+        };
+        // A few endpoints: inside the stack buffer.
+        STATUS.set_endpoints(rows(3));
+        let small = document_of(1);
+        std::assert!(small.windows(17).any(|w| w == b"udp/10.0.0.3:7447"));
+        // Past it: 512 bytes hold the document of about five endpoints, so thirty overflow.
+        STATUS.set_endpoints(rows(30));
+        let large = document_of(2);
+        std::assert!(
+            large.windows(18).any(|w| w == b"udp/10.0.0.30:7447"),
+            "the last of thirty endpoints is in the document the stack buffer could not hold"
+        );
+        std::assert!(large.len() > 512, "the document passed the stack buffer");
     }
 
     /// The admin GET the node answers most, repeated, for a profiler to run under: `valgrind
