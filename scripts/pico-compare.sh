@@ -141,7 +141,16 @@ one_thr() {
     compose "$pv" "$pub_cpus" timeout 12 "$out/bin/z_pub_thr_$pv" -m peer -e "tcp/127.0.0.1:$port" -s "$size"
     "${CMD[@]}" >"$dir/pub" 2>&1
     wait "$sub" 2>/dev/null
-    echo "  $direction pub=$pv sub=$sv size=$size rep$rep: msg/s $(median "$dir/sub" 3)"
+    local result lines
+    result="$(median "$dir/sub" 3)"
+    echo "  $direction pub=$pv sub=$sv size=$size rep$rep: msg/s $result"
+    # A run that delivered few measurement lines did not run at full rate, or did not run: say what
+    # each side printed last, because a number taken from three lines is not a rate to compare.
+    lines="${result##*n=}"
+    if [ "$result" = "no samples" ] || [ "${lines:-0}" -lt 20 ]; then
+        echo "    publisher said: $(tail -n 2 "$dir/pub" | tr '\n' '|')"
+        echo "    subscriber said: $(tail -n 2 "$dir/sub" | tr '\n' '|')"
+    fi
     rm -rf "$dir"
 }
 
@@ -156,6 +165,9 @@ thr() {
             one_thr TX W W "$size" "$rep"
             one_thr RX W P "$size" "$rep"
             one_thr RX W W "$size" "$rep"
+            # the control: pico on both sides, which says whether a pico side that collapses does so
+            # against any peer or only against wz
+            one_thr CONTROL P P "$size" "$rep"
         done
     done
 }
