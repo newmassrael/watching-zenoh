@@ -126,6 +126,11 @@ UPSTREAM_REL = pathlib.Path("commons", "zenoh-protocol", "src", "core",
 FN_RE = re.compile(r"fn sn_res_word\(.*?\)\s*->\s*&'static str\s*\{(?P<body>.*?)\n\}",
                    re.S)
 ARM_RE = re.compile(r"(?P<code>0b[01]{1,8}|_)\s*=>\s*\"(?P<word>[^\"]+)\"")
+# The other form `sn_res_word` has taken (ac8e93ffc): no match, one index into the const that
+# `crate::dissect_schema` also reads, so the words are written once. The index IS the code, which
+# is why the expression below has to be exactly the two-bit mask and nothing wider.
+INDEX_RE = re.compile(r"SN_RES_WORDS\[usize::from\(code\s*&\s*0b11\)\]")
+ARRAY_RE = re.compile(r"const SN_RES_WORDS:\s*\[&str;\s*4\]\s*=\s*\[(?P<items>[^\]]*)\];")
 CONST_STR_RE = re.compile(r"^const (?P<name>[A-Z0-9_]+):\s*&str\s*=\s*\"(?P<val>[^\"]+)\";",
                           re.M)
 CONST_U8_RE = re.compile(r"^const (?P<name>[A-Z0-9_]+):\s*u8\s*=\s*(?P<val>\d+);", re.M)
@@ -146,6 +151,15 @@ def wz_mapping(text: str) -> dict[int, str]:
     fn = FN_RE.search(text)
     if not fn:
         return {}
+    if INDEX_RE.search(fn.group("body")):
+        # The function indexes the const, so the const IS the mapping: position = code. Four
+        # words or nothing -- a const of another length is a function this reader cannot vouch
+        # for, and no answer reds where a guessed one would pass.
+        array = ARRAY_RE.search(text)
+        if not array:
+            return {}
+        words = re.findall(r'"([^"]*)"', array.group("items"))
+        return dict(enumerate(words)) if len(words) == 4 else {}
     out: dict[int, str] = {}
     catch_all: str | None = None
     for arm in ARM_RE.finditer(fn.group("body")):
@@ -242,7 +256,8 @@ def check_all(dissect_text: str, interop_text: str,
 
     wz = wz_mapping(dissect_text)
     if not wz:
-        fail.append(f"  sn-res-words FAIL: no `sn_res_word` match arm was parsed out "
+        fail.append(f"  sn-res-words FAIL: no `sn_res_word` answer (a match arm, or the "
+                    f"`SN_RES_WORDS` index and its four words) was parsed out "
                     f"of\n    {DISSECT}. That is the reader having stopped reading, "
                     f"not the\n    function having no answers -- a population of zero "
                     f"is not a pass.")
@@ -346,6 +361,11 @@ _GOOD_FN = ('fn sn_res_word(code: u8) -> &\'static str {\n'
             '    }\n'
             '}\n')
 
+_INDEXED_FN = ('fn sn_res_word(code: u8) -> &\'static str {\n'
+               '    SN_RES_WORDS[usize::from(code & 0b11)]\n'
+               '}\n\n'
+               'pub(crate) const SN_RES_WORDS: [&str; 4] = ["8bit", "16bit", "32bit", "64bit"];\n')
+
 _GOOD_INTEROP = ('const NON_DEFAULT_RESOLUTION: &str = "16bit";\n'
                  'const NON_DEFAULT_RES_CODE: u8 = 1;\n'
                  'const DEFAULT_RESOLUTION: &str = "32bit";\n'
@@ -387,6 +407,18 @@ def selftest(tmp: pathlib.Path) -> int:
          wz_mapping(_GOOD_FN.replace('        0b01 => "16bit",\n', "")) == {})
     case("a function this reader cannot find yields NO mapping, not a pass",
          wz_mapping("fn something_else() {}") == {})
+
+    # The indexed form (ac8e93ffc): the const is the mapping.
+    case("the indexed form maps all four codes from the const",
+         wz_mapping(_INDEXED_FN) == WORDS)
+    case("a reordered const is a different mapping",
+         wz_mapping(_INDEXED_FN.replace('"16bit", "32bit"', '"32bit", "16bit"')) != WORDS)
+    case("an indexed function whose const is gone yields NO mapping",
+         wz_mapping(_INDEXED_FN.split("pub(crate) const")[0]) == {})
+    case("a const of another length yields NO mapping",
+         wz_mapping(_INDEXED_FN.replace('; 4]', '; 3]').replace(', "64bit"', "")) == {})
+    case("an index wider than the two-bit mask is not read as the mapping",
+         wz_mapping(_INDEXED_FN.replace("0b11)", "0b111)")) == {})
 
     case("the interop pairs are read whole",
          interop_pairs(_GOOD_INTEROP)
@@ -431,15 +463,20 @@ def selftest(tmp: pathlib.Path) -> int:
     rc0, _ = verdict(dis, inter, pin)
     case("the shipped tree passes", rc0 == 0)
 
-    rc1, why = verdict(dis.replace('0b10 => "32bit"', '0b10 => "32bits"'),
-                       inter, pin)
+    # The mutation is the word the shipped function answers with, wherever it lives: the const
+    # when the function indexes it, the match arm when it does not. Asserting the replace moved
+    # something is the control that this case still mutates anything (see R2534's note below).
+    renamed = dis.replace('"32bit", "64bit"]', '"32bits", "64bit"]').replace(
+        '0b10 => "32bit"', '0b10 => "32bits"')
+    case("the renamed-word mutation changes the shipped text", renamed != dis)
+    rc1, why = verdict(renamed, inter, pin)
     case("a renamed word in sn_res_word reds",
          rc1 == 1 and "is `32bits` in" in why)
 
     rc2, why = verdict(dis.replace("fn sn_res_word", "fn sn_res_word_renamed"),
                        inter, pin)
     case("a function this gate cannot find reds rather than passing",
-         rc2 == 1 and "no `sn_res_word` match arm was parsed" in why)
+         rc2 == 1 and "no `sn_res_word` answer" in why)
 
     rc3, why = verdict(dis, inter.replace('DEFAULT_RESOLUTION: &str = "32bit"',
                                           'DEFAULT_RESOLUTION: &str = "8bit"'), pin)
