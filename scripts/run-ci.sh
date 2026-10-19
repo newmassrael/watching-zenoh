@@ -21013,23 +21013,26 @@ layer_e7s_router_hat_data_plane_scaling() {
 # kit's functions run against a real `--router-hat` router, so the claim that this client does what
 # upstream's does is a test and not a sentence.
 #
-# Nine tests in one file. Four run the kit: two machines meeting and one reaching the other's
+# Ten tests in one file. Four run the kit: two machines meeting and one reaching the other's
 # engine, a machine that goes away being told as lost, the offline catch-up of a shared list, and
-# the first of those across two federated routers. One holds what the kit cannot see: the congestion
-# control a put leaves with, read off the sample a raw wz session receives. Four hold the raw
-# capabilities the binding rides on, with a demo process as the client and then with the library.
-# Two mutations were measured to turn them red: presence history switched off fails the four kit
-# tests, and a put sent as `Drop` fails the congestion one.
+# the first of those across two federated routers. Two hold what the kit cannot see: the congestion
+# control a put leaves with, read off the sample a raw wz session receives, and what a put does when
+# the router has stopped reading (it ends in a retryable refusal after the room it waits for, the
+# session close is not starved by the callers, and dropping the client returns; about twenty
+# seconds, because the wait is the point). Four hold the raw capabilities the binding rides on, with
+# a demo process as the client and then with the library. Two mutations were measured to turn them
+# red: presence history switched off fails the four kit tests, and a put sent as `Drop` fails the
+# congestion one.
 #
 # The build is the demo as a router WITH the liveliness plane (`routing-token-tables`), which the
 # binding's readiness rides on. It is not E7s's build: E7s measures a router and must not carry a
 # feature that changes what it measures. Every test fn name carries `wz_router_hat_`, because the
 # default Layer E sweep skips by the TEST name (`--skip wz_router`) and not by the file's, so the
-# `--skip` leaves all nine to this lane. The count guard is 9 so that a dropped `#[ignore]` (selecting none) or a renamed
-# test reddens.
+# `--skip` leaves all ten to this lane. The count guard is 10 so that a dropped `#[ignore]`
+# (selecting none) or a renamed test reddens.
 layer_e7m_wz_mesh_client_conformance() {
     (cd crates && cargo build -p wz-ap-demo --no-default-features --features preset-ap-client,router-hat-router,routing-token-tables --quiet) || return 1
-    _runci_guarded_test "E7m wz mesh client conformance" 9 \
+    _runci_guarded_test "E7m wz mesh client conformance" 10 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_serves_a_wz_client_the_way_the_sce_zenoh_inbox_does -- --ignored --nocapture --test-threads=1 --quiet || return 1
 }

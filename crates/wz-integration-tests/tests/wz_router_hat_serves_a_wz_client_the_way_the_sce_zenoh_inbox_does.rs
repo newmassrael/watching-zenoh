@@ -178,6 +178,19 @@ impl Node {
         let _ = child.kill();
         let _ = child.wait();
     }
+
+    /// Freeze the process where it stands (SIGSTOP): its sockets stay open and it reads nothing
+    /// more, which is a peer that has stopped taking what it is sent, not one that has gone.
+    fn freeze(&mut self) {
+        // SAFETY: a signal sent to a child this struct owns, whose pid is still ours until waited.
+        unsafe { libc::kill(self.guard.child_mut().id() as libc::pid_t, libc::SIGSTOP) };
+    }
+
+    /// Let a frozen process run again (SIGCONT).
+    fn thaw(&mut self) {
+        // SAFETY: as in `freeze`.
+        unsafe { libc::kill(self.guard.child_mut().id() as libc::pid_t, libc::SIGCONT) };
+    }
 }
 
 fn spawn(demo: &Path, label: &str, args: &[&str]) -> Node {
@@ -735,6 +748,101 @@ fn wz_router_hat_forwards_a_wz_client_put_with_block_congestion_control() {
         );
         drop(client);
     });
+}
+
+/// What a put does when the peer has stopped taking what it is sent. The binding puts with `Block`,
+/// which waits for room instead of dropping, and a wz session waits at most `wait_before_close`
+/// (5 seconds by upstream's default) before it gives the peer up as unresponsive and closes the
+/// session. `WzClient` runs the session and its callers' puts on one thread, so three things are
+/// held here, each of which a client could get wrong:
+///
+/// - the wait ENDS, and is not reported as success: the put that waited its whole room answers
+///   with a retryable error that says there was no room (a wz publish answers `Ok` there, as
+///   upstream's does, and the client turns that into the refusal the binding asks for, section
+///   20.2 of SCE_MESH.md: an envelope that was not placed is not reported as sent);
+/// - the session closing is not starved by callers: no later put waits its room again, so at most
+///   one put waits the full time, whatever the callers send next;
+/// - dropping the client returns.
+///
+/// The writer that drains the queue lives on wz's own transmit runtime and not on the session's
+/// thread, which is what makes the wait a wait and not a deadlock.
+///
+/// A router that is frozen after the client has connected is the peer. The payloads are large
+/// enough to fill the kernel's socket buffers and then the session's queue. Before the client
+/// judged a put by its wait, this test saw puts #40 to #42 answer `Ok` after exactly 5 seconds each
+/// and the session end only on the fourth, and in another run no end within a minute.
+#[test]
+#[ignore = "opt-in: needs wz-ap-demo built with preset-ap-client, router-hat-router and routing-token-tables"]
+fn wz_router_hat_that_stops_reading_makes_a_wz_client_put_end_in_an_error_and_not_hang() {
+    let (mut router, port) = a_router();
+    let mut client = WzClient::connect(&[&format!("tcp/127.0.0.1:{port}")])
+        .expect("the wz client connects to the router");
+    // The route is not needed: a put to a key nobody subscribes still goes to the router, which
+    // is what has to take it.
+    let payload = vec![0xA5u8; 64 * 1024];
+    router.freeze();
+
+    // Fill the buffers and the queue. The bound on the whole loop is the point: a put that blocks
+    // for good would never leave it.
+    let started = Instant::now();
+    let mut first_error = None;
+    let mut accepted = 0usize;
+    while first_error.is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "a put to a peer that stopped reading did not end within a minute after {accepted} puts"
+        );
+        let put_started = Instant::now();
+        match client.put("sce-mesh/1/to/hub/alice", &payload) {
+            Ok(()) => {
+                assert!(
+                    put_started.elapsed() < Duration::from_secs(5),
+                    "put #{} waited {:?} for room and was reported as sent",
+                    accepted + 1,
+                    put_started.elapsed()
+                );
+                accepted += 1;
+            }
+            Err(error) => first_error = Some((error, put_started.elapsed())),
+        }
+    }
+    let (error, waited) = first_error.expect("the loop ends on an error");
+    eprintln!(
+        "{accepted} puts of 64 KiB were taken, then one was refused after {waited:?}: {:?}",
+        error.message
+    );
+    assert!(accepted > 0, "not even the first put was taken: {error}");
+    assert!(
+        error.retryable && error.message.contains("no room"),
+        "the refusal says there was no room, and that sending again may work: {error:?}"
+    );
+    assert!(
+        waited >= Duration::from_secs(5),
+        "it was refused after {waited:?}, before the whole room was waited for"
+    );
+
+    // The session is closing, so a later put does not wait its room again: it is refused within the
+    // time a close takes, which is the router's silence being given up on, not another 5 seconds
+    // per put.
+    let again_started = Instant::now();
+    let again = client
+        .put("sce-mesh/1/to/hub/alice", &payload)
+        .expect_err("a put on a closing session is refused");
+    assert!(
+        again_started.elapsed() < Duration::from_secs(10),
+        "a put after the room was given up waited {:?}: {again}",
+        again_started.elapsed()
+    );
+
+    // Dropping the client joins its thread, and that returns.
+    let dropped = Instant::now();
+    drop(client);
+    assert!(
+        dropped.elapsed() < Duration::from_secs(30),
+        "dropping the client took {:?}",
+        dropped.elapsed()
+    );
+    router.thaw();
 }
 
 #[test]

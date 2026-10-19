@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use sce_rust_mesh::inbox::{ClientError, Held, PresenceKind, PutError, ZenohClient};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -54,6 +55,7 @@ use wz_runtime_tokio::session_open::{
     dial_endpoint, initiate_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz_session_core::qos::CongestionControl;
+use wz_session_core::session_init_params::TxQueueConf;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::SampleView;
@@ -349,7 +351,12 @@ async fn serve(
         );
         tokio::pin!(drive);
         loop {
+            // The session first, then the callers: a put that waited out its room asks the drive
+            // loop to close the session as unresponsive, and that request is only seen when the loop
+            // is polled. With the two arms picked at random a caller that sends the next put at once
+            // could keep the close waiting for many puts, each of which waits again.
             tokio::select! {
+                biased;
                 _ = &mut drive => break true,
                 command = commands.recv() => match command {
                     None | Some(Command::Close) => break false,
@@ -447,21 +454,43 @@ fn handle(
             // Block, not drop: the binding counts an envelope as the unit of delivery, and one the
             // network dropped without telling it is one the core would wait for (SCE_MESH.md
             // section 20.2).
-            let sent = session
-                .publish(
-                    &key,
-                    &payload,
-                    PublishOptions::put().with_congestion_control(CongestionControl::Block),
-                )
-                .map(|_| ())
-                .map_err(put_error);
-            let _ = reply.send(sent);
+            let began = Instant::now();
+            let published = session.publish(
+                &key,
+                &payload,
+                PublishOptions::put().with_congestion_control(CongestionControl::Block),
+            );
+            let _ = reply.send(judge_put(published.map(|_| ()), began.elapsed()));
         }
         Command::Undeclare(id) => {
             held.remove(&id);
         }
         // Handled by the loop that ends the session.
         Command::Close => {}
+    }
+}
+
+/// How long a blocking put waits for room on a link before the session gives the peer up: the
+/// default `wait_before_close`, which is what `session_params` leaves in the session's queue
+/// configuration.
+fn block_wait() -> Duration {
+    Duration::from_micros(TxQueueConf::default().wait_before_close_us)
+}
+
+/// What a put's answer means to the binding. A wz session mirrors upstream's: a put that waited its
+/// full `wait_before_close` for room and found none ASKS THE SESSION TO CLOSE as unresponsive, and
+/// the publish itself answers `Ok`, the closing being the session machinery's to do. The binding
+/// asks a client that a put it cannot place is not reported as sent (SCE_MESH.md section 20.2), so
+/// a put that waited that long is an error here: the envelope was not placed, and the session is
+/// closing. It is retryable, in the sense that the same bytes can be sent once there is a session
+/// again.
+fn judge_put(published: Result<(), PublishError>, waited: Duration) -> Result<(), PutError> {
+    match published {
+        Ok(()) if waited >= block_wait() => Err(PutError::retryable(format!(
+            "no room on the link within {waited:?}: the session closes as unresponsive"
+        ))),
+        Ok(()) => Ok(()),
+        Err(error) => Err(put_error(error)),
     }
 }
 
@@ -506,6 +535,29 @@ mod tests {
         assert!(put_error(PublishError::FragmentChainAbandoned).retryable);
         assert!(!put_error(PublishError::ExceedsCapacity).retryable);
         assert!(!put_error(PublishError::RequiresUnicast).retryable);
+    }
+
+    #[test]
+    fn a_put_that_waited_its_whole_room_is_not_reported_as_sent() {
+        let limit = block_wait();
+        // The publish answers Ok in both cases below: the closing of a session whose peer takes
+        // nothing is the session machinery's, and what tells the two apart is the wait.
+        assert_eq!(judge_put(Ok(()), Duration::from_millis(1)), Ok(()));
+        assert_eq!(judge_put(Ok(()), limit - Duration::from_millis(1)), Ok(()));
+        let refused = judge_put(Ok(()), limit).expect_err("a put that waited the whole room");
+        assert!(refused.retryable, "{refused}");
+        assert!(refused.message.contains("no room"), "{refused}");
+        // A refusal the publish itself gives is carried through unchanged, whatever the wait.
+        assert!(
+            !judge_put(Err(PublishError::ExceedsCapacity), Duration::ZERO)
+                .expect_err("refused")
+                .retryable
+        );
+        assert!(
+            judge_put(Err(PublishError::TransportUnavailable), limit)
+                .expect_err("refused")
+                .retryable
+        );
     }
 
     #[test]
