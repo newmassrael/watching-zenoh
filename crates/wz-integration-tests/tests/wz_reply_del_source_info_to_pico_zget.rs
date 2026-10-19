@@ -267,20 +267,35 @@ async fn wz_reply_del_source_info_decoded_by_pico_z_get() {
     };
 
     let result = tokio::select! {
+        // z_get is a one-shot burst-and-exit querier: once it has its reply and the final
+        // notification it prints and exits, which closes the session, so the drive loop ends
+        // exactly when pico is done and may end before the poll above has looked. That is no
+        // failure by itself; the verdict is what pico printed, read again after a short wait for
+        // the capture to hand over the last lines.
         outcome = drive => {
-            let trace = poll_trace.lock().expect("poll trace");
-            panic!(
-                "wz drive loop reached a terminal state ({outcome:?}) before pico \
-                 decoded the reply-Del source_info.\n\
-                 The last {} poll outcome(s), oldest first — the LAST one is why \
-                 the loop ended:\n  {}",
-                trace.len(),
-                if trace.is_empty() {
-                    String::from("(none: the loop terminated before its first poll)")
-                } else {
-                    trace.join("\n  ")
-                },
-            )
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let captured = read_captured(&mut z_get_stdout_reader);
+                if captured.contains(delete_witness) && captured.contains(source_info_witness) {
+                    break Ok(());
+                }
+                if Instant::now() >= deadline {
+                    let trace = poll_trace.lock().expect("poll trace");
+                    break Err(format!(
+                        "wz drive loop reached a terminal state ({outcome:?}) before pico \
+                         decoded the reply-Del source_info.\n\
+                         The last {} poll outcome(s), oldest first — the LAST one is why \
+                         the loop ended:\n  {}\n--- captured stdout ---\n{captured}",
+                        trace.len(),
+                        if trace.is_empty() {
+                            String::from("(none: the loop terminated before its first poll)")
+                        } else {
+                            trace.join("\n  ")
+                        },
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
         r = scenario => r,
     };
