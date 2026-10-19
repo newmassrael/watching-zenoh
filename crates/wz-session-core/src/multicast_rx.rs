@@ -868,15 +868,15 @@ pub fn sweep_multicast_reassembling<
     F: FnMut(IterationEvent<'_>),
 {
     crate::reassembly_dispatch::sweep_reporting(reasm, now_ms, on_event);
-    // R311y784 — the two arguments serve two different consumers and both are
-    // used here: the slot INDEX aborts this node's own chains (private
-    // bookkeeping), the DEPARTURE tells the application which peer went quiet.
-    // Before this round only the first existed, so a lease expiry reclaimed
-    // buffers silently and the app kept a dead peer forever.
-    dispatcher.sweep_with(now_ms, |idx, lost| {
-        abort_peer_chains(reasm, idx);
-        on_event(IterationEvent::MulticastPeerLost(lost));
-    });
+    // The two observers serve two different consumers and both are used here:
+    // the slot INDEX aborts this node's own chains (private bookkeeping), the
+    // DEPARTURE tells the application which peer went quiet. They are separate
+    // so the chain abort is the Router's own, whatever the peer machine hands up.
+    dispatcher.sweep_with(
+        now_ms,
+        |idx| abort_peer_chains(reasm, idx),
+        |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
+    );
 }
 
 #[cfg(all(

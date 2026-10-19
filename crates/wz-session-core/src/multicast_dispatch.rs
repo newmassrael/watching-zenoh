@@ -59,20 +59,23 @@
 //! the reassembly Router's deadline split: value = wire advertisement +
 //! local cap, transition = statechart, clock = runtime.
 //!
-//! ## Effect-point bindings (no-op)
+//! ## Duty bindings
 //!
-//! The generated `*Policy<A>`'s `actions` field is private, so a binding
-//! buried in the `Engine` cannot reach the Router-owned link / peer table
-//! and cannot be read back. The `<sce:action>` effect points are therefore
-//! realised by the Router (which observes the FSM state), and the
-//! [`SessionBinding`] / [`PeerBinding`] action bodies are honest no-ops —
-//! zero-field markers of the SPEC's effect points (SSOT with §3.1 / §3.2),
-//! not dead counters. Behaviour is verified through the FSM state
-//! ([`session_state`](MulticastDispatcher::session_state) /
-//! [`peer_state`](MulticastDispatcher::peer_state)) and the `ingest_*`
-//! return values. (`reassembly_dispatch`'s `SlotBinding` still carries
-//! similarly-unreadable counters — the same simplification applies there,
-//! a separate cleanup.)
+//! Every `<sce:action>` of both machines is a duty (SCE `docs/adr/0038`), and
+//! the binding's body is the causal path of its effect: it records the effect
+//! in the binding's duty outbox, and the Router takes the outbox right after
+//! the `process_event` that ran the body and performs what it holds. The
+//! generated policy lends its host back only by shared reference
+//! (`actions()`), which is why the outbox is an atomic byte the Router takes
+//! through `&self`.
+//!
+//! - `init_rx_seq` (a peer entering Discovered) — the Router seeds the
+//!   admitted peer's RX SN conduits and lease from its JOIN.
+//! - `emit_peer_lost` (a peer entering Expired) — the Router hands the
+//!   departure ([`MulticastPeerLost`]) to the eviction's observer.
+//!
+//! The session binding's three duties are still realised by the Router
+//! observing the session state, with empty bodies.
 
 // The observer event surface is alloc-gated (FramePayload carries Vec),
 // so the full ingest pipeline gates on alloc too; the chain-key + eviction
@@ -106,6 +109,7 @@ use crate::session_fsm_multicast::{
 };
 use crate::sn;
 use core::net::SocketAddr;
+use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::Engine;
 // §5.21 routing-namespace — the per-session egress prefix + the per-PEER stateful
 // ingress decorator live ON the dispatcher (the only always-`&mut` per-session
@@ -356,29 +360,66 @@ impl SessionFsmMulticastActions for SessionBinding {
     fn release_multicast_link(&mut self) {}
 }
 
+/// The duties a machine's action bodies recorded and the Router has not yet
+/// performed, one bit per duty.
+///
+/// A body writes it through `&mut self`; the Router reads it through the
+/// shared reference the generated policy lends (`actions()`), so the byte is
+/// atomic. Taken as a load then a store rather than a swap: a Cortex-M0 has no
+/// compare-and-swap, and nothing runs between the two, since the machine and
+/// the Router that drives it are one thread.
+#[derive(Default)]
+struct DutyOutbox(AtomicU8);
+
+impl DutyOutbox {
+    fn record(&mut self, duty: u8) {
+        *self.0.get_mut() |= duty;
+    }
+
+    fn take(&self) -> Duties {
+        let recorded = self.0.load(Ordering::Relaxed);
+        self.0.store(0, Ordering::Relaxed);
+        Duties(recorded)
+    }
+}
+
+/// What one [`DutyOutbox::take`] found.
+#[derive(Clone, Copy)]
+struct Duties(u8);
+
+impl Duties {
+    fn has(self, duty: u8) -> bool {
+        self.0 & duty != 0
+    }
+}
+
 /// Host binding for the generated [`MulticastPeerActions`]; one per pool
-/// slot. Like [`SessionBinding`], the two `<sce:action>` effect points
-/// (`init_rx_seq` on Discovered entry, `emit_peer_lost` on Expired entry)
-/// are Router-realised — a per-peer RX-seq table and the upward peer-lost
-/// event are Router/host state the buried binding cannot reach (engine-free
-/// split). No-op bodies: the SCXML marks WHERE the effect goes (SSOT with
-/// §3.2), the Router realises it — `init_rx_seq` as
-/// [`PeerSlot::seed_from_join`] on JOIN admission (A1a), `emit_peer_lost` as
-/// the upward peer-lost surface (still deferred — see the module deferral
-/// notes). Zero-field, no dead counters.
-struct PeerBinding;
+/// slot. Each body records its duty, and the Router performs it right after
+/// the event that ran the body: `init_rx_seq` (Discovered entry) seeds the
+/// admitted peer from its JOIN in [`MulticastDispatcher::ingest_join_qos`],
+/// and `emit_peer_lost` (Expired entry) hands the departure to the eviction's
+/// observer in `PeerSlot::evict`.
+#[derive(Default)]
+struct PeerBinding {
+    duties: DutyOutbox,
+}
+
+impl PeerBinding {
+    const INIT_RX_SEQ: u8 = 0b01;
+    const PEER_LOST: u8 = 0b10;
+}
 
 impl MulticastPeerActions for PeerBinding {
-    // docs/adr/0038: `init_rx_seq` is performed (`PeerSlot::seed_from_join`),
-    // `emit_peer_lost` is not: the upward peer-lost surface is deferred. The
-    // host therefore declares what is true, and the machine is built with
-    // `new_simulated` where the peer slot is created. Declare `Performs` and
-    // build with `new` once the surface exists.
     const REALIZATION: ::sce_rust_runtime::ActionRealization =
-        ::sce_rust_runtime::ActionRealization::Simulates;
+        ::sce_rust_runtime::ActionRealization::Performs;
 
-    fn init_rx_seq(&mut self) {}
-    fn emit_peer_lost(&mut self) {}
+    fn init_rx_seq(&mut self) {
+        self.duties.record(Self::INIT_RX_SEQ);
+    }
+
+    fn emit_peer_lost(&mut self) {
+        self.duties.record(Self::PEER_LOST);
+    }
 }
 
 /// One peer-table slot: the engine-free per-peer FSM plus the Router-owned
@@ -508,7 +549,7 @@ struct PeerSlot {
 
 impl PeerSlot {
     fn new() -> Self {
-        let mut engine = Engine::new(MulticastPeerPolicy::new_simulated(PeerBinding));
+        let mut engine = Engine::new(MulticastPeerPolicy::new(PeerBinding::default()));
         // W3C SCXML 3.3: enter the initial `Free` leaf.
         engine.initialize();
         Self {
@@ -589,15 +630,47 @@ impl PeerSlot {
         }
     }
 
-    /// R311y784 — this slot's occupant as a departure record, for the
-    /// §3.2 `emit_peer_lost` effect the SCXML has marked since R311jh.
+    /// The duties this slot's machine recorded since they were last taken.
+    fn take_duties(&self) -> Duties {
+        self.engine.policy().actions().duties.take()
+    }
+
+    /// Admit the peer a validated first JOIN announced into this free slot:
+    /// Free -> Discovered, whose `init_rx_seq` seeds the peer from `baseline`,
+    /// then Discovered -> Active. The two transitions are driven together
+    /// because a multicast peer has no further handshake: a validated JOIN is a
+    /// live member (§3.2 "first Join validated" -> steady state Active).
+    fn admit(
+        &mut self,
+        src: SocketAddr,
+        zid: &[u8],
+        baseline: JoinBaseline,
+        qos_next_sns: Option<[crate::sn::MulticastRxPair; crate::qos::Priority::NUM]>,
+        now_ms: u64,
+    ) {
+        self.src = Some(src);
+        self.zid = Some(copy_zid(zid));
+        self.last_seen_ms = now_ms;
+        // The node role the member view reports and the Designated-Router
+        // election (§5.21 I3b) filters on.
+        self.whatami = baseline.whatami;
+        self.engine
+            .process_event(MulticastPeerEvent::PeerDiscovered);
+        if self.take_duties().has(PeerBinding::INIT_RX_SEQ) {
+            self.seed_from_join(baseline, qos_next_sns);
+        }
+        self.engine.process_event(MulticastPeerEvent::PeerActivated);
+    }
+
+    /// R311y784 — this slot's occupant as a departure record, what
+    /// `emit_peer_lost` hands up.
     ///
-    /// Must be called BEFORE [`Self::evict`], which clears `zid`. A free slot
-    /// (or one somehow holding no zid) reports an EMPTY peer id rather than
-    /// panicking: both callers reach this only through a liveness check, so an
-    /// empty id here would mean the peer table's own `src.is_some() iff
-    /// zid.is_some()` invariant had broken, and a departure event carrying an
-    /// empty zid is a legible symptom where a panic in a sweep is not.
+    /// Read by [`Self::evict`] before it clears `zid`. A free slot (or one
+    /// somehow holding no zid) reports an EMPTY peer id rather than panicking:
+    /// every eviction is reached only through a liveness check, so an empty id
+    /// here would mean the peer table's own `src.is_some() iff zid.is_some()`
+    /// invariant had broken, and a departure event carrying an empty zid is a
+    /// legible symptom where a panic in a sweep is not.
     fn departure(&self, reason: MulticastPeerLostReason) -> MulticastPeerLost {
         let peer = match &self.zid {
             Some((buf, len)) => MulticastPeerId::from_wire(&buf[..*len as usize]),
@@ -606,11 +679,19 @@ impl PeerSlot {
         MulticastPeerLost { peer, reason }
     }
 
-    /// Drive `peer.lost` (-> Expired, `emit_peer_lost`) then `peer.recycle`
-    /// (-> Free) and clear the Router-side membership state for reuse. The
-    /// caller has already established the peer should leave (Close or lease).
-    fn evict(&mut self) {
+    /// Drive `peer.lost` (-> Expired) then `peer.recycle` (-> Free) and clear
+    /// the Router-side membership state for reuse. The caller has already
+    /// established the peer should leave, and why (`reason`).
+    ///
+    /// `emit_peer_lost` is performed between the two events: the departure is
+    /// handed to `on_lost`, read before anything is cleared, because once the
+    /// zid is gone there is no peer left to name.
+    fn evict(&mut self, reason: MulticastPeerLostReason, on_lost: impl FnOnce(MulticastPeerLost)) {
+        let departure = self.departure(reason);
         self.engine.process_event(MulticastPeerEvent::PeerLost);
+        if self.take_duties().has(PeerBinding::PEER_LOST) {
+            on_lost(departure);
+        }
         self.engine.process_event(MulticastPeerEvent::PeerRecycle);
         self.src = None;
         self.zid = None;
@@ -1078,8 +1159,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// zenoh-pico multicast model — `_z_find_peer_entry(addr)`): a Join from
     /// a NEW address admits a peer (Free -> Discovered -> Active), records
     /// its `zid`, and stores the advertised baselines from `baseline` (the
-    /// §3.2 `init_rx_seq` effect point + the R311ks per-peer lease window,
-    /// realised here by the Router); a Join from a KNOWN address refreshes
+    /// peer machine's §3.2 `init_rx_seq` duty, with the R311ks per-peer lease
+    /// window); a Join from a KNOWN address refreshes
     /// its lease, re-records the zid, and RE-stores the baselines
     /// (zenoh-pico re-copies `_sn_rx_sns` AND `_lease` from every JOIN,
     /// multicast/rx.c:453-456 — the announcer's advertisement is
@@ -1138,6 +1219,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 self.peers[idx].remote_subs.clear();
             }
             self.peers[idx].zid = Some(copy_zid(zid));
+            // The re-seed is the Router's refresh, not `init_rx_seq`: the machine
+            // states that duty for a peer entering Discovered, and an Active
+            // peer's JOIN is another inbound message the machine does not see
+            // (Active has no self-transition; last_seen is refreshed the same
+            // way). What it re-stores is the announcer's own advertisement, which
+            // zenoh-pico re-copies at every JOIN, so a peer that restarted its SN
+            // streams is believed rather than refused until its lease runs out.
             self.peers[idx].seed_from_join(baseline, qos_next_sns);
             // Refresh the peer's role from its latest JOIN. A peer's whatami is
             // stable, but a same-slot zid reuse is a different peer, and both the
@@ -1149,24 +1237,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             Some(i) => i,
             None => return JoinOutcome::Refused(JoinRefuse::PeerTableFull),
         };
-        // A validated first Join admits the peer: Free -> Discovered
-        // (init_rx_seq) -> Active. The two transitions are driven together
-        // because a multicast peer has no further handshake — a validated
-        // Join is a live member (§3.2 "first Join validated" -> steady
-        // state Active).
-        self.peers[idx].src = Some(src);
-        self.peers[idx].zid = Some(copy_zid(zid));
-        self.peers[idx].last_seen_ms = now_ms;
-        self.peers[idx].seed_from_join(baseline, qos_next_sns);
-        // Record the newly-admitted peer's node role, which the member view
-        // reports and the Designated-Router election (§5.21 I3b) filters on.
-        self.peers[idx].whatami = baseline.whatami;
-        self.peers[idx]
-            .engine
-            .process_event(MulticastPeerEvent::PeerDiscovered);
-        self.peers[idx]
-            .engine
-            .process_event(MulticastPeerEvent::PeerActivated);
+        self.peers[idx].admit(src, zid, baseline, qos_next_sns, now_ms);
         JoinOutcome::Admitted
     }
 
@@ -1409,12 +1480,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// departure observer, the announced-departure twin of
     /// [`sweep_with`](MulticastDispatcher::sweep_with)'s inferred one.
     ///
-    /// `on_lost` fires BEFORE the slot recycles, for the same reason the sweep
-    /// reads its departure first: `evict()` clears the zid, so afterwards
-    /// there is no peer left to name. It does not fire when no live peer is at
-    /// `src` — an unattributable Close (a stale datagram, a peer never
-    /// admitted) must not manufacture a departure event, which is why the
-    /// closure is inside the `Some` arm rather than at the return.
+    /// `on_lost` is where the peer machine's `emit_peer_lost` duty hands the
+    /// departure, before the slot recycles: once the zid is cleared there is no
+    /// peer left to name. It does not fire when no live peer is at `src` — an
+    /// unattributable Close (a stale datagram, a peer never admitted) must not
+    /// manufacture a departure event, and with no peer there is no machine to
+    /// enter Expired.
     pub fn close_by_src_with(
         &mut self,
         src: SocketAddr,
@@ -1429,10 +1500,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     ///
     /// A reason PARAMETER rather than a second eviction entry point, which is
     /// the shape R2333 settled on this same file: the departure mechanics
-    /// (fire before `evict()` so the zid still exists, and only inside the
-    /// `Some` arm so an unattributable datagram cannot manufacture a
-    /// departure) are invariant across causes, and a copy per cause is what
-    /// lets the two drift.
+    /// (handed up by the peer machine's `emit_peer_lost` while the zid still
+    /// exists, and only for a live peer so an unattributable datagram cannot
+    /// manufacture a departure) are invariant across causes, and a copy per
+    /// cause is what lets the two drift.
     pub fn drop_by_src_with(
         &mut self,
         src: SocketAddr,
@@ -1441,8 +1512,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     ) -> bool {
         match self.find_by_src(src) {
             Some(idx) => {
-                on_lost(self.peers[idx].departure(reason));
-                self.peers[idx].evict();
+                self.peers[idx].evict(reason, on_lost);
                 true
             }
             None => false,
@@ -1458,27 +1528,30 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// multicast/lease.c:124), capped by the local config bound. Returns
     /// the number of peers expired (§3.1 PeerSweep).
     pub fn sweep(&mut self, now_ms: u64) -> usize {
-        self.sweep_with(now_ms, |_, _| {})
+        self.sweep_with(now_ms, |_| {}, |_| {})
     }
 
-    /// [`sweep`](MulticastDispatcher::sweep) with an eviction observer:
-    /// `on_evict` fires once per expired peer with its pool-slot index and
-    /// its [`MulticastPeerLost`] departure, BEFORE the slot is recycled. The
-    /// reassembly-running host aborts the evicted peer's in-progress chains
-    /// here (pico's per-entry dbufs die with the peer entry; the wz chains
-    /// are keyed by slot index, so they must be aborted before the index can
-    /// be re-issued to a new peer).
+    /// [`sweep`](MulticastDispatcher::sweep) with two eviction observers, one
+    /// per consumer, both called for each expired peer before its slot is
+    /// recycled.
     ///
-    /// R311y784 added the second argument. The two carry different things on
-    /// purpose: the INDEX is this node's private slot key, valid only until
-    /// the slot recycles and meaningless to an application; the DEPARTURE is
-    /// the peer's wire identity, which is what an observer can act on and
-    /// what both upstreams hand up. A caller that wants only the chain abort
-    /// ignores it (`|idx, _|`).
+    /// `on_evict` gets the peer's pool-slot index: this node's private slot
+    /// key, valid only until the slot recycles. The reassembly-running host
+    /// aborts the evicted peer's in-progress chains there (pico's per-entry
+    /// dbufs die with the peer entry; the wz chains are keyed by slot index, so
+    /// they must be aborted before the index can be re-issued to a new peer).
+    /// It is called by the Router itself, ahead of the eviction, so the chain
+    /// abort does not depend on any duty of the peer machine.
+    ///
+    /// `on_lost` gets the peer's [`MulticastPeerLost`] departure, its wire
+    /// identity and the inferred reason: what an observer can act on and what
+    /// both upstreams hand up. It is where the peer machine's `emit_peer_lost`
+    /// duty hands the departure as the peer enters Expired.
     pub fn sweep_with(
         &mut self,
         now_ms: u64,
-        mut on_evict: impl FnMut(usize, MulticastPeerLost),
+        mut on_evict: impl FnMut(usize),
+        mut on_lost: impl FnMut(MulticastPeerLost),
     ) -> usize {
         let cap = self.config.lease_ms;
         let mut expired = 0;
@@ -1490,13 +1563,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             if now_ms < slot.last_seen_ms.saturating_add(window) {
                 continue;
             }
-            // R311y784 — the departure is read BEFORE `evict()`, which is the
-            // only ordering that works: evict clears `zid`, so reading it
-            // after would report an empty peer. Same reason `on_evict` already
-            // fires here rather than below.
-            let lost = slot.departure(MulticastPeerLostReason::LeaseExpired);
-            on_evict(idx, lost);
-            slot.evict();
+            on_evict(idx);
+            slot.evict(MulticastPeerLostReason::LeaseExpired, &mut on_lost);
             expired += 1;
         }
         expired
@@ -2965,10 +3033,10 @@ mod tests {
     /// chains on (a recycled index must never continue a dead peer's
     /// chain).
     ///
-    /// R311y784 added the second argument, and this test now pins BOTH, because
-    /// they answer different questions and only one of them is reportable to an
-    /// application: the index is a private slot key, the departure is the
-    /// peer's wire identity.
+    /// It pins BOTH observers, because they answer different questions and
+    /// only one of them is reportable to an application: the index is a
+    /// private slot key, the departure is the peer's wire identity, handed up
+    /// by the peer machine's `emit_peer_lost`.
     #[test]
     fn sweep_with_reports_evicted_slot_indices() {
         let mut d = running_dispatcher::<4>(5_000);
@@ -2977,10 +3045,7 @@ mod tests {
         let mut evicted = std::vec::Vec::new();
         let mut departed = std::vec::Vec::new();
         assert_eq!(
-            d.sweep_with(6_000, |idx, lost| {
-                evicted.push(idx);
-                departed.push(lost);
-            }),
+            d.sweep_with(6_000, |idx| evicted.push(idx), |lost| departed.push(lost)),
             1
         );
         assert_eq!(evicted, [0], "only the lapsed peer's slot is reported");

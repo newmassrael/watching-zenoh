@@ -1105,9 +1105,11 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             #[cfg(feature = "reassembly")]
             sweep_multicast_reassembling(dispatcher, reasm, now, on_event);
             #[cfg(not(feature = "reassembly"))]
-            dispatcher.sweep_with(now, |_, lost| {
-                on_event(IterationEvent::MulticastPeerLost(lost));
-            });
+            dispatcher.sweep_with(
+                now,
+                |_| {},
+                |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
+            );
             *next_sweep_ms = now.saturating_add(tick_ms);
         }
         None

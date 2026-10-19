@@ -1059,15 +1059,17 @@ where
                 sweep_multicast_reassembling(dispatcher, &mut reasm, now, &mut on_event);
                 // R311y784 — was a bare `sweep`, which discarded the departure.
                 // A non-reassembly build has no chains to abort, so the slot
-                // index is genuinely unused here (`|_, lost|`) -- but the peer
-                // that fell silent is exactly as reportable as in the
-                // reassembly build, and reporting it in only one of the two
-                // would make the observer stream depend on a feature that has
-                // nothing to do with membership.
+                // index is genuinely unused here (`|_|`) -- but the peer that
+                // fell silent is exactly as reportable as in the reassembly
+                // build, and reporting it in only one of the two would make the
+                // observer stream depend on a feature that has nothing to do
+                // with membership.
                 #[cfg(not(feature = "reassembly"))]
-                dispatcher.sweep_with(now, |_, lost| {
-                    on_event(IterationEvent::MulticastPeerLost(lost));
-                });
+                dispatcher.sweep_with(
+                    now,
+                    |_| {},
+                    |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
+                );
             }
         }
         // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member
