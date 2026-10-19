@@ -204,6 +204,10 @@ int32_t __wrap_z_impl_k_usleep(int32_t us)
 #define TRACE_MAX 48
 static struct {
 	uint32_t size;
+	/* Cycles since the application's recvfrom returned: where in the query's turnaround the
+	 * allocation happened.
+	 */
+	uint32_t at;
 	uint32_t chain[10];
 } trace[TRACE_MAX];
 static uint32_t trace_n;
@@ -218,6 +222,7 @@ static void trace_alloc(size_t size)
 	uint32_t found = 0;
 
 	trace[trace_n].size = (uint32_t)size;
+	trace[trace_n].at = (uint32_t)(k_cycle_get_32() - t_in);
 	for (uint32_t i = 0; i < 160 && found < 10; i++) {
 		uintptr_t v = sp[i];
 
@@ -238,7 +243,11 @@ static void trace_print(void)
 	}
 	trace_printed = true;
 	for (uint32_t i = 0; i < trace_n; i++) {
-		printk("wz: alloc %u:", trace[i].size);
+		/* Microseconds since the recvfrom, in tenths. */
+		uint32_t tenths = (uint32_t)((uint64_t)trace[i].at * 10000000ull /
+					     sys_clock_hw_cycles_per_sec());
+
+		printk("wz: alloc %u @%u:", trace[i].size, tenths);
 		for (uint32_t c = 0; c < 10 && trace[i].chain[c] != 0; c++) {
 			printk(" %x", trace[i].chain[c]);
 		}
