@@ -97,25 +97,34 @@ const UNIT_LEN: usize = 3;
 /// Three bytes each (`len_lo, len_hi, T_MID_KEEP_ALIVE`), so a 1400-byte
 /// payload carries ~466 messages and the byte-proportional term includes the
 /// per-message decode a live tap actually pays.
-fn zenoh_payload(payload_len: usize) -> Vec<u8> {
+///
+/// The bytes are those at `stream_offset..` of ONE endless run of KeepAlives,
+/// so a unit a packet cuts short is finished by the next packet. An earlier
+/// form began every packet at a unit boundary, which at a size not divisible
+/// by [`UNIT_LEN`] spliced `len_lo, len_hi` onto the next packet's
+/// `len_lo, len_hi, ..`: the stream after the first packet was misframed, and
+/// the sweep counted whatever the misframed bytes decoded to.
+fn zenoh_payload(stream_offset: usize, payload_len: usize) -> Vec<u8> {
     let unit = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
     debug_assert_eq!(unit.len(), UNIT_LEN);
-    let mut out = Vec::with_capacity(payload_len);
-    while out.len() < payload_len {
-        let take = unit.len().min(payload_len - out.len());
-        out.extend_from_slice(&unit[..take]);
-    }
-    out
+    (stream_offset..stream_offset + payload_len)
+        .map(|at| unit[at % UNIT_LEN])
+        .collect()
 }
 
-/// One Ethernet/IPv4/TCP frame carrying `payload_len` bytes.
+/// The sequence number of the stream's first byte.
+const STREAM_ISN: u32 = 1000;
+
+/// One Ethernet/IPv4/TCP frame carrying the `payload_len` stream bytes that
+/// begin at `stream_offset`.
 ///
 /// Checksums are filled by `wz-packet-fixtures` rather than left zero: over
 /// IPv4 a zero TCP checksum is present-and-wrong, and a decoder that files
 /// every packet into the corruption bucket would be measured on the error path
 /// instead of the reassembly path — the wrong function, timed accurately.
-fn tcp_frame(seq: u32, payload_len: usize) -> Vec<u8> {
-    let payload = zenoh_payload(payload_len);
+fn tcp_frame(stream_offset: usize, payload_len: usize) -> Vec<u8> {
+    let payload = zenoh_payload(stream_offset, payload_len);
+    let seq = STREAM_ISN.wrapping_add(stream_offset as u32);
     let mut tcp = Vec::with_capacity(20 + payload_len);
     tcp.extend_from_slice(&1111u16.to_be_bytes());
     tcp.extend_from_slice(&7447u16.to_be_bytes());
@@ -207,12 +216,9 @@ fn decode_ns_per_packet(payload_len: usize, iters: usize, ceiling: Ceiling) -> (
     //
     // Built OUTSIDE the clock: the checksum arithmetic is real work and belongs
     // to the fixture, not to the decoder.
-    let mut frames = Vec::with_capacity(iters + 64);
-    let mut seq: u32 = 1000;
-    for _ in 0..iters + 64 {
-        frames.push(tcp_frame(seq, payload_len));
-        seq = seq.wrapping_add(payload_len as u32);
-    }
+    let frames: Vec<Vec<u8>> = (0..iters + 64)
+        .map(|i| tcp_frame(i * payload_len, payload_len))
+        .collect();
 
     let mut d = match ceiling {
         Ceiling::LiveTap => Dissection::with_limits(DissectionLimits::for_live_tap()),
@@ -256,7 +262,7 @@ fn decode_ns_per_packet(payload_len: usize, iters: usize, ceiling: Ceiling) -> (
 /// touches every byte once, which is the floor the decoder's per-byte slope is
 /// worth comparing against.
 fn copy_ns_per_packet(payload_len: usize, iters: usize) -> f64 {
-    let frame = tcp_frame(1000, payload_len);
+    let frame = tcp_frame(0, payload_len);
     let mut sink: Vec<u8> = Vec::with_capacity(frame.len());
     for _ in 0..64 {
         sink.clear();
@@ -322,14 +328,32 @@ fn selftest() -> i32 {
 
     // The frame builder must actually grow with the payload, or the sweep the
     // fit runs on would be the degenerate case above wearing real timings.
-    let small = tcp_frame(1, 64).len();
-    let large = tcp_frame(1, 1400).len();
+    let small = tcp_frame(0, 64).len();
+    let large = tcp_frame(0, 1400).len();
     if large - small != 1400 - 64 {
         failures += 1;
         println!("  FAIL frame builder: 64 -> {small} bytes, 1400 -> {large}; the sweep is flat");
     }
 
-    let total = 5;
+    // Packets of every swept size, laid end to end, must be ONE run of whole
+    // KeepAlives: otherwise the stream the decoder reads past the first packet
+    // is misframed and the population floor counts what the misframed bytes
+    // happen to decode to.
+    let keep_alive = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    for &size in SIZES {
+        let laid: Vec<u8> = (0..UNIT_LEN)
+            .flat_map(|i| zenoh_payload(i * size, size))
+            .collect();
+        // UNIT_LEN packets of `size` bytes are exactly `size` whole KeepAlives.
+        if laid != keep_alive.repeat(size) {
+            failures += 1;
+            println!(
+                "  FAIL stream builder: {UNIT_LEN} {size}-byte packets are not one run of KeepAlives"
+            );
+        }
+    }
+
+    let total = 6;
     println!(
         "decode-cost selftest: {}/{total} arm(s) pass",
         total - failures
