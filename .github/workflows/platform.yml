@@ -57,6 +57,7 @@ on:
       - "crates/wz-codecs/**"
       - "crates/wz-codecs-test-support/**"
       - "crates/wz-codegen-build/**"
+      - "crates/wz-mesh-client/**"
       - "crates/wz-packet-fixtures/**"
       - "crates/wz-rest/**"
       - "crates/wz-routing-graph/**"

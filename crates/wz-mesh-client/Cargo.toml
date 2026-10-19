@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-mesh-client -- the watching-zenoh client of SCE Mesh's Zenoh binding.
+#
+# SCE Mesh's Zenoh binding (SCE_MESH.md section 20) reaches a Zenoh network through four operations
+# a client performs, named by the `ZenohClient` trait of `sce-rust-mesh`. The implementation in the
+# SCE repository is upstream's `zenoh` crate. This crate is the other one: the same four operations
+# on a wz session, so that a machine whose Mesh runs on watching-zenoh needs no upstream Zenoh code.
+#
+# It lives here and not in the SCE repository because the dependency runs one way: wz uses SCE as
+# the `vendor/sce` submodule, and a crate of SCE that named wz would close a cycle.
+
+[package]
+name = "wz-mesh-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The watching-zenoh client of SCE Mesh's Zenoh binding: a wz session behind the ZenohClient trait."
+
+[dependencies]
+# The trait, and nothing else of the crate that matters here. Its default features stay on: the
+# router core keeps a map of held envelopes and refuses to build without `alloc`.
+sce-rust-mesh = { path = "../../vendor/sce/backends/rust/mesh" }
+wz-runtime-tokio = { path = "../wz-runtime-tokio" }
+wz-session-core = { path = "../wz-session-core" }
+# One current-thread runtime on a thread of this crate's own: the session is driven there and
+# nowhere else, because a wz session is not `Send`.
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+
+[lints]
+workspace = true

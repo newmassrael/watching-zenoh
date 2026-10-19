@@ -1770,6 +1770,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sce-rust-mesh"
+version = "0.1.0"
+dependencies = [
+ "sce-forge-runtime",
+ "sce-portable-bytes",
+ "sce-rust-runtime",
+]
+
+[[package]]
 name = "sce-rust-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2995,6 +3004,7 @@ dependencies = [
  "libloading",
  "proptest",
  "sce-forge-runtime",
+ "sce-rust-mesh",
  "sce-rust-runtime",
  "sha3",
  "socket2",
@@ -3007,6 +3017,7 @@ dependencies = [
  "wz-capture",
  "wz-codecs",
  "wz-codegen-build",
+ "wz-mesh-client",
  "wz-packet-fixtures",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
@@ -3061,6 +3072,16 @@ dependencies = [
 [[package]]
 name = "wz-mcu-stack"
 version = "0.1.0"
+
+[[package]]
+name = "wz-mesh-client"
+version = "0.1.0"
+dependencies = [
+ "sce-rust-mesh",
+ "tokio",
+ "wz-runtime-tokio",
+ "wz-session-core",
+]
 
 [[package]]
 name = "wz-oa-tc6"

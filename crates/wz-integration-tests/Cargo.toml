@@ -227,6 +227,12 @@ wz-session-core = { path = "../wz-session-core", features = [
 wz = { path = "../wz", features = ["rest-http-bridge", "rest-sse-subscribe"] }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
+# `wz_router_hat_serves_a_wz_client_the_way_the_sce_zenoh_inbox_does.rs` runs the wz client of SCE
+# Mesh's Zenoh binding through the kit SCE publishes for such clients (its `conformance` feature,
+# which pulls nothing beyond what the crate already needs). Both are path dependencies, so the
+# lockfile gains workspace packages and no registry crate.
+sce-rust-mesh = { path = "../../vendor/sce/backends/rust/mesh", features = ["conformance"] }
+wz-mesh-client = { path = "../wz-mesh-client" }
 # R116b — `hal_timer_routing.rs` declares an in-test TimerProbePolicy
 # that uses sce_rust_runtime::{Engine, Hal, StatePolicy} directly to
 # exercise the Hal-routed scheduler clock post-SCE fa3a2fda. The

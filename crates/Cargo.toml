@@ -120,6 +120,10 @@ members = [
     "wz-session-core",
     "wz-session-core-test-support",
     "wz-statechart-bridge",
+    # The watching-zenoh client of SCE Mesh's Zenoh binding: a wz session behind the `ZenohClient`
+    # trait of `sce-rust-mesh`. In this repository and not in SCE's because wz uses SCE as a
+    # submodule, so the dependency can only run this way.
+    "wz-mesh-client",
     "wz-switchboard-schema",
     "wz-switchboard-codegen",
     "wz-switchboard-example",
