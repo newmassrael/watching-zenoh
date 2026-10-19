@@ -42,6 +42,11 @@
 //! §5.M pool-exhaustion defence), while a reserved-arena backing gets it from
 //! the slot's own width. A caller-side check would be correct for one and
 //! redundant-but-harmless for the other, which is how a bound drifts.
+//!
+//! The Router still needs the verdict BEFORE it stages: whether the bytes fit
+//! decides which event the slot machine is sent, and the machine's own duty is
+//! what then stages them. [`ChainStaging::fits`] is that question asked of the
+//! arena, on the same rule as `append`, so the answer stays the trait's.
 
 /// Why an arena refused bytes.
 ///
@@ -105,6 +110,25 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
 
     /// The bytes staged into `chain` so far, in arrival order.
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8];
+
+    /// Whether [`Self::append`] of `len` more bytes to `chain` would be
+    /// accepted, asked without staging anything.
+    ///
+    /// The Router asks before it drives the slot machine: a payload that does
+    /// not fit is a `codec.error` for the machine, one that does is a
+    /// `fragment.chunk` whose duty then stages it, and a transition cannot be
+    /// taken back once a refused append shows it was the wrong one.
+    ///
+    /// The provided answer is the rule `append` states, the chain's total
+    /// against `CAP`. An arena whose `append` can refuse for another reason
+    /// overrides this to say so, or the Router stages bytes the machine has
+    /// already accepted into an arena that will not take them.
+    fn fits(&self, chain: &Self::Chain, len: usize) -> bool {
+        self.bytes(chain)
+            .len()
+            .checked_add(len)
+            .is_some_and(|total| total <= CAP)
+    }
 
     /// Reserve `want` bytes at the end of `chain` and hand back exactly those,
     /// for a filler that writes them IN PLACE.

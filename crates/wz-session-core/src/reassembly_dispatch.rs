@@ -11,7 +11,7 @@
 //! *Router* the scxml header describes: it holds the N slot
 //! [`Engine`](sce_rust_runtime::Engine) instances and owns everything the
 //! engine-free FSM cannot — the stateful SN-consecutiveness arithmetic,
-//! the per-peer quota, the staging buffers, and the deadline clock.
+//! the per-peer quota, the staging arena, and the deadline clock.
 //!
 //! ## Division of labour (scxml header / §2.3 / §2.5)
 //!
@@ -29,19 +29,48 @@
 //!   field (`fragment_chunk_schema.scxml`), so the slot FSM guards
 //!   Continue (`more != 0`, stay Receiving) vs Final (`more == 0`,
 //!   -> Complete) natively.
-//! - **Staging — the Router.** `fragment_chunk_schema.scxml` documents
-//!   "the dispatcher stages the payload here": the Router owns each slot's
-//!   bounded staging buffer ([`BoundedVec`]). This is forced by two
-//!   constraints and is the spec-intended split, not a shortcut: (a) the
-//!   MCU reassembly profile is `--no-default-features --features
-//!   reassembly,no_std` — NO `alloc`, so the scouting glue's
-//!   `Arc<...>`-shared-state read-back pattern is unavailable; and (b) the
-//!   generated `ReassemblySlotPolicy`'s `actions` field is private, so the
-//!   binding's state is unreadable through the `Engine` regardless. The
-//!   slot FSM therefore owns state + transitions + the `more` guard (the
-//!   engine-free protocol logic, SSOT with the scxml); the Router owns the
-//!   data plane. The generated [`ReassemblySlotActions`] are bound to a
-//!   thin counter [`SlotBinding`] for test observability.
+//! - **Storage — the Router; staging — the slot machine's duties.** The
+//!   Router owns the arena ([`ChainStaging`]) and each slot's handle into
+//!   it, because the payload never flows through the FSM
+//!   (`fragment_chunk_schema.scxml` carries the `more` bit only). What the
+//!   Router does with them is decided by the machine: every
+//!   `<sce:action effect="duty">` of `reassembly_slot.scxml` is the one
+//!   cause of its effect (below).
+//!
+//! ## Duties (docs/adr/0038 in SCE)
+//!
+//! The generated [`ReassemblySlotActions`] are bound to `SlotBinding`, whose
+//! bodies post the duty they name into a one-byte outbox. The Router drives
+//! the slot engine one event at a time and drains the outbox right after,
+//! then performs exactly the duties the machine's transition ran, and derives
+//! the [`IngestOutcome`] from them:
+//!
+//! | duty | the Router's act |
+//! |---|---|
+//! | `begin_chain` | bind the reserved staging, arm key / SN / deadline, stage the first payload |
+//! | `append_fragment_payload` | stage the payload, advance the chain's SN |
+//! | `finalize_message` | stage the final payload (unless `begin_chain` of the same transition did), deliver, then raise `slot.release` |
+//! | `abort_ooo` / `abort_peer_drop` / `abort_evicted` / `abort_codec` | raise `slot.release` |
+//! | `reset_slot` | return the staging to the arena, clear key / SN / deadline |
+//!
+//! `record_timeout` is a notice and posts nothing: the deadline is the
+//! Router's clock, and the sweep raises `slot.release` after it.
+//!
+//! What the Router checks before it drives the machine is only what decides
+//! which event to send: the per-peer quota and a free slot (refusals that
+//! never reach a slot), the arena's reservation for a chain that would start
+//! (`acquire`, refused as [`RefuseReason::PoolExhausted`]), and whether the
+//! payload fits the chain ([`ChainStaging::fits`]): a continuation that would
+//! not fit is sent as `codec.error`, a first fragment that would not fit is
+//! [`AbortReason::CapacityOverflow`] with the machine untouched.
+//!
+//! The outbox is an `AtomicU8` because the generated policy hands its host
+//! back by shared reference only, so draining it is a store through `&`. The
+//! drain is a plain load then a plain store, no read-modify-write: the target
+//! set includes `thumbv6m`, which has no atomic RMW, and every access happens
+//! under the Router's own `&mut self`, so the pair cannot race. A `Cell` would
+//! do the same and make the slot table `!Sync`, which a statically placed MCU
+//! table cannot be.
 //!
 //! ## Timeout ownership (§4)
 //!
@@ -70,8 +99,9 @@ use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
 use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
-    ReassemblySlotInject, ReassemblySlotPolicy, ReassemblySlotState,
+    ReassemblySlotInject, ReassemblySlotPolicy,
 };
+use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::Engine;
 // R311mh — `sweep_reporting` (below) raises an IterationEvent on a timed-out
 // chain; the event surface is the `driver_loop` module's, which a storage profile
@@ -356,56 +386,78 @@ pub struct Fragment<'a> {
     pub markers: crate::extfragment::FragmentMarkers,
 }
 
-/// Thin host binding for the generated [`ReassemblySlotActions`]. The
-/// Router owns the staging buffer and emits the reassembled message
-/// itself (see the module "Division of labour" note), so these actions
-/// carry no data state — they only count dispatches for test
-/// observability and keep the engine-free FSM's `<sce:action>` contract
-/// satisfied at compile time.
-#[derive(Debug, Default, Clone, Copy)]
+/// The duties a slot transition can post, one bit each. The four abort arms
+/// share one bit: what the Router does for each is the same release, and the
+/// reason it reports is its own classification of the event it raised.
+mod duty {
+    pub(super) const BEGIN: u8 = 1 << 0;
+    pub(super) const APPEND: u8 = 1 << 1;
+    pub(super) const FINALIZE: u8 = 1 << 2;
+    pub(super) const ABORT: u8 = 1 << 3;
+    pub(super) const RESET: u8 = 1 << 4;
+}
+
+/// Host binding for the generated [`ReassemblySlotActions`]: each duty body
+/// posts its bit into `duties`, and the Router performs the duty when it
+/// drains the outbox after driving the engine (the module's "Duties" table).
+/// A body that does not post is a duty the Router never performs.
+#[derive(Debug, Default)]
 struct SlotBinding {
-    begins: u32,
-    appends: u32,
-    finalizes: u32,
-    aborts: u32,
-    timeouts: u32,
-    resets: u32,
+    duties: AtomicU8,
+}
+
+impl SlotBinding {
+    fn post(&mut self, bit: u8) {
+        *self.duties.get_mut() |= bit;
+    }
+
+    /// Drain the outbox. A load and a store rather than a swap: see the
+    /// module docs for why no read-modify-write is used.
+    fn take(&self) -> u8 {
+        let duties = self.duties.load(Ordering::Relaxed);
+        self.duties.store(0, Ordering::Relaxed);
+        duties
+    }
+
+    /// What is posted and not yet drained.
+    #[cfg(test)]
+    fn pending(&self) -> u8 {
+        self.duties.load(Ordering::Relaxed)
+    }
 }
 
 impl ReassemblySlotActions for SlotBinding {
-    // docs/adr/0038: the dispatcher performs these duties from the FSM
-    // outcome (`complete` delivers the message, the abort paths drop the
-    // chain, `release` and `sweep` reclaim the slot), so the host performs
-    // them although the bodies only count.
+    // docs/adr/0038: every duty body below posts the effect its name states,
+    // and the Router performs a duty only when its bit is drained.
     const REALIZATION: ::sce_rust_runtime::ActionRealization =
         ::sce_rust_runtime::ActionRealization::Performs;
 
     fn begin_chain(&mut self) {
-        self.begins = self.begins.saturating_add(1);
+        self.post(duty::BEGIN);
     }
     fn append_fragment_payload(&mut self) {
-        self.appends = self.appends.saturating_add(1);
+        self.post(duty::APPEND);
     }
     fn finalize_message(&mut self) {
-        self.finalizes = self.finalizes.saturating_add(1);
+        self.post(duty::FINALIZE);
     }
     fn abort_ooo(&mut self) {
-        self.aborts = self.aborts.saturating_add(1);
+        self.post(duty::ABORT);
     }
     fn abort_peer_drop(&mut self) {
-        self.aborts = self.aborts.saturating_add(1);
+        self.post(duty::ABORT);
     }
     fn abort_evicted(&mut self) {
-        self.aborts = self.aborts.saturating_add(1);
+        self.post(duty::ABORT);
     }
     fn abort_codec(&mut self) {
-        self.aborts = self.aborts.saturating_add(1);
+        self.post(duty::ABORT);
     }
-    fn record_timeout(&mut self) {
-        self.timeouts = self.timeouts.saturating_add(1);
-    }
+    // A notice: the sweep that raised the timeout releases the slot itself,
+    // so nothing waits on this.
+    fn record_timeout(&mut self) {}
     fn reset_slot(&mut self) {
-        self.resets = self.resets.saturating_add(1);
+        self.post(duty::RESET);
     }
 }
 
@@ -493,24 +545,41 @@ impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLO
         self.key.is_none()
     }
 
-    /// Drive the slot's terminal-state `slot.release` transition back to
-    /// Empty and clear the Router-side chain state for reuse.
+    /// Send `event` to the slot engine and drain the duties its transition
+    /// ran (none when the current state does not answer the event).
+    fn drive(&mut self, event: ReassemblySlotEvent) -> u8 {
+        self.engine.process_event(event);
+        self.engine.policy().actions().take()
+    }
+
+    /// Send a `fragment.chunk` carrying the wire `more` bit, which the
+    /// machine's guards split on, and drain the duties its transition ran.
+    fn drive_chunk(&mut self, more: u8) -> u8 {
+        self.engine.raise_fragment_chunk(chunk_event(more));
+        self.engine.step();
+        self.engine.policy().actions().take()
+    }
+
+    /// Raise `slot.release` and perform `reset_slot` if the machine ran it:
+    /// return the chain's staging to the arena and clear the chain state.
+    /// Returns whether it ran; only the terminal states answer the event.
     ///
-    /// R311y589 — takes the arena because releasing the staging is now part of
+    /// R311y589 — takes the arena because releasing the staging is part of
     /// releasing the slot, and it has to be: on a reserved arena the handle IS
     /// the reservation, so a slot that went Empty while still holding one would
     /// shrink the arena permanently. Passing it in rather than reaching for it
     /// keeps `Slot` ignorant of the Router.
-    fn release(&mut self, staging: &mut S) {
-        // Only the terminal states (Complete / Aborted / TimedOut) have a
-        // `slot.release` transition; the caller only releases from there.
-        self.engine.process_event(ReassemblySlotEvent::SlotRelease);
+    fn release(&mut self, staging: &mut S) -> bool {
+        if self.drive(ReassemblySlotEvent::SlotRelease) & duty::RESET == 0 {
+            return false;
+        }
         self.key = None;
         self.last_sn = 0;
         self.deadline_ms = 0;
         if let Some(chain) = self.chain.take() {
             staging.release(chain);
         }
+        true
     }
 }
 
@@ -682,7 +751,9 @@ where
         }
     }
 
-    /// Hand the completed chain in `idx` to `deliver` and reclaim the slot.
+    /// The `finalize_message` duty's delivery: hand the completed chain in
+    /// `idx` to `deliver` and raise `slot.release`, whose `reset_slot`
+    /// reclaims the slot.
     ///
     /// Lent when `lend` and the arena can: the Router slot is released first
     /// (the chain's staging is no longer the Router's), then the shared bytes
@@ -773,19 +844,14 @@ where
     /// probe on one is a probe on both only while there is literally one
     /// place that raises it.
     ///
-    /// Driving the FSM is not bookkeeping. `Slot::release` raises
-    /// `slot.release`, which only the three TERMINAL states answer, so a
-    /// slot whose Router-side key is cleared WITHOUT the abort transition
-    /// leaves its engine parked in `Receiving` — silently, since
-    /// `Receiving` accepts a `fragment.chunk` and completes on `more == 0`
-    /// exactly as `Empty` does. That desync is the shape a measured damage
-    /// probe found this round, and `the_drop_arm_leaves_the_slot_fsm_in_a_
-    /// declared_state` is the assertion that sees it.
+    /// Driving the FSM is not bookkeeping. The chain is freed only by the
+    /// `reset_slot` duty, which `slot.release` runs from the three TERMINAL
+    /// states alone, so a chain the machine was not driven out of
+    /// `Receiving` is not freed at all, and the Router's key can never read
+    /// free over an engine still parked there
+    /// (`the_drop_arm_leaves_the_slot_fsm_in_a_declared_state`).
     fn abort_peer_drop(&mut self, idx: usize, reason: AbortReason) -> IngestOutcome {
-        self.slots[idx]
-            .engine
-            .process_event(ReassemblySlotEvent::FragmentDrop);
-        self.abort(idx, reason)
+        self.abort(idx, ReassemblySlotEvent::FragmentDrop, reason)
     }
 
     /// R311y578 — push the negotiated protocol patch level's verdict into
@@ -838,15 +904,19 @@ where
             if slot.is_free() || now_ms < slot.deadline_ms {
                 continue;
             }
-            slot.engine
-                .process_event(ReassemblySlotEvent::ReassemblyTimeout);
+            // `record_timeout` is a notice and posts no duty; the release
+            // below is the sweep's own act on its own clock.
+            slot.drive(ReassemblySlotEvent::ReassemblyTimeout);
             // BEFORE the release, which is what makes the number takeable at
             // all: the handle is the arena's again the moment after.
-            if let Some(chain) = slot.chain.as_ref() {
-                loss.bytes += staging.bytes(chain).len() as u64;
+            let staged = slot
+                .chain
+                .as_ref()
+                .map_or(0, |chain| staging.bytes(chain).len() as u64);
+            if slot.release(staging) {
+                loss.bytes += staged;
+                loss.chains += 1;
             }
-            slot.release(staging);
-            loss.chains += 1;
         }
         loss
     }
@@ -886,32 +956,28 @@ where
             None => return IngestOutcome::Refused(RefuseReason::PoolExhausted),
         };
 
-        // Arm the chain before driving the FSM so a staging overflow on the
-        // very first fragment releases cleanly.
-        self.slots[idx].key = Some(ChainKey::new(frag.peer_key, frag.reliable, frag.priority));
-        self.slots[idx].last_sn = frag.sn;
-        self.slots[idx].deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
-        // Reserve this chain's staging. A well-dimensioned arena cannot refuse
-        // here (the Router just found a free slot of its own), but the arm is
-        // real rather than an `unwrap`: the two dims are an invariant between
-        // two numbers, and reporting exhaustion is the honest answer if they
-        // ever disagree. `PoolExhausted` is already the Router's word for it.
-        let chain = match self.staging.acquire() {
-            Some(c) => c,
-            None => {
-                self.slots[idx].key = None;
-                return IngestOutcome::Refused(RefuseReason::PoolExhausted);
-            }
+        // Reserve this chain's staging before the machine is told of it, since
+        // the reservation can fail and a transition cannot be taken back. A
+        // well-dimensioned arena cannot refuse here (the Router just found a
+        // free slot of its own), but the arm is real rather than an `unwrap`:
+        // the two dims are an invariant between two numbers, and reporting
+        // exhaustion is the honest answer if they ever disagree.
+        // `PoolExhausted` is already the Router's word for it. The reservation
+        // waits on the slot, whose key stays clear until `begin_chain` binds it.
+        let deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
+        let Self { slots, staging, .. } = self;
+        let slot = &mut slots[idx];
+        slot.chain = staging.acquire();
+        let Some(chain) = slot.chain.as_ref() else {
+            return IngestOutcome::Refused(RefuseReason::PoolExhausted);
         };
-        self.slots[idx].chain = Some(chain);
-
-        {
-            let Self { slots, staging, .. } = self;
-            let slot = &mut slots[idx];
-            let chain = slot.chain.as_mut().expect("just armed");
-            if staging.append(chain, frag.payload).is_err() {
-                return self.abort(idx, AbortReason::CapacityOverflow);
+        // A first fragment wider than the slot never reaches the machine: no
+        // transition of `Empty` refuses a chunk, so the chain ends here.
+        if !staging.fits(chain, frag.payload.len()) {
+            if let Some(chain) = slot.chain.take() {
+                staging.release(chain);
             }
+            return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         }
 
         // Empty --fragment.chunk--> { Receiving | Complete }, the slot FSM's
@@ -928,18 +994,37 @@ where
         // delivered as one merged blob (R311oo dup-fragment merge bug). The
         // delivered lone tail is a chain remnant, not a whole frame, so the
         // upstream frame decode drops it — exactly pico's outcome.
-        self.slots[idx]
-            .engine
-            .raise_fragment_chunk(chunk_event(frag.more));
-        self.slots[idx].engine.step();
-
-        match self.slots[idx].engine.get_current_state() {
-            ReassemblySlotState::Complete => {
-                self.complete(idx, lend, deliver);
-                IngestOutcome::Reassembled
-            }
-            _ => IngestOutcome::Begun,
+        let duties = slot.drive_chunk(frag.more);
+        assert!(
+            duties & duty::BEGIN != 0,
+            "an Empty slot answers fragment.chunk with begin_chain"
+        );
+        slot.key = Some(ChainKey::new(frag.peer_key, frag.reliable, frag.priority));
+        slot.last_sn = frag.sn;
+        slot.deadline_ms = deadline_ms;
+        self.stage(idx, frag.payload);
+        // On `more == 0` the same transition also ran `finalize_message`; its
+        // payload is the one `begin_chain` just staged.
+        if duties & duty::FINALIZE != 0 {
+            self.complete(idx, lend, deliver);
+            return IngestOutcome::Reassembled;
         }
+        IngestOutcome::Begun
+    }
+
+    /// Stage `payload` onto the open chain in `idx`: the staging half of the
+    /// `begin_chain`, `append_fragment_payload` and `finalize_message` duties.
+    /// The arena said the bytes fit before the machine was driven, so a
+    /// refusal here is an arena whose `fits` and `append` disagree.
+    fn stage(&mut self, idx: usize, payload: &[u8]) {
+        let Self { slots, staging, .. } = self;
+        let chain = slots[idx]
+            .chain
+            .as_mut()
+            .expect("an open chain has staging");
+        staging
+            .append(chain, payload)
+            .expect("the arena admitted these bytes before the slot was driven");
     }
 
     fn ingest_continuation<F: FnOnce(ChainBytes<'_>)>(
@@ -960,45 +1045,60 @@ where
         // than as the judgement it cannot make; the slot FSM's one abort arm for
         // "this continuation cannot be admitted" serves both words.
         if let Err(reason) = ring.admits(self.slots[idx].last_sn, frag.sn) {
-            self.slots[idx]
-                .engine
-                .process_event(ReassemblySlotEvent::FragmentOoo);
-            return self.abort(idx, reason);
+            return self.abort(idx, ReassemblySlotEvent::FragmentOoo, reason);
         }
 
-        {
-            let Self { slots, staging, .. } = self;
-            let slot = &mut slots[idx];
-            let chain = slot.chain.as_mut().expect("an active chain has staging");
-            if staging.append(chain, frag.payload).is_err() {
-                self.slots[idx]
-                    .engine
-                    .process_event(ReassemblySlotEvent::CodecError);
-                return self.abort(idx, AbortReason::CapacityOverflow);
-            }
+        // A payload the chain cannot hold is a codec error for the machine,
+        // decided before the chunk is sent: once a final chunk has driven the
+        // slot to `Complete` no abort arm is left to take.
+        let fits = {
+            let chain = self.slots[idx]
+                .chain
+                .as_ref()
+                .expect("an open chain has staging");
+            self.staging.fits(chain, frag.payload.len())
+        };
+        if !fits {
+            return self.abort(
+                idx,
+                ReassemblySlotEvent::CodecError,
+                AbortReason::CapacityOverflow,
+            );
         }
 
-        self.slots[idx].last_sn = frag.sn;
-        self.slots[idx]
-            .engine
-            .raise_fragment_chunk(chunk_event(frag.more));
-        self.slots[idx].engine.step();
-
-        // The slot FSM's `more` guard decided Continue vs Final.
-        match self.slots[idx].engine.get_current_state() {
-            ReassemblySlotState::Complete => {
-                self.complete(idx, lend, deliver);
-                IngestOutcome::Reassembled
-            }
-            _ => IngestOutcome::Continued,
+        // The slot FSM's `more` guard decides Continue vs Final.
+        let duties = self.slots[idx].drive_chunk(frag.more);
+        if duties & duty::APPEND != 0 {
+            self.stage(idx, frag.payload);
+            self.slots[idx].last_sn = frag.sn;
+            return IngestOutcome::Continued;
         }
+        assert!(
+            duties & duty::FINALIZE != 0,
+            "a Receiving slot answers fragment.chunk with append or finalize"
+        );
+        self.stage(idx, frag.payload);
+        self.complete(idx, lend, deliver);
+        IngestOutcome::Reassembled
     }
 
-    /// The slot FSM has already been driven into `Aborted` by the caller's
-    /// abort event; record the reason and reclaim the slot.
-    fn abort(&mut self, idx: usize, reason: AbortReason) -> IngestOutcome {
+    /// Send the open chain in `idx` an abort `event` and perform the abort
+    /// duty its arm runs: raise `slot.release`, whose `reset_slot` reclaims
+    /// the slot. `reason` is the Router's own word for why it sent `event`.
+    fn abort(
+        &mut self,
+        idx: usize,
+        event: ReassemblySlotEvent,
+        reason: AbortReason,
+    ) -> IngestOutcome {
         let Self { slots, staging, .. } = self;
-        slots[idx].release(staging);
+        let slot = &mut slots[idx];
+        let duties = slot.drive(event);
+        assert!(
+            duties & duty::ABORT != 0,
+            "a Receiving slot answers every abort event with an abort duty"
+        );
+        slot.release(staging);
         IngestOutcome::Aborted(reason)
     }
 
@@ -1016,10 +1116,11 @@ where
     pub fn abort_channel(&mut self, peer_key: &[u8], priority: Priority, reliable: bool) -> bool {
         match self.find_active(peer_key, reliable, priority) {
             Some(idx) => {
-                self.slots[idx]
-                    .engine
-                    .process_event(ReassemblySlotEvent::FragmentOoo);
-                self.abort(idx, AbortReason::OutOfOrder);
+                self.abort(
+                    idx,
+                    ReassemblySlotEvent::FragmentOoo,
+                    AbortReason::OutOfOrder,
+                );
                 true
             }
             None => false,
@@ -1509,6 +1610,225 @@ mod tests {
     }
 }
 
+// ── The slot binding's outbox: each duty body posts the effect the Router then
+//    performs, nothing else posts, and nothing stays posted after a drive. ──
+#[cfg(test)]
+mod duty_tests {
+    use super::*;
+    // Aliased so the event paths the source-scanning test in this file counts
+    // are spelled by their producers alone.
+    use crate::reassembly_slot::ReassemblySlotEvent as Event;
+    use crate::reassembly_slot::ReassemblySlotState as State;
+    use alloc::vec::Vec;
+
+    const PEER: &[u8] = &[0xAA; 16];
+    const MASK: u64 = crate::sn::mask_from_res(0x02);
+
+    type TestSlot = Slot<1, 64, HeapStaging<1, 64>>;
+
+    fn frag(sn: u64, more: u8, payload: &[u8]) -> Fragment<'_> {
+        Fragment {
+            peer_key: PEER,
+            reliable: true,
+            sn,
+            more,
+            payload,
+            priority: Priority::DEFAULT,
+            markers: crate::extfragment::FragmentMarkers::NONE,
+        }
+    }
+
+    fn assert_drained<const S: usize, const C: usize>(d: &ReassemblyDispatcher<S, C>) {
+        for slot in &d.slots {
+            assert_eq!(
+                slot.engine.policy().actions().pending(),
+                0,
+                "a duty was posted and never drained"
+            );
+        }
+    }
+
+    /// Send `event`, return the duties it posted, and check the outbox is
+    /// empty again.
+    fn drive(slot: &mut TestSlot, event: Event) -> u8 {
+        let duties = slot.drive(event);
+        assert_eq!(slot.engine.policy().actions().pending(), 0);
+        duties
+    }
+
+    fn chunk(slot: &mut TestSlot, more: u8) -> u8 {
+        let duties = slot.drive_chunk(more);
+        assert_eq!(slot.engine.policy().actions().pending(), 0);
+        duties
+    }
+
+    fn state(slot: &TestSlot) -> State {
+        slot.engine.get_current_state()
+    }
+
+    /// Every transition of `reassembly_slot.scxml` posts exactly the duties of
+    /// the actions it names, and a state that does not answer an event posts
+    /// nothing. This is the binding checked against the machine, transition
+    /// by transition, without the Router in between.
+    #[test]
+    fn each_slot_transition_posts_the_duties_its_actions_name() {
+        let mut slot = TestSlot::new();
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(state(&slot), State::Receiving);
+        assert_eq!(chunk(&mut slot, 1), duty::APPEND);
+        assert_eq!(chunk(&mut slot, 0), duty::FINALIZE);
+        assert_eq!(state(&slot), State::Complete);
+        assert_eq!(drive(&mut slot, Event::SlotRelease), duty::RESET);
+        assert_eq!(state(&slot), State::Empty);
+
+        // A first fragment that is also the last: one transition, two actions.
+        assert_eq!(chunk(&mut slot, 0), duty::BEGIN | duty::FINALIZE);
+        assert_eq!(state(&slot), State::Complete);
+        assert_eq!(drive(&mut slot, Event::SlotRelease), duty::RESET);
+
+        for abort in [
+            Event::FragmentOoo,
+            Event::FragmentDrop,
+            Event::SlotEvict,
+            Event::CodecError,
+        ] {
+            assert_eq!(drive(&mut slot, abort), 0, "{abort:?} on an Empty slot");
+            assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+            assert_eq!(drive(&mut slot, abort), duty::ABORT, "{abort:?}");
+            assert_eq!(state(&slot), State::Aborted, "{abort:?}");
+            assert_eq!(
+                drive(&mut slot, Event::SlotRelease),
+                duty::RESET,
+                "{abort:?}"
+            );
+        }
+
+        // The timeout's action is a notice: it posts nothing, and the release
+        // after it still resets the slot.
+        assert_eq!(chunk(&mut slot, 1), duty::BEGIN);
+        assert_eq!(drive(&mut slot, Event::ReassemblyTimeout), 0);
+        assert_eq!(state(&slot), State::TimedOut);
+        assert_eq!(drive(&mut slot, Event::SlotRelease), duty::RESET);
+
+        assert_eq!(
+            drive(&mut slot, Event::SlotRelease),
+            0,
+            "Empty has no release"
+        );
+        assert_eq!(state(&slot), State::Empty);
+    }
+
+    /// No ingest path, and neither the channel abort nor the sweep, leaves a
+    /// duty posted for the next drive to find.
+    #[test]
+    fn no_router_path_leaves_a_duty_in_the_outbox() {
+        fn feed(
+            d: &mut ReassemblyDispatcher<2, 8>,
+            sn: u64,
+            more: u8,
+            payload: &[u8],
+        ) -> IngestOutcome {
+            let outcome = d.ingest(frag(sn, more, payload), MASK, 0, |_| {});
+            assert_drained(d);
+            outcome
+        }
+        let mut d: ReassemblyDispatcher<2, 8> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 100));
+        assert_eq!(feed(&mut d, 1, 1, b"aa"), IngestOutcome::Begun);
+        assert_eq!(feed(&mut d, 2, 1, b"bb"), IngestOutcome::Continued);
+        assert_eq!(feed(&mut d, 3, 0, b"cc"), IngestOutcome::Reassembled);
+        assert_eq!(feed(&mut d, 4, 0, b"dd"), IngestOutcome::Reassembled);
+        assert_eq!(feed(&mut d, 5, 1, b"ee"), IngestOutcome::Begun);
+        assert_eq!(
+            feed(&mut d, 9, 1, b"ff"),
+            IngestOutcome::Aborted(AbortReason::OutOfOrder)
+        );
+        assert_eq!(feed(&mut d, 10, 1, b"gg"), IngestOutcome::Begun);
+        assert_eq!(
+            feed(&mut d, 11, 1, b"hhhhhhh"),
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+        );
+        assert_eq!(
+            feed(&mut d, 12, 1, b"123456789"),
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+        );
+        assert_eq!(feed(&mut d, 13, 1, b"ii"), IngestOutcome::Begun);
+        assert!(d.abort_channel(PEER, Priority::DEFAULT, true));
+        assert_drained(&d);
+        assert_eq!(feed(&mut d, 14, 1, b"jj"), IngestOutcome::Begun);
+        assert_eq!(d.sweep(1_000), 1);
+        assert_drained(&d);
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 2);
+    }
+
+    /// A first fragment wider than the slot ends where it arrived: the arena's
+    /// reservation goes back and the slot machine never leaves `Empty`.
+    #[test]
+    fn a_first_fragment_wider_than_the_slot_never_reaches_the_machine() {
+        let mut d: ReassemblyDispatcher<1, 8> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        assert_eq!(
+            d.ingest(frag(1, 1, b"123456789"), MASK, 0, |_| panic!(
+                "a refused chain delivers nothing"
+            )),
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+        );
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 1, "the reservation was returned");
+        assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
+        assert_eq!(
+            d.ingest(frag(2, 1, b"1234"), MASK, 0, |_| {}),
+            IngestOutcome::Begun,
+            "the one slot still serves a chain that fits"
+        );
+    }
+
+    /// The bound is inclusive: a chain of exactly `CAP` bytes reassembles,
+    /// whether one fragment carries it or two.
+    #[test]
+    fn a_chain_of_exactly_the_slot_width_reassembles() {
+        let mut d: ReassemblyDispatcher<1, 8> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        assert_eq!(
+            d.ingest(frag(1, 0, b"12345678"), MASK, 0, |m| got.push(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(
+            d.ingest(frag(2, 1, b"abcd"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.ingest(frag(3, 0, b"efgh"), MASK, 0, |m| got.push(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(got, [b"12345678".to_vec(), b"abcdefgh".to_vec()]);
+    }
+
+    /// A timed-out chain is reclaimed by the release the sweep raises after
+    /// the timeout: counted once, with the bytes it had staged, its staging
+    /// back in the arena and its slot machine at `Empty`.
+    #[test]
+    fn a_swept_chain_is_reclaimed_by_the_release_after_the_timeout() {
+        let mut d: ReassemblyDispatcher<1, 64> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 100));
+        d.ingest(frag(1, 1, b"abc"), MASK, 0, |_| {});
+        d.ingest(frag(2, 1, b"de"), MASK, 0, |_| {});
+        assert_eq!(
+            d.sweep_counting(100),
+            ChainLoss {
+                chains: 1,
+                bytes: 5
+            }
+        );
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 1);
+        assert_eq!(d.slots[0].engine.get_current_state(), State::Empty);
+        assert_eq!(d.sweep_counting(1_000), ChainLoss::default());
+    }
+}
+
 // ── R311y578 — the Fragment chain-boundary markers (`0x2 First` /
 //    `0x3 Drop`), the rules zenoh gates on the negotiated patch level
 //    (`unicast/universal/rx.rs:155-170`). Before this round the Router
@@ -1520,6 +1840,7 @@ mod tests {
 mod chain_boundary_marker_tests {
     use super::*;
     use crate::extfragment::FragmentMarkers;
+    use crate::reassembly_slot::ReassemblySlotState;
     use alloc::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
@@ -1861,6 +2182,7 @@ mod chain_boundary_marker_tests {
 mod unknown_ring_tests {
     use super::*;
     use crate::extfragment::FragmentMarkers;
+    use crate::reassembly_slot::ReassemblySlotState;
     use alloc::vec::Vec;
 
     const PEER: &[u8] = &[0xAA; 16];
