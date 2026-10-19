@@ -760,6 +760,8 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         // deadline each tick and run the (self-guarded) check only when it
         // crossed, so the steady state stays event-free — the observer
         // sees `Emitted` verdicts, not a per-tick `WithinInterval` flood.
+        // There is no deadline while the FSM's keepalive worker is stopped,
+        // so a session in Closing emits nothing after its Close frame.
         #[cfg(feature = "transport-keepalive")]
         if let Some(ka_deadline_ms) = keepalive_wake_deadline(&self.actions) {
             if now_ms >= ka_deadline_ms {

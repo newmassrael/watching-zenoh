@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The AP realisation of the session FSM's `start_keepalive_worker` action: a
-//! backstop that keeps KEEPALIVE flowing while the drive loop cannot.
+//! A backstop for the session FSM's keepalive worker that keeps KEEPALIVE
+//! flowing while the drive loop cannot.
+//!
+//! The worker itself is the link's `keepalive_armed`, which the FSM's
+//! `start_keepalive_worker` sets on `Established` entry and
+//! `stop_keepalive_worker` clears on its exit. The drive loop emits while it
+//! is set; this pacer is started only while it is set and ends when it is
+//! cleared, so neither emitter outlives the duty the machine released.
 //!
 //! ## Why the loop alone is not enough
 //!
@@ -40,8 +46,10 @@
 //! the writer's channel closes when the last `Arc<SessionLinkActions>` goes, and
 //! a timer task that owned one would hold the session open. It belongs to ONE
 //! establishment, named by the `established_at` stamp it started under, and
-//! ends when the session is no longer that establishment: closed, torn down, or
-//! re-established by the reconnect supervisor, which starts a pacer of its own.
+//! ends when the session is no longer that establishment: the machine left
+//! `Established` (its exit stopped the keepalive worker), the link was torn
+//! down, or the reconnect supervisor re-established it, which starts a pacer of
+//! its own.
 //!
 //! It runs on [`WzRuntime::Tx`], the subsystem whose threads never run
 //! application callbacks.
@@ -64,8 +72,11 @@ use crate::session_glue::SessionLinkActions;
 const SLACK_DIVISOR: u64 = 4;
 
 /// Start the backstop for the establishment `actions` is in now. Returns at
-/// once; a session that is not Established has nothing to pace.
+/// once; a session whose keepalive worker is not running has nothing to pace.
 pub(crate) fn spawn_keepalive_pacer(actions: &Arc<SessionLinkActions>, clock: TokioTime) {
+    if !TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed) {
+        return;
+    }
     let Some(generation) = established_at(actions) else {
         return;
     };
@@ -86,6 +97,7 @@ fn step(weak: &Weak<SessionLinkActions>, clock: &TokioTime, generation: u64) -> 
             return None;
         }
         let now = clock.now_monotonic_ms();
+        // `None` once the FSM's exit from Established stopped the worker.
         let due = keepalive_wake_deadline(&actions)?;
         let slack = (actions.adopted_lease_ms() / LEASE_EXPIRE_FACTOR / SLACK_DIVISOR).max(1);
         let backstop = due.saturating_add(slack);

@@ -102,6 +102,9 @@ fn r61_listener_path_inbound_to_established() {
     assert_eq!(t.enable_rx_tx_regions, 1);
     assert_eq!(t.start_lease_monitor, 1);
     assert_eq!(t.start_keepalive_worker, 1);
+    // What the two starts do, beside the counts that record they ran.
+    assert!(*actions.link.lease_armed.lock().unwrap());
+    assert!(*actions.link.keepalive_armed.lock().unwrap());
 }
 
 // ── 2. LinkOpening -> link.open_timeout -> Closing (Generic)
@@ -191,9 +194,11 @@ fn r61_established_lease_expired_to_closing_expired() {
     let t = actions.trace_snapshot();
     assert_eq!(t.close_reason, CloseReason::Expired);
     assert_eq!(t.send_close_frame_with_reason, 1);
-    // Established.onexit ran.
+    // Established.onexit ran, and stopped both duties.
     assert_eq!(t.stop_keepalive_worker, 1);
     assert_eq!(t.stop_lease_monitor, 1);
+    assert!(!*actions.link.keepalive_armed.lock().unwrap());
+    assert!(!*actions.link.lease_armed.lock().unwrap());
 }
 
 // ── 8. Established -> framing.error -> Closing (Invalid)

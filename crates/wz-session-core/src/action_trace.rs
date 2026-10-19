@@ -11,7 +11,8 @@
 //! how many times each native script action fired and the last
 //! close-reason observed; the integration tests read these counters via
 //! `SessionLinkActions::trace_snapshot` to verify the SCXML-driven
-//! dispatch reached this side.
+//! dispatch reached this side. A count records that an action ran; it is
+//! never what the action does.
 //!
 //! Only the trace state moves: the live trace slot
 //! (`SessionLinkActions::trace: R::Mutex<ActionTrace>`) and the snapshot
@@ -44,10 +45,9 @@ pub struct ActionTrace {
     pub stop_keepalive_worker: u32,
     /// R311kx — incremented on every KeepAlive wire emit
     /// (`SessionLinkActions::send_keep_alive`, the cadence-driven
-    /// liveness ping). Counts EMITS, not worker starts — pairs with
-    /// `start_keepalive_worker` (the Established.onentry trace marker)
-    /// the way `send_close_frame_with_reason` pairs with the Closing
-    /// entry actions.
+    /// liveness ping). Counts EMITS, not worker starts:
+    /// `start_keepalive_worker` counts the starts, and what starts the
+    /// worker is the link's `keepalive_armed`, not either counter.
     pub send_keep_alive: u32,
     pub free_pool_slots: u32,
     pub set_close_reason_count: u32,

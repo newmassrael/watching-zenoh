@@ -55,20 +55,27 @@ pub const fn lease_from_wire(in_seconds: bool, wire_value: u64) -> u64 {
 /// recent. R311la — `last_inbound_at` advances on EVERY successfully
 /// parsed inbound message (zenoh-pico `_received` parity,
 /// unicast/rx.c:88), not just KeepAlives, so a sustained data flow
-/// keeps the session alive exactly as pico's lease task does. Both
-/// slots being `None` means the FSM has not reached Established yet
-/// AND nothing has been received (e.g. pre-handshake), and the
-/// helper defers via `NoBaseline`. The prior R77 baseline was the
-/// inbound stamp alone, which left `NoBaseline` pinned indefinitely
-/// until the first inbound — violating session-fsm §2.5 ("lease
-/// counts from Established entry").
+/// keeps the session alive exactly as pico's lease task does. The prior
+/// R77 baseline was the inbound stamp alone, which left `NoBaseline`
+/// pinned indefinitely until the first inbound — violating session-fsm
+/// §2.5 ("lease counts from Established entry").
+///
+/// The comparison is made only while the session FSM's lease monitor runs
+/// (`start_lease_monitor` on `Established` entry, `stop_lease_monitor` on
+/// its exit); any other time the answer is `NotMonitored`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseCheckOutcome {
-    /// Both `established_at` and `last_inbound_at` are
-    /// `None`. The helper makes no decision and does NOT inject
-    /// `LeaseExpired`. In practice this surfaces only pre-Established
-    /// (since `Established.onentry` populates `established_at` per
-    /// R84). Production callers treat this as "still polling".
+    /// The link's lease monitor is not running: the session has not reached
+    /// `Established`, or has left it (its exit stopped the monitor), or the
+    /// link was reset for a re-dial. The helper makes no decision and does
+    /// NOT inject `LeaseExpired`; a caller waiting on the lease has nothing
+    /// to wait for.
+    NotMonitored,
+    /// The monitor runs but both `established_at` and `last_inbound_at`
+    /// are `None`. The helper makes no decision and does NOT inject
+    /// `LeaseExpired`. Not reached through the FSM, whose
+    /// `Established.onentry` stamps `established_at` (R84) before it
+    /// starts the monitor.
     NoBaseline,
     /// `now.duration_since(baseline) < params.lease_ms` where
     /// `baseline = max(established_at, last_inbound_at)`.
@@ -94,11 +101,12 @@ pub enum LeaseCheckOutcome {
 /// the checker that produces it is `transport-keepalive`-gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeepAliveCheckOutcome {
-    /// The session is not Established (no `established_at` stamp) or the
-    /// transport is mid-teardown (`transport_available == false`). The
-    /// emitter is dormant — zenoh-pico's keep-alive task runs only on an
-    /// open transport (spawned after `_z_open`, suspended on
-    /// RECONNECTING, retired on CLOSED).
+    /// The link's keepalive worker is not running (the session FSM starts
+    /// it on `Established` entry and stops it on the exit) or the transport
+    /// is mid-teardown (`transport_available == false`). The emitter is
+    /// dormant — zenoh-pico's keep-alive task runs only on an open
+    /// transport (spawned after `_z_open`, suspended on RECONNECTING,
+    /// retired on CLOSED).
     Inactive,
     /// The line spoke within the last `adopted_lease / LEASE_EXPIRE_FACTOR`
     /// milliseconds (the `last_outbound_at` stamp is fresh) — no emit, the

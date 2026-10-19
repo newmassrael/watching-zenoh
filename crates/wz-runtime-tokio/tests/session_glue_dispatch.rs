@@ -93,11 +93,29 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     binding.enable_rx_tx_regions();
     binding.start_lease_monitor();
     binding.start_keepalive_worker();
+    // The start duties arm the link's liveness: the counters asserted below
+    // only record that they ran.
+    assert!(
+        *actions.link.lease_armed.lock().unwrap(),
+        "start_lease_monitor arms the lease monitor"
+    );
+    assert!(
+        *actions.link.keepalive_armed.lock().unwrap(),
+        "start_keepalive_worker arms the keepalive worker"
+    );
 
     // ─── Step 2: session-close walk ────────────────────────────
     binding.set_close_reason_generic();
     binding.stop_keepalive_worker();
     binding.stop_lease_monitor();
+    assert!(
+        !*actions.link.keepalive_armed.lock().unwrap(),
+        "stop_keepalive_worker disarms the keepalive worker"
+    );
+    assert!(
+        !*actions.link.lease_armed.lock().unwrap(),
+        "stop_lease_monitor disarms the lease monitor"
+    );
     binding.send_close_frame_with_reason();
     binding.release_link();
     binding.free_pool_slots();

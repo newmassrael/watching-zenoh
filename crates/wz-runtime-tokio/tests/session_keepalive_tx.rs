@@ -175,6 +175,55 @@ mod keepalive_emitter {
         );
     }
 
+    /// The keepalive worker is the machine's duty for `Established` alone:
+    /// its exit stops it, so a session in `Closing` sends no KeepAlive after
+    /// its Close frame however long the line stays idle, and neither drive
+    /// loop nor the pacer has a wake to arm for one. The transport is still
+    /// available in `Closing` (only `Closed` releases the link), so the
+    /// stopped worker is the only thing that keeps the emit off the wire.
+    #[test]
+    fn keepalive_stops_when_the_session_leaves_established() {
+        use wz_runtime_tokio::session_glue::keepalive_wake_deadline;
+        let (rec, actions, mut engine) = recording_setup();
+        drive_to_established(&mut engine);
+        assert!(
+            *actions.link.keepalive_armed.lock().unwrap(),
+            "Established entry starts the keepalive worker"
+        );
+        assert!(keepalive_wake_deadline(&actions).is_some());
+
+        engine.process_event(E::SessionClose);
+        assert_eq!(engine.get_current_state(), S::Closing);
+        assert!(
+            !*actions.link.keepalive_armed.lock().unwrap(),
+            "the exit from Established stops the keepalive worker"
+        );
+        assert!(
+            *actions.link.transport_available.lock().unwrap(),
+            "Closing still holds the link, so the transport gate does not stop the emit"
+        );
+        assert_eq!(
+            keepalive_wake_deadline(&actions),
+            None,
+            "a stopped worker arms no wake"
+        );
+
+        // 4_000 ms is past the 10_000/3 interval that emits in Established.
+        let idle_check = actions.clock.now_monotonic_ms() + 4_000;
+        assert_eq!(
+            check_keepalive_deadline(&actions, idle_check),
+            KeepAliveCheckOutcome::Inactive
+        );
+        let keepalives = rec
+            .snapshot()
+            .sends
+            .iter()
+            .filter(|(bytes, _)| bytes == &vec![0x04])
+            .count();
+        assert_eq!(keepalives, 0, "no KeepAlive reached the wire in Closing");
+        assert_eq!(actions.trace_snapshot().send_keep_alive, 0);
+    }
+
     /// The cadence divides the ADOPTED window (R311kv min(local, peer)):
     /// a peer-advertised 3_000 ms lease makes the interval 1_000 ms, so
     /// a 2_000 ms idle line emits where the local-only 10_000/3 window

@@ -347,7 +347,8 @@ pub enum DriverLoopOutcome {
 /// - [`IterationEvent::Lease`] fires when the lease-deadline
 ///   sleep arm wins the `tokio::select!` race — i.e. the peer
 ///   has gone silent. The carried [`LeaseCheckOutcome`] is the
-///   helper's verdict (`NoBaseline` / `WithinLease` / `Expired`);
+///   helper's verdict (`NotMonitored` / `NoBaseline` / `WithinLease` /
+///   `Expired`);
 ///   on `Expired` the FSM has already been advanced to `Closing`
 ///   inside the helper, so the next loop top will return
 ///   `Terminated`.

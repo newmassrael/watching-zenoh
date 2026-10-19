@@ -21,13 +21,14 @@
 //!     │ open_ack.received
 //!     ▼
 //!   Established            (onentry: enable_rx_tx_regions,
+//!                                    record_established_at,
 //!                                    start_lease_monitor,
-//!                                    start_keepalive_worker)
+//!                                    start_keepalive_worker;
+//!                           onexit:  stop_keepalive_worker,
+//!                                    stop_lease_monitor)
 //!     │ session.close
 //!     ▼
-//!   Closing                (onexit:  stop_keepalive_worker,
-//!                                    stop_lease_monitor;
-//!                           onentry: send_close_frame_with_reason)
+//!   Closing                (onentry: send_close_frame_with_reason)
 //!     │ closing.timeout
 //!     ▼
 //!   Closed (final)         (onentry: release_link, free_pool_slots)

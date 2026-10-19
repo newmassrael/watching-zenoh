@@ -2058,6 +2058,24 @@ pub struct LinkState<R: SessionRuntime> {
     /// (`_Z_ERR_TRANSPORT_NOT_AVAILABLE`); the handshake / CLOSE
     /// transport messages bypass the chokepoint and stay ungated.
     pub transport_available: R::Mutex<bool>,
+    /// Whether this link's keepalive worker runs: set by the FSM's
+    /// `start_keepalive_worker` on `Established` entry and cleared by
+    /// `stop_keepalive_worker` on its exit (and by
+    /// [`SessionLinkActions::reset_for_reopen`]). It is what the drive loops'
+    /// [`crate::drive::keepalive_wake_deadline`] and
+    /// [`crate::drive::check_keepalive_deadline`] read, so the duty the
+    /// machine releases on leaving `Established` stops the emits with it: a
+    /// session in `Closing` sends nothing after its Close frame.
+    #[cfg(feature = "transport-keepalive")]
+    pub keepalive_armed: R::Mutex<bool>,
+    /// Whether this link's lease monitor runs: set by the FSM's
+    /// `start_lease_monitor` on `Established` entry and cleared by
+    /// `stop_lease_monitor` on its exit (and by
+    /// [`SessionLinkActions::reset_for_reopen`]). Unarmed, the link has no
+    /// lease deadline ([`crate::drive::lease_wake_deadline`] is `None`) and
+    /// [`crate::drive::check_lease_deadline`] raises nothing, so the machine
+    /// is never told `lease.expired` outside the state that handles it.
+    pub lease_armed: R::Mutex<bool>,
     /// R2943 (transport-multilink) — the reliability class this link DECLARED
     /// and negotiated, zenoh's `link.config.reliability`: `None` until a
     /// negotiation settles one. It is the first of the two inputs
@@ -2916,6 +2934,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 established_at: R::new_mutex(None::<u64>),
                 last_outbound_at: R::new_mutex(None::<u64>),
                 transport_available: R::new_mutex(true),
+                #[cfg(feature = "transport-keepalive")]
+                keepalive_armed: R::new_mutex(false),
+                lease_armed: R::new_mutex(false),
                 #[cfg(feature = "transport-multilink")]
                 declared_reliability: R::new_mutex(None),
                 #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
@@ -12782,8 +12803,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// Like the CLOSE primitive, this is wire-side and FSM-state-blind;
     /// the Established/teardown gating lives in the checker
-    /// (`check_keepalive_deadline` consults `is_established` +
-    /// `transport_available`). R311g signature-stability — the method
+    /// (`check_keepalive_deadline` consults the link's armed keepalive
+    /// worker + `transport_available`). R311g signature-stability — the method
     /// exists across feature states; minus `transport-keepalive` the
     /// body silently no-ops (the FSM cannot enter the keepalive cadence
     /// there, per the `start_keepalive_worker` gate).
@@ -12919,7 +12940,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Cleared (per-transport): `inbound_cookie`,
     /// `inbound_opensyn_cookie`, `last_inbound_at`,
     /// `established_at` (so [`Self::is_established`] reads `false` until
-    /// the re-handshake completes), `inbound_peer_zid`,
+    /// the re-handshake completes), the armed keepalive worker and lease
+    /// monitor, `inbound_peer_zid`,
     /// `inbound_peer_init_caps`, the RX SN gate (`rx_sn`, re-seeded by
     /// the reopen handshake's OpenSyn/OpenAck), the open batching window
     /// (`transport-batching`), and `outbound_frame_sn` (re-seeded to
@@ -12973,6 +12995,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.awaiting_open_ack, |slot| *slot = false);
             R::with_mutex_mut(&self.link.last_inbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.link.established_at, |slot| *slot = None);
+            // The liveness duties belong to the transport that was
+            // established: the replacement link's Established entry starts
+            // its own, and none runs over the re-dial window.
+            #[cfg(feature = "transport-keepalive")]
+            R::with_mutex_mut(&self.link.keepalive_armed, |armed| *armed = false);
+            R::with_mutex_mut(&self.link.lease_armed, |armed| *armed = false);
             // R311kw — the outbound stamp is per-transport: the replacement
             // link starts with no TX history (pico's fresh transport
             // initializes `_transmitted = 0`, unicast/transport.c:65).
@@ -13343,10 +13371,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     // docs/adr/0038: this host performs the machine's duties. The wire emits,
     // the link open and release, the close reason and the established stamp
     // are done by the bodies below. The keepalive worker and the lease monitor
-    // are performed by the drive loop that owns the clock, not by
-    // `start_*`/`stop_*` (those only count): `check_keepalive_deadline` emits
-    // the KeepAlive (the tokio keepalive pacer backs it up) and
-    // `check_lease_deadline` raises `lease.expired`.
+    // run in the drive loop that owns the clock, and `start_*`/`stop_*` are
+    // what start and stop them: they arm and disarm the link's
+    // `keepalive_armed` / `lease_armed`, and `check_keepalive_deadline` (with
+    // the tokio keepalive pacer) emits and `check_lease_deadline` raises
+    // `lease.expired` only while those are set.
     const REALIZATION: ::sce_rust_runtime::ActionRealization =
         ::sce_rust_runtime::ActionRealization::Performs;
 
@@ -13879,22 +13908,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn start_lease_monitor(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |t| t.start_lease_monitor += 1);
+        // The monitor is the drive loop's lease deadline; arming it is what
+        // gives this link one (`drive::lease_wake_deadline`).
+        R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = true);
     }
 
     #[inline(never)]
     fn stop_lease_monitor(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |t| t.stop_lease_monitor += 1);
+        R::with_mutex_mut(&self.link().lease_armed, |armed| *armed = false);
     }
 
     #[inline(never)]
     fn start_keepalive_worker(&mut self) {
-        // R311cb — transport-keepalive gates the keepalive worker. cfg-off:
-        // no-op (the FSM cannot enter the lease-monitored Established
-        // sub-region's keepalive cadence). Wire-level KeepAlive parse is a
-        // separate axis (codec-keep-alive).
+        // R311cb — transport-keepalive gates the keepalive worker. Wire-level
+        // KeepAlive parse is a separate axis (codec-keep-alive).
         #[cfg(feature = "transport-keepalive")]
         {
             R::with_mutex_mut(&self.inner.trace, |t| t.start_keepalive_worker += 1);
+            // The worker is the drive loops' keepalive deadline and the AP
+            // pacer; both emit only while this is set.
+            R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = true);
         }
     }
 
@@ -13903,6 +13937,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(feature = "transport-keepalive")]
         {
             R::with_mutex_mut(&self.inner.trace, |t| t.stop_keepalive_worker += 1);
+            R::with_mutex_mut(&self.link().keepalive_armed, |armed| *armed = false);
         }
     }
 

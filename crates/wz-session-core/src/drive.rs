@@ -2117,12 +2117,20 @@ fn in_place_unit<R: SessionRuntime, T: TimeSource>(
 /// session by it (unicast/lease.c:147). The same min(advertised,
 /// local-cap) shape the multicast per-peer sweep applies (R311ks);
 /// pre-OPEN (`peer_open_lease_ms` empty) the local window governs alone.
+///
+/// The check is the session FSM's lease monitor, so it runs only while the
+/// machine has it started (`start_lease_monitor` on `Established` entry,
+/// `stop_lease_monitor` on its exit): otherwise it answers
+/// [`LeaseCheckOutcome::NotMonitored`] and raises nothing.
 pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     now_ms: u64,
 ) -> LeaseCheckOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    if !R::with_mutex_mut(&actions.link.lease_armed, |armed| *armed) {
+        return LeaseCheckOutcome::NotMonitored;
+    }
     // R311kx — deadline arithmetic shared with the loop wake computation
     // (`lease_wake_deadline`): `deadline = baseline + adopted window`, so
     // "the wake fired" and "the window elapsed" cannot drift apart.
@@ -2569,9 +2577,16 @@ fn max_stamp(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 /// peer-advertised lease (R311kv min) woke late by the difference.
 /// R311la — the inbound stamp is the any-RX `last_inbound_at` (pico
 /// `_received` parity), not the former KeepAlive-only slot.
+///
+/// `None` as well while the link's lease monitor is not running (before
+/// `Established`, and after its exit released the monitor): a stamp left
+/// from the established window is not a deadline anyone keeps.
 pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
+    if !R::with_mutex_mut(&actions.link.lease_armed, |armed| *armed) {
+        return None;
+    }
     let inbound = R::with_mutex_mut(&actions.link.last_inbound_at, |g| *g);
     let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
     max_stamp(established, inbound).map(|b| b.saturating_add(actions.adopted_lease_ms()))
@@ -2588,18 +2603,26 @@ pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
 /// `.max(1)` keeps a degenerate 0 ms lease from hot-spinning the emitter;
 /// the lease comparator expires such a session on its first check
 /// regardless.
+///
+/// `None` whenever the link's keepalive worker is not running: the session
+/// FSM starts it on `Established` entry and stops it on the exit, so a
+/// session in `Closing` arms no keepalive wake on either drive loop and the
+/// tokio pacer ends.
 #[cfg(feature = "transport-keepalive")]
 pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
+    if !R::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed) {
+        return None;
+    }
     let outbound = R::with_mutex_mut(&actions.link.last_outbound_at, |g| *g);
     let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
     let interval = (actions.adopted_lease_ms() / crate::lease::LEASE_EXPIRE_FACTOR).max(1);
     max_stamp(established, outbound).map(|b| b.saturating_add(interval))
 }
 
-/// R311kx — run one keepalive TX deadline check: when the session is
-/// Established, the transport is live, and the line has been idle for
+/// R311kx — run one keepalive TX deadline check: when the link's keepalive
+/// worker is running, the transport is live, and the line has been idle for
 /// `adopted_lease_ms / LEASE_EXPIRE_FACTOR` (no wire emit since the
 /// [`keepalive_wake_deadline`] baseline), emit one KeepAlive through
 /// [`SessionLinkActions::send_keep_alive`] — which re-stamps
@@ -2618,12 +2641,12 @@ pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     now_ms: u64,
 ) -> crate::lease::KeepAliveCheckOutcome {
     use crate::lease::KeepAliveCheckOutcome as K;
-    if !actions.is_established() || !R::with_mutex_mut(&actions.link.transport_available, |g| *g) {
+    if !R::with_mutex_mut(&actions.link.transport_available, |g| *g) {
         return K::Inactive;
     }
     match keepalive_wake_deadline(actions) {
-        // Unreachable while Established (`established_at` is a baseline),
-        // kept total for the enum's sake.
+        // The worker is not running: never started, or stopped by the
+        // machine's exit from Established.
         None => K::Inactive,
         Some(deadline_ms) if now_ms >= deadline_ms => {
             actions.send_keep_alive();

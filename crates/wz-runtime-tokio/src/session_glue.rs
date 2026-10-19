@@ -1256,9 +1256,16 @@ async fn park_on_drain<T, F>(
         #[cfg(not(feature = "transport-keepalive"))]
         let ka_dl: Option<u64> = None;
         let Some(deadline_ms) = [lease_dl, ka_dl].into_iter().flatten().min() else {
-            // Nothing is armed, so there is nothing to starve: this is the
-            // pre-Established shape, where the data plane is not yet running
-            // and the loop head blocks on the link poll for the same reason.
+            // No liveness duty runs. Once this transport has been
+            // established that means the machine has left Established and
+            // released them: the session is closing, there is nothing left
+            // to deliver into, and the park ends as it does on an expiry.
+            if actions.is_established() {
+                return;
+            }
+            // Before Established there is nothing to starve: the data plane
+            // is not yet running and the loop head blocks on the link poll
+            // for the same reason.
             (&mut drain).await;
             return;
         };
@@ -1288,16 +1295,17 @@ async fn park_on_drain<T, F>(
                 // dead session open on a reader that may never read.
                 //
                 // It is also what keeps this from spinning. `Expired` moves the
-                // FSM to Closing, which is NOT a final state, while
-                // `established_at` still stamps a lease deadline now in the
-                // past -- so re-arming would compute `remaining_ms == 0` and
-                // busy-loop forever. MEASURED: the first draft returned on
+                // FSM to Closing, which is NOT a final state; a check that
+                // finds no monitor running (`NotMonitored`) or a dormant
+                // keepalive emitter says the session has left Established, and
+                // a build without `transport-keepalive` has only the lease
+                // verdict to say it. MEASURED: the first draft returned on
                 // `is_in_final_state()` alone and hung exactly there, burning a
-                // ten-minute build. A dormant keepalive emitter says the same
-                // thing one step earlier (the transport is mid-teardown), and
-                // its deadline does not move either.
+                // ten-minute build, when a stale lease stamp still armed a
+                // deadline in the past.
                 if ka_dormant
                     || lease_outcome == LeaseCheckOutcome::Expired
+                    || lease_outcome == LeaseCheckOutcome::NotMonitored
                     || engine.is_in_final_state()
                 {
                     return;
@@ -5376,6 +5384,9 @@ mod reconnect_tx_tests {
         TokioRuntime::with_mutex_mut(&actions.link.last_inbound_at, |slot| *slot = Some(43));
         TokioRuntime::with_mutex_mut(&actions.inbound_cookie, |slot| *slot = Some(vec![1, 2]));
         TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot = Some(vec![9; 4]));
+        TokioRuntime::with_mutex_mut(&actions.link.lease_armed, |armed| *armed = true);
+        #[cfg(feature = "transport-keepalive")]
+        TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed = true);
         assert!(actions.is_established());
 
         actions.reset_for_reopen();
@@ -5383,6 +5394,15 @@ mod reconnect_tx_tests {
         assert!(
             !actions.is_established(),
             "reset must drop Established so declare gates hold until re-handshake"
+        );
+        assert!(
+            !TokioRuntime::with_mutex_mut(&actions.link.lease_armed, |armed| *armed),
+            "no lease monitor runs over the re-dial window"
+        );
+        #[cfg(feature = "transport-keepalive")]
+        assert!(
+            !TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed),
+            "no keepalive worker runs over the re-dial window"
         );
         assert!(TokioRuntime::with_mutex_mut(
             &actions.link.last_inbound_at,

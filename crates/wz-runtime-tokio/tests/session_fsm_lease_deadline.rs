@@ -55,14 +55,12 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActio
     assert_eq!(engine.get_current_state(), S::Established);
 }
 
-// ── Scenario 1: both baseline slots empty (pre-Established) →
-//                NoBaseline, state unchanged. R84 changed this from
-//                "last_inbound_at is empty" to "both slots
-//                are empty" because Established.onentry now populates
-//                established_at, so a post-Established session always
-//                has at least one baseline.
+// ── Scenario 1: pre-Established → NotMonitored, state unchanged. The
+//                lease monitor is started by Established.onentry, so
+//                before it there is no lease to check, whatever the
+//                stamps hold.
 #[test]
-fn r77_no_baseline_when_both_slots_empty_pre_established() {
+fn r77_not_monitored_pre_established() {
     let (actions, mut engine) = fresh_setup();
     // Do NOT drive to Established — both slots stay None.
     assert!(
@@ -73,19 +71,63 @@ fn r77_no_baseline_when_both_slots_empty_pre_established() {
         actions.link.established_at.lock().unwrap().is_none(),
         "established slot empty pre-Established"
     );
+    assert!(
+        !*actions.link.lease_armed.lock().unwrap(),
+        "no lease monitor runs before Established"
+    );
     let pre_state = engine.get_current_state();
 
     let outcome = check_lease_deadline(&actions, &mut engine, actions.clock.now_monotonic_ms());
     assert_eq!(
         outcome,
-        LeaseCheckOutcome::NoBaseline,
-        "both slots absent must surface NoBaseline; got {outcome:?}"
+        LeaseCheckOutcome::NotMonitored,
+        "no monitor must surface NotMonitored; got {outcome:?}"
     );
     assert_eq!(
         engine.get_current_state(),
         pre_state,
-        "NoBaseline branch must NOT mutate FSM state"
+        "NotMonitored branch must NOT mutate FSM state"
     );
+}
+
+// ── The lease monitor is the machine's duty for Established alone: its
+//    exit stops it, so the established stamp it leaves behind is no
+//    deadline afterwards. A check far past that window raises nothing.
+#[test]
+fn lease_is_not_checked_once_established_is_left() {
+    use wz_runtime_tokio::session_glue::lease_wake_deadline;
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    assert!(
+        *actions.link.lease_armed.lock().unwrap(),
+        "Established entry starts the lease monitor"
+    );
+    let established = actions.link.established_at.lock().unwrap().unwrap();
+
+    engine.process_event(E::SessionClose);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert!(
+        !*actions.link.lease_armed.lock().unwrap(),
+        "the exit from Established stops the lease monitor"
+    );
+    assert!(
+        actions.link.established_at.lock().unwrap().is_some(),
+        "the established stamp outlives the state, so it cannot be the gate"
+    );
+    assert_eq!(
+        lease_wake_deadline(&actions),
+        None,
+        "a stopped monitor arms no lease wake"
+    );
+
+    // 20 s past Established entry, twice the fixture lease.
+    let outcome = check_lease_deadline(&actions, &mut engine, established + 20 * 1000);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::NotMonitored,
+        "a lease check outside Established must not report an expiry; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
 }
 
 // ── R84 Scenario A: drive_to_established populates established_at;
