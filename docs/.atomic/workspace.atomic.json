@@ -276242,6 +276242,64 @@
         "Rows of an unproven flow still stand: the claim asked for rows not to stand as zenoh or for a fact that says so, and this round gives the fact."
       ]
     },
+    "Round 3382": {
+      "decision_summary": "Hosted reds of the verify-once removal run and of R3381's push are repaid. (1) C1cn lost 70 session-core tests to a full runner disk (log: 9 MB free); its job now prunes the runner as the ci job does. (2) Layer E's zp_stop_read_task hang: each serial face took a read-gate place but is polled only inside the drive's poll, so an idle drive's stop waited forever; a face is now Pausable::nested and takes no place. (3) R3381 refused Inits of a foreign version, and every handshake the passive tests fed it announced wz's internal 0x05: crafted fixtures now carry zenoh's 0x09, tapped e2e sessions open with the strict interop profile, and the damage sweep's pinned split moves one position per half, the version byte. (4) The decode-cost bench restarted each packet at a unit boundary, so 512 and 1400 were misframed and passed on garbage; packets now continue one stream. (5) The C consumer still read a KeepAlive's since row as unjudged.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: the nondefault job (Layer C1cn) frees the runner disk before its legs, with the ci job's prune and its df bracket.",
+        "crates/wz-capi-core/src/drive.rs: Pausable::nested, a gated future that takes no place in the read gate; SerialFaces wraps each face with it; a test holds that an idle drive's stop returns, the nested face is frozen until a start and runs after one.",
+        "crates/wz-session-wire-fixtures: PROTOCOL_VERSION 0x09 cited to upstream; every crafted Init announces it (alloc and fixed forms).",
+        "crates/wz-runtime-tokio/tests/passive_dissect_e2e.rs, pcap_dissect_e2e.rs: both ends open with zenoh_interop_session_init_params.",
+        "crates/wz-capture/src/transport_build_tests.rs: the oracle comparison builds version 9.",
+        "crates/wz-integration-tests/src/lib.rs: damage-sweep split re-measured (dialer 5/14, listener 3/11) with the reason.",
+        "crates/wz-capture/benches/decode_cost.rs: packets carry consecutive stream bytes; selftest arm 6 holds it.",
+        "crates/wz-capi-dissect/tests/c_abi_consumer.c: the since check expects a judged `no` row."
+      ],
+      "verification_bullets": [
+        "Bisected the decode-cost red on pc2: 4f69c1cf8 decodes 19115/52944 at 512/1400, 720a4f861 6498/14524; after the fix 19456/53200, exactly packets x size / 3.",
+        "Red-first: the new drive test timed out with Pausable::new and passes with Pausable::nested; wz-capi-core 71 tests, wz-capi-pico tests and clippy pass.",
+        "pico_read_task_twice_and_diff --ignored ten times pinned to two CPUs on pc2: 10 x 6 passed.",
+        "pc2: decode_cost --selftest 6/6 and --quick; wz-session-wire-fixtures; wz-runtime-tokio (all targets, incl. passive_dissect_e2e 2 and pcap_dissect_e2e 3); wz-integration-tests --lib 59; wz-capture --all-features; wz-mcu-session-acceptor; run-ci Layer C1bo pass with the C consumer linked; clippy -D warnings on every touched crate.",
+        "Local: actionlint and the workflow gates, hook_script_reference_gate, upstream_citation_anchor_gate (FORM) rc 0.",
+        "NOT verified: any hosted run of this push; whether the prune leaves C1cn enough disk is read off its df on that run."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The disk repair is read off one warning; the post-prune df the step prints on the next hosted run is the measurement that confirms the headroom.",
+        "The earlier Layer E red of 8968869ff (wz_reply_del_source_info_to_pico_zget) is a different test and is not addressed here.",
+        "wz's active acceptor still takes an Init of any version, where zenoh closes on a mismatch; the wz-internal 0x05 test profile depends on that. Whether the active side should refuse too is an open parity question, not decided here."
+      ],
+      "publishable_decision_summary": "Hosted reds of the verify-once removal run and of R3381's push are repaid. (1) C1cn lost 70 session-core tests to a full runner disk (log: 9 MB free); its job now prunes the runner as the ci job does. (2) Layer E's zp_stop_read_task hang: each serial face took a read-gate place but is polled only inside the drive's poll, so an idle drive's stop waited forever; a face is now Pausable::nested and takes no place. (3) R3381 refused Inits of a foreign version, and every handshake the passive tests fed it announced wz's internal 0x05: crafted fixtures now carry zenoh's 0x09, tapped e2e sessions open with the strict interop profile, and the damage sweep's pinned split moves one position per half, the version byte. (4) The decode-cost bench restarted each packet at a unit boundary, so 512 and 1400 were misframed and passed on garbage; packets now continue one stream. (5) The C consumer still read a KeepAlive's since row as unjudged.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: the nondefault job (Layer C1cn) frees the runner disk before its legs, with the ci job's prune and its df bracket.",
+        "crates/wz-capi-core/src/drive.rs: Pausable::nested, a gated future that takes no place in the read gate; SerialFaces wraps each face with it; a test holds that an idle drive's stop returns, the nested face is frozen until a start and runs after one.",
+        "crates/wz-session-wire-fixtures: PROTOCOL_VERSION 0x09 cited to upstream; every crafted Init announces it (alloc and fixed forms).",
+        "crates/wz-runtime-tokio/tests/passive_dissect_e2e.rs, pcap_dissect_e2e.rs: both ends open with zenoh_interop_session_init_params.",
+        "crates/wz-capture/src/transport_build_tests.rs: the oracle comparison builds version 9.",
+        "crates/wz-integration-tests/src/lib.rs: damage-sweep split re-measured (dialer 5/14, listener 3/11) with the reason.",
+        "crates/wz-capture/benches/decode_cost.rs: packets carry consecutive stream bytes; selftest arm 6 holds it.",
+        "crates/wz-capi-dissect/tests/c_abi_consumer.c: the since check expects a judged `no` row."
+      ],
+      "publishable_verification_bullets": [
+        "Bisected the decode-cost red on pc2: 4f69c1cf8 decodes 19115/52944 at 512/1400, 720a4f861 6498/14524; after the fix 19456/53200, exactly packets x size / 3.",
+        "Red-first: the new drive test timed out with Pausable::new and passes with Pausable::nested; wz-capi-core 71 tests, wz-capi-pico tests and clippy pass.",
+        "pico_read_task_twice_and_diff --ignored ten times pinned to two CPUs on pc2: 10 x 6 passed.",
+        "pc2: decode_cost --selftest 6/6 and --quick; wz-session-wire-fixtures; wz-runtime-tokio (all targets, incl. passive_dissect_e2e 2 and pcap_dissect_e2e 3); wz-integration-tests --lib 59; wz-capture --all-features; wz-mcu-session-acceptor; run-ci Layer C1bo pass with the C consumer linked; clippy -D warnings on every touched crate.",
+        "Local: actionlint and the workflow gates, hook_script_reference_gate, upstream_citation_anchor_gate (FORM) rc 0.",
+        "NOT verified: any hosted run of this push; whether the prune leaves C1cn enough disk is read off its df on that run."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The disk repair is read off one warning; the post-prune df the step prints on the next hosted run is the measurement that confirms the headroom.",
+        "The earlier Layer E red of 8968869ff (wz_reply_del_source_info_to_pico_zget) is a different test and is not addressed here.",
+        "wz's active acceptor still takes an Init of any version, where zenoh closes on a mismatch; the wz-internal 0x05 test profile depends on that. Whether the active side should refuse too is an open parity question, not decided here."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
