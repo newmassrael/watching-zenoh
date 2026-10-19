@@ -80,7 +80,9 @@ fn listener_entries(port: u16, dictionary_path: &str) -> Vec<(&'static str, Stri
         ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
         (
             "transport/auth/usrpwd/dictionary_file",
-            format!("\"{dictionary_path}\""),
+            // `{:?}` quotes and escapes: a Windows temp path holds backslashes, which a bare
+            // JSON5 string reads as escape sequences and refuses (the insert returned -2 there).
+            format!("{dictionary_path:?}"),
         ),
     ]
 }

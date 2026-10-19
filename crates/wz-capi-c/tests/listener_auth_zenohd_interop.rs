@@ -116,7 +116,8 @@ unsafe fn open_listener(port: u16, dictionary: &str) -> z_owned_session_t {
         ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
         (
             "transport/auth/usrpwd/dictionary_file",
-            format!("\"{dictionary}\""),
+            // Quoted and escaped, so a path with backslashes is a valid JSON5 string.
+            format!("{dictionary:?}"),
         ),
     ] {
         let k = CString::new(key).unwrap();
