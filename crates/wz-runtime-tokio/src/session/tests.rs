@@ -7292,6 +7292,162 @@ fn make_undecl_subscriber(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
     .unwrap()
 }
 
+// ── A put is left unwritten to a peer only when the peer has SAID it wants nothing the key
+// reaches. Each test below pins one of the conditions that make that sentence true, and the
+// one that would turn a missing declaration into a lost put if it were dropped.
+
+/// A session whose remote met it as a peer (role 1 on the wire), with nothing declared yet.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+fn session_met_as_peer(remote_role: wz_codecs::whatami::WhatAmI) -> TokioSession {
+    let (session, _driver) = build_session();
+    *session
+        .actions()
+        .peer_whatami
+        .lock()
+        .expect("peer_whatami poisoned in test fixture") = Some(remote_role.to_wire());
+    session
+}
+
+/// The peer's `DeclareFinal` of the initial interest arrives.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+fn peer_ends_initial_declarations(session: &TokioSession) {
+    use hashbrown::HashMap;
+    use wz_session_core::declare_build::build_declare_final_reply;
+    use wz_session_core::extbound::INITIAL_INTEREST_ID;
+    use wz_session_core::network_message::NetworkMessage;
+    let messages = [NetworkMessage::Declare(Box::new(
+        build_declare_final_reply(INITIAL_INTEREST_ID),
+    ))];
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_messages(&messages, &HashMap::new());
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+fn peer_declares(session: &TokioSession, id: u64, key: &str) {
+    use hashbrown::HashMap;
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_declare(&make_decl_subscriber(id, key), &HashMap::new());
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+#[test]
+fn a_peer_that_has_not_ended_its_declarations_is_written_to() {
+    use wz_codecs::whatami::WhatAmI;
+    let session = session_met_as_peer(WhatAmI::Peer);
+    assert!(
+        !session.peer_wants_no_put_on("home/temp"),
+        "nothing declared and no final: a declaration may simply not have arrived"
+    );
+    peer_declares(&session, 1, "other/**");
+    assert!(
+        !session.peer_wants_no_put_on("home/temp"),
+        "a subscriber on another key is still not the whole of what the peer will declare"
+    );
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+#[test]
+fn a_peer_that_ended_its_declarations_and_wants_nothing_here_is_not_written_to() {
+    use wz_codecs::whatami::WhatAmI;
+    let session = session_met_as_peer(WhatAmI::Peer);
+    peer_declares(&session, 1, "other/**");
+    peer_ends_initial_declarations(&session);
+    assert!(session.peer_wants_no_put_on("home/temp"));
+    assert!(
+        !session.peer_wants_no_put_on("other/x"),
+        "a put on a key the peer's subscriber covers is written"
+    );
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+#[test]
+fn an_overlapping_wildcard_subscriber_keeps_the_put() {
+    use wz_codecs::whatami::WhatAmI;
+    let session = session_met_as_peer(WhatAmI::Peer);
+    peer_declares(&session, 1, "home/*/temp");
+    peer_ends_initial_declarations(&session);
+    assert!(!session.peer_wants_no_put_on("home/kitchen/temp"));
+    assert!(session.peer_wants_no_put_on("home/kitchen/door"));
+    // A put whose own key is a wildcard reaches every key it covers.
+    assert!(!session.peer_wants_no_put_on("home/**"));
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+#[test]
+fn a_subscription_declared_after_the_final_is_written_to_from_then_on() {
+    use wz_codecs::whatami::WhatAmI;
+    let session = session_met_as_peer(WhatAmI::Peer);
+    peer_ends_initial_declarations(&session);
+    assert!(session.peer_wants_no_put_on("home/temp"));
+    peer_declares(&session, 7, "home/temp");
+    assert!(
+        !session.peer_wants_no_put_on("home/temp"),
+        "a late subscriber starts to receive"
+    );
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .dispatch_declare(&make_undecl_subscriber(7), &hashbrown::HashMap::new());
+    assert!(
+        session.peer_wants_no_put_on("home/temp"),
+        "and stops when it undeclares"
+    );
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+#[test]
+fn a_router_or_client_remote_is_always_written_to() {
+    use wz_codecs::whatami::WhatAmI;
+    for remote in [WhatAmI::Router, WhatAmI::Client] {
+        let session = session_met_as_peer(remote);
+        peer_ends_initial_declarations(&session);
+        assert!(
+            !session.peer_wants_no_put_on("home/temp"),
+            "{remote:?}: only what it was asked for has been declared, so an absent \
+             subscriber says nothing"
+        );
+    }
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+#[test]
+fn a_remote_whose_role_never_arrived_is_written_to() {
+    let (session, _driver) = build_session();
+    peer_ends_initial_declarations(&session);
+    assert!(!session.peer_wants_no_put_on("home/temp"));
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+#[test]
+fn a_lost_link_returns_the_peer_to_being_written_to_until_it_ends_again() {
+    use wz_codecs::whatami::WhatAmI;
+    let session = session_met_as_peer(WhatAmI::Peer);
+    peer_ends_initial_declarations(&session);
+    assert!(session.peer_wants_no_put_on("home/temp"));
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_subscribers
+        .flush_declarations_on_link_loss(&|_| false);
+    assert!(
+        !session.peer_wants_no_put_on("home/temp"),
+        "the reconnected peer has not yet declared again"
+    );
+    peer_ends_initial_declarations(&session);
+    assert!(session.peer_wants_no_put_on("home/temp"));
+}
+
 #[test]
 fn publisher_get_matching_status_false_on_fresh_session_with_no_peers() {
     let (session, _driver) = build_session();

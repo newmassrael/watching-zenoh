@@ -455,6 +455,14 @@ mod admin_declarations;
 /// subscriber) and the library's one config-write handler.
 #[cfg(feature = "transport-unicast")]
 mod admin_space;
+/// What a put owes this session's peer, kept against the peer's declaration epoch; see
+/// [`Session::peer_wants_no_put_on`].
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "declare-final",
+    target_has_atomic = "64"
+))]
+mod put_route;
 #[cfg(all(feature = "transport-unicast", feature = "adminspace-write"))]
 pub use admin_space::apply_admin_config_write;
 #[cfg(feature = "transport-unicast")]
@@ -870,6 +878,14 @@ where
     /// SHARED on clone, as the chain is.
     #[cfg(feature = "access-acl")]
     egress_policy: Arc<std::sync::atomic::AtomicBool>,
+    /// What a put owes this session's peer, remembered against the peer's declaration epoch
+    /// ([`Self::peer_wants_no_put_on`]). SHARED on clone: it is one link's fact.
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "declare-final",
+        target_has_atomic = "64"
+    ))]
+    put_route: Arc<put_route::PutRouteMemo>,
     /// R2702 — the §5.16 INGRESS chain, the twin of the field above, consulted
     /// on the inbound batch before the observer fans it out.
     ///
@@ -1212,6 +1228,12 @@ where
             interceptors_egress: self.interceptors_egress.clone(),
             #[cfg(feature = "access-acl")]
             egress_policy: self.egress_policy.clone(),
+            #[cfg(all(
+                feature = "declare-subscriber",
+                feature = "declare-final",
+                target_has_atomic = "64"
+            ))]
+            put_route: self.put_route.clone(),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: self.interceptors_ingress.clone(),
         }
@@ -2581,6 +2603,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             ),
             #[cfg(feature = "access-acl")]
             egress_policy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(all(
+                feature = "declare-subscriber",
+                feature = "declare-final",
+                target_has_atomic = "64"
+            ))]
+            put_route: Arc::new(put_route::PutRouteMemo::new()),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
@@ -2781,6 +2809,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             ),
             #[cfg(feature = "access-acl")]
             egress_policy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(all(
+                feature = "declare-subscriber",
+                feature = "declare-final",
+                target_has_atomic = "64"
+            ))]
+            put_route: Arc::new(put_route::PutRouteMemo::new()),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
@@ -2913,30 +2947,133 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn send_initial_interest_final(&self) -> bool {
         #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         {
-            use wz_session_core::extbound::{sends_initial_interest_final, INITIAL_INTEREST_ID};
+            use wz_session_core::extbound::INITIAL_INTEREST_ID;
             use wz_session_core::response_sink::DeclareReplySink;
 
-            let actions = self.actions();
-            let Some(remote) = actions
-                .peer_whatami_wire()
-                .and_then(wz_codecs::whatami::WhatAmI::from_wire)
-            else {
-                return false;
-            };
-            if !sends_initial_interest_final(
-                actions.params.whatami,
-                remote,
-                actions.peer_remote_bound(),
-            ) {
+            if !self.meets_remote_as_peer_hat() {
                 return false;
             }
-            actions.send_declare_final_reply(INITIAL_INTEREST_ID);
+            self.actions().send_declare_final_reply(INITIAL_INTEREST_ID);
             true
         }
         #[cfg(not(any(feature = "liveliness-token", feature = "declare-subscriber")))]
         {
             false
         }
+    }
+
+    /// Whether this node and the remote meet as the peer hat's two north-bound peers: each end
+    /// PUSHES what it declares and ends it with the `DeclareFinal` of the initial interest
+    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`). Every other pair
+    /// is pull mode, where what a remote has declared to us is only what we asked for.
+    ///
+    /// Read off the session's own link: this node's role, the role the handshake told it the
+    /// remote has and the bound the remote announced on its Open. A remote whose role never
+    /// arrived is not met as a peer.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    fn meets_remote_as_peer_hat(&self) -> bool {
+        self.peer_hat_link() == Some(true)
+    }
+
+    /// [`Self::meets_remote_as_peer_hat`] with the third answer it hides: `None` while the
+    /// remote's role has not arrived, which is not the same as a remote that is not a peer.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    fn peer_hat_link(&self) -> Option<bool> {
+        let actions = self.actions();
+        let remote = actions
+            .peer_whatami_wire()
+            .and_then(wz_codecs::whatami::WhatAmI::from_wire)?;
+        Some(wz_session_core::extbound::sends_initial_interest_final(
+            actions.params.whatami,
+            remote,
+            actions.peer_remote_bound(),
+        ))
+    }
+
+    /// Whether a put on `keyexpr` need not be written to this session's link, because the
+    /// remote has said it wants nothing that key reaches.
+    ///
+    /// That is only knowable on a peer-to-peer link, where the remote pushes its declarations
+    /// and ends them with the `DeclareFinal` of the initial interest: before that final a
+    /// declaration may simply not have arrived, and on any other pair (a router, a client)
+    /// the remote declares only what it was asked for, so an absent subscriber says nothing.
+    /// Upstream's peer hat routes a put the same way: to a face that holds a matching
+    /// subscriber or whose subscriber interest is not yet finalized, and to no other
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn compute_data_route(`). A remote that
+    /// never sends the final (zenoh-pico) is therefore always written to.
+    ///
+    /// One read of the remote's declarations under the observer's lock, which the put did not
+    /// take before; `false` in a build without the subscriber plane.
+    pub fn peer_wants_no_put_on(&self, keyexpr: &str) -> bool {
+        #[cfg(all(
+            feature = "declare-subscriber",
+            feature = "declare-final",
+            target_has_atomic = "64"
+        ))]
+        {
+            use put_route::Link;
+            let memo = &self.put_route;
+            let epoch = memo.epoch(|| {
+                R::with_mutex_mut(&self.observer, |obs| obs.remote_subscribers.peer().epoch())
+            });
+            // Read BEFORE the answer is worked out: a declaration that lands in between moves the
+            // epoch past this one, so the answer kept is a miss next time and never a stale hit.
+            let seen = epoch.load(std::sync::atomic::Ordering::Acquire);
+            let link = match memo.link_at(seen) {
+                Some(link) => link,
+                None => {
+                    // The role arrives with the handshake. Until it has, the peer is written to
+                    // and the question is asked again.
+                    let Some(peer_hat) = self.peer_hat_link() else {
+                        return false;
+                    };
+                    let link = if peer_hat { Link::PeerHat } else { Link::Other };
+                    memo.set_link(link, seen);
+                    link
+                }
+            };
+            // Almost every link of a node that dials a router, and the whole cost of the
+            // question there: two loads.
+            if link == Link::Other {
+                return false;
+            }
+            if let Some(skip) = memo.recall(keyexpr, seen) {
+                return skip;
+            }
+            let skip = self.peer_wants_no_put_on_now(keyexpr);
+            memo.remember(keyexpr, seen, skip);
+            skip
+        }
+        #[cfg(all(
+            feature = "declare-subscriber",
+            feature = "declare-final",
+            not(target_has_atomic = "64")
+        ))]
+        {
+            self.peer_wants_no_put_on_now(keyexpr)
+        }
+        #[cfg(not(all(feature = "declare-subscriber", feature = "declare-final")))]
+        {
+            let _ = keyexpr;
+            false
+        }
+    }
+
+    /// [`Self::peer_wants_no_put_on`] worked out from the peer's declarations, without the memo.
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-final"))]
+    fn peer_wants_no_put_on_now(&self, keyexpr: &str) -> bool {
+        if !self.meets_remote_as_peer_hat() {
+            return false;
+        }
+        R::with_mutex_mut(&self.observer, |obs| {
+            obs.remote_subscribers.peer().initial_declarations_final()
+                && !obs.remote_subscribers.has_matching_for(
+                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
+                        keyexpr,
+                        Locality::Remote,
+                    ),
+                )
+        })
     }
 
     /// R2815 — this session's own zenoh id, upstream's `session.zid()`
