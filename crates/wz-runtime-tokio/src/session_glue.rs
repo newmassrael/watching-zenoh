@@ -1017,6 +1017,67 @@ async fn wait_revised<'n>(
     }
 }
 
+/// What the link yielded when the loop looked for it without waiting, held until the loop's
+/// poll arm hands it on. See [`take_what_is_waiting`].
+///
+/// The next outcome of the link: the one held, if there is one, else the link's own. The held
+/// one is first because it was read first; whatever follows it (the rest of its framing
+/// unit, the next frame) comes from the link in the order it always did.
+async fn next_outcome<D: LinkDriver>(
+    held: &mut Option<DriverLoopOutcome>,
+    driver: &mut D,
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) -> DriverLoopOutcome {
+    if let Some(outcome) = held.take() {
+        return outcome;
+    }
+    poll_and_dispatch_one(driver, actions, engine).await
+}
+
+/// Before the loop judges the peer silent, take what the peer has already sent.
+///
+/// A deadline that passes while the loop was NOT reading (a callback that blocked, a host that
+/// was stopped) says nothing about the peer: its frames are in the socket, unread. When the
+/// loop wakes, that data and the expired deadline are both ready, and which the `select!`
+/// polls first is chance, so a session whose callback blocked longer than the lease was
+/// closed as often as not by the loop's own check, on a peer that had never gone quiet. One
+/// look at the link, without waiting, settles it: a frame decoded there stamps the
+/// inbound-activity time (`observe_inbound`), so the check that follows sees a live peer, and
+/// the frame itself is delivered by the poll arm, first, through [`next_outcome`].
+///
+/// Nothing waiting costs one poll that returns pending; the check then runs as it always did.
+fn take_what_is_waiting<D: LinkDriver>(
+    held: &mut Option<DriverLoopOutcome>,
+    driver: &mut D,
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
+    if held.is_some() {
+        return;
+    }
+    *held = now_or_never(poll_and_dispatch_one(driver, actions, engine));
+}
+
+/// Poll `future` once with a waker that does nothing, and answer what it gave if it finished.
+/// The future is dropped if it did not, which the link's reads allow (they are cancel-safe: a
+/// `select!` drops them the same way whenever another arm wins). A waker of no consequence is
+/// right because the loop polls the link again at once with its own, and a read registers the
+/// latest waker it is polled with.
+fn now_or_never<F: core::future::Future>(future: F) -> Option<F::Output> {
+    struct NoWake;
+    impl std::task::Wake for NoWake {
+        fn wake(self: Arc<Self>) {}
+    }
+    let mut future = core::pin::pin!(future);
+    let waker = std::task::Waker::from(Arc::new(NoWake));
+    let mut cx = std::task::Context::from_waker(&waker);
+    match future.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(output) => Some(output),
+        std::task::Poll::Pending => None,
+    }
+}
+
 /// Wait for the armed steady-state timer, or never when there is none. The
 /// `select!` precondition keeps the `None` case from ever being polled; this stays
 /// total for the same reason [`wait_revised`] does.
@@ -1313,6 +1374,9 @@ where
     // A caller WITHOUT a revision source gives no signal when its deadline moves
     // earlier, so it keeps the recompute-every-iteration shape exactly.
     let mut steady_timer: Option<(u64, core::pin::Pin<Box<_>>)> = None;
+    // An outcome taken off the link by a deadline wake, to be delivered first (see
+    // [`take_what_is_waiting`]).
+    let mut held: Option<DriverLoopOutcome> = None;
     // The caller's revision wake, kept registered across iterations (see
     // [`wait_revised`]).
     let mut revision = deadline_revised.map(|n| Box::pin(n.notified()));
@@ -1418,7 +1482,7 @@ where
                     // R2922 — a request staged from outside the loop. Fall
                     // through: the loop head raises it.
                     _ = actions.core.out_of_band.signalled() => {}
-                    outcome = poll_and_dispatch_one(driver, actions, engine) => {
+                    outcome = next_outcome(&mut held, driver, actions, engine) => {
                         // §5.21 routing-namespace — strip the DIRECT decoded
                         // FramePayload before dispatch. Covers BOTH the
                         // reassembly-on path (where `report_outcome_reassembling`
@@ -1510,6 +1574,7 @@ where
                         if real_deadline.is_some_and(|d| d > clock.now_monotonic_ms()) {
                             continue;
                         }
+                        take_what_is_waiting(&mut held, driver, actions, engine);
                         #[cfg(feature = "transport-keepalive")]
                         {
                             let ka_outcome =
@@ -1530,6 +1595,7 @@ where
                         // Expired transition tearing the session down in
                         // the same wake).
                         None => {
+                            take_what_is_waiting(&mut held, driver, actions, engine);
                             #[cfg(feature = "transport-keepalive")]
                             {
                                 let ka_outcome = check_keepalive_deadline(

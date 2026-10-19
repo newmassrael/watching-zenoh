@@ -73,12 +73,17 @@ struct Ctx {
     entered: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
     blocked_for_ms: Arc<AtomicUsize>,
+    released_at: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 /// What one run observed.
 struct Run {
     released_in_time: bool,
     blocked_for: Duration,
+    /// When the peer's session ended against when the callback returned: negative is during the
+    /// block (the C side stopped sending KEEPALIVE), positive is after it (the C side closed
+    /// the session on resuming), `None` is that it did not end.
+    ended_ms_after_release: Option<i128>,
     ended_while_blocked: bool,
     delivered_after: bool,
     ended_after_release: bool,
@@ -99,6 +104,7 @@ unsafe extern "C" fn on_sample_block_once(_sample: *const z_loaned_sample_t, ctx
         std::thread::sleep(ctx.block);
         ctx.blocked_for_ms
             .store(began.elapsed().as_millis() as usize, Ordering::SeqCst);
+        *ctx.released_at.lock().unwrap() = Some(Instant::now());
         ctx.released.store(true, Ordering::SeqCst);
     }
 }
@@ -129,6 +135,7 @@ fn native_peer(
     ready: mpsc::Sender<()>,
     stop: Arc<tokio::sync::Notify>,
     terminated: Arc<AtomicBool>,
+    ended_at: Arc<std::sync::Mutex<Option<Instant>>>,
 ) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -184,7 +191,10 @@ fn native_peer(
             }
         };
         tokio::select! {
-            _ = pump => { terminated.store(true, Ordering::SeqCst); }
+            _ = pump => {
+                *ended_at.lock().unwrap() = Some(Instant::now());
+                terminated.store(true, Ordering::SeqCst);
+            }
             _ = publishing => {}
             _ = stop.notified() => {}
             _ = tokio::time::sleep(Duration::from_secs(60)) => {}
@@ -215,12 +225,15 @@ fn run_with_block(block: Duration) -> Run {
     let entered = Arc::new(AtomicBool::new(false));
     let released = Arc::new(AtomicBool::new(false));
     let blocked_for_ms = Arc::new(AtomicUsize::new(0));
+    let released_at = Arc::new(std::sync::Mutex::new(None));
+    let ended_at = Arc::new(std::sync::Mutex::new(None));
     let ctx = Box::into_raw(Box::new(Ctx {
         block,
         received: received.clone(),
         entered: entered.clone(),
         released: released.clone(),
         blocked_for_ms: blocked_for_ms.clone(),
+        released_at: released_at.clone(),
     }));
 
     let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
@@ -270,9 +283,9 @@ fn run_with_block(block: Duration) -> Run {
     let stop = Arc::new(tokio::sync::Notify::new());
     let terminated = Arc::new(AtomicBool::new(false));
     let peer = {
-        let (stop, terminated) = (stop.clone(), terminated.clone());
+        let (stop, terminated, ended_at) = (stop.clone(), terminated.clone(), ended_at.clone());
         let endpoint = format!("tcp/127.0.0.1:{port}");
-        std::thread::spawn(move || native_peer(endpoint, ready_tx, stop, terminated))
+        std::thread::spawn(move || native_peer(endpoint, ready_tx, stop, terminated, ended_at))
     };
     ready_rx
         .recv_timeout(Duration::from_secs(10))
@@ -289,7 +302,6 @@ fn run_with_block(block: Duration) -> Run {
         || released.load(Ordering::SeqCst),
         block + Duration::from_secs(10),
     );
-    let ended_while_blocked = terminated.load(Ordering::SeqCst);
     let received_at_release = received.load(Ordering::SeqCst);
 
     // THE GATE, part two: a sample that arrives after the release is delivered.
@@ -307,9 +319,26 @@ fn run_with_block(block: Duration) -> Run {
         drop(Box::from_raw(ctx));
     }
 
+    // WHEN the peer's session ended, against when the callback returned. Reading a flag right
+    // after the release cannot tell a session that died of the C side's silence during the
+    // block from one the C side closed in the moment it resumed.
+    let released_instant = *released_at.lock().unwrap();
+    let ended_instant = *ended_at.lock().unwrap();
+    let ended_ms_after_release = match (ended_instant, released_instant) {
+        (Some(ended), Some(released)) if ended >= released => {
+            Some(ended.duration_since(released).as_millis() as i128)
+        }
+        (Some(ended), Some(released)) => {
+            Some(-(released.duration_since(ended).as_millis() as i128))
+        }
+        _ => None,
+    };
+    let ended_while_blocked = ended_ms_after_release.is_some_and(|ms| ms < 0);
+
     Run {
         released_in_time,
         blocked_for: Duration::from_millis(blocked_for_ms.load(Ordering::SeqCst) as u64),
+        ended_ms_after_release,
         ended_while_blocked,
         delivered_after,
         ended_after_release,
@@ -340,7 +369,26 @@ fn a_callback_that_blocks_past_the_lease_keeps_the_session_and_its_delivery() {
         LONG_BLOCK > LEASE + Duration::from_secs(2),
         "the block must outlast the lease or the test proves nothing"
     );
+    // The failure this pins is a race the loop lost about one run in four, so a single run
+    // passes on a build that has the defect three times in four. `WZ_BLOCKING_REPEAT` runs
+    // the case that many times in one process (default 1), which is how a change to the
+    // drive loop is checked against it; the hosted lanes run it once.
+    let repeats = std::env::var("WZ_BLOCKING_REPEAT")
+        .ok()
+        .and_then(|text| text.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(1);
+    for attempt in 1..=repeats {
+        long_block_run(attempt, repeats);
+    }
+}
+
+fn long_block_run(attempt: usize, repeats: usize) {
     let run = run_with_block(LONG_BLOCK);
+    eprintln!(
+        "long block {attempt}/{repeats}: ended_ms_after_release {:?}",
+        run.ended_ms_after_release
+    );
     assert!(run.released_in_time, "the blocked callback never returned");
     assert!(
         run.blocked_for >= LEASE,
@@ -349,13 +397,16 @@ fn a_callback_that_blocks_past_the_lease_keeps_the_session_and_its_delivery() {
     );
     assert!(
         !run.ended_while_blocked,
-        "the peer's session ended while the C callback was blocked: the C side stopped \
-         sending KEEPALIVE and the peer's lease expired"
+        "the peer's session ended {:?} ms after the callback returned (negative: during \
+         the block, the C side stopped sending KEEPALIVE and the peer's lease expired)",
+        run.ended_ms_after_release
     );
     assert!(
         run.delivered_after && !run.ended_after_release,
-        "the session did not keep delivering after the callback returned \
-         (received at release {}, now {})",
+        "the session did not keep delivering after the callback returned: it ended {:?} ms \
+         after the release (positive: the C side closed it on resuming, judging a peer silent \
+         whose frames were waiting unread), received at release {}, now {}",
+        run.ended_ms_after_release,
         run.received_at_release,
         run.received_now
     );
