@@ -72,6 +72,21 @@ config NET_CONFIG_NEED_IPV4
 config NET_DHCPV4
 	default y
 
+config WZ_RX_IN_PLACE
+	bool "Read each received datagram where the link holds it"
+	help
+	  The session decodes a datagram's records where it lies in the link's receive buffer
+	  and dispatches them one at a time: a Request reaches the queryable as a borrowed
+	  query, and no owned copy of the frame, the key or the request is built on the
+	  heap. Without it the datagram is copied onto the heap, its payload copied again,
+	  and every record decoded into an owned message before the application sees the
+	  first (the path every other record of the session still takes: the handshake,
+	  KeepAlive, Close).
+
+	  The Zephyr sockets link lends its receive buffer, so this is a selection and not a
+	  new path. Off by default until a lab records a run of it: the board's row is
+	  graded on the image without it.
+
 endif # WZ_NET_BACKEND_ZEPHYR_SOCKETS
 
 if WZ_NET_BACKEND_LWIP_MAC

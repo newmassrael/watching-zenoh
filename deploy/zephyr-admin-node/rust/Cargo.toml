@@ -55,6 +55,13 @@ heap = [
 # The network stack the board's Kconfig chose (`CONFIG_WZ_NET_BACKEND_*`);
 # deploy/zephyr-admin-node/CMakeLists.txt turns exactly one on.
 net-zephyr-sockets = []
+# The session reads each datagram where the link holds it and dispatches its records one at a
+# time (`wz-runtime-coop`'s `rx-in-place`): a Request is lent to the queryable registry as a
+# borrowed query and nothing of it is built on the heap. The Zephyr sockets link already lends
+# its receive buffer (`ZephyrUdpDriver::recv_with`) and the observer already takes the lent
+# record, so the only thing missing was this selection (`CONFIG_WZ_RX_IN_PLACE`). The crate is
+# named directly only to turn the selector on; the facade's `runtime-coop` links the same one.
+rx-in-place = ["dep:wz-runtime-coop", "wz-runtime-coop/rx-in-place"]
 # lwIP polled from the node's loop, over a wz Ethernet MAC crate. The facade's
 # `session-lwip-fixed` brings lwIP's links and the real lwIP build, which needs
 # WZ_LWIP_PORT in the build's environment (the CMake sets it); the heap profile adds

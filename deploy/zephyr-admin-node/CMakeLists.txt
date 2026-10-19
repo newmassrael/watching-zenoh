@@ -35,6 +35,11 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     socket bind getsockname sendto recvfrom poll close
     wzApplicationGetIpv4Address wzApplicationGetZid)
 
+  # The session reads each datagram where the link holds it (CONFIG_WZ_RX_IN_PLACE).
+  if(CONFIG_WZ_RX_IN_PLACE)
+    list(APPEND backend_feature rx-in-place)
+  endif()
+
   # The CYT4BF's ETH0 under Zephyr's own stack: the Ethernet driver over the wz MAC crate
   # and the TRNG as the entropy device (overlays/t2g_zeth.overlay states both). The
   # board's pieces they call are the ones the lwIP backend compiles below.
