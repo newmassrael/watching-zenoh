@@ -39,6 +39,12 @@ extern int wz_zeth_receive(uint8_t *buf, size_t capacity);
 extern int wz_zeth_poll_link(uint64_t now_ms);
 extern int wz_zeth_link_up(void);
 
+#ifdef CONFIG_WZ_ZETH_STAMPS
+/* wz_zeth_stamps.c */
+extern void wz_zeth_stamp_rx(void);
+extern void wz_zeth_stamp_tx(void);
+#endif
+
 /* A frame without its FCS and with room for a VLAN tag; the MAC drops a longer one whole. */
 #define ZETH_FRAME_MAX 1536
 
@@ -94,6 +100,9 @@ static void zeth_deliver(struct zeth_data *data, size_t len)
 		eth_stats_update_errors_rx(data->iface);
 		return;
 	}
+#ifdef CONFIG_WZ_ZETH_STAMPS
+	wz_zeth_stamp_rx();
+#endif
 	if (net_recv_data(data->iface, pkt) < 0) {
 		net_pkt_unref(pkt);
 		eth_stats_update_errors_rx(data->iface);
@@ -169,6 +178,9 @@ static int zeth_send(const struct device *dev, struct net_pkt *pkt)
 	if (net_pkt_read(pkt, data->tx_frame, len) != 0) {
 		return -EIO;
 	}
+#ifdef CONFIG_WZ_ZETH_STAMPS
+	wz_zeth_stamp_tx();
+#endif
 	for (uint32_t waited = 0;; waited += ZETH_TX_RETRY_US) {
 		k_mutex_lock(&data->lock, K_FOREVER);
 		int taken = wz_zeth_transmit(data->tx_frame, len);

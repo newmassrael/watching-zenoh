@@ -54,6 +54,16 @@ config WZ_ZETH_RX_POLL_INTERVAL_US
 	  which is the lowest latency and keeps the CPU out of idle, for a measurement or a
 	  node that has nothing else to do with it.
 
+config WZ_ZETH_STAMPS
+	bool "Tell where a query's time goes between the wire and the wire"
+	help
+	  Reads the cycle counter at four places of a query's round trip (the driver's receive,
+	  the application's recvfrom and sendto, the driver's send) and prints the mean of the
+	  gaps every 500 queries. The application is not changed: recvfrom and sendto are wrapped
+	  at link time, so a wz node and a zenoh-pico application have the same instrument. A
+	  diagnostic: the lines are writes to a UART, so no timing measured by anything else is
+	  taken from an image that has it on.
+
 endif # WZ_ZETH
 
 # Set by whatever drives ETH0 (this driver, or the lwIP backend's MAC), so the pin routing

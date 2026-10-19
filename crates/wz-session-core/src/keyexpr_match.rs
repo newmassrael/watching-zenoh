@@ -75,6 +75,72 @@ use crate::bounded::BoundedVec;
 /// declared-bound precedent.
 pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 
+/// How many chunks of a keyexpr [`KeyChunks`] holds on the stack. Real keys are a handful of
+/// chunks deep (`@/<zid>/peer/status/connect` is five), so a scan of one almost never leaves it.
+const STACK_KEY_CHUNKS: usize = 16;
+
+/// A keyexpr split on `/` into a view of its chunks, held on the stack when it has at most
+/// [`STACK_KEY_CHUNKS`] of them.
+///
+/// Every scan in this crate splits the key it is asked about, and on the growable (AP and
+/// heap-MCU) backing a [`BoundedVec`] of chunks is a `Vec` that grows as it is pushed to: a split
+/// of a five-chunk key cost two or three allocations and as many frees, on every message and for
+/// every queryable the message was tried against. A key deeper than the stack view is split into
+/// the [`BoundedVec`] as before, so what it holds and what it refuses are exactly what they
+/// were: on the fixed backing a key deeper than [`MAX_KEYEXPR_CHUNKS`] is not representable and
+/// [`KeyChunks::split`] answers `None`, which every caller reads as no-match.
+pub struct KeyChunks<'a> {
+    inline: [&'a str; STACK_KEY_CHUNKS],
+    len: usize,
+    spilled: Option<BoundedVec<&'a str, MAX_KEYEXPR_CHUNKS>>,
+}
+
+impl<'a> KeyChunks<'a> {
+    /// Split `text` on `/`. `None` when it has more chunks than the backing can represent.
+    pub fn split(text: &'a str) -> Option<Self> {
+        let mut inline = [""; STACK_KEY_CHUNKS];
+        let mut len = 0usize;
+        let mut fits = true;
+        for chunk in text.split('/') {
+            if len == STACK_KEY_CHUNKS {
+                fits = false;
+                break;
+            }
+            inline[len] = chunk;
+            len += 1;
+        }
+        if fits {
+            return Some(Self {
+                inline,
+                len,
+                spilled: None,
+            });
+        }
+        let mut spilled: BoundedVec<&'a str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+        for chunk in text.split('/') {
+            if spilled.push(chunk).is_err() {
+                return None;
+            }
+        }
+        Some(Self {
+            inline,
+            len,
+            spilled: Some(spilled),
+        })
+    }
+}
+
+impl<'a> core::ops::Deref for KeyChunks<'a> {
+    type Target = [&'a str];
+
+    fn deref(&self) -> &[&'a str] {
+        match &self.spilled {
+            Some(spilled) => spilled,
+            None => &self.inline[..self.len],
+        }
+    }
+}
+
 /// Whether a published `target` (already split on `/`) is well-formed — i.e.
 /// has no empty `/`-delimited chunk. A target with an empty chunk (a trailing
 /// `home/`, leading `/home`, interior `home//temp`, or the empty key `""`) is
@@ -133,15 +199,12 @@ fn target_chunks_well_formed(target_chunks: &[&str]) -> bool {
 /// pathological inputs (the productive zenoh-style patterns
 /// `home/**` / `sensors/*/temp` stay linear).
 pub fn keyexpr_pattern_matches(pattern_chunks: &[&str], target: &str) -> bool {
-    let mut target_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for chunk in target.split('/') {
-        // No-alloc backing: a target deeper than the declared bound
-        // cannot be represented, so it is conservatively no-match. The
-        // alloc backing never takes this arm (push is infallible).
-        if target_chunks.push(chunk).is_err() {
-            return false;
-        }
-    }
+    // No-alloc backing: a target deeper than the declared bound cannot be
+    // represented, so it is conservatively no-match. The alloc backing
+    // never takes this arm.
+    let Some(target_chunks) = KeyChunks::split(target) else {
+        return false;
+    };
     // A malformed target (an empty chunk) matches nothing — see
     // `target_chunks_well_formed`.
     if !target_chunks_well_formed(&target_chunks) {
@@ -452,15 +515,12 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
     if !target_chunks_well_formed(target_chunks) {
         return false;
     }
-    let mut candidate_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for chunk in candidate.split('/') {
-        // No-alloc backing: a candidate deeper than the declared bound cannot be
-        // represented, so it is conservatively no-match (the alloc backing never
-        // takes this arm). Same shape as keyexpr_pattern_matches' target split.
-        if candidate_chunks.push(chunk).is_err() {
-            return false;
-        }
-    }
+    // No-alloc backing: a candidate deeper than the declared bound cannot be
+    // represented, so it is conservatively no-match (the alloc backing never
+    // takes this arm). Same shape as keyexpr_pattern_matches' target split.
+    let Some(candidate_chunks) = KeyChunks::split(candidate) else {
+        return false;
+    };
     keyexpr_intersect_patterns(&candidate_chunks, target_chunks)
 }
 
@@ -495,15 +555,12 @@ pub fn keyexpr_includes_target(superset: &str, target_chunks: &[&str]) -> bool {
     if !target_chunks_well_formed(target_chunks) {
         return false;
     }
-    let mut superset_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for chunk in superset.split('/') {
-        // No-alloc backing: a rule deeper than the declared bound cannot be
-        // represented, so it is conservatively no-match (the alloc backing never
-        // takes this arm). Same shape as `keyexpr_intersects_target`.
-        if superset_chunks.push(chunk).is_err() {
-            return false;
-        }
-    }
+    // No-alloc backing: a rule deeper than the declared bound cannot be
+    // represented, so it is conservatively no-match (the alloc backing never
+    // takes this arm). Same shape as `keyexpr_intersects_target`.
+    let Some(superset_chunks) = KeyChunks::split(superset) else {
+        return false;
+    };
     keyexpr_includes_patterns(&superset_chunks, target_chunks)
 }
 
@@ -732,6 +789,47 @@ fn chunk_includes(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stack view holds exactly the chunks `str::split('/')` yields, at every depth around its
+    /// own bound (it spills past `STACK_KEY_CHUNKS`) and the backing's (`MAX_KEYEXPR_CHUNKS`), and
+    /// refuses exactly what the backing refuses: the matchers that use it answer as they did.
+    #[test]
+    fn key_chunks_are_the_split_at_every_depth_around_both_bounds() {
+        for depth in [
+            1usize,
+            2,
+            5,
+            STACK_KEY_CHUNKS - 1,
+            STACK_KEY_CHUNKS,
+            STACK_KEY_CHUNKS + 1,
+        ] {
+            let key = ["k"; STACK_KEY_CHUNKS + 1][..depth].join("/");
+            let view = KeyChunks::split(&key).expect("a key this shallow is representable");
+            let want: [&str; STACK_KEY_CHUNKS + 1] = ["k"; STACK_KEY_CHUNKS + 1];
+            assert_eq!(&*view, &want[..depth], "depth {depth}");
+        }
+        // Distinct chunks, so a reordering or a drop shows.
+        let key = "a/bb/ccc/dddd/e/ff/ggg/hhhh/i/jj/kkk/llll/m/nn/ooo/pppp/q/rr";
+        let view = KeyChunks::split(key).expect("eighteen chunks fit the backing");
+        assert!(view.iter().copied().eq(key.split('/')));
+        // The empty key is one empty chunk, as `split` has it, and the matchers' own
+        // well-formedness guard is what refuses it.
+        assert_eq!(&*KeyChunks::split("").expect("one chunk"), &[""][..]);
+        // The bound of the backing: representable up to MAX_KEYEXPR_CHUNKS chunks on the fixed
+        // one, and past it only where the backing grows.
+        let at = "a/".repeat(MAX_KEYEXPR_CHUNKS - 1) + "a";
+        assert_eq!(
+            KeyChunks::split(&at).map(|v| v.len()),
+            Some(MAX_KEYEXPR_CHUNKS)
+        );
+        let past = "a/".repeat(MAX_KEYEXPR_CHUNKS) + "a";
+        let split = KeyChunks::split(&past);
+        if crate::bounded::ENFORCES_CAPACITY {
+            assert!(split.is_none());
+        } else {
+            assert_eq!(split.map(|v| v.len()), Some(MAX_KEYEXPR_CHUNKS + 1));
+        }
+    }
 
     // Profile-agnostic behaviour guard. The exhaustive R220/R293/R296
     // ratchet cases live in the alloc-gated `pubsub.rs`; these run in

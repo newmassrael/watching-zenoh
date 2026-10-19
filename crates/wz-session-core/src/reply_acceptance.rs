@@ -194,13 +194,9 @@ impl ReplyAcceptanceStored {
 /// conservatively a non-match on that backing, the same rule every other scan
 /// in [`keyexpr_match`] takes; the alloc backing grows past the bound.
 pub fn reply_keyexpr_intersects(query_keyexpr: &str, reply: &str) -> bool {
-    let mut query_chunks: crate::bounded::BoundedVec<&str, { keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
-        crate::bounded::BoundedVec::new();
-    for chunk in query_keyexpr.split('/') {
-        if query_chunks.push(chunk).is_err() {
-            return false;
-        }
-    }
+    let Some(query_chunks) = keyexpr_match::KeyChunks::split(query_keyexpr) else {
+        return false;
+    };
     keyexpr_match::keyexpr_intersects_target(reply, &query_chunks)
 }
 

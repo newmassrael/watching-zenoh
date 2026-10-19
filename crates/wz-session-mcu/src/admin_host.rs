@@ -105,6 +105,13 @@ impl ConnectControl {
         })
     }
 
+    /// The generation [`Self::endpoints`] would report, without copying the list: what a loop
+    /// that only asks whether a write has landed reads on every pass, the list being read only
+    /// when it has.
+    pub fn generation(&self) -> u32 {
+        critical_section::with(|cs| self.state.borrow(cs).borrow().generation)
+    }
+
     /// The verdict on the most recent write this node received, applied or
     /// not. `None` before the first.
     pub fn last_outcome(&self) -> Option<ConnectWriteOutcome> {

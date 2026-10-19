@@ -65,4 +65,11 @@ impl NodeNet for ZephyrNet {
     fn zid(&self) -> Vec<u8> {
         self.zid.clone()
     }
+
+    fn idle_sleep_us(&self) -> i32 {
+        // The session's pass waits on its socket for up to a millisecond (`ZephyrUdpDriver::
+        // service`), which is what gives the net stack's threads the CPU; a sleep after it only
+        // delays the next frame.
+        0
+    }
 }

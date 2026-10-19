@@ -503,12 +503,9 @@ impl<C: QuerySink> Queryable<C> {
         // query into target chunks and intersect against this queryable's
         // pattern, the same seam `declare::declared_intersects` already uses. For
         // a concrete query this is identical to the prior pattern match.
-        let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-        for c in keyexpr.split('/') {
-            if target.push(c).is_err() {
-                return false;
-            }
-        }
+        let Some(target) = crate::keyexpr_match::KeyChunks::split(keyexpr) else {
+            return false;
+        };
         keyexpr_intersects_target(&self.pattern, &target)
     }
 }

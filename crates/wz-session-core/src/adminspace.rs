@@ -2079,13 +2079,9 @@ fn is_plain_key(key: &str) -> bool {
 /// [`key_intersects_query`] by the general rule: both keys split into chunks and intersected
 /// chunk by chunk, which is what answers a query that holds a wildcard.
 fn key_intersects_query_by_chunks(query: &str, key: &str) -> bool {
-    let mut chunks: crate::bounded::BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
-        crate::bounded::BoundedVec::new();
-    for chunk in key.split('/') {
-        if chunks.push(chunk).is_err() {
-            return false;
-        }
-    }
+    let Some(chunks) = crate::keyexpr_match::KeyChunks::split(key) else {
+        return false;
+    };
     crate::keyexpr_match::keyexpr_intersects_target(query, &chunks)
 }
 

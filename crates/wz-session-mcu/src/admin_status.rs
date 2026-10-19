@@ -258,6 +258,17 @@ impl NodeStatus {
         critical_section::with(|cs| self.state.borrow(cs).borrow().endpoints.clone())
     }
 
+    /// How many sessions the node reports, without copying them: what a loop that only asks
+    /// whether the list changed reads on every pass.
+    pub fn session_count(&self) -> usize {
+        critical_section::with(|cs| self.state.borrow(cs).borrow().sessions.len())
+    }
+
+    /// Whether the node answers admin GETs (`adminspace.permissions.read`).
+    fn read_permitted(&self) -> bool {
+        critical_section::with(|cs| self.state.borrow(cs).borrow().permit_read)
+    }
+
     fn snapshot(&self) -> (bool, Vec<AdminSession>) {
         critical_section::with(|cs| {
             let s = self.state.borrow(cs).borrow();
@@ -294,8 +305,28 @@ pub fn host_admin_queryable(
 ) -> Result<(), RegisterError> {
     let pattern = admin_queryable_key(&identity.zid_hex, identity.whatami);
     let status_key = admin_connect_status_key(&identity.zid_hex, identity.whatami);
+    // The two legs of the answer that cost something to prepare, each asked for by exactly one
+    // key: the sessions are listed by the root document `@/<zid>/<whatami>` and by nothing else,
+    // and the config is the one document of `@/<zid>/<whatami>/config`. A GET that names neither
+    // (the `status/connect` one is the common) is answered without copying the session list or
+    // rendering the config, which were done for every GET before.
+    let mut root_key = String::new();
+    wz_session_core::adminspace::write_admin_root_key(
+        &mut root_key,
+        &identity.zid_hex,
+        identity.whatami,
+    );
+    let config_key = alloc::format!("{root_key}/config");
     let answer = BoxedQuerySink::new(move |query, out| {
-        let (read, sessions) = status.snapshot();
+        let wants_root =
+            wz_session_core::adminspace::key_intersects_query(query.keyexpr(), &root_key);
+        let wants_config =
+            wz_session_core::adminspace::key_intersects_query(query.keyexpr(), &config_key);
+        let (read, sessions) = if wants_root {
+            status.snapshot()
+        } else {
+            (status.read_permitted(), Vec::new())
+        };
         if read {
             if let Some(source) = connect {
                 if wz_session_core::adminspace::key_intersects_query(query.keyexpr(), &status_key) {
@@ -313,9 +344,11 @@ pub fn host_admin_queryable(
             }
         }
         let mut config_json = String::new();
-        match config {
-            Some(view) => view.write_config_json(&mut config_json),
-            None => config_json.push_str("{}"),
+        if wants_config {
+            match config {
+                Some(view) => view.write_config_json(&mut config_json),
+                None => config_json.push_str("{}"),
+            }
         }
         let ctx = AdminAnswerCtx {
             zid_hex: &identity.zid_hex,

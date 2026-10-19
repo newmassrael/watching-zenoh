@@ -1,0 +1,309 @@
+/* SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+ * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+ *
+ * Where the time of one query goes between the wire and the wire, with the same instrument for
+ * every application: the cycle counter read at four places of a query's round trip through the
+ * node, and the four gaps told on the console every few hundred queries.
+ *
+ *   rx   the driver's receive thread has the frame and is about to hand it to the stack
+ *   in   the application's recvfrom returned that datagram (the stack's receive path, the
+ *        socket's queue and the thread wake-up are between rx and in)
+ *   out  the application calls sendto with its reply (the application's own work is between
+ *        in and out)
+ *   tx   the driver's send has the reply frame and is about to put it on the wire (the stack's
+ *        send path is between out and tx)
+ *
+ * The application is not changed: `recvfrom` and `sendto` are wrapped at link time
+ * (`-Wl,--wrap`, zeth.cmake), so a wz node and a zenoh-pico application are measured by the same
+ * four stamps. A frame that is not a query (a keep-alive, an ARP) does not complete the
+ * sequence and is not counted. CONFIG_WZ_ZETH_STAMPS only; never in a build whose time is
+ * being measured by anything else, since a console line is a write to a UART.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+
+struct sockaddr;
+typedef unsigned int socklen_t_;
+
+ssize_t __real_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *from,
+			socklen_t_ *fromlen);
+ssize_t __real_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *to,
+		      socklen_t_ tolen);
+
+/* One query in flight. 0 is "not stamped yet" (the counter reads 0 once in 12 s at 350 MHz,
+ * which a sample in thousands will not meet; a sample that did is one query uncounted).
+ */
+static volatile uint32_t t_rx, t_in, t_out;
+
+/* The totals of the queries completed since the last line. */
+static uint64_t sum_rx_in, sum_in_out, sum_out_tx, sum_total;
+static uint32_t max_in_out;
+static uint32_t completed;
+
+#define REPORT_EVERY 500
+
+/* The mean of `n` gaps whose cycle counts add to `sum`, in hundredths of a microsecond. */
+static uint32_t centi_us(uint64_t sum, uint32_t hz, uint32_t n)
+{
+	return (uint32_t)(sum * 100000000ull / hz / n);
+}
+
+static void report_buckets(uint32_t n, uint32_t hz);
+static void trace_print(void);
+
+void wz_zeth_stamp_rx(void)
+{
+	t_rx = k_cycle_get_32() | 1u;
+	t_in = 0;
+	t_out = 0;
+}
+
+void wz_zeth_stamp_tx(void)
+{
+	uint32_t tx = k_cycle_get_32();
+	uint32_t rx = t_rx, in = t_in, out = t_out;
+
+	if (rx == 0 || in == 0 || out == 0) {
+		return;
+	}
+	t_rx = 0;
+	t_in = 0;
+	t_out = 0;
+	trace_print();
+	sum_rx_in += (uint32_t)(in - rx);
+	sum_in_out += (uint32_t)(out - in);
+	sum_out_tx += (uint32_t)(tx - out);
+	sum_total += (uint32_t)(tx - rx);
+	if ((uint32_t)(out - in) > max_in_out) {
+		max_in_out = (uint32_t)(out - in);
+	}
+	if (++completed == REPORT_EVERY) {
+		uint32_t hz = sys_clock_hw_cycles_per_sec();
+		uint32_t n = completed;
+
+		uint32_t a = centi_us(sum_rx_in, hz, n);
+		uint32_t b = centi_us(sum_in_out, hz, n);
+		uint32_t c = centi_us(sum_out_tx, hz, n);
+		uint32_t d = centi_us(sum_total, hz, n);
+
+		printk("wz: stamps: %u queries, mean us: rx->in %u.%02u, in->out %u.%02u "
+		       "(max %u), out->tx %u.%02u, rx->tx %u.%02u\n",
+		       n, a / 100, a % 100, b / 100, b % 100,
+		       (unsigned int)(max_in_out * 1000000ull / hz), c / 100, c % 100,
+		       d / 100, d % 100);
+		report_buckets(n, hz);
+		sum_rx_in = sum_in_out = sum_out_tx = sum_total = 0;
+		max_in_out = 0;
+		completed = 0;
+	}
+}
+
+/* What the application does between its recvfrom and its sendto, counted at the calls the whole
+ * image makes (wrapped at link time like recvfrom and sendto): the time spent waiting (poll and
+ * the sleeps), the heap's calls and the time in them, and the copies. Only calls that START
+ * inside the window are counted. Per query the figures are the totals divided by the queries
+ * the line is of.
+ */
+struct bucket {
+	uint64_t calls;
+	uint64_t cycles;
+	uint64_t bytes;
+};
+static struct bucket b_poll, b_sleep, b_malloc, b_free, b_memcpy;
+
+static inline bool in_window(void)
+{
+	return t_in != 0 && t_out == 0;
+}
+
+static void print_bucket(const char *name, struct bucket *b, uint32_t n, uint32_t hz,
+			 bool bytes)
+{
+	/* Per query: the calls (tenths) and the microseconds (hundredths) they took. */
+	uint32_t calls10 = (uint32_t)(b->calls * 10 / n);
+	uint32_t us100 = (uint32_t)(b->cycles * 100000000ull / hz / n);
+
+	printk("wz: stamps:   %-6s %u.%u calls, %u.%02u us per query", name, calls10 / 10,
+	       calls10 % 10, us100 / 100, us100 % 100);
+	if (bytes) {
+		printk(", %u bytes", (unsigned int)(b->bytes / n));
+	}
+	printk("\n");
+	b->calls = b->cycles = b->bytes = 0;
+}
+
+static void report_buckets(uint32_t n, uint32_t hz)
+{
+	print_bucket("poll", &b_poll, n, hz, false);
+	print_bucket("sleep", &b_sleep, n, hz, false);
+	print_bucket("malloc", &b_malloc, n, hz, true);
+	print_bucket("free", &b_free, n, hz, false);
+	print_bucket("memcpy", &b_memcpy, n, hz, true);
+}
+
+struct pollfd;
+
+int __real_poll(struct pollfd *fds, unsigned int nfds, int timeout);
+void *__real_k_malloc(size_t size);
+void __real_k_free(void *ptr);
+void *__real_memcpy(void *dst, const void *src, size_t len);
+int32_t __real_z_impl_k_sleep(k_timeout_t timeout);
+int32_t __real_z_impl_k_usleep(int32_t us);
+
+int __wrap_poll(struct pollfd *fds, unsigned int nfds, int timeout)
+{
+	if (!in_window()) {
+		return __real_poll(fds, nfds, timeout);
+	}
+	uint32_t t0 = k_cycle_get_32();
+	int rc = __real_poll(fds, nfds, timeout);
+
+	b_poll.calls++;
+	b_poll.cycles += (uint32_t)(k_cycle_get_32() - t0);
+	return rc;
+}
+
+int32_t __wrap_z_impl_k_sleep(k_timeout_t timeout)
+{
+	if (!in_window()) {
+		return __real_z_impl_k_sleep(timeout);
+	}
+	uint32_t t0 = k_cycle_get_32();
+	int32_t rc = __real_z_impl_k_sleep(timeout);
+
+	b_sleep.calls++;
+	b_sleep.cycles += (uint32_t)(k_cycle_get_32() - t0);
+	return rc;
+}
+
+int32_t __wrap_z_impl_k_usleep(int32_t us)
+{
+	if (!in_window()) {
+		return __real_z_impl_k_usleep(us);
+	}
+	uint32_t t0 = k_cycle_get_32();
+	int32_t rc = __real_z_impl_k_usleep(us);
+
+	b_sleep.calls++;
+	b_sleep.cycles += (uint32_t)(k_cycle_get_32() - t0);
+	return rc;
+}
+
+/* One query's allocations told in full, once, to find where they come from: the size and the
+ * return addresses (Thumb code addresses) found on the stack above the call, which the host
+ * resolves against the image's symbols. The query is the 300th after the line counter last
+ * restarted, so the heap and the caches are warm; it is slowed by the console writes, which is
+ * why its time is not counted in the means (the window is closed while it prints).
+ */
+#define TRACE_AT 300
+#define TRACE_MAX 48
+static struct {
+	uint32_t size;
+	uint32_t chain[10];
+} trace[TRACE_MAX];
+static uint32_t trace_n;
+static bool trace_printed;
+
+static void trace_alloc(size_t size)
+{
+	if (completed != TRACE_AT || trace_printed || trace_n >= TRACE_MAX) {
+		return;
+	}
+	uintptr_t *sp = (uintptr_t *)__builtin_frame_address(0);
+	uint32_t found = 0;
+
+	trace[trace_n].size = (uint32_t)size;
+	for (uint32_t i = 0; i < 160 && found < 10; i++) {
+		uintptr_t v = sp[i];
+
+		if ((v & 1u) && v >= 0x10080000u && v < 0x10100000u) {
+			trace[trace_n].chain[found++] = (uint32_t)v;
+		}
+	}
+	for (; found < 10; found++) {
+		trace[trace_n].chain[found] = 0;
+	}
+	trace_n++;
+}
+
+static void trace_print(void)
+{
+	if (completed != TRACE_AT || trace_printed || trace_n == 0) {
+		return;
+	}
+	trace_printed = true;
+	for (uint32_t i = 0; i < trace_n; i++) {
+		printk("wz: alloc %u:", trace[i].size);
+		for (uint32_t c = 0; c < 10 && trace[i].chain[c] != 0; c++) {
+			printk(" %x", trace[i].chain[c]);
+		}
+		printk("\n");
+	}
+}
+
+void *__wrap_k_malloc(size_t size)
+{
+	if (!in_window()) {
+		return __real_k_malloc(size);
+	}
+	trace_alloc(size);
+	uint32_t t0 = k_cycle_get_32();
+	void *p = __real_k_malloc(size);
+
+	b_malloc.calls++;
+	b_malloc.bytes += size;
+	b_malloc.cycles += (uint32_t)(k_cycle_get_32() - t0);
+	return p;
+}
+
+void __wrap_k_free(void *ptr)
+{
+	if (!in_window()) {
+		__real_k_free(ptr);
+		return;
+	}
+	uint32_t t0 = k_cycle_get_32();
+
+	__real_k_free(ptr);
+	b_free.calls++;
+	b_free.cycles += (uint32_t)(k_cycle_get_32() - t0);
+}
+
+void *__wrap_memcpy(void *dst, const void *src, size_t len)
+{
+	if (!in_window()) {
+		return __real_memcpy(dst, src, len);
+	}
+	uint32_t t0 = k_cycle_get_32();
+	void *rc = __real_memcpy(dst, src, len);
+
+	b_memcpy.calls++;
+	b_memcpy.bytes += len;
+	b_memcpy.cycles += (uint32_t)(k_cycle_get_32() - t0);
+	return rc;
+}
+
+ssize_t __wrap_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *from,
+			socklen_t_ *fromlen)
+{
+	ssize_t got = __real_recvfrom(fd, buf, len, flags, from, fromlen);
+
+	if (got > 0 && t_rx != 0) {
+		t_in = k_cycle_get_32() | 1u;
+	}
+	return got;
+}
+
+ssize_t __wrap_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *to,
+		      socklen_t_ tolen)
+{
+	if (t_in != 0 && t_out == 0) {
+		t_out = k_cycle_get_32() | 1u;
+	}
+	return __real_sendto(fd, buf, len, flags, to, tolen);
+}

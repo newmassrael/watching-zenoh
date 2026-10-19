@@ -197,6 +197,17 @@ pub trait NodeNet {
     fn pump(&mut self) -> bool {
         false
     }
+
+    /// What an idle pass of the loop sleeps, in microseconds. A stack polled from this thread
+    /// (lwIP) has nothing else that gives the CPU away, so the loop does: [`IDLE_SLEEP_US`].
+    /// A stack whose links already wait for their sockets (Zephyr's: the session's pass polls
+    /// its socket for up to a millisecond) answers 0, because a sleep on top of that is a delay
+    /// a frame that arrives during it waits out, and on silicon it was measured: the time from
+    /// the driver having a frame to the application reading it went from 64 to 97 us, varying,
+    /// to a steady 45.
+    fn idle_sleep_us(&self) -> i32 {
+        IDLE_SLEEP_US
+    }
 }
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
@@ -302,15 +313,19 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
             }
         }
 
-        let (written, endpoints) = CONTROL.endpoints();
-        if generation != Some(written) {
+        // What a pass asks of the node's state is whether it changed, so a pass reads the
+        // generation and the count, which copy nothing, and takes the lists only when one moved:
+        // copying them on every pass was an allocation per string of every session and endpoint,
+        // a few hundred thousand times a second on an idle node.
+        if generation != Some(CONTROL.generation()) {
+            let (written, endpoints) = CONTROL.endpoints();
             generation = Some(written);
             log_line(format!(
                 "zephyr-admin-node: connect/endpoints = {endpoints:?}"
             ));
         }
-        let sessions = STATUS.sessions();
-        if sessions.len() != reported {
+        if STATUS.session_count() != reported {
+            let sessions = STATUS.sessions();
             reported = sessions.len();
             for s in &sessions {
                 log_line(format!(
@@ -327,7 +342,10 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
             busy_passes += 1;
         } else {
             busy_passes = 0;
-            yield_us(IDLE_SLEEP_US);
+            let sleep_us = net.idle_sleep_us();
+            if sleep_us > 0 {
+                yield_us(sleep_us);
+            }
         }
     }
 }
