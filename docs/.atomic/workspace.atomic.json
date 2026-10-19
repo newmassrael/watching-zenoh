@@ -276104,6 +276104,144 @@
         "Receive against pico, payload sizes other than 8 bytes and the MCU against pico stay open; the SCE session answered the scheduler.drive request locally and has not pushed, so the wz pin is not moved; a second request (the busy-poll budget as a scheduler field) is written in SCE's claudedocs, uncommitted."
       ]
     },
+    "Round 3379": {
+      "decision_summary": "The selector language reaches every field of a record's dissection. A word that is no fixed field is a dotted path into the tree the field document shows (qos.priority, put.encoding.id, source_info.zid), written from the message or as any tail, resolved at parse against a declared shape, wz_session_core::dissect_schema, whose test walks seeded noise over every message id and fails on a walked path it lacks. An extension is named by its ext_name, the chain is not a level, a named entry's header fields stand under ext. A path alone tests presence. A walked message lacking the field is a decided no, != its negation; an unwalked record is undecided. A tail ending fields of two kinds is refused with longer tails; an unknown word names the five nearest. in / not in, matches (feature filter-regex, regex-automata on alloc), key contains and len() join. wz_dissect_selector_fields (ABI 44) lists it all; selector_diagnose moves to 5.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/dissect_schema.rs (new): the normalised view of a field tree a path reads (ext entries by name, the chain transparent, a walked body collapsed, a named entry's header under ext), path matching over it, and the declared shape of every root's tree; dissect.rs holds the target and resolution words once for the walker and the shape.",
+        "crates/wz-capture/src/field_path.rs (new), pattern.rs (new): path resolution, kinds, the nearest-name search, the per-record tree a plane builds when a selector reads one, and the matches engine behind filter-regex.",
+        "crates/wz-capture/src/filter.rs: path, presence, in, not in, matches, key contains and len() terms; RecordView.tree; Filter::reads_tree; the brace tokens; new typed refusals; selector_fields_json. agg.rs, payload.rs, exchange.rs hand each record its own tree (an exchange keeps its request's).",
+        "crates/wz-capture/src/doc_revision.rs, fields_json.rs: selector_diagnose revision 5 and the selector_fields document, its kind family declared and rendered.",
+        "crates/wz-capi-dissect: wz_dissect_selector_fields, ABI 44, header language text and door, the C consumer test; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py follow. wz-capi-dissect and wz-analyze turn filter-regex on."
+      ],
+      "verification_bullets": [
+        "Verified once with the two rounds after it, on a build host over the tree that carries all three: the library tests of wz-capture with the dissect and filter-regex features (1516), with its default features (1210) and with none (976), wz-session-core's passive, scouting, inbound and parse-error tests, wz-capi-dissect (210, the C ABI consumer test among them) and wz-analyze pass; clippy is clean on wz-capture (both feature sets), wz-session-core (dissect), wz-capi-dissect, wz-analyze and wz-codecs; the doc builds hold wz-session-core at its budget of 505 and the others at 0.",
+        "The declared shape's own test walks 20000 seeded messages per id over every transport, network and scouting id and finds every walked path declared at its kind; the selector's path tests read trees the walker built from wire bytes.",
+        "NOT verified here: the hosted run of this push, and the consumer, which has not yet exercised the door."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The consumer's second half follows as its own landing: every row judged (Declare, Interest, Oam and the transport messages, with a msg field for the wire message name; kind unchanged), and the context fields src, dst, addr, sport, dport, port, link, flow and packet.",
+        "An exchange's two rows answer path terms with the request's tree, as every record term; a ResponseFinal's own fields become reachable when each row is judged by its own message.",
+        "The declared shape is held to the walkers in one direction (every walked path is declared); a declared path the noise never reaches is not reported. A path index ([n]) for repeated fields is not in the language; a repeated field answers yes when any occurrence does."
+      ],
+      "publishable_decision_summary": "The selector language reaches every field of a record's dissection. A word that is no fixed field is a dotted path into the tree the field document shows (qos.priority, put.encoding.id, source_info.zid), written from the message or as any tail, resolved at parse against a declared shape, wz_session_core::dissect_schema, whose test walks seeded noise over every message id and fails on a walked path it lacks. An extension is named by its ext_name, the chain is not a level, a named entry's header fields stand under ext. A path alone tests presence. A walked message lacking the field is a decided no, != its negation; an unwalked record is undecided. A tail ending fields of two kinds is refused with longer tails; an unknown word names the five nearest. in / not in, matches (feature filter-regex, regex-automata on alloc), key contains and len() join. wz_dissect_selector_fields (ABI 44) lists it all; selector_diagnose moves to 5.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/dissect_schema.rs (new): the normalised view of a field tree a path reads (ext entries by name, the chain transparent, a walked body collapsed, a named entry's header under ext), path matching over it, and the declared shape of every root's tree; dissect.rs holds the target and resolution words once for the walker and the shape.",
+        "crates/wz-capture/src/field_path.rs (new), pattern.rs (new): path resolution, kinds, the nearest-name search, the per-record tree a plane builds when a selector reads one, and the matches engine behind filter-regex.",
+        "crates/wz-capture/src/filter.rs: path, presence, in, not in, matches, key contains and len() terms; RecordView.tree; Filter::reads_tree; the brace tokens; new typed refusals; selector_fields_json. agg.rs, payload.rs, exchange.rs hand each record its own tree (an exchange keeps its request's).",
+        "crates/wz-capture/src/doc_revision.rs, fields_json.rs: selector_diagnose revision 5 and the selector_fields document, its kind family declared and rendered.",
+        "crates/wz-capi-dissect: wz_dissect_selector_fields, ABI 44, header language text and door, the C consumer test; scripts/lib/capi_abi_pin.py and analysis_surface_parity.py follow. wz-capi-dissect and wz-analyze turn filter-regex on."
+      ],
+      "publishable_verification_bullets": [
+        "Verified once with the two rounds after it, on a build host over the tree that carries all three: the library tests of wz-capture with the dissect and filter-regex features (1516), with its default features (1210) and with none (976), wz-session-core's passive, scouting, inbound and parse-error tests, wz-capi-dissect (210, the C ABI consumer test among them) and wz-analyze pass; clippy is clean on wz-capture (both feature sets), wz-session-core (dissect), wz-capi-dissect, wz-analyze and wz-codecs; the doc builds hold wz-session-core at its budget of 505 and the others at 0.",
+        "The declared shape's own test walks 20000 seeded messages per id over every transport, network and scouting id and finds every walked path declared at its kind; the selector's path tests read trees the walker built from wire bytes.",
+        "NOT verified here: the hosted run of this push, and the consumer, which has not yet exercised the door."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The consumer's second half follows as its own landing: every row judged (Declare, Interest, Oam and the transport messages, with a msg field for the wire message name; kind unchanged), and the context fields src, dst, addr, sport, dport, port, link, flow and packet.",
+        "An exchange's two rows answer path terms with the request's tree, as every record term; a ResponseFinal's own fields become reachable when each row is judged by its own message.",
+        "The declared shape is held to the walkers in one direction (every walked path is declared); a declared path the noise never reaches is not reported. A path index ([n]) for repeated fields is not in the language; a repeated field answers yes when any occurrence does."
+      ]
+    },
+    "Round 3380": {
+      "decision_summary": "Every row of the field and selection documents is judged. A row plane (crates/wz-capture/src/row_plane.rs), run once per capture beside the census planes, judges what they leave: a Declare, Interest or network Oam in a batch, a transport message with no batch, and a ResponseFinal whose request is missing. RecordView.kind becomes a three-state Record: a kind; None, a row with no record, where every term about a record is decided as an absent field (no, and yes under != or not); Unread, the orphan close, where they are undecided and dir is the requester's. A halted batch adds an undecided record. Unjudged is left to undecodable rows and ambiguous selectors. Ten row facts join the language: msg (any message the row rode in), src, dst, addr (IP with prefix, MAC, vsock cid), sport, dport, port, link, flow and packet. flow is the document's list_id, printed on every flow object and read per document against a live handle's numbering.",
+      "changes_bullets": [
+        "crates/wz-capture/src/row_plane.rs (new): the row plane; fields_json.rs folds it into RowJudgement beside the payload and exchange planes, judged_by reads flow terms against a document's list numbering, and every flow object carries list_id.",
+        "crates/wz-capture/src/filter.rs: Record (Is, None, Unread) on RecordView, RowFacts and MessageNames, the ten row-fact fields and their terms (Address, Ports, Link, Flow, FlowIn, Packet, Msg), Filter::reads_row and Filter::numbered_by; node.rs: ListContext::placed, place and row_facts; payload.rs, agg.rs, exchange.rs place each record and hand it its row facts, and the exchange plane judges a close's row with the close's own facts.",
+        "crates/wz-session-core/src/network_message.rs: NetworkMessage::name, the documents' word for each message.",
+        "crates/wz-capture/src/doc_revision.rs: fields 40, selection 6, selection_since 4, selector_diagnose 6, selector_fields 2; crates/wz-capi-dissect: header language table and row-word text, test literals."
+      ],
+      "verification_bullets": [
+        "Verified once with the rounds before and after it, on a build host over the tree that carries all three: the crate tests and clippy Round 3379 lists pass, the new row tests among them.",
+        "The selection document's per-row tables were rewritten for the new rule and pass: a record-less row reads no under a record term and yes under its negation, the orphan close reads undecided, dir is a row fact; a generated-capture test over 40 seeds holds that no orphan close is unjudged and every record term over one is undecided.",
+        "NOT verified here: the hosted run of this push, and the consumer, which has not yet read the judged rows or the list_id on flow objects."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "A path into a transport message on a datagram flow is undecided: the library keeps a stream flow's bytes and not a datagram's (the caller holds the packet), so the row plane has no tree for an Init over UDP.",
+        "A record's tree is its network message; the transport envelope around it (Frame.sn, a Frame's qos) is reachable only on rows judged as a whole, not on the records a Frame carries.",
+        "Scouting rows (Scout, Hello) keep their unjudged word; the census door's flow terms compare list positions, which equal a file's list_id and not a live handle's."
+      ],
+      "publishable_decision_summary": "Every row of the field and selection documents is judged. A row plane (crates/wz-capture/src/row_plane.rs), run once per capture beside the census planes, judges what they leave: a Declare, Interest or network Oam in a batch, a transport message with no batch, and a ResponseFinal whose request is missing. RecordView.kind becomes a three-state Record: a kind; None, a row with no record, where every term about a record is decided as an absent field (no, and yes under != or not); Unread, the orphan close, where they are undecided and dir is the requester's. A halted batch adds an undecided record. Unjudged is left to undecodable rows and ambiguous selectors. Ten row facts join the language: msg (any message the row rode in), src, dst, addr (IP with prefix, MAC, vsock cid), sport, dport, port, link, flow and packet. flow is the document's list_id, printed on every flow object and read per document against a live handle's numbering.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/row_plane.rs (new): the row plane; fields_json.rs folds it into RowJudgement beside the payload and exchange planes, judged_by reads flow terms against a document's list numbering, and every flow object carries list_id.",
+        "crates/wz-capture/src/filter.rs: Record (Is, None, Unread) on RecordView, RowFacts and MessageNames, the ten row-fact fields and their terms (Address, Ports, Link, Flow, FlowIn, Packet, Msg), Filter::reads_row and Filter::numbered_by; node.rs: ListContext::placed, place and row_facts; payload.rs, agg.rs, exchange.rs place each record and hand it its row facts, and the exchange plane judges a close's row with the close's own facts.",
+        "crates/wz-session-core/src/network_message.rs: NetworkMessage::name, the documents' word for each message.",
+        "crates/wz-capture/src/doc_revision.rs: fields 40, selection 6, selection_since 4, selector_diagnose 6, selector_fields 2; crates/wz-capi-dissect: header language table and row-word text, test literals."
+      ],
+      "publishable_verification_bullets": [
+        "Verified once with the rounds before and after it, on a build host over the tree that carries all three: the crate tests and clippy Round 3379 lists pass, the new row tests among them.",
+        "The selection document's per-row tables were rewritten for the new rule and pass: a record-less row reads no under a record term and yes under its negation, the orphan close reads undecided, dir is a row fact; a generated-capture test over 40 seeds holds that no orphan close is unjudged and every record term over one is undecided.",
+        "NOT verified here: the hosted run of this push, and the consumer, which has not yet read the judged rows or the list_id on flow objects."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A path into a transport message on a datagram flow is undecided: the library keeps a stream flow's bytes and not a datagram's (the caller holds the packet), so the row plane has no tree for an Init over UDP.",
+        "A record's tree is its network message; the transport envelope around it (Frame.sn, a Frame's qos) is reachable only on rows judged as a whole, not on the records a Frame carries.",
+        "Scouting rows (Scout, Hello) keep their unjudged word; the census door's flow terms compare list positions, which equal a file's list_id and not a live handle's."
+      ]
+    },
+    "Round 3381": {
+      "decision_summary": "Arbitrary UDP no longer stands as zenoh. The passive reader refuses an Init or a Join announcing a protocol version other than 0x09 (new wire_const::PROTOCOL_VERSION, InboundParseError::ForeignVersion), and the capture's scouting decode does the same for a Scout or a Hello; a participant's decode keeps upstream's order. The byte alone is one chance in 256, measured: a random datagram opened as a Join of 0x09. So every PassiveFrame carries unit_read_whole, and only a unit read whole (every message decoded, every byte accounted for) counts as evidence or names a node, an initiator or an acceptor. VersionEvidence counts own-version messages in whole units and foreign-version ones anywhere; flows and session rows carry zenoh: proven, unproven, foreign_version or mixed. A session joined after its handshake is unproven, as arbitrary bytes are.",
+      "changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: wire_const::PROTOCOL_VERSION, cited to upstream's VERSION and to the two receive paths that refuse another one.",
+        "crates/wz-session-core: InboundParseError::ForeignVersion; InboundFrame::announced_version and ScoutingFrame::announced_version; parse_scouting_consuming and parse_scouting_observed; passive.rs gates Init and Join on the version, stamps PassiveFrame::unit_read_whole once a unit's walk ends, and defines VersionEvidence.",
+        "crates/wz-capture: LinkIngest counts VersionEvidence and names an initiator only out of a whole unit; node.rs names a node only out of a whole unit or a whole scouting datagram (ScoutingDatagram::read_whole); ZenohVerdict; flow objects and session rows and their flows carry zenoh; doc_revision fields 41 and session_table 3 with the zenoh family.",
+        "crates/wz-capi-dissect: header text (WHETHER A FLOW IS ZENOH), C consumer pins and session table literals; crates/wz-analyze: fixtures carry unit_read_whole."
+      ],
+      "verification_bullets": [
+        "Verified once with the two rounds before it, on a build host: the crate tests and clippy Round 3379 lists pass.",
+        "The claim's own measurement, reproduced as a test: 300 random datagrams of 1 to 200 bytes to 7446, 7447, 5353, 443, 9999 and 12345 stand as rows, and none is proven, none names a node, an initiator or an acceptor, and some were refused for their version. Its first run found one datagram that opened as a Join of 0x09, which is why only a unit read whole counts. Controls: a session with its handshake is proven with two own-version messages; an Init followed by bytes no message explains is unproven and names nobody; a Scout of 0x09 names a node and one of 0x08 or one with trailing bytes does not; the foreign-version InitSyn is refused with its version for 0x08, 0x00 and 0x0a.",
+        "Local gates pass: upstream citation anchors, discard sites, consumer revision pins, prose names, surface parity. NOT verified here: the hosted run, and the consumer's real captures."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "A zenoh session the capture joined after its handshake is unproven until a peer scouts or rejoins: nothing in a Frame, a KeepAlive or an Open is fixed by the protocol, so no structural test can tell it from arbitrary bytes that decode.",
+        "The selector has no zenoh term yet; a consumer filters on the flow object's word.",
+        "Rows of an unproven flow still stand: the claim asked for rows not to stand as zenoh or for a fact that says so, and this round gives the fact."
+      ],
+      "publishable_decision_summary": "Arbitrary UDP no longer stands as zenoh. The passive reader refuses an Init or a Join announcing a protocol version other than 0x09 (new wire_const::PROTOCOL_VERSION, InboundParseError::ForeignVersion), and the capture's scouting decode does the same for a Scout or a Hello; a participant's decode keeps upstream's order. The byte alone is one chance in 256, measured: a random datagram opened as a Join of 0x09. So every PassiveFrame carries unit_read_whole, and only a unit read whole (every message decoded, every byte accounted for) counts as evidence or names a node, an initiator or an acceptor. VersionEvidence counts own-version messages in whole units and foreign-version ones anywhere; flows and session rows carry zenoh: proven, unproven, foreign_version or mixed. A session joined after its handshake is unproven, as arbitrary bytes are.",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: wire_const::PROTOCOL_VERSION, cited to upstream's VERSION and to the two receive paths that refuse another one.",
+        "crates/wz-session-core: InboundParseError::ForeignVersion; InboundFrame::announced_version and ScoutingFrame::announced_version; parse_scouting_consuming and parse_scouting_observed; passive.rs gates Init and Join on the version, stamps PassiveFrame::unit_read_whole once a unit's walk ends, and defines VersionEvidence.",
+        "crates/wz-capture: LinkIngest counts VersionEvidence and names an initiator only out of a whole unit; node.rs names a node only out of a whole unit or a whole scouting datagram (ScoutingDatagram::read_whole); ZenohVerdict; flow objects and session rows and their flows carry zenoh; doc_revision fields 41 and session_table 3 with the zenoh family.",
+        "crates/wz-capi-dissect: header text (WHETHER A FLOW IS ZENOH), C consumer pins and session table literals; crates/wz-analyze: fixtures carry unit_read_whole."
+      ],
+      "publishable_verification_bullets": [
+        "Verified once with the two rounds before it, on a build host: the crate tests and clippy Round 3379 lists pass.",
+        "The claim's own measurement, reproduced as a test: 300 random datagrams of 1 to 200 bytes to 7446, 7447, 5353, 443, 9999 and 12345 stand as rows, and none is proven, none names a node, an initiator or an acceptor, and some were refused for their version. Its first run found one datagram that opened as a Join of 0x09, which is why only a unit read whole counts. Controls: a session with its handshake is proven with two own-version messages; an Init followed by bytes no message explains is unproven and names nobody; a Scout of 0x09 names a node and one of 0x08 or one with trailing bytes does not; the foreign-version InitSyn is refused with its version for 0x08, 0x00 and 0x0a.",
+        "Local gates pass: upstream citation anchors, discard sites, consumer revision pins, prose names, surface parity. NOT verified here: the hosted run, and the consumer's real captures."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A zenoh session the capture joined after its handshake is unproven until a peer scouts or rejoins: nothing in a Frame, a KeepAlive or an Open is fixed by the protocol, so no structural test can tell it from arbitrary bytes that decode.",
+        "The selector has no zenoh term yet; a consumer filters on the flow object's word.",
+        "Rows of an unproven flow still stand: the claim asked for rows not to stand as zenoh or for a fact that says so, and this round gives the fact."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
