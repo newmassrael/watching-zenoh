@@ -3604,12 +3604,23 @@ mod tests {
         }
     }
 
-    /// R2937 — publish `items` through `producer` once a loop has attached its
-    /// pipeline: a push made before then is dropped, as upstream drops one
-    /// while its transport has no link. Run beside the loop (`tokio::join!`).
+    /// R2937 — run the loop `drive` and publish `items` through `producer` once
+    /// it has attached its pipeline: a push made before then is dropped, as
+    /// upstream drops one while its transport has no link. A loop that ends
+    /// before it attaches (a link that never opened) would leave the publish
+    /// waiting for good, so that is the failure, not a wait.
     #[cfg(feature = "codec-push")]
-    async fn publish_when_linked(producer: &MulticastTxProducer, items: Vec<MulticastTxItem>) {
-        producer.linked().await;
+    async fn drive_publishing(
+        drive: impl std::future::Future<Output = MulticastOutcome>,
+        producer: &MulticastTxProducer,
+        items: Vec<MulticastTxItem>,
+    ) -> MulticastOutcome {
+        let mut drive = std::pin::pin!(drive);
+        tokio::select! {
+            biased;
+            () = producer.linked() => {}
+            outcome = &mut drive => panic!("the loop ended before it attached its pipeline: {outcome:?}"),
+        }
         for item in items {
             assert_eq!(
                 producer.push(item),
@@ -3617,6 +3628,7 @@ mod tests {
                 "an idle group has room"
             );
         }
+        drive.await
     }
 
     /// R2929 / R2937 — run the loop over a link whose writes are held shut
@@ -4218,7 +4230,7 @@ mod tests {
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
         let own = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        let (outcome, ()) = tokio::join!(
+        let outcome = drive_publishing(
             drive_multicast_session_with_membership(
                 &mut dispatcher,
                 MulticastDriveConfig {
@@ -4236,11 +4248,10 @@ mod tests {
                 &stats,
                 None,
             ),
-            publish_when_linked(
-                &producer,
-                vec![multicast_put_literal("demo/out", b"sent").expect("put item")],
-            ),
-        );
+            &producer,
+            vec![multicast_put_literal("demo/out", b"sent").expect("put item")],
+        )
+        .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         let metrics = stats.metrics();
@@ -4784,7 +4795,7 @@ mod tests {
         let clock = TokioTime::new();
 
         let own = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        let (outcome, ()) = tokio::join!(
+        let outcome = drive_publishing(
             drive_multicast_session(
                 &mut dispatcher,
                 MulticastDriveConfig {
@@ -4797,11 +4808,10 @@ mod tests {
                 |_| {},
                 &producer,
             ),
-            publish_when_linked(
-                &producer,
-                vec![multicast_put_literal("demo/mc", b"tx-half").expect("put item")],
-            ),
-        );
+            &producer,
+            vec![multicast_put_literal("demo/mc", b"tx-half").expect("put item")],
+        )
+        .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         // Exactly one data frame went out, on the reliable channel
@@ -4868,7 +4878,7 @@ mod tests {
         let clock = TokioTime::new();
 
         let own = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        let (outcome, ()) = tokio::join!(
+        let outcome = drive_publishing(
             drive_multicast_session(
                 &mut dispatcher,
                 MulticastDriveConfig {
@@ -4883,11 +4893,10 @@ mod tests {
             ),
             // The app publishes the RELATIVE keyexpr; the namespace is
             // transparent, applied by the pipeline the loop attached.
-            publish_when_linked(
-                &producer,
-                vec![multicast_put_literal("demo/mc", b"ns-tx").expect("put item")],
-            ),
-        );
+            &producer,
+            vec![multicast_put_literal("demo/mc", b"ns-tx").expect("put item")],
+        )
+        .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         let frames: Vec<Vec<u8>> = sent
@@ -5303,7 +5312,7 @@ mod tests {
             let (mut link, sent) = FakeDriver::with([]).into_link();
             let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
-            tokio::join!(
+            drive_publishing(
                 drive_multicast_session(
                     &mut dispatcher,
                     MulticastDriveConfig {
@@ -5316,11 +5325,10 @@ mod tests {
                     |_| {},
                     &producer,
                 ),
-                publish_when_linked(
-                    &producer,
-                    vec![multicast_put_literal("demo/mc", &oversize_payload()).expect("put item")],
-                ),
-            );
+                &producer,
+                vec![multicast_put_literal("demo/mc", &oversize_payload()).expect("put item")],
+            )
+            .await;
 
             assert!(
                 !sent
@@ -5381,7 +5389,7 @@ mod tests {
             let mut dispatcher_a = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
             let own = small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]);
-            tokio::join!(
+            drive_publishing(
                 drive_multicast_session(
                     &mut dispatcher_a,
                     MulticastDriveConfig {
@@ -5394,11 +5402,10 @@ mod tests {
                     |_| {},
                     &producer,
                 ),
-                publish_when_linked(
-                    &producer,
-                    vec![multicast_put_literal("demo/mc", &payload).expect("put item")],
-                ),
-            );
+                &producer,
+                vec![multicast_put_literal("demo/mc", &payload).expect("put item")],
+            )
+            .await;
 
             // Node B ingests A's wire output in emit order.
             let inbound: Vec<(Vec<u8>, SocketAddr)> =
