@@ -41,18 +41,22 @@
 //! would be doing, and it reads the congestion control the router forwarded off the received
 //! sample, so a put that dropped the option would fail it.
 //!
-//! Four more tests run `wz-mesh-client`, the crate that is that adapter, through the kit SCE
+//! Five more tests run `wz-mesh-client`, the crate that is that adapter, through the kit SCE
 //! publishes for the clients of its Zenoh binding (`sce_rust_mesh::conformance`): two machines
 //! meeting through a router and one reaching the other's engine, a machine that goes away being
-//! told as lost, the offline catch-up of a shared list, and the first of those across two
-//! federated routers. They are the same functions upstream's client is run through in the SCE
-//! repository, so that this client does what that one does is a test and not a claim. Each runs
-//! on a router of its own, because the kit's machines carry fixed names.
+//! told as lost, the offline catch-up of a shared list, a machine that loses its session when the
+//! router is killed and comes back and resyncs, and the first of those across two federated
+//! routers. They are the same functions upstream's client is run through in the SCE repository,
+//! so that this client does what that one does is a test and not a claim. Each runs on a router
+//! of its own, because the kit's machines carry fixed names.
+//!
+//! The resync one is what holds `WzClient::on_session_end`: the router is killed and started
+//! again on the same port, the machines that reconnect are told their session ended, and one that
+//! left during the gap is never believed to be up.
 //!
 //! ## What it does not hold
 //!
-//! A reconnecting client, or a mobile build: `wz-mesh-client` ends with its session, and nothing
-//! here builds it for Android or iOS.
+//! A mobile build: nothing here builds `wz-mesh-client` for Android or iOS.
 //!
 //! Opt-in (`#[ignore]`): it needs the demo built with `preset-ap-client`, `router-hat-router` and
 //! `routing-token-tables`:
@@ -79,8 +83,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sce_rust_mesh::conformance::{self, Harness};
-use sce_rust_mesh::inbox::ZenohClient;
+use sce_rust_mesh::conformance::{self, Disruptable, Harness};
+use sce_rust_mesh::inbox::{ClientError, ZenohClient};
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, project_root, ChildGuard,
 };
@@ -229,12 +233,26 @@ fn start_router(demo: &Path) -> (Node, u16) {
 
 /// A router, joined to the router listening on `connect_to` when one is named.
 fn start_router_federated(demo: &Path, connect_to: Option<u16>) -> (Node, u16) {
+    try_start_router(demo, connect_to, None)
+        .unwrap_or_else(|why| panic!("the router did not start: {why}"))
+}
+
+/// [`start_router_federated`], listening on `listen` when a port is named and on one the system
+/// picks when not. It fails, and does not panic, when the process ends or says nothing before the
+/// deadline: that is what a port still held by the router that was just killed gives, and the
+/// caller that restarts a router asks again.
+fn try_start_router(
+    demo: &Path,
+    connect_to: Option<u16>,
+    listen: Option<u16>,
+) -> Result<(Node, u16), String> {
     let connect = connect_to.map(|port| format!("127.0.0.1:{port}"));
-    let mut args = vec!["--router-hat", "127.0.0.1:0"];
+    let address = format!("127.0.0.1:{}", listen.unwrap_or(0));
+    let mut args = vec!["--router-hat", address.as_str()];
     if let Some(connect) = &connect {
         args.extend(["--connect", connect.as_str()]);
     }
-    let node = spawn(demo, "wz-ap-demo router-hat", &args);
+    let mut node = spawn(demo, "wz-ap-demo router-hat", &args);
     let deadline = Instant::now() + WITHIN;
     let mut banner = String::new();
     loop {
@@ -249,13 +267,17 @@ fn start_router_federated(demo: &Path, connect_to: Option<u16>) -> (Node, u16) {
                         "the demo was not built with `{needed}`: {banner}"
                     );
                 }
-                return (node, port);
+                return Ok((node, port));
             }
         }
-        assert!(
-            Instant::now() < deadline,
-            "the router did not say which port it listens on"
-        );
+        if let Ok(Some(status)) = node.guard.child_mut().try_wait() {
+            return Err(format!(
+                "the router ended ({status}) before it said which port it listens on"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err("the router did not say which port it listens on".to_string());
+        }
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -651,6 +673,80 @@ impl Harness for WzHarness {
     }
 }
 
+/// A router that can be lost and come back on its own address: what the resync function of the kit
+/// does to the router, and what a client on a changing network meets.
+struct RestartableRouter {
+    demo: PathBuf,
+    port: u16,
+    node: Mutex<Option<Node>>,
+}
+
+/// The wz client on a router that can be lost: [`Disruptable::drop_every_session`] kills the router
+/// and starts it again on the same port. Clones share the router.
+#[derive(Clone)]
+struct RestartingWzHarness {
+    router: Arc<RestartableRouter>,
+}
+
+impl RestartingWzHarness {
+    fn start() -> Self {
+        let demo = demo_binary();
+        assert_demo_binary_newer_than_sources(&demo);
+        let (node, port) = start_router(&demo);
+        RestartingWzHarness {
+            router: Arc::new(RestartableRouter {
+                demo,
+                port,
+                node: Mutex::new(Some(node)),
+            }),
+        }
+    }
+
+    fn dial(&self) -> Result<WzClient, ClientError> {
+        WzClient::connect(&[&format!("tcp/127.0.0.1:{}", self.router.port)])
+    }
+}
+
+impl Harness for RestartingWzHarness {
+    type Client = WzClient;
+
+    fn connect(&self) -> WzClient {
+        self.dial().expect("the wz client connects to the router")
+    }
+}
+
+impl Disruptable for RestartingWzHarness {
+    fn drop_every_session(&self) {
+        let mut node = self.router.node.lock().expect("the router lock");
+        // The process ends without a goodbye, which closes every session it carried the way a
+        // lost link does.
+        if let Some(mut gone) = node.take() {
+            gone.kill();
+        }
+        // The port can be held for a moment after the process is gone: ask again until it is free.
+        let mut last = String::new();
+        for _ in 0..40 {
+            match try_start_router(&self.router.demo, None, Some(self.router.port)) {
+                Ok((restarted, port)) => {
+                    assert_eq!(port, self.router.port, "the same address");
+                    *node = Some(restarted);
+                    return;
+                }
+                Err(why) => last = why,
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        panic!(
+            "the router did not start again on port {}: {last}",
+            self.router.port
+        );
+    }
+
+    fn try_connect(&self) -> Result<WzClient, ClientError> {
+        self.dial()
+    }
+}
+
 /// A router, and the demo it came from, checked once for the build the kit needs.
 fn a_router() -> (Node, u16) {
     let demo = demo_binary();
@@ -670,6 +766,18 @@ fn wz_router_hat_lets_two_wz_clients_meet_and_reach_each_others_engine() {
 fn wz_router_hat_reports_a_wz_client_that_went_away_as_lost() {
     let (_router, port) = a_router();
     conformance::a_machine_that_goes_away_is_told_as_lost(&WzHarness { port });
+}
+
+/// A machine whose router is lost comes back and learns who is still there. The kit kills the
+/// router and starts it again on the same address, and the machines that reconnect through
+/// `open_reconnecting` are told by the wz client, with no thread looking for it, that their session
+/// ended. Without that notice the binding keeps believing in the peers that left during the gap.
+#[test]
+#[ignore = "opt-in: needs wz-ap-demo built with preset-ap-client, router-hat-router and routing-token-tables"]
+fn wz_router_hat_brings_a_wz_client_machine_back_and_resyncs_after_its_router_is_lost() {
+    conformance::a_machine_that_loses_its_session_comes_back_and_resyncs(
+        &RestartingWzHarness::start(),
+    );
 }
 
 #[test]
