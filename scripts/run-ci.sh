@@ -5388,7 +5388,10 @@ layer_c1v_cargo_test_ws() {
     # Round 3372 -- 8 -> 10: `spawned_faces_are_driven_in_parallel` and
     # `held_faces_are_driven_one_at_a_time`, the pair that shows the spawned entry runs the faces
     # side by side and the held one does not. Both are ungated, so C1y moves by the same +2.
-    _runci_guarded_test C1v 10 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # Round 3377 -- 10 -> 11: `local_faces_are_driven_one_at_a_time_on_one_thread`, the control
+    # on the other side of that pair: the local entry keeps one thread, which the worker entry
+    # gives up. Ungated, so C1y moves by the same +1.
+    _runci_guarded_test C1v 11 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -8932,7 +8935,8 @@ layer_c1y_cargo_test_routing_peer() {
     # the number run 35515719160 reported against the old pin -- this red was
     # the pin, not the test.
     # Round 3372 -- 11 -> 13: the same two tests as C1v above, which are not feature-gated.
-    _runci_guarded_test "C1y accept_loop" 13 \
+    # Round 3377 -- 13 -> 14: the local-faces control of C1v above, which is not feature-gated.
+    _runci_guarded_test "C1y accept_loop" 14 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
