@@ -439,10 +439,17 @@ pub type AdminQuerySink<const BODY: usize, const SESSIONS: usize> =
 /// The registrations of the admin node, as the sinks its observer is typed with
 /// ([`wz_session_core::slot_observer::SlotObserverOf`]): the config-write subscriber
 /// and the admin queryable, both closed, and no listener on a peer's declarations.
+///
+/// A node built without `adminspace-write` answers admin GETs and takes no config
+/// write, as upstream's admin space does with its write permission off, so its
+/// subscriber slot is [`NoSink`].
 pub struct AdminSinks<const BODY: usize, const SESSIONS: usize>;
 
 impl<const BODY: usize, const SESSIONS: usize> ObserverSinks for AdminSinks<BODY, SESSIONS> {
+    #[cfg(feature = "adminspace-write")]
     type Subscriber = crate::admin_host::ConnectWriteSink;
+    #[cfg(not(feature = "adminspace-write"))]
+    type Subscriber = NoSink;
     type Queryable = AdminQuerySink<BODY, SESSIONS>;
     type Declared = NoSink;
     type Undeclared = NoSink;
