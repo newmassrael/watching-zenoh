@@ -128,7 +128,15 @@ pub(super) fn send_staged_reply<R: SessionRuntime, T: TimeSource>(
     if let Ok((response, reservation)) =
         reply.into_response_shm(|protocol| actions.shm_admits(protocol))
     {
-        let left = actions.try_send_response(response).is_ok();
+        // The egress policy is asked BEFORE the send, not inside it: a reply the policy denies
+        // has to give back the reference it reserved for its receiver, which the send would
+        // report as taken (a denied reply is consumed, not refused). Dropping the reservation
+        // is what returns it.
+        let Some(response) = actions.reply_egress_verdict(response) else {
+            drop(reservation);
+            return;
+        };
+        let left = actions.send_response_admitted(response).is_ok();
         if let (true, Some(reservation)) = (left, reservation) {
             reservation.commit();
         }

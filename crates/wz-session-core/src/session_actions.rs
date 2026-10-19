@@ -1744,6 +1744,21 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// access pattern.
     #[cfg(feature = "alloc")]
     pub outbound_mappings: R::Mutex<HashMap<u64, String>>,
+    /// The egress admission of a REPLY: the §5.16 verdict the session that owns this bundle
+    /// installs when it holds an egress policy, asked of every `Response` before it is sent.
+    ///
+    /// A reply leaves through [`Self::try_send_response`] and not through the session's
+    /// `send_network_message`, because it is staged by a handler and drained from three places
+    /// (a deferred handler job, a query a handler kept, the observer's pending replies), none of
+    /// which holds the session. The one door they share is this bundle, so the verdict is asked
+    /// here, the way the namespace's egress decoration is. `None` for a session with no policy,
+    /// and then [`Self::set_egress_reply_gate`]'s flag keeps the test to one atomic read.
+    #[cfg(all(feature = "alloc", feature = "codec-response"))]
+    egress_reply_gate: R::Mutex<Option<ReplyEgressGate>>,
+    /// Whether [`Self::egress_reply_gate`] holds a gate: the data path reads this and takes the
+    /// lock only when it is set.
+    #[cfg(all(feature = "alloc", feature = "codec-response"))]
+    egress_reply_gate_set: core::sync::atomic::AtomicBool,
     /// A4 (session-reconnect) — declaration cache. Mirrors zenoh-pico's
     /// `_z_session_t._declaration_cache` slot
     /// (`include/zenoh-pico/net/session.h` under
@@ -2441,6 +2456,12 @@ enum DispatchStage {
 #[cfg(feature = "alloc")]
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
 
+/// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
+/// admits the `Response`. See [`SessionLinkActions::set_egress_reply_gate`].
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
+pub type ReplyEgressGate =
+    alloc::sync::Arc<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
+
 /// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
 /// needs to decide between one frame and a fragment chain, and to route
 /// whichever it emits.
@@ -3002,6 +3023,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
                 outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
+                #[cfg(all(feature = "alloc", feature = "codec-response"))]
+                egress_reply_gate: R::new_mutex(None::<ReplyEgressGate>),
+                #[cfg(all(feature = "alloc", feature = "codec-response"))]
+                egress_reply_gate_set: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "session-reconnect")]
                 declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
                 // §5.21 routing-namespace — `None` until the AP layer installs the
@@ -12581,6 +12606,66 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// egress as [`Self::send_response`], which is this with the verdict dropped.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
     pub fn try_send_response(&self, response: ResponseOwned) -> Result<(), SendWireError> {
+        // The session's §5.16 egress policy, asked of the reply as the user wrote it: BEFORE the
+        // namespace below decorates the key, for the reason ingress asks AFTER it strips (a
+        // policy governs the keyexpr a user knows). A denied reply is consumed, as a denied put
+        // is: the handler replied and nothing was sent.
+        match self.reply_egress_verdict(response) {
+            Some(response) => self.send_response_admitted(response),
+            None => Ok(()),
+        }
+    }
+
+    /// The egress policy's verdict on one reply: the reply back when it is admitted, `None` when
+    /// the session's policy denies it. Always the former for a session that holds no policy,
+    /// at the cost of one atomic read.
+    ///
+    /// Public so a caller that must know BEFORE it sends (a reply whose payload is a
+    /// shared-memory buffer reserves a reference for its receiver, and a reply that is denied
+    /// has to give that reference back) can ask, and then send with
+    /// [`Self::send_response_admitted`] so the verdict is not asked twice: a rate limit that
+    /// counted a reply twice would halve itself.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    pub fn reply_egress_verdict(&self, response: ResponseOwned) -> Option<ResponseOwned> {
+        if !self
+            .egress_reply_gate_set
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            return Some(response);
+        }
+        let gate = R::with_mutex_mut(&self.egress_reply_gate, |slot| slot.clone());
+        let Some(gate) = gate else {
+            return Some(response);
+        };
+        let message =
+            crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
+        if !gate(&message) {
+            return None;
+        }
+        match message {
+            crate::network_message::NetworkMessage::Response(response) => Some(*response),
+            _ => None,
+        }
+    }
+
+    /// Install (or, with `None`, remove) the egress admission of this bundle's replies. Called by
+    /// the session that owns the bundle when it takes an egress policy; see
+    /// [`ReplyEgressGate`]. The gate runs on the thread that sends the reply, possibly under
+    /// the session's observer lock (the observer's own pending replies are sent from inside it),
+    /// so it must not take that lock.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    pub fn set_egress_reply_gate(&self, gate: Option<ReplyEgressGate>) {
+        let set = gate.is_some();
+        R::with_mutex_mut(&self.egress_reply_gate, |slot| *slot = gate);
+        self.egress_reply_gate_set
+            .store(set, core::sync::atomic::Ordering::Release);
+    }
+
+    /// [`Self::try_send_response`] for a reply the egress policy has ALREADY admitted
+    /// ([`Self::reply_egress_verdict`]): the namespace's decoration and the send, without the
+    /// verdict.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    pub fn send_response_admitted(&self, response: ResponseOwned) -> Result<(), SendWireError> {
         // §5.21 routing-namespace — the reply EGRESS seam. Query replies flush
         // through this dedicated `dispatch_response` path, which bypasses BOTH
         // the `send_network_message` floor AND the unicast `Tp` send arm, so the

@@ -1231,6 +1231,38 @@ where
 /// turns a nested pair into a sequential one. The cost is one `String` clone per
 /// governed message on a session that HAS a policy installed; a session with no
 /// policy never builds this at all.
+/// The §5.16 egress verdict on one REPLY, asked from the action bundle's reply gate.
+///
+/// A free function over the two things it needs, the egress chain and the bundle, because the
+/// gate that calls it lives INSIDE the bundle and has to be `Send + Sync` without holding the
+/// session (whose transport payload is not).
+///
+/// Replies are sent from inside the observer's own lock (its pending replies flush there), so
+/// this must not take that lock, which `Session::acl_admits_on` does to read the peer's alias
+/// table. A reply's key is the one the queryable wrote: a literal, or an id of OUR space
+/// (`outbound_mappings`, its own mutex), and never the peer's, so the peer's table is not
+/// needed and an empty one stands in for it. A key that still does not resolve is denied, as
+/// everywhere in the chain.
+#[cfg(feature = "access-acl")]
+fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
+    chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+    actions: &Arc<wz_session_core::session_actions::SessionLinkActions<R, T>>,
+    msg: &wz_session_core::network_message::NetworkMessage,
+) -> bool {
+    if R::with_mutex_mut(chain_slot, |chain| chain.is_empty()) {
+        return true;
+    }
+    let no_peer = hashbrown::HashMap::new();
+    let keyexpr = R::with_mutex_mut(&actions.outbound_mappings, |ours| {
+        crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
+            msg,
+            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, &no_peer),
+        )
+    });
+    let ctx = SessionAclContext { actions, keyexpr };
+    R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
+}
+
 #[cfg(feature = "access-acl")]
 struct SessionAclContext<'a, R: SessionRuntime, T: TimeSource> {
     actions: &'a Arc<wz_session_core::session_actions::SessionLinkActions<R, T>>,
@@ -1276,6 +1308,11 @@ impl<R: SessionRuntime, T: TimeSource> crate::interceptor::InterceptorContext
 #[cfg(feature = "access-acl")]
 impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> crate::interceptor::InterceptorSink
     for Session<R, T, Tp>
+where
+    // The reply gate is held by the action bundle and called from whichever thread sends a
+    // reply, so the bundle has to be shareable. A runtime whose bundle is not (a single-thread
+    // one) takes no part in this impl rather than weakening the gate's bound.
+    wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
 {
     fn set_interceptors(&self, config: crate::interceptor::InterceptorConfig) {
         // REPLACES, never appends — the seam's contract, and what makes a
@@ -1298,6 +1335,27 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> crate::intercep
             self.egress_policy
                 .store(!chain.is_empty(), std::sync::atomic::Ordering::Release);
         });
+        // The replies this session sends leave through the action bundle, which has no chain of
+        // its own: it is handed the verdict. WEAKLY, because the bundle lives inside the
+        // session and a strong handle in it would keep the session alive for ever.
+        if let Some(actions) = Tp::acl_subject_source(&self.transport) {
+            let gate: Option<wz_session_core::session_actions::ReplyEgressGate> = if self
+                .egress_policy
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                let chain = self.interceptors_egress.clone();
+                let bundle = Arc::downgrade(actions);
+                // A bundle that is gone has no reply left to send; deny is the safe answer.
+                Some(Arc::new(move |msg| {
+                    bundle
+                        .upgrade()
+                        .is_some_and(|actions| acl_admits_reply_egress(&chain, &actions, msg))
+                }))
+            } else {
+                None
+            };
+            actions.set_egress_reply_gate(gate);
+        }
         R::with_mutex_mut(&self.interceptors_ingress, |chain| {
             let version = chain.version().wrapping_add(1);
             *chain =
@@ -1719,6 +1777,16 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         reliable: bool,
         express: bool,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        // The §5.16 egress verdict, here as well as in `send_network_message_qos`: a query, a
+        // declaration and a liveliness message leave through this seam and not through that one,
+        // so a policy that was asked only of the prioritised publish was never asked of them. A
+        // denied message is CONSUMED, as it is there: the caller sees a send that succeeded
+        // and the peer sees nothing, which is what upstream's egress interceptor does at the
+        // `Mux`.
+        #[cfg(feature = "access-acl")]
+        if !self.acl_admits_egress(&msg) {
+            return Ok(());
+        }
         Tp::send_network_message(&self.transport, msg, reliable, express)
     }
 
