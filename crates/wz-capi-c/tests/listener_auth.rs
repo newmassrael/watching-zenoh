@@ -21,6 +21,7 @@
 
 use std::ffi::CString;
 use std::io::Write as _;
+use std::time::{Duration, Instant};
 
 use wz_capi_c::abi::{z_moved_config_t, z_moved_session_t, z_owned_config_t, z_owned_session_t};
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
@@ -298,6 +299,16 @@ fn a_client_presents_the_credential_its_own_config_states() {
         rc, Z_OK,
         "a client stating the right user and password was not admitted"
     );
+    // The client's open returns on the OpenAck, and the listener records the face only after it
+    // has sent that OpenAck. Upstream's order is the same: it inserts the transport only after
+    // (`io/zenoh-transport/src/unicast/manager.rs`
+    // @ `transport_error!(ack.send_open_ack().await, close::reason::GENERIC);`).
+    // Reading the count at once races the listener, so the read waits for it within a bound.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // SAFETY: the listener is live.
+    while unsafe { peers_held(&listener) } == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     // SAFETY: the listener is live.
     assert_eq!(
         unsafe { peers_held(&listener) },
