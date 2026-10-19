@@ -1559,6 +1559,33 @@ jobs:
         # the job is CREATED, and the margin gate needs elapsed RUN time.
         run: date +%s > "$RUNNER_TEMP/wz_job_start"
 
+      # The `ci` job's prune, for the same overflow on this job's own disk.
+      # MEASURED on run 39243303345 (job 118029057605): the runner warned "Free
+      # space left: 9 MB" during the wz-session-core legs, and the census then
+      # counted 1834 of that crate's 1904 feature-only tests as run and lost two
+      # crates from its total (13 where the run before read 15). Nothing about the
+      # tests had changed; the listing of a leg that could not be written was
+      # simply short. This job uses only `actions/checkout`, `Swatinem/rust-cache`
+      # and rustup, so nothing it runs lives in the paths removed here.
+      - name: Free runner disk space (headroom for the feature-matrix census)
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
       - name: Checkout (with submodules)
         # `submodules: recursive` is load-bearing: the members this lane
         # compiles resolve through vendor/sce path deps.
