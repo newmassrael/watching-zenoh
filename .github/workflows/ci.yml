@@ -1549,10 +1549,32 @@ jobs:
   # reached only by a `--workspace` command or by being named, and this lane's
   # two gates iterate members individually. No `fetch-depth: 0` either: this
   # lane reads no history.
+  #
+  # SHARDED (run 39295676896). One job read `elapsed 1783s of 1800s budget (99%)`
+  # and failed its margin step with every gate in it green, 21 of its 26 minutes
+  # being the census (`-- --list` of every crate twice; wz-runtime-tokio alone is
+  # nine). The census is now a matrix over the members' positions, the compile
+  # gate and the domain-bundles build run in the last shard only (shard 0 holds
+  # wz-runtime-tokio, about 570 s of the census on a hosted runner, so the two
+  # shards land near 760 s each), and every crate is examined by exactly one
+  # shard.
+  #
+  # DROP-PROOF INVARIANT (the footprint job's, co-located on purpose): `shard`
+  # MUST list exactly [0 .. WZ_CENSUS_SHARDS-1]. The census asserts SHARD <
+  # SHARDS but cannot see a missing shard, and a missing shard is a set of
+  # crates no longer examined while everything stays green. Change the list and
+  # the count together.
   nondefault:
-    name: non-default feature compile + census (Layer C1cn)
+    name: non-default feature compile + census (Layer C1cn, shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    env:
+      WZ_CENSUS_SHARDS: "2"
+      WZ_CENSUS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Budget stamp — start this job's own clock
         # Same reason the `ci` job stamps: `timeout-minutes` measures from when

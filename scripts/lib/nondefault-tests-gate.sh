@@ -1097,12 +1097,35 @@ if [[ "${1:-}" == "--census" ]]; then
             grep -E ': test$' | sed 's/: test$//' | sort -u
     }
 
+    # SHARDING (hosted C1cn). The census builds every crate twice and is most of
+    # that job's clock (about 21 of its 26 minutes, wz-runtime-tokio alone nine),
+    # so hosted CI runs it as `WZ_CENSUS_SHARDS` jobs, each examining the members
+    # whose position in the member list is congruent to its `WZ_CENSUS_SHARD`.
+    # Unset, the census examines every member, which is what a local run wants.
+    # The partition covers every member only if ALL shards run, and this script
+    # cannot see a missing one: change the workflow's `shard` list and
+    # `WZ_CENSUS_SHARDS` together, or a crate silently stops being examined.
+    shards="${WZ_CENSUS_SHARDS:-1}"
+    shard="${WZ_CENSUS_SHARD:-0}"
+    if ! [[ "$shards" =~ ^[1-9][0-9]*$ && "$shard" =~ ^[0-9]+$ ]] ||
+        (( shard >= shards )); then
+        echo "nondefault-tests: FAIL -- WZ_CENSUS_SHARD=$shard of" \
+             "WZ_CENSUS_SHARDS=$shards is not a shard of a positive count" >&2
+        exit 1
+    fi
+    [[ "$shards" -gt 1 ]] && echo "  census: shard $shard of $shards"
+
     rc=0
     total=0
     crates_with=0
     checked_rows=""
+    member_idx=-1
+    mine=" "
     while read -r pkg tier; do
         [[ -n "$pkg" ]] || continue
+        member_idx=$((member_idx + 1))
+        (( member_idx % shards == shard )) || continue
+        mine="$mine$pkg "
         if [[ "$tier" == "excluded" ]]; then
             echo "  census: $pkg SKIPPED -- gate 7 excludes it from all-features"
             continue
@@ -1225,8 +1248,14 @@ if [[ "${1:-}" == "--census" ]]; then
 
     # The mirror defect: an excuse kept for a package the loop never reached, so
     # the staleness check above never ran on it.
+    # A row for a package another shard examines is that shard's to check; a row
+    # for a package no shard examines (not a member at all) is nobody's, and is
+    # refused here by every shard.
     for row in "${SKIPS[@]}"; do
         IFS='|' read -r sp spath _ <<<"$row"
+        if [[ " $mine" != *" $sp "* ]] && grep -qE "^$sp([[:space:]]|\$)" <<<"$members"; then
+            continue
+        fi
         if [[ " $checked_rows " != *" $sp>$spath "* ]]; then
             echo "nondefault-tests: FAIL -- SKIPS names $sp $spath, but the" >&2
             echo "  census never examined that package, so nothing checked the" >&2

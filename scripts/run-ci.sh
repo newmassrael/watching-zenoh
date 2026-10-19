@@ -10550,7 +10550,16 @@ layer_c1cf_reduced_features() {
 # Like C1cf it is a LANE and not only a pre-push arm, for the same reason: a
 # changed-crate filter cannot see a crate broken by a change elsewhere.
 layer_c1cn_nondefault_features() {
-    bash scripts/lib/nondefault-features-gate.sh || return 1
+    # Hosted CI shards the census (WZ_CENSUS_SHARD of WZ_CENSUS_SHARDS, see the
+    # census in nondefault-tests-gate.sh); the two builds that are not the census
+    # run once, in the LAST shard (the one whose slice of the census is the
+    # lighter: shard 0 holds wz-runtime-tokio), and every shard runs its slice of
+    # the census. Unset means unsharded, which is shard 0 of 1 and so the last.
+    local _shard0=0
+    [[ "${WZ_CENSUS_SHARD:-0}" == "$(( ${WZ_CENSUS_SHARDS:-1} - 1 ))" ]] && _shard0=1
+    if [[ $_shard0 -eq 1 ]]; then
+        bash scripts/lib/nondefault-features-gate.sh || return 1
+    fi
     # R2156 (unregistered open-debt item 543) — the CENSUS half. The gate above
     # asks whether feature-gated code COMPILES; this asks whether anything RUNS
     # it, and refuses a test that only a feature build reaches when no leg runs
@@ -10568,7 +10577,9 @@ layer_c1cn_nondefault_features() {
     bash scripts/lib/nondefault-tests-gate.sh --census || return 1
     # R3335 -- the BUILD half of the domain bundles: the census reads their
     # names, and nothing built one until this line.
-    bash scripts/lib/domain-bundles-gate.sh || return 1
+    if [[ $_shard0 -eq 1 ]]; then
+        bash scripts/lib/domain-bundles-gate.sh || return 1
+    fi
 }
 
 layer_c1i_cargo_test_scouting() {
