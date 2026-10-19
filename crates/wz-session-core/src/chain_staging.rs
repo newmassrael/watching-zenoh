@@ -334,3 +334,110 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
         Ok(crate::link::RxBytes::lend(chain.buf.into_vec()))
     }
 }
+
+/// An arena whose chains are ALWAYS heap buffers, whatever `bounded-heapless`
+/// says.
+///
+/// [`HeapStaging`] stages into [`crate::bounded::BoundedVec`], and so follows
+/// that type's backing: a growable heap buffer on the `alloc` backing, a fixed
+/// `CAP`-byte array held inline once a final MCU binary turns
+/// `bounded-heapless` on. That is right for a Router on that MCU, which asked
+/// for its memory to be fixed. It is wrong for a reader that only ever runs on a
+/// host: with `CAP` at 64 KiB the inline array put about half a mebibyte of
+/// empty slots inside every passive session, built and moved on the stack, and
+/// a debug build ran a thread's stack out constructing one. This arena keeps the
+/// heap trade wherever it is used: an idle chain costs nothing and a live one
+/// costs what it staged.
+///
+/// `CAP` is enforced here, as [`HeapStaging`] enforces it on its growable
+/// backing, because a heap buffer would otherwise grow past it.
+#[cfg(feature = "alloc")]
+pub struct VecStaging<const SLOTS: usize, const CAP: usize> {
+    /// Handles currently out, for [`ChainStaging::available`]'s leak check.
+    outstanding: usize,
+}
+
+/// One chain's staging in a [`VecStaging`]: a heap buffer.
+#[cfg(feature = "alloc")]
+pub struct VecChain<const CAP: usize> {
+    buf: alloc::vec::Vec<u8>,
+    /// Bytes handed out by the most recent [`ChainStaging::buf`] and not yet
+    /// resolved by [`ChainStaging::commit`]; see [`HeapChain`]'s field.
+    reserved: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP> for VecStaging<SLOTS, CAP> {
+    fn new() -> Self {
+        Self { outstanding: 0 }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for VecStaging<SLOTS, CAP> {
+    type Chain = VecChain<CAP>;
+
+    fn acquire(&mut self) -> Option<Self::Chain> {
+        if self.outstanding >= SLOTS {
+            return None;
+        }
+        self.outstanding += 1;
+        Some(VecChain {
+            buf: alloc::vec::Vec::new(),
+            reserved: 0,
+        })
+    }
+
+    fn release(&mut self, _chain: Self::Chain) {
+        self.outstanding = self.outstanding.saturating_sub(1);
+    }
+
+    fn append(&mut self, chain: &mut Self::Chain, payload: &[u8]) -> Result<(), StagingError> {
+        if chain.buf.len().saturating_add(payload.len()) > CAP {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        chain.buf.extend_from_slice(payload);
+        Ok(())
+    }
+
+    fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
+        &chain.buf
+    }
+
+    fn buf<'a>(
+        &'a mut self,
+        chain: &'a mut Self::Chain,
+        want: usize,
+    ) -> Result<&'a mut [u8], StagingError> {
+        let start = chain.buf.len();
+        let end = start
+            .checked_add(want)
+            .filter(|end| *end <= CAP)
+            .ok_or(StagingError::ChainCapExceeded)?;
+        chain.reserved = want;
+        chain.buf.resize(end, 0);
+        Ok(&mut chain.buf[start..end])
+    }
+
+    fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
+        if filled > chain.reserved {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        let unused = chain.reserved - filled;
+        chain.buf.truncate(chain.buf.len() - unused);
+        chain.reserved = 0;
+        Ok(())
+    }
+
+    fn available(&self) -> usize {
+        SLOTS.saturating_sub(self.outstanding)
+    }
+
+    /// The chain's buffer, moved into shared storage with no copy, on every
+    /// backing: the buffer is a heap one here whatever the build.
+    #[cfg(feature = "rx-shared-bytes")]
+    fn lend(&mut self, chain: Self::Chain) -> Result<crate::link::RxBytes, Self::Chain> {
+        self.outstanding = self.outstanding.saturating_sub(1);
+        Ok(crate::link::RxBytes::lend(chain.buf))
+    }
+}

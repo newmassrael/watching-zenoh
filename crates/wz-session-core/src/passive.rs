@@ -1406,12 +1406,10 @@ pub struct PassiveSession {
     /// the direction IS the peer key here and the split is structural rather
     /// than a lookup.
     ///
-    /// `CAP` is advisory on the `alloc` backing this module requires
-    /// ([`crate::bounded::BoundedVec`]), so the 64 KiB default costs nothing
-    /// until fragments actually arrive; it is a const parameter so a
-    /// constrained observer can still bound it.
+    /// The chains stage into heap buffers in every build ([`PassiveRouter`]),
+    /// so the 64 KiB ceiling costs nothing until fragments actually arrive.
     #[cfg(feature = "reassembly")]
-    reasm: [ReassemblyDispatcher<PASSIVE_CHAIN_SLOTS, PASSIVE_CHAIN_CAP>; 2],
+    reasm: [PassiveRouter; 2],
     /// R311y585 (A4) — the per-direction `id -> keyexpr` bindings, folded
     /// from every `Declare` this observer decodes.
     ///
@@ -1669,11 +1667,26 @@ const PASSIVE_CHAIN_QUOTA: u16 = 4;
 #[cfg(feature = "reassembly")]
 pub const PASSIVE_CHAIN_SLOTS: usize = 4;
 
-/// Reassembled-message ceiling per chain. Advisory on the `alloc` backing
-/// ([`crate::bounded::BoundedVec`]), so it costs nothing until fragments
-/// arrive; it still bounds what a corrupt or hostile chain can accumulate.
+/// Reassembled-message ceiling per chain. It costs nothing until fragments
+/// arrive, because the chains are heap buffers ([`PassiveRouter`]); it still
+/// bounds what a corrupt or hostile chain can accumulate.
 #[cfg(feature = "reassembly")]
 pub const PASSIVE_CHAIN_CAP: usize = 65_536;
+
+/// One direction's chain router, staging into heap buffers in EVERY build.
+///
+/// Not the default arena, [`crate::chain_staging::HeapStaging`], which follows
+/// `bounded-heapless` to a fixed array per slot: with the ceiling above that is
+/// half a mebibyte of empty slots inside every session, and a debug build ran a
+/// test thread's stack out constructing one in the one build that turns the
+/// feature on beside this module (`--all-features`). An observer is a host shape
+/// (this module requires `alloc`), so the heap trade is the only one it wants.
+#[cfg(feature = "reassembly")]
+pub type PassiveRouter = ReassemblyDispatcher<
+    PASSIVE_CHAIN_SLOTS,
+    PASSIVE_CHAIN_CAP,
+    crate::chain_staging::VecStaging<PASSIVE_CHAIN_SLOTS, PASSIVE_CHAIN_CAP>,
+>;
 
 impl PassiveSession {
     /// A fresh observer with no bytes and no inferred context.
@@ -3145,6 +3158,18 @@ mod tests {
     use super::*;
     use crate::inbound::parse_inbound;
     use alloc::vec;
+
+    /// A session is small in EVERY build, so it can be built and moved on an
+    /// ordinary thread's stack. Measured before [`PassiveRouter`]: about half a
+    /// mebibyte once `bounded-heapless` turned each chain slot into an inline
+    /// 64 KiB array, and a debug build overflowed a 4 MiB stack constructing
+    /// one. The bound is generous on purpose; what it refuses is a slot's
+    /// worth of inline staging coming back.
+    #[test]
+    fn a_session_is_small_in_every_build() {
+        let size = core::mem::size_of::<PassiveSession>();
+        assert!(size < 64 * 1024, "PassiveSession is {size} bytes");
+    }
 
     /// R311y631 (§1.2b) — the ONE message a unit was expected to hold.
     ///
