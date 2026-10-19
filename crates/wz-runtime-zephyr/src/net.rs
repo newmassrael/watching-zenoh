@@ -15,9 +15,10 @@
 //!
 //! Zephyr's net stack runs its RX path on its own threads, so there is no
 //! input path for the drive loop to pump. What the loop's thread owes it is
-//! the CPU: [`SessionDatagramLink::service`] yields for one tick through the
-//! board's `wz_yield_ms` seam, the one the deploy's cooperative loop already
-//! uses, so the net threads get to run between iterations.
+//! the CPU: [`SessionDatagramLink::service`] waits on the link's socket for up to
+//! one millisecond (`poll` with a timeout), so the net threads get to run between
+//! iterations and a datagram that arrives is taken the moment it is queued, not at
+//! the end of a sleep.
 
 use alloc::format;
 use alloc::string::String;
@@ -66,6 +67,12 @@ pub const ZID_MAX: usize = 16;
 
 /// How often [`await_board_ipv4`] asks the board again.
 const ADDRESS_POLL_MS: u32 = 100;
+
+/// How long one pass of the drive loop waits for its link's socket to have a datagram. It bounds
+/// the loop's timers (the lease, the keep-alive, the retransmissions), which are looked at once
+/// per pass, so it is as long as the loop has always slept between passes: a quiet link costs
+/// the same, a datagram costs none of it.
+const SERVICE_WAIT_MS: c_int = 1;
 
 /// The board's IPv4 address, if its interface has one now.
 ///
@@ -272,6 +279,21 @@ impl ZephyrUdpSocket {
         }
     }
 
+    /// Block until a datagram is queued or `timeout_ms` has passed, and return at once when one
+    /// already is. The wait the drive loop makes in place of a sleep: the net stack's own threads
+    /// get the CPU while this one waits, as they do in a sleep, but a datagram that arrives wakes
+    /// the loop where a sleep would have held it for the rest of the tick. A failed `poll` is
+    /// the same as a quiet socket here: the receive that follows reads and reports the error.
+    pub fn wait_readable(&self, timeout_ms: c_int) {
+        let mut pfd = PollFd {
+            fd: self.fd,
+            events: POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one live `pollfd`; the timeout bounds the wait.
+        let _ = unsafe { poll(&mut pfd, 1, timeout_ms) };
+    }
+
     /// Take one queued datagram into `buf` without blocking: `Ok(None)` when
     /// nothing is queued, else its length and source.
     ///
@@ -448,8 +470,10 @@ impl BoxedLinkDriver for ZephyrUdpDriver {
 
 impl SessionDatagramLink for ZephyrUdpDriver {
     fn service(&self) {
-        // SAFETY: the board's `k_msleep` seam; blocks this thread one tick.
-        unsafe { wz_yield_ms(1) };
+        // Zephyr's net stack runs its own threads: all this thread owes it is the CPU. It gives
+        // it by waiting for the socket, so a datagram is taken the moment it is queued, and a
+        // quiet socket costs one millisecond, which is what bounds the loop's timers.
+        self.socket.wait_readable(SERVICE_WAIT_MS);
     }
 
     fn try_recv(&self) -> Option<RxFrame> {
@@ -559,9 +583,8 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
 
     fn service(&self) {
         // Zephyr's net stack runs its own threads: all this thread owes it is
-        // the CPU, as for the unicast link.
-        // SAFETY: the board's `k_msleep` seam; blocks this thread one tick.
-        unsafe { wz_yield_ms(1) };
+        // the CPU, as for the unicast link, and it gives it the same way.
+        self.socket.wait_readable(SERVICE_WAIT_MS);
     }
 
     /// The interface has a carrier while it holds an address: the board's
