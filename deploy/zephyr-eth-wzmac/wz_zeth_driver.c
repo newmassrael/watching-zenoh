@@ -126,6 +126,17 @@ static void zeth_rx_thread(void *p1, void *p2, void *p3)
 	k_mutex_unlock(&data->lock);
 	zeth_set_carrier(data, up);
 
+	/* The open is the deepest this thread goes; say how much of its stack it took, so that a size
+	 * that is only just enough does not pass for a size that is.
+	 */
+	size_t unused = 0;
+
+	if (k_thread_stack_space_get(&data->rx_thread, &unused) == 0) {
+		printk("wz: zeth: receive thread stack, %u of %u bytes used by the open\n",
+		       (unsigned int)(CONFIG_WZ_ZETH_RX_STACK_SIZE - unused),
+		       (unsigned int)CONFIG_WZ_ZETH_RX_STACK_SIZE);
+	}
+
 	for (;;) {
 		k_mutex_lock(&data->lock, K_FOREVER);
 		int len = wz_zeth_receive(data->rx_frame, sizeof(data->rx_frame));

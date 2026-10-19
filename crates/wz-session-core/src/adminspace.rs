@@ -2033,7 +2033,52 @@ fn reply_leg(
 /// in this crate is ([`crate::keyexpr_match::MAX_KEYEXPR_CHUNKS`]): unbounded on the
 /// growable backing, so the AP answers exactly as before, and a key deeper than the
 /// bound is not a match on a no-heap node.
-fn key_intersects_query(query: &str, key: &str) -> bool {
+///
+/// A GET names one key far more often than it names a pattern, and every leg of the answer asks
+/// this of its own key, so the exact case is answered by comparing the two texts: two keys with
+/// no wildcard intersect exactly when they are the same key. Nothing is split, and no chunk view
+/// is built for either side.
+///
+/// Public for the hosts that answer one admin key of their own beside the legs this module
+/// writes (the MCU admin node's `status/connect`), so that they ask the same question the same way
+/// and do not split the key into a vector of their own for every GET.
+pub fn key_intersects_query(query: &str, key: &str) -> bool {
+    if is_plain_key(key) && !has_wildcard(query) {
+        return query == key;
+    }
+    key_intersects_query_by_chunks(query, key)
+}
+
+/// Whether `text` has a wildcard in it: `*` (a chunk, or `**`) or `$` (`$*`, inside a chunk).
+fn has_wildcard(text: &str) -> bool {
+    text.bytes().any(|b| b == b'*' || b == b'$')
+}
+
+/// Whether `key` is a plain keyexpr the chunk scans would take whole: no wildcard, no empty
+/// chunk, and no deeper than they accept. For such a key, and a query with no wildcard,
+/// intersection is equality, which is the one fact [`key_intersects_query`]'s shortcut rests on.
+fn is_plain_key(key: &str) -> bool {
+    let mut chunks = 0usize;
+    let mut chunk_len = 0usize;
+    for b in key.bytes() {
+        match b {
+            b'*' | b'$' => return false,
+            b'/' => {
+                if chunk_len == 0 {
+                    return false;
+                }
+                chunks += 1;
+                chunk_len = 0;
+            }
+            _ => chunk_len += 1,
+        }
+    }
+    chunk_len > 0 && chunks < crate::keyexpr_match::MAX_KEYEXPR_CHUNKS
+}
+
+/// [`key_intersects_query`] by the general rule: both keys split into chunks and intersected
+/// chunk by chunk, which is what answers a query that holds a wildcard.
+fn key_intersects_query_by_chunks(query: &str, key: &str) -> bool {
     let mut chunks: crate::bounded::BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
         crate::bounded::BoundedVec::new();
     for chunk in key.split('/') {
@@ -3706,6 +3751,62 @@ mod tests {
     use alloc::format;
     use alloc::string::ToString as _;
     use alloc::vec;
+
+    /// Every key and query of up to three chunks over a vocabulary with the wildcards, an empty
+    /// chunk and chunks that share a prefix: the shortcut for a plain key and a plain query
+    /// answers exactly as the chunk-by-chunk rule does for every pair, and the keys deeper than
+    /// the scans accept are answered by the rule, not by equality.
+    #[test]
+    fn the_exact_key_shortcut_answers_as_the_chunk_rule_does() {
+        let chunks = ["a", "b", "ab", "*", "**", "$*", "a$*", ""];
+        let mut texts: Vec<String> = Vec::new();
+        for depth in 1..=3usize {
+            let mut next = 0usize;
+            let total = chunks.len().pow(depth as u32);
+            while next < total {
+                let mut rest = next;
+                let mut parts: Vec<&str> = Vec::new();
+                for _ in 0..depth {
+                    parts.push(chunks[rest % chunks.len()]);
+                    rest /= chunks.len();
+                }
+                texts.push(parts.join("/"));
+                next += 1;
+            }
+        }
+        let mut shortcut_taken = 0usize;
+        for query in &texts {
+            for key in &texts {
+                assert_eq!(
+                    key_intersects_query(query, key),
+                    key_intersects_query_by_chunks(query, key),
+                    "query {query:?}, key {key:?}"
+                );
+                if is_plain_key(key) && !has_wildcard(query) {
+                    shortcut_taken += 1;
+                }
+            }
+        }
+        // The test would pass vacuously if the shortcut were never the path taken.
+        assert!(
+            shortcut_taken > 100,
+            "the shortcut was taken {shortcut_taken} times"
+        );
+        // A key deeper than the scans accept is not a plain key: the rule decides it. One the
+        // scans accept whole is.
+        let deep = vec!["k"; crate::keyexpr_match::MAX_KEYEXPR_CHUNKS + 1].join("/");
+        assert!(!is_plain_key(&deep));
+        let shallow = vec!["k"; crate::keyexpr_match::MAX_KEYEXPR_CHUNKS].join("/");
+        assert!(is_plain_key(&shallow));
+        assert_eq!(
+            key_intersects_query(&shallow, &shallow),
+            key_intersects_query_by_chunks(&shallow, &shallow)
+        );
+        assert_eq!(
+            key_intersects_query(&deep, &deep),
+            key_intersects_query_by_chunks(&deep, &deep)
+        );
+    }
 
     /// R2658 — the config-key vocabulary every decoder test below supplies.
     ///

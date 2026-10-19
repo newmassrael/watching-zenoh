@@ -153,7 +153,15 @@ function(wz_zephyr_rust_app)
     sys_clock_tick_get k_malloc k_free
     wz_log wz_yield_ms wz_delay_us wz_irq_lock wz_irq_unlock
     wzApplicationGetRandom wzApplicationGetTimeSinceEpoch)
-  target_link_libraries(app PUBLIC ${rust_lib})
+  # CONFIG_WZ_LIBC_MEMCPY_FIRST: the C library goes BEFORE the staticlib, in addition to where
+  # Zephyr puts it (last), so that its strong `memcpy` family is the image's and not the
+  # staticlib's weak generic one (see the symbol's help for the measurement, which says when it
+  # pays). The library is still named last for what only the staticlib references.
+  if(CONFIG_WZ_LIBC_MEMCPY_FIRST)
+    target_link_libraries(app PUBLIC -lc ${rust_lib})
+  else()
+    target_link_libraries(app PUBLIC ${rust_lib})
+  endif()
   foreach(sym IN LISTS kept WZ_UNDEFINED)
     target_link_libraries(app PUBLIC -Wl,--undefined=${sym})
   endforeach()

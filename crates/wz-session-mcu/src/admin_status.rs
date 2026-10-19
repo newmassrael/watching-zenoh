@@ -298,11 +298,7 @@ pub fn host_admin_queryable(
         let (read, sessions) = status.snapshot();
         if read {
             if let Some(source) = connect {
-                let chunks: Vec<&str> = status_key.split('/').collect();
-                if wz_session_core::keyexpr_match::keyexpr_intersects_target(
-                    query.keyexpr(),
-                    &chunks,
-                ) {
+                if wz_session_core::adminspace::key_intersects_query(query.keyexpr(), &status_key) {
                     let mut body = String::new();
                     connect_status_json(source, &status.endpoints(), &mut body);
                     // A reply that cannot be sent is what upstream logs and

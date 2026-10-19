@@ -57,4 +57,22 @@ config WZ_CORE_CLOCK_BOARD_HOOK
 	  A board without this answers 0 to the image and is not checked, which is what
 	  every emulated board does.
 
+config WZ_LIBC_MEMCPY_FIRST
+	bool "Link the C library before the Rust staticlib, so its memcpy family is the image's"
+	help
+	  The Rust staticlib carries `compiler_builtins`, whose generic, weak `memcpy`, `memmove`,
+	  `memset` and `memcmp` are the first definitions the linker meets when the C library is
+	  scanned after it (Zephyr puts it last), so the whole image (the kernel, the network
+	  stack, every C application beside the Rust) runs them and never the library's own, which
+	  on a Cortex-M is assembly. With this on, the library is scanned first and its strong
+	  definitions are the image's.
+
+	  MEASURED on the T2G kit (Cortex-M7, 350 MHz), same MAC, driver and Zephyr stack, three
+	  rounds of 800 GETs, images alternated: with CONFIG_SPEED_OPTIMIZATIONS=y a GET answered by
+	  the wz node takes 0.717 ms without this and 0.689 with it (the node's own turnaround on
+	  the wire 0.478 -> 0.420 ms), and one answered by zenoh-pico 0.406 -> 0.380 ms. With the
+	  default size optimization it is the other way: 0.805 -> 0.855 ms. So it is off by default
+	  and an image that is built for speed turns it on; an image whose grade rests on a
+	  witnessed run keeps the bytes it was witnessed with.
+
 endmenu

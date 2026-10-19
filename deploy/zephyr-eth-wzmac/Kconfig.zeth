@@ -14,6 +14,8 @@ config WZ_ZETH
 	select NET_L2_ETHERNET
 	select WZ_CORE_CLOCK_BOARD_HOOK
 	select WZ_CYT4BF_PINS_WANTED
+	select INIT_STACKS
+	select THREAD_STACK_INFO
 	help
 	  Zephyr has no Ethernet driver for this controller. This one is an
 	  `ethernet_api` implementation whose frames go through `wz-eth-mac-cyt4bf`, the
@@ -29,7 +31,12 @@ if WZ_ZETH
 
 config WZ_ZETH_RX_STACK_SIZE
 	int "Stack of the driver's receive thread, in bytes"
-	default 2048
+	default 4096
+	help
+	  The thread opens the MAC (pin routing, PHY bring-up, the console lines of each stage)
+	  and then polls it. 2048 bytes held for a size-optimized build and overflowed the
+	  stack guard in a speed-optimized one, whose frames are deeper. The driver prints how
+	  much of the stack the open used.
 
 config WZ_ZETH_RX_PRIORITY
 	int "Priority of the driver's receive thread"
