@@ -79,7 +79,12 @@ pub type TcpReadDriver = StreamReadDriver<TcpRead>;
 /// inside the budget is then taken by a core that never went idle: no idle-state exit, no
 /// wake through the reactor. The price is the budget's CPU time for every read that has to
 /// wait, so it is a setting for a node that wants its round trip short, not a default.
-pub struct TcpRead(TcpReadInner, Option<std::net::TcpStream>);
+pub struct TcpRead(
+    TcpReadInner,
+    // Read by `poll_fd` alone, which is unix: a field a platform never reads is dead code there,
+    // and a warning is an error in this tree.
+    #[cfg(unix)] Option<std::net::TcpStream>,
+);
 
 enum TcpReadInner {
     /// The half `into_split` made, registered where the link was made.
@@ -91,7 +96,11 @@ enum TcpReadInner {
 
 impl TcpRead {
     pub(crate) fn new(half: OwnedReadHalf) -> Self {
-        Self(TcpReadInner::Half(half), None)
+        Self(
+            TcpReadInner::Half(half),
+            #[cfg(unix)]
+            None,
+        )
     }
 
     /// The socket read directly while busy-polling: a duplicate of the descriptor, made on the
