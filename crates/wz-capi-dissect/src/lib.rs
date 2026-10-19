@@ -7847,13 +7847,14 @@ mod tests {
         // neither is on this success branch. Nor is revision 4's, which
         // added two fields and the escapes of a quoted value, nor revision 5's
         // (paths, the list operators, the braces of a list), nor revision 6's
-        // (the row's facts as fields).
+        // (the row's facts as fields). Revision 7 adds each token's `role`, what
+        // the parser read it as.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":6},\"ok\":true,\
-             \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\"},\
-             {\"start\":4,\"end\":6,\"kind\":\"operator\"},\
-             {\"start\":7,\"end\":14,\"kind\":\"word\"}]}"
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":7},\"ok\":true,\
+             \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},\
+             {\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},\
+             {\"start\":7,\"end\":14,\"kind\":\"word\",\"role\":\"value\"}]}"
         );
 
         out = core::ptr::null_mut();
@@ -7870,17 +7871,18 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":6},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":7},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
         // A refused selector still carries every token it lexed: this one
-        // fails in the PARSER, so all three are there.
+        // fails in the PARSER, so all three are there, and the parser reached
+        // all three: the refused value is still the token in a value's slot.
         assert!(
             verdict.ends_with(
-                ",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\"},\
-                 {\"start\":5,\"end\":7,\"kind\":\"operator\"},\
-                 {\"start\":8,\"end\":18,\"kind\":\"word\"}]}"
+                ",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\",\"role\":\"field\"},\
+                 {\"start\":5,\"end\":7,\"kind\":\"operator\",\"role\":\"operator\"},\
+                 {\"start\":8,\"end\":18,\"kind\":\"word\",\"role\":\"value\"}]}"
             ),
             "the tokens close the verdict on the refused branch too: {verdict}"
         );

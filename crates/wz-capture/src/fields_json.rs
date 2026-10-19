@@ -8176,7 +8176,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 67] = [
+        let live: [(&str, &str, Vec<&'static str>); 68] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -8313,6 +8313,13 @@ mod tests {
                 rev::SELECTOR_DIAGNOSE,
                 "kind",
                 crate::filter::TokenClass::names(),
+            ),
+            // The parser's roles, the second family on the selector verdict,
+            // walked from the enum `diagnose_json` writes them through.
+            (
+                rev::SELECTOR_DIAGNOSE,
+                "role",
+                crate::filter::TokenRole::names(),
             ),
             // The binder verdict's refusal words, walked from the enum the
             // emitter writes them through.
@@ -9131,11 +9138,18 @@ mod tests {
             }
         }
         // The selector verdict, over selectors that between them
-        // reach every token class, on both branches.
+        // reach every token class, on both branches. The last two hold every
+        // class twice over, once read by the parser and once lexed and never
+        // parsed (the unclosed quote stops the lexer), so every class arrives
+        // both with a `role` and without one, and every role word arrives.
         let diagnoses: Vec<String> = [
             "(key == 'a b') && not size >= 3",
             "x != 1 || !y < 2 and z > 3 or w <= 4",
             "key == \"unclosed",
+            "(kind == \"put\") && ! key == a || kind in {put, del} and \
+             len(put.payload) > 0 or not size < 3",
+            "(kind == \"put\") && ! key == a || kind in {put, del} and \
+             len(put.payload) > 0 or not size < 3 \"unclosed",
         ]
         .into_iter()
         .map(crate::filter::diagnose_json)

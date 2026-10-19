@@ -2900,14 +2900,15 @@ int main(void) {
      * word that is no field as a PATH into the record's dissection, adds the
      * list operators and two token classes for a list's braces; again none of
      * it is on this branch. Nor is revision 6's, the row's facts as fields.
+     * Revision 7 adds each token's `role`, what the parser read it as.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":6},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":7},"
                  "\"ok\":true,\"tokens\":["
-                 "{\"start\":0,\"end\":3,\"kind\":\"word\"},"
-                 "{\"start\":4,\"end\":6,\"kind\":\"operator\"},"
-                 "{\"start\":7,\"end\":14,\"kind\":\"word\"}]}") == 0,
+                 "{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},"
+                 "{\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},"
+                 "{\"start\":7,\"end\":14,\"kind\":\"word\",\"role\":\"value\"}]}") == 0,
           "not a pass: %s", verdict);
     wz_dissect_string_free(verdict);
 
@@ -3676,6 +3677,20 @@ int main(void) {
         CHECK(rc == WZ_DISSECT_OK && taken != NULL &&
                   strstr(taken, "\"ok\":true") != NULL,
               "a listed path is refused: %s", taken ? taken : "(null)");
+        /* The roles a colouring reads (revision 7): the lexer calls `in` and
+         * the list's values words, and the parser says which is which. */
+        CHECK(taken != NULL &&
+                  strstr(taken, "{\"start\":0,\"end\":12,\"kind\":\"word\",\"role\":\"path\"}") !=
+                      NULL &&
+                  strstr(taken,
+                         "{\"start\":13,\"end\":15,\"kind\":\"word\",\"role\":\"operator\"}") !=
+                      NULL &&
+                  strstr(taken,
+                         "{\"start\":16,\"end\":17,\"kind\":\"open_brace\",\"role\":\"group\"}") !=
+                      NULL &&
+                  strstr(taken,
+                         "{\"start\":23,\"end\":31,\"kind\":\"word\",\"role\":\"value\"}") != NULL,
+              "the list's tokens carry the parser's roles: %s", taken ? taken : "(null)");
         wz_dissect_string_free(taken);
     }
 
@@ -3973,7 +3988,8 @@ int main(void) {
         CHECK(strstr(verdict, "\"ok\":true") != NULL,
               "an unquoted non-ASCII word is a word: %s", verdict);
         /* And its token span counts BYTES: 7 + six UTF-8 bytes. */
-        CHECK(strstr(verdict, "{\"start\":7,\"end\":13,\"kind\":\"word\"}") != NULL,
+        CHECK(strstr(verdict,
+                     "{\"start\":7,\"end\":13,\"kind\":\"word\",\"role\":\"value\"}") != NULL,
               "a multi-byte word's span is a byte span: %s", verdict);
         wz_dissect_string_free(verdict);
 

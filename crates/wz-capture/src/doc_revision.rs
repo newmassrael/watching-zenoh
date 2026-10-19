@@ -3228,6 +3228,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_FIELDS_R1_CARRIES,
     },
+    // Revision 7 ADDS `role` to a token object and retires nothing: what the
+    // parser read the token as, `field`, `path`, `operator`, `value`,
+    // `function`, `logic` or `group` (`crate::filter::TokenRole`). It is
+    // ABSENT on a token the parser did not reach, which is every token of a
+    // selector the lexer refused and every token after the place a selector is
+    // refused; and on a word in a field's slot that names neither a field nor a
+    // path. `kind` does not move: `in` is still a `word`, now with `role`
+    // `operator`.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 7,
+        keys: SELECTOR_DIAGNOSE_R7_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R7_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R7_CARRIES,
+    },
     // A `zid` PREFIX IS READ AGAINST THE CAPTURE, and an ambiguous one is
     // reported on the verdict document.
     //
@@ -9867,6 +9884,45 @@ pub const SELECTOR_DIAGNOSE_R5_FAMILIES: &[ValueFamily] = &[ValueFamily {
     key: "kind",
     values: TOKEN_CLASS_R5,
 }];
+
+/// The selector verdict's key set at revision 7: revision 5's and a token's
+/// `role`.
+pub const SELECTOR_DIAGNOSE_R7_KEYS: &[&str] = &[
+    "at", "document", "end", "kind", "message", "name", "ok", "revision", "role", "start", "tokens",
+];
+
+/// What a token's `role` says at selector-verdict revision 7: the words of
+/// [`crate::filter::TokenRole`].
+pub const TOKEN_ROLE_R7: &[&str] = &[
+    "field", "function", "group", "logic", "operator", "path", "value",
+];
+
+/// The selector verdict's value families at revision 7: the token class and
+/// the token role.
+pub const SELECTOR_DIAGNOSE_R7_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "kind",
+        values: TOKEN_CLASS_R5,
+    },
+    ValueFamily {
+        key: "role",
+        values: TOKEN_ROLE_R7,
+    },
+];
+
+/// Both families are PASSENGERS: no word of either decides the keys beside
+/// it. `role` itself is absent from a token the parser did not reach, of any
+/// class, so no class always or never brings it.
+pub const SELECTOR_DIAGNOSE_R7_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "role",
+        shape: CarriesShape::Passenger,
+    },
+];
 
 /// The field list's key set at revision 1: the envelope, `matches`, the two
 /// lists, and the keys of their objects.
@@ -17855,7 +17911,8 @@ mod tests {
             // gained the braces of a list.
             // To 6 when the row's facts (`msg`, the endpoints, the ports, the
             // link, the flow, the packet) joined the fields.
-            (SELECTOR_DIAGNOSE, 6),
+            // To 7 when a token gained `role`, what the parser read it as.
+            (SELECTOR_DIAGNOSE, 7),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),

@@ -1626,23 +1626,34 @@ impl Filter {
     /// The parse itself, `node` terms included. [`Self::parse`] is this plus
     /// the refusal; the binder reads the terms it must replace out of it.
     fn parse_tree(source: &str) -> Result<Self, FilterError> {
-        let tokens = lex(source)?;
+        Self::parse_read(source).0
+    }
+
+    /// The parse, and what it read each lexed token as: one entry per token,
+    /// `None` where the parse did not reach it. A selector the lexer refuses is
+    /// never parsed, so it has no roles at all.
+    fn parse_read(source: &str) -> (Result<Self, FilterError>, Vec<Option<TokenRole>>) {
+        let tokens = match lex(source) {
+            Ok(tokens) => tokens,
+            Err(e) => return (Err(e), Vec::new()),
+        };
         if tokens.is_empty() {
-            return Ok(Self::any());
+            return (Ok(Self::any()), Vec::new());
         }
         let mut parser = Parser {
             tokens: &tokens,
             at: 0,
             end: source.len(),
+            roles: alloc::vec![None; tokens.len()],
         };
-        let root = parser.expression()?;
-        if let Some(tok) = parser.peek() {
-            return Err(FilterError {
+        let parsed = parser.expression().and_then(|root| match parser.peek() {
+            Some(tok) => Err(FilterError {
                 at: tok.at,
                 kind: FilterErrorKind::TrailingInput,
-            });
-        }
-        Ok(Self { root })
+            }),
+            None => Ok(Self { root }),
+        });
+        (parsed, parser.roles)
     }
 
     /// Decide one record.
@@ -2523,7 +2534,72 @@ impl TokenClass {
     }
 }
 
-/// One token as a consumer sees it: a BYTE span and a class.
+/// WHAT THE PARSER READ A TOKEN AS: the slot of the grammar it filled.
+///
+/// The class is the lexer's fact and this is the parser's, and they differ
+/// exactly where a consumer colouring a selector needs them to: `in`,
+/// `contains` and `matches` are `word`s that fill an operator's slot, the
+/// values of a list are `word`s, `len` is a `word` that names a function, and
+/// the `not` of `not in` is half an operator rather than a negation.
+///
+/// A role is written when the parser reads a token into its slot, so a token
+/// the parser never reached has none: after the place a selector is refused,
+/// and everywhere in a selector the lexer refused, since the parser never runs
+/// over one. A word in a field's slot is the one token that can be reached and
+/// still have none: whether it is a `field` or a `path` is decided by looking
+/// it up, and a word the lookup refuses is neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenRole {
+    /// A fixed field: `key`, `kind`, `zid`, `msg`, ….
+    Field,
+    /// A path into a record's dissection.
+    Path,
+    /// A comparison, `in`, `not in` (both of its tokens), `contains` or
+    /// `matches`.
+    Operator,
+    /// A value compared against: after an operator, or inside a list.
+    Value,
+    /// `len`, the one function.
+    Function,
+    /// `and`, `or`, and a `not` that negates what follows it.
+    Logic,
+    /// A bracket: the `(` `)` of a group or of `len`, the `{` `}` of a list.
+    Group,
+}
+
+impl TokenRole {
+    /// The word the selector verdict writes under a token's `role`.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Field => "field",
+            Self::Path => "path",
+            Self::Operator => "operator",
+            Self::Value => "value",
+            Self::Function => "function",
+            Self::Logic => "logic",
+            Self::Group => "group",
+        }
+    }
+
+    /// Every word [`Self::word`] can return, by walking the variants: what the
+    /// declared value family is held to.
+    pub fn names() -> Vec<&'static str> {
+        [
+            Self::Field,
+            Self::Path,
+            Self::Operator,
+            Self::Value,
+            Self::Function,
+            Self::Logic,
+            Self::Group,
+        ]
+        .into_iter()
+        .map(Self::word)
+        .collect()
+    }
+}
+
+/// One token as a consumer sees it: a BYTE span, a class and a role.
 ///
 /// `start..end` are byte offsets into the selector, the same unit as
 /// [`FilterError::at`], so a caret and a colour run are placed by one rule.
@@ -2535,6 +2611,8 @@ pub struct LexedToken {
     pub end: usize,
     /// What the lexer took it for.
     pub class: TokenClass,
+    /// What the parser read it as; `None` where the parser did not reach it.
+    pub role: Option<TokenRole>,
 }
 
 /// The selector verdict `wz_dissect_selector_diagnose` hands back, rendered
@@ -2574,12 +2652,18 @@ pub fn diagnose_json(expr: &str) -> String {
         let _ = fmt::Write::write_fmt(
             &mut out,
             format_args!(
-                "{{\"start\":{},\"end\":{},\"kind\":\"{}\"}}",
+                "{{\"start\":{},\"end\":{},\"kind\":\"{}\"",
                 t.start,
                 t.end,
                 t.class.word()
             ),
         );
+        // ABSENT where the parser did not reach the token: not knowing is the
+        // missing key, and no word stands for it.
+        if let Some(role) = t.role {
+            let _ = fmt::Write::write_fmt(&mut out, format_args!(",\"role\":\"{}\"", role.word()));
+        }
+        out.push('}');
     }
     out.push_str("]}");
     out
@@ -2719,15 +2803,21 @@ pub fn bind_refusal_words() -> Vec<&'static str> {
 /// unclosed quote would make the colouring useless at exactly the moment it is
 /// read. Where it stopped is [`Filter::parse`]'s `at`, not this function's to
 /// repeat.
+///
+/// Each token carries the role the SAME parse read it as ([`TokenRole`]), and
+/// none where that parse did not reach it.
 pub fn tokens(source: &str) -> Vec<LexedToken> {
     let mut out = Vec::new();
     // The error is deliberately dropped: it is the verdict's to report.
     let _ = lex_into(source, &mut out);
+    let (_, roles) = Filter::parse_read(source);
     out.into_iter()
-        .map(|t| LexedToken {
+        .enumerate()
+        .map(|(i, t)| LexedToken {
             start: t.at,
             end: t.end,
             class: TokenClass::of(&t.kind),
+            role: roles.get(i).copied().flatten(),
         })
         .collect()
 }
@@ -2976,11 +3066,27 @@ struct Parser<'a> {
     at: usize,
     /// The byte length of the source: where an input that ran out is refused.
     end: usize,
+    /// What each token was read as, by index; see [`TokenRole`].
+    roles: Vec<Option<TokenRole>>,
 }
 
 impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&'a Token> {
         self.tokens.get(self.at)
+    }
+
+    /// Record that the token at `index` was read as `role`.
+    fn mark(&mut self, index: usize, role: TokenRole) {
+        if let Some(slot) = self.roles.get_mut(index) {
+            *slot = Some(role);
+        }
+    }
+
+    /// Record that the token just consumed was read as `role`.
+    fn read_as(&mut self, role: TokenRole) {
+        if let Some(index) = self.at.checked_sub(1) {
+            self.mark(index, role);
+        }
     }
 
     fn next(&mut self) -> Option<&'a Token> {
@@ -3007,6 +3113,7 @@ impl<'a> Parser<'a> {
         let mut nodes = alloc::vec![self.conjunction()?];
         while matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Or)) {
             self.at += 1;
+            self.read_as(TokenRole::Logic);
             nodes.push(self.conjunction()?);
         }
         Ok(if nodes.len() == 1 {
@@ -3020,6 +3127,7 @@ impl<'a> Parser<'a> {
         let mut nodes = alloc::vec![self.unary()?];
         while matches!(self.peek().map(|t| &t.kind), Some(TokenKind::And)) {
             self.at += 1;
+            self.read_as(TokenRole::Logic);
             nodes.push(self.unary()?);
         }
         Ok(if nodes.len() == 1 {
@@ -3032,6 +3140,7 @@ impl<'a> Parser<'a> {
     fn unary(&mut self) -> Result<Node, FilterError> {
         if matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Not)) {
             self.at += 1;
+            self.read_as(TokenRole::Logic);
             return Ok(Node::Not(alloc::boxed::Box::new(self.unary()?)));
         }
         self.atom()
@@ -3049,12 +3158,16 @@ impl<'a> Parser<'a> {
         };
         if matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Open)) {
             self.at += 1;
+            self.read_as(TokenRole::Group);
             let inner = self.expression()?;
             match self.next() {
                 Some(Token {
                     kind: TokenKind::Close,
                     ..
-                }) => Ok(inner),
+                }) => {
+                    self.read_as(TokenRole::Group);
+                    Ok(inner)
+                }
                 _ => Err(FilterError {
                     at: open_at,
                     kind: FilterErrorKind::UnclosedGroup,
@@ -3083,6 +3196,8 @@ impl<'a> Parser<'a> {
         {
             if w == "len" {
                 let at = *at;
+                self.mark(self.at, TokenRole::Function);
+                self.mark(self.at + 1, TokenRole::Group);
                 self.at += 2;
                 return self.len_term(at);
             }
@@ -3116,6 +3231,10 @@ impl<'a> Parser<'a> {
             Some(known) => Subject::Fixed(known),
             None => Subject::Path(resolve_path(&field, field_at)?),
         };
+        self.read_as(match subject {
+            Subject::Fixed(_) => TokenRole::Field,
+            Subject::Path(_) => TokenRole::Path,
+        });
 
         let (op_at, cmp) = match self.peek() {
             Some(Token {
@@ -3151,6 +3270,8 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Word(w)) if w == "in"
             ) =>
             {
+                // Half of the operator, not a negation of what follows.
+                self.mark(self.at, TokenRole::Operator);
                 self.at += 1;
                 (*at, Cmp::NotIn)
             }
@@ -3188,6 +3309,7 @@ impl<'a> Parser<'a> {
             }
         };
         self.at += 1;
+        self.read_as(TokenRole::Operator);
 
         match cmp {
             // `f in {a, b}` IS `f == a or f == b`, built term by term so every
@@ -3226,26 +3348,35 @@ impl<'a> Parser<'a> {
     }
 
     /// One value token: a word or a quoted run.
+    ///
+    /// The token is a `value` from here whatever the field then makes of it: a
+    /// value the field refuses is still the token in the value's slot.
     fn literal(&mut self, subject: &Subject) -> Result<Value, FilterError> {
         match self.next() {
             Some(Token {
                 at,
                 end,
                 kind: TokenKind::Word(w),
-            }) => Ok(Value {
-                at: *at,
-                end: *end,
-                literal: Literal::Word(w.clone()),
-            }),
+            }) => {
+                self.read_as(TokenRole::Value);
+                Ok(Value {
+                    at: *at,
+                    end: *end,
+                    literal: Literal::Word(w.clone()),
+                })
+            }
             Some(Token {
                 at,
                 end,
                 kind: TokenKind::Quoted(bytes),
-            }) => Ok(Value {
-                at: *at,
-                end: *end,
-                literal: Literal::Quoted(bytes.clone()),
-            }),
+            }) => {
+                self.read_as(TokenRole::Value);
+                Ok(Value {
+                    at: *at,
+                    end: *end,
+                    literal: Literal::Quoted(bytes.clone()),
+                })
+            }
             Some(t) => Err(FilterError {
                 at: t.at,
                 kind: match subject {
@@ -3277,7 +3408,11 @@ impl<'a> Parser<'a> {
                 at,
                 kind: TokenKind::OpenBrace,
                 ..
-            }) => *at,
+            }) => {
+                let at = *at;
+                self.read_as(TokenRole::Group);
+                at
+            }
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
@@ -3299,6 +3434,7 @@ impl<'a> Parser<'a> {
                     ..
                 }) => {
                     self.at += 1;
+                    self.read_as(TokenRole::Group);
                     break;
                 }
                 Some(Token {
@@ -3318,6 +3454,7 @@ impl<'a> Parser<'a> {
                         offset += piece.len() + 1;
                     }
                     self.at += 1;
+                    self.read_as(TokenRole::Value);
                 }
                 Some(Token {
                     kind: TokenKind::Quoted(_),
@@ -3368,6 +3505,7 @@ impl<'a> Parser<'a> {
             }
         };
         let path = resolve_path(&written, path_at)?;
+        self.read_as(TokenRole::Path);
         if !matches!(
             self.next(),
             Some(Token {
@@ -3380,6 +3518,7 @@ impl<'a> Parser<'a> {
                 kind: FilterErrorKind::UnclosedGroup,
             });
         }
+        self.read_as(TokenRole::Group);
         if !path.kind().has_width() {
             return Err(FilterError {
                 at: len_at,
@@ -3394,7 +3533,11 @@ impl<'a> Parser<'a> {
             Some(Token {
                 kind: TokenKind::Op(op),
                 ..
-            }) => *op,
+            }) => {
+                let op = *op;
+                self.read_as(TokenRole::Operator);
+                op
+            }
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
@@ -3413,7 +3556,10 @@ impl<'a> Parser<'a> {
                 at,
                 kind: TokenKind::Word(w),
                 ..
-            }) => path_integer(w, *at)?,
+            }) => {
+                self.read_as(TokenRole::Value);
+                path_integer(w, *at)?
+            }
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
@@ -5174,17 +5320,163 @@ mod tests {
         let doc = diagnose_json("kind");
         assert!(doc.contains("\"ok\":false,\"at\":4,"), "{doc}");
         assert!(
-            doc.ends_with(",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\"}]}"),
+            doc.ends_with(
+                ",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\",\"role\":\"field\"}]}"
+            ),
             "the token span is the lexer's and did not move: {doc}"
         );
         let doc = diagnose_json("kind == ");
         assert!(doc.contains("\"at\":8,"), "{doc}");
         assert!(
             doc.ends_with(
-                ",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\"},\
-                 {\"start\":5,\"end\":7,\"kind\":\"operator\"}]}"
+                ",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\",\"role\":\"field\"},\
+                 {\"start\":5,\"end\":7,\"kind\":\"operator\",\"role\":\"operator\"}]}"
             ),
             "{doc}"
+        );
+    }
+
+    /// Each token of `src` as the text it spans and the role the parser read
+    /// it as, `None` where the parser did not reach it.
+    fn roles(src: &str) -> Vec<(&str, Option<&'static str>)> {
+        tokens(src)
+            .into_iter()
+            .map(|t| (&src[t.start..t.end], t.role.map(TokenRole::word)))
+            .collect()
+    }
+
+    /// THE PARSER'S ROLES, where the lexer's class cannot tell a consumer what
+    /// to colour: the words that are operators, the words that are values, the
+    /// word that is a function, and the `not` that is half an operator.
+    #[test]
+    fn tokens_carry_the_role_the_parser_read_them_as() {
+        let src = "(kind in {put, del} or kind not in {put}) && ! key contains \"a\"";
+        assert_eq!(
+            roles(src),
+            alloc::vec![
+                ("(", Some("group")),
+                ("kind", Some("field")),
+                ("in", Some("operator")),
+                ("{", Some("group")),
+                // One lexed word holding a comma; the list splits it, and the
+                // token is a value either way.
+                ("put,", Some("value")),
+                ("del", Some("value")),
+                ("}", Some("group")),
+                ("or", Some("logic")),
+                ("kind", Some("field")),
+                // `not in` is ONE operator in two tokens.
+                ("not", Some("operator")),
+                ("in", Some("operator")),
+                ("{", Some("group")),
+                ("put", Some("value")),
+                ("}", Some("group")),
+                (")", Some("group")),
+                ("&&", Some("logic")),
+                // A `not` before a term negates it.
+                ("!", Some("logic")),
+                ("key", Some("field")),
+                ("contains", Some("operator")),
+                ("\"a\"", Some("value")),
+            ]
+        );
+        Filter::parse(src).expect("the table above is a selector that parses");
+
+        // A word that fills a value's slot is a value whatever it spells.
+        assert_eq!(
+            roles("key == in"),
+            alloc::vec![
+                ("key", Some("field")),
+                ("==", Some("operator")),
+                ("in", Some("value")),
+            ]
+        );
+    }
+
+    /// The roles of a path and of `len`, which need the declared shape a path
+    /// resolves against; and with them every role the family declares.
+    #[cfg(feature = "dissect")]
+    #[test]
+    fn a_path_and_len_carry_their_roles() {
+        let src = "len(put.payload) > 3 or put.payload";
+        assert_eq!(
+            roles(src),
+            alloc::vec![
+                ("len", Some("function")),
+                ("(", Some("group")),
+                ("put.payload", Some("path")),
+                (")", Some("group")),
+                (">", Some("operator")),
+                ("3", Some("value")),
+                ("or", Some("logic")),
+                // A path alone is a presence test: a path with no operator.
+                ("put.payload", Some("path")),
+            ]
+        );
+        Filter::parse(src).expect("the table above is a selector that parses");
+        let other = "(kind in {put} or kind not in {put}) && ! key contains \"a\"";
+        let mut reached: Vec<&str> = roles(src)
+            .into_iter()
+            .chain(roles(other))
+            .filter_map(|(_, r)| r)
+            .collect();
+        reached.sort_unstable();
+        reached.dedup();
+        let mut declared = TokenRole::names();
+        declared.sort_unstable();
+        assert_eq!(
+            reached, declared,
+            "every role the family declares was reached"
+        );
+    }
+
+    /// NO ROLE WHERE THE PARSER DID NOT REACH: past a refusal, over a selector
+    /// the lexer refused, and on a word in a field's slot that names nothing,
+    /// which is neither a field nor a path. A value the field refuses is still
+    /// the token in the value's slot.
+    #[test]
+    fn a_token_the_parser_did_not_reach_has_no_role() {
+        assert_eq!(
+            roles("kind == put and frob == 1"),
+            alloc::vec![
+                ("kind", Some("field")),
+                ("==", Some("operator")),
+                ("put", Some("value")),
+                ("and", Some("logic")),
+                ("frob", None),
+                ("==", None),
+                ("1", None),
+            ]
+        );
+        assert_eq!(
+            roles("kind == frobnicate"),
+            alloc::vec![
+                ("kind", Some("field")),
+                ("==", Some("operator")),
+                ("frobnicate", Some("value")),
+            ]
+        );
+        // The lexer refuses the open quote, so the parser never ran.
+        assert_eq!(
+            roles("kind == put and key == \"open"),
+            alloc::vec![
+                ("kind", None),
+                ("==", None),
+                ("put", None),
+                ("and", None),
+                ("key", None),
+                ("==", None),
+            ]
+        );
+        // Trailing input: everything before it was read, the stray `)` was not.
+        assert_eq!(
+            roles("kind == put)"),
+            alloc::vec![
+                ("kind", Some("field")),
+                ("==", Some("operator")),
+                ("put", Some("value")),
+                (")", None),
+            ]
         );
     }
 

@@ -2343,8 +2343,32 @@ int wz_dissect_pcap_session_table(const unsigned char *bytes, size_t len,
  * `in`, `contains` and `matches` are `word`s: each is an operator only where
  * one stands, so `key == in` still names the chunk.
  *
+ * From verdict revision 7 a token also carries `role`, what the PARSER read it
+ * as, which is what a colouring wants where `kind` cannot say:
+ *
+ *     ...,"tokens":[{"start":0,"end":4,"kind":"word","role":"field"},
+ *                   {"start":5,"end":7,"kind":"word","role":"operator"}, ...]}
+ *
+ *     `field`     a fixed field: key, kind, zid, msg, ...
+ *     `path`      a path into a record's dissection
+ *     `operator`  a comparison, `in`, `contains`, `matches`, and BOTH tokens of
+ *                 `not in`
+ *     `value`     a value: after an operator, and each token inside `{ }`
+ *     `function`  `len`
+ *     `logic`     `and`, `or`, and a `not` (or `!`) that negates what follows
+ *     `group`     a bracket: ( ) of a group or of `len`, { } of a list
+ *
+ * `role` is ABSENT, not null, on a token the parser did not reach: every
+ * token after the place a selector is refused, every token of a selector the
+ * LEXER refused (the parser never runs over one), and a word in a field's
+ * place that names neither a field nor a path. A value the field then
+ * refuses (`kind == frobnicate`) still has `role` `value`. `kind` does not
+ * move: `in` is a `word` with `role` `operator`.
+ *
  * @values selector_diagnose kind
- * @carries selector_diagnose kind passenger */
+ * @carries selector_diagnose kind passenger
+ * @values selector_diagnose role
+ * @carries selector_diagnose role passenger */
 int wz_dissect_selector_diagnose(const char *selector, char **out);
 
 /* (ABI 35) -- RESOLVE A SELECTOR'S `node` TERMS to the zids your own list of
