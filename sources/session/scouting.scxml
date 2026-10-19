@@ -164,7 +164,7 @@
       <sce:action name="record_hello_and_emit" effect="duty"/>
     </transition>
     <transition event="scout.timer.elapsed" target="Idle">
-      <sce:action name="emit_scout_timeout" effect="duty"/>
+      <sce:action name="emit_scout_timeout" effect="notice"/>
     </transition>
   </state>
 

@@ -378,8 +378,10 @@ pub struct ScoutActionsBinding<R: Runtime = TokioRuntime> {
 // concrete impl matches `ScoutingActions<TokioRuntime>`'s inherent impl.
 impl ScoutingActionsTrait for ScoutActionsBinding<TokioRuntime> {
     // docs/adr/0038: this host performs the machine's duties. `scout_emit`
-    // stages the datagram the drive loop sends, `record_hello_and_emit` and
-    // `emit_scout_timeout` write the staging slots the caller reads back.
+    // stages the datagram the drive loop sends and `record_hello_and_emit`
+    // writes the staging slots the caller reads back. `emit_scout_timeout` and
+    // `diag_scout_tx_failed` are notices that only count: a window that ends
+    // with no Hello leaves `discovered` unset whether or not they run.
     const REALIZATION: ::sce_rust_runtime::ActionRealization =
         ::sce_rust_runtime::ActionRealization::Performs;
 
