@@ -18859,6 +18859,18 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
         --test redial_zenohd_interop -- --ignored --quiet --test-threads=1 \
         || return 1
+    # A C session whose config names a usrpwd dictionary authenticates a REAL zenohd's
+    # credential. `listener_auth` (a default lane) proves the config reaches the session with a
+    # peer wz wrote itself; this is the other direction, a peer wz did not write computing its own
+    # HMAC from `transport/auth/usrpwd/{user,password}`, read where a C program reads it
+    # (`z_info_routers_zid`). 2 legs on one listener configuration: the right password becomes a
+    # router of the listener, and a zenohd whose ONLY difference is the password never does
+    # (after the right one proved it connects at all). In this crate for the reason the legs
+    # above give. MEASURED: 2 passed against zenohd 1.10.0 (the pin is 1.10.1; this lane is
+    # where it is judged against the pinned binary).
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+        --test listener_auth_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
     # The READ direction, which is the one that bears on replacement: an operator
     # standing wz up in place of a zenoh node already HAS the config file, and
     # until R311y842 it was an input to nothing. Four legs: the differential
