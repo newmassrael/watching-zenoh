@@ -2142,14 +2142,25 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// no-op the second time). Returns the number of entries swept.
     #[cfg(feature = "query-get")]
     pub fn sweep_expired_queries(&self) -> usize {
-        let now_ms = self.clock.now_monotonic_ms();
-        let swept = R::with_mutex_mut(&self.observer, |observer| {
-            observer.replies.sweep_timed_out(now_ms)
-        });
+        let swept = self.sweep_expired_queries_staged();
         // Drain OUTSIDE the observer lock (the standing drain-after-dispatch
         // contract) — a timed-out query's staged `on_final` runs here.
         self.drain_deferred_fires();
         swept
+    }
+
+    /// [`Self::sweep_expired_queries`] without the drain: the fires of the
+    /// entries swept are STAGED and left for the caller's own
+    /// [`Self::drain_deferred_fires`]. For a caller that drains right after
+    /// anyway (the C ABI's per-event dispatch runs three sweeps and one
+    /// drain), so a frame that expires nothing does not pay a drain, with its
+    /// two lock acquisitions, per sweep.
+    #[cfg(feature = "query-get")]
+    pub fn sweep_expired_queries_staged(&self) -> usize {
+        let now_ms = self.clock.now_monotonic_ms();
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.replies.sweep_timed_out(now_ms)
+        })
     }
 
     /// R311y296 — when the earliest pending query is due, on this
@@ -6825,9 +6836,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Idempotent and cheap when nothing is expired. Returns entries swept.
     #[cfg(feature = "liveliness-get")]
     pub fn sweep_expired_liveliness_gets(&self) -> usize {
+        let swept = self.sweep_expired_liveliness_gets_staged();
+        self.drain_deferred_fires();
+        swept
+    }
+
+    /// [`Self::sweep_expired_liveliness_gets`] without the drain; see
+    /// [`Self::sweep_expired_queries_staged`]. The prune of the finalized
+    /// interests still runs in the sweep's own lock window.
+    #[cfg(feature = "liveliness-get")]
+    pub fn sweep_expired_liveliness_gets_staged(&self) -> usize {
         let now_ms = self.clock.now_monotonic_ms();
         let actions = self.actions();
-        let swept = R::with_mutex_mut(&self.observer, |observer| {
+        R::with_mutex_mut(&self.observer, |observer| {
             let swept = observer.liveliness_gets.sweep_timed_out(now_ms);
             for interest_id in observer.liveliness_gets.take_finalized() {
                 wz_session_core::response_sink::LivelinessGetPrune::prune_liveliness_get_interest(
@@ -6836,9 +6857,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 );
             }
             swept
-        });
-        self.drain_deferred_fires();
-        swept
+        })
     }
 
     /// R311y533 — when the earliest pending liveliness snapshot is due, or

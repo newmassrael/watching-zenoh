@@ -2408,7 +2408,10 @@ impl SharedSession {
                 }
             }
             session.dispatch_iteration_event(event);
-            session.sweep_expired_queries();
+            // The sweeps only STAGE what they expire; the one drain at the end of
+            // this call runs it, so a frame that expires nothing pays one drain
+            // and not three.
+            session.sweep_expired_queries_staged();
             // R311y533 — the LIVELINESS-GET table has the same deadline
             // contract and, until this line, no enforcer under the C ABI.
             // `z_liveliness_get` arms a 10 s default (pico's own rule for
@@ -2423,7 +2426,7 @@ impl SharedSession {
             // directly above: firing a snapshot's synthetic timeout reply and
             // its final invokes C callbacks, and this is the one thread on
             // which that is allowed.
-            session.sweep_expired_liveliness_gets();
+            session.sweep_expired_liveliness_gets_staged();
             // R311y554 — the DRIVE-TASK half of the local-delivery hand-off.
             //
             // What a C thread staged on THIS face session (and, for an ABI whose
