@@ -573,6 +573,8 @@ struct Pausable<F> {
     inner: Pin<Box<F>>,
     /// This future's place in the gate, taken by its first poll.
     registered: Option<u64>,
+    /// Whether this future takes a place in the gate at all: see [`Self::nested`].
+    takes_a_slot: bool,
 }
 
 impl<F> Pausable<F> {
@@ -581,6 +583,34 @@ impl<F> Pausable<F> {
             gate,
             inner: Box::pin(inner),
             registered: None,
+            takes_a_slot: true,
+        }
+    }
+
+    /// A gated future that is polled only from inside ANOTHER gated future's poll, on its
+    /// thread: a serial face, which is a local task of the drive thread's `LocalSet`. It
+    /// holds while the task is stopped, as every gated future does, and takes no place in
+    /// the gate, so a stop does not wait for it.
+    ///
+    /// It must not take one. A stop waits until every place has parked, and a nested future
+    /// parks only when it is polled, which happens only inside its parent's poll; a parent
+    /// that is polled after the stop parks before it polls anything inside it. So once the
+    /// drive thread was idle when the stop came, the nested place could never park: the stop
+    /// woke the parent, the parent parked and said so, the stop woke it again, and the two
+    /// threads passed that wake back and forth for as long as anyone waited. Measured on the
+    /// hosted pico lane (`pico_read_task_twice_and_diff`, three runs in a row): the C driver
+    /// never returned from `zp_stop_read_task`, and both its thread and the drive thread were
+    /// running when the test gave up.
+    ///
+    /// Nothing is lost by not waiting for it. The parent's place parks at the start of a poll
+    /// on the same thread that runs the nested future, so when it has parked the nested
+    /// future is not running, and it is not polled again until a start.
+    fn nested(gate: Arc<ReadGate>, inner: F) -> Self {
+        Self {
+            gate,
+            inner: Box::pin(inner),
+            registered: None,
+            takes_a_slot: false,
         }
     }
 }
@@ -610,7 +640,11 @@ impl<F: Future> Future for Pausable<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let this = self.get_mut();
-        let id = this.gate.note_poll(&mut this.registered, cx.waker());
+        let id = if this.takes_a_slot {
+            this.gate.note_poll(&mut this.registered, cx.waker())
+        } else {
+            None
+        };
         if !this.gate.drive_may_run() {
             this.gate.park(cx.waker());
             if !this.gate.drive_may_run() {
@@ -2956,7 +2990,8 @@ impl FaceExecutor for GateFaces {
 
 /// The [`FaceExecutor`] of a [`FaceDrive::Serial`] node: every face's drive is a local task of
 /// the drive thread, polled only while the node's read task may run, as the top-level drive is
-/// ([`Pausable`]), and is one of the futures a stop waits for. The thread is the same one that
+/// ([`Pausable::nested`]); a stop waits for the top-level drive, inside whose poll every such
+/// face runs, and not for each face. The thread is the same one that
 /// runs every callback, so a program's callbacks stay serial; what each face no longer shares
 /// is the accept loop's task, which would otherwise be polled again, with all its arms, for
 /// every frame of every face.
@@ -2966,7 +3001,7 @@ struct SerialFaces {
 
 impl FaceExecutor for SerialFaces {
     fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
-        Box::pin(Pausable::new(self.gate.clone(), drive))
+        Box::pin(Pausable::nested(self.gate.clone(), drive))
     }
 }
 
@@ -3972,6 +4007,63 @@ mod tests {
         // Let the drive end, so its thread can be joined.
         gate.start().expect("a start off the drive thread");
         release.notify_one();
+        drive.join().expect("the drive thread");
+    }
+
+    /// A serial node's faces are local tasks polled inside the drive's own poll
+    /// ([`Pausable::nested`]). With the drive idle when the stop comes -- the face waiting
+    /// for its next frame -- the stop returns, the face does not run until a start, and it
+    /// runs again after one. A face that took a place in the gate never parked here: the
+    /// drive parks before it polls anything inside it, and the stop waited for the face.
+    #[test]
+    fn a_stop_reaches_an_idle_drive_whose_faces_are_nested() {
+        let gate = Arc::new(ReadGate::new(true));
+        gate.mark_opened();
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tick = Arc::new(Notify::new());
+        let done = Arc::new(AtomicBool::new(false));
+        let drive = {
+            let (gate, ticks, tick, done) =
+                (gate.clone(), ticks.clone(), tick.clone(), done.clone());
+            std::thread::spawn(move || {
+                runtime().block_on(Pausable::new(gate.clone(), async move {
+                    let local = tokio::task::LocalSet::new();
+                    local
+                        .run_until(async move {
+                            let face =
+                                tokio::task::spawn_local(Pausable::nested(gate, async move {
+                                    while !done.load(Ordering::SeqCst) {
+                                        tick.notified().await;
+                                        ticks.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                }));
+                            let _ = face.await;
+                        })
+                        .await;
+                }));
+            })
+        };
+        tick.notify_one();
+        wait_until("the face's first tick", || {
+            ticks.load(Ordering::SeqCst) >= 1
+        });
+
+        stop_within_five_seconds(&gate);
+        let frozen = ticks.load(Ordering::SeqCst);
+        tick.notify_one();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            frozen,
+            "a nested face ran after the stop returned"
+        );
+
+        gate.start().expect("a start off the drive thread");
+        wait_until("the face to resume", || {
+            ticks.load(Ordering::SeqCst) > frozen
+        });
+        done.store(true, Ordering::SeqCst);
+        tick.notify_one();
         drive.join().expect("the drive thread");
     }
 
