@@ -591,8 +591,11 @@ static int check_selection_since_door(void) {
           "both rows are numbered: %s", doc);
     CHECK(strstr(doc, "\"revised\":[]") != NULL,
           "nothing was said before, so nothing is revised: %s", doc);
-    CHECK(strstr(doc, "\"selected\":\"unjudged\"") != NULL,
-          "a KeepAlive carries no record a selector can speak of: %s", doc);
+    /* Judged since since-document revision 4: a KeepAlive answers a record
+     * term such as `bytes` as a field it does not carry. */
+    CHECK(strstr(doc, "\"selected\":\"no\"") != NULL &&
+              strstr(doc, "\"selected\":\"unjudged\"") == NULL,
+          "a KeepAlive's row is judged, and carries no bytes: %s", doc);
     cursor = since_through(doc);
     CHECK(cursor == 2, "through_seq=%llu after two rows", cursor);
     wz_dissect_string_free(doc);
