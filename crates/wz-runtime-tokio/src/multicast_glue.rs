@@ -3655,7 +3655,7 @@ mod tests {
             let recorder = count.clone();
             let (stop, mut shutdown) = tokio::sync::watch::channel(false);
             let loop_producer = producer.clone();
-            let task = tokio::spawn(async move {
+            let mut task = tokio::spawn(async move {
                 let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
                 let clock = TokioTime::new();
                 drive_multicast_session_with_membership(
@@ -3677,7 +3677,13 @@ mod tests {
                 )
                 .await
             });
-            producer.linked().await;
+            // A loop that ends before it attaches its pipeline (a link that
+            // never opened) would leave `linked` waiting for good; its
+            // outcome is the failure.
+            tokio::select! {
+                () = producer.linked() => {}
+                outcome = &mut task => panic!("the loop ended before it attached its pipeline: {outcome:?}"),
+            }
             Self {
                 producer,
                 count,
@@ -3701,11 +3707,22 @@ mod tests {
             .expect("pushing thread");
         }
 
-        /// Wait until the loop has counted `n` outcomes.
+        /// Wait until the loop has counted `n` outcomes. A loop that has
+        /// ended counts nothing more, so that is the failure, not a wait.
         async fn counted(&self, n: usize) {
             loop {
                 let (sent, dropped) = self.count.read();
                 if sent + dropped >= n {
+                    return;
+                }
+                if self.task.is_finished() {
+                    // Read again: the loop may have counted the last one on
+                    // its way out.
+                    let (sent, dropped) = self.count.read();
+                    assert!(
+                        sent + dropped >= n,
+                        "the loop ended after {sent} sent and {dropped} dropped of {n}"
+                    );
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
