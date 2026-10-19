@@ -229,3 +229,42 @@ fn a_config_that_states_pubkey_keys_fails_the_open_until_they_are_enforced() {
         "a config stating pubkey authentication opened a node that does not enforce it"
     );
 }
+
+/// A listener config that states `access_control/enabled` as `enabled`.
+fn access_control_entries(port: u16, enabled: bool) -> Vec<(&'static str, String)> {
+    vec![
+        ("scouting/multicast/enabled", "false".to_owned()),
+        ("mode", "\"peer\"".to_owned()),
+        ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
+        ("access_control/enabled", enabled.to_string()),
+    ]
+}
+
+/// Access control is a policy a node enforces on what its peers send and receive. This surface
+/// does not enforce it yet (the ingress verdict has no caller on a C session's receive path), and
+/// a node that starts with the policy it was configured with half applied, or not at all, is one
+/// its operator believes protected. The disabled config is the control: it must still open, so
+/// the refusal below is the policy and not every config that mentions the key.
+#[test]
+fn a_config_that_enables_access_control_fails_the_open_until_it_is_enforced() {
+    let port = free_port();
+    // SAFETY: a fresh config and session.
+    let (rc, control) = unsafe { open_with(&access_control_entries(port, false)) };
+    // SAFETY: the control is live and owned here.
+    unsafe { close_session(control) };
+    assert_eq!(
+        rc, Z_OK,
+        "the control (access control stated as disabled) did not open, so the refusal below \
+         proves nothing"
+    );
+
+    let port = free_port();
+    // SAFETY: a fresh config and session.
+    let (rc, session) = unsafe { open_with(&access_control_entries(port, true)) };
+    // SAFETY: a gravestone drops as a no-op, a live session closes.
+    unsafe { close_session(session) };
+    assert_eq!(
+        rc, Z_EINVAL,
+        "a config enabling access control opened a node that does not enforce it"
+    );
+}

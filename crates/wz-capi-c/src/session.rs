@@ -253,8 +253,8 @@ pub unsafe extern "C" fn z_open(
     guarded(|| unsafe { open_session(this_, config, no_shm_clients()) })
 }
 
-/// The authentication a config asks the node to hold, or `Err(())` for a config whose
-/// authentication this surface cannot hold.
+/// The authentication a config asks the node to hold, or `Err(())` for a config that names a
+/// security mechanism (authentication or access control) this surface cannot hold.
 ///
 /// A config that names a security mechanism is never opened as if it did not: a node told to
 /// demand credentials that starts and admits everyone is worse than one that does not start,
@@ -264,11 +264,17 @@ pub unsafe extern "C" fn z_open(
 ///     a file that cannot be read, or that holds no user, fails the open.
 ///   * `transport/auth/pubkey/*` is not enforced by this surface yet, so a config that states any
 ///     of its four keys fails the open.
-fn node_auth_of(node: &ZenohNodeConfig) -> Result<Option<NodeAuth>, ()> {
+///   * `access_control` with `enabled: true` is not enforced yet either: a C session's receive
+///     path has no caller of the ingress verdict (`Session::apply_acl_ingress`), so the policy
+///     would govern what the node sends and not what it is sent, and a policy applied in one
+///     direction is the half-protection an operator cannot tell from the whole. It fails the
+///     open until both directions are enforced; a disabled `access_control` opens as it did.
+fn node_security_of(node: &ZenohNodeConfig) -> Result<Option<NodeAuth>, ()> {
     if node.pubkey_public_key_pem.is_some()
         || node.pubkey_private_key_pem.is_some()
         || node.pubkey_public_key_file.is_some()
         || node.pubkey_private_key_file.is_some()
+        || node.access_control.enabled
     {
         return Err(());
     }
@@ -342,7 +348,7 @@ pub(crate) unsafe fn open_session(
         // The authentication the config asks the node to hold. Decided before anything is bound
         // or dialled: a config that names a security mechanism this open cannot hold must not
         // become a node that runs without it.
-        let auth = match node.as_ref().map(node_auth_of).transpose() {
+        let auth = match node.as_ref().map(node_security_of).transpose() {
             Ok(auth) => auth.flatten(),
             Err(()) => return Z_EINVAL,
         };
