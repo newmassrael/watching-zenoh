@@ -384,30 +384,6 @@ enum WriteKeyForm<'a> {
     },
 }
 
-/// The flows a `downsampling` or `low_pass_filter` item governs: the ones it names,
-/// or BOTH when it names none.
-///
-/// The reader keeps an omitted `flows` as an empty list (upstream's `None`), and
-/// upstream reads `None` as ingress and egress (`low_pass.rs` `get_or_insert`,
-/// `downsampling.rs` `unwrap_or`). A rule compiled with the empty list governs no
-/// flow, and `for_flow` then installs nothing, so a document that left `flows` out
-/// (the usual form) was honoured by the reader and did nothing at all.
-#[cfg(all(
-    feature = "zenoh-config",
-    any(feature = "adminspace-core", feature = "routing-router-hat"),
-    feature = "routing-peer",
-    any(feature = "access-quota", feature = "access-downsampling")
-))]
-fn flows_or_both(
-    flows: Vec<crate::interceptor::InterceptorFlow>,
-) -> Vec<crate::interceptor::InterceptorFlow> {
-    if flows.is_empty() {
-        crate::interceptor::InterceptorFlow::ALL.to_vec()
-    } else {
-        flows
-    }
-}
-
 /// Classify a runtime write key into its [`WriteKeyForm`].
 #[cfg(all(
     feature = "zenoh-config",
@@ -2608,40 +2584,16 @@ impl WzConfig {
                     // zenohd resolves a silent document to (it renders `[]`).
                     None => Vec::new(),
                 };
-                let confs = self.interceptor_inputs.low_pass.clone();
-                let mut rules = Vec::with_capacity(confs.len());
-                for conf in &confs {
-                    // Every literal was validated at PARSE, so none of these can
-                    // be `None` here. Answering `false` rather than unwrapping
-                    // keeps that an assertion about the reader instead of a
-                    // panic in a running node if the two ever drift.
-                    let (Some(messages), Some(flows), Some(links)) = (
-                        conf.messages
-                            .iter()
-                            .map(|m| {
-                                crate::interceptor::low_pass::LowPassMessage::from_upstream_str(m)
-                            })
-                            .collect::<Option<Vec<_>>>(),
-                        conf.flows
-                            .iter()
-                            .map(|f| crate::interceptor::InterceptorFlow::from_upstream_str(f))
-                            .collect::<Option<Vec<_>>>(),
-                        conf.link_protocols
-                            .iter()
-                            .map(|l| wz_session_core::link::InterceptorLink::from_upstream_str(l))
-                            .collect::<Option<Vec<_>>>(),
-                    ) else {
-                        return false;
-                    };
-                    rules.push(crate::interceptor::low_pass::LowPassRule {
-                        key_exprs: conf.key_exprs.clone(),
-                        max_payload_size: conf.size_limit as usize,
-                        messages,
-                        flows: flows_or_both(flows),
-                        link_protocols: links,
-                        interfaces: conf.interfaces.clone(),
-                    });
-                }
+                // Every literal was validated at PARSE, so the compiler cannot
+                // answer `None` here. Answering `false` rather than unwrapping
+                // keeps that an assertion about the reader instead of a panic in
+                // a running node if the two ever drift. The compile itself is
+                // `interceptor::document`'s, shared with the C ABI's own open.
+                let Some(rules) =
+                    crate::interceptor::document::low_pass_rules(&self.interceptor_inputs.low_pass)
+                else {
+                    return false;
+                };
                 self.interceptors.low_pass = rules;
                 true
             }
@@ -2664,45 +2616,11 @@ impl WzConfig {
                     Some(ingest) => ingest.config.downsampling.clone(),
                     None => Vec::new(),
                 };
-                let items = self.interceptor_inputs.downsampling.clone();
-                let mut rules = Vec::new();
-                for item in &items {
-                    let (Some(messages), Some(flows), Some(links)) = (
-                        item.messages
-                            .iter()
-                            .map(|m| {
-                                crate::interceptor::downsampling::DownsamplingMessage::from_upstream_str(m)
-                            })
-                            .collect::<Option<Vec<_>>>(),
-                        item.flows
-                            .iter()
-                            .map(|f| crate::interceptor::InterceptorFlow::from_upstream_str(f))
-                            .collect::<Option<Vec<_>>>(),
-                        item.link_protocols
-                            .iter()
-                            .map(|l| {
-                                wz_session_core::link::InterceptorLink::from_upstream_str(l)
-                            })
-                            .collect::<Option<Vec<_>>>(),
-                    ) else {
-                        return false;
-                    };
-                    for rule in &item.rules {
-                        rules.push(crate::interceptor::downsampling::DownsamplingRule {
-                            key_exprs: vec![rule.key_expr.clone()],
-                            // `0.0` is DROP-ALL and a negative or non-finite rate
-                            // is no throttle; both live in this one function, so
-                            // the reader does not restate either edge.
-                            min_interval: crate::interceptor::downsampling::interval_from_freq(
-                                rule.freq,
-                            ),
-                            messages: messages.clone(),
-                            flows: flows_or_both(flows.clone()),
-                            link_protocols: links.clone(),
-                            interfaces: item.interfaces.clone(),
-                        });
-                    }
-                }
+                let Some(rules) = crate::interceptor::document::downsampling_rules(
+                    &self.interceptor_inputs.downsampling,
+                ) else {
+                    return false;
+                };
                 self.interceptors.downsampling = rules;
                 true
             }

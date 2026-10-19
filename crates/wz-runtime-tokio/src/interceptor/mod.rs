@@ -47,6 +47,11 @@
 // none, which is access control disabled.
 #[cfg(feature = "access-acl")]
 pub mod access_control;
+// A node's document compiled into this module's config. Not gated on `routing-peer`: the C ABI
+// compiles its own session's interceptors from the same keys a router reads, and the compile
+// must not drag the routing plane in with it.
+#[cfg(feature = "zenoh-config")]
+pub mod document;
 #[cfg(feature = "access-downsampling")]
 pub mod downsampling;
 // Gated on its CONSUMERS, which are the `InterceptorContext` implementations
