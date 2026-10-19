@@ -9190,6 +9190,9 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-downsampling --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-quota --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --lib --no-default-features --features access-acl,zenoh-config --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --lib --no-default-features --features access-downsampling,zenoh-config --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --lib --no-default-features --features access-quota,zenoh-config --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extauth --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
