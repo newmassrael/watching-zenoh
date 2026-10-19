@@ -276394,6 +276394,44 @@
         "The earlier Layer E red of 8968869ff (wz_reply_del_source_info_to_pico_zget) is still unattributed."
       ]
     },
+    "Round 3386": {
+      "decision_summary": "Repay the hosted red of 40c265deb's run (39290565383) that no other push repays. The C1 red in wz-capi-c listener_auth was a race in the test, not a defect: a client's z_open returns when the OpenAck arrives, and the listener records the face only after it has sent that OpenAck. Upstream keeps the same order (it inserts the transport after ack.send_open_ack), so making the listener register first would leave parity. The right fix is the test's: wait, within a five-second bound, for the listener to hold the client, then assert the count. The other four reds of that run were attributed job by job: the C0 prose-name red was this session's (R3384 removed the constant the prose named) and another session repaid it first; C1cn's missing leg and clock and C1bz's doc-link count were repaid by that session too; C1bz was measured at budget here, its hosted job having been cancelled.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the admitted-client count waits within a bound for the listener to record the face, citing upstream's send-then-insert order.",
+        "docs/hosted-red-acks.md: row R3386 for run 39290565383."
+      ],
+      "verification_bullets": [
+        "pc2: cargo test -p wz-capi-c --test listener_auth ten times in a row, 8 of 8 passed each time; clippy -D warnings on wz-capi-c with tests.",
+        "pc2: C1bz for wz-runtime-tokio alone passes on this tree, so the doc-link count sits on its budget.",
+        "Local: cargo fmt --check on wz-capi-c, upstream_citation_anchor_gate --check rc 0; the cited needle was read in the pinned manager.rs."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "E7s went red once on 255b81afe (one face down in a steady starved window) and passed on a rerun of the same tree; it is an intermittent of a CPU-starvation measurement with no attribution beyond that, watched rather than repaid.",
+        "Other crates' tests have never run with every feature on; the Layer E red of 8968869ff is still unattributed."
+      ],
+      "publishable_decision_summary": "Repay the hosted red of 40c265deb's run (39290565383) that no other push repays. The C1 red in wz-capi-c listener_auth was a race in the test, not a defect: a client's z_open returns when the OpenAck arrives, and the listener records the face only after it has sent that OpenAck. Upstream keeps the same order (it inserts the transport after ack.send_open_ack), so making the listener register first would leave parity. The right fix is the test's: wait, within a five-second bound, for the listener to hold the client, then assert the count. The other four reds of that run were attributed job by job: the C0 prose-name red was this session's (R3384 removed the constant the prose named) and another session repaid it first; C1cn's missing leg and clock and C1bz's doc-link count were repaid by that session too; C1bz was measured at budget here, its hosted job having been cancelled.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the admitted-client count waits within a bound for the listener to record the face, citing upstream's send-then-insert order.",
+        "docs/hosted-red-acks.md: row R3386 for run 39290565383."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: cargo test -p wz-capi-c --test listener_auth ten times in a row, 8 of 8 passed each time; clippy -D warnings on wz-capi-c with tests.",
+        "pc2: C1bz for wz-runtime-tokio alone passes on this tree, so the doc-link count sits on its budget.",
+        "Local: cargo fmt --check on wz-capi-c, upstream_citation_anchor_gate --check rc 0; the cited needle was read in the pinned manager.rs."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "E7s went red once on 255b81afe (one face down in a steady starved window) and passed on a rerun of the same tree; it is an intermittent of a CPU-starvation measurement with no attribution beyond that, watched rather than repaid.",
+        "Other crates' tests have never run with every feature on; the Layer E red of 8968869ff is still unattributed."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
