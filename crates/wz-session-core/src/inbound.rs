@@ -506,6 +506,21 @@ impl InboundFrame {
             InboundFrame::Unknown { .. } => 255,
         }
     }
+
+    /// The protocol version this message announces, for the two transport
+    /// messages that carry one (Init and Join); `None` for every other kind.
+    ///
+    /// Beside [`Self::kind_name`] for the reason that method gives: the arms sit
+    /// under the variants' own `#[cfg]`s.
+    pub fn announced_version(&self) -> Option<u8> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            InboundFrame::Init { body, .. } => Some(body.version),
+            #[cfg(all(feature = "alloc", feature = "codec-join"))]
+            InboundFrame::Join { body, .. } => Some(body.version),
+            _ => None,
+        }
+    }
 }
 
 /// R311y215 — project the QoS priority carried by a decoded Frame/Fragment ext

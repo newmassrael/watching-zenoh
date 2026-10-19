@@ -656,6 +656,11 @@ impl NodeCensus {
             let Ok(decoded) = &datagram.frame else {
                 continue;
             };
+            // A datagram that holds more than the message read out of it names
+            // nobody, on `named_zid`'s rule for a transport unit.
+            if !datagram.read_whole {
+                continue;
+            }
             let (zid, whatami, kind) = match decoded {
                 wz_session_core::scouting_message::ScoutingFrame::Hello { body, .. } => {
                     (body.zid.to_vec(), Some(body.whatami()), Named::Hello)
@@ -859,10 +864,17 @@ fn end_sending(d: Direction) -> FlowEnd {
 /// mask of this module's: a private `(cbyte >> 1) & 0x03` here read a peer as a
 /// router and a client as a peer until the sweep in
 /// `the_role_a_handshake_names_is_the_role_the_census_states` was written.
+///
+/// Only out of a framing unit read whole (`PassiveFrame::unit_read_whole`): an
+/// Init that opens a unit of arbitrary bytes decodes often enough to name a node
+/// nobody runs, and is not followed by messages that end where the unit ends.
 fn named_zid(frame: &PassiveFrame) -> Option<(Vec<u8>, Option<u8>, Named)> {
     let Ok(decoded) = &frame.frame else {
         return None;
     };
+    if !frame.unit_read_whole {
+        return None;
+    }
     match decoded {
         InboundFrame::Init { body, .. } => {
             Some((body.zid.to_vec(), Some(body.whatami()), Named::Init))
@@ -905,10 +917,11 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
 /// Does this message NAME a node? An INIT or a JOIN: the two messages
 /// [`named_zid`] reads a zid from, asked without building the zid.
 fn names_a_zid(frame: &PassiveFrame) -> bool {
-    matches!(
-        &frame.frame,
-        Ok(InboundFrame::Init { .. } | InboundFrame::Join { .. })
-    )
+    frame.unit_read_whole
+        && matches!(
+            &frame.frame,
+            Ok(InboundFrame::Init { .. } | InboundFrame::Join { .. })
+        )
 }
 
 /// What a [`NodeMemory`] has done: messages it took, folds it continued and folds

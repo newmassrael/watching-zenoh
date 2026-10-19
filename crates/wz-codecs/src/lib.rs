@@ -540,6 +540,18 @@ codec_group!(
 pub mod encoding_ids;
 
 pub mod wire_const {
+    /// The zenoh protocol version this workspace reads and writes, the
+    /// `version` byte an Init, a Join, a Scout and a Hello each carry
+    /// (`commons/zenoh-protocol/src/lib.rs` @ `pub const VERSION: u8 = 0x09;`).
+    ///
+    /// A message announcing another version is laid out by a protocol this
+    /// workspace does not implement, so its body after that byte is not one a
+    /// reader here can claim to have read. Upstream refuses such an InitSyn
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `if init_syn.version != input.mine_version {`) and ignores such a Join
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if join.version != self.manager.config.version {`).
+    pub const PROTOCOL_VERSION: u8 = 0x09;
     /// Transport-message OAM (`zenoh-protocol/src/transport/mod.rs:54`
     /// `id::OAM`). Ungated with `T_MID_INIT` below and for the same reason:
     /// the bare MID is wire-spec ground truth, and a reader that does not

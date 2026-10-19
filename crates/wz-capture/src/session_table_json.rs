@@ -20,8 +20,14 @@
 //!   and the last packet of the session, so a consumer derives an uptime from a
 //!   clock the document states;
 //! * `frames`, `bytes` -- the totals, which no retention bound moves;
+//! * `zenoh` -- whether the bytes are zenoh, as
+//!   [`crate::session_table::ZenohVerdict`] decides it from the version an
+//!   Init, Join, Scout or Hello announced: `proven`, `unproven`,
+//!   `foreign_version` or `mixed`. A row of arbitrary bytes on a zenoh port is
+//!   `unproven`, and so is a session the capture joined after its handshake;
 //! * `flows` -- the flows the row is made of, each with the flow object every
-//!   other document carries, for a consumer that joins.
+//!   other document carries and its own `encrypted`, `bytes` and `zenoh`, for a
+//!   consumer that joins.
 //!
 //! # EVERY KEY IS PRESENT, ALWAYS
 //!
@@ -41,7 +47,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::session_table::{session_table, Cell, SessionRow, Stated, Unstated, Why};
+use crate::session_table::{session_table, Cell, SessionRow, Stated, Unstated, Why, ZenohVerdict};
 use crate::{CaptureError, Dissection};
 
 /// Why a container was refused, the closed set.
@@ -206,7 +212,12 @@ fn push_row(row: &SessionRow, out: &mut String) {
     push_cell(out, &mut unstated, Cell::Frames, &row.frames, |n, o| {
         let _ = write!(o, "{n}");
     });
-    let _ = write!(out, ",\"bytes\":{},\"unstated\":[", row.bytes);
+    let _ = write!(
+        out,
+        ",\"bytes\":{},\"zenoh\":\"{}\",\"unstated\":[",
+        row.bytes,
+        ZenohVerdict::of(row.zenoh).name()
+    );
     for (i, (cell, reason)) in unstated.iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -227,9 +238,10 @@ fn push_row(row: &SessionRow, out: &mut String) {
         crate::census_json::push_flow(&link.flow, out);
         let _ = write!(
             out,
-            ",\"encrypted\":\"{}\",\"bytes\":{}}}",
+            ",\"encrypted\":\"{}\",\"bytes\":{},\"zenoh\":\"{}\"}}",
             link.encryption.name(),
-            link.bytes
+            link.bytes,
+            ZenohVerdict::of(link.zenoh).name()
         );
     }
     out.push_str("]}");

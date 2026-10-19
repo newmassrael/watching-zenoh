@@ -30,7 +30,9 @@ use wz_session_core::wire_const;
 
 use crate::datagram_tests::{fill_ipv4_checksum, fill_tcp_checksum, udp_packet, udp_packet_v6};
 use crate::link::LINKTYPE_ETHERNET;
-use crate::session_table::{session_table, Cell, Encryption, SessionRow, Unstated, Why};
+use crate::session_table::{
+    session_table, Cell, Encryption, SessionRow, Unstated, Why, ZenohVerdict,
+};
 use crate::session_table_json::{refusal_json, session_table_json, Refusal};
 use crate::{Dissection, DissectionLimits};
 
@@ -1865,16 +1867,18 @@ fn the_headers_example_is_the_document_of_a_real_session() {
         "the example's numbers"
     );
     let doc = session_table_json(&packets.dissect());
-    let want = "{\"document\":{\"name\":\"session_table\",\"revision\":2},\"ok\":true,\
+    let want = "{\"document\":{\"name\":\"session_table\",\"revision\":3},\"ok\":true,\
                 \"sessions\":[{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
                 \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
                 \"first_seen_ts_ns\":\"1700000000000000000\",\
                 \"last_seen_ts_ns\":\"1700000000000015000\",\
-                \"frames\":10,\"bytes\":48,\"unstated\":[],\"flows\":[{\"flow\":{\"low\":";
+                \"frames\":10,\"bytes\":48,\"zenoh\":\"proven\",\"unstated\":[],\
+                \"flows\":[{\"flow\":{\"low\":";
     assert!(doc.starts_with(want), "{doc}");
     assert!(
         doc.contains(
-            "\"link\":\"tcp\"},\"encrypted\":\"clear\",\"bytes\":48}]}],\"excluded\":\
+            "\"link\":\"tcp\"},\"encrypted\":\"clear\",\"bytes\":48,\"zenoh\":\"proven\"}]}],\
+             \"excluded\":\
              [{\"why\":\"multicast_group\",\"count\":0},{\"why\":\"scouting_only\",\"count\":0}],\
              \"dropped_by_limits\":{"
         ),
@@ -1984,4 +1988,188 @@ fn damaged_and_garbage_containers_are_documents_and_never_panics() {
     // BOTH branches were reached, or the loop proved nothing about either.
     assert!(tables > 100, "readable inputs: {tables}");
     assert!(refusals > 1_000, "refused inputs: {refusals}");
+}
+
+// ── whether a flow is zenoh ─────────────────────────────────────────────────
+
+/// A deterministic stream of bytes, so a run that fails fails the same way again.
+struct Noise(u64);
+
+impl Noise {
+    fn next(&mut self) -> u64 {
+        // xorshift64
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn bytes(&mut self, len: usize) -> Vec<u8> {
+        (0..len).map(|_| self.next() as u8).collect()
+    }
+}
+
+/// ARBITRARY UDP IS NOT ZENOH. Datagrams of random bytes, 1 to 200 long, to the
+/// two zenoh ports and four others, each on a flow of its own: what a capture of
+/// an ordinary network holds. They decode as zenoh messages and every flow is a
+/// row; none is `proven`, none names a node, and none names an initiator or an
+/// acceptor, because those come only from a message whose version byte is the
+/// protocol's.
+#[test]
+fn arbitrary_udp_bytes_prove_no_flow_zenoh_and_name_no_node() {
+    let mut noise = Noise(0x9E37_79B9_7F4A_7C15);
+    let mut out = Packets::default();
+    let ports = [7446u16, 7447, 5353, 443, 9999, 12345];
+    for i in 0..300u64 {
+        let len = 1 + (noise.next() % 200) as usize;
+        let payload = noise.bytes(len);
+        let dport = ports[(i % ports.len() as u64) as usize];
+        out.push(
+            T0 + i * 1_000,
+            udp_packet(LOW, 20_000 + i as u16, HIGH, dport, &payload),
+        );
+    }
+    let d = out.dissect();
+    let table = session_table(&d);
+    assert!(
+        !table.rows.is_empty(),
+        "the bytes decode and stand as rows; the fact is what says what they are"
+    );
+    for row in &table.rows {
+        assert_ne!(word(row.zenoh), ZenohVerdict::Proven, "{row:?}");
+        assert!(row.initiator.is_err() && row.acceptor.is_err(), "{row:?}");
+    }
+    for flow in d.datagram_flows() {
+        assert_ne!(
+            word(flow.ingest.zenoh()),
+            ZenohVerdict::Proven,
+            "{:?}",
+            flow.flow
+        );
+    }
+    let census = crate::node::nodes(&d);
+    assert!(
+        census.nodes().is_empty(),
+        "random bytes named nodes: {:?}",
+        census.nodes()
+    );
+    // The population held what the claim measured: some datagrams began like
+    // an Init, a Join, a Scout or a Hello, and were refused for their version.
+    let foreign: u64 = d
+        .datagram_flows()
+        .iter()
+        .map(|f| f.ingest.zenoh().foreign_version)
+        .sum();
+    assert!(foreign > 0, "no datagram reached the version byte");
+}
+
+/// A session whose handshake is in the capture is `proven`, in the row and in
+/// the flow, and the document says so.
+#[test]
+fn a_session_with_its_handshake_is_proven() {
+    let (packets, _) = udp_session(true, 2);
+    let d = packets.dissect();
+    let table = session_table(&d);
+    let row = only(&table);
+    assert_eq!(word(row.zenoh), ZenohVerdict::Proven);
+    assert_eq!(row.zenoh.own_version, 2, "the InitSyn and the InitAck");
+    let doc = session_table_json(&d);
+    assert!(doc.contains("\"zenoh\":\"proven\",\"unstated\""), "{doc}");
+}
+
+/// A flow the capture joined after its handshake is `unproven`, the same word
+/// arbitrary bytes get, because it is the same observation.
+#[test]
+fn a_flow_joined_after_its_handshake_is_unproven() {
+    let (packets, _) = midstream_tcp(3);
+    let table = session_table(&packets.dissect());
+    assert_eq!(word(only(&table).zenoh), ZenohVerdict::Unproven);
+}
+
+/// An Init of another protocol version names nobody and folds nothing: the
+/// flow is `foreign_version` and its row states no initiator.
+#[test]
+fn an_init_of_another_version_is_foreign_and_names_nobody() {
+    let mut wire = init(&ZID_A, false);
+    wire[1] = 0x08;
+    let mut out = Packets::default();
+    let mut udp = Udp::new(true, 43210);
+    udp.send(&mut out, T0, true, &wire);
+    let d = out.dissect();
+    let table = session_table(&d);
+    let row = only(&table);
+    assert_eq!(word(row.zenoh), ZenohVerdict::ForeignVersion);
+    assert_eq!(row.initiator, Err(Unstated::NotInCapture));
+    assert!(crate::node::nodes(&d).nodes().is_empty());
+}
+
+/// An Init of the protocol's version that does NOT end where its datagram ends
+/// proves nothing and names nobody: random bytes that open like an Init are
+/// followed by more random bytes, and a batch of zenoh messages is not.
+#[test]
+fn an_init_followed_by_bytes_no_message_explains_proves_nothing() {
+    let read = |wire: &[u8]| {
+        let mut out = Packets::default();
+        let mut udp = Udp::new(true, 43210);
+        udp.send(&mut out, T0, true, wire);
+        let d = out.dissect();
+        let row = only(&session_table(&d)).clone();
+        (
+            word(row.zenoh),
+            row.initiator.is_ok(),
+            crate::node::nodes(&d).nodes().len(),
+        )
+    };
+    let whole = init(&ZID_A, false);
+    assert_eq!(read(&whole), (ZenohVerdict::Proven, true, 1), "the control");
+    let mut trailed = whole.clone();
+    // A reserved MID behind the Init: it decodes as nothing this reader can
+    // measure, so the datagram is not read whole.
+    trailed.extend_from_slice(&[0x1F, 0xAB, 0xCD]);
+    assert_eq!(read(&trailed), (ZenohVerdict::Unproven, false, 0));
+}
+
+/// A Scout of another protocol version on the scouting group names no node; the
+/// same Scout at the protocol's version does.
+#[test]
+fn a_scout_of_another_version_names_no_node() {
+    use crate::datagram_tests::SCOUT_GROUP;
+    let scout = |version: u8| {
+        let mut scout = wz_codecs::scout::Scout::new();
+        scout.version = version;
+        scout.set_what(0x03);
+        scout.set_i(true);
+        scout.set_zid_len_m1(3);
+        scout.zid = Some(&ZID_C);
+        let mut wire = vec![wire_const::S_MID_SCOUT];
+        wire.extend_from_slice(&scout.encode_to_vec());
+        wire
+    };
+    let census_of = |wire: &[u8]| {
+        let mut out = Packets::default();
+        out.push(T0, udp_packet(LOW, 43210, SCOUT_GROUP, 7446, wire));
+        let d = out.dissect();
+        let verdict = word(d.datagram_flows()[0].ingest.zenoh());
+        (crate::node::nodes(&d).nodes().len(), verdict)
+    };
+    assert_eq!(census_of(&scout(0x09)), (1, ZenohVerdict::Proven));
+    assert_eq!(census_of(&scout(0x08)), (0, ZenohVerdict::ForeignVersion));
+    // And a Scout of the protocol's version with bytes behind it it does not
+    // account for is not one.
+    let mut trailed = scout(0x09);
+    trailed.extend_from_slice(&[0xAB, 0xCD]);
+    assert_eq!(census_of(&trailed), (0, ZenohVerdict::Unproven));
+}
+
+fn word(evidence: wz_session_core::passive::VersionEvidence) -> ZenohVerdict {
+    ZenohVerdict::of(evidence)
+}
+
+/// The word set the documents declare is the enum's.
+#[test]
+fn the_declared_zenoh_words_are_the_enums() {
+    assert_eq!(
+        crate::doc_revision::ZENOH_VERDICT_R41.to_vec(),
+        ZenohVerdict::names()
+    );
 }

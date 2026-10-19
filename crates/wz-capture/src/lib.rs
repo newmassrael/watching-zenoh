@@ -494,7 +494,7 @@ use wz_session_core::passive::NANOS_PER_MILLI;
 pub use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
-use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
+use wz_session_core::scouting_message::{parse_scouting_observed, ScoutingFrame};
 
 use crate::link::{FlowKey, SkipReason, Transport};
 use crate::tcp::StreamAssembler;
@@ -1523,6 +1523,11 @@ pub struct ScoutingDatagram {
     /// is never batched, so the payload IS its framing unit; the record door
     /// reports it as the unit length, as it does for a transport datagram.
     pub unit_len: usize,
+    /// Whether the message decoded out of the datagram took all of it:
+    /// [`PassiveFrame::unit_read_whole`] for a datagram of one message. Only a
+    /// datagram read whole names a node or counts as evidence that the flow is
+    /// zenoh.
+    pub read_whole: bool,
 }
 
 /// A flow's scouting messages, with the count EVER produced.
@@ -7276,19 +7281,24 @@ impl Dissection {
             // Decoded WITHOUT touching the session: a scouting message is not
             // part of any session, so folding it would let a pre-session
             // datagram move state that only a peer's handshake may move.
-            // R311y709 — `parse_scouting` reads these bytes, so they are fed.
-            // A scouting datagram advances no session, which is a different
-            // question from whether anything read it.
+            // R311y709 — `parse_scouting_observed` reads these bytes, so they
+            // are fed. A scouting datagram advances no session, which is a
+            // different question from whether anything read it.
             flow.residue.fed += d.payload.len() as u64;
+            let read = parse_scouting_observed(&d.payload);
+            let whole = matches!(&read, Ok((_, n)) if *n == d.payload.len());
+            let frame = read.map(|(frame, _)| frame);
+            flow.ingest.observe_scouting(&frame, whole);
             flow.scouting.push(ScoutingDatagram {
                 direction,
                 packet_index: d.packet_index,
-                frame: parse_scouting(&d.payload),
+                frame,
                 // The clock was advanced for this datagram above, before the
                 // flow borrow; a transport frame on this flow reads the same.
                 observed_at_ms: flow.session.observed_at(),
                 observed_at_ns: flow.session.observed_at_nanos(),
                 unit_len: d.payload.len(),
+                read_whole: whole,
             });
             // R311y651 (§4.4) — bounded by the SAME limit the frame list is,
             // because it answers the same question — how many decoded messages

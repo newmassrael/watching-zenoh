@@ -1199,7 +1199,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":40,"key":"kind","values":[...],
+ *     {"name":"fields","revision":41,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1250,6 +1250,7 @@
  * @carries fields unopened_reason discriminant
  * @carries fields verdict passenger
  * @carries fields wrong passenger
+ * @carries fields zenoh passenger
  *
  * `the_header_and_the_library_agree_about_every_carries_axis` holds both
  * directions, so a family reclassified later cannot arrive unmarked and a
@@ -2091,14 +2092,15 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":2},"ok":true,
+ *     {"document":{"name":"session_table","revision":3},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
  *                   "last_seen_ts_ns":"1700000000000015000",
- *                   "frames":10,"bytes":48,"unstated":[],
+ *                   "frames":10,"bytes":48,"zenoh":"proven","unstated":[],
  *                   "flows":[{"flow":{"low":{...},"high":{...},"link":"tcp"},
- *                             "encrypted":"clear","bytes":48}]}],
+ *                             "encrypted":"clear","bytes":48,
+ *                             "zenoh":"proven"}]}],
  *      "excluded":[{"why":"multicast_group","count":0},
  *                  {"why":"scouting_only","count":0}],
  *      "dropped_by_limits":{...}}
@@ -2155,11 +2157,45 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                every datagram, a duplicate counted again; for the serial line
  *                the bytes of the line as captured. Never the Ethernet, IP or
  *                transport headers. A count this library measures: a bare number.
+ *   `zenoh`      whether the bytes are zenoh (session_table revision 3); see
+ *                WHETHER A FLOW IS ZENOH below. A row's word is its flows'
+ *                evidence taken together.
  *   `unstated`   one {"cell":...,"reason":...} for each cell that is null; see
  *                below.
  *   `flows`      the flows the row is made of, each with the flow object every
  *                other document carries (so a consumer can join), its `encrypted`
- *                finding and its own `bytes`.
+ *                finding, its own `bytes` and its own `zenoh`.
+ *
+ * WHETHER A FLOW IS ZENOH. Arbitrary bytes decode as zenoh transport messages:
+ * a datagram on any port is read as one, and a few bytes make a KeepAlive or a
+ * Frame. So a row, a flow and a node are evidence of nothing by existing. Four
+ * messages begin with a byte the protocol fixes, the protocol version (0x09):
+ * an Init, a Join, a Scout and a Hello. `zenoh` is what those said, on every
+ * row and flow here and on every flow object of the field document (revision
+ * 41):
+ *
+ *   `proven`           one of the four decoded with version 0x09 out of a unit
+ *                      read WHOLE (a datagram, or a stream's length-prefixed
+ *                      unit, every message of which decoded and every byte of
+ *                      which a message accounts for), and none announced
+ *                      another. The version byte alone is one chance in 256:
+ *                      a random datagram that opens like a Join of 0x09 does
+ *                      not also end where a batch ends;
+ *   `unproven`         none of the four was read. Arbitrary bytes are this, and
+ *                      so is a zenoh session the capture joined after its
+ *                      handshake: the two are the same observation;
+ *   `foreign_version`  every one of the four announced another version;
+ *   `mixed`            both.
+ *
+ * @values fields zenoh
+ *
+ * A message of the four announcing another version is not read past that byte
+ * (since field-document revision 41 and session_table revision 3): its row is a
+ * decode error naming the version, it names no node and no initiator or
+ * acceptor, and it folds nothing into the flow's `context`. And an Init, a Join,
+ * a Scout or a Hello names a node, an initiator or an acceptor only out of a
+ * unit read whole, on the rule `proven` uses: that and the version byte are
+ * what keep arbitrary bytes from becoming a node with a zid and a role.
  *
  * EVERY CELL IS PRESENT ON EVERY ROW. A value this reader cannot state is `null`
  * and the row's `unstated` names it with a REASON, so a cell is null exactly when
@@ -2231,6 +2267,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @values session_table reason
  * @values session_table refusal
  * @values session_table why
+ * @values session_table zenoh
  * @carries session_table cell passenger
  * @carries session_table encrypted passenger
  * @carries session_table family passenger
@@ -2239,6 +2276,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @carries session_table reason passenger
  * @carries session_table refusal passenger
  * @carries session_table why passenger
+ * @carries session_table zenoh passenger
  *
  * @bound limits work-ceiling -- it bounds the WALK, and what the walk dropped is
  * reported in dropped_by_limits. */
@@ -4569,7 +4607,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":40,"key":"state",
+ *     "value_families":[{"name":"fields","revision":41,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

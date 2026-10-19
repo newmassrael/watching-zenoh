@@ -2144,6 +2144,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R37_CARRIES,
     },
+    // Revision 41 ADDS `zenoh` to every flow object and retires nothing: whether
+    // the flow's bytes are zenoh, `proven`, `unproven`, `foreign_version` or
+    // `mixed`, from the version its Inits, Joins, Scouts and Hellos announced.
+    //
+    // Values move as well. An Init or a Join announcing a version other than
+    // 0x09 is no longer decoded past that byte: its row's message is an error
+    // naming the version, it folds nothing into the `context` (so
+    // `context.version` is 0x09 or `null`), and it names no node. A Scout or a
+    // Hello of another version is the same error on a scouting row. And an
+    // Init, a Join, a Scout or a Hello names a node only out of a framing unit
+    // read whole, the rule `proven` is decided by.
+    DocumentShape {
+        document: FIELDS,
+        revision: 41,
+        keys: FIELDS_R41_KEYS,
+        retiring: &[],
+        families: FIELDS_R41_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R41_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2857,6 +2877,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: SESSION_TABLE_R1_FAMILIES,
         planes: &[],
         carries: SESSION_TABLE_R1_CARRIES,
+    },
+    // Revision 3 ADDS `zenoh` to every row and to every flow of a row, the field
+    // document's word from its revision 41, and retires nothing. A row's word is
+    // its flows' evidence together. Values move with it: an Init of another
+    // protocol version names no zid, so a flow of arbitrary bytes no longer
+    // takes an initiator or an acceptor from one.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 3,
+        keys: SESSION_TABLE_R3_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R3_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R3_CARRIES,
     },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
@@ -14207,6 +14241,503 @@ pub const FIELDS_R37_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// Whether a flow's bytes are zenoh: the closed set
+/// [`crate::session_table::ZenohVerdict`] writes, declared by the field document
+/// from revision 41 and the session table from revision 3.
+pub const ZENOH_VERDICT_R41: &[&str] = &["foreign_version", "mixed", "proven", "unproven"];
+
+/// The keys the field document carries at revision 41: revision 39's (and so
+/// 40's) PLUS `zenoh`, on every flow object.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+pub const FIELDS_R41_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "closes",
+    "compression",
+    "conduit",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "revised",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "under",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+    "zenoh",
+    "zid",
+];
+
+/// The value families the field document declares at revision 41: revision 37's
+/// PLUS `zenoh`, written out in full for the reason [`ValueFamily::values`]
+/// gives.
+pub const FIELDS_R41_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R41,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 41: revision 37's
+/// PLUS `zenoh`, a passenger (every flow object carries the same keys whichever
+/// word it says).
+pub const FIELDS_R41_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The keys the `session_table` document carries at revision 3: revision 2's
+/// PLUS `zenoh`, on every row and on every flow of a row.
+pub const SESSION_TABLE_R3_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "bytes",
+    "caps",
+    "cell",
+    "count",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "excluded",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "high",
+    "initiator",
+    "last_seen_ts_ns",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "name",
+    "ok",
+    "phase",
+    "port",
+    "reason",
+    "refusal",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "unstated",
+    "why",
+    "zenoh",
+];
+
+/// The `session_table` document's value families at revision 3: revision 1's
+/// eight PLUS `zenoh`.
+pub const SESSION_TABLE_R3_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "cell",
+        values: &[
+            "acceptor",
+            "first_seen_ts_ns",
+            "frames",
+            "initiator",
+            "last_seen_ts_ns",
+            "link",
+            "phase",
+        ],
+    },
+    ValueFamily {
+        key: "encrypted",
+        values: &[
+            "clear",
+            "decrypted_quic",
+            "decrypted_tls",
+            "encrypted_unreadable",
+            "mixed",
+            "unknown",
+        ],
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: &["encrypted", "mixed", "no_clock", "not_in_capture"],
+    },
+    ValueFamily {
+        key: "refusal",
+        values: &["damaged", "not_a_capture", "truncated"],
+    },
+    ValueFamily {
+        key: "why",
+        values: &["multicast_group", "scouting_only"],
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R41,
+    },
+];
+
+/// All nine families are PASSENGERS, revision 1's argument with `zenoh` beside
+/// `encrypted`: a row and a flow of a row carry it whichever word it says.
+pub const SESSION_TABLE_R3_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "cell",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "encrypted",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "refusal",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "why",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -17287,7 +17818,9 @@ mod tests {
             // flow: one key, no word moves and nothing retires.
             // To 40 when every row was judged and every flow carried its
             // `list_id`: values only.
-            (FIELDS, 40),
+            // To 41 when every flow carried `zenoh`, and an Init or a Join of
+            // another protocol version stopped being read past its version.
+            (FIELDS, 41),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -17368,7 +17901,8 @@ mod tests {
             // The capture read as sessions, one row per zid pair.
             // To 2 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
-            (SESSION_TABLE, 2),
+            // To 3 when every row and flow carried `zenoh`.
+            (SESSION_TABLE, 3),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

@@ -2234,11 +2234,11 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":2},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":3},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
-        "\"frames\":3,\"bytes\":3,"
+        "\"frames\":3,\"bytes\":3,\"zenoh\":\"unproven\","
         "\"unstated\":[{\"cell\":\"initiator\",\"reason\":\"not_in_capture\"},"
         "{\"cell\":\"acceptor\",\"reason\":\"not_in_capture\"}],\"flows\":[";
     static const unsigned char junk[] = "not a capture, and not close to one";
@@ -3419,8 +3419,12 @@ int main(void) {
      * flow. A key arrives; nothing retires.
      * 40: every row is judged (a row with no record answers a record term as an
      * absent field) and every flow object carries `list_id`. Values move; no
-     * key arrives and nothing retires. */
-    revisioned[2].revision = 40;
+     * key arrives and nothing retires.
+     * 41: every flow object carries `zenoh` (proven, unproven, foreign_version,
+     * mixed), and an Init or a Join of another protocol version is not read past
+     * its version byte. A key arrives and a family is declared; nothing
+     * retires. */
+    revisioned[2].revision = 41;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -3558,9 +3562,11 @@ int main(void) {
      * way to hold the document's opening to the revision this consumer was
      * written against: a refusal is the same document, under the same envelope.
      * 2: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
-     * flow. A key arrives; nothing retires. */
+     * flow. A key arrives; nothing retires.
+     * 3: every row and every flow of a row carries `zenoh`. A key arrives and a
+     * family is declared; nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 2;
+    revisioned[12].revision = 3;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,

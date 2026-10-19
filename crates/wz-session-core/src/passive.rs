@@ -289,7 +289,77 @@ pub struct FlowContext {
     /// joined mid-handshake, reports. It takes the acceptor's word when it has
     /// one, for the reason [`Self::caps`] does, and falls back to the claim the
     /// refusal was about rather than to nothing.
+    ///
+    /// # Only a version this reader reads is folded
+    ///
+    /// An Init announcing a version other than
+    /// [`wz_codecs::wire_const::PROTOCOL_VERSION`] is not decoded past that byte
+    /// ([`InboundParseError::ForeignVersion`]), so it reaches no fold, and this is
+    /// `None` or that version. The claim a refused foreign-version InitSyn made is
+    /// on its own record, as the error's `version`, which is where a reader
+    /// asking why a session was refused finds it.
     pub version: Option<u8>,
+}
+
+/// What a flow's VERSION-BEARING messages say about whether its bytes are zenoh.
+///
+/// # Why the version byte, and why the whole unit
+///
+/// Arbitrary bytes decode as zenoh transport messages: a few bytes make a
+/// KeepAlive or a Frame, and a datagram on any port is read as a batch of them.
+/// Nothing in those messages is fixed by the protocol, so none of them is
+/// evidence. Four messages are: an Init, a Join, a Scout and a Hello each carry
+/// the protocol version, which upstream holds to one value
+/// ([`wz_codecs::wire_const::PROTOCOL_VERSION`]).
+///
+/// The byte alone is one chance in 256, and a capture of an ordinary network
+/// reaches it: measured on 300 random datagrams, one began as a Join of version
+/// 0x09. So a message of this reader's version counts only when the framing
+/// unit that carried it was read WHOLE: every message of the unit decoded and
+/// every byte of it was accounted for. Random bytes that happen to open with a
+/// well-formed Join do not also happen to end where a batch ends.
+///
+/// A message announcing another version counts wherever it stands. It is either
+/// not zenoh or a zenoh this reader does not implement, and neither is a flow
+/// this reader can read as zenoh.
+///
+/// A flow the capture joined after its handshake carries none of the four until
+/// a peer scouts or rejoins, and reads exactly as arbitrary bytes do; this type
+/// does not pretend otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VersionEvidence {
+    /// Messages of [`wz_codecs::wire_const::PROTOCOL_VERSION`], each in a unit
+    /// read whole.
+    pub own_version: u64,
+    /// Messages refused as [`InboundParseError::ForeignVersion`].
+    pub foreign_version: u64,
+}
+
+impl VersionEvidence {
+    /// One message's contribution, from what its decode came to and whether the
+    /// unit that carried it was read whole.
+    pub fn observe(&mut self, decode: Result<Option<u8>, &InboundParseError>, whole: bool) {
+        match decode {
+            Ok(Some(version)) if version == wz_codecs::wire_const::PROTOCOL_VERSION => {
+                if whole {
+                    self.own_version += 1;
+                }
+            }
+            Ok(Some(_)) | Err(InboundParseError::ForeignVersion { .. }) => {
+                self.foreign_version += 1;
+            }
+            Ok(None) | Err(_) => {}
+        }
+    }
+
+    /// Two bodies of evidence together, for a flow read by several sessions or a
+    /// row that groups several flows.
+    pub fn and(self, other: VersionEvidence) -> VersionEvidence {
+        VersionEvidence {
+            own_version: self.own_version.saturating_add(other.own_version),
+            foreign_version: self.foreign_version.saturating_add(other.foreign_version),
+        }
+    }
 }
 
 /// What the observer knows of ONE direction's half of a session, as of the
@@ -953,6 +1023,15 @@ pub struct PassiveFrame {
     /// The message alone and not the batch: a batch of N messages would
     /// otherwise be copied N times.
     pub decompressed: Option<Vec<u8>>,
+    /// Whether the framing unit this message came out of was read WHOLE: every
+    /// message of it decoded and every byte of it was accounted for.
+    ///
+    /// The same for every message of a unit. It is what lets a version-bearing
+    /// message count as evidence that the bytes are zenoh (see
+    /// [`VersionEvidence`]), and what lets an Init or a Join name a node: a
+    /// message that opens a unit of arbitrary bytes and happens to decode is not
+    /// followed by more messages that end where the unit ends.
+    pub unit_read_whole: bool,
 }
 
 /// R311y609 (C12) — what the observer makes of ONE data frame's sequence
@@ -2027,7 +2106,31 @@ impl PassiveSession {
     /// ([`PassiveFrame::observed_at_ns`]). The caller supplies it, because only
     /// the caller knows which packet a byte came from; where it knows nothing it
     /// answers with the observer's own clock.
+    ///
+    /// Every message of the unit is stamped with
+    /// [`PassiveFrame::unit_read_whole`] here and not as it is decoded, because
+    /// whether the unit was read whole is known only once its walk has ended.
     fn decode_framing_unit(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        source: UnitSource<'_>,
+        handshake: LinkHandshake,
+        resync: Option<StreamResync>,
+    ) -> Vec<PassiveFrame> {
+        let seat = usize::from(direction == Direction::B);
+        let unaccounted = self.unaccounted_batch_bytes[seat];
+        let mut frames = self.walk_framing_unit(direction, bytes, source, handshake, resync);
+        let whole = self.unaccounted_batch_bytes[seat] == unaccounted
+            && frames.iter().all(|f| f.frame.is_ok());
+        for frame in &mut frames {
+            frame.unit_read_whole = whole;
+        }
+        frames
+    }
+
+    /// The walk [`Self::decode_framing_unit`] describes.
+    fn walk_framing_unit(
         &mut self,
         direction: Direction,
         bytes: &[u8],
@@ -2112,6 +2215,7 @@ impl PassiveSession {
                         observed_at_ns: unit_instant,
                         reserved_header_bits: 0,
                         decompressed: None,
+                        unit_read_whole: false,
                     }];
                 }
             }
@@ -2150,6 +2254,16 @@ impl PassiveSession {
             };
             #[cfg(not(feature = "codec-frame"))]
             let parsed = parse_inbound_consuming(rest);
+            // An Init or a Join announcing another protocol version is not read
+            // past that byte: see `InboundParseError::ForeignVersion`. It takes
+            // the decode-error path from here, so it names nobody, folds
+            // nothing and, past the front of the unit, stops the walk.
+            let parsed = parsed.and_then(|(f, n)| match f.announced_version() {
+                Some(version) if version != wz_codecs::wire_const::PROTOCOL_VERSION => {
+                    Err(InboundParseError::ForeignVersion { version })
+                }
+                _ => Ok((f, n)),
+            });
             let (frame, consumed) = match parsed {
                 Ok((f, n)) => (Ok(f), n),
                 Err(e) => (Err(e), 0),
@@ -2243,6 +2357,8 @@ impl PassiveSession {
                 observed_at_ns: instant,
                 reserved_header_bits: reserved,
                 decompressed: own,
+                // Stamped by `decode_framing_unit` once the walk has ended.
+                unit_read_whole: false,
             });
             batch_index += 1;
             if consumed == 0 {
@@ -4677,19 +4793,19 @@ mod tests {
 
     /// The flow's protocol version is the initiator's claim until the acceptor
     /// answers, and the acceptor's word from then on; before any Init it is
-    /// `None`, which is a different fact from a version of zero.
+    /// `None`.
     #[test]
     fn the_context_reports_the_version_the_handshake_announced() {
         let mut s = PassiveSession::new();
         assert_eq!(s.context().version, None, "no Init has been seen");
         s.push(
             Direction::A,
-            &framed(&init_wire_versioned(false, 0x08, vec![]), 2),
+            &framed(&init_wire_versioned(false, 0x09, vec![]), 2),
         );
         s.next_frame(Direction::A).expect("syn");
         assert_eq!(
             s.context().version,
-            Some(0x08),
+            Some(0x09),
             "the claim stands until the acceptor has answered"
         );
         s.push(
@@ -4697,19 +4813,34 @@ mod tests {
             &framed(&init_wire_versioned(true, 0x09, vec![]), 2),
         );
         s.next_frame(Direction::B).expect("ack");
-        assert_eq!(
-            s.context().version,
-            Some(0x09),
-            "the acceptor's word replaces the claim"
-        );
+        assert_eq!(s.context().version, Some(0x09));
+    }
 
-        let mut zero = PassiveSession::new();
-        zero.push(
-            Direction::A,
-            &framed(&init_wire_versioned(false, 0, vec![]), 2),
-        );
-        zero.next_frame(Direction::A).expect("syn");
-        assert_eq!(zero.context().version, Some(0), "zero is a version");
+    /// An Init announcing a version this reader does not read is a record whose
+    /// decode is refused with the version it announced, and it folds nothing:
+    /// not the version, not the phase, not a zid. Zero is refused like any other
+    /// foreign version, which is what keeps a run of zero bytes from reading as a
+    /// handshake.
+    #[test]
+    fn an_init_of_a_foreign_version_is_refused_with_its_version_and_folds_nothing() {
+        for version in [0x08, 0x00, 0x0a] {
+            let mut s = PassiveSession::new();
+            s.push(
+                Direction::A,
+                &framed(&init_wire_versioned(false, version, vec![]), 2),
+            );
+            let frame = s.next_frame(Direction::A).expect("a record");
+            assert!(
+                matches!(
+                    frame.frame,
+                    Err(InboundParseError::ForeignVersion { version: v }) if v == version
+                ),
+                "{:?}",
+                frame.frame
+            );
+            assert_eq!(s.context().version, None);
+            assert_eq!(s.context().phase, SessionPhase::Unseen);
+        }
     }
 
     /// An acceptor's answer seen FIRST is not replaced by a claim seen after

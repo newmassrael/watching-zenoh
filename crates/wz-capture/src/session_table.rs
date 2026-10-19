@@ -59,7 +59,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use wz_session_core::inbound::InboundFrame;
-use wz_session_core::passive::{Direction, PassiveFrame, SessionPhase};
+use wz_session_core::parse_error::InboundParseError;
+use wz_session_core::passive::{Direction, PassiveFrame, SessionPhase, VersionEvidence};
+use wz_session_core::scouting_message::ScoutingFrame;
 
 use crate::link::{FlowKey, LinkKind};
 use crate::{Dissection, Framing};
@@ -88,6 +90,76 @@ pub struct LinkIngest {
     /// reader produced and did not understand, and is not evidence that the
     /// bytes are zenoh: four junk bytes decode to one.
     understood: bool,
+    /// What the flow's version-bearing messages said, counted here for the
+    /// reason the module gives: an Init is the oldest message of a flow and the
+    /// first a retention ceiling discards. See [`VersionEvidence`].
+    zenoh: VersionEvidence,
+}
+
+/// Whether a flow is zenoh, as [`VersionEvidence`] decides it. The closed set:
+///
+/// * `proven` -- an Init, Join, Scout or Hello of the protocol version this
+///   reader reads decoded from the flow, in a framing unit read whole, and none
+///   of another version;
+/// * `unproven` -- none of the four was read: arbitrary bytes, or a zenoh flow
+///   the capture joined after its handshake;
+/// * `foreign_version` -- every one of the four announced another version;
+/// * `mixed` -- both were read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZenohVerdict {
+    /// Version-bearing messages of this reader's version, and no other.
+    Proven,
+    /// No version-bearing message.
+    Unproven,
+    /// Version-bearing messages of another version only.
+    ForeignVersion,
+    /// Both.
+    Mixed,
+}
+
+impl ZenohVerdict {
+    /// The word `evidence` comes to.
+    pub fn of(evidence: VersionEvidence) -> ZenohVerdict {
+        match (evidence.own_version > 0, evidence.foreign_version > 0) {
+            (true, false) => ZenohVerdict::Proven,
+            (false, false) => ZenohVerdict::Unproven,
+            (false, true) => ZenohVerdict::ForeignVersion,
+            (true, true) => ZenohVerdict::Mixed,
+        }
+    }
+
+    /// The word this verdict is written as.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ZenohVerdict::Proven => "proven",
+            ZenohVerdict::Unproven => "unproven",
+            ZenohVerdict::ForeignVersion => "foreign_version",
+            ZenohVerdict::Mixed => "mixed",
+        }
+    }
+
+    /// Every verdict, from an exhaustive match.
+    pub fn all() -> [ZenohVerdict; 4] {
+        let one = |v: ZenohVerdict| match v {
+            ZenohVerdict::Proven => ZenohVerdict::Proven,
+            ZenohVerdict::Unproven => ZenohVerdict::Unproven,
+            ZenohVerdict::ForeignVersion => ZenohVerdict::ForeignVersion,
+            ZenohVerdict::Mixed => ZenohVerdict::Mixed,
+        };
+        [
+            one(ZenohVerdict::Proven),
+            one(ZenohVerdict::Unproven),
+            one(ZenohVerdict::ForeignVersion),
+            one(ZenohVerdict::Mixed),
+        ]
+    }
+
+    /// Every word, sorted.
+    pub fn names() -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = Self::all().iter().map(|v| v.name()).collect();
+        words.sort_unstable();
+        words
+    }
 }
 
 /// What a flow's Inits say about who initiated it.
@@ -146,7 +218,15 @@ impl LinkIngest {
         if matches!(&frame.frame, Ok(decoded) if !matches!(decoded, InboundFrame::Unknown { .. })) {
             self.understood = true;
         }
-        if frame.inadmissible_on_link {
+        // Before the admissibility test: an Init on a link that cannot carry one
+        // names nobody, and is still a message of a version.
+        self.zenoh.observe(
+            frame.frame.as_ref().map(InboundFrame::announced_version),
+            frame.unit_read_whole,
+        );
+        // An Init in a unit not read whole names nobody either: see
+        // `PassiveFrame::unit_read_whole`.
+        if frame.inadmissible_on_link || !frame.unit_read_whole {
             return;
         }
         let Ok(InboundFrame::Init { is_ack, body, .. }) = &frame.frame else {
@@ -164,6 +244,23 @@ impl LinkIngest {
         for frame in frames {
             self.observe_frame(frame);
         }
+    }
+
+    /// One scouting datagram's decode, for the evidence alone: a Scout or a
+    /// Hello names a node in the census, never a session. `whole` is whether the
+    /// message took the whole datagram.
+    pub(crate) fn observe_scouting(
+        &mut self,
+        frame: &Result<ScoutingFrame, InboundParseError>,
+        whole: bool,
+    ) {
+        self.zenoh
+            .observe(frame.as_ref().map(ScoutingFrame::announced_version), whole);
+    }
+
+    /// What the flow's version-bearing messages said.
+    pub fn zenoh(&self) -> VersionEvidence {
+        self.zenoh
     }
 
     /// The instant of the first packet of this flow, if any packet had a clock.
@@ -545,6 +642,8 @@ pub struct Link {
     /// The two nodes both directions named, in zid order, where both did: the
     /// session this flow belongs to. `None` leaves the flow a row of its own.
     pub pair: Option<(Vec<u8>, Vec<u8>)>,
+    /// What the flow's version-bearing messages said.
+    pub zenoh: VersionEvidence,
 }
 
 /// One row: a session, or a flow whose session is not known.
@@ -568,6 +667,9 @@ pub struct SessionRow {
     pub frames: Stated<u64>,
     /// Bytes carried, summed over the flows.
     pub bytes: u64,
+    /// The flows' evidence together: a session is zenoh by what any of its
+    /// flows proved, and a row grouped by a zid pair has an Init behind it.
+    pub zenoh: VersionEvidence,
     /// The flows, in the order the dissection holds them.
     pub links: Vec<Link>,
 }
@@ -658,6 +760,9 @@ impl SessionRow {
         let bytes = links
             .iter()
             .fold(0u64, |sum, l| sum.saturating_add(l.bytes));
+        let zenoh = links
+            .iter()
+            .fold(VersionEvidence::default(), |sum, l| sum.and(l.zenoh));
         SessionRow {
             initiator,
             acceptor,
@@ -668,6 +773,7 @@ impl SessionRow {
             last_seen_ns: last.ok_or(Unstated::NoClock),
             frames,
             bytes,
+            zenoh,
             links,
         }
     }
@@ -830,6 +936,7 @@ fn link_of(
         initiator,
         acceptor,
         pair,
+        zenoh: ingest.zenoh(),
     }
 }
 

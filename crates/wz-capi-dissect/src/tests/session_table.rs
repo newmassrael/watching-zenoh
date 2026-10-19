@@ -142,7 +142,7 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
     let b = wz_session_core::zid_hex::zid_to_zenoh_hex(&ZID_B);
     assert!(
         doc.starts_with(&format!(
-            "{{\"document\":{{\"name\":\"session_table\",\"revision\":2}},\"ok\":true,\
+            "{{\"document\":{{\"name\":\"session_table\",\"revision\":3}},\"ok\":true,\
              \"sessions\":[{{\"initiator\":\"{a}\",\"acceptor\":\"{b}\",\"link\":\"udp\",\
              \"phase\":\"init_complete\",\"encrypted\":\"clear\","
         )),
@@ -152,7 +152,8 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
     let want_bytes = init(&ZID_A, false).len() + init(&ZID_B, true).len() + 4;
     assert!(
         doc.contains(&format!(
-            "\"frames\":6,\"bytes\":{want_bytes},\"unstated\":[],\"flows\":["
+            "\"frames\":6,\"bytes\":{want_bytes},\"zenoh\":\"proven\",\"unstated\":[],\
+             \"flows\":["
         )),
         "{doc}"
     );
@@ -313,7 +314,7 @@ fn a_bad_container_is_a_refusal_and_a_callers_bug_is_a_code() {
         let doc = call_pcap(bytes, WZ_DISSECT_LIMITS_NONE).expect("a refusal is answered");
         assert!(
             doc.starts_with(&format!(
-                "{{\"document\":{{\"name\":\"session_table\",\"revision\":2}},\"ok\":false,\
+                "{{\"document\":{{\"name\":\"session_table\",\"revision\":3}},\"ok\":false,\
                  \"refusal\":\"{word}\",\"message\":"
             )),
             "{doc}"

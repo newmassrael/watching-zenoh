@@ -1602,6 +1602,7 @@ fn push_stream_flow(
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
+    push_zenoh(flow.ingest.zenoh(), out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
@@ -1892,6 +1893,7 @@ fn push_datagram_flow(
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
+    push_zenoh(flow.ingest.zenoh(), out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
@@ -3693,6 +3695,22 @@ fn tri_state(v: Option<bool>) -> &'static str {
         Some(false) => "false",
         None => "null",
     }
+}
+
+/// Revision 41 — whether the flow's bytes are zenoh, one word from the closed
+/// set [`crate::session_table::ZenohVerdict`]: `proven`, `unproven`,
+/// `foreign_version`, `mixed`.
+///
+/// Beside the context and not inside it: the context is what the handshake
+/// negotiated, and this is what every Init, Join, Scout and Hello of the flow
+/// said, the scouting ones included, which no session folds. Counted at ingest,
+/// so a retention ceiling that has discarded the Init does not move it.
+fn push_zenoh(evidence: wz_session_core::passive::VersionEvidence, out: &mut String) {
+    let _ = write!(
+        out,
+        ",\"zenoh\":\"{}\"",
+        crate::session_table::ZenohVerdict::of(evidence).name()
+    );
 }
 
 /// The flow's observation CONTEXT: what the handshake it watched
@@ -6552,6 +6570,22 @@ mod tests {
             push_context(&context, &mut out);
             arms.push(out);
         }
+        // Every `zenoh` word, from the evidence that decides it.
+        let mut zenoh_words = alloc::collections::BTreeSet::new();
+        for (own_version, foreign_version) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let evidence = wz_session_core::passive::VersionEvidence {
+                own_version,
+                foreign_version,
+            };
+            zenoh_words.insert(crate::session_table::ZenohVerdict::of(evidence).name());
+            let mut out = String::new();
+            push_zenoh(evidence, &mut out);
+            arms.push(out);
+        }
+        assert_eq!(
+            zenoh_words.into_iter().collect::<Vec<_>>(),
+            crate::session_table::ZenohVerdict::names()
+        );
         let mut out = String::new();
         push_first_byte(
             Some(FirstByte {
@@ -8142,7 +8176,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 65] = [
+        let live: [(&str, &str, Vec<&'static str>); 67] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -8477,6 +8511,18 @@ mod tests {
                 rev::SESSION_TABLE,
                 "why",
                 crate::session_table::Why::names(),
+            ),
+            // Whether a flow is zenoh, declared by both documents that carry it
+            // and held to the one enum that writes it.
+            (
+                rev::SESSION_TABLE,
+                "zenoh",
+                crate::session_table::ZenohVerdict::names(),
+            ),
+            (
+                rev::FIELDS,
+                "zenoh",
+                crate::session_table::ZenohVerdict::names(),
             ),
             // The verdict document's two families, each held to the
             // SAME walk the field document's is. Two declarations of one

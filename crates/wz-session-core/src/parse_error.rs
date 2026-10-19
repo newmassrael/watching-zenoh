@@ -71,6 +71,20 @@ pub enum InboundParseError {
         /// the unknown mandatory `0x58` from the region name `0x48`.
         eid: u8,
     },
+    /// The message announced a protocol version other than
+    /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], so the rest of its body is
+    /// laid out by a protocol this reader does not implement.
+    ///
+    /// Raised by the passive reader alone, for the four messages that carry a
+    /// version (Init, Join, Scout, Hello). A participant's own decode keeps
+    /// upstream's order, which decodes the body and leaves the refusal to the
+    /// handshake. An observer has no handshake to leave it to, and a body read
+    /// past a foreign version byte is the reading that turns arbitrary bytes into
+    /// a node with a zid and a role.
+    ForeignVersion {
+        /// The version byte the message announced.
+        version: u8,
+    },
 }
 
 impl fmt::Display for InboundParseError {
@@ -93,6 +107,12 @@ impl fmt::Display for InboundParseError {
                 f,
                 "inbound ext {:#04x} is unknown and MANDATORY (M bit set)",
                 eid
+            ),
+            Self::ForeignVersion { version } => write!(
+                f,
+                "inbound message announces protocol version {:#04x}; this reader reads {:#04x}",
+                version,
+                wz_codecs::wire_const::PROTOCOL_VERSION
             ),
         }
     }

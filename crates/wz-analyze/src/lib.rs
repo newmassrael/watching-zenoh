@@ -8801,6 +8801,7 @@ mod message_name_tests {
             reserved_header_bits: 0,
             undefined_mandatory_ext: None,
             decompressed: None,
+            unit_read_whole: false,
         };
         let name = message_name(&frame);
         assert!(
@@ -8845,6 +8846,7 @@ mod message_name_tests {
             reserved_header_bits: 0,
             undefined_mandatory_ext: None,
             decompressed: None,
+            unit_read_whole: true,
         }
     }
 

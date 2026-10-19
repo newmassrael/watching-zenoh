@@ -106,6 +106,12 @@ pub enum ScoutingFrame {
 /// "multicast transports are not expected to handle INIT messages"
 /// (`src/transport/multicast/rx.c:493-504`).
 pub fn parse_scouting(bytes: &[u8]) -> Result<ScoutingFrame, InboundParseError> {
+    parse_scouting_consuming(bytes).map(|(frame, _)| frame)
+}
+
+/// [`parse_scouting`], and how many bytes of `bytes` the message took: the
+/// header, the body and the chain. An `Unknown` MID took its header byte alone.
+pub fn parse_scouting_consuming(bytes: &[u8]) -> Result<(ScoutingFrame, usize), InboundParseError> {
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
     match mid {
@@ -119,11 +125,14 @@ pub fn parse_scouting(bytes: &[u8]) -> Result<ScoutingFrame, InboundParseError> 
             } else {
                 Vec::new()
             };
-            Ok(ScoutingFrame::Scout {
-                has_ext,
-                body,
-                extensions,
-            })
+            Ok((
+                ScoutingFrame::Scout {
+                    has_ext,
+                    body,
+                    extensions,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
         #[cfg(feature = "codec-hello")]
         wire_const::S_MID_HELLO => {
@@ -139,13 +148,16 @@ pub fn parse_scouting(bytes: &[u8]) -> Result<ScoutingFrame, InboundParseError> 
             } else {
                 Vec::new()
             };
-            Ok(ScoutingFrame::Hello {
-                has_ext,
-                body,
-                extensions,
-            })
+            Ok((
+                ScoutingFrame::Hello {
+                    has_ext,
+                    body,
+                    extensions,
+                },
+                bytes.len() - cursor.remaining(),
+            ))
         }
-        other => Ok(ScoutingFrame::Unknown { mid: other }),
+        other => Ok((ScoutingFrame::Unknown { mid: other }, 1)),
     }
 }
 
@@ -228,6 +240,46 @@ impl ScoutingFrame {
             ScoutingFrame::Hello { .. } => 11,
             ScoutingFrame::Unknown { .. } => 255,
         }
+    }
+
+    /// The protocol version this message announces: a Scout's and a Hello's
+    /// body both begin with one. `None` for a MID this build does not know.
+    pub fn announced_version(&self) -> Option<u8> {
+        match self {
+            #[cfg(feature = "codec-scout")]
+            ScoutingFrame::Scout { body, .. } => Some(body.version),
+            #[cfg(feature = "codec-hello")]
+            ScoutingFrame::Hello { body, .. } => Some(body.version),
+            ScoutingFrame::Unknown { .. } => None,
+        }
+    }
+}
+
+/// [`parse_scouting`] as a passive OBSERVER reads a datagram: a Scout or a Hello
+/// announcing a protocol version other than [`wire_const::PROTOCOL_VERSION`] is
+/// [`InboundParseError::ForeignVersion`] rather than a decoded message.
+///
+/// A participant keeps [`parse_scouting`], which follows upstream: zenoh's
+/// scouting reads a Hello without comparing its version. An observer cannot
+/// borrow that leniency. A participant receives from the group it joined, while
+/// an observer is handed every datagram on a port, and arbitrary bytes there
+/// decode as a Hello with a zid and a role often enough to populate a census with
+/// nodes nobody runs. The version byte is the one field of the body that the
+/// protocol fixes, so it is what tells a Hello from bytes that merely parse as
+/// one.
+///
+/// The bytes the message took are returned with it, as
+/// [`parse_scouting_consuming`] returns them: a datagram is one scouting message,
+/// and whether that message accounts for the whole datagram is the other half of
+/// telling a Hello from bytes that open like one (see `VersionEvidence` in the
+/// passive reader).
+pub fn parse_scouting_observed(bytes: &[u8]) -> Result<(ScoutingFrame, usize), InboundParseError> {
+    let (frame, consumed) = parse_scouting_consuming(bytes)?;
+    match frame.announced_version() {
+        Some(version) if version != wz_codecs::wire_const::PROTOCOL_VERSION => {
+            Err(InboundParseError::ForeignVersion { version })
+        }
+        _ => Ok((frame, consumed)),
     }
 }
 
@@ -319,6 +371,38 @@ mod tests {
             }
             other => panic!("HELLO decoded as {other:?}"),
         }
+    }
+
+    /// An observer refuses a Hello and a Scout of another protocol version; a
+    /// participant's decode of the same bytes still succeeds, as upstream's does.
+    #[cfg(all(feature = "codec-scout", feature = "codec-hello"))]
+    #[test]
+    fn an_observer_refuses_a_foreign_version_that_a_participant_reads() {
+        let mut hello = Hello::new();
+        hello.version = 0x08;
+        hello.set_whatami(0x01);
+        hello.set_zid_len_m1(3);
+        hello.zid = &[1, 2, 3, 4];
+        let mut wire = alloc::vec![wire_const::S_MID_HELLO];
+        wire.extend_from_slice(&hello.encode_to_vec(0));
+        assert!(parse_scouting(&wire).is_ok());
+        assert!(matches!(
+            parse_scouting_observed(&wire),
+            Err(InboundParseError::ForeignVersion { version: 0x08 })
+        ));
+
+        let mut scout = scout_wire(0);
+        scout[1] = 0x00;
+        assert!(parse_scouting(&scout).is_ok());
+        assert!(matches!(
+            parse_scouting_observed(&scout),
+            Err(InboundParseError::ForeignVersion { version: 0x00 })
+        ));
+        let own = scout_wire(0);
+        assert!(
+            matches!(parse_scouting_observed(&own), Ok((_, n)) if n == own.len()),
+            "the version this workspace reads is read, and the message is the datagram"
+        );
     }
 
     /// R2059 (open-debt item 421) — EVERY zid width a Hello can carry, decoded
