@@ -2076,6 +2076,14 @@ pub struct LinkState<R: SessionRuntime> {
     /// [`crate::drive::check_lease_deadline`] raises nothing, so the machine
     /// is never told `lease.expired` outside the state that handles it.
     pub lease_armed: R::Mutex<bool>,
+    /// The reason this link's Close frame carries: written by the FSM's
+    /// `set_close_reason_*` on the transition into `Closing`, read by
+    /// `send_close_frame_with_reason` on its entry. `None` until a
+    /// transition sets one, and again after
+    /// [`SessionLinkActions::reset_for_reopen`], so a reader can tell a
+    /// close this transport staged from none. Read it through
+    /// [`SessionLinkActions::close_reason`].
+    pub close_reason: R::Mutex<Option<CloseReason>>,
     /// R2943 (transport-multilink) — the reliability class this link DECLARED
     /// and negotiated, zenoh's `link.config.reliability`: `None` until a
     /// negotiation settles one. It is the first of the two inputs
@@ -2937,6 +2945,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "transport-keepalive")]
                 keepalive_armed: R::new_mutex(false),
                 lease_armed: R::new_mutex(false),
+                close_reason: R::new_mutex(None),
                 #[cfg(feature = "transport-multilink")]
                 declared_reliability: R::new_mutex(None),
                 #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
@@ -8012,6 +8021,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
     }
 
+    /// The reason the session FSM staged for this link's Close frame: the
+    /// last `set_close_reason_*` the machine ran on its way into `Closing`,
+    /// or `None` when this transport has run none (a peer close, a link loss,
+    /// an accept that timed out silently, or nothing yet).
+    pub fn close_reason(&self) -> Option<CloseReason> {
+        R::with_mutex_mut(&self.link.close_reason, |reason| *reason)
+    }
+
     /// Initiator-side inbound dispatch — parse the wire bytes, and if
     /// the frame is `Init` with the `_Z_FLAG_T_INIT_A` discriminator
     /// set (i.e. peer InitAck), capture the cookie payload into
@@ -12941,7 +12958,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `inbound_opensyn_cookie`, `last_inbound_at`,
     /// `established_at` (so [`Self::is_established`] reads `false` until
     /// the re-handshake completes), the armed keepalive worker and lease
-    /// monitor, `inbound_peer_zid`,
+    /// monitor, the staged close reason, `inbound_peer_zid`,
     /// `inbound_peer_init_caps`, the RX SN gate (`rx_sn`, re-seeded by
     /// the reopen handshake's OpenSyn/OpenAck), the open batching window
     /// (`transport-batching`), and `outbound_frame_sn` (re-seeded to
@@ -13001,6 +13018,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-keepalive")]
             R::with_mutex_mut(&self.link.keepalive_armed, |armed| *armed = false);
             R::with_mutex_mut(&self.link.lease_armed, |armed| *armed = false);
+            // The close reason is the closed transport's; the replacement
+            // has staged none.
+            R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);
             // R311kw — the outbound stamp is per-transport: the replacement
             // link starts with no TX history (pico's fresh transport
             // initializes `_transmitted = 0`, unicast/transport.c:65).
@@ -13324,6 +13344,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     #[inline]
     fn link(&self) -> &LinkState<R> {
         &self.inner.link
+    }
+
+    /// The four `set_close_reason_*` actions: stage the reason the link's
+    /// Close frame will carry, where `send_close_frame_with_reason` reads it.
+    fn stage_close_reason(&self, reason: CloseReason) {
+        R::with_mutex_mut(&self.inner.trace, |t| t.set_close_reason_count += 1);
+        R::with_mutex_mut(&self.link().close_reason, |slot| *slot = Some(reason));
     }
 }
 
@@ -13825,14 +13852,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         #[cfg(feature = "codec-close")]
         {
             let a = &self.inner;
-            // Single trace lock — read the staged close reason, then bump
-            // the emit counter (read-then-increment preserves the original
-            // two-statement field-access order).
-            let reason = R::with_mutex_mut(&a.trace, |t| {
-                let reason = t.close_reason as u8;
-                t.send_close_frame_with_reason += 1;
-                reason
-            });
+            R::with_mutex_mut(&a.trace, |t| t.send_close_frame_with_reason += 1);
+            // Every transition into Closing stages a reason first; the
+            // wire's own default answers an entry driven without one.
+            let staged = R::with_mutex_mut(&self.link().close_reason, |r| *r);
+            let reason = staged.unwrap_or_default() as u8;
             // R311y205 (transport-multilink) — the FSM `Closing` close rides the
             // link whose drive loop reached Closing, and is not reliability-routed.
             // R311y839 — and its SCOPE follows that: the sibling `release_link`
@@ -13948,34 +13972,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 
     #[inline(never)]
     fn set_close_reason_generic(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |trace| {
-            trace.set_close_reason_count += 1;
-            trace.close_reason = CloseReason::Generic;
-        });
+        self.stage_close_reason(CloseReason::Generic);
     }
 
     #[inline(never)]
     fn set_close_reason_invalid(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |trace| {
-            trace.set_close_reason_count += 1;
-            trace.close_reason = CloseReason::Invalid;
-        });
+        self.stage_close_reason(CloseReason::Invalid);
     }
 
     #[inline(never)]
     fn set_close_reason_expired(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |trace| {
-            trace.set_close_reason_count += 1;
-            trace.close_reason = CloseReason::Expired;
-        });
+        self.stage_close_reason(CloseReason::Expired);
     }
 
     #[inline(never)]
     fn set_close_reason_unresponsive(&mut self) {
-        R::with_mutex_mut(&self.inner.trace, |trace| {
-            trace.set_close_reason_count += 1;
-            trace.close_reason = CloseReason::Unresponsive;
-        });
+        self.stage_close_reason(CloseReason::Unresponsive);
     }
 }
 

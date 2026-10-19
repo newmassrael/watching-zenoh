@@ -520,8 +520,8 @@ async fn r311kc_rx_init_ack_enlarged_caps_rejects_session() {
         "Closing entry must record a close reason"
     );
     assert_eq!(
-        trace.close_reason,
-        CloseReason::Invalid,
+        actions.close_reason(),
+        Some(CloseReason::Invalid),
         "params rejection closes with INVALID (wire 'invalid parameters')"
     );
 }
@@ -696,7 +696,6 @@ async fn r311y817_rx_init_ack_future_patch_rejects_session() {
         S::Closing,
         "patch rejection must drive the establishment.ext_rejected arm to Closing"
     );
-    let trace = actions.trace_snapshot();
     // R311y823 REVERSED THIS ASSERTION IN PLACE rather than deleting it. It
     // read `CloseReason::Invalid` ("wire 'invalid parameters'") because
     // R311y817 routed the patch reject through `framing.error` like every
@@ -706,8 +705,8 @@ async fn r311y817_rx_init_ack_future_patch_rejects_session() {
     // the site. The wire-byte half lives in
     // `r311y823_init_ack_patch_reject_closes_generic_on_the_wire`.
     assert_eq!(
-        trace.close_reason,
-        CloseReason::Generic,
+        actions.close_reason(),
+        Some(CloseReason::Generic),
         "an ext-chain rejection closes with GENERIC, not the body family's INVALID"
     );
     // The refused level must NOT have reached the min(): a torn-down
@@ -1015,8 +1014,8 @@ async fn r311y823_init_ack_patch_reject_closes_generic_on_the_wire() {
     );
     assert_eq!(engine.get_current_state(), S::Closing);
     assert_eq!(
-        actions.trace_snapshot().close_reason,
-        CloseReason::Generic,
+        actions.close_reason(),
+        Some(CloseReason::Generic),
         "an EXTENSION reject closes GENERIC (zenoh routes every ext \
          handler's error through the GENERIC map_err, not the body's \
          INVALID arm)"
@@ -1050,8 +1049,8 @@ async fn r311y823_init_ack_caps_reject_still_closes_invalid_on_the_wire() {
     );
     assert_eq!(engine.get_current_state(), S::Closing);
     assert_eq!(
-        actions.trace_snapshot().close_reason,
-        CloseReason::Invalid,
+        actions.close_reason(),
+        Some(CloseReason::Invalid),
         "a BODY size-parameter reject keeps INVALID (zenoh reserves it \
          for exactly these fields)"
     );
@@ -1084,8 +1083,8 @@ async fn r311y823_malformed_frame_still_closes_invalid_on_the_wire() {
     );
     assert_eq!(engine.get_current_state(), S::Closing);
     assert_eq!(
-        actions.trace_snapshot().close_reason,
-        CloseReason::Invalid,
+        actions.close_reason(),
+        Some(CloseReason::Invalid),
         "a framing error is not an establishment-extension reject"
     );
     assert_eq!(

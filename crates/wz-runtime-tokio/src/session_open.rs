@@ -4476,19 +4476,19 @@ pub(crate) async fn drive_open_loop(
         }
         if engine.is_in_final_state() {
             // Pre-Established terminal. A handshake-timer transition on the
-            // Initiator path ran `set_close_reason_generic` (count >= 1,
-            // reason Generic); a peer Close / link loss / the silent accept
-            // inactivity timeout reaches Closed without a close-reason action
-            // (count == 0), so the Initiator timeout is distinguishable while
-            // the accept timeout folds into Terminal (silent-drop by design).
-            let trace = actions.trace_snapshot();
-            return Err(
-                if trace.set_close_reason_count >= 1 && trace.close_reason == CloseReason::Generic {
-                    OpenError::HandshakeTimeout
-                } else {
-                    OpenError::Terminal
-                },
-            );
+            // Initiator path ran `set_close_reason_generic`, which staged
+            // Generic on this link; a peer Close / link loss / the silent
+            // accept inactivity timeout reaches Closed without a close-reason
+            // action (nothing staged), so the Initiator timeout is
+            // distinguishable while the accept timeout folds into Terminal
+            // (silent-drop by design). The staged reason is per transport
+            // (`reset_for_reopen` clears it), so a reopen never reads the
+            // reason of the transport it replaced.
+            return Err(if actions.close_reason() == Some(CloseReason::Generic) {
+                OpenError::HandshakeTimeout
+            } else {
+                OpenError::Terminal
+            });
         }
         if let Some(limit) = max_iters {
             if iter >= limit {

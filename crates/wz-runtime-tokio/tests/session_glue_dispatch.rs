@@ -144,7 +144,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     assert_eq!(trace.stop_keepalive_worker, 1);
     assert_eq!(trace.free_pool_slots, 1);
     assert_eq!(trace.set_close_reason_count, 4);
-    assert_eq!(trace.close_reason, CloseReason::Unresponsive);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Unresponsive));
 
     let snap = driver.snapshot();
     assert_eq!(snap.opens, 1);

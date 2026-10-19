@@ -5387,6 +5387,9 @@ mod reconnect_tx_tests {
         TokioRuntime::with_mutex_mut(&actions.link.lease_armed, |armed| *armed = true);
         #[cfg(feature = "transport-keepalive")]
         TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed = true);
+        TokioRuntime::with_mutex_mut(&actions.link.close_reason, |reason| {
+            *reason = Some(wz_session_core::close_reason::CloseReason::Generic)
+        });
         assert!(actions.is_established());
 
         actions.reset_for_reopen();
@@ -5403,6 +5406,11 @@ mod reconnect_tx_tests {
         assert!(
             !TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed),
             "no keepalive worker runs over the re-dial window"
+        );
+        assert_eq!(
+            actions.close_reason(),
+            None,
+            "the replaced transport's close reason must not be read as the new one's"
         );
         assert!(TokioRuntime::with_mutex_mut(
             &actions.link.last_inbound_at,

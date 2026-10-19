@@ -463,7 +463,8 @@ fn a_close_and_a_keep_alive_are_sent_without_the_heap() {
         "the Close on the wire is the one the heap encoder writes"
     );
 
-    let staged = acceptor.actions.trace_snapshot().close_reason as u8;
+    // The reason staged on this link, or the wire's default when none is.
+    let staged = acceptor.actions.close_reason().unwrap_or_default() as u8;
     let ((), n) = m.count(|| acceptor.fsm().send_close_frame_with_reason());
     costs.check("Close (FSM Closing action)", n);
     assert_eq!(

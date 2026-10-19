@@ -185,8 +185,8 @@ fn r84_expired_via_established_baseline_alone() {
         "Expired via established_at must drive Established -> Closing"
     );
     assert_eq!(
-        actions.trace_snapshot().close_reason,
-        CloseReason::Expired,
+        actions.close_reason(),
+        Some(CloseReason::Expired),
         "Closing.onentry must set close_reason=Expired"
     );
 }
@@ -282,8 +282,8 @@ fn r77_expired_drives_established_to_closing() {
     );
     let trace = actions.trace_snapshot();
     assert_eq!(
-        trace.close_reason,
-        CloseReason::Expired,
+        actions.close_reason(),
+        Some(CloseReason::Expired),
         "Closing.onentry must set close_reason=Expired"
     );
     assert_eq!(

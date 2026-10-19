@@ -79,14 +79,14 @@ fn init_ack_timeout_in_sent_init_syn_drives_closing_generic() {
     );
     let trace = actions.trace_snapshot();
     assert_eq!(
-        trace.close_reason,
-        CloseReason::Generic,
-        "the timeout transition runs set_close_reason_generic"
+        actions.close_reason(),
+        Some(CloseReason::Generic),
+        "the timeout transition runs set_close_reason_generic, whose staged \
+         reason is the signal connect_and_open_session maps to HandshakeTimeout"
     );
     assert!(
         trace.set_close_reason_count >= 1,
-        "set_close_reason_count must record the timeout close-reason action \
-         (this is the signal connect_and_open_session maps to HandshakeTimeout)"
+        "set_close_reason_count must record the timeout close-reason action"
     );
     assert_eq!(
         trace.record_established_at, 0,
@@ -109,7 +109,7 @@ fn open_ack_timeout_in_got_init_ack_drives_closing_generic() {
         "open_ack.timeout in its arming state must drive GotInitAck -> Closing"
     );
     let trace = actions.trace_snapshot();
-    assert_eq!(trace.close_reason, CloseReason::Generic);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Generic));
     assert!(trace.set_close_reason_count >= 1);
     assert_eq!(trace.record_established_at, 0);
 }

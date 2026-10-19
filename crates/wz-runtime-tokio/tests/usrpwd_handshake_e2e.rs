@@ -468,8 +468,8 @@ async fn usrpwd_bad_password_rejects_and_tears_down_the_responder() {
     // `link.close(Some(GENERIC))` through exactly that map_err
     // (`unicast/establishment/accept.rs:302`, `open.rs:329`).
     assert_eq!(
-        resp_trace.close_reason,
-        CloseReason::Generic,
+        h.responder_actions.close_reason(),
+        Some(CloseReason::Generic),
         "an auth reject is an establishment-EXTENSION failure, so it closes \
          GENERIC (wire Close(GENERIC)) rather than the body family's INVALID"
     );

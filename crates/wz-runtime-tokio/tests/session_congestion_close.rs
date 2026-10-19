@@ -133,8 +133,8 @@ async fn a_blocking_message_on_a_congested_link_closes_the_running_session_as_un
          staged and never raised"
     );
     assert_eq!(
-        actions.trace_snapshot().close_reason,
-        CloseReason::Unresponsive,
+        actions.close_reason(),
+        Some(CloseReason::Unresponsive),
         "zenoh closes a transport it could not push a blocking message to as \
          UNRESPONSIVE"
     );

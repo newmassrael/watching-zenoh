@@ -4,15 +4,16 @@
 //! R311ef — script-action dispatch trace counters lifted from
 //! `wz-runtime-tokio::session_glue`.
 //!
-//! Pure no_std + no_alloc value type (a bag of `u32` counters plus a
-//! [`crate::close_reason::CloseReason`] field, all `Copy`), so it sits on
-//! the runtime-agnostic side alongside [`crate::qos`] /
-//! [`crate::close_reason`] / [`crate::ext_chain_role`]. The struct records
-//! how many times each native script action fired and the last
-//! close-reason observed; the integration tests read these counters via
+//! Pure no_std + no_alloc value type (a bag of `u32` counters, all
+//! `Copy`), so it sits on the runtime-agnostic side alongside
+//! [`crate::qos`] / [`crate::close_reason`] / [`crate::ext_chain_role`].
+//! The struct records how many times each native script action fired; the
+//! integration tests read these counters via
 //! `SessionLinkActions::trace_snapshot` to verify the SCXML-driven
 //! dispatch reached this side. A count records that an action ran; it is
-//! never what the action does.
+//! never what the action does, and no session path reads one to decide
+//! anything (the staged close reason, for one, is the link's
+//! `close_reason`, read through `SessionLinkActions::close_reason`).
 //!
 //! Only the trace state moves: the live trace slot
 //! (`SessionLinkActions::trace: R::Mutex<ActionTrace>`) and the snapshot
@@ -23,8 +24,6 @@
 //! `session_glue.rs` keeps a `pub use` re-export so the
 //! `crate::session_glue::ActionTrace` callsites resolve unchanged. A DP3
 //! leaf out of `session_glue.rs`.
-
-use crate::close_reason::CloseReason;
 
 /// Counters + last-wire-bytes snapshot the integration tests inspect
 /// to verify the script-action dispatch reached this side AND the
@@ -51,7 +50,6 @@ pub struct ActionTrace {
     pub send_keep_alive: u32,
     pub free_pool_slots: u32,
     pub set_close_reason_count: u32,
-    pub close_reason: CloseReason,
     /// R84 — incremented on `record_established_at()` script dispatch
     /// (Established.onentry). Pairs 1:1 with the
     /// `SessionLinkActions::established_at` timestamp slot so tests
@@ -90,7 +88,6 @@ impl ActionTrace {
             send_keep_alive: self.send_keep_alive,
             free_pool_slots: self.free_pool_slots,
             set_close_reason_count: self.set_close_reason_count,
-            close_reason: self.close_reason,
             record_established_at: self.record_established_at,
             cookie_valid_check: self.cookie_valid_check,
         }

@@ -118,7 +118,7 @@ fn r61_link_opening_open_timeout_to_closing_generic() {
     assert_eq!(engine.get_current_state(), S::Closing);
     let t = actions.trace_snapshot();
     assert_eq!(t.set_close_reason_count, 1);
-    assert_eq!(t.close_reason, CloseReason::Generic);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Generic));
     assert_eq!(t.send_close_frame_with_reason, 1);
 }
 
@@ -137,6 +137,7 @@ fn r61_link_opening_link_lost_to_closed_direct() {
     // set_close_reason call.
     assert_eq!(t.send_close_frame_with_reason, 0);
     assert_eq!(t.set_close_reason_count, 0);
+    assert_eq!(actions.close_reason(), None, "no close reason was staged");
 }
 
 // ── 4. Opening (SentInitSyn) -> init_ack.timeout -> Closing
@@ -150,7 +151,7 @@ fn r61_opening_init_ack_timeout_to_closing() {
     engine.process_event(E::InitAckTimeout);
     assert_eq!(engine.get_current_state(), S::Closing);
     let t = actions.trace_snapshot();
-    assert_eq!(t.close_reason, CloseReason::Generic);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Generic));
     assert_eq!(t.send_close_frame_with_reason, 1);
 }
 
@@ -162,8 +163,7 @@ fn r61_opening_framing_error_to_closing_invalid() {
     engine.process_event(E::LinkOpened);
     engine.process_event(E::FramingError);
     assert_eq!(engine.get_current_state(), S::Closing);
-    let t = actions.trace_snapshot();
-    assert_eq!(t.close_reason, CloseReason::Invalid);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Invalid));
 }
 
 // ── 6. Opening (GotInitAck) -> open_ack.timeout -> Closing
@@ -177,8 +177,7 @@ fn r61_opening_open_ack_timeout_to_closing() {
 
     engine.process_event(E::OpenAckTimeout);
     assert_eq!(engine.get_current_state(), S::Closing);
-    let t = actions.trace_snapshot();
-    assert_eq!(t.close_reason, CloseReason::Generic);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Generic));
 }
 
 // ── 7. Established -> lease.expired -> Closing (Expired)
@@ -192,7 +191,7 @@ fn r61_established_lease_expired_to_closing_expired() {
     engine.process_event(E::LeaseExpired);
     assert_eq!(engine.get_current_state(), S::Closing);
     let t = actions.trace_snapshot();
-    assert_eq!(t.close_reason, CloseReason::Expired);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Expired));
     assert_eq!(t.send_close_frame_with_reason, 1);
     // Established.onexit ran, and stopped both duties.
     assert_eq!(t.stop_keepalive_worker, 1);
@@ -208,7 +207,7 @@ fn r61_established_framing_error_to_closing_invalid() {
     drive_to_established(&mut engine);
     engine.process_event(E::FramingError);
     assert_eq!(engine.get_current_state(), S::Closing);
-    assert_eq!(actions.trace_snapshot().close_reason, CloseReason::Invalid);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Invalid));
 }
 
 // ── 9. Established -> tx.congestion.exhaust -> Closing
@@ -218,10 +217,7 @@ fn r61_established_tx_congestion_exhaust_to_closing() {
     drive_to_established(&mut engine);
     engine.process_event(E::TxCongestionExhaust);
     assert_eq!(engine.get_current_state(), S::Closing);
-    assert_eq!(
-        actions.trace_snapshot().close_reason,
-        CloseReason::Unresponsive
-    );
+    assert_eq!(actions.close_reason(), Some(CloseReason::Unresponsive));
 }
 
 // ── 10. Established -> peer.close -> Closed (skips Closing)
@@ -234,6 +230,11 @@ fn r61_established_peer_close_to_closed_direct() {
     let t = actions.trace_snapshot();
     assert_eq!(t.release_link, 1);
     assert_eq!(t.send_close_frame_with_reason, 0);
+    assert_eq!(
+        actions.close_reason(),
+        None,
+        "a peer close stages no reason"
+    );
 }
 
 // ── 11. Accepting -> framing.error -> Closing (Invalid)
@@ -244,5 +245,5 @@ fn r61_accepting_framing_error_to_closing_invalid() {
     engine.process_event(E::InitSynReceived);
     engine.process_event(E::FramingError);
     assert_eq!(engine.get_current_state(), S::Closing);
-    assert_eq!(actions.trace_snapshot().close_reason, CloseReason::Invalid);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Invalid));
 }
