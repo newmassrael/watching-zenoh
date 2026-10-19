@@ -1002,16 +1002,24 @@ where
 /// stays TOTAL rather than unwrapping: a future refactor that drops the
 /// precondition then degrades to "never re-arm" — a late sweep — instead of a
 /// panic on the data plane.
-async fn notified_or_pending(revised: Option<&tokio::sync::Notify>) {
-    match revised {
-        Some(notify) => notify.notified().await,
+///
+/// The `Notified` is the caller's to KEEP across iterations: constructing one per
+/// iteration registers it with the `Notify` and deregisters it again when the `select!`
+/// drops it, each under the `Notify`'s waiter lock, which on the data plane is once
+/// per frame. A kept one stays registered while the loop works and is replaced only
+/// after it has fired.
+async fn wait_revised<'n>(
+    slot: &mut Option<core::pin::Pin<Box<tokio::sync::futures::Notified<'n>>>>,
+) {
+    match slot {
+        Some(notified) => notified.as_mut().await,
         None => std::future::pending().await,
     }
 }
 
 /// Wait for the armed steady-state timer, or never when there is none. The
 /// `select!` precondition keeps the `None` case from ever being polled; this stays
-/// total for the same reason [`notified_or_pending`] does.
+/// total for the same reason [`wait_revised`] does.
 async fn wait_armed<S: core::future::Future<Output = ()>>(
     slot: &mut Option<(u64, core::pin::Pin<Box<S>>)>,
 ) {
@@ -1305,6 +1313,9 @@ where
     // A caller WITHOUT a revision source gives no signal when its deadline moves
     // earlier, so it keeps the recompute-every-iteration shape exactly.
     let mut steady_timer: Option<(u64, core::pin::Pin<Box<_>>)> = None;
+    // The caller's revision wake, kept registered across iterations (see
+    // [`wait_revised`]).
+    let mut revision = deadline_revised.map(|n| Box::pin(n.notified()));
     let mut iter: usize = 0;
     loop {
         if engine.is_in_final_state() {
@@ -1400,8 +1411,9 @@ where
                     // The revision may have moved the deadline EARLIER than the
                     // timer armed for the old one, so that timer is dropped and
                     // the loop head arms a new one.
-                    _ = notified_or_pending(deadline_revised), if deadline_revised.is_some() => {
+                    _ = wait_revised(&mut revision), if revision.is_some() => {
                         steady_timer = None;
+                        revision = deadline_revised.map(|n| Box::pin(n.notified()));
                     }
                     // R2922 — a request staged from outside the loop. Fall
                     // through: the loop head raises it.
