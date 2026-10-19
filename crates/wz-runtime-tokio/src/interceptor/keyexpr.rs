@@ -23,13 +23,14 @@
 //! importing the seam's resolver adds no edge, while the seam importing the
 //! forwarder's was an edge from a thing to one of its own consumers.
 
+#[cfg(any(feature = "routing-peer", test))]
 use hashbrown::HashMap;
 
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::wireexpr_resolve::resolve_wireexpr;
+use wz_session_core::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 
 /// Resolve the GOVERNED keyexpr a §5.16 ACL enforcer gates for `msg`, alias-aware
 /// against `keyexpr_table` — the SSOT every `InterceptorContext::full_keyexpr`
@@ -47,15 +48,36 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 /// an INGRESS undeclare, which zenoh deliberately admits when its `ext_wire_expr`
 /// is unset; the enforcer owns that asymmetry, not this resolver, because it
 /// depends on the flow. Adding a new governed kind is a ONE-place edit here.
+///
+/// The peer-only form: what the routing forwarders call, each holding one face's table. A
+/// session that holds both spaces calls [`resolve_governed_keyexpr_in`].
+#[cfg(any(feature = "routing-peer", test))]
 pub(crate) fn resolve_governed_keyexpr(
     msg: &NetworkMessage,
     keyexpr_table: &HashMap<u64, String>,
 ) -> Option<String> {
+    resolve_governed_keyexpr_in(msg, MappingSpaces::peer_only(keyexpr_table))
+}
+
+/// [`resolve_governed_keyexpr`] against BOTH id spaces, for a session that holds both.
+///
+/// The mapping bit of a wire expression names a space RELATIVE TO THE SENDER: `M=1`
+/// (`WireexprLocal`) is the sender's, `M=0` (`WireexprNonlocal`) the receiver's.
+/// [`MappingSpaces`] is laid out from the receiver's point of view (`peer` answers `M=1`), so
+/// the caller of an EGRESS verdict, where the sender is this node, hands over its own table in
+/// the `peer` slot and the peer's in the `own` one. Getting that backwards is not a missed
+/// match, it is a denial: a governed message whose key cannot be resolved is refused (see
+/// above), so an egress policy that read our aliases out of the peer's table refused every put
+/// on a declared key, the key the policy names or not.
+pub(crate) fn resolve_governed_keyexpr_in(
+    msg: &NetworkMessage,
+    spaces: MappingSpaces<'_>,
+) -> Option<String> {
     match msg {
-        NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, keyexpr_table),
-        NetworkMessage::Request(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
-        NetworkMessage::Response(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
-        NetworkMessage::Declare(d) => declare_governed_keyexpr(d, keyexpr_table),
+        NetworkMessage::Push(p) => resolve_wireexpr_in(&p.keyexpr.body, spaces),
+        NetworkMessage::Request(r) => resolve_wireexpr_in(&r.keyexpr.body, spaces),
+        NetworkMessage::Response(r) => resolve_wireexpr_in(&r.keyexpr.body, spaces),
+        NetworkMessage::Declare(d) => declare_governed_keyexpr(d, spaces),
         // An Interest carries its keyexpr in the body zenoh writes only when the
         // mode is not Final (`zenoh-codec network/interest.rs:69-73`), so a Final
         // Interest answers `None` here — and is ungoverned at the action arm, the
@@ -64,7 +86,7 @@ pub(crate) fn resolve_governed_keyexpr(
             .body
             .as_ref()
             .and_then(|b| b.keyexpr.as_ref())
-            .and_then(|we| resolve_wireexpr(&we.body, keyexpr_table)),
+            .and_then(|we| resolve_wireexpr_in(&we.body, spaces)),
         _ => None,
     }
 }
@@ -82,15 +104,12 @@ pub(crate) fn resolve_governed_keyexpr(
 /// omitted that extension answers `None`, which is not a resolution FAILURE but
 /// an absent field: on ingress the enforcer admits it (zenoh's deliberate
 /// asymmetry, `access_control.rs:472-485`), on egress it denies (`:762-776`).
-fn declare_governed_keyexpr(
-    declare: &DeclareOwned,
-    keyexpr_table: &HashMap<u64, String>,
-) -> Option<String> {
+fn declare_governed_keyexpr(declare: &DeclareOwned, spaces: MappingSpaces<'_>) -> Option<String> {
     if let Some(we) = declare_subscriber_wireexpr(declare)
         .or_else(|| declare_queryable_wireexpr(declare))
         .or_else(|| declare_token_wireexpr(declare))
     {
-        return resolve_wireexpr(&we.body, keyexpr_table);
+        return resolve_wireexpr_in(&we.body, spaces);
     }
     let exts = match &declare.body {
         DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
@@ -98,7 +117,8 @@ fn declare_governed_keyexpr(
         DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.extensions.as_ref(),
         _ => return None,
     };
-    resolve_ext_keyexpr(exts, keyexpr_table)
+    // The extension names its key in the SENDER's space (`M=1`), which is the `peer` slot.
+    resolve_ext_keyexpr(exts, spaces.peer())
 }
 
 /// The keyexpr `Wireexpr` a `DeclareSubscriber` declares interest in — `None` for

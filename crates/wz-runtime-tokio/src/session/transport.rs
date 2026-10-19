@@ -153,12 +153,14 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// the unicast bundle encodes from the borrowed parts straight into its batch frame, and
     /// a multicast group queues an owned item for its own pipeline.
     ///
-    /// Compiled only where the owned message is not read on the way out: the stats class is
-    /// taken from it, the egress policy is judged on it, and the namespace is applied to it.
+    /// Compiled only where the owned message is not read on the way out of EVERY session: the
+    /// stats class is taken from it and the namespace is applied to it. The egress policy is
+    /// judged on it too, but that is a fact about the session, not the build, so it is asked at
+    /// the call ([`Session::plain_put_lane_open`](super::Session::plain_put_lane_open)) and a
+    /// build that can enforce keeps this path for the sessions that have no policy.
     #[cfg(all(
         feature = "codec-push",
         not(feature = "transport-stats"),
-        not(feature = "access-acl"),
         not(feature = "routing-namespace")
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -295,7 +297,6 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     #[cfg(all(
         feature = "codec-push",
         not(feature = "transport-stats"),
-        not(feature = "access-acl"),
         not(feature = "routing-namespace")
     ))]
     fn send_plain_put_qos(

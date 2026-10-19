@@ -862,6 +862,14 @@ where
     ///
     #[cfg(feature = "access-acl")]
     interceptors_egress: Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+    /// Whether the egress chain above holds anything: set by [`InterceptorSink::set_interceptors`],
+    /// read on every put. It is what lets a build that CAN enforce a policy keep the fast ways to
+    /// send a plain Put for the sessions that have none. Those paths were once compiled out of
+    /// every build that has `access-acl`, so merely being able to enforce cost every session the
+    /// borrowed-bytes send; it is now paid by the session that actually states a policy.
+    /// SHARED on clone, as the chain is.
+    #[cfg(feature = "access-acl")]
+    egress_policy: Arc<std::sync::atomic::AtomicBool>,
     /// R2702 — the §5.16 INGRESS chain, the twin of the field above, consulted
     /// on the inbound batch before the observer fans it out.
     ///
@@ -1203,6 +1211,8 @@ where
             #[cfg(feature = "access-acl")]
             interceptors_egress: self.interceptors_egress.clone(),
             #[cfg(feature = "access-acl")]
+            egress_policy: self.egress_policy.clone(),
+            #[cfg(feature = "access-acl")]
             interceptors_ingress: self.interceptors_ingress.clone(),
         }
     }
@@ -1283,6 +1293,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> crate::intercep
             let version = chain.version().wrapping_add(1);
             *chain =
                 config.build_chain_versioned(crate::interceptor::InterceptorFlow::Egress, version);
+            // Under the chain's own lock, so a put that reads the flag and a put that takes
+            // the chain cannot disagree about which policy is current.
+            self.egress_policy
+                .store(!chain.is_empty(), std::sync::atomic::Ordering::Release);
         });
         R::with_mutex_mut(&self.interceptors_ingress, |chain| {
             let version = chain.version().wrapping_add(1);
@@ -1536,13 +1550,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             // text and bytes: the owned message below is a copy of each, a chain and a
             // `Box`, built to be encoded once and dropped. A transport with no such path,
             // or a build where the owned message is read on the way out, answers `None`
-            // and takes the owned one.
-            #[cfg(all(
-                not(feature = "transport-stats"),
-                not(feature = "access-acl"),
-                not(feature = "routing-namespace")
-            ))]
-            let sent_plain = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
+            // and takes the owned one. The egress policy reads the owned message, so a session
+            // that holds one takes it too; a session that does not keeps this path in a build
+            // that can enforce (`Self::egress_policy_active`).
+            #[cfg(all(not(feature = "transport-stats"), not(feature = "routing-namespace")))]
+            let sent_plain = if opts.kind == SampleKind::Put
+                && meta.is_plain_apart_from_qos()
+                && !self.egress_policy_active()
+            {
                 match Tp::send_plain_put_qos(
                     &self.transport,
                     0,
@@ -1562,11 +1577,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             } else {
                 false
             };
-            #[cfg(any(
-                feature = "transport-stats",
-                feature = "access-acl",
-                feature = "routing-namespace"
-            ))]
+            #[cfg(any(feature = "transport-stats", feature = "routing-namespace"))]
             let sent_plain = false;
             if !sent_plain {
                 // R311ms / R311nb — build the Put / Del as a `NetworkMessage::Push`
@@ -1755,12 +1766,38 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
     }
 
+    /// Whether this session holds an egress policy, so a Put it sends must be judged on the
+    /// owned message. One atomic read, and a constant `false` in a build that cannot enforce
+    /// one, so the fast sends cost the sessions that have none nothing.
+    #[inline]
+    fn egress_policy_active(&self) -> bool {
+        #[cfg(feature = "access-acl")]
+        {
+            self.egress_policy
+                .load(std::sync::atomic::Ordering::Acquire)
+        }
+        #[cfg(not(feature = "access-acl"))]
+        {
+            false
+        }
+    }
+
+    /// Whether a Put on this session may be sent from borrowed bytes without being judged: the
+    /// question a caller of `publish_plain_declared` asks before it takes that road.
+    pub fn plain_put_lane_open(&self) -> bool {
+        !self.egress_policy_active()
+    }
+
     /// R2702 — whether the §5.16 egress chain admits `msg` from THIS session.
     /// The verdict body is shared with the ingress twin; see
     /// [`Self::acl_admits_on`].
     #[cfg(feature = "access-acl")]
     fn acl_admits_egress(&self, msg: &wz_session_core::network_message::NetworkMessage) -> bool {
-        self.acl_admits_on(&self.interceptors_egress, msg)
+        self.acl_admits_on(
+            &self.interceptors_egress,
+            msg,
+            crate::interceptor::InterceptorFlow::Egress,
+        )
     }
 
     /// R2702 — apply the §5.16 INGRESS chain to one inbound batch IN PLACE, the
@@ -1790,7 +1827,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         if let wz_session_core::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } =
             outcome
         {
-            messages.retain(|msg| self.acl_admits_on(&self.interceptors_ingress, msg));
+            messages.retain(|msg| {
+                self.acl_admits_on(
+                    &self.interceptors_ingress,
+                    msg,
+                    crate::interceptor::InterceptorFlow::Ingress,
+                )
+            });
         }
     }
 
@@ -1816,6 +1859,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         &self,
         chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
         msg: &wz_session_core::network_message::NetworkMessage,
+        flow: crate::interceptor::InterceptorFlow,
     ) -> bool {
         let empty = R::with_mutex_mut(chain_slot, |chain| chain.is_empty());
         if empty {
@@ -1827,12 +1871,35 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let Some(actions) = Tp::acl_subject_source(&self.transport) else {
             return true;
         };
-        // FIRST lock: the alias table, for the governed keyexpr. Released here.
+        // FIRST lock: the alias tables, for the governed keyexpr. Released here.
+        //
+        // Which table answers which mapping bit depends on who SENT the message. An inbound
+        // message was sent by the peer: its `M=1` is the peer's table and its `M=0` is ours. An
+        // outbound message was sent by us: its `M=1` is OUR table (the ids this node declared,
+        // which every put on a declared publisher carries) and its `M=0` the peer's. Reading
+        // our own ids out of the peer's table is not a harmless miss: an unresolved governed key
+        // is DENIED, so an egress policy refused every put on a declared key, whether the
+        // policy named that key or not.
         let keyexpr = R::with_mutex_mut(&self.observer, |obs| {
-            crate::interceptor::keyexpr::resolve_governed_keyexpr(
-                msg,
-                obs.subscribers.mapping_spaces().peer(),
-            )
+            let peer = obs.subscribers.mapping_spaces().peer();
+            match flow {
+                crate::interceptor::InterceptorFlow::Ingress => {
+                    crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
+                        msg,
+                        wz_session_core::wireexpr_resolve::MappingSpaces::with_own(
+                            peer, &**actions,
+                        ),
+                    )
+                }
+                crate::interceptor::InterceptorFlow::Egress => {
+                    R::with_mutex_mut(&actions.outbound_mappings, |ours| {
+                        crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
+                            msg,
+                            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, peer),
+                        )
+                    })
+                }
+            }
         });
         let ctx = SessionAclContext { actions, keyexpr };
         // SECOND lock: the chain. The context holds no lock of its own.
@@ -2445,6 +2512,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 R::new_mutex(crate::interceptor::InterceptorChain::new()),
             ),
             #[cfg(feature = "access-acl")]
+            egress_policy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "access-acl")]
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
             )),
@@ -2642,6 +2711,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             interceptors_egress: Arc::new(
                 R::new_mutex(crate::interceptor::InterceptorChain::new()),
             ),
+            #[cfg(feature = "access-acl")]
+            egress_policy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
@@ -3489,13 +3560,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // A plain aliased Put is sent from the borrowed bytes, as the literal one is in
             // `Self::publish`: with the key as a one-id alias, the message is the id, the
             // QoS byte and the payload, and building an owned copy of them to encode once is
-            // most of what the send costs.
-            #[cfg(all(
-                not(feature = "transport-stats"),
-                not(feature = "access-acl"),
-                not(feature = "routing-namespace")
-            ))]
-            let sent_plain = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
+            // most of what the send costs. Not for a session that holds an egress policy: it is
+            // judged on the owned message (`Self::egress_policy_active`).
+            #[cfg(all(not(feature = "transport-stats"), not(feature = "routing-namespace")))]
+            let sent_plain = if opts.kind == SampleKind::Put
+                && meta.is_plain_apart_from_qos()
+                && !self.egress_policy_active()
+            {
                 // This body is the unicast session's, so the bundle is the send seam.
                 self.actions().send_plain_put_qos(
                     mapping_id,
@@ -3510,11 +3581,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             } else {
                 false
             };
-            #[cfg(any(
-                feature = "transport-stats",
-                feature = "access-acl",
-                feature = "routing-namespace"
-            ))]
+            #[cfg(any(feature = "transport-stats", feature = "routing-namespace"))]
             let sent_plain = false;
             if !sent_plain {
                 let push = match opts.kind {
@@ -3644,10 +3711,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         payload: &[u8],
         params: &PlainPutParams,
     ) -> Result<(), PublishError> {
+        // A session that holds an egress policy is refused here, as a build that has no such
+        // path is: this send never builds the message the policy reads, so letting it through
+        // would be sending around the policy. The caller (`Self::stamps_publishes`'s sibling
+        // in the C API) asks first and takes the general publish; this is the lock on the door.
+        if self.egress_policy_active() {
+            return Err(PublishError::ExceedsCapacity);
+        }
         #[cfg(all(
             feature = "codec-push",
             not(feature = "transport-stats"),
-            not(feature = "access-acl"),
             not(feature = "routing-namespace")
         ))]
         {
@@ -3665,7 +3738,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(not(all(
             feature = "codec-push",
             not(feature = "transport-stats"),
-            not(feature = "access-acl"),
             not(feature = "routing-namespace")
         )))]
         {

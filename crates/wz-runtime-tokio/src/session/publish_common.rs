@@ -460,13 +460,16 @@ impl PublishOptions {
     /// express flag, `priority_band`), by the same code.
     ///
     /// Also `None` in a build that does not send a plain Put from borrowed bytes (it counts
-    /// or filters the owned message, or has no Push codec): the build's one answer, so a
-    /// caller never asks which features are on.
+    /// or rewrites the owned message, or has no Push codec): the build's one answer, so a
+    /// caller never asks which features are on. A build that can ENFORCE an egress policy
+    /// is not one of those: whether a put is judged is a fact about the session that sends it
+    /// ([`Session::plain_put_lane_open`](super::Session::plain_put_lane_open)), not about the
+    /// build, and answering `None` here for every such build made merely being able to enforce
+    /// cost every session the fast send.
     pub fn plain_put_params(&self) -> Option<PlainPutParams> {
         #[cfg(all(
             feature = "codec-push",
             not(feature = "transport-stats"),
-            not(feature = "access-acl"),
             not(feature = "routing-namespace")
         ))]
         {
@@ -488,7 +491,6 @@ impl PublishOptions {
         #[cfg(not(all(
             feature = "codec-push",
             not(feature = "transport-stats"),
-            not(feature = "access-acl"),
             not(feature = "routing-namespace")
         )))]
         {
