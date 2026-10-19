@@ -241,6 +241,11 @@ pub enum AbortReason {
     /// key. The sender restarted; the staged bytes are a stranded prefix
     /// and are discarded before the new chain begins (zenoh
     /// `guard.defrag.clear()` on `ext_first.is_some()`).
+    ///
+    /// The `duplicate-first` reason of docs/reassembly-fsm.md §2.4.6, taken
+    /// through the slot FSM's `slot.evict` arm (`abort_evicted`). It names
+    /// the chain that was evicted, not the fragment that evicted it, whose
+    /// ingest reports its own admission.
     Superseded,
     /// A continuation arrived whose SN is not the chain's last SN plus one, and
     /// the caller does not know the SN ring ([`SnRing::Unknown`]), so the router
@@ -814,12 +819,10 @@ where
     fn apply_chain_boundary_markers(&mut self, frag: &Fragment<'_>) -> Option<IngestOutcome> {
         let active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
         if frag.markers.first {
-            // A restart supersedes whatever is staged on this key. The
-            // stranded prefix is discarded through the FSM's peer-drop arm
-            // rather than dropped behind its back, so the slot leaves
-            // Receiving by a declared transition.
+            // A restart supersedes whatever is staged on this key: the open
+            // chain is evicted before the marked fragment is admitted.
             if let Some(idx) = active {
-                self.abort_peer_drop(idx, AbortReason::Superseded);
+                self.evict_duplicate_first(idx);
             }
             // Fall through: the marked fragment itself now starts a chain.
             return None;
@@ -831,18 +834,14 @@ where
         }
         if frag.markers.dropped {
             let idx = active.expect("active is Some on this path");
-            return Some(self.abort_peer_drop(idx, AbortReason::SenderDropped));
+            return Some(self.abort_peer_drop(idx));
         }
         None
     }
 
     /// R311y578 — the SINGLE producer of the slot FSM's `fragment.drop`
-    /// -> `Aborted` arm (`abort_peer_drop`), shared by both marker-driven
-    /// aborts. One seam by construction, rather than two callsites that
-    /// happen to agree: the drop fold and the supersede fold are the same
-    /// event on the wire ("the sender is not finishing this chain"), and a
-    /// probe on one is a probe on both only while there is literally one
-    /// place that raises it.
+    /// -> `Aborted` arm (`abort_peer_drop`): the sender's `0x3 Drop` marker
+    /// on an open chain, docs/reassembly-fsm.md §2.4.7a peer-drop.
     ///
     /// Driving the FSM is not bookkeeping. The chain is freed only by the
     /// `reset_slot` duty, which `slot.release` runs from the three TERMINAL
@@ -850,8 +849,27 @@ where
     /// `Receiving` is not freed at all, and the Router's key can never read
     /// free over an engine still parked there
     /// (`the_drop_arm_leaves_the_slot_fsm_in_a_declared_state`).
-    fn abort_peer_drop(&mut self, idx: usize, reason: AbortReason) -> IngestOutcome {
-        self.abort(idx, ReassemblySlotEvent::FragmentDrop, reason)
+    fn abort_peer_drop(&mut self, idx: usize) -> IngestOutcome {
+        self.abort(
+            idx,
+            ReassemblySlotEvent::FragmentDrop,
+            AbortReason::SenderDropped,
+        )
+    }
+
+    /// The SINGLE producer of the slot FSM's `slot.evict` -> `Aborted` arm
+    /// (`abort_evicted`): docs/reassembly-fsm.md §2.4.6 duplicate-first. A
+    /// `0x2 First` arrived on a key whose chain is open, so by the
+    /// one-active-per-key rule (§2.1) the open chain is aborted and its key
+    /// freed before the new First is admitted, which is zenoh's
+    /// `defrag.clear()` on `ext_first`. The evicted chain's reason is
+    /// [`AbortReason::Superseded`]; the fragment's own outcome is the one its
+    /// admission then gives.
+    ///
+    /// Only the marker rules can tell a duplicate First from a continuation,
+    /// so without them a fragment on an open key is judged as a continuation.
+    fn evict_duplicate_first(&mut self, idx: usize) {
+        self.abort(idx, ReassemblySlotEvent::SlotEvict, AbortReason::Superseded);
     }
 
     /// R311y578 — push the negotiated protocol patch level's verdict into
@@ -2065,39 +2083,67 @@ mod chain_boundary_marker_tests {
         assert_eq!(got.as_deref(), Some(&b"XXYY"[..]));
     }
 
-    /// The SUPERSEDE fold reaches the FSM through the SAME seam. This is
-    /// asserted structurally, not behaviourally: a measured probe showed
-    /// that the engine's resting state is identical whether or not the
-    /// supersede raised the abort (a stranded `Receiving` re-arms into
-    /// `Receiving`, and both end at `Empty` once the chain completes), so
-    /// there is no observable difference to test for. What removes the
-    /// doubt is that both folds call ONE private helper
-    /// ([`ReassemblyDispatcher::abort_peer_drop`]) — this test pins that,
-    /// so a future edit splitting them back apart fails here rather than
-    /// silently reopening the desync the drop probe caught.
+    /// Each marker abort raises its own arm of the slot FSM, and each arm has
+    /// one producer: `fragment.drop` (§2.4.7a peer-drop) in
+    /// [`ReassemblyDispatcher::abort_peer_drop`], `slot.evict` (§2.4.6
+    /// duplicate-first) in [`ReassemblyDispatcher::evict_duplicate_first`].
+    ///
+    /// Asserted on the source because both arms post the same abort duty and
+    /// the Router releases the slot the same way after either, so which arm
+    /// ran is not visible from outside. That the arm ran at all is visible,
+    /// and the behavioural tests around this one assert it.
     #[test]
-    fn both_marker_aborts_go_through_the_one_fsm_seam() {
-        // The needle is ASSEMBLED at compile time, so the joined form does
+    fn each_marker_abort_raises_its_own_arm() {
+        // The needles are ASSEMBLED at compile time, so the joined forms do
         // not occur in this file's own source and cannot self-match.
-        let needle = concat!("ReassemblySlotEvent", "::", "FragmentDrop");
         let src = include_str!("reassembly_dispatch.rs");
-        let raises = src.matches(needle).count();
-        assert_eq!(
-            raises, 1,
-            "exactly ONE `fragment.drop` producer; found {raises}. Both the \
-             supersede fold and the drop fold must route through \
-             `abort_peer_drop`, whose damage probe then covers both."
-        );
-        // ...and the supersede fold does reach an Aborted-then-reused slot:
-        // one slot, so the second chain can only proceed on a released one.
+        for (needle, arm) in [
+            (
+                concat!("ReassemblySlotEvent", "::", "FragmentDrop"),
+                "fragment.drop",
+            ),
+            (
+                concat!("ReassemblySlotEvent", "::", "SlotEvict"),
+                "slot.evict",
+            ),
+        ] {
+            let raises = src.matches(needle).count();
+            assert_eq!(raises, 1, "exactly ONE `{arm}` producer; found {raises}");
+        }
+    }
+
+    /// A duplicate `First` evicts the open chain through `slot.evict` and the
+    /// new chain takes the key (§2.4.6 duplicate-first). One slot, so the new
+    /// chain can only begin on the slot the eviction released: had
+    /// `abort_evicted` not run, the slot would still hold the old chain.
+    #[test]
+    fn a_duplicate_first_evicts_the_open_chain_through_slot_evict() {
         let mut d = armed::<1, 256>();
-        d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {});
-        d.ingest(marked(2, 1, b"BBB", FIRST), MASK, 0, |_| {});
+        assert_eq!(
+            d.ingest(marked(1, 1, b"AAA", FIRST), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.ingest(marked(2, 1, b"BBB", FIRST), MASK, 0, |_| panic!(
+                "neither chain is complete"
+            )),
+            IngestOutcome::Begun,
+            "the duplicate First is admitted once the open chain is evicted"
+        );
+        assert_eq!(d.active_chains(), 1);
+        assert_eq!(d.staging_available(), 0, "one chain holds the one slot");
+        assert_eq!(
+            d.slots[0].engine.get_current_state(),
+            ReassemblySlotState::Receiving
+        );
         let mut got: Option<Vec<u8>> = None;
-        d.ingest(marked(3, 0, b"CCC", NONE), MASK, 0, |m| {
-            got = Some(m.to_vec())
-        });
+        assert_eq!(
+            d.ingest(marked(3, 0, b"CCC", NONE), MASK, 0, |m| got =
+                Some(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
         assert_eq!(got.as_deref(), Some(&b"BBBCCC"[..]));
+        assert_eq!(d.staging_available(), 1);
         assert_eq!(
             d.slots[0].engine.get_current_state(),
             ReassemblySlotState::Empty
