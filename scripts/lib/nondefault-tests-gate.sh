@@ -267,6 +267,14 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # header: a named list is what makes the census a ratchet instead of a
     # tautology.
     "wz-capi-pico|hook|transport-link-quic,transport-link-tls,transport-link-unixpipe|"
+    # The two node-config features the zenoh-c ABI turns on: the usrpwd
+    # credential machinery and the interceptor chain (`access_control`,
+    # `low_pass_filter`, `downsampling`). Both are off here by default, so the
+    # twelve tests that build a `NodeAuth` / `NodePolicy` from a config
+    # document, and the matching-aggregate test that needs a stated policy,
+    # were compiled by no lane until this row -- the census reported them as
+    # claimed by nothing. The filter is empty: every test of the build runs.
+    "wz-capi-core|hook|access-extauth-usrpwd,interceptors|"
     # R2524 — `dissect` -> `dissect,fixtures`, and the route here is the point.
     # R2520 added the `fixtures` feature (the shared item-713 captures, which a
     # `#[cfg(test)]` fixture cannot carry across a crate boundary) and did NOT
