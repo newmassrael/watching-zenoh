@@ -151,7 +151,11 @@ libc = { version = "0.2", optional = true }
 # R2970 — `transport-qos` so its transport snapshot reports what a zenoh-c
 # session now negotiates: QoS is on by default upstream, and `z_transport_is_qos`
 # read `false` for every session because the ext was not built here at all.
-wz-capi-core = { path = "../wz-capi-core", features = ["transport-qos", "access-extauth-usrpwd"] }
+#
+# `access-extauth-usrpwd` and `interceptors`: the credentials and the traffic policy (`access_control`,
+# `low_pass_filter`, `downsampling`) a zenoh-c node's config states are enforced, not accepted and
+# dropped.
+wz-capi-core = { path = "../wz-capi-core", features = ["transport-qos", "access-extauth-usrpwd", "interceptors"] }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and

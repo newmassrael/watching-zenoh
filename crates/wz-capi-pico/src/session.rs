@@ -370,6 +370,9 @@ pub unsafe extern "C" fn z_open(
                 // pico's config carries no `transport/auth` keys this ABI reads, so its node
                 // authenticates nobody, as it always has.
                 auth: None,
+                // And no `access_control`, `low_pass_filter` or `downsampling` keys either: its
+                // node states no traffic policy, as it never has.
+                policy: wz_capi_core::node_policy::NodePolicy::default(),
             },
         ) {
             Ok(state) => {

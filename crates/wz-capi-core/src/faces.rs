@@ -1515,6 +1515,10 @@ pub struct SharedSession {
     /// The authentication the node's config asks for, installed on every session the node opens
     /// before its first wire byte. See [`SessionResources::auth`].
     auth: Option<crate::node_auth::NodeAuth>,
+    /// The policy the node's config states for its traffic, installed on every face. When it is
+    /// not inert the send and receive lanes that step around a per-message verdict are off for
+    /// this node's sessions. See [`SessionResources::policy`].
+    policy: crate::node_policy::NodePolicy,
 }
 
 /// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
@@ -1580,6 +1584,10 @@ pub struct SessionResources {
     /// a listener that holds one admits only the peers that hold a user of it. `None` is a node
     /// that authenticates nobody, which every node was until the config's key reached a session.
     pub auth: Option<crate::node_auth::NodeAuth>,
+    /// The traffic policy the node's config states (`access_control`, `low_pass_filter`,
+    /// `downsampling`). Inert for a node that states none, which is every node until the keys
+    /// reached a session.
+    pub policy: crate::node_policy::NodePolicy,
 }
 
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
@@ -1603,6 +1611,7 @@ impl Default for SessionResources {
             initial_interest: false,
             gossip: None,
             auth: None,
+            policy: crate::node_policy::NodePolicy::default(),
         }
     }
 }
@@ -1687,6 +1696,7 @@ impl SharedSession {
             initial_interest,
             gossip,
             auth,
+            policy,
         } = resources;
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
@@ -1776,12 +1786,41 @@ impl SharedSession {
             initial_interest,
             gossip,
             auth,
+            policy,
         })
     }
 
     /// The authentication the node holds, for the sessions it dials and accepts.
     pub fn node_auth(&self) -> Option<&crate::node_auth::NodeAuth> {
         self.auth.as_ref()
+    }
+
+    /// Whether this node states a traffic policy. Read on the data path, so it is a pointer test.
+    pub fn has_policy(&self) -> bool {
+        !self.policy.is_inert()
+    }
+
+    /// The node's INGRESS admission for the frame face `id` just decoded: a message the policy
+    /// denies is dropped from `outcome` before any subscriber, queryable or reply sink sees it.
+    /// The drive loop calls this for a whole frame and again for a fragment chain that
+    /// completes. A node with no policy returns at the first test, which is every node that
+    /// states none.
+    pub fn ingress(&self, id: u64, outcome: &mut DriverLoopOutcome) {
+        if !self.has_policy() {
+            return;
+        }
+        #[cfg(feature = "interceptors")]
+        {
+            // Cloned out of the lock first: the verdict resolves the message's key through the
+            // face's own alias table, under the observer lock, and the registry's must not be
+            // held across that.
+            let session = self.lock().faces.get(&id).map(|face| face.session.clone());
+            if let Some(session) = session {
+                session.apply_acl_ingress(outcome);
+            }
+        }
+        #[cfg(not(feature = "interceptors"))]
+        let _ = (id, outcome);
     }
 
     /// Where this node can be reached, for the entries gossip sends about it: the locators of
@@ -1914,7 +1953,15 @@ impl SharedSession {
         // registry (`Self::dispatch`) and nothing here filters or forwards the owned
         // messages of a frame, so the drive loop may report a frame of plain Puts as the
         // places of its records and skip building a message for each.
-        actions.set_plain_put_lane(true);
+        //
+        // Unless the node states a traffic policy: a verdict is read from a message, and a
+        // frame reported as places in the datagram has none to read, so a policy that sat
+        // beside this lane would be stepped around by exactly the traffic the lane exists for
+        // (the receive bypass `tests/interceptors.rs` measures). The policy is installed on the
+        // face's session first, both flows, and the lane stays off for this node's faces only.
+        #[cfg(feature = "interceptors")]
+        self.policy.install_on(&session);
+        actions.set_plain_put_lane(!self.has_policy());
         // R3065 -- the face reads what its peer sends through the node's own clients.
         install_shm_reader(&session, &self.shm_clients);
 
@@ -3323,6 +3370,14 @@ impl SharedSession {
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> Option<Result<usize, FanoutError>> {
+        // A node that states a traffic policy sends through the general publish: this lane writes
+        // the frame without building the message a verdict reads, so the policy's egress half
+        // (an ACL deny, a size cap, a rate) would never be asked. Every caller of the lane goes
+        // through here, which is why the test is here and not in each of them. (The session
+        // refuses the lane too, for a caller that did not ask: `Session::publish_plain_declared`.)
+        if self.has_policy() {
+            return None;
+        }
         if params.destination.allows_remote() {
             if sessions.iter().any(|session| session.stamps_publishes()) {
                 return None;
@@ -4541,6 +4596,12 @@ impl FaceForwarder for CApiForwarder {
         self.shared.dispatch(id.0 + self.base, event);
     }
 
+    /// This face's ingress admission: the node's policy applied to the frame before the
+    /// subscribers see it. See [`SharedSession::ingress`].
+    fn ingress(&self, id: FaceId, outcome: &mut DriverLoopOutcome) {
+        self.shared.ingress(id.0 + self.base, outcome);
+    }
+
     /// Arm this face's drive loop on its earliest pending `z_get` deadline, so
     /// [`SharedSession::dispatch`]'s sweep runs when a get is actually due.
     ///
@@ -4815,6 +4876,52 @@ mod matching_aggregate_tests {
             Some(Ok(0))
         ));
         assert_eq!(shared.drain_local_plane(), 0);
+    }
+
+    /// The plain lane is the node's to give up, and only the node that states a traffic policy
+    /// gives it up. In a build that CAN enforce a policy a node without one still takes the lane
+    /// (the same destination that answers `Some` above), and a node with one is answered `None`
+    /// for the identical put, so the general publish judges it. Both halves are asserted on one
+    /// put: a build that dropped the lane for everyone would fail the first, and one that kept
+    /// it for everyone would fail the second.
+    #[cfg(feature = "interceptors")]
+    #[test]
+    fn only_a_node_that_states_a_policy_gives_up_the_plain_lane() {
+        use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
+
+        let put = |policy: crate::node_policy::NodePolicy| {
+            let shared = SharedSession::new_with_resources(
+                TokioTime::new(),
+                test_zid(),
+                SessionResources {
+                    policy,
+                    ..SessionResources::default()
+                },
+            )
+            .expect("test host entropy");
+            let mapping = shared
+                .declare_keyexpr("wz/plain/target".to_owned())
+                .expect("the first alias id is not exhausted");
+            let params = PublishOptions::put()
+                .plain_put_params()
+                .expect("a build that can enforce still sends plain puts");
+            shared.put_plain_declared("wz/plain/target", mapping, b"x", &params)
+        };
+        let stated = ZenohNodeConfig::from_json5(
+            r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["wz/**"], size_limit: 4 } ] }"#,
+        )
+        .expect("a document a real zenohd starts on")
+        .config;
+
+        assert!(
+            matches!(put(crate::node_policy::NodePolicy::default()), Some(Ok(0))),
+            "a node with no policy keeps the lane"
+        );
+        assert!(
+            put(crate::node_policy::NodePolicy::from_node_config(&stated).expect("compiles"))
+                .is_none(),
+            "a node with a policy sends through the general publish, which judges the put"
+        );
     }
 
     /// The plain lane behind a write filter answers as the filter and the lane answer one

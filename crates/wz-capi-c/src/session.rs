@@ -16,6 +16,7 @@ use wz_capi_core::drive::{
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::node_auth::NodeAuth;
+use wz_capi_core::node_policy::NodePolicy;
 use wz_capi_core::scouting_node::ScoutingPlan;
 use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
@@ -253,8 +254,9 @@ pub unsafe extern "C" fn z_open(
     guarded(|| unsafe { open_session(this_, config, no_shm_clients()) })
 }
 
-/// The authentication a config asks the node to hold, or `Err(())` for a config that names a
-/// security mechanism (authentication or access control) this surface cannot hold.
+/// The authentication and the traffic policy a config asks the node to hold, or `Err(())` for a
+/// config that names a security mechanism (authentication or access control) this surface cannot
+/// hold.
 ///
 /// A config that names a security mechanism is never opened as if it did not: a node told to
 /// demand credentials that starts and admits everyone is worse than one that does not start,
@@ -266,26 +268,26 @@ pub unsafe extern "C" fn z_open(
 ///     them when it dials; one stated without the other fails the open.
 ///   * `transport/auth/pubkey/*` is not enforced by this surface yet, so a config that states any
 ///     of its four keys fails the open.
-///   * `access_control` with `enabled: true` is not enforced yet either: a C session's receive
-///     path has no caller of the ingress verdict (`Session::apply_acl_ingress`), so the policy
-///     would govern what the node sends and not what it is sent, and a policy applied in one
-///     direction is the half-protection an operator cannot tell from the whole. It fails the
-///     open until both directions are enforced; a disabled `access_control` opens as it did.
-fn node_security_of(node: &ZenohNodeConfig) -> Result<Option<NodeAuth>, ()> {
+///   * `access_control`, `low_pass_filter` and `downsampling` are compiled into the node's
+///     traffic policy and enforced on every face in both directions; a subtree the compiler
+///     refuses (a policy naming a rule that does not exist) fails the open, as zenoh's start
+///     does. A disabled `access_control` and an absent filter state no policy at all.
+fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePolicy), ()> {
     if node.pubkey_public_key_pem.is_some()
         || node.pubkey_private_key_pem.is_some()
         || node.pubkey_public_key_file.is_some()
         || node.pubkey_private_key_file.is_some()
-        || node.access_control.enabled
     {
         return Err(());
     }
-    NodeAuth::from_usrpwd_config(
+    let auth = NodeAuth::from_usrpwd_config(
         node.usrpwd_dictionary_file.as_deref(),
         node.usrpwd_user.as_deref(),
         node.usrpwd_password.as_ref(),
     )
-    .map_err(|_| ())
+    .map_err(|_| ())?;
+    let policy = NodePolicy::from_node_config(node).map_err(|_| ())?;
+    Ok((auth, policy))
 }
 
 /// The open `z_open` and `z_open_with_custom_shm_clients` both are: the same config, the same
@@ -347,11 +349,12 @@ pub(crate) unsafe fn open_session(
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
         unsafe { (*config)._this = crate::abi::z_owned_config_t::null_value() };
 
-        // The authentication the config asks the node to hold. Decided before anything is bound
-        // or dialled: a config that names a security mechanism this open cannot hold must not
-        // become a node that runs without it.
-        let auth = match node.as_ref().map(node_security_of).transpose() {
-            Ok(auth) => auth.flatten(),
+        // The authentication and the traffic policy the config asks the node to hold. Decided
+        // before anything is bound or dialled: a config that names a security mechanism this open
+        // cannot hold must not become a node that runs without it.
+        let (auth, policy) = match node.as_ref().map(node_security_of).transpose() {
+            Ok(Some((auth, policy))) => (auth, policy),
+            Ok(None) => (None, NodePolicy::default()),
             Err(()) => return Z_EINVAL,
         };
 
@@ -480,6 +483,7 @@ pub(crate) unsafe fn open_session(
             // up its link and no other. A face of this session has a thread of its own.
             face_drive: FaceDrive::PerFace,
             auth,
+            policy,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

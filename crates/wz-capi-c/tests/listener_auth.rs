@@ -337,41 +337,48 @@ fn a_config_that_states_a_user_without_a_password_fails_the_open() {
     assert_eq!(rc, Z_EINVAL, "a user with no password opened a session");
 }
 
-/// A listener config that states `access_control/enabled` as `enabled`.
-fn access_control_entries(port: u16, enabled: bool) -> Vec<(&'static str, String)> {
+/// A listener config that states `access_control` as enabled, with `policies` verbatim.
+fn access_control_entries(port: u16, policies: &str) -> Vec<(&'static str, String)> {
     vec![
         ("scouting/multicast/enabled", "false".to_owned()),
         ("mode", "\"peer\"".to_owned()),
         ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
-        ("access_control/enabled", enabled.to_string()),
+        ("access_control/enabled", "true".to_owned()),
+        ("access_control/default_permission", "\"allow\"".to_owned()),
+        ("access_control/policies", policies.to_owned()),
     ]
 }
 
-/// Access control is a policy a node enforces on what its peers send and receive. This surface
-/// does not enforce it yet (the ingress verdict has no caller on a C session's receive path), and
-/// a node that starts with the policy it was configured with half applied, or not at all, is one
-/// its operator believes protected. The disabled config is the control: it must still open, so
-/// the refusal below is the policy and not every config that mentions the key.
+/// Access control a node cannot compile is not one it may start without: zenoh refuses to start
+/// on a policy that names a rule or subject that does not exist, and so does this open, where
+/// the alternative is a node its operator believes protected and that is not. Whether a policy
+/// that DOES compile is enforced is `tests/interceptors.rs`'s claim; the control here is that it
+/// opens at all, so the refusal is the policy and not every config that mentions the key.
 #[test]
-fn a_config_that_enables_access_control_fails_the_open_until_it_is_enforced() {
+fn an_access_control_policy_that_cannot_be_compiled_fails_the_open() {
     let port = free_port();
     // SAFETY: a fresh config and session.
-    let (rc, control) = unsafe { open_with(&access_control_entries(port, false)) };
+    let (rc, control) = unsafe { open_with(&access_control_entries(port, "[]")) };
     // SAFETY: the control is live and owned here.
     unsafe { close_session(control) };
     assert_eq!(
         rc, Z_OK,
-        "the control (access control stated as disabled) did not open, so the refusal below \
-         proves nothing"
+        "the control (access control enabled with no policy) did not open, so the refusal \
+         below proves nothing"
     );
 
     let port = free_port();
     // SAFETY: a fresh config and session.
-    let (rc, session) = unsafe { open_with(&access_control_entries(port, true)) };
+    let (rc, session) = unsafe {
+        open_with(&access_control_entries(
+            port,
+            r#"[{ rules: ["no_such_rule"], subjects: ["no_such_subject"] }]"#,
+        ))
+    };
     // SAFETY: a gravestone drops as a no-op, a live session closes.
     unsafe { close_session(session) };
     assert_eq!(
         rc, Z_EINVAL,
-        "a config enabling access control opened a node that does not enforce it"
+        "a policy naming a rule that does not exist opened a node that cannot enforce it"
     );
 }

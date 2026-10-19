@@ -61,5 +61,6 @@ pub mod faces;
 pub mod group;
 pub mod listeners;
 pub mod node_auth;
+pub mod node_policy;
 pub mod scouting;
 pub mod scouting_node;

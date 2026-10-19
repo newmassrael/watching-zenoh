@@ -1704,6 +1704,10 @@ async fn drive_face(
     // have made the sweep late exactly where it matters most.
     let deadline_shared = shared.clone();
     let next_deadline = move || deadline_shared.next_reply_deadline_ms(face);
+    // The node's traffic policy, applied to each decoded frame before dispatch: the dial role
+    // does not go through `accept_loop` either, so `FaceForwarder::ingress` cannot reach it and
+    // this closure is its equivalent. Nothing to do for a node that states no policy.
+    let ingress_shared = shared.clone();
     // `face_up` above registered the face, so its re-arm signal exists.
     let revised = shared.deadline_revised(face);
 
@@ -1736,7 +1740,9 @@ async fn drive_face(
                 // over the outcome's lifetime, and rustc reports it as
                 // "implementation of `FnMut` is not general enough" at the
                 // `select!` rather than at the closure.
-                ingress: |_: &mut wz_runtime_tokio::session_glue::DriverLoopOutcome| {},
+                ingress: |outcome: &mut wz_runtime_tokio::session_glue::DriverLoopOutcome| {
+                    ingress_shared.ingress(face, outcome)
+                },
                 after_dispatch: || core::future::ready(()),
             },
         ) => {}
@@ -3310,6 +3316,10 @@ pub struct OpenStance {
     /// zenoh-c's ABI resolves it from `transport/auth/usrpwd/dictionary_file`, and `None` is a
     /// node that authenticates nobody. zenoh-pico's ABI carries no such key and says `None`.
     pub auth: Option<crate::node_auth::NodeAuth>,
+    /// The traffic policy the node's config states ([`SessionResources::policy`]): zenoh-c's ABI
+    /// compiles `access_control`, `low_pass_filter` and `downsampling` into it, and an inert
+    /// policy is a node that states none. zenoh-pico's ABI reads no such keys and says inert.
+    pub policy: crate::node_policy::NodePolicy,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -3428,6 +3438,7 @@ pub fn open_blocking(
         listen_phase,
         face_drive,
         auth,
+        policy,
     } = stance;
     let link_tx = LinkTx {
         queue: tx_queue,
@@ -3466,6 +3477,7 @@ pub fn open_blocking(
                     dials: dial_tx.clone(),
                 }),
                 auth,
+                policy,
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,
@@ -4262,6 +4274,7 @@ mod tests {
             listen_phase: ListenPhase::SHIPPED,
             face_drive: FaceDrive::Serial,
             auth: None,
+            policy: crate::node_policy::NodePolicy::default(),
         }
     }
 
