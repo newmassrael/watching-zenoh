@@ -1,0 +1,25 @@
+/* SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+ * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+ *
+ * The T2G kit's Ethernet and entropy source as Zephyr devices: what turns the drivers of
+ * deploy/zephyr-eth-wzmac on. The same two nodes as the admin node's
+ * overlays/t2g_zeth.overlay.
+ */
+
+/ {
+	chosen {
+		zephyr,entropy = &wz_trng;
+	};
+
+	wz_trng: wz-trng {
+		compatible = "wz,cyt4bf-trng";
+	};
+
+	/* The PHY of this kit drives the RMII reference clock (`ref-clock-divider` stays 0). The
+	 * station address is drawn at every boot.
+	 */
+	wz_eth: wz-eth {
+		compatible = "wz,cyt4bf-eth";
+		zephyr,random-mac-address;
+	};
+};

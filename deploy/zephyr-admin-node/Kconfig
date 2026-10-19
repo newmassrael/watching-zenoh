@@ -84,6 +84,7 @@ config WZ_MAC_CYT4BF
 	depends on SOC_FAMILY_INFINEON_CAT1C
 	select WZ_ENTROPY_BOARD_HOOK
 	select WZ_CORE_CLOCK_BOARD_HOOK
+	select WZ_CYT4BF_PINS_WANTED
 	help
 	  The MXETH block of the CYT4BF family (a Cadence GEM) through
 	  `wz-eth-mac-cyt4bf`, with the PHY on its RMII port. The random source is the

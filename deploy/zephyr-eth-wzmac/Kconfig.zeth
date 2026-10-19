@@ -13,6 +13,7 @@ config WZ_ZETH
 	depends on NETWORKING
 	select NET_L2_ETHERNET
 	select WZ_CORE_CLOCK_BOARD_HOOK
+	select WZ_CYT4BF_PINS_WANTED
 	help
 	  Zephyr has no Ethernet driver for this controller. This one is an
 	  `ethernet_api` implementation whose frames go through `wz-eth-mac-cyt4bf`, the
@@ -48,7 +49,13 @@ config WZ_ZETH_RX_POLL_INTERVAL_US
 
 endif # WZ_ZETH
 
-if WZ_ZETH || WZ_MAC_CYT4BF
+# Set by whatever drives ETH0 (this driver, or the lwIP backend's MAC), so the pin routing
+# below is offered to both and an application that has only one of them does not name the
+# other's symbols.
+config WZ_CYT4BF_PINS_WANTED
+	bool
+
+if WZ_CYT4BF_PINS_WANTED
 
 choice WZ_CYT4BF_PINS
 	prompt "ETH0 pin routing"
@@ -62,7 +69,7 @@ config WZ_CYT4BF_PINS_T2G_LITE
 
 endchoice
 
-endif # WZ_ZETH || WZ_MAC_CYT4BF
+endif # WZ_CYT4BF_PINS_WANTED
 
 config WZ_ZETH_TRNG
 	bool "Entropy device over the CYT4BF CRYPTO block's TRNG"

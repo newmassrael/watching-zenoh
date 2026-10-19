@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zephyr-pico-compare/rust -- the part of the zenoh-pico comparison image that is wz: the CYT4BF's
+# Ethernet MAC crate behind the Zephyr Ethernet driver (deploy/zephyr-eth-wzmac), and nothing
+# else. zenoh-pico itself is C, over Zephyr's own network stack and sockets; this staticlib is
+# only what lets that stack sit on the kit's MAC, the MAC the wz admin node's Zephyr-sockets
+# image is driven through, so the two are measured on one controller, one driver and one stack.
+#
+# Standalone workspace (the empty `[workspace]` table) so cargo does not pull it into
+# crates/Cargo.toml's member build, where a thumb target is not the host.
+
+[workspace]
+
+[package]
+name = "wz-zephyr-pico-compare"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+publish = false
+description = "wz Rust staticlib for the zenoh-pico comparison image: the CYT4BF MAC behind the Zephyr Ethernet driver."
+
+[lib]
+name = "wz_zephyr_pico_compare"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+# critical-section IMPL provider: the staticlib root defines it over Zephyr's irq_lock
+# (`wz_runtime_zephyr::zephyr_image_no_heap!`), so the key is the kernel's `unsigned int`.
+critical-section = { version = "1", features = ["restore-state-u32"] }
+# AtomicU64 is not native on thumbv7m: the coop clock routes it through the fallback and
+# critical-section, matching wz-runtime-coop.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The Zephyr profile's seams (clock, glue, the image's allocator, panic handler and critical
+# section) and the MAC trait. The crates that carry them name a form of the task pool, so this
+# takes the heap form the admin node's own heap profile takes; nothing here uses it.
+wz = { path = "../../../crates/wz", default-features = false, features = [
+    "runtime-coop",
+    "platform-zephyr",
+] }
+wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = [
+    "session-unicast",
+    "no_std",
+    "alloc",
+] }
+wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf" }
+
+# The MAC glue is the admin node's source, compiled here as it is there; the features it names for
+# its lwIP backend and its pools are that image's, and this image has none of them.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("net-lwip-mac", "tx-pool", "rx-pool"))'] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

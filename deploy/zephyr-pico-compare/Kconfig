@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+mainmenu "zenoh-pico comparison node on the T2G kit"
+
+rsource "../zephyr-common/Kconfig.wz"
+rsource "../zephyr-eth-wzmac/Kconfig.zeth"
+
+config PICO_COMPARE_LOCATOR
+	string "The router the node connects to"
+	default "udp/192.168.100.1:7447"
+	help
+	  zenoh-pico runs as a client of a router on the bench host, over UDP unicast: the
+	  link the wz admin node's session runs over. The router listens on this locator.
+
+config PICO_COMPARE_DEBUG
+	bool "zenoh-pico's own debug log on the console"
+	help
+	  Builds the library with ZENOH_DEBUG=3. For finding out why a session does not come up;
+	  never for a measurement, since every line is a write to a 115200 baud UART.
+
+source "Kconfig.zephyr"
