@@ -110,7 +110,7 @@ fn pico_encode_qos_join(
             _whatami: WHATAMI_PEER,
             _req_id_res: params.req_id_res,
             _seq_num_res: params.seq_num_res,
-            _version: params.version,
+            _version: wire_const::PROTOCOL_VERSION,
             _patch: 1, // _Z_CURRENT_PATCH
         };
         let mut wbf = _z_wbuf_make(256, false);
@@ -180,7 +180,6 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
     }
 
     let params = MulticastParams {
-        version: 0x08,
         whatami: WhatAmI::Peer,
         zid: vec![0x01, 0x02, 0x03],
         // whole seconds -> the T flag rides (lease in seconds on the wire).

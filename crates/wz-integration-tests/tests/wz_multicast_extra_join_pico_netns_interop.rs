@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     read_captured, zenoh_pico_cli_binary, ChildGuard, NetnsPair, PICO_BATCH_MULTICAST_SIZE,
-    PICO_PROTO_VERSION, PICO_SN_RESOLUTION,
+    PICO_SN_RESOLUTION,
 };
 use wz_runtime_tokio::multicast_glue::{drive_multicast_session, MulticastDriveConfig};
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -84,7 +84,6 @@ const DELIVERY_BUDGET: Duration = Duration::from_secs(15);
 
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
-        version: PICO_PROTO_VERSION,
         whatami: WhatAmI::Peer,
         zid: vec![0x7a; 4],
         lease_ms: 5_000,

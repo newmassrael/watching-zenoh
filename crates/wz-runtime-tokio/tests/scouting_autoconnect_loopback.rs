@@ -167,7 +167,6 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
         .await
         .expect("bind + join the scouting group as the responder");
     let identity = ResponderIdentity::try_new(
-        0x09,
         RESPONDER_ROLE,
         RESPONDER_ZID.to_vec(),
         // THE LINK BETWEEN THE TWO HALVES: the locator the Hello advertises is
@@ -192,7 +191,6 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
         .await
         .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
-        version: 0x09,
         what: 0x03, // ROUTER | PEER — what this node is looking for.
         zid: SCOUT_ZID.to_vec(),
         timeout_ms: 300,

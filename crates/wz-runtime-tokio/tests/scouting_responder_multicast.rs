@@ -72,13 +72,8 @@ fn scout_datagram(what: u8) -> Vec<u8> {
 }
 
 fn wz_identity() -> ResponderIdentity {
-    ResponderIdentity::try_new(
-        0x09,
-        WhatAmI::Peer,
-        WZ_ZID.to_vec(),
-        vec![WZ_LOCATOR.to_string()],
-    )
-    .expect("the demo's identity shape is well-formed")
+    ResponderIdentity::try_new(WhatAmI::Peer, WZ_ZID.to_vec(), vec![WZ_LOCATOR.to_string()])
+        .expect("the demo's identity shape is well-formed")
 }
 
 async fn responder_on(group: Ipv4Addr, port: u16) -> ScoutingResponder {

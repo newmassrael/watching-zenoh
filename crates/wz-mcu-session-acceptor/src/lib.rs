@@ -777,7 +777,6 @@ pub(crate) fn acceptor_params(
     entropy: &mut impl wz_session_core::entropy::EntropySource,
 ) -> SessionInitParams {
     SessionInitParams {
-        version: 0x05,
         whatami: WhatAmI::Peer,
         // `zid_bytes` / `cookie_bytes` are the profile's own spelling of these two
         // (a `Vec` on the growable backing, a fixed buffer under `bounded-heapless`),

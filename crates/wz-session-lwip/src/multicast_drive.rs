@@ -504,7 +504,6 @@ mod tests {
     /// JOIN built with one `zid` is admitted by a loop running another.
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: zid_vec(zid),
             lease_ms: 5_000,

@@ -72,11 +72,12 @@ pub fn zid_vec(src: &[u8]) -> SessionBytes<ZID_MAX> {
 
 /// Inputs for each outbound multicast JOIN frame plus the periodic-emit
 /// cadence.
+///
+/// No protocol version: a JOIN announces the protocol's
+/// ([`wz_codecs::wire_const::PROTOCOL_VERSION`]), for the reason
+/// [`crate::session_init_params::SessionInitParams`] gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MulticastParams {
-    /// Zenoh protocol version byte (`Z_PROTO_VERSION`), emitted as JOIN
-    /// body byte 0.
-    pub version: u8,
     /// This peer's role (Router / Peer / Client). The JOIN encoder
     /// projects it to the cbyte's 2-bit wire form via [`WhatAmI::to_wire`]
     /// (`join` codec `set_whatami`) at the codec edge — the typed role is

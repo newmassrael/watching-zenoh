@@ -603,7 +603,6 @@ fn group_params(
     lease_ms: u64,
 ) -> wz::runtime_tokio::multicast_glue::MulticastParams {
     wz::runtime_tokio::multicast_glue::MulticastParams {
-        version: crate::args::DEMO_PROTO_VERSION,
         whatami: WhatAmI::Peer,
         zid,
         lease_ms,

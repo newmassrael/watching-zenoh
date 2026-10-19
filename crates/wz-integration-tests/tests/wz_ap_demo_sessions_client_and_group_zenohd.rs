@@ -128,7 +128,6 @@ fn group_member(zid_byte: u8) -> (impl std::future::Future<Output = ()>, Multica
         let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, PORT)));
         let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
         let params = MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: vec![zid_byte; 4],
             lease_ms: 5_000,

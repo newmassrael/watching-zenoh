@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
+use wz_codecs::wire_const::PROTOCOL_VERSION;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState};
 use wz_runtime_tokio::session_glue::{
@@ -107,9 +108,12 @@ async fn r60_fsm_drives_real_tcp_loopback() {
         "first wire byte must be FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT"
     );
 
-    // The next byte is the `fixture_session_init_params` version
-    // (0x05). Catches a regression where the adapter / Lua /
-    // SessionLinkActions chain corrupts the payload between
+    // The next byte is the protocol version every wz encoder writes
+    // (`PROTOCOL_VERSION`). Catches a regression where the adapter /
+    // Lua / SessionLinkActions chain corrupts the payload between
     // encode_init and the socket.
-    assert_eq!(payload[1], 0x05, "second wire byte must be version");
+    assert_eq!(
+        payload[1], PROTOCOL_VERSION,
+        "second wire byte must be version"
+    );
 }

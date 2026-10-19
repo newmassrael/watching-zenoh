@@ -52,8 +52,6 @@ pub const SCOUTING_TIMEOUT_DEFAULT_MS: u64 = 1000;
 /// The default `what` mask (pico `Z_CONFIG_SCOUTING_WHAT_DEFAULT`,
 /// `config.h.in:149`) = ROUTER|PEER.
 pub const SCOUTING_WHAT_DEFAULT: u8 = 0x03;
-/// The protocol version byte wz announces in its Scout.
-pub const SCOUT_PROTO_VERSION: u8 = 0x09;
 /// One discovery cycle, for a caller that wants a FIRST-ANSWER lookup rather
 /// than a survey and re-enters until it gets one (the `wz-ap-demo` `--scout`
 /// path). `z_scout` does not use it: its window is the caller's whole budget.
@@ -176,7 +174,6 @@ pub fn run_scout(
             return Vec::new();
         };
         let actions = ScoutingActions::new(ScoutParams {
-            version: SCOUT_PROTO_VERSION,
             what,
             zid,
             // The caller's whole budget IS the window: upstream hands its

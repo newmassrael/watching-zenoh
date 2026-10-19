@@ -163,7 +163,6 @@ impl Responder {
                     .await
                     .expect("the responder joins its group");
                 let identity = ResponderIdentity::try_new(
-                    0x09,
                     wz_runtime_tokio::session_glue::WhatAmI::Peer,
                     zid,
                     vec![locator],

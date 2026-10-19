@@ -191,7 +191,6 @@ impl wz_session_core::entropy::EntropySource for Counting {
 
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: vec![zid; 4],
         seq_num_res: 2,

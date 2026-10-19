@@ -6702,7 +6702,9 @@ pub mod common {
     /// body); pinning the VALUES here removes the cross-lane drift risk
     /// without dragging wz-session-core into the lib's dependency graph
     /// (which would defeat the resolver-2 dev-dep isolation, R311nm/nl).
-    pub const PICO_PROTO_VERSION: u8 = 0x09; // config.h.in Z_PROTO_VERSION
+    /// pico's `Z_PROTO_VERSION` has no counterpart here: the protocol
+    /// version is not a parameter, and every wz encoder writes
+    /// `PROTOCOL_VERSION`.
     pub const PICO_SN_RESOLUTION: u8 = 0x02; // config.h.in Z_SN_RESOLUTION / Z_REQ_RESOLUTION
     pub const PICO_BATCH_MULTICAST_SIZE: u16 = 2_048; // CMakeLists.txt BATCH_MULTICAST_SIZE
 

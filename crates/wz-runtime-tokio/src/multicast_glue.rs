@@ -1233,7 +1233,6 @@ fn router_group_params(
 ) -> wz_session_core::multicast_params::MulticastParams {
     let RouterGroupProfile { zid, qos, tx_queue } = profile;
     wz_session_core::multicast_params::MulticastParams {
-        version: 0x09,
         whatami: wz_session_core::WhatAmI::Router,
         zid,
         lease_ms: 5_000,
@@ -2092,7 +2091,6 @@ mod tests {
 
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: zid.to_vec(),
             lease_ms: 5_000,
@@ -2831,6 +2829,49 @@ mod tests {
             wz_session_core::driver_loop::MulticastPeerLostReason::CapabilitiesChanged,
             "the peer neither announced a departure nor went silent — it \
              changed the terms, which is its own cause",
+        );
+    }
+
+    /// An admitted peer whose re-JOIN announces another protocol version is
+    /// dropped as `CapabilitiesChanged`, as a changed batch size is above. The
+    /// version is one of the terms a group's members must share, and zenoh's
+    /// known-peer check lists it first among them
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @
+    /// `if join.version != peer.version`); wz drops where zenoh ignores, for
+    /// the reason the test above gives.
+    #[tokio::test]
+    async fn a_rejoin_announcing_another_version_drops_the_admitted_peer() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let good = params(&peer_b);
+        let mut driver = FakeDriver::with([
+            (join0(&good), src(2)),
+            (join_of_version(&good, 0x08), src(2)),
+        ]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let (seen, sink) = departure_sink();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            sink,
+            &MulticastTxProducer::new(),
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 0);
+        let lost = departures(&seen);
+        assert_eq!(lost.len(), 1, "one departure, once; got {lost:?}");
+        assert_eq!(lost[0].peer.as_slice(), &peer_b);
+        assert_eq!(
+            lost[0].reason,
+            wz_session_core::driver_loop::MulticastPeerLostReason::CapabilitiesChanged,
         );
     }
 
@@ -3585,13 +3626,27 @@ mod tests {
 
     // ── A1b — data plane: Frame payload -> observer registries ──
 
-    /// A JOIN whose version differs from ours is ignored (§3.2 rejection
-    /// rules / zenoh-pico proto-version guard): no peer is admitted.
+    /// A JOIN announcing a version other than the protocol's, with that byte
+    /// written on the wire.
+    fn join_of_version(p: &MulticastParams, version: u8) -> Vec<u8> {
+        let mut wire = join0(p);
+        assert_eq!(
+            wire[1],
+            wz_codecs::wire_const::PROTOCOL_VERSION,
+            "a JOIN's second byte is its version"
+        );
+        wire[1] = version;
+        wire
+    }
+
+    /// A JOIN whose version differs from the protocol's is ignored (§3.2
+    /// rejection rules / zenoh-pico proto-version guard): no peer is admitted.
+    /// The version is not a parameter, so the foreign one is written on the
+    /// wire, as a peer of another revision would send it.
     #[tokio::test]
     async fn drive_loop_ignores_join_with_version_mismatch() {
-        let mut peer = params(&[0x01, 0x02, 0x03, 0x04]);
-        peer.version = 0x08; // wire-incompatible announcer
-        let mut driver = FakeDriver::with([(join0(&peer), src(2))]);
+        let peer = params(&[0x01, 0x02, 0x03, 0x04]);
+        let mut driver = FakeDriver::with([(join_of_version(&peer, 0x08), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 

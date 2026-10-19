@@ -11801,7 +11801,6 @@ fn tapped_qos_group_session() -> (
     crate::multicast_pipeline::MulticastTxTap,
 ) {
     let params = wz_session_core::multicast_params::MulticastParams {
-        version: 0x09,
         whatami: wz_session_core::WhatAmI::Peer,
         zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
         lease_ms: 5_000,

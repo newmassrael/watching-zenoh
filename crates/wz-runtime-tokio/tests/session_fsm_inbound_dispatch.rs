@@ -837,7 +837,7 @@ fn r86_handle_inbound_initsyn_captures_peer_zid() {
     // wire across the dispatch layers.
     let wire = vec![
         0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
-        0x05,        // version
+        0x09,        // version
         0x31,        // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
         0xB0,
         0xB1,
@@ -883,7 +883,7 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     // FLAG_T_INIT_S (0x40) and FLAG_T_INIT_A (0x20) parent flags.
     let wire = vec![
         0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
-        0x05,
+        0x09,
         0x31,
         0xC0,
         0xC1,
@@ -925,7 +925,7 @@ fn r311qh_peer_zid_captures_the_remote_zid_both_directions() {
     assert!(acc.peer_zid().is_none(), "routing zid starts empty");
     let initsyn = vec![
         0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
-        0x05,
+        0x09,
         0x31, // version, cbyte (whatami Peer, zid_len 4)
         0xB0,
         0xB1,
@@ -949,7 +949,7 @@ fn r311qh_peer_zid_captures_the_remote_zid_both_directions() {
     let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new());
     let initack = vec![
         0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
-        0x05,
+        0x09,
         0x31, // version, cbyte
         0xC0,
         0xC1,
@@ -994,7 +994,7 @@ fn r311td_peer_whatami_captures_the_remote_role_both_directions() {
     assert!(acc.peer_whatami_wire().is_none(), "role starts empty");
     let initsyn = vec![
         0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
-        0x05,
+        0x09,
         0x30, // version, cbyte (whatami Router wire 0, zid_len 4)
         0xB0,
         0xB1,
@@ -1017,7 +1017,7 @@ fn r311td_peer_whatami_captures_the_remote_role_both_directions() {
     let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new());
     let initack = vec![
         0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
-        0x05,
+        0x09,
         0x32, // version, cbyte (whatami Client wire 2, zid_len 4)
         0xC0,
         0xC1,

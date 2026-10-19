@@ -188,7 +188,6 @@ impl SessionFactory<SystickClockRef> for Factory {
     /// whole.
     fn params(&mut self) -> SessionInitParams {
         SessionInitParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: zid_bytes(&ZID),
             seq_num_res: 2,

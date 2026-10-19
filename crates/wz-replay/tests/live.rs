@@ -550,7 +550,6 @@ fn keyexpr_and_payload(message: &NetworkMessage) -> Option<(String, Vec<u8>)> {
 
 fn peer_init_params() -> SessionInitParams {
     SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         // Distinct from the replay tool's own zid, or the handshake is a node
         // talking to itself.

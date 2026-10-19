@@ -139,13 +139,8 @@ const WHAT_PEER: u8 = 0b010;
 const SCOUT_ITER_CAP: usize = 10_000;
 
 fn wz_identity() -> ResponderIdentity {
-    ResponderIdentity::try_new(
-        0x09,
-        WhatAmI::Peer,
-        WZ_ZID.to_vec(),
-        vec![WZ_LOCATOR.to_string()],
-    )
-    .expect("the identity shape is well-formed")
+    ResponderIdentity::try_new(WhatAmI::Peer, WZ_ZID.to_vec(), vec![WZ_LOCATOR.to_string()])
+        .expect("the identity shape is well-formed")
 }
 
 /// A Scout datagram in the shape wz's `scout_emit` and zenoh's `Runtime::scout`
@@ -205,7 +200,6 @@ async fn discover(scout: (Ipv4Addr, u16), resp: (Ipv4Addr, u16)) -> ScoutOutcome
             .await
             .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
-        version: 0x09,
         what: WHAT_ROUTER | WHAT_PEER,
         zid: SCOUT_ZID.to_vec(),
         timeout_ms: 500,

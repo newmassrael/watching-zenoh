@@ -50,7 +50,6 @@ use wz_session_core::tx_buf::{SliceTxBuf, TxBuf};
 
 fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
     SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: zid_bytes(zid),
         seq_num_res: 2,
@@ -111,7 +110,7 @@ fn oracle_init(
     }
     let cookie = if is_ack { cookie } else { None };
     let body = InitBody {
-        version: p.version,
+        version: wire_const::PROTOCOL_VERSION,
         cbyte: p.whatami.to_wire() | (((p.zid.len() as u8 - 1) & 0x0F) << 4),
         zid: &p.zid,
         sn_res: Some((caps.seq_num_res & 0x03) | ((caps.req_id_res & 0x03) << 2)),

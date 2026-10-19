@@ -429,7 +429,6 @@ mod cookie_nonce_draw_tests {
 
     fn params() -> SessionInitParams {
         SessionInitParams {
-            version: 0x05,
             whatami: wz_session_core::WhatAmI::Peer,
             zid: vec![0x0A, 0x0B, 0x0C, 0x0D],
             seq_num_res: 2,

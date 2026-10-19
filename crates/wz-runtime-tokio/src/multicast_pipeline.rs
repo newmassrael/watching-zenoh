@@ -821,7 +821,6 @@ mod tests {
 
     fn params(is_qos: bool) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: wz_session_core::WhatAmI::Peer,
             zid: vec![1, 2, 3, 4],
             lease_ms: 5_000,

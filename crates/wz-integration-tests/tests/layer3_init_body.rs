@@ -19,6 +19,7 @@
 //!   - parent.A: VLE(cookie_len) + cookie bytes
 
 use wz_codecs::init_body::InitBody;
+use wz_codecs::wire_const::PROTOCOL_VERSION;
 use zenoh_pico_sys::{
     _z_delete_context_t, _z_id_t, _z_init_encode, _z_slice_t, _z_t_msg_init_t, _z_wbuf_clear,
     _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear, z_whatami_t,
@@ -127,7 +128,7 @@ fn zenoh_pico_encode_init(input: &InitInput) -> Vec<u8> {
 fn layer3_init_body_s0_a0() {
     // No optional fields: body = version + cbyte + zid only.
     let input = InitInput {
-        version: 0x05,
+        version: PROTOCOL_VERSION,
         whatami: WHATAMI_ROUTER,
         zid: &[0x01, 0x02, 0x03],
         seq_num_res: 0,
@@ -159,7 +160,7 @@ fn layer3_init_body_s0_a0() {
 fn layer3_init_body_s1_a0() {
     // parent.S=1 only: + sn_res + batch_size.
     let input = InitInput {
-        version: 0x05,
+        version: PROTOCOL_VERSION,
         whatami: WHATAMI_PEER,
         zid: &[0x10, 0x20, 0x30, 0x40],
         seq_num_res: 0x03, // 2-bit max
@@ -193,7 +194,7 @@ fn layer3_init_body_s0_a1() {
     // parent.A=1 only: + cookie.
     let cookie = vec![0xBA, 0xBE, 0x11, 0x22];
     let input = InitInput {
-        version: 0x05,
+        version: PROTOCOL_VERSION,
         whatami: WHATAMI_CLIENT,
         zid: &[0xAA, 0xBB],
         seq_num_res: 0,
@@ -226,7 +227,7 @@ fn layer3_init_body_s1_a1() {
     // Both gates set: full body shape.
     let cookie = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77];
     let input = InitInput {
-        version: 0x05,
+        version: PROTOCOL_VERSION,
         whatami: WHATAMI_ROUTER,
         zid: &(0x01..=0x10).collect::<Vec<u8>>(), // 16-byte zid
         seq_num_res: 0x01,

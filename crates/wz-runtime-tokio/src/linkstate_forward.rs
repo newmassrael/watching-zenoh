@@ -8617,7 +8617,7 @@ mod tests {
         let (actions, _sink) = recording_actions();
         let initsyn = vec![
             0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
-            0x05,
+            0x09,
             0x30, // version, cbyte (whatami Router wire 0, zid_len 4)
             0xAA,
             0xAA,

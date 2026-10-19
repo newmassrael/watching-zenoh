@@ -73,7 +73,6 @@ type Table = SessionSlots<Rt, CoopTime<Frozen>, LwipUdpDriver, Fill, 2>;
 
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: zid_bytes(&[zid; 4]),
         seq_num_res: 2,

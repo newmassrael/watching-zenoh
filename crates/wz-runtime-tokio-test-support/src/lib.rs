@@ -44,7 +44,6 @@ use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, T
 /// link against it.
 pub fn fixture_session_init_params() -> SessionInitParams {
     SessionInitParams {
-        version: 0x05,
         whatami: WhatAmI::Peer,
         zid: vec![0x01; 4],
         seq_num_res: 0,
@@ -63,23 +62,24 @@ pub fn fixture_session_init_params() -> SessionInitParams {
 
 /// The zenoh-1.5.0 INTEROP wire-negotiation profile, parameterized on the two
 /// fields that legitimately vary per caller: `whatami` (the role the opener
-/// presents) and `zid` (its identity). The remaining eight fields are the
-/// negotiation shape a STRICT zenoh peer accepts at InitSyn — `version: 0x09`,
-/// a real `batch_size: 65535`, and `seq_num_res`/`req_id_res = 2` — the shape
-/// `wz-ap-demo`'s initiator path uses. This differs from
-/// [`fixture_session_init_params`], whose `version: 0x05` / `batch_size: 0` are
-/// wz<->wz internal-test values a strict zenohd rejects at InitSyn.
+/// presents) and `zid` (its identity). The remaining fields are the
+/// negotiation shape a STRICT zenoh peer accepts at InitSyn — a real
+/// `batch_size: 65535` and `seq_num_res`/`req_id_res = 2` — the shape
+/// `wz-ap-demo`'s initiator path uses. (The protocol version is not a field:
+/// every encoder writes `PROTOCOL_VERSION`.) This differs from
+/// [`fixture_session_init_params`] only in its sizes: that fixture's
+/// `batch_size: 0` is a wz<->wz internal-test value a strict zenohd rejects
+/// at InitSyn.
 ///
 /// This is the SSOT for that profile: the in-process zenohd storage-replication
 /// interop e2e (a `Client` dialing a router — [`zenohd_interop_session_init_params`])
 /// and the `wz-e2e-*` acceptor scaffolding (a `Peer` accepting one peer) both
 /// derive their `SessionInitParams` from this ONE builder rather than each
-/// re-declaring the eight shared negotiation fields inline. (`wz-ap-demo`'s
+/// re-declaring the shared negotiation fields inline. (`wz-ap-demo`'s
 /// `demo_session_init_params` is `pub(crate)` to that binary, so it cannot be
 /// the shared source for an in-process or cross-crate test.)
 pub fn zenoh_interop_session_init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
     SessionInitParams {
-        version: 0x09,
         whatami,
         zid,
         seq_num_res: 2,

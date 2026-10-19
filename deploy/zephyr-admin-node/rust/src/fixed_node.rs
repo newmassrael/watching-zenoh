@@ -200,7 +200,6 @@ impl SessionFactory<Clock> for Factory {
     /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
     fn params(&mut self) -> SessionInitParams {
         SessionInitParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: zid_bytes(&self.zid),
             seq_num_res: 2,

@@ -178,7 +178,8 @@ pub fn encode_init_into(
         None
     };
     let body = InitBody {
-        version: params.version,
+        // The protocol's, not a parameter: see `SessionInitParams`.
+        version: wire_const::PROTOCOL_VERSION,
         cbyte: init_cbyte(params.whatami, params.zid.len()),
         // zid is the protocol-bounded peer id (1..=16); init_cbyte
         // above already encodes its length.
@@ -494,7 +495,6 @@ mod tests {
     fn open_params(lease_ms: u64) -> crate::session_init_params::SessionInitParams {
         use alloc::vec;
         crate::session_init_params::SessionInitParams {
-            version: 0x05,
             whatami: WhatAmI::Peer,
             zid: crate::session_init_params::zid_bytes(&[0x01; 4]),
             seq_num_res: 0,

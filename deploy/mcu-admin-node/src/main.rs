@@ -147,7 +147,6 @@ impl EntropySource for ClockSeededXorshift {
 #[cfg(not(feature = "fixed-memory"))]
 fn params(signing_key: &[u8]) -> SessionInitParams {
     SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: ZID.to_vec(),
         seq_num_res: 2,

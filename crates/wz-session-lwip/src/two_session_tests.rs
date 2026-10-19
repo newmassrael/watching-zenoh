@@ -98,7 +98,6 @@ impl wz_session_core::entropy::EntropySource for Counting {
 /// each other and from the group session's.
 fn unicast_params(zid: u8) -> SessionInitParams {
     SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: vec![zid; 4],
         seq_num_res: 2,
@@ -116,7 +115,6 @@ fn unicast_params(zid: u8) -> SessionInitParams {
 /// The group parameters: the group session's own, and the injected member's.
 fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
     MulticastParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: wz_session_core::multicast_params::zid_vec(zid),
         lease_ms,

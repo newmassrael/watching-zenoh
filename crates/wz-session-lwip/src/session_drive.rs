@@ -269,7 +269,6 @@ mod tests {
 
     fn test_params() -> SessionInitParams {
         SessionInitParams {
-            version: 0x05,
             whatami: WhatAmI::Peer,
             zid: vec![0x01, 0x02, 0x03, 0x04],
             seq_num_res: 2,

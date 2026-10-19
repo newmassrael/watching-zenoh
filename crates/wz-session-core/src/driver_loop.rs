@@ -220,6 +220,26 @@ pub enum DriverLoopOutcome {
     /// level.
     #[cfg(feature = "codec-init-body")]
     InitRegionRejected,
+    /// An InitSyn announced a protocol version other than
+    /// [`wz_codecs::wire_const::PROTOCOL_VERSION`], carried here.
+    ///
+    /// zenoh refuses it first thing, before reading any other field, and closes
+    /// INVALID (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `if init_syn.version != input.mine_version {`), so the dispatcher
+    /// injects `FramingError` and the FSM closes with `CloseReason::Invalid`.
+    /// A body laid out by another protocol revision is not one this node can
+    /// claim to have read, and answering it with an InitAck would be
+    /// negotiating fields it does not know the meaning of.
+    ///
+    /// ACCEPTOR-ONLY, as upstream's is: neither reference checks the version an
+    /// InitAck carries. zenoh-pico checks no InitSyn's either; wz follows zenoh,
+    /// the stricter of the two, because the byte decides how every byte after
+    /// it is laid out.
+    #[cfg(feature = "codec-init-body")]
+    InitSynVersionRejected {
+        /// The version the InitSyn announced.
+        version: u8,
+    },
     /// R2858 — the peer's `open::ext::RemoteBound` (`0x7` on the OPEN
     /// carrier) was PRESENT and, after upstream's `as u8` truncation, is
     /// neither bound. Both roles refuse it with GENERIC through

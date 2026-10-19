@@ -432,7 +432,6 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
 #[cfg(any(feature = "heap", feature = "fixed-memory"))]
 fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         // The heap form names the slice's own `to_vec`; the fixed form links no `alloc`
         // to name it through, so it asks the session tier for the value.

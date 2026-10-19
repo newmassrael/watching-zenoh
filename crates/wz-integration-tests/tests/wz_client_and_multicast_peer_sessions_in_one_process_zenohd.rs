@@ -89,7 +89,6 @@ const ITER_CAP: usize = 4096;
 
 fn group_params(zid_byte: u8) -> MulticastParams {
     MulticastParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: vec![zid_byte; 4],
         lease_ms: 5_000,

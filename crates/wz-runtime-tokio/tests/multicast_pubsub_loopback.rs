@@ -72,7 +72,6 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
 
 fn mc_params(zid_byte: u8) -> MulticastParams {
     MulticastParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: vec![zid_byte; 4],
         lease_ms: 5_000,

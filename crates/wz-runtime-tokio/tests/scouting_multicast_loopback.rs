@@ -181,7 +181,6 @@ async fn scout_discovers_peer_locator_over_multicast() {
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
-        version: 0x09,
         what: 0x03, // ROUTER | PEER
         zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
         timeout_ms: 1000,
@@ -266,7 +265,6 @@ async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_grou
                 .await
                 .expect("bind the MOVED multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03,
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
             timeout_ms: 500,
@@ -355,7 +353,6 @@ async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
-        version: 0x09,
         what: 0x03,
         zid: OUR_ZID.to_vec(),
         timeout_ms: 1500,
@@ -448,7 +445,6 @@ async fn an_empty_answer_from_the_group_does_not_end_an_exit_on_first_window() {
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
-        version: 0x09,
         what: 0x03,
         zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
         timeout_ms: 2000,
@@ -598,7 +594,6 @@ mod round2 {
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03, // ROUTER | PEER
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
             timeout_ms: 1000,
@@ -737,7 +732,6 @@ mod round3_tls {
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03, // ROUTER | PEER
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
             timeout_ms: 1000,

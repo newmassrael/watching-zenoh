@@ -769,7 +769,6 @@ mod multicast {
     /// the batch is fragmented.
     fn params() -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: wz_session_core::WhatAmI::Peer,
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
             lease_ms: 5_000,

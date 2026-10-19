@@ -83,7 +83,6 @@ fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
     let cookie_signing_key = SigningKey::from_entropy(&mut FreertosEntropy)
         .map_err(|e| format!("draw the cookie signing key: {:?}", e))?;
     Ok(SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: vec![zid; 4],
         seq_num_res: 2,
@@ -100,7 +99,6 @@ fn unicast_params(zid: u8) -> Result<SessionInitParams, String> {
 /// The group parameters: the group session's own, and the member's.
 fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
     MulticastParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: zid.to_vec(),
         lease_ms,

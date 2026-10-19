@@ -266,9 +266,9 @@ fn spawn_seeding_zpub(key: &str, value: &str, port: u16) -> ChildGuard {
 /// Dial zenohd in-process and reach Established, retrying to absorb zenohd's
 /// cold-start window between "listener up" (the TCP-accept gate) and
 /// "handshake-ready" (transport/routing tasks scheduled). The open params are
-/// the shared [`zenohd_interop_session_init_params`] (version 0x09 / real
-/// batch_size / res 2) — a strict zenohd rejects the wz<->wz fixture shape
-/// (version 0x05 / batch_size 0) at InitSyn.
+/// the shared [`zenohd_interop_session_init_params`] (real batch_size / res 2)
+/// — a strict zenohd rejects the wz<->wz fixture shape (batch_size 0) at
+/// InitSyn.
 async fn connect_to_zenohd(port: u16) -> OpenedSession {
     let locator = parse_any_locator(&format!("tcp/127.0.0.1:{port}")).expect("parse locator");
     for attempt in 1..=20 {

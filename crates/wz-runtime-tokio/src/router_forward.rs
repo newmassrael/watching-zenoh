@@ -19427,7 +19427,6 @@ mod tests {
     ) {
         crate::multicast_pipeline::MulticastTxTap::attach(
             &wz_session_core::multicast_params::MulticastParams {
-                version: 0x09,
                 whatami: wz_session_core::WhatAmI::Router,
                 zid: vec![0x01],
                 lease_ms: 5_000,

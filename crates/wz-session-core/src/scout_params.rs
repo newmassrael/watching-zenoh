@@ -24,11 +24,13 @@
 use alloc::vec::Vec;
 
 /// Inputs for one outbound Scout frame plus the active-scouting deadline.
+///
+/// No protocol version: a Scout announces the protocol's
+/// ([`wz_codecs::wire_const::PROTOCOL_VERSION`]), as upstream's does
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `version: zenoh_protocol::VERSION,`),
+/// for the reason [`crate::session_init_params::SessionInitParams`] gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoutParams {
-    /// Zenoh protocol version byte (`Z_PROTO_VERSION`), emitted as Scout
-    /// body byte 0.
-    pub version: u8,
     /// WhatAmI bitmask the scouter is looking for (low 3 bits of the
     /// Scout cbyte; `0x01` ROUTER, `0x02` PEER, `0x04` CLIENT — a peer
     /// scouting for routers and peers sends `0x03`). Mirrors

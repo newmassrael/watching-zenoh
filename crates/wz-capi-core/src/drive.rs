@@ -1164,7 +1164,6 @@ pub(crate) fn init_params(
     link_tx: LinkTx,
 ) -> Result<SessionInitParams, EntropyUnavailable> {
     Ok(SessionInitParams {
-        version: 0x09,
         whatami,
         zid,
         seq_num_res: 2,

@@ -371,7 +371,6 @@ mod tests {
 
     fn params(zid: u8) -> SessionInitParams {
         SessionInitParams {
-            version: 0x09,
             whatami: wz_session_core::WhatAmI::Peer,
             zid: vec![zid; 4],
             seq_num_res: 2,

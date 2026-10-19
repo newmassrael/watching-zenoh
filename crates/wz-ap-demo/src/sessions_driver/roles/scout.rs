@@ -42,7 +42,7 @@ use wz::runtime_tokio::scouting_glue::{
 use wz::runtime_tokio::UdpDriver;
 
 #[cfg(feature = "scouting-active")]
-use crate::args::{ScoutSocketArgs, DEMO_PROTO_VERSION};
+use crate::args::ScoutSocketArgs;
 #[cfg(feature = "scouting-active")]
 use crate::sessions_driver::Say;
 use crate::sessions_driver::{Args, Ctx, KeyDef, KeyKind, Play, RoleDef};
@@ -244,7 +244,6 @@ async fn run(ctx: Ctx) {
         }
     };
     let actions = ScoutingActions::new(ScoutParams {
-        version: DEMO_PROTO_VERSION,
         what: mask,
         zid: ctx.session.zid().to_vec(),
         timeout_ms: ctx.int("timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS),

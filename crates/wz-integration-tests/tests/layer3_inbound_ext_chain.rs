@@ -15,6 +15,7 @@
 //!   `[parent_flags|T_MID_INIT, ...init_body, ...ext_chain]`
 
 use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+use wz_codecs::wire_const::PROTOCOL_VERSION;
 use wz_runtime_tokio::session_glue::{
     parse_inbound, InboundFrame, InboundParseError, MAX_EXT_CHAIN_DEPTH,
 };
@@ -81,7 +82,7 @@ fn pico_initack_with_chain() -> Vec<u8> {
             _whatami: WHATAMI_PEER,
             _req_id_res: 0,
             _seq_num_res: 0,
-            _version: 0x05,
+            _version: PROTOCOL_VERSION,
             _patch: 0,
         };
         assert_eq!(_z_init_encode(&mut wbf, parent_flags, &msg), 0);
@@ -180,10 +181,12 @@ fn ext_chain_overflow_rejects_unbounded_continuation() {
     // high nibble 0, so cbyte = wire-form whatami only.
     let cbyte = ((WHATAMI_PEER >> 1) & 0x03) as u8;
     wire.extend_from_slice(&[
-        0x05, // version
-        cbyte, 0xAA, // zid
+        PROTOCOL_VERSION, // version
+        cbyte,
+        0xAA, // zid
         0x00, // sn_res
-        0x00, 0x00, // batch_size LE
+        0x00,
+        0x00, // batch_size LE
         0x00, // VLE cookie_len=0
     ]);
     // MAX_EXT_CHAIN_DEPTH+1 Unit entries, all Z=1, no terminator.

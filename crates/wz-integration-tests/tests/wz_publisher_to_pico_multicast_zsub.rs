@@ -71,8 +71,7 @@ use tokio::net::UdpSocket;
 
 use wz_integration_tests::common::{
     default_route_iface, read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard,
-    PICO_BATCH_MULTICAST_SIZE, PICO_PROTO_VERSION, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
-    Z_SUB_INIT_TIMEOUT,
+    PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP, Z_SUB_INIT_TIMEOUT,
 };
 use wz_runtime_tokio::multicast_glue::{
     drive_multicast_session, multicast_put_literal, MulticastDriveConfig, MulticastTxProducer,
@@ -100,7 +99,6 @@ const PAYLOAD: &str = "WZ-MCAST-JOIN-INTEROP-R311nm";
 /// constants above so pico admits the wz peer from its JOIN beacon.
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
-        version: PICO_PROTO_VERSION,
         whatami: WhatAmI::Peer,
         zid: vec![0x77; 4],
         lease_ms: 5_000,

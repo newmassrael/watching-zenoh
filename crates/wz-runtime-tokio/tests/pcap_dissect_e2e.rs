@@ -51,10 +51,9 @@ use wz_session_core::passive::{Direction, SessionPhase};
 
 const ITER_CAP: usize = 64;
 
-/// One end of the recorded link, speaking zenoh's own wire shape. The
-/// dissection under test refuses an Init of any version but zenoh's, so the
-/// wz-internal fixture profile (version `0x05`) would hand it a handshake it
-/// must not read.
+/// One end of the recorded link, speaking zenoh's own wire shape: the interop
+/// profile's sizes are the ones a zenoh peer negotiates, where the wz-internal
+/// fixture profile's are wz<->wz test values.
 fn peer_params(zid: u8) -> SessionInitParams {
     zenoh_interop_session_init_params(WhatAmI::Peer, vec![zid; 4])
 }

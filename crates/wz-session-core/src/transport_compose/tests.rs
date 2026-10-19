@@ -10,7 +10,6 @@ use wz_codecs::whatami::WhatAmI;
 
 fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
     SessionInitParams {
-        version: 0x05,
         whatami: WhatAmI::Peer,
         zid: crate::session_init_params::zid_bytes(zid),
         seq_num_res: 2,
@@ -56,7 +55,7 @@ fn compose_init_matches_the_session_encoder() {
                     } else {
                         InitRole::Syn
                     },
-                    version: p.version,
+                    version: wz_codecs::wire_const::PROTOCOL_VERSION,
                     whatami: 1,
                     zid: &zid,
                     size: Some(SizeParams {

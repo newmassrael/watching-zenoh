@@ -512,6 +512,32 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                 if !admit {
                     return DriverLoopOutcome::SideEffectOnly;
                 }
+                // An InitSyn of another protocol version is refused before any
+                // of its fields is negotiated, as upstream refuses it before
+                // reading the resolution (`DriverLoopOutcome::InitSynVersionRejected`).
+                // After the admission gate, so an InitSyn over the half-open
+                // cap or the rate limit is still dropped silently rather than
+                // answered with a Close: the anti-amplification rule outranks
+                // the courtesy of saying why. Scoped to the state that awaits
+                // an InitSyn, as the InitAck checks above are scoped to the one
+                // that awaits an InitAck.
+                #[cfg(feature = "codec-init-body")]
+                if let InboundFrame::Init {
+                    is_ack: false,
+                    body,
+                    ..
+                } = &frame
+                {
+                    use crate::session_fsm_unicast::SessionFsmUnicastState as S;
+                    if engine.get_current_state() == S::AwaitingInitSyn
+                        && body.version != wz_codecs::wire_const::PROTOCOL_VERSION
+                    {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::InitSynVersionRejected {
+                            version: body.version,
+                        };
+                    }
+                }
                 // R2772 — REBUILD the acceptor's negotiated state from the
                 // cookie the peer just echoed. This is the half that makes the
                 // cookie a CARRIER: R2769 gave it the state and taught the

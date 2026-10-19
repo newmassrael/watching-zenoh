@@ -584,7 +584,6 @@ fn vanishing_subscriber_peer(
         let opened = initiate_and_open_session(
             dialed,
             SessionInitParams {
-                version: 0x09,
                 whatami: WhatAmI::Client,
                 zid,
                 seq_num_res: 2,

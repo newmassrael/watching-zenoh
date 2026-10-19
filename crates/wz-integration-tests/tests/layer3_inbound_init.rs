@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use wz_codecs::wire_const::PROTOCOL_VERSION;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, parse_inbound, BoxedLinkDriver, InboundFrame, InboundParseError,
@@ -132,7 +133,7 @@ impl BoxedLinkDriver for NoopDriver {
 fn parse_inbound_decodes_pico_initack_frame() {
     let cookie = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
     let wire = pico_encode_initack_frame(
-        0x05,
+        PROTOCOL_VERSION,
         WHATAMI_PEER,
         &[0x01, 0x02, 0x03, 0x04],
         /*seq_num_res=*/ 2,
@@ -155,7 +156,7 @@ fn parse_inbound_decodes_pico_initack_frame() {
                 extensions.is_empty(),
                 "no-Z-flag frame must yield empty extensions"
             );
-            assert_eq!(body.version, 0x05);
+            assert_eq!(body.version, PROTOCOL_VERSION);
             assert_eq!(body.zid.as_slice(), [0x01, 0x02, 0x03, 0x04].as_slice());
             assert_eq!(body.sn_res, Some(0x06)); // (seq=2 & 0x03) | ((req=1 & 0x03) << 2)
             assert_eq!(body.batch_size, Some(0xCAFE));
@@ -173,7 +174,7 @@ fn parse_inbound_decodes_pico_initack_frame() {
 fn handle_inbound_populates_cookie_slot_from_initack() {
     let cookie = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     let wire = pico_encode_initack_frame(
-        0x05,
+        PROTOCOL_VERSION,
         WHATAMI_PEER,
         &[0xA0, 0xA1, 0xA2, 0xA3],
         0,

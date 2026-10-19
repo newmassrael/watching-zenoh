@@ -102,7 +102,6 @@ use crate::scouting_message::{parse_scouting, ScoutingFrame};
 /// made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponderIdentity {
-    version: u8,
     whatami: WhatAmI,
     zid: Vec<u8>,
     locators: Vec<String>,
@@ -152,17 +151,17 @@ impl ResponderIdentity {
 
     /// Build the identity a responder answers with.
     ///
-    /// `version` is echoed into every Hello. Upstream answers with its OWN
-    /// `zenoh_protocol::VERSION` rather than the Scout's
-    /// (`orchestrator.rs:1161`), so it is a property of the node, not of the
-    /// question.
+    /// A Hello carries the protocol's version
+    /// ([`wz_codecs::wire_const::PROTOCOL_VERSION`]), not the Scout's and not a
+    /// value the caller picks: upstream answers with its own
+    /// `zenoh_protocol::VERSION` (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `version: zenoh_protocol::VERSION,`), which nothing configures.
     ///
     /// `locators` may be empty. Upstream tolerates that on the receiving side
     /// with a warning ("Received Hello with no locators",
     /// `orchestrator.rs:1102`) and simply does not connect, so an empty list is
     /// an honest "I am here but not dialable" rather than a malformed reply.
     pub fn try_new(
-        version: u8,
         whatami: WhatAmI,
         zid: Vec<u8>,
         locators: Vec<String>,
@@ -174,7 +173,6 @@ impl ResponderIdentity {
             return Err(ResponderIdentityError::ZidTooLong { len: zid.len() });
         }
         Ok(Self {
-            version,
             whatami,
             zid,
             locators,
@@ -230,11 +228,6 @@ impl ResponderIdentity {
             (Some(noloopback), Some(ip)) if !ip.is_loopback() => noloopback,
             _ => &self.locators,
         }
-    }
-
-    /// The protocol version byte this node answers with.
-    pub fn version(&self) -> u8 {
-        self.version
     }
 
     /// This node's role — the `what` gate reads it, and the Hello carries its
@@ -421,7 +414,7 @@ pub fn hello_datagram(identity: &ResponderIdentity) -> Vec<u8> {
 /// list was chosen for.
 fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> Vec<u8> {
     let mut hello = Hello::new();
-    hello.version = identity.version;
+    hello.version = wz_codecs::wire_const::PROTOCOL_VERSION;
     hello.set_whatami(identity.whatami.to_wire());
     // Neither arithmetic can go wrong: `try_new` refuses an empty zid and one
     // longer than the 4-bit field, which is the whole reason it is a
@@ -484,7 +477,6 @@ mod tests {
 
     fn identity(whatami: WhatAmI, zid: &[u8], locators: &[&str]) -> ResponderIdentity {
         ResponderIdentity::try_new(
-            0x09,
             whatami,
             zid.to_vec(),
             locators.iter().map(|l| l.to_string()).collect(),
@@ -765,16 +757,16 @@ mod tests {
     #[test]
     fn an_identity_that_cannot_be_self_echo_gated_is_refused() {
         assert_eq!(
-            ResponderIdentity::try_new(0x09, WhatAmI::Peer, vec![], vec![]),
+            ResponderIdentity::try_new(WhatAmI::Peer, vec![], vec![]),
             Err(ResponderIdentityError::EmptyZid),
         );
         // The other end of the same field: 16 bytes is the longest the Hello's
         // 4-bit length can express, so 17 is refused and 16 is not.
         assert_eq!(
-            ResponderIdentity::try_new(0x09, WhatAmI::Peer, vec![0xAB; 17], vec![]),
+            ResponderIdentity::try_new(WhatAmI::Peer, vec![0xAB; 17], vec![]),
             Err(ResponderIdentityError::ZidTooLong { len: 17 }),
         );
-        let longest = ResponderIdentity::try_new(0x09, WhatAmI::Peer, vec![0xAB; 16], vec![])
+        let longest = ResponderIdentity::try_new(WhatAmI::Peer, vec![0xAB; 16], vec![])
             .expect("16 bytes is the maximum, not past it");
         // And it ENCODES: the boundary is asserted on the wire, not only on the
         // constructor, because `zid_len_m1` masks to 4 bits and would silently

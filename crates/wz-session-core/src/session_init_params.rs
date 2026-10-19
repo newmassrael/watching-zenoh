@@ -75,10 +75,17 @@ pub fn cookie_bytes(src: &[u8]) -> SessionBytes<COOKIE_MAX> {
 /// Per-deploy parameters that drive the codec field values for the
 /// 4-way handshake + close. Production callers source these from
 /// `deploy.yaml`; tests pass fixed values for reproducible wire bytes.
+///
+/// # No protocol version here
+///
+/// The version an Init announces is the protocol's
+/// ([`wz_codecs::wire_const::PROTOCOL_VERSION`]), and the encoder writes it
+/// without asking. Upstream holds it the same way: its transport manager's
+/// version is set to `zenoh_protocol::VERSION` and no builder method moves it.
+/// A field here let tests announce a version no zenoh speaks, and once an
+/// acceptor refuses a foreign version that is a node that cannot be dialled.
 #[derive(Debug, Clone)]
 pub struct SessionInitParams {
-    /// Protocol version (zenoh: 0x05 at the time of writing).
-    pub version: u8,
     /// This node's role (Router / Peer / Client). The handshake encoder
     /// projects it to the 2-bit INIT / OPEN cbyte wire form via
     /// [`WhatAmI::to_wire`] (`_z_whatami_to_uint8`, transport.c:31-37) at

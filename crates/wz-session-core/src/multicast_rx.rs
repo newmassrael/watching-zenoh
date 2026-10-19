@@ -898,7 +898,6 @@ mod batch_walk_tests {
 
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: crate::multicast_params::zid_vec(zid),
             lease_ms: 5_000,

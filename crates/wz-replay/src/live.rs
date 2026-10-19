@@ -245,7 +245,6 @@ async fn play_into_session(
 fn session_init_params(
 ) -> Result<SessionInitParams, wz::runtime_tokio::session_glue::EntropyUnavailable> {
     Ok(SessionInitParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: REPLAY_ZID.to_vec(),
         seq_num_res: 2,

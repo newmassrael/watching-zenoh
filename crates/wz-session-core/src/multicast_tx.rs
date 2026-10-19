@@ -1240,7 +1240,6 @@ mod qos_emit_tests {
 
     fn params(is_qos: bool) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
             lease_ms: 5_000,
@@ -1333,7 +1332,6 @@ mod push_tests {
 
     fn params(batch_size: u16) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
             lease_ms: 5_000,
@@ -1595,7 +1593,6 @@ mod lend_tests {
 
     fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
             lease_ms: 5_000,
@@ -1800,7 +1797,6 @@ mod lent_emit_tests {
 
     fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: crate::multicast_params::zid_vec(&[1, 2, 3, 4]),
             lease_ms: 5_000,

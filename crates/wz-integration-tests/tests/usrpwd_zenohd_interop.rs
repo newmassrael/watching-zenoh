@@ -114,8 +114,8 @@ async fn dial_with_creds(
     let locator = parse_any_locator(&format!("tcp/127.0.0.1:{port}")).expect("parse locator");
     connect_and_open_session_with_auth(
         locator,
-        // version 0x09 / real batch_size / res 2 — a strict zenohd rejects the
-        // wz<->wz fixture shape (version 0x05) at InitSyn (storage A10 note).
+        // real batch_size / res 2 — a strict zenohd rejects the wz<->wz
+        // fixture shape (batch_size 0) at InitSyn (storage A10 note).
         zenohd_interop_session_init_params(),
         initiator_dispatch(user, password),
         &DialConfig::default(),

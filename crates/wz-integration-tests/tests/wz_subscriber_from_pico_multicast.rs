@@ -67,7 +67,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     default_route_iface, read_captured, zenoh_pico_cli_binary, ChildGuard,
-    PICO_BATCH_MULTICAST_SIZE, PICO_PROTO_VERSION, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
+    PICO_BATCH_MULTICAST_SIZE, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
 };
 use wz_runtime_tokio::multicast_glue::{drive_multicast_session, MulticastDriveConfig};
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -94,7 +94,6 @@ const VALUE: &str = "WZ-MCAST-DIALIN-R311no";
 /// with R311nm's pinning in the wz -> pico direction).
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
-        version: PICO_PROTO_VERSION,
         whatami: WhatAmI::Peer,
         zid: vec![0x77; 4],
         lease_ms: 5_000,

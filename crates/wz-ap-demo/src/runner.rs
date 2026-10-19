@@ -126,8 +126,6 @@ use wz::runtime_tokio::startup_phase::{
 };
 use wz::runtime_tokio::sync::Mutex;
 
-#[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
-use crate::args::DEMO_PROTO_VERSION;
 use crate::args::{
     demo_session_init_params, DeclareEmitSpec, LivelinessGetSpec, PublisherSpec, QueryEmitSpec,
     QueryRoleSpec, QueryableReply, QueryableSpec, RemoteLogSpec, ReplyConsumerSpec, Role,
@@ -984,7 +982,6 @@ pub(crate) async fn scout_for_peer_locator(
     // a responder logging the scouter sees the same zid the InitSyn then
     // carries. `--zid` therefore reaches here, not only the session params.
     let actions = ScoutingActions::new(ScoutParams {
-        version: DEMO_PROTO_VERSION,
         what: SCOUT_WHAT,
         zid,
         timeout_ms: SCOUT_CYCLE_MS,
@@ -1135,13 +1132,12 @@ pub(crate) async fn spawn_scouting_responder(
             )
         })?;
     let identity =
-        ResponderIdentity::try_new(DEMO_PROTO_VERSION, whatami, zid.to_vec(), locators.clone())
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("wz-ap-demo: --scout-listen cannot answer: {e}"),
-                )
-            })?;
+        ResponderIdentity::try_new(whatami, zid.to_vec(), locators.clone()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("wz-ap-demo: --scout-listen cannot answer: {e}"),
+            )
+        })?;
     // R2956 — zenoh's zid form, as every zid this binary prints.
     let zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(zid);
     // The socket ACTUALLY joined and the identity ACTUALLY answered with — the
@@ -1301,7 +1297,6 @@ async fn spawn_scouting_autoconnect(
 
     let policy = AutoConnect::with_strategies(Zid::from_slice(zid), args.matcher, args.strategy);
     let actions = ScoutingActions::new(ScoutParams {
-        version: DEMO_PROTO_VERSION,
         // The Scout asks for exactly the roles the policy would dial —
         // `autoconnect.matcher()` is what upstream passes as `Runtime::scout`'s
         // `what` here. Asking for roles this node would refuse anyway is traffic
@@ -2885,7 +2880,6 @@ async fn install_rescout_plan(
     recon.set_targets(std::sync::Arc::new(ScoutedGroup::new(
         driver,
         ScoutParams {
-            version: DEMO_PROTO_VERSION,
             what: SCOUT_WHAT,
             zid: plan.zid.clone(),
             timeout_ms: SCOUT_CYCLE_MS,

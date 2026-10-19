@@ -68,10 +68,6 @@ use wz_session_core::sink::SampleView;
 /// What every call after the session ended says.
 const SESSION_ENDED: &str = "the session to the router has ended";
 
-/// The Zenoh protocol version byte a client of the 1.x line announces, which is the one the
-/// watching-zenoh demo announces to a router of that line.
-const PROTOCOL_VERSION: u8 = 0x09;
-
 /// The lease a client announces, in milliseconds: the interval after which a router that has heard
 /// nothing ends the session and with it this machine's presence.
 const LEASE_MS: u64 = 10_000;
@@ -307,7 +303,6 @@ fn session_params() -> Result<SessionInitParams, ClientError> {
     // A zenoh id is the bytes up to its last non-zero one.
     let significant = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     Ok(SessionInitParams {
-        version: PROTOCOL_VERSION,
         whatami: WhatAmI::Client,
         zid: zid[..significant].to_vec(),
         seq_num_res: 2,

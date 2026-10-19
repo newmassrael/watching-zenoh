@@ -23,6 +23,7 @@ use wz_codecs::ext_entry::{ExtEntry, ExtEntryOwned, ExtEntryVariant};
 use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
+use wz_codecs::wire_const::PROTOCOL_VERSION;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, BoxedLinkDriver, ExtChainRole, LinkSendOutcome,
@@ -41,8 +42,8 @@ const FLAG_T_INIT_A: u8 = 0x20;
 const FLAG_T_Z: u8 = 0x80;
 const M_FLAG: u8 = 0x10;
 
-// Fixture inputs — match fixture_session_init_params().
-const FIXTURE_VERSION: u8 = 0x05;
+// Fixture inputs — match fixture_session_init_params(). The version is
+// not one of them: wz always encodes `PROTOCOL_VERSION`.
 const FIXTURE_WHATAMI_API: u8 = 0x02; // Peer
 const FIXTURE_ZID: [u8; 4] = [0x01, 0x01, 0x01, 0x01];
 const FIXTURE_SEQ_NUM_RES: u8 = 0;
@@ -114,7 +115,7 @@ fn pico_init_body(parent_flags: u8) -> Vec<u8> {
             _whatami: FIXTURE_WHATAMI_API as u32,
             _req_id_res: FIXTURE_REQ_ID_RES,
             _seq_num_res: FIXTURE_SEQ_NUM_RES,
-            _version: FIXTURE_VERSION,
+            _version: PROTOCOL_VERSION,
             _patch: 0,
         };
         assert_eq!(_z_init_encode(&mut wbf, parent_flags, &msg), 0);

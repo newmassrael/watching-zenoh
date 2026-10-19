@@ -57,7 +57,7 @@ use wz_runtime_tokio::session_open::BoundListener;
 use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 
-use crate::scouting::{SCOUT_PROTO_VERSION, SCOUT_TICK_MS};
+use crate::scouting::SCOUT_TICK_MS;
 
 /// The first scouting window and the longest one, in milliseconds: a Scout goes out at the start
 /// of each, and the next window is twice the last (`zenoh/src/net/runtime/orchestrator.rs` @
@@ -294,7 +294,6 @@ impl ScoutLink {
         let mut window_ms = SCOUT_INITIAL_PERIOD_MS;
         loop {
             let actions = ScoutingActions::new(ScoutParams {
-                version: SCOUT_PROTO_VERSION,
                 what: plan.what(),
                 zid: zid.to_vec(),
                 timeout_ms: window_ms,
@@ -488,10 +487,9 @@ pub async fn bind_responder(
     if !plan.answers {
         return Ok(None);
     }
-    let identity =
-        ResponderIdentity::try_new(SCOUT_PROTO_VERSION, whatami, zid.to_vec(), advertised.local)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
-            .with_noloopback_locators(advertised.remote);
+    let identity = ResponderIdentity::try_new(whatami, zid.to_vec(), advertised.local)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
+        .with_noloopback_locators(advertised.remote);
     let named = plan
         .interface
         .as_deref()

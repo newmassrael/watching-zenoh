@@ -31,6 +31,7 @@
 
 use std::sync::Arc;
 
+use wz_codecs::wire_const::PROTOCOL_VERSION;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastActions;
 use wz_runtime_tokio::session_glue::{
@@ -58,7 +59,6 @@ fn expected_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
 /// `_z_init_encode` reference uses the same input space.
 fn fixture_params() -> SessionInitParams {
     SessionInitParams {
-        version: 0x05,
         whatami: WhatAmI::Peer,
         zid: vec![0x10, 0x20, 0x30, 0x40],
         seq_num_res: 0x03,
@@ -157,7 +157,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     let init_syn_flags = 0x40u8 | 0x80u8; // FLAG_T_INIT_S | FLAG_T_Z
     let mut expected_init_syn = Vec::new();
     expected_init_syn.push(init_syn_flags | 0x01 /* T_MID_INIT */);
-    expected_init_syn.push(params.version);
+    expected_init_syn.push(PROTOCOL_VERSION);
     expected_init_syn.push(init_cbyte);
     expected_init_syn.extend_from_slice(&params.zid);
     expected_init_syn.push(init_sn_res);

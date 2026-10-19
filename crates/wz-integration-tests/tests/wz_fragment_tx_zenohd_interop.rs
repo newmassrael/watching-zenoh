@@ -174,9 +174,9 @@ async fn publish_through_zenohd_with_batch(
         || tempfile::tempfile().expect("tempfile for z_sub stdout"),
     );
 
-    // The zenohd-STRICT open shape (version 0x09 / real batch_size / res 2).
-    // The wz<->wz `fixture_session_init_params` shape (version 0x05 /
-    // batch_size 0) is rejected by a real zenohd at InitSyn — the same reason
+    // The zenohd-STRICT open shape (real batch_size / res 2).
+    // The wz<->wz `fixture_session_init_params` shape (batch_size 0) is
+    // rejected by a real zenohd at InitSyn — the same reason
     // `wz_zenohd_storage_replication.rs:232-234` records for its own dial.
     let mut params = zenohd_interop_session_init_params();
     if let Some(batch) = batch_size {

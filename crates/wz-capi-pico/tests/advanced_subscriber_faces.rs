@@ -87,7 +87,6 @@ fn init_params(whatami: WhatAmI) -> SessionInitParams {
     let mut zid = vec![0u8; 16];
     getrandom::getrandom(&mut zid).expect("OS entropy");
     SessionInitParams {
-        version: 0x09,
         whatami,
         zid,
         seq_num_res: 2,

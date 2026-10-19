@@ -8444,16 +8444,6 @@ impl Role {
     }
 }
 
-/// The zenoh protocol version byte this demo emits — `Z_PROTO_VERSION`
-/// (zenoh-pico `include/zenoh-pico/config.h.in:190`), the value the interop
-/// rationale above pins the session handshake to.
-///
-/// R311y428 — named rather than repeated: `--scout` emits it a SECOND time, in
-/// the Scout frame's body byte 0 (`ScoutParams::version`), and a Scout that
-/// announced a different version than the InitSyn that follows would be a wire
-/// inconsistency with no single place to correct it.
-pub(crate) const DEMO_PROTO_VERSION: u8 = 0x09;
-
 /// R2886 (open-debt item 824) — `--router` is a SPELLING of `--router-hat`, and
 /// this is the one place that says so: `main` applies it to the argv before
 /// `--check-topology`, the config expansion or any mode branch reads a flag, so
@@ -8887,7 +8877,6 @@ pub(crate) fn session_init_params_for(
     tuning: &TransportTuning,
 ) -> std::io::Result<SessionInitParams> {
     Ok(SessionInitParams {
-        version: DEMO_PROTO_VERSION,
         whatami,
         zid,
         seq_num_res: 2,

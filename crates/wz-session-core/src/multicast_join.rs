@@ -127,7 +127,8 @@ pub fn encode_join_into<S: SceSink>(
 ) -> Result<(), CodecError> {
     let zid = &params.zid;
     let mut join = Join::new();
-    join.version = params.version;
+    // The protocol's, not a parameter: see `MulticastParams`.
+    join.version = wz_codecs::wire_const::PROTOCOL_VERSION;
     join.set_whatami(params.whatami.to_wire());
     if !zid.is_empty() {
         join.set_zid_len_m1((zid.len() - 1) as u8);
@@ -437,8 +438,15 @@ pub use crate::join_decode::{decode_join, decode_join_zid};
 /// a peer-FSM transition). The lease is NOT validated — any
 /// advertisement is accepted (pico parity; the Router caps the hold
 /// window locally).
+///
+/// A Join of another protocol version is ignored, as both references do
+/// (zenoh `io/zenoh-transport/src/multicast/rx.rs` @
+/// `if join.version != self.manager.config.version {`, pico
+/// `src/transport/multicast/rx.c` @ `if (msg->_version != Z_PROTO_VERSION) {`).
+/// The version compared against is the protocol's own, which neither reference
+/// lets a node configure.
 pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBaseline> {
-    if join.version != params.version {
+    if join.version != wz_codecs::wire_const::PROTOCOL_VERSION {
         return None;
     }
     let res_cbyte = join.sn_res.unwrap_or(pack_res_cbyte(
@@ -475,7 +483,6 @@ mod tests {
 
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
-            version: 0x09,
             whatami: WhatAmI::Peer,
             zid: crate::multicast_params::zid_vec(zid),
             lease_ms: 5_000,
@@ -841,7 +848,7 @@ mod tests {
     fn validate_join_rejects_mismatched_req_id_res() {
         let p = params(&[0x01, 0x02, 0x03, 0x04]);
         let mut join = Join::new();
-        join.version = p.version;
+        join.version = wz_codecs::wire_const::PROTOCOL_VERSION;
         join.set_whatami(p.whatami.to_wire());
         join.set_zid_len_m1(3);
         join.zid = &[0x05, 0x06, 0x07, 0x08];
@@ -849,6 +856,33 @@ mod tests {
         join.batch_size = Some(p.batch_size);
         join.lease = p.lease_ms;
         assert!(validate_join(&join, &p).is_none(), "req-id mismatch");
+    }
+
+    /// A Join of another protocol version is refused whatever else it agrees
+    /// on, and the same Join at the protocol's version is admitted: the pair
+    /// is what shows the version is the term refused.
+    #[test]
+    fn validate_join_refuses_another_protocol_version() {
+        let p = params(&[0x01, 0x02, 0x03, 0x04]);
+        let zid = [0x05, 0x06, 0x07, 0x08];
+        let join_of = |version: u8| {
+            let mut join = Join::new();
+            join.version = version;
+            join.set_whatami(p.whatami.to_wire());
+            join.set_zid_len_m1(3);
+            join.zid = &zid;
+            join.sn_res = Some(pack_res_cbyte(p.seq_num_res, p.req_id_res));
+            join.batch_size = Some(p.batch_size);
+            join.lease = p.lease_ms;
+            join
+        };
+        assert!(validate_join(&join_of(wz_codecs::wire_const::PROTOCOL_VERSION), &p).is_some());
+        for version in [0x00, 0x05, 0x08, 0x0a] {
+            assert!(
+                validate_join(&join_of(version), &p).is_none(),
+                "{version:#04x}"
+            );
+        }
     }
 
     /// `decode_join_zid` rejects a datagram whose MID is not `T_MID_JOIN`.

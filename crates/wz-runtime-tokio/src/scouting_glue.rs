@@ -122,7 +122,7 @@ use crate::LinkDriver;
 /// [`ScoutingActions::trace_snapshot`] after the policy takes the binding.
 pub struct ScoutingActions<R: Runtime = TokioRuntime> {
     /// Inputs for the outbound Scout frame + the scouting deadline
-    /// (version / what / zid / timeout_ms).
+    /// (what / zid / timeout_ms).
     pub params: ScoutParams,
     /// Script-action dispatch counters, read in tests via
     /// [`ScoutingActions::trace_snapshot`].
@@ -394,7 +394,7 @@ impl ScoutingActionsTrait for ScoutActionsBinding<TokioRuntime> {
         a.trace.lock().unwrap().scout_emit += 1;
         let zid = &a.params.zid;
         let mut scout = Scout::new();
-        scout.version = a.params.version;
+        scout.version = wz_codecs::wire_const::PROTOCOL_VERSION;
         scout.set_what(a.params.what);
         if !zid.is_empty() {
             // I=1 + zid_len_m1 packed into cbyte, then the id bytes
@@ -673,7 +673,6 @@ mod tests {
     /// `z_scout` survey (pico `net/primitives.c:81`).
     fn fixture_actions_mode(exit_on_first: bool) -> Arc<ScoutingActions> {
         ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03, // ROUTER | PEER
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
             timeout_ms: 1000,
@@ -1158,7 +1157,6 @@ mod tests {
         let good = craft_hello_with(0x01, &[0xA1], &["udp/127.0.0.1:7447"]);
         let mut driver = ScriptedScoutLink::with([malformed, good]);
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03,
             zid: vec![0xAA],
             timeout_ms: 400,
@@ -1235,7 +1233,6 @@ mod tests {
         let count = observed.len();
         let mut driver = ScriptedScoutLink::with(observed);
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03,
             zid: OUR_ZID.to_vec(),
             timeout_ms: 400,
@@ -1281,7 +1278,6 @@ mod tests {
         let echoed = craft_scout_with(&[0xAA]);
         let mut driver = ScriptedScoutLink::with([echoed]);
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03,
             // NOT the zid in the datagram above.
             zid: vec![0xBB],
@@ -1322,7 +1318,6 @@ mod tests {
             craft_hello_with(0x01, &[0xB2], &["udp/127.0.0.1:7447"]),
         ]);
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03,
             zid: vec![0xAA],
             timeout_ms: 400,
@@ -1373,7 +1368,6 @@ mod tests {
             craft_hello_with(0x02, &[0xB2], &["udp/127.0.0.1:7448"]),
         ]);
         let actions = ScoutingActions::new(ScoutParams {
-            version: 0x09,
             what: 0x03,
             zid: vec![0xAA],
             timeout_ms: 400,

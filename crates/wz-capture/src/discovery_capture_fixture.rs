@@ -149,7 +149,6 @@ fn scout_datagram(zid: &[u8]) -> Vec<u8> {
 /// A responder's identity: a peer with `zid` advertising `locators`.
 fn identity(zid: &[u8], locators: &[&str]) -> ResponderIdentity {
     ResponderIdentity::try_new(
-        VERSION,
         WhatAmI::Peer,
         zid.to_vec(),
         locators.iter().map(|l| l.to_string()).collect(),

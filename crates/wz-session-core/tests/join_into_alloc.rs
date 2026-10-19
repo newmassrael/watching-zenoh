@@ -73,7 +73,6 @@ fn allocations_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
 
 fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
     MulticastParams {
-        version: 0x09,
         whatami: WhatAmI::Peer,
         zid: zid_vec(&[0xab; 8]),
         lease_ms: 10_000,

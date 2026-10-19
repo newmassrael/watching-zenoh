@@ -21,6 +21,7 @@
 //! convention.
 
 use wz_codecs::join::Join;
+use wz_codecs::wire_const::PROTOCOL_VERSION;
 use zenoh_pico_sys::{
     _z_conduit_sn_list_t, _z_conduit_sn_list_t__bindgen_ty_1, _z_coundit_sn_t, _z_id_t,
     _z_join_encode, _z_t_msg_join_t, _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
@@ -103,7 +104,7 @@ fn zenoh_pico_encode_join(input: &JoinInput) -> Vec<u8> {
 #[test]
 fn layer3_join_s0_basic() {
     let input = JoinInput {
-        version: 0x05,
+        version: PROTOCOL_VERSION,
         whatami: WHATAMI_PEER,
         zid: &[0x01, 0x02, 0x03],
         seq_num_res: 0,
@@ -134,7 +135,7 @@ fn layer3_join_s0_basic() {
 #[test]
 fn layer3_join_s1_with_size_negotiation() {
     let input = JoinInput {
-        version: 0x05,
+        version: PROTOCOL_VERSION,
         whatami: WHATAMI_PEER,
         zid: &[0xAA, 0xBB, 0xCC, 0xDD],
         seq_num_res: 0x03,
@@ -172,7 +173,7 @@ fn layer3_join_s1_with_size_negotiation() {
 #[test]
 fn layer3_join_t_flag_lease_in_seconds() {
     let input = JoinInput {
-        version: 0x05,
+        version: PROTOCOL_VERSION,
         whatami: WHATAMI_PEER,
         zid: &[0x01, 0x02, 0x03],
         seq_num_res: 0,
@@ -217,7 +218,7 @@ fn layer3_join_vle_boundaries_on_sn() {
     ];
     for (lease, sn_r, sn_be) in corpus {
         let input = JoinInput {
-            version: 0x05,
+            version: PROTOCOL_VERSION,
             whatami: WHATAMI_PEER,
             zid: &[0x11],
             seq_num_res: 0,
