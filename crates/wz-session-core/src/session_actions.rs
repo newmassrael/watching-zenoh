@@ -2458,9 +2458,13 @@ pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sy
 
 /// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
 /// admits the `Response`. See [`SessionLinkActions::set_egress_reply_gate`].
+///
+/// A `Box`, not an `Arc`: the bundle is built for ARMv6-M too, which has no pointer-width atomics
+/// to count references with, so the gate is called where it is stored (under its slot's lock)
+/// and never cloned out.
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub type ReplyEgressGate =
-    alloc::sync::Arc<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
+    alloc::boxed::Box<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
 
 /// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
 /// needs to decide between one frame and a fragment chain, and to route
@@ -12633,13 +12637,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             return Some(response);
         }
-        let gate = R::with_mutex_mut(&self.egress_reply_gate, |slot| slot.clone());
-        let Some(gate) = gate else {
-            return Some(response);
-        };
         let message =
             crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
-        if !gate(&message) {
+        // Called under the slot's lock: the gate takes the session's chain and mapping locks and
+        // never this one, so it cannot meet itself here.
+        let admitted = R::with_mutex_mut(&self.egress_reply_gate, |slot| {
+            slot.as_ref().map_or(true, |gate| gate(&message))
+        });
+        if !admitted {
             return None;
         }
         match message {

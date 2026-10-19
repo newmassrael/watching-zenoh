@@ -1346,7 +1346,7 @@ where
                 let chain = self.interceptors_egress.clone();
                 let bundle = Arc::downgrade(actions);
                 // A bundle that is gone has no reply left to send; deny is the safe answer.
-                Some(Arc::new(move |msg| {
+                Some(Box::new(move |msg| {
                     bundle
                         .upgrade()
                         .is_some_and(|actions| acl_admits_reply_egress(&chain, &actions, msg))
