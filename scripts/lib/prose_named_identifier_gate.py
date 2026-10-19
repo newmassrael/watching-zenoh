@@ -313,6 +313,12 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_LOCALITY_ANY",
         "Z_LOCALITY_REMOTE",
         "Z_LOCALITY_SESSION_LOCAL",
+        # The protocol version byte is wz's own `PROTOCOL_VERSION` (codecs and
+        # the wire fixtures), not pico's config macro. Entered when the
+        # acceptor's version refusal replaced the demo's version knob and the
+        # prose that remained cites the macro as the thing wz has no
+        # counterpart of. Described, not spelled, for the reason above.
+        "Z_PROTO_VERSION",
         "Z_QUERY_TARGET_DEFAULT",
         "Z_REPLY_KEYEXPR_DEFAULT",
         "Z_SAMPLE_KIND_DEFAULT",
