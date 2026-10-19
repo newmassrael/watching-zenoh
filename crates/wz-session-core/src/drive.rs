@@ -33,8 +33,8 @@ use crate::link::SessionRuntime;
 // arm passes the value without naming the type.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 use crate::parse_error::InboundParseError;
-use crate::session_actions::{SessionActionsBinding, SessionLinkActions};
-use crate::session_fsm_unicast::SessionFsmUnicastPolicy;
+use crate::session_actions::{SessionActionsBinding, SessionLinkActions, SESSION_HOST_REALIZATION};
+use crate::session_fsm_unicast::{SessionFsmUnicastActions, SessionFsmUnicastPolicy};
 // `InboundFrame` is named by the ungated `Unknown` match arm; the codec-gated
 // arms (`Frame` / `KeepAlive` / `Fragment` / `Init` / `Open` / `Close`) reuse it.
 use crate::inbound::InboundFrame;
@@ -2677,13 +2677,44 @@ pub type SessionEngine<R, T> = Engine<SessionFsmUnicastPolicy<SessionActionsBind
 /// (Stage 4b SSOT — wz-runtime-tokio's `new_session_engine<T>` delegates here).
 /// The caller retains `actions` (to read trace / observe link state) and drives
 /// the returned engine with `dispatch_link_event` / `check_lease_deadline`.
+///
+/// docs/adr/0038 — the policy is built with `new` in a build whose binding
+/// performs every duty and with `new_simulated` in one that compiles a duty
+/// body out, by [`SESSION_HOST_REALIZATION`]: a build is never refused for the
+/// features it left out, and a build that has them all is still held, at
+/// compile time, to a binding that declares it performs.
 pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
     actions: &R::ActionsHandle<T>,
 ) -> SessionEngine<R, T> {
     // `SessionActionsBinding.inner` is private to this crate; construct through
     // the pub `::new` constructor (mirrors the AP `new_session_engine`).
     let binding = SessionActionsBinding::new(actions.clone());
-    Engine::new(SessionFsmUnicastPolicy::new(binding))
+    Engine::new(PolicyConstructor::<BINDING_PERFORMS>.build(binding))
+}
+
+/// [`SESSION_HOST_REALIZATION`] as the constructor choice it makes.
+const BINDING_PERFORMS: bool = SESSION_HOST_REALIZATION.is_performing();
+
+/// Chooses the generated policy's constructor by a constant, so that only the
+/// chosen one is ever instantiated. Naming `SessionFsmUnicastPolicy::new` in a
+/// branch not taken would still evaluate its compile-time refusal for a
+/// simulating binding, which is why this is a type and not an `if`.
+struct PolicyConstructor<const PERFORMS: bool>;
+
+trait BuildSessionPolicy<A: SessionFsmUnicastActions + 'static> {
+    fn build(self, actions: A) -> SessionFsmUnicastPolicy<A>;
+}
+
+impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<true> {
+    fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
+        SessionFsmUnicastPolicy::new(actions)
+    }
+}
+
+impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<false> {
+    fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
+        SessionFsmUnicastPolicy::new_simulated(actions)
+    }
 }
 
 // ── reassembly-pool drive (reassembly-gated; `reassembly` implies `codec-frame`,

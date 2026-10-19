@@ -247,3 +247,19 @@ fn r61_accepting_framing_error_to_closing_invalid() {
     assert_eq!(engine.get_current_state(), S::Closing);
     assert_eq!(actions.close_reason(), Some(CloseReason::Invalid));
 }
+
+// ── The binding states, in its own type, the realization its build has, and
+//    the engine factory builds the machine over it either way.
+#[test]
+fn the_binding_declares_the_realization_of_its_build() {
+    use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastActions;
+    use wz_session_core::session_actions::SESSION_HOST_REALIZATION;
+
+    assert_eq!(
+        <SessionActionsBinding as SessionFsmUnicastActions>::REALIZATION,
+        SESSION_HOST_REALIZATION,
+        "the binding's REALIZATION is the build's, not a word of its own"
+    );
+    let (_actions, engine) = fresh_engine();
+    assert_eq!(engine.get_current_state(), S::Init);
+}

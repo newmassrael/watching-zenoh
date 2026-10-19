@@ -13299,6 +13299,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 }
 
+/// docs/adr/0038 — what [`SessionActionsBinding`] does with the session
+/// machine's duties in THIS build, and the one place that says it.
+///
+/// A duty body is compiled out with the feature it needs: the InitSyn and
+/// OpenSyn emits without `session-unicast-open` or their body codecs, the
+/// InitAck and OpenAck emits without `session-unicast-accept` or theirs, the
+/// Close frame without `codec-close`, the keepalive worker without
+/// `transport-keepalive`. None of those actions is out of the machine's
+/// reach in such a build (either role can be started on any build, and every
+/// `Established` and `Closing` entry runs them), so a build missing one of
+/// the features runs a machine whose duty does nothing, and says so:
+/// `Simulates`. The binding's `REALIZATION` is this value, and
+/// [`crate::drive::new_session_engine`] picks the policy constructor from
+/// it.
+pub const SESSION_HOST_REALIZATION: ::sce_rust_runtime::ActionRealization = if cfg!(all(
+    feature = "session-unicast-open",
+    feature = "session-unicast-accept",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "transport-keepalive"
+)) {
+    ::sce_rust_runtime::ActionRealization::Performs
+} else {
+    ::sce_rust_runtime::ActionRealization::Simulates
+};
+
 /// R311il — thin newtype that carries the generated
 /// [`SessionFsmUnicastActionsTrait`] impl for the
 /// [`crate::session_fsm_unicast::SessionFsmUnicastPolicy`] to own by
@@ -13376,7 +13403,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 /// A subset build that elides a codec genuinely cannot dial that leg, and
 /// the host handshake deadline-sweep (see `drive_session_until_terminal`)
 /// turns the resulting no-emit into an honest `*.timeout -> Closing`
-/// rather than an indefinite hang.
+/// rather than an indefinite hang. Such a build declares
+/// `REALIZATION = Simulates` ([`SESSION_HOST_REALIZATION`]): the emit is a
+/// duty of the machine, and a body without it does not perform it.
 ///
 /// # Why every method is `#[inline(never)]`
 ///
@@ -13395,16 +13424,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     for SessionActionsBinding<R, T>
 {
-    // docs/adr/0038: this host performs the machine's duties. The wire emits,
-    // the link open and release, the close reason and the established stamp
-    // are done by the bodies below. The keepalive worker and the lease monitor
-    // run in the drive loop that owns the clock, and `start_*`/`stop_*` are
-    // what start and stop them: they arm and disarm the link's
-    // `keepalive_armed` / `lease_armed`, and `check_keepalive_deadline` (with
-    // the tokio keepalive pacer) emits and `check_lease_deadline` raises
-    // `lease.expired` only while those are set.
-    const REALIZATION: ::sce_rust_runtime::ActionRealization =
-        ::sce_rust_runtime::ActionRealization::Performs;
+    // docs/adr/0038: with every feature its duties need, this host performs
+    // them. The wire emits, the link open and release, the close reason and
+    // the established stamp are done by the bodies below. The keepalive
+    // worker and the lease monitor run in the drive loop that owns the clock,
+    // and `start_*`/`stop_*` are what start and stop them: they arm and
+    // disarm the link's `keepalive_armed` / `lease_armed`, and
+    // `check_keepalive_deadline` (with the tokio keepalive pacer) emits and
+    // `check_lease_deadline` raises `lease.expired` only while those are set.
+    // A build that compiles a duty body out simulates instead
+    // (`SESSION_HOST_REALIZATION` names which builds).
+    const REALIZATION: ::sce_rust_runtime::ActionRealization = SESSION_HOST_REALIZATION;
 
     #[inline(never)]
     fn link_driver_open(&mut self) {
@@ -13946,7 +13976,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     #[inline(never)]
     fn start_keepalive_worker(&mut self) {
         // R311cb — transport-keepalive gates the keepalive worker. Wire-level
-        // KeepAlive parse is a separate axis (codec-keep-alive).
+        // KeepAlive parse is a separate axis (codec-keep-alive). cfg-off the
+        // body is empty and the binding declares that it simulates
+        // (`SESSION_HOST_REALIZATION`).
         #[cfg(feature = "transport-keepalive")]
         {
             R::with_mutex_mut(&self.inner.trace, |t| t.start_keepalive_worker += 1);
@@ -14204,5 +14236,68 @@ mod tx_limits_cache_tests {
         stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
         assert!(seen > 0, "the readers saw the value at least once");
+    }
+}
+
+#[cfg(test)]
+mod duty_realization_tests {
+    use super::SESSION_HOST_REALIZATION;
+    use sce_rust_runtime::ActionRealization;
+
+    /// Each feature whose absence empties a duty body of the binding, held
+    /// on its own, so the build that drops one reads the one it dropped; and
+    /// the build that has them all performs.
+    #[test]
+    fn a_build_declares_simulates_exactly_when_it_empties_a_duty_body() {
+        #[cfg(not(feature = "session-unicast-open"))]
+        assert_eq!(
+            SESSION_HOST_REALIZATION,
+            ActionRealization::Simulates,
+            "send_init_syn and send_open_syn emit nothing without session-unicast-open"
+        );
+        #[cfg(not(feature = "session-unicast-accept"))]
+        assert_eq!(
+            SESSION_HOST_REALIZATION,
+            ActionRealization::Simulates,
+            "send_init_ack_with_cookie and send_open_ack emit nothing without \
+             session-unicast-accept"
+        );
+        #[cfg(not(feature = "codec-init-body"))]
+        assert_eq!(
+            SESSION_HOST_REALIZATION,
+            ActionRealization::Simulates,
+            "neither Init message is emitted without codec-init-body"
+        );
+        #[cfg(not(feature = "codec-open-body"))]
+        assert_eq!(
+            SESSION_HOST_REALIZATION,
+            ActionRealization::Simulates,
+            "neither Open message is emitted without codec-open-body"
+        );
+        #[cfg(not(feature = "codec-close"))]
+        assert_eq!(
+            SESSION_HOST_REALIZATION,
+            ActionRealization::Simulates,
+            "send_close_frame_with_reason emits nothing without codec-close"
+        );
+        #[cfg(not(feature = "transport-keepalive"))]
+        assert_eq!(
+            SESSION_HOST_REALIZATION,
+            ActionRealization::Simulates,
+            "start_keepalive_worker starts nothing without transport-keepalive"
+        );
+        #[cfg(all(
+            feature = "session-unicast-open",
+            feature = "session-unicast-accept",
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-close",
+            feature = "transport-keepalive"
+        ))]
+        assert_eq!(
+            SESSION_HOST_REALIZATION,
+            ActionRealization::Performs,
+            "every duty body performs in this build"
+        );
     }
 }
