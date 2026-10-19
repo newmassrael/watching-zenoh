@@ -1009,6 +1009,18 @@ async fn notified_or_pending(revised: Option<&tokio::sync::Notify>) {
     }
 }
 
+/// Wait for the armed steady-state timer, or never when there is none. The
+/// `select!` precondition keeps the `None` case from ever being polled; this stays
+/// total for the same reason [`notified_or_pending`] does.
+async fn wait_armed<S: core::future::Future<Output = ()>>(
+    slot: &mut Option<(u64, core::pin::Pin<Box<S>>)>,
+) {
+    match slot {
+        Some((_, timer)) => timer.as_mut().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// R311y296 — a caller-owned deadline the drive loop folds into its
 /// Established wake, for work that must happen ON the drive thread at a
 /// time the loop cannot know by itself.
@@ -1280,6 +1292,19 @@ where
     // but not reassembled (this loop runs the data plane).
     #[cfg(feature = "reassembly")]
     let mut reasm = TokioReassembly::new(reassembly_config());
+    // The Established lease / keepalive wake, kept ARMED across iterations for a
+    // caller that signals its own deadline revisions (`ExtraDeadline::revised`).
+    // Both deadlines only move LATER while the session stands (every inbound
+    // frame pushes the lease out, every outbound one the keepalive), so a timer
+    // armed for an earlier moment is still correct: it wakes early, the loop
+    // finds the real deadline still ahead, and re-arms. What it spares is the
+    // per-frame cost of recomputing three deadlines (a dozen mutex reads and two
+    // clock reads) and of registering and cancelling a timer entry, which on a
+    // request/reply round trip is a measurable share of the thread's work.
+    //
+    // A caller WITHOUT a revision source gives no signal when its deadline moves
+    // earlier, so it keeps the recompute-every-iteration shape exactly.
+    let mut steady_timer: Option<(u64, core::pin::Pin<Box<_>>)> = None;
     let mut iter: usize = 0;
     loop {
         if engine.is_in_final_state() {
@@ -1319,11 +1344,20 @@ where
         // the link poll). `Some((abs_ms, Some(event)))` = handshake
         // timeout to raise; `Some((abs_ms, None))` = lease / keepalive
         // deadline (-> run both checks, each self-guarded).
+        let loop_now_ms = clock.now_monotonic_ms();
         let deadline: Option<(
             u64,
             Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
-        )> = match deadline_tracker.poll(engine.get_current_state(), clock.now_monotonic_ms()) {
-            Some((deadline_ms, event)) => Some((deadline_ms, Some(event))),
+        )> = match deadline_tracker.poll(engine.get_current_state(), loop_now_ms) {
+            Some((deadline_ms, event)) => {
+                // A handshake phase: the armed steady-state timer is not this
+                // iteration's wake and must not outlive the phase it was armed in.
+                steady_timer = None;
+                Some((deadline_ms, Some(event)))
+            }
+            None if deadline_revised.is_some() && steady_timer.is_some() => {
+                steady_timer.as_ref().map(|(armed_ms, _)| (*armed_ms, None))
+            }
             None => {
                 let lease_dl = lease_wake_deadline(actions);
                 #[cfg(feature = "transport-keepalive")]
@@ -1344,8 +1378,12 @@ where
         };
         match deadline {
             Some((deadline_ms, kind)) => {
-                let now_ms = clock.now_monotonic_ms();
-                let remaining_ms = deadline_ms.saturating_sub(now_ms);
+                let remaining_ms = deadline_ms.saturating_sub(loop_now_ms);
+                // Arm the steady timer once and keep it (see `steady_timer`).
+                let lazy = kind.is_none() && deadline_revised.is_some();
+                if lazy && steady_timer.is_none() {
+                    steady_timer = Some((deadline_ms, Box::pin(clock.sleep(remaining_ms))));
+                }
                 tokio::select! {
                     // R311y296 — the caller revised its extra deadline while we
                     // were parked on the OLD one. Fall through with no work: the
@@ -1358,7 +1396,13 @@ where
                     // no revision source: tokio evaluates the branch expression
                     // ONLY when the precondition holds, so `None` costs no
                     // `Notified` register/deregister per iteration.
-                    _ = notified_or_pending(deadline_revised), if deadline_revised.is_some() => {}
+                    //
+                    // The revision may have moved the deadline EARLIER than the
+                    // timer armed for the old one, so that timer is dropped and
+                    // the loop head arms a new one.
+                    _ = notified_or_pending(deadline_revised), if deadline_revised.is_some() => {
+                        steady_timer = None;
+                    }
                     // R2922 — a request staged from outside the loop. Fall
                     // through: the loop head raises it.
                     _ = actions.core.out_of_band.signalled() => {}
@@ -1432,7 +1476,39 @@ where
                         )
                         .await;
                     }
-                    _ = clock.sleep(remaining_ms) => match kind {
+                    // The armed steady-state timer fired. It was armed for the
+                    // deadline of some earlier iteration, so the real one may be
+                    // further out: look before acting, and when it is, arm again
+                    // and run no check and raise no event (the early wake is not
+                    // a deadline).
+                    _ = wait_armed(&mut steady_timer), if lazy => {
+                        steady_timer = None;
+                        #[cfg(feature = "transport-keepalive")]
+                        let ka_dl = keepalive_wake_deadline(actions);
+                        #[cfg(not(feature = "transport-keepalive"))]
+                        let ka_dl: Option<u64> = None;
+                        let real_deadline = [
+                            lease_wake_deadline(actions),
+                            ka_dl,
+                            next_extra_deadline(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .min();
+                        if real_deadline.is_some_and(|d| d > clock.now_monotonic_ms()) {
+                            continue;
+                        }
+                        #[cfg(feature = "transport-keepalive")]
+                        {
+                            let ka_outcome =
+                                check_keepalive_deadline(actions, clock.now_monotonic_ms());
+                            on_event(IterationEvent::KeepAlive(ka_outcome));
+                        }
+                        let lease_outcome =
+                            check_lease_deadline(actions, engine, clock.now_monotonic_ms());
+                        on_event(IterationEvent::Lease(lease_outcome));
+                    }
+                    _ = clock.sleep(remaining_ms), if !lazy => match kind {
                         // Established lease / keepalive deadline. Both
                         // checks are deadline-self-guarded, so whichever
                         // armed the earlier wake fires and the other
