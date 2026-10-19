@@ -56,6 +56,8 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 # WZ_CAPI_WORKER_THREADS at run time (see wz-capi-core's feature of this name).
 default = ["serial-drive-own-thread"]
 serial-drive-own-thread = ["wz-capi-core/serial-drive-own-thread"]
+# Receive busy-poll, off by default: see wz-capi-core's feature of this name.
+rx-busy-poll = ["wz-capi-core/rx-busy-poll"]
 # R311y391 (CALLER fail-fast, pico half) — off-default `unixpipe/` (Unix
 # named-pipe) ACCEPT transport, forwarding wz-runtime-tokio's
 # `transport-link-unixpipe`. This is a SUPERSET feature, NOT a zenoh-pico-native

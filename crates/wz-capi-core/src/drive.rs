@@ -3314,6 +3314,27 @@ fn drive_runs_on_its_own_thread(drive: FaceDrive, workers_requested: bool) -> bo
         && !workers_requested
 }
 
+/// How long a read that would wait keeps reading its socket before it sleeps, for the nodes of
+/// this process: `WZ_CAPI_RX_BUSY_POLL_US` when it is set (zero turns it off), else what the
+/// build says, which is [`RX_BUSY_POLL_BUILD_US`] under the `rx-busy-poll` feature and nothing
+/// without it. Busy-polling takes a reply that comes back inside the budget on a core that
+/// never went idle, and costs the budget's CPU time for every read that has to wait.
+fn rx_busy_poll_budget(configured: Option<&str>) -> Duration {
+    let micros = configured
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(if cfg!(feature = "rx-busy-poll") {
+            RX_BUSY_POLL_BUILD_US
+        } else {
+            0
+        });
+    Duration::from_micros(micros)
+}
+
+/// The budget a build with the `rx-busy-poll` feature polls for: about the idle gap of a request
+/// and its reply between two processes of one host, measured (a longer budget shortened nothing
+/// more and lengthened the tail).
+const RX_BUSY_POLL_BUILD_US: u64 = 10;
+
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
 /// only the bind.
@@ -3413,6 +3434,9 @@ pub fn open_blocking(
     //
     // The workers carry the stack of the drive thread, because the control tasks they
     // run (a dial's handshake) poll the same futures (see [`DRIVE_THREAD_STACK_BYTES`]).
+    wz_runtime_tokio::link_pipeline::set_rx_busy_poll(rx_busy_poll_budget(
+        std::env::var("WZ_CAPI_RX_BUSY_POLL_US").ok().as_deref(),
+    ));
     let handle = std::thread::Builder::new()
         .name("wz-capi-drive".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -3525,6 +3549,24 @@ mod tests {
         assert!(!drive_runs_on_its_own_thread(FaceDrive::Serial, true));
         assert!(!drive_runs_on_its_own_thread(FaceDrive::PerFace, false));
         assert!(!drive_runs_on_its_own_thread(FaceDrive::PerFace, true));
+    }
+
+    /// The variable wins over the build, and zero turns busy-polling off in a build that has it.
+    #[test]
+    fn the_busy_poll_budget_is_the_variable_then_the_build() {
+        let built = if cfg!(feature = "rx-busy-poll") {
+            10
+        } else {
+            0
+        };
+        assert_eq!(rx_busy_poll_budget(None), Duration::from_micros(built));
+        assert_eq!(
+            rx_busy_poll_budget(Some("not a number")),
+            Duration::from_micros(built)
+        );
+        assert_eq!(rx_busy_poll_budget(Some("25")), Duration::from_micros(25));
+        assert_eq!(rx_busy_poll_budget(Some(" 7 ")), Duration::from_micros(7));
+        assert_eq!(rx_busy_poll_budget(Some("0")), Duration::ZERO);
     }
 
     /// A configured id is read the way zenoh reads it, in both forms it takes.

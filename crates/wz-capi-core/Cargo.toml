@@ -63,6 +63,12 @@ transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
 # selects the multi-thread runtime, so a node with long blocking callbacks keeps
 # a way to run its timers and spawned tasks beside them.
 serial-drive-own-thread = []
+# A TCP read that would wait first keeps reading its socket for a few microseconds, so a reply
+# that comes back inside that window is taken by a core that never went idle (loopback round trip
+# 22 -> 14 us measured against zenoh-pico's 18 us, with a worse 99th percentile and the budget's
+# CPU time spent on every read that waits). Off: a build that wants the short round trip turns it
+# on, and WZ_CAPI_RX_BUSY_POLL_US overrides it at run time in either direction.
+rx-busy-poll = []
 # R2259 (open-debt item 593) — the QoS ext, named here for the same reason the
 # three link kinds above are: `FaceSnapshot::of` reads `SessionLinkActions::is_qos`,
 # which is `transport-qos`-gated upstream, so the name must EXIST here or the

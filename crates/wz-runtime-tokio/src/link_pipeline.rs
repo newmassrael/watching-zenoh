@@ -71,7 +71,15 @@ pub type TcpReadDriver = StreamReadDriver<TcpRead>;
 /// by the reactor's thread, which finds the socket readable and wakes it through a futex:
 /// a thread hop on every message received, about two microseconds measured. A reader that
 /// has its own reactor sleeps in `epoll_wait` itself and reads when the socket is.
-pub struct TcpRead(TcpReadInner);
+///
+/// ## Receive busy-poll
+///
+/// With a budget set ([`set_rx_busy_poll`]), a read that would wait first keeps reading the
+/// socket for up to that long and sleeps in the reactor only after it. A reply that comes back
+/// inside the budget is then taken by a core that never went idle: no idle-state exit, no
+/// wake through the reactor. The price is the budget's CPU time for every read that has to
+/// wait, so it is a setting for a node that wants its round trip short, not a default.
+pub struct TcpRead(TcpReadInner, Option<std::net::TcpStream>);
 
 enum TcpReadInner {
     /// The half `into_split` made, registered where the link was made.
@@ -83,7 +91,27 @@ enum TcpReadInner {
 
 impl TcpRead {
     pub(crate) fn new(half: OwnedReadHalf) -> Self {
-        Self(TcpReadInner::Half(half))
+        Self(TcpReadInner::Half(half), None)
+    }
+
+    /// The socket read directly while busy-polling: a duplicate of the descriptor, made on the
+    /// first wait that polls. A real `read` is the point (tokio's `try_read` answers at once
+    /// while the reactor has not marked the socket ready, which a busy-polling reader is
+    /// waiting for), and the duplicate shares the socket, so it is non-blocking as the
+    /// stream is and what it reads is the stream's own bytes in order.
+    // LINK-SOCKET-SEAM-NOT-APPLICABLE: the descriptor duplicated is the one the link was
+    // wired with, whose options the seam already applied; a duplicate shares the socket.
+    #[cfg(unix)]
+    fn poll_fd(&mut self) -> Option<&std::net::TcpStream> {
+        use std::os::fd::AsFd;
+        if self.1.is_none() {
+            let owned = match &self.0 {
+                TcpReadInner::Half(half) => half.as_ref().as_fd().try_clone_to_owned(),
+                TcpReadInner::Rebound(stream) => stream.as_fd().try_clone_to_owned(),
+            };
+            self.1 = owned.ok().map(std::net::TcpStream::from);
+        }
+        self.1.as_ref()
     }
 
     /// Register this half's socket with the reactor of the runtime the caller runs in, so
@@ -117,11 +145,72 @@ impl tokio::io::AsyncRead for TcpRead {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
-        match &mut self.get_mut().0 {
+        let this = self.get_mut();
+        let polled = match &mut this.0 {
             TcpReadInner::Half(half) => std::pin::Pin::new(half).poll_read(cx, buf),
             #[cfg(unix)]
             TcpReadInner::Rebound(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        };
+        #[cfg(unix)]
+        if polled.is_pending() {
+            let budget = rx_busy_poll();
+            if !budget.is_zero() {
+                if let Some(raw) = this.poll_fd() {
+                    if let Some(read) = busy_read(raw, buf, budget) {
+                        return std::task::Poll::Ready(read);
+                    }
+                }
+            }
         }
+        polled
+    }
+}
+
+/// How long a TCP read that would wait keeps reading the socket before it sleeps in the
+/// reactor, in nanoseconds; zero (the default) is no busy-polling. One value for the process,
+/// as the drive model it belongs to is.
+static RX_BUSY_POLL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set the receive busy-poll budget of every TCP link read from now on (see [`TcpRead`]).
+/// Zero turns it off.
+pub fn set_rx_busy_poll(budget: std::time::Duration) {
+    let ns = u64::try_from(budget.as_nanos()).unwrap_or(u64::MAX);
+    RX_BUSY_POLL_NS.store(ns, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The receive busy-poll budget now in force.
+pub fn rx_busy_poll() -> std::time::Duration {
+    std::time::Duration::from_nanos(RX_BUSY_POLL_NS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Read `raw` into `buf` until something arrives or `budget` has passed. `Some` is a finished
+/// read (bytes, end of stream or an error), `None` is a budget spent with nothing to read:
+/// the caller then waits on the reactor, which it registered with before this ran.
+#[cfg(unix)]
+fn busy_read(
+    raw: &std::net::TcpStream,
+    buf: &mut tokio::io::ReadBuf<'_>,
+    budget: std::time::Duration,
+) -> Option<io::Result<()>> {
+    // An empty buffer would read zero bytes, which a caller takes for the end of the stream.
+    if buf.remaining() == 0 {
+        return None;
+    }
+    let began = std::time::Instant::now();
+    loop {
+        match io::Read::read(&mut &*raw, buf.initialize_unfilled()) {
+            Ok(n) => {
+                buf.advance(n);
+                return Some(Ok(()));
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Some(Err(e)),
+        }
+        if began.elapsed() >= budget {
+            return None;
+        }
+        std::hint::spin_loop();
     }
 }
 
@@ -594,6 +683,79 @@ pub fn wire_tcp_stream_with_lowlatency(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A non-blocking loopback pair of `std` streams: the reader (as `busy_read` is handed it)
+    /// and the writer.
+    #[cfg(unix)]
+    fn loopback_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let writer =
+            std::net::TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (reader, _) = listener.accept().expect("accept");
+        reader.set_nonblocking(true).expect("non-blocking");
+        (reader, writer)
+    }
+
+    /// The busy read takes bytes that arrive inside its budget, and answers `None` when
+    /// nothing does, an end of stream as a finished read of nothing, and an empty buffer
+    /// without reading.
+    ///
+    /// The control is the three non-arrival cases: a busy read that returned `Some` for
+    /// every call would pass the arrival leg alone.
+    #[cfg(unix)]
+    #[test]
+    fn busy_read_takes_what_arrives_inside_its_budget_and_nothing_else() {
+        use std::io::Write;
+        let budget = std::time::Duration::from_secs(5);
+        let (reader, mut writer) = loopback_pair();
+
+        // Nothing sent, a short budget: spent, `None`, and it did wait for the budget.
+        let mut storage = [0u8; 16];
+        let mut buf = tokio::io::ReadBuf::new(&mut storage);
+        let began = std::time::Instant::now();
+        assert!(busy_read(&reader, &mut buf, std::time::Duration::from_millis(5)).is_none());
+        assert!(began.elapsed() >= std::time::Duration::from_millis(5));
+        assert!(buf.filled().is_empty());
+
+        // Bytes that arrive while it spins are taken, long before the budget is spent.
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            writer.write_all(b"ab").expect("write");
+            writer
+        });
+        let began = std::time::Instant::now();
+        let read = busy_read(&reader, &mut buf, budget).expect("the bytes arrived in the budget");
+        assert!(read.is_ok());
+        assert_eq!(buf.filled(), b"ab");
+        assert!(
+            began.elapsed() < budget,
+            "it returned on the bytes, not on the budget"
+        );
+        let writer = sender.join().expect("sender");
+
+        // An empty buffer reads nothing and does not claim an end of stream.
+        let mut none: [u8; 0] = [];
+        let mut empty = tokio::io::ReadBuf::new(&mut none);
+        assert!(busy_read(&reader, &mut empty, budget).is_none());
+
+        // A closed peer is a finished read that added nothing.
+        drop(writer);
+        let mut storage = [0u8; 16];
+        let mut buf = tokio::io::ReadBuf::new(&mut storage);
+        let read = busy_read(&reader, &mut buf, budget).expect("the close is a finished read");
+        assert!(read.is_ok());
+        assert!(buf.filled().is_empty(), "an end of stream adds no bytes");
+    }
+
+    /// The budget is process-wide, zero by default, and what was set is what is read back.
+    #[test]
+    fn the_rx_busy_poll_budget_reads_back_what_was_set() {
+        let before = rx_busy_poll();
+        set_rx_busy_poll(std::time::Duration::from_micros(37));
+        assert_eq!(rx_busy_poll(), std::time::Duration::from_micros(37));
+        set_rx_busy_poll(before);
+        assert_eq!(rx_busy_poll(), before);
+    }
 
     /// `dial_tcp` surfaces a connect error rather than panicking when the
     /// target refuses.
