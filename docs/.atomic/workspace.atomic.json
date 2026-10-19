@@ -276432,6 +276432,42 @@
         "Other crates' tests have never run with every feature on; the Layer E red of 8968869ff is still unattributed."
       ]
     },
+    "Round 3387": {
+      "decision_summary": "The wz-duty branch (ADR 0038: a Performs action's body is the cause of its effect) grows the heap multicast image's text by 988 and 932 bytes (thumbv7m, thumbv7em-hf) and the typed session slot of the two admin-node images by 16 bytes, which put Layer Q outside the band of 256 and off the slot record. Every commit of the branch that touches those crates was built on its own on a build host, so the growth is named per commit rather than per arc: the reassembly slot duties +744/+752, the slot.evict arm +4/+4, the multicast peer duties +100/-24, the multicast session duties +140/+200; the whole 16 bytes of the slot are the keepalive_armed and lease_armed flags (two RefCell<bool> of 8 bytes on thumb), and moving the close reason from the trace to the link is byte-neutral. The growth is the code ADR 0038 requires (bodies that post a duty and drivers that drain it instead of inferring it from state) and is accepted, with one part owed rather than chosen: the reassembly ingest path asserts its invariants with three assert! and three expect, whose messages, panic locations and StagingError's Debug are in the image; open debt item 904 turns them into an ingest outcome and lowers the figure in the same commit. The baselines move to the build host's reading of the rebased branch and the band stays at 256.",
+      "changes_bullets": [
+        "scripts/check-footprint.sh: the multicast-e2e text baselines move from 66296 and 66104 to 67060 and 67044 (thumbv7m, thumbv7em-hf); the comment above the table records the per-commit growth, the per-symbol diff and the owed part (debt 904). data and bss do not move, and the band stays at 256.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36720 to 36736 and zephyr-admin-node 36712 to 36728, the measured size of one typed slot after the keepalive and lease duties gained their armed flags."
+      ],
+      "verification_bullets": [
+        "Through bx on a build host: the multicast image (deploy/mcu-multicast-e2e, release, the lane's cross-test lwIP port and Layer Q's remap rustflags) built for both targets at aef63f203 and at each of the branch's nine commits that touch its crates, with arm-none-eabi-size and arm-none-eabi-nm -S read for each and session_slot_bytes.py --check run at each; aef63f203 reproduces the lane's 66072/66112 exactly. The symbol lists of aef63f203 and the branch tip were diffed with hashes stripped and anonymous constants summed: +964 bytes of symbols against +988 on thumbv7m, +910 against +932 on thumbv7em-hf.",
+        "Through bx on a build host: Layer Q of run-ci.sh on the rebased branch with these baselines passes (slot 36736 and 36728 equal to the record; multicast text 67060 +0 and 67048 +4). Layer Q on aef63f203 alone passes with the old figures, so the red was the branch's.",
+        "Not verified here: the 4 bytes between two builds of one tree on thumbv7em-hf (67044 by hand, 67048 by the lane) are recorded, not explained; the roughly 220 bytes of panic message text owed to debt 904 is counted in the source, not itemised in the ELF."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Debt 904: replace the reassembly ingest path's assert! and expect with an ingest outcome, and lower BASELINE_MC_TEXT in the same commit.",
+        "The footprint of the pushed tree is read by the hosted Layer Q.5 of the run that carries this push."
+      ],
+      "publishable_decision_summary": "The wz-duty branch (ADR 0038: a Performs action's body is the cause of its effect) grows the heap multicast image's text by 988 and 932 bytes (thumbv7m, thumbv7em-hf) and the typed session slot of the two admin-node images by 16 bytes, which put Layer Q outside the band of 256 and off the slot record. Every commit of the branch that touches those crates was built on its own on a build host, so the growth is named per commit rather than per arc: the reassembly slot duties +744/+752, the slot.evict arm +4/+4, the multicast peer duties +100/-24, the multicast session duties +140/+200; the whole 16 bytes of the slot are the keepalive_armed and lease_armed flags (two RefCell<bool> of 8 bytes on thumb), and moving the close reason from the trace to the link is byte-neutral. The growth is the code ADR 0038 requires (bodies that post a duty and drivers that drain it instead of inferring it from state) and is accepted, with one part owed rather than chosen: the reassembly ingest path asserts its invariants with three assert! and three expect, whose messages, panic locations and StagingError's Debug are in the image; open debt item 904 turns them into an ingest outcome and lowers the figure in the same commit. The baselines move to the build host's reading of the rebased branch and the band stays at 256.",
+      "publishable_changes_bullets": [
+        "scripts/check-footprint.sh: the multicast-e2e text baselines move from 66296 and 66104 to 67060 and 67044 (thumbv7m, thumbv7em-hf); the comment above the table records the per-commit growth, the per-symbol diff and the owed part (debt 904). data and bss do not move, and the band stays at 256.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36720 to 36736 and zephyr-admin-node 36712 to 36728, the measured size of one typed slot after the keepalive and lease duties gained their armed flags."
+      ],
+      "publishable_verification_bullets": [
+        "Through bx on a build host: the multicast image (deploy/mcu-multicast-e2e, release, the lane's cross-test lwIP port and Layer Q's remap rustflags) built for both targets at aef63f203 and at each of the branch's nine commits that touch its crates, with arm-none-eabi-size and arm-none-eabi-nm -S read for each and session_slot_bytes.py --check run at each; aef63f203 reproduces the lane's 66072/66112 exactly. The symbol lists of aef63f203 and the branch tip were diffed with hashes stripped and anonymous constants summed: +964 bytes of symbols against +988 on thumbv7m, +910 against +932 on thumbv7em-hf.",
+        "Through bx on a build host: Layer Q of run-ci.sh on the rebased branch with these baselines passes (slot 36736 and 36728 equal to the record; multicast text 67060 +0 and 67048 +4). Layer Q on aef63f203 alone passes with the old figures, so the red was the branch's.",
+        "Not verified here: the 4 bytes between two builds of one tree on thumbv7em-hf (67044 by hand, 67048 by the lane) are recorded, not explained; the roughly 220 bytes of panic message text owed to debt 904 is counted in the source, not itemised in the ELF."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Debt 904: replace the reassembly ingest path's assert! and expect with an ingest outcome, and lower BASELINE_MC_TEXT in the same commit.",
+        "The footprint of the pushed tree is read by the hosted Layer Q.5 of the run that carries this push."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [

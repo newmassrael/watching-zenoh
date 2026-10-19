@@ -926,8 +926,43 @@ declare -A BASELINE_MC_TEXT=(
     # symbols that left; it does not show WHICH inlining decision made main grow
     # by 1182, and no commit of the arc was built on its own, so no single commit
     # is named. data is 4 and bss 270112. Old: 65056/64980.
-    ["thumbv7m-none-eabi"]=66296
-    ["thumbv7em-none-eabihf"]=66104
+    #
+    # R3387 -- GREW +988 / +932 B. A build host read 67060 / 67044 on the wz-duty
+    # branch rebased onto `aef63f203` and 66072 / 66112 on `aef63f203` itself
+    # (Layer Q's own run of the branch read 67048 on thumbv7em-hf: 4 B of spread
+    # between two builds of one tree). Every commit of the branch that touches the
+    # image's crates was built on its own (one host, one toolchain, Layer Q's
+    # remap flags), so the growth is named per commit (thumbv7m / thumbv7em-hf):
+    #   reassembly slot duties made the cause of their effect   +744 / +752
+    #   a duplicate-first chain evicted through slot.evict        +4 /   +4
+    #   the multicast peer duties performed from their bodies   +100 /  -24
+    #   the multicast session duties performed from their bodies +140 / +200
+    # and the keepalive, lease and close-reason commits move it by 0. A per-symbol
+    # diff of the two trees on thumbv7m (arm-none-eabi-nm -S, hashes stripped,
+    # anonymous constants summed) reads +964 of the +988; the rest is padding:
+    #   anonymous constants                                   +328
+    #   `mcu_multicast_e2e::__cortex_m_rt_main`               +262
+    #   `MulticastDispatcher::session_duties` +126 (NEW),
+    #     `clear_peers_if_stopped` -86 (GONE)
+    #   `ReassemblyDispatcher::stage` +118, `::abort` +74, `Slot::drive` +66,
+    #     `Slot::drive_chunk` +44 (NEW); the slot policy's `Engine::process`
+    #     -58 (GONE) and `microstep` -106
+    #   `group_drive::perform_link_duties` +76 (NEW), `MulticastPump` +42
+    #   the peer and session policies' `enter_states` +38, +36
+    #   `<StagingError as Debug>::fmt` +26 (NEW)
+    # INTENTIONAL: ADR 0038 holds `Performs` to the body being the cause of the
+    # effect, so the duties the Router and the drive loops used to infer from
+    # state are now posted by the action bodies and drained (the slot binding's
+    # `duties`, the dispatchers' `DutyOutbox`), which is code the image did not
+    # have. One part is OWED rather than chosen: the reassembly ingest path
+    # asserts its invariants with three `assert!` and three `.expect`, which put
+    # their messages (about 220 B, counted in the source, not itemised in the
+    # ELF), their panic locations and `StagingError`'s Debug into the image.
+    # Open debt item 904 turns them into an ingest outcome and lowers this
+    # figure in the same commit. data is 4 and bss 270120 on both trees.
+    # Old: 66296/66104.
+    ["thumbv7m-none-eabi"]=67060
+    ["thumbv7em-none-eabihf"]=67044
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
