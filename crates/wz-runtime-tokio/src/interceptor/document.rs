@@ -4,8 +4,10 @@
 //! The config document's interceptor keys, compiled into the rules that enforce them.
 //!
 //! `low_pass_filter` and `downsampling` are read into feature-independent echo types
-//! ([`LowPassFilterConf`], [`DownsamplingItemConf`]) because the reader must read one document to
-//! one set of values in every build. The enforcement types ([`LowPassRule`], [`DownsamplingRule`])
+//! ([`crate::zenoh_config::LowPassFilterConf`], [`crate::zenoh_config::DownsamplingItemConf`])
+//! because the reader must read one document to one set of values in every build. The
+//! enforcement types ([`crate::interceptor::low_pass::LowPassRule`],
+//! [`crate::interceptor::downsampling::DownsamplingRule`])
 //! live behind features. This module is the one place the document's spelling becomes the
 //! enforcement type, so the two consumers of it cannot compile the same key two ways:
 //!
