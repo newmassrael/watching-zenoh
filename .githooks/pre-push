@@ -320,11 +320,12 @@ if [[ -n "$diff_base" ]]; then
     fi
 fi
 
-# (There was a gate 2c4 here: a passing `scripts/verify-once.sh` receipt for every lane the
-# push required. The owner removed it on 2026-10-19, with the script, its plan and its
-# table: the receipts lived in one directory shared by every session, so a session's
-# verification overwrote another's, and a push that had passed every lane was refused.
-# A push is judged by the gates below and by the hosted run, which stays the authority.)
+# (There was a gate 2c4 here: a passing receipt for every lane the push required, written by
+# a script that ran those lanes on the build host once. The owner removed the gate and the
+# script on 2026-10-19, with its plan and its table: the receipts lived in one directory
+# shared by every session, so a session's verification overwrote another's, and a push that
+# had passed every lane was refused. A push is judged by the gates below and by the hosted
+# run, which stays the authority.)
 
 # ─── gate 2c — the PREVIOUS push's hosted verdict (R311y765) ────────
 # grades: not-a-file
