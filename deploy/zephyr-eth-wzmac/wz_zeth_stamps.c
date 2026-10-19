@@ -55,6 +55,7 @@ static uint32_t centi_us(uint64_t sum, uint32_t hz, uint32_t n)
 
 static void report_buckets(uint32_t n, uint32_t hz);
 static void trace_print(void);
+static void prof_print(void);
 
 void wz_zeth_stamp_rx(void)
 {
@@ -74,6 +75,7 @@ void wz_zeth_stamp_tx(void)
 	t_rx = 0;
 	t_in = 0;
 	t_out = 0;
+	prof_print();
 	trace_print();
 	sum_rx_in += (uint32_t)(in - rx);
 	sum_in_out += (uint32_t)(out - in);
@@ -121,6 +123,75 @@ static inline bool in_window(void)
 	return t_in != 0 && t_out == 0;
 }
 
+/* A profile of the application's part of a query, taken by the firmware itself: the kernel's
+ * tick interrupt (every 100 us, with CONFIG_TICKLESS_KERNEL=n) records the program counter it
+ * interrupted when, and only when, the application's thread is between its recvfrom and its
+ * sendto. The gate and the sample are one instruction stream apart, which an external probe
+ * reading the two over SWD cannot say (its reads are not simultaneous, and a profile gated that
+ * way was wrong). The samples are printed once, when the buffer is full, and resolved on the
+ * host against the image's symbols.
+ */
+#define PROF_MAX 6000
+static uint32_t prof_pc[PROF_MAX];
+static uint32_t prof_n;
+static volatile bool prof_full;
+static bool prof_printed;
+static k_tid_t app_thread;
+
+#include <zephyr/spinlock.h>
+
+void __real_sys_clock_announce_locked(int32_t ticks, k_spinlock_key_t key);
+
+/* The kernel's tick interrupt calls this (Zephyr 4.4: the driver's ISR calls
+ * `sys_clock_announce_locked`, not `sys_clock_announce`, which is only a wrapper of it).
+ */
+/* How far a tick gets through the sampler's conditions, so a profile that comes back empty says
+ * which condition stopped it.
+ */
+static uint32_t prof_ticks, prof_in_window, prof_on_app, prof_in_code;
+
+void __wrap_sys_clock_announce_locked(int32_t ticks, k_spinlock_key_t key)
+{
+	prof_ticks++;
+	if (in_window() && prof_n < PROF_MAX) {
+		prof_in_window++;
+		if (app_thread != NULL && k_current_get() == app_thread) {
+			uint32_t psp;
+
+			prof_on_app++;
+			__asm volatile("mrs %0, psp" : "=r"(psp));
+			/* The frame the hardware pushed for the interrupted thread: r0-r3, r12, lr, pc. */
+			uint32_t pc = ((uint32_t *)psp)[6];
+
+			if (pc >= 0x10080000u && pc < 0x10100000u) {
+				prof_in_code++;
+				prof_pc[prof_n++] = pc;
+				if (prof_n == PROF_MAX) {
+					prof_full = true;
+				}
+			}
+		}
+	}
+	__real_sys_clock_announce_locked(ticks, key);
+}
+
+static void prof_print(void)
+{
+	if (!prof_full || prof_printed) {
+		return;
+	}
+	prof_printed = true;
+	printk("wz: pcs %u samples\n", prof_n);
+	for (uint32_t i = 0; i < prof_n; i += 12) {
+		printk("wz: pcs");
+		for (uint32_t j = i; j < i + 12 && j < prof_n; j++) {
+			printk(" %x", prof_pc[j]);
+		}
+		printk("\n");
+	}
+	printk("wz: pcs done\n");
+}
+
 static void print_bucket(const char *name, struct bucket *b, uint32_t n, uint32_t hz,
 			 bool bytes)
 {
@@ -139,6 +210,8 @@ static void print_bucket(const char *name, struct bucket *b, uint32_t n, uint32_
 
 static void report_buckets(uint32_t n, uint32_t hz)
 {
+	printk("wz: stamps:   sampler ticks %u, in window %u, on the app thread %u, in code %u\n",
+	       prof_ticks, prof_in_window, prof_on_app, prof_in_code);
 	print_bucket("poll", &b_poll, n, hz, false);
 	print_bucket("sleep", &b_sleep, n, hz, false);
 	print_bucket("malloc", &b_malloc, n, hz, true);
@@ -304,6 +377,8 @@ ssize_t __wrap_recvfrom(int fd, void *buf, size_t len, int flags, struct sockadd
 
 	if (got > 0 && t_rx != 0) {
 		t_in = k_cycle_get_32() | 1u;
+		/* The thread that reads the queries is the one the sampler follows. */
+		app_thread = k_current_get();
 	}
 	return got;
 }

@@ -170,7 +170,7 @@ static int wz_enable_core_caches(void)
 {
 	const char *data = "data OFF: this build has no non-cacheable section or no MPU";
 
-#if defined(CONFIG_ICACHE)
+#if defined(CONFIG_ICACHE) && !defined(CONFIG_WZ_ICACHE_OFF)
 	sys_cache_instr_enable();
 #endif
 #if defined(CONFIG_DCACHE) && defined(CONFIG_NOCACHE_MEMORY) && defined(CONFIG_ARM_MPU)

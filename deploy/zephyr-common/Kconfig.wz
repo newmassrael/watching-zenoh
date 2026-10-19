@@ -75,4 +75,26 @@ config WZ_LIBC_MEMCPY_FIRST
 	  and an image that is built for speed turns it on; an image whose grade rests on a
 	  witnessed run keeps the bytes it was witnessed with.
 
+config WZ_ICACHE_OFF
+	bool "Leave the instruction cache off (a diagnostic)"
+	depends on WZ_ENABLE_CORE_CACHES
+	help
+	  Skips enabling the instruction cache, so a measurement can tell how much of a code path's
+	  time is the cache's: a path that fits the cache slows by the flash's wait states when it is
+	  off, and one that already misses it slows by less. Never in an image that is measured for
+	  anything else.
+
+config WZ_CODE_IN_RAM
+	bool "Run the wz Rust staticlib's code from RAM instead of from flash"
+	depends on ARCH_HAS_RAMFUNC_SUPPORT && XIP
+	help
+	  The image executes from flash in place, through the core's instruction cache. A query
+	  handled by the wz node runs through more code than the cache holds, so each query
+	  fetches part of it from flash again. With this on, the staticlib's `.text` is linked
+	  into the `.ramfunc` output section, which Zephyr loads from flash into RAM at boot, and
+	  its code is fetched from RAM.
+
+	  An experiment with a measurement attached to it where it is turned on (the overlay that
+	  turns it on states the numbers): off by default.
+
 endmenu

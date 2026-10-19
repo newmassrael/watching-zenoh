@@ -165,4 +165,14 @@ function(wz_zephyr_rust_app)
   foreach(sym IN LISTS kept WZ_UNDEFINED)
     target_link_libraries(app PUBLIC -Wl,--undefined=${sym})
   endforeach()
+
+  # CONFIG_WZ_CODE_IN_RAM: the staticlib's code is linked into the `.ramfunc` output section,
+  # which the image copies from flash into RAM at boot. The snippet is the one line that names
+  # the archive; the member filter `*<archive>:*` takes every object of it.
+  if(CONFIG_WZ_CODE_IN_RAM)
+    get_filename_component(rust_lib_name ${rust_lib} NAME)
+    set(code_in_ram_ld ${CMAKE_CURRENT_BINARY_DIR}/wz_code_in_ram.ld)
+    file(WRITE ${code_in_ram_ld} "*${rust_lib_name}:*(.text .text.*)\n")
+    zephyr_linker_sources(RAMFUNC_SECTION ${code_in_ram_ld})
+  endif()
 endfunction()

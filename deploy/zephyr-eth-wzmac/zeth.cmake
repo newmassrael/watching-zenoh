@@ -29,7 +29,7 @@ function(wz_zeth_driver)
     target_sources(app PRIVATE ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/wz_zeth_stamps.c)
     target_link_libraries(app PUBLIC -Wl,--wrap=recvfrom -Wl,--wrap=sendto -Wl,--wrap=poll
       -Wl,--wrap=k_malloc -Wl,--wrap=k_free -Wl,--wrap=memcpy
-      -Wl,--wrap=z_impl_k_sleep -Wl,--wrap=z_impl_k_usleep)
+      -Wl,--wrap=z_impl_k_sleep -Wl,--wrap=z_impl_k_usleep -Wl,--wrap=sys_clock_announce_locked)
   endif()
   if(NOT CONFIG_NOCACHE_MEMORY)
     message(FATAL_ERROR "wz: the Ethernet driver's DMA rings are in the non-cacheable "
