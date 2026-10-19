@@ -625,6 +625,11 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // carries `dictionary_file: null` beside `user` and `password`, so the
         // resolved tree answers null exactly as it does for the TLS paths above.
         "transport/auth/usrpwd/dictionary_file",
+        // The usrpwd initiator credential, classed on the sentence above: DEFAULT_CONFIG carries
+        // `user` and `password` as `null` beside the dictionary, so a silent file resolves each
+        // to null and the tree has no default to compare.
+        "transport/auth/usrpwd/user",
+        "transport/auth/usrpwd/password",
         // R2627 — the four pubkey identity keys, classed the way the dictionary
         // above is and on the same kind of evidence: the pinned upstream's
         // `DEFAULT_CONFIG.json5` carries `public_key_pem`, `private_key_pem`,
@@ -3561,6 +3566,14 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         private_key_pem: "PLACEHOLDER-PRIVATE-PEM",
         public_key_file: "/etc/wz/pubkey.pem",
         private_key_file: "/etc/wz/pubkey.key",
+      }},
+      // The usrpwd INITIATOR credential, NAMED for the pubkey identity's reason: it is what a
+      // connecting client presents, so a client genuinely carries it (unlike the dictionary,
+      // which is responder state). Placeholders, and never presented by this binary: the
+      // demo has no auth plane, so it names both keys and reports them `NoSinkInThisBuild`.
+      usrpwd: {{
+        user: "wz-fixture-user",
+        password: "wz-fixture-placeholder",
       }},
     }},
     link: {{

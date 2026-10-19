@@ -936,6 +936,34 @@ pub struct AdminspaceConfig {
     pub write: bool,
 }
 
+/// A credential read from a config, which a `Debug` print of the config must not show.
+///
+/// [`ZenohNodeConfig`] derives `Debug`, and a node's config is printed: in assertion failures, in
+/// logs a host writes of what it started with, in a bug report. A password held as a plain
+/// `String` would be in every one of them. This type holds the text, hands it out only through
+/// [`Self::expose`] (the one place a reader of the code has to look to see it used), and prints
+/// as `SecretText(<redacted>)`. It compares by value so the config still compares.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretText(String);
+
+impl SecretText {
+    /// Hold `text` as a secret.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    /// The text. Called where the credential is presented, and nowhere else.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SecretText(<redacted>)")
+    }
+}
+
 /// The topology-and-transport subset of a stock zenoh node's config.
 ///
 /// Every field maps to exactly one zenoh config key (named in its doc), so a
@@ -978,6 +1006,14 @@ pub struct ZenohNodeConfig {
     /// [`UsrPwdStore::from_dictionary_file`](crate::extauth_usrpwd_store::UsrPwdStore::from_dictionary_file),
     /// which is where the filesystem belongs.
     pub usrpwd_dictionary_file: Option<String>,
+    /// `transport/auth/usrpwd/user`, the name this node presents when it DIALS a peer that
+    /// demands usrpwd: the initiator half of the credential whose responder half is the
+    /// dictionary above. `None` is a node that presents none.
+    pub usrpwd_user: Option<String>,
+    /// `transport/auth/usrpwd/password`, the password that goes with [`Self::usrpwd_user`]. Held
+    /// as a [`SecretText`] so a print of the config does not show it. Upstream requires the two
+    /// together; the reader keeps each as stated and the open refuses half a credential.
+    pub usrpwd_password: Option<SecretText>,
     /// R2627 — `transport/auth/pubkey/public_key_pem`, the node's RSA public key
     /// as inline PEM text.
     ///
@@ -1385,6 +1421,10 @@ impl Default for ZenohNodeConfig {
             // dictionary_file is an `Option` with no default path, and a node
             // that names none does not respond to usrpwd.
             usrpwd_dictionary_file: None,
+            // Absent likewise: `UsrPwdConf`'s `user` and `password` are `Option`s with no
+            // default, and a node naming none presents no credential when it dials.
+            usrpwd_user: None,
+            usrpwd_password: None,
             // R2627 — all four absent, which is upstream's default: every
             // `PubKeyConf` identity field is an `Option` with no default, and a
             // node naming none of them has no pubkey identity
@@ -1999,6 +2039,12 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // — caught by this round's own config-parse test, which is the only thing
     // that exercises the boundary rather than the reader.
     "transport/auth/usrpwd/dictionary_file",
+    // The usrpwd initiator credential, MOVED here from `UNHONOURED_UPSTREAM_CONFIG_KEYS` /
+    // `UNHONOURED_BEYOND_WZ` / the `CredentialStore` beyond-group and the citation ledger, and
+    // moved rather than deleted for the reason R2567 records above. wz now ACTS on both: the
+    // C ABI presents them when its session dials (`NodeAuth`).
+    "transport/auth/usrpwd/user",
+    "transport/auth/usrpwd/password",
     // R2627 — the pubkey identity, MOVED here from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS` / `UNHONOURED_BEYOND_WZ` / the
     // `CredentialStore` beyond-group, and moved rather than deleted for the
@@ -2478,12 +2524,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // wz reads them the same way, through `keypair_from_config`.
     // R2567 — `transport/auth/usrpwd/dictionary_file` LEFT this list: wz now
     // parses it into `ZenohNodeConfig::usrpwd_dictionary_file` and loads it
-    // through `UsrPwdStore::from_dictionary_file`. Its two siblings stay, and
-    // the distinction is real rather than tidy: `user` / `password` are the
-    // INITIATOR's own credentials, which wz takes from its caller rather than
-    // from a config file, so nothing here reads them yet.
-    "transport/auth/usrpwd/password",
-    "transport/auth/usrpwd/user",
+    // through `UsrPwdStore::from_dictionary_file`. Its two siblings, `user` and
+    // `password`, the INITIATOR's own credentials, stayed until the C ABI began
+    // presenting them from its config when it dials, and then LEFT too, for
+    // [`HONOURED_CONFIG_KEYS`].
     "transport/link/protocols",
     "transport/link/rx/buffer_size",
     "transport/link/rx/max_message_size",
@@ -2686,9 +2730,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // leaving it was FORCED rather than chosen: every row here asserts a thing
     // wz cannot act on, and wz now acts on this one. That is what a
     // negative-assertion list is for — implementing the capability makes the row
-    // false, so the key cannot be honoured quietly.
-    "transport/auth/usrpwd/password",
-    "transport/auth/usrpwd/user",
+    // false, so the key cannot be honoured quietly. The same went for `user` and
+    // `password` once the C ABI presented them when it dials.
     "transport/link/protocols",
     "transport/link/rx/buffer_size",
     "transport/link/rx/max_message_size",
@@ -2887,27 +2930,13 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "PluginSearchDirs",
         &["plugins_loading/search_dirs"],
     ),
-    (
-        "a credential store",
-        "CredentialStore",
-        &[
-            // R2336 (open-debt item 15) — `key_size` / `known_keys_file` are
-            // [`UPSTREAM_INERT_CONFIG_KEYS`] now, so they are no longer part of
-            // the population this grouping has to cover. Upstream has no
-            // credential store behind either: nothing reads them.
-            // R2567 — the dictionary key left this group with the list above.
-            // The group's claim is that wz has no CREDENTIAL STORE; it now has
-            // one (`UsrPwdStore`), but only behind usrpwd's responder table.
-            // R2627 — the four pubkey identity keys left as well, which is the
-            // half of R2567's sentence that has stopped being true: it said "the
-            // pubkey material has no store behind it", and `PubKeyLookup` plus
-            // `keypair_from_config` are that store. What remains is usrpwd's
-            // `user` / `password`, initiator credentials this layer never reads
-            // from config, and for those the group's claim still holds.
-            "transport/auth/usrpwd/password",
-            "transport/auth/usrpwd/user",
-        ],
-    ),
+    // The "a credential store" group is GONE, not emptied: its history is that
+    // `key_size` / `known_keys_file` left it for [`UPSTREAM_INERT_CONFIG_KEYS`] (R2336,
+    // upstream reads neither), the usrpwd dictionary left with R2567, the four pubkey
+    // identity keys left with R2627, and its last two members, usrpwd's `user` and
+    // `password`, left when the C ABI began presenting them from its config when it
+    // dials. A group claims wz has no such store for the keys it names; with no key left
+    // there is nothing for the claim to be about.
     (
         "a configurable link-TX surface",
         "LinkTxConf",
@@ -3238,16 +3267,9 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // exists. The gate that caught this says exactly that -- "a verdict about
     // evidence that is gone" -- which is why the row is removed rather than
     // reworded.
-    (
-        "transport/auth/usrpwd/password",
-        "foreign-node-config",
-        "zenohd",
-    ),
-    (
-        "transport/auth/usrpwd/user",
-        "foreign-node-config",
-        "zenohd",
-    ),
+    // And the same for `transport/auth/usrpwd/user` and `password`: their rows said
+    // wz names them only to configure a FOREIGN zenohd, and the C ABI now reads
+    // them for itself, so the rows are removed for the same reason.
     (
         "transport/link/tls/connect_certificate",
         "wz-has-it",
@@ -6459,6 +6481,17 @@ impl ZenohNodeConfig {
             out.usrpwd_dictionary_file = Some(v);
             named.push("transport/auth/usrpwd/dictionary_file");
         }
+        // The usrpwd initiator credential, taken as stated. Whether the two are given together
+        // is the open's to judge (this function also validates configs destined for another
+        // node, and upstream's own reader decides that pairing at start-up, not here).
+        if let Some(v) = want_string(&doc, "transport/auth/usrpwd/user", "a user name")? {
+            out.usrpwd_user = Some(v);
+            named.push("transport/auth/usrpwd/user");
+        }
+        if let Some(v) = want_string(&doc, "transport/auth/usrpwd/password", "a password")? {
+            out.usrpwd_password = Some(SecretText::new(v));
+            named.push("transport/auth/usrpwd/password");
+        }
         // R2627 — the pubkey identity. Taken as text/paths and paired later, for
         // the reason the dictionary above is: the pairing reads files, and this
         // function must not. Each key is its own arm so a wrong type names the
@@ -7917,6 +7950,17 @@ mod tests {
             (
                 "transport/auth/usrpwd/dictionary_file",
                 r#"{ "transport": { "auth": { "usrpwd": { "dictionary_file": "/etc/wz/creds" } } } }"#,
+            ),
+            // The usrpwd initiator credential, one fixture each: the reader takes each key
+            // on its own, and a fixture naming both would let one key's arm stand for the
+            // other's.
+            (
+                "transport/auth/usrpwd/user",
+                r#"{ "transport": { "auth": { "usrpwd": { "user": "alice" } } } }"#,
+            ),
+            (
+                "transport/auth/usrpwd/password",
+                r#"{ "transport": { "auth": { "usrpwd": { "password": "s3cret" } } } }"#,
             ),
             // R2627 — the four pubkey identity keys, driven the way the
             // dictionary above is and for the same reason: the reader takes TEXT
@@ -9857,6 +9901,45 @@ mod tests {
             without.config.usrpwd_dictionary_file, None,
             "an absent key is None, not an empty path"
         );
+    }
+
+    /// The usrpwd initiator credential lands in its own fields, each on its own, and the
+    /// password never appears in a print of the config.
+    ///
+    /// The `Debug` half is the one that matters in production: a node's config is printed in
+    /// assertion output, in a host's startup log and in bug reports, and a password held as a
+    /// plain string would be in all of them. The user name is not a secret and is printed.
+    #[test]
+    fn the_usrpwd_credential_is_read_per_key_and_the_password_is_not_printed() {
+        let both = ZenohNodeConfig::from_json5(
+            r#"{"transport": {"auth": {"usrpwd": {"user": "alice", "password": "hunter2-secret"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(both.config.usrpwd_user.as_deref(), Some("alice"));
+        assert_eq!(
+            both.config.usrpwd_password.as_ref().map(SecretText::expose),
+            Some("hunter2-secret")
+        );
+        let printed = format!("{:?}", both.config);
+        assert!(
+            !printed.contains("hunter2-secret"),
+            "a print of the config showed the password: {printed}"
+        );
+        assert!(printed.contains("alice"), "the user name is not a secret");
+
+        let user_only = ZenohNodeConfig::from_json5(
+            r#"{"transport": {"auth": {"usrpwd": {"user": "alice"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(user_only.config.usrpwd_user.as_deref(), Some("alice"));
+        assert_eq!(
+            user_only.config.usrpwd_password, None,
+            "each key lands in its own field"
+        );
+
+        let neither = ZenohNodeConfig::from_json5(r#"{"mode": "peer"}"#).unwrap();
+        assert_eq!(neither.config.usrpwd_user, None);
+        assert_eq!(neither.config.usrpwd_password, None);
     }
 
     /// R2627 — each pubkey identity key lands in ITS OWN field.

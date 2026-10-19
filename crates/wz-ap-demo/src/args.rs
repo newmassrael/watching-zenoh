@@ -1832,6 +1832,19 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             exp.record("transport/auth/usrpwd/dictionary_file", effect);
         }
     }
+    // The dictionary's initiator-side siblings, decided the same way for the same reason: this
+    // binary has no auth plane, so a file that states a user and password is told, per key, that
+    // this binary dials without them.
+    if named("transport/auth/usrpwd/user") {
+        if let Some(effect) = no_sink("transport/auth/usrpwd/user") {
+            exp.record("transport/auth/usrpwd/user", effect);
+        }
+    }
+    if named("transport/auth/usrpwd/password") {
+        if let Some(effect) = no_sink("transport/auth/usrpwd/password") {
+            exp.record("transport/auth/usrpwd/password", effect);
+        }
+    }
     // R2650 — `low_pass_filter`'s decision site, and the shape is the dictionary's
     // for a DIFFERENT reason worth keeping apart. There the plane is absent; here
     // the plane exists and `--max-payload` is a real sink, but it takes one global
@@ -3228,6 +3241,27 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          username and an HMAC rather than the store or its path.",
     ),
     (
+        "transport/auth/usrpwd/user",
+        KIND_NOT_YET_READ,
+        "a frame DOES carry it: the initiator writes the user name into the OpenSyn \
+         usrpwd sub-extension, \
+         `io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `user: user.to_vec(),`. \
+         No leg reads a CONFIG-sourced user off that frame yet, and this binary \
+         expands it to NO flag (--acl-deny, --downsample and --max-payload are its \
+         only access flags) and has no auth plane to present it with, so the key is \
+         pinned in `config_keys_the_demo_drops()`.",
+    ),
+    (
+        "transport/auth/usrpwd/password",
+        KIND_OFF_WIRE,
+        "expands to NO flag (--acl-deny, --downsample and --max-payload are this \
+         binary's only access flags), and it has no auth plane to present it with \
+         (it is pinned in `config_keys_the_demo_drops()`). Off-wire even where a \
+         sink DOES exist: the password never travels, only an HMAC of it keyed by \
+         the responder's nonce, \
+         `io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `let hmac = hmac::sign(&key, password)`.",
+    ),
+    (
         "downsampling",
         KIND_OFF_WIRE,
         "expands to NO flag, for its sibling's reason one level deeper. The \
@@ -3479,6 +3513,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         // the demo now withholds them. Nothing here is withheld on the
         // dictionary: the plane it configures is absent, not ignored.
         "transport/auth/usrpwd/dictionary_file",
+        // The INITIATOR half of the same plane: `user` and `password` are what a node
+        // presents when it dials, and this binary has no auth plane to present them
+        // with (it dials with none), so they are the first kind for the dictionary's
+        // reason. The C ABI session does act on them (`NodeAuth`); this is a statement
+        // about THIS binary, which is why the reader honours the keys and this list
+        // still names them.
+        "transport/auth/usrpwd/user",
+        "transport/auth/usrpwd/password",
         // R2650 — `low_pass_filter`, and a THIRD kind again: the plane is here and
         // the sink exists, but it cannot carry what the document says.
         //
@@ -4838,6 +4880,21 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { usrpwd: {
                        dictionary_file: "/etc/wz/usrpwd.txt" } } } }"#,
+            ),
+            // The initiator half, one row each, for the dictionary's reason: the table stays
+            // universal, the key reaches nothing in this binary (it has no auth plane to
+            // present a credential with), and the reader must NAME it from its own document.
+            (
+                "transport/auth/usrpwd/user",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { auth: { usrpwd: { user: "alice" } } } }"#,
+            ),
+            (
+                "transport/auth/usrpwd/password",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { auth: { usrpwd: { password: "s3cret" } } } }"#,
             ),
             // R2650 — `low_pass_filter`, the first interceptor key with a reader.
             // A dropped key like the rows above, so the pair proves the expansion
