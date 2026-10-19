@@ -20,7 +20,9 @@
 //! and this compiler disagree about a literal the reader had already validated; callers treat it
 //! as the assertion it is and refuse, rather than unwrapping in a running node.
 
-use super::{InterceptorConfig, InterceptorFlow};
+use super::InterceptorConfig;
+#[cfg(any(feature = "access-quota", feature = "access-downsampling"))]
+use super::InterceptorFlow;
 use crate::zenoh_config::ZenohNodeConfig;
 
 /// The flows a `downsampling` or `low_pass_filter` item governs: the ones it names, or BOTH when
