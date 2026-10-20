@@ -261,14 +261,15 @@ impl SessionInitParams {
     /// internal "unset" sentinel and must never reach the wire — a
     /// zenoh-pico peer adopts a literal 0 verbatim
     /// (unicast/transport.c:135-136) and sizes a 0-byte TX wbuf from it
-    /// (transport.c:47-49), bricking the session. The single accessor
-    /// every advertisement and own-side comparison reads:
-    /// `encode_init`'s wire write, `init_ack_params`' capping min, the
-    /// R311kc InitAck validator's own side, and
-    /// `negotiated_batch_mtu`'s own arm — so the wire value and every
-    /// comparison against it stay one value (the R311kd zero-sentinel
-    /// patched only the wz<->wz MTU consult; this closes the wire
-    /// emission itself).
+    /// (transport.c:47-49), bricking the session. The configured half of
+    /// what a session advertises: `SessionLinkActions::own_batch_advertisement`
+    /// caps it by the link's receive capacity, and that capped value is what
+    /// every advertisement and own-side comparison reads (the Init wire
+    /// write, `init_ack_params`' capping min, the R311kc InitAck validator's
+    /// own side, and `negotiated_batch_mtu`'s own arm) — so the wire value
+    /// and every comparison against it stay one value (the R311kd
+    /// zero-sentinel patched only the wz<->wz MTU consult; this closes the
+    /// wire emission itself).
     pub fn effective_batch_size(&self) -> u16 {
         match self.batch_size {
             0 => 65535,

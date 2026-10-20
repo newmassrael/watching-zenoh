@@ -1305,6 +1305,14 @@ impl BoxedLinkDriver for SerialWriteDriver {
         // guard. TCP / UDP inherit the unbounded `DEFAULT_LINK_MTU`.
         SERIAL_MTU
     }
+
+    fn link_rx_capacity(&self) -> usize {
+        // The decoder refuses a destuffed frame past `SERIAL_MFS`, the
+        // `SERIAL_MTU` payload plus its envelope (`serial_link::decode_frame`),
+        // so no batch above `SERIAL_MTU` can arrive whole. zenoh's serial link
+        // reports the same bound as its MTU and caps the advertised batch by it.
+        SERIAL_MTU
+    }
 }
 
 /// Async writer task. Owns the [`WriteHalf`] and drains the outbound channel,

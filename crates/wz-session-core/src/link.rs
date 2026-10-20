@@ -704,6 +704,24 @@ pub trait BoxedLinkDriver {
         DEFAULT_LINK_MTU
     }
 
+    /// The largest single frame this link can RECEIVE, in bytes: the bound
+    /// the session's own batch advertisement is capped by, so a peer is never
+    /// invited to send a batch the link has no room to take. zenoh caps the
+    /// advertised batch the same way, `config.batch_size.min(link mtu)` on
+    /// both the opening and the accepting side (`unicast/establishment/
+    /// open.rs:652-656`, `accept.rs:781`).
+    ///
+    /// Distinct from [`Self::link_mtu`], which is the SEND fragment budget:
+    /// the tokio UDP link fragments to pico's 1450 but receives a whole
+    /// 65507-byte datagram, so advertising its send budget would shrink every
+    /// peer's batches for nothing. A link whose receive buffer is the frame
+    /// bound (the lwIP session socket's slot, serial's `SERIAL_MTU`) declares
+    /// it here; a stream link has no frame bound and inherits
+    /// [`DEFAULT_LINK_MTU`], inert against the `u16` advertisement.
+    fn link_rx_capacity(&self) -> usize {
+        DEFAULT_LINK_MTU
+    }
+
     /// R311y453 — the LINK-DERIVED SUBJECT of this driver's transport: what the
     /// §5.16 interceptors scope their rules by, or `None` for a driver that
     /// carries no subject at all (the test doubles).

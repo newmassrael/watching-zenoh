@@ -5806,4 +5806,73 @@ mod init_advertisement_tests {
         };
         assert_eq!(body.batch_size, Some(1024));
     }
+
+    /// The batch a session advertises is capped by the largest frame its link
+    /// receives, as zenoh caps it (`open.rs:652-656`, `accept.rs:781`): a node
+    /// configured for 1024 whose link takes 256 says 256 in its InitSyn and its
+    /// InitAck, refuses an InitAck that enlarges the 256 it sent, and sends to
+    /// the same 256. Before the cap the InitSyn said 1024 and a peer that
+    /// believed it sent batches the node could not receive.
+    #[test]
+    fn the_advertised_batch_is_capped_by_what_the_link_receives() {
+        use super::{
+            new_session_actions, BoxedLinkDriver, ExtChainRole, LinkSendOutcome, PeerInitCaps,
+        };
+        use crate::runtime_impl::TokioTime;
+        use crate::Reliability;
+        use std::sync::Arc;
+
+        const RX_CAPACITY: u16 = 256;
+        struct SmallSlots;
+        impl BoxedLinkDriver for SmallSlots {
+            fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+            fn link_rx_capacity(&self) -> usize {
+                usize::from(RX_CAPACITY)
+            }
+        }
+
+        let mut params = fixture_session_init_params();
+        params.batch_size = 1024;
+        let actions = new_session_actions(Arc::new(SmallSlots), params, TokioTime::new());
+        let advertised = |is_ack: bool, role: ExtChainRole| {
+            let wire = actions
+                .encode_init_with_role(is_ack, None, role)
+                .expect("encode Init");
+            let InboundFrame::Init { body, .. } = parse_inbound(&wire).expect("parse own Init")
+            else {
+                panic!("an encoded Init must parse as Init");
+            };
+            body.batch_size
+        };
+
+        assert_eq!(actions.own_batch_advertisement(), RX_CAPACITY);
+        assert_eq!(
+            advertised(false, ExtChainRole::InitSyn),
+            Some(RX_CAPACITY),
+            "the InitSyn must not invite batches the link cannot receive"
+        );
+        assert_eq!(
+            advertised(true, ExtChainRole::InitAck),
+            Some(RX_CAPACITY),
+            "an InitAck with no InitSyn parsed says the own, capped, size"
+        );
+
+        actions.set_peer_init_caps(Some(PeerInitCaps {
+            seq_num_res: 0,
+            req_id_res: 0,
+            batch_size: 65535,
+        }));
+        assert_eq!(advertised(true, ExtChainRole::InitAck), Some(RX_CAPACITY));
+        assert_eq!(actions.init_ack_params().batch_size, RX_CAPACITY);
+        assert_eq!(actions.negotiated_batch_mtu(), usize::from(RX_CAPACITY));
+
+        // The initiator holds a reply to what its InitSyn carried, not to the
+        // configured size the wire never saw.
+        assert!(actions.init_ack_caps_acceptable(Some(0), Some(RX_CAPACITY)));
+        assert!(!actions.init_ack_caps_acceptable(Some(0), Some(RX_CAPACITY + 1)));
+    }
 }

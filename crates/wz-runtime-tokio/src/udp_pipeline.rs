@@ -1142,6 +1142,16 @@ impl BoxedLinkDriver for UdpWriteDriver {
         // the unbounded `DEFAULT_LINK_MTU`; serial caps at SERIAL_MTU (1500).
         UDP_LINK_MTU
     }
+
+    fn link_rx_capacity(&self) -> usize {
+        // Every read path takes a whole datagram, not the 1450 this link sends:
+        // the dial read and the accept demux read into `MAX_UDP_PAYLOAD`, and
+        // the zero-copy pool's large class holds it (`link_rx_datagram`). So
+        // the advertisement is capped by the datagram ceiling, as zenoh's UDP
+        // link caps it by its own (`UDP_MAX_MTU`), and a peer is not made to
+        // fragment to this side's send budget.
+        MAX_UDP_PAYLOAD
+    }
 }
 
 /// Async writer task. Holds the shared `Arc<UdpSocket>` + the unicast `peer`

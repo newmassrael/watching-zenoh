@@ -179,7 +179,7 @@ use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 #[cfg(all(feature = "codec-close", not(feature = "tx-lend-only")))]
 use crate::handshake_encode::encode_close;
 #[cfg(all(feature = "alloc", feature = "codec-init-body"))]
-use crate::handshake_encode::encode_init;
+use crate::handshake_encode::encode_init_with_caps;
 #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
 use crate::handshake_encode::encode_open;
 
@@ -1667,7 +1667,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// InitSyn with `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION`. Empty
     /// slot means no InitSyn has been parsed yet (handshake
     /// hasn't started) and `encode_init_with_role(is_ack=true)`
-    /// falls back to `self.params` verbatim — test paths that
+    /// falls back to this node's own advertisement — test paths that
     /// emit InitAck directly without an inbound parse cycle
     /// (R60, layer3_init_body) continue to work.
     pub inbound_peer_init_caps: R::Mutex<Option<PeerInitCaps>>,
@@ -4707,8 +4707,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// written into a lent slot from the parameters where they lie (no clone of
     /// the bundle), the extension chain staged for `role`, and `cookie_override`
     /// as [`encode_init`](crate::handshake_encode::encode_init) takes it. The
-    /// InitAck advertises the sizes capped to the peer's InitSyn
-    /// ([`Self::init_ack_caps`]).
+    /// sizes are [`Self::init_caps`]'.
     #[cfg(all(
         feature = "tx-lend-only",
         feature = "codec-init-body",
@@ -4720,11 +4719,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
-        let caps = if is_ack {
-            self.init_ack_caps()
-        } else {
-            crate::handshake_encode::InitCaps::of(&self.params)
-        };
+        let caps = self.init_caps(is_ack);
         // The codec's worst case for the body and the longest chain a peer can
         // send back, so the link lends one slot that holds any InitSyn / InitAck.
         const WANT: usize = 1
@@ -4848,7 +4843,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The three sizes an InitAck advertises, capped to the peer's InitSyn when
     /// one has been parsed ([`Self::init_ack_params`] puts them in a clone of the
-    /// parameter bundle; [`Self::init_ack_caps`] names them without one). One
+    /// parameter bundle; [`Self::init_caps`] names them without one). One
     /// rule, so the two cannot disagree: `(seq_num_res, req_id_res,
     /// batch_size)`. `peer` is the slot's value, read by the caller.
     fn init_ack_sizes(&self, peer: Option<PeerInitCaps>) -> (u8, u8, u16) {
@@ -4867,34 +4862,50 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // R311kj — min over the EFFECTIVE own advertisement (0 =
                 // unset would otherwise pin the InitAck to a literal 0 on
                 // the wire); the peer side is already 0-normalized by the
-                // from_init_body projection.
-                params.effective_batch_size().min(p.batch_size),
+                // from_init_body projection. The own side is what this node
+                // advertises, link-capped, as zenoh's acceptor mins the
+                // InitSyn against its own link-capped size (`accept.rs:218`).
+                self.own_batch_advertisement().min(p.batch_size),
             ),
-            None => (params.seq_num_res, params.req_id_res, params.batch_size),
+            None => (
+                params.seq_num_res,
+                params.req_id_res,
+                self.own_batch_advertisement(),
+            ),
         }
     }
 
-    /// [`Self::init_ack_params`]' sizes as the Init encoder takes them, with no
-    /// copy of the parameter bundle: what the lend-only InitAck sender hands
-    /// `encode_init_into`.
+    /// The sizes an Init message advertises, as the Init encoder takes them and
+    /// with no copy of the parameter bundle: an InitAck's are
+    /// [`Self::init_ack_params`]' (capped to the peer's InitSyn), an InitSyn's
+    /// are this node's own, its batch size capped by what the link receives
+    /// ([`Self::own_batch_advertisement`]). Both senders read this one rule, so
+    /// the lend-only and the vector sender cannot advertise different sizes.
     #[cfg(all(
-        feature = "tx-lend-only",
         feature = "codec-init-body",
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+        any(
+            feature = "alloc",
+            all(
+                feature = "tx-lend-only",
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            )
+        )
     ))]
-    fn init_ack_caps(&self) -> crate::handshake_encode::InitCaps {
-        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
-        let (seq_num_res, req_id_res, batch_size) = self.init_ack_sizes(peer);
+    fn init_caps(&self, is_ack: bool) -> crate::handshake_encode::InitCaps {
+        let (seq_num_res, req_id_res, batch_size) = if is_ack {
+            let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+            self.init_ack_sizes(peer)
+        } else {
+            (
+                self.params.seq_num_res,
+                self.params.req_id_res,
+                self.own_batch_advertisement(),
+            )
+        };
         crate::handshake_encode::InitCaps {
             seq_num_res,
             req_id_res,
-            // The wire never carries the internal 0 = "unset" sentinel: no peer
-            // caps leaves the bundle's own, which may be that sentinel.
-            batch_size: if batch_size == 0 {
-                self.params.effective_batch_size()
-            } else {
-                batch_size
-            },
+            batch_size,
         }
     }
 
@@ -5008,8 +5019,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// buffer accepts.
     ///
     /// R311kj — `0` ("unset") is an INTERNAL sentinel only: the own
-    /// side reads [`SessionInitParams::effective_batch_size`] (the same
-    /// value `encode_init` put on the wire — 0 never reaches a peer),
+    /// side reads [`Self::own_batch_advertisement`] (the same value the
+    /// Init put on the wire — 0 never reaches a peer),
     /// and the peer side reads the captured [`PeerInitCaps`], whose
     /// `from_init_body` projection 0-normalizes a legacy/non-conforming
     /// wire 0 defensively. zenoh-pico never advertises 0 (default
@@ -5022,7 +5033,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// peer RX budget even for fragment sizing).
     pub fn negotiated_batch_mtu(&self) -> usize {
         // R311kj — both sides are 0-normalized at their SSOT
-        // (own: effective_batch_size, the same value the InitSyn wire
+        // (own: own_batch_advertisement, the same value the Init wire
         // carried; peer: the from_init_body projection), so the min is
         // a plain min — no sentinel arms here.
         //
@@ -5031,12 +5042,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // budget below the negotiated batch so an oversize message
         // fragments to chunks the link can actually emit — exactly how
         // zenoh-pico sizes its TX wbuf `min(zl->_mtu, batch_size)`
-        // (transport/unicast/transport.c:47). The advertised batch is
-        // NOT itself reduced (pico does not either — the peer's RX
-        // budget stays the full advertisement); only this TX-side budget
-        // is link-capped. For an unbounded stream link the term is
+        // (transport/unicast/transport.c:47). This SEND budget is not
+        // what the advertisement is capped by: that is the link's
+        // receive capacity ([`Self::own_batch_advertisement`]), which
+        // for the tokio UDP link is a whole datagram while its send
+        // budget is 1450. For an unbounded stream link the term is
         // [`BoxedLinkDriver::link_mtu`]'s `DEFAULT_LINK_MTU` (65535),
-        // inert against the `u16` batch advertisements, so TCP / UDP are
+        // inert against the `u16` batch advertisements, so TCP is
         // unchanged.
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
         self.batch_mtu_for(peer)
@@ -5044,12 +5056,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// [`Self::negotiated_batch_mtu`] over a peer's caps already read: the one formula.
     fn batch_mtu_for(&self, peer: Option<PeerInitCaps>) -> usize {
-        let own = self.params.effective_batch_size() as usize;
+        let own = self.own_batch_advertisement() as usize;
         let link = self.link_driver().link_mtu();
         match peer {
             Some(p) => own.min(p.batch_size as usize).min(link),
             None => own.min(link),
         }
+    }
+
+    /// The batch size this node advertises in its Init, and the own side of
+    /// every comparison against that advertisement: the configured budget
+    /// ([`SessionInitParams::effective_batch_size`], never the `0` sentinel)
+    /// capped by the largest frame the link can receive
+    /// ([`BoxedLinkDriver::link_rx_capacity`]). zenoh computes the same,
+    /// `config.batch_size.min(link mtu)`, before either side's Init
+    /// (`unicast/establishment/open.rs:652-656`, `accept.rs:781`), so a peer
+    /// is never invited to send a batch the link has no room to take: the
+    /// lwIP slim profile receives into 256-byte slots and says 256, not the
+    /// 1024 it is configured with.
+    ///
+    /// zenoh-pico has no such cap because it needs none: it advertises its
+    /// compile-time `Z_BATCH_UNICAST_SIZE` and sizes its receive buffer to the
+    /// same constant. wz configures the two separately, so the cap is what
+    /// keeps them one number on the wire.
+    pub fn own_batch_advertisement(&self) -> u16 {
+        let rx = self.link_driver().link_rx_capacity();
+        self.params
+            .effective_batch_size()
+            .min(u16::try_from(rx).unwrap_or(u16::MAX))
     }
 
     /// Declare the largest message this profile can reassemble, in bytes —
@@ -5183,26 +5217,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
     ) -> Result<Vec<u8>, CodecError> {
-        // R121d — capped-to-peer params so the outbound InitAck
+        // R121d — the InitAck advertises capped-to-peer sizes so it
         // satisfies the wire-spec `InitAck.size <= InitSyn.size`
-        // invariant. The owned clone is cheap (the heavy field is
-        // `cookie_signing_key`, a 32-byte `Zeroizing<Vec<u8>>`) and
-        // stays local to this call frame. R311di-pre-f5 — params
-        // captured outside the with_mutex_mut closure since
-        // `init_ack_params` also acquires `inbound_peer_init_caps`
-        // and nested R::with_mutex_mut on the same SessionLinkActions
-        // would deadlock on a per-profile mutex (lwIP critical_section
-        // is non-reentrant; embassy_sync re-entry is undefined). The
-        // chain slot stays inside the closure so the encode call
-        // composes against `&chain` without an extra clone.
-        let params_owned = if is_ack {
-            Some(self.init_ack_params())
-        } else {
-            None
-        };
+        // invariant, and either message's batch size is capped by what
+        // the link receives ([`Self::init_caps`]). R311di-pre-f5 — the
+        // sizes are read outside the with_mutex_mut closure since they
+        // acquire `inbound_peer_init_caps` (and a swappable link's own
+        // mutex), and nested R::with_mutex_mut on the same
+        // SessionLinkActions would deadlock on a per-profile mutex (lwIP
+        // critical_section is non-reentrant; embassy_sync re-entry is
+        // undefined). The chain slot stays inside the closure so the
+        // encode call composes against `&chain` without an extra clone.
+        let caps = self.init_caps(is_ack);
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            let params = params_owned.as_ref().unwrap_or(&self.params);
-            encode_init(params, is_ack, chain, cookie_override)
+            encode_init_with_caps(&self.params, caps, is_ack, chain, cookie_override)
         })
     }
 
@@ -8416,9 +8444,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.params.seq_num_res,
             self.params.req_id_res,
             // R311kj — compare against the EFFECTIVE advertisement,
-            // i.e. exactly the value encode_init put on the InitSyn
-            // wire (0 = unset never reaches the wire).
-            self.params.effective_batch_size(),
+            // i.e. exactly the value the InitSyn put on the wire (0 =
+            // unset never reaches the wire), link-capped as it was sent.
+            self.own_batch_advertisement(),
             sn_res_byte,
             batch_size,
         )

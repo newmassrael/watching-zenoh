@@ -84,19 +84,32 @@ pub fn encode_init(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Result<Vec<u8>, CodecError> {
-    // The worst case the codec bounds the body by, the header byte and the
-    // chain's own entries (a coarse four bytes each, as the chain encoder
-    // reserves): one allocation for the whole frame, as the body-then-chain
-    // form it replaced made.
-    let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + extensions.len() * 4);
-    encode_init_into(
-        &mut wire,
+    encode_init_with_caps(
         params,
         InitCaps::of(params),
         is_ack,
         extensions,
         cookie_override,
-    )?;
+    )
+}
+
+/// [`encode_init`] advertising `caps` rather than what `params` says as it
+/// stands: the session's sender, whose advertisement is also capped by what
+/// its link can receive (`SessionLinkActions::own_batch_advertisement`).
+#[cfg(all(feature = "alloc", feature = "codec-init-body"))]
+pub fn encode_init_with_caps(
+    params: &SessionInitParams,
+    caps: InitCaps,
+    is_ack: bool,
+    extensions: &[ExtEntryOwned],
+    cookie_override: Option<&[u8]>,
+) -> Result<Vec<u8>, CodecError> {
+    // The worst case the codec bounds the body by, the header byte and the
+    // chain's own entries (a coarse four bytes each, as the chain encoder
+    // reserves): one allocation for the whole frame, as the body-then-chain
+    // form it replaced made.
+    let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + extensions.len() * 4);
+    encode_init_into(&mut wire, params, caps, is_ack, extensions, cookie_override)?;
     Ok(wire)
 }
 

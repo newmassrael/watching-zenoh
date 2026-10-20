@@ -350,6 +350,14 @@ impl BoxedLinkDriver for LwipUdpDriver {
     fn link_mtu(&self) -> usize {
         SESSION_RX_SLOT_SIZE
     }
+
+    // The same slot bounds what arrives: a datagram past it does not fit the
+    // slot it is received into. Declaring it caps the batch size this node
+    // advertises, so the slim profile tells its peer 256 rather than the
+    // configured 1024 it could never receive.
+    fn link_rx_capacity(&self) -> usize {
+        SESSION_RX_SLOT_SIZE
+    }
 }
 
 // The driver's tests share sockets and drivers by `Rc`, the form every profile
