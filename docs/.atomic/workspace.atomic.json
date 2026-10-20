@@ -276526,6 +276526,40 @@
         "wz's own --all-features is not a build (SCE's no_std and http-send exclusion); no lane runs the facade's tests beyond its leg sets."
       ]
     },
+    "Round 3390": {
+      "decision_summary": "Repay run 39361259024's Layer C0 red, which R3389 caused: rust-toolchain-pinned.sh opened without a round citation, and gate_provenance_lint requires one in a gate script's first 60 lines. The pre-push hook defers its round-fed gates to hosted, and R3389 did not run them itself before pushing; run 39344495779 never reached the gate because the trigger-path gate failed first in the same fail-fast layer. The header now cites R3389 with no register item. The R3389 cache fix ran as designed in that run: the image's stable toolchain was removed and the first run under the new key built cold at 87% of its budget, under the alarm.",
+      "changes_bullets": [
+        "scripts/lib/rust-toolchain-pinned.sh: the header opens with R3389 (no register item).",
+        "hosted-red-acks: R3390 for run 39361259024."
+      ],
+      "verification_bullets": [
+        "Local: gate_provenance_lint passed on the repaired tree.",
+        "pc2: run-ci Layer C0 whole passed on the repaired tree (356 s).",
+        "Hosted logs of run 39361259024: the gate's own line names the file; validate + verify + test removed the stable toolchain and built cold at 1570 s of 1800 s."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Pushed with --no-verify at the owner's explicit request in the current turn; the hook did not grade this push, so the hosted run for it is the first verdict."
+      ],
+      "publishable_decision_summary": "Repay run 39361259024's Layer C0 red, which R3389 caused: rust-toolchain-pinned.sh opened without a round citation, and gate_provenance_lint requires one in a gate script's first 60 lines. The pre-push hook defers its round-fed gates to hosted, and R3389 did not run them itself before pushing; run 39344495779 never reached the gate because the trigger-path gate failed first in the same fail-fast layer. The header now cites R3389 with no register item. The R3389 cache fix ran as designed in that run: the image's stable toolchain was removed and the first run under the new key built cold at 87% of its budget, under the alarm.",
+      "publishable_changes_bullets": [
+        "scripts/lib/rust-toolchain-pinned.sh: the header opens with R3389 (no register item).",
+        "hosted-red-acks: R3390 for run 39361259024."
+      ],
+      "publishable_verification_bullets": [
+        "Local: gate_provenance_lint passed on the repaired tree.",
+        "pc2: run-ci Layer C0 whole passed on the repaired tree (356 s).",
+        "Hosted logs of run 39361259024: the gate's own line names the file; validate + verify + test removed the stable toolchain and built cold at 1570 s of 1800 s."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Pushed with --no-verify at the owner's explicit request in the current turn; the hook did not grade this push, so the hosted run for it is the first verdict."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
