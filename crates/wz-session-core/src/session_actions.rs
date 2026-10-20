@@ -4864,7 +4864,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // the wire); the peer side is already 0-normalized by the
                 // from_init_body projection. The own side is what this node
                 // advertises, link-capped, as zenoh's acceptor mins the
-                // InitSyn against its own link-capped size (`accept.rs:218`).
+                // InitSyn against its own link-capped size
+                // (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+                // `.min(init_syn.batch_size)`).
                 self.own_batch_advertisement().min(p.batch_size),
             ),
             None => (
@@ -5070,7 +5072,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// capped by the largest frame the link can receive
     /// ([`BoxedLinkDriver::link_rx_capacity`]). zenoh computes the same,
     /// `config.batch_size.min(link mtu)`, before either side's Init
-    /// (`unicast/establishment/open.rs:652-656`, `accept.rs:781`), so a peer
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+    /// `.min(link_unicast.config.batch.mtu)`,
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `manager.config.batch_size.min(batch_size::UNICAST).min(mtu)`), so a peer
     /// is never invited to send a batch the link has no room to take: the
     /// lwIP slim profile receives into 256-byte slots and says 256, not the
     /// 1024 it is configured with.

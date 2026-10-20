@@ -5808,7 +5808,9 @@ mod init_advertisement_tests {
     }
 
     /// The batch a session advertises is capped by the largest frame its link
-    /// receives, as zenoh caps it (`open.rs:652-656`, `accept.rs:781`): a node
+    /// receives, as zenoh caps it
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+    /// `.min(link_unicast.config.batch.mtu)`): a node
     /// configured for 1024 whose link takes 256 says 256 in its InitSyn and its
     /// InitAck, refuses an InitAck that enlarges the 256 it sent, and sends to
     /// the same 256. Before the cap the InitSyn said 1024 and a peer that

@@ -708,8 +708,11 @@ pub trait BoxedLinkDriver {
     /// the session's own batch advertisement is capped by, so a peer is never
     /// invited to send a batch the link has no room to take. zenoh caps the
     /// advertised batch the same way, `config.batch_size.min(link mtu)` on
-    /// both the opening and the accepting side (`unicast/establishment/
-    /// open.rs:652-656`, `accept.rs:781`).
+    /// both the opening and the accepting side
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @
+    /// `.min(link_unicast.config.batch.mtu)`,
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `manager.config.batch_size.min(batch_size::UNICAST).min(mtu)`).
     ///
     /// Distinct from [`Self::link_mtu`], which is the SEND fragment budget:
     /// the tokio UDP link fragments to pico's 1450 but receives a whole
