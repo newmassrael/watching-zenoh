@@ -8545,7 +8545,11 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
     # anything_is_published`, which needs no feature at all (the ids are checked
     # before any declare), so unlike the two rows either side of it this one is
     # fully discriminated HERE.
-    _runci_guarded_test "C1aw group" 9 \
+    # 9 -> 10: `link_interfaces::tests::a_group_link_is_on_the_interface_it_was_joined_on`,
+    # which the `group` filter selects by name and which is a multicast-link witness rather than
+    # a group-membership one. It runs in every leg below that filters on `group`, with no feature
+    # of its own.
+    _runci_guarded_test "C1aw group" 10 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-group-membership,pubsub-allow-loop \
         --lib group --quiet || return 1
     # R2557 — the SAME seven cases with `query-consolidation` ON, which is the
@@ -8554,7 +8558,7 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
     # where it passes because nothing consolidates — a test green by not being
     # asked the question. The pin's control probe (drop it, `Latest` collapses
     # the two answers, 3 members become 2) reds HERE and nowhere else.
-    _runci_guarded_test "C1aw group (query-consolidation)" 9 \
+    _runci_guarded_test "C1aw group (query-consolidation)" 10 \
         cargo test -p wz-runtime-tokio \
         --features ext-pubsub-group-membership,query-consolidation,pubsub-allow-loop,query-get \
         --lib group --quiet || return 1
@@ -8564,7 +8568,7 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
     # green for not having been asked -- the shape the R2557 comment above
     # names, and the shape the control for this round (attach the byte
     # unconditionally) reds in. It reds HERE and nowhere else.
-    _runci_guarded_test "C1aw group (pubsub-qos)" 9 \
+    _runci_guarded_test "C1aw group (pubsub-qos)" 10 \
         cargo test -p wz-runtime-tokio \
         --features ext-pubsub-group-membership,pubsub-qos,pubsub-allow-loop \
         --lib group --quiet || return 1
@@ -12013,7 +12017,12 @@ layer_c1bf_cargo_clippy_all_features() {
     # exhaustive struct literal cannot survive. Its two features are INDEPENDENT
     # axes rather than an exclusive pair, so `--all-features` is a real arm (the
     # no-unstable + shared-memory one) and no narrowing is needed.
-    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c)
+    #
+    # `wz-capi-core` joined it with the capability features (R3394): `OpenStance` carries a
+    # `scouting` field that exists with `scout`, and `SessionResources` a `gossip` field that
+    # exists with `peer`, so a struct literal of either names the fields of the build its author
+    # made. The two ABI crates that build one say each field behind the feature that has it.
+    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`

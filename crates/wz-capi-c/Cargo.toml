@@ -59,6 +59,110 @@ crate-type = ["cdylib", "rlib"]
 name = "hold_a_listener"
 required-features = ["peer"]
 
+# The tests of a capability exist only where the capability does: a build that leaves the plane
+# out has no symbol for them to call, so they are not compiled there (and not run). Nearly every
+# one meets its session through a listener of this same library, so each needs `peer` beside what
+# it exercises; a build without `peer` is covered by `client_only_dials_a_listener`.
+[[test]]
+name = "config_verdict_zenohd_interop"
+required-features = ["peer"]
+
+[[test]]
+name = "connect_retry_open"
+required-features = ["peer"]
+
+[[test]]
+name = "fragmentation_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "gossip_introduces"
+required-features = ["gossip"]
+
+[[test]]
+name = "group_roundtrip"
+required-features = ["group", "peer"]
+
+[[test]]
+name = "interceptors"
+required-features = ["peer"]
+
+[[test]]
+name = "interceptors_declare"
+required-features = ["liveliness", "peer"]
+
+[[test]]
+name = "interceptors_query"
+required-features = ["peer", "query", "queryable"]
+
+[[test]]
+name = "interceptors_subject"
+required-features = ["peer"]
+
+[[test]]
+name = "listen_set"
+required-features = ["peer"]
+
+[[test]]
+name = "listener_auth"
+required-features = ["peer"]
+
+[[test]]
+name = "listener_auth_zenohd_interop"
+required-features = ["peer"]
+
+[[test]]
+name = "local_delivery_thread"
+required-features = ["peer"]
+
+[[test]]
+name = "locality_roundtrip"
+required-features = ["peer", "query", "queryable"]
+
+[[test]]
+name = "parallel_faces_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "peer_put_routing"
+required-features = ["peer"]
+
+[[test]]
+name = "put_cost"
+required-features = ["peer"]
+
+[[test]]
+name = "redial_zenohd_interop"
+required-features = ["peer"]
+
+[[test]]
+name = "scouting_autoconnect"
+required-features = ["peer", "scout"]
+
+[[test]]
+name = "scouting_open"
+required-features = ["peer", "scout"]
+
+[[test]]
+name = "scouting_ttl"
+required-features = ["scout"]
+
+[[test]]
+name = "session_roles"
+required-features = ["peer"]
+
+[[test]]
+name = "source_info_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "timestamp_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "transport_events_roundtrip"
+required-features = ["peer"]
+
 # R2103 (open-debt item 521) — build.rs gives the cdylib its SONAME. Without
 # one, a consumer that links this artifact by path records that absolute
 # build-time path in DT_NEEDED and cannot redistribute what it built, which for

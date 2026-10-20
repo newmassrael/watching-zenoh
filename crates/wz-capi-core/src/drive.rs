@@ -3928,6 +3928,7 @@ mod tests {
 
     /// The node a link opened to is the node that was dialled whatever the spelling of its id:
     /// the expected one is read off the routing graph (trimmed), the other off the handshake.
+    #[cfg(feature = "scout")]
     #[test]
     fn a_link_to_the_dialled_node_is_the_dialled_node_whatever_its_zero_tail() {
         let trimmed = [0x0a, 0x0b, 0x0c];
@@ -4222,6 +4223,7 @@ mod tests {
     /// for its next frame -- the stop returns, the face does not run until a start, and it
     /// runs again after one. A face that took a place in the gate never parked here: the
     /// drive parks before it polls anything inside it, and the stop waited for the face.
+    #[cfg(feature = "peer")]
     #[test]
     fn a_stop_reaches_an_idle_drive_whose_faces_are_nested() {
         let gate = Arc::new(ReadGate::new(true));
@@ -4374,6 +4376,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "peer")]
     fn strings(list: &[&str]) -> Vec<String> {
         list.iter().map(|text| (*text).to_owned()).collect()
     }
@@ -4382,6 +4385,7 @@ mod tests {
     /// rest of the node's locators: the stated endpoint has a schedule of its own, and a second
     /// link to the same node is refused by it (one link per node), which sent the endpoint back to
     /// its retry schedule and the open through `scouting/delay`.
+    #[cfg(feature = "peer")]
     #[test]
     fn scouting_does_not_dial_a_locator_the_config_states() {
         let configured = strings(&["tcp/127.0.0.1:7447"]);
@@ -4407,6 +4411,7 @@ mod tests {
     /// An endpoint's `#` configuration tail is not part of its locator, and its `?` metadata is:
     /// upstream's `to_locator` drops the first and keeps the second, and a scouted locator has
     /// no tail to begin with.
+    #[cfg(feature = "peer")]
     #[test]
     fn an_endpoints_tail_is_not_its_locator_and_its_metadata_is() {
         assert_eq!(endpoint_locator("tcp/127.0.0.1:7447"), "tcp/127.0.0.1:7447");
@@ -4429,6 +4434,7 @@ mod tests {
     }
 
     /// The stance of a pico-shaped peer, as `wz-capi-pico` opens one.
+    #[cfg(feature = "peer")]
     fn peer_stance() -> OpenStance {
         OpenStance {
             tx_queue: TxQueueConf::pico(),
@@ -4449,6 +4455,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "peer")]
     fn open_peer(connect: Vec<String>, listen: Vec<String>) -> Result<SessionState, OpenError> {
         open_blocking(
             connect,
@@ -4482,6 +4489,7 @@ mod tests {
     /// a face that left the registry is the route to an empty read, and that is the reading of
     /// the 1 of 1200 hosted Platform run 38013268899 counted on Windows. A face to another
     /// listener is counted apart, so a shared port that survives is reported as what it is.
+    #[cfg(feature = "peer")]
     #[test]
     fn an_open_that_dialled_a_peer_returns_with_its_face_in_the_registry() {
         const THREADS: usize = 8;

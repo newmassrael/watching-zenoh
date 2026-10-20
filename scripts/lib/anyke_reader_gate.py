@@ -72,7 +72,7 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 #: where the reader is.
 OWNERS: dict[str, str] = {
     "crates/wz-session-core/src/selector_params.rs": "zenoh",
-    "crates/wz-capi-pico/src/query.rs": "pico",
+    "crates/wz-capi-pico/src/reply_keyexpr.rs": "pico",
 }
 
 #: The literal, in both spellings Rust admits for it.

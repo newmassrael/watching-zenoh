@@ -481,6 +481,7 @@ impl Outbound {
     /// The bytes this payload holds, whichever way it is held: what a path that cannot
     /// carry a descriptor sends, and what the descriptor stands in for on one that can.
     #[cfg(any(
+        test,
         feature = "queryable",
         all(
             feature = "zenoh-c-shared-memory",

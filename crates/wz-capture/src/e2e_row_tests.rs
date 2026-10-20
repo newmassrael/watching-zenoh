@@ -943,16 +943,18 @@ fn a_row_the_cursor_passes_over_still_moves_the_counter_of_the_rows_after_it() {
     }
 }
 
-/// A RUN WITH A PROFILE RULE IS WALKED WHOLE BY THE SINCE DOOR THAT REMEMBERS.
+/// A RUN WITH A PROFILE RULE GOES ON ACROSS STEPS, AND JUDGES THE REPETITION ALL THE SAME.
 ///
-/// A walk that continued from where the last one stopped would not visit the rows
-/// the cursor passes, and a counter is a fact about the frames before a row, so the
-/// row after the cursor would be judged as the first frame its slot ever received.
-/// The memory therefore does not resume when a rule binds a key to a profile: the
-/// document is the plain since document, with the repetition judged as one, and
-/// the memory says it walked whole.
+/// A counter is a fact about the frames before a row, so a walk that went on from where the
+/// last one stopped without that fact would judge the row after the cursor as the first frame
+/// its slot ever received. The memory therefore carries the judgement state of the end-to-end
+/// slots (`FieldsMemory::e2e`) from step to step: the second step is resumed, not walked whole
+/// again, and its document is the plain since document, with the repetition judged as one.
+/// (Until R3393 the memory did not resume when a rule bound a key to a profile, and this test
+/// said so; a slot judged from two lists still begins again, which the dissect door's own test
+/// pins.)
 #[test]
-fn a_run_with_a_profile_rule_is_walked_whole_by_the_door_that_remembers() {
+fn a_run_with_a_profile_rule_goes_on_across_steps_and_judges_the_repetition() {
     use crate::fields_json::{fields_json_since_remembering, FieldsMemory};
     for link in LINKS {
         let mut wire = Wire::new(link, true);
@@ -997,8 +999,8 @@ fn a_run_with_a_profile_rule_is_walked_whole_by_the_door_that_remembers() {
         assert_eq!(verdicts(&doc), expect(&[REPEAT]), "{link:?}: {doc}");
         assert_eq!(
             memory.stats().resumed,
-            0,
-            "{link:?}: a run with a profile rule must not be resumed"
+            1,
+            "{link:?}: the second step of a run with a profile rule is resumed"
         );
     }
 }

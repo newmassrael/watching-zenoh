@@ -555,7 +555,12 @@ const GROUP_PEER_TABLE: usize = 32;
 
 /// The policy a group session is held to, and the interface it joined on: the link the
 /// policy's `link_protocols` and `interfaces` axes read.
+///
+/// Read only where the group can be held to a policy (`access-acl-multicast`); a build with the
+/// group and without that feature carries the value from the caller to the function that would
+/// use it and no further, as the parameter it travels in says.
 #[cfg(feature = "transport-multicast")]
+#[cfg_attr(not(feature = "access-acl-multicast"), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct GroupPolicy<'a> {
     access: &'a crate::sessions_access::AccessSpec,

@@ -263,13 +263,8 @@ fn install_observer(
     let identity = FixedNodeIdentity::new(zid_hex, "peer", VERSION, locators)
         .map_err(|_| c"wz: FAIL - the node's identity does not fit its fixed fields")?;
     let installed = NODE.app.install_with(|observer| {
-        if host_connect_writes_fixed(
-            &mut observer.subscribers,
-            zid_hex,
-            "peer",
-            &CONTROL.control,
-        )
-        .is_err()
+        if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &CONTROL.control)
+            .is_err()
         {
             return Err(c"wz: FAIL - the node's observer refused its config subscriber");
         }
