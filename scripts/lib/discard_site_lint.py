@@ -158,6 +158,24 @@ ALLOWED = [
         "a local the call just produced",
     ),
     (
+        "wz-capture/fields_json.rs",
+        "self.checkpoints.pop_front();",
+        "a checkpoint of the container walk given up because no message the "
+        "dissection still holds names a packet in its chunk. A checkpoint is an "
+        "INDEX into the capture bytes the caller holds, rebuilt by walking them "
+        "again, and not a copy of anything captured; what a packet in a chunk "
+        "given up would have said is read as absent, the answer for a packet "
+        "nobody names",
+    ),
+    (
+        "wz-capture/fields_json.rs",
+        "loaded.remove(0);",
+        "the oldest of the few chunks one call keeps read, evicted to make room "
+        "for the next. A cache of packets BORROWED from the capture bytes, read "
+        "again from its checkpoint when asked for; nothing in it is held "
+        "nowhere else",
+    ),
+    (
         "wz-capture/agg.rs",
         "while let Some(node) = stack.pop() {",
         "a traversal's own work list, built and consumed inside one call; "
