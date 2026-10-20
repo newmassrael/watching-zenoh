@@ -1290,12 +1290,10 @@ fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
 /// cannot disagree about the same message.
 ///
 /// A group has no peer to ask, so the subject is the group's LINK and the message's key, nothing
-/// more: [`GroupAclContext`] answers no zid and no user, which under the chain's own rules means a
-/// rule scoped by either never applies, and a rule scoped by `link_protocols` or `interfaces`
-/// applies when the link matches. A key that does not resolve to a literal is denied, as
-/// everywhere in the chain: a group carries no alias table of its own at this point (the
-/// dispatcher has already turned a member's declared aliases into literals before its gate runs,
-/// and the session sends literals).
+/// more: [`GroupContext`](crate::interceptor::GroupContext) answers no zid and no user, which
+/// under the chain's own rules means a rule scoped by either never applies, and a rule scoped by
+/// `link_protocols` or `interfaces` applies when the link matches. A key that does not resolve to
+/// a literal is denied, as everywhere in the chain.
 #[cfg(feature = "access-acl-multicast")]
 fn acl_admits_group<R: SessionRuntime>(
     chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
@@ -1305,46 +1303,8 @@ fn acl_admits_group<R: SessionRuntime>(
     if R::with_mutex_mut(chain_slot, |chain| chain.is_empty()) {
         return true;
     }
-    let no_aliases = hashbrown::HashMap::new();
-    let keyexpr = crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
-        msg,
-        wz_session_core::wireexpr_resolve::MappingSpaces::peer_only(&no_aliases),
-    );
-    let ctx = GroupAclContext { link, keyexpr };
+    let ctx = crate::interceptor::GroupContext::of_message(link, msg);
     R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
-}
-
-/// The per-message [`InterceptorContext`] of a group: its link and the already-resolved key. See
-/// [`acl_admits_group`].
-#[cfg(feature = "access-acl-multicast")]
-struct GroupAclContext<'a> {
-    link: &'a wz_session_core::link::LinkSubject,
-    keyexpr: Option<String>,
-}
-
-#[cfg(feature = "access-acl-multicast")]
-impl crate::interceptor::InterceptorContext for GroupAclContext<'_> {
-    // A group member is not authenticated and its zid is not a routing identity here: no subject.
-    fn subject(&self) -> Option<wz_routing_graph::Zid> {
-        None
-    }
-
-    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
-        Some(self.link)
-    }
-
-    // No handshake ran, so nobody authenticated as anyone: a rule naming a user does not apply.
-    fn username(&self) -> Option<String> {
-        None
-    }
-
-    // Resolved by the caller; one message per context, as `SessionAclContext`'s.
-    fn full_keyexpr(
-        &self,
-        _msg: &wz_session_core::network_message::NetworkMessage,
-    ) -> Option<String> {
-        self.keyexpr.clone()
-    }
 }
 
 #[cfg(feature = "access-acl")]
@@ -1411,6 +1371,21 @@ where
         // installing one and leaving the other empty is not "half configured",
         // it is a policy that silently governs one direction.
         //
+        // A policy handed to a GROUP session that does not govern the group protects nothing
+        // there. Upstream's own interceptors leave a multicast transport alone without a word,
+        // which is how an operator comes to believe a group is covered by an ACL it is outside,
+        // so this says it, once per install, and names the way to change it.
+        #[cfg(feature = "access-acl-multicast")]
+        let govern_multicast = config.govern_multicast;
+        #[cfg(not(feature = "access-acl-multicast"))]
+        let govern_multicast = false;
+        if let Some(notice) = crate::interceptor::group_policy_notice(
+            Tp::acl_subject_source(&self.transport).is_none(),
+            !config.is_inert(),
+            govern_multicast,
+        ) {
+            log::warn!("{notice}");
+        }
         // A GROUP session is governed only when the host asked for it. Upstream installs no
         // interceptor on a multicast transport, so a config written for the node's unicast
         // sessions must leave a group's traffic alone unless it says otherwise; an inert config

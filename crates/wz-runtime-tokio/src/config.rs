@@ -1348,6 +1348,22 @@ impl WzConfig {
         self
     }
 
+    /// Hold the node's multicast group to the interceptor pipeline too
+    /// (`InterceptorConfig::govern_multicast`), consumed at setup.
+    ///
+    /// A wz switch with no key in the zenoh document, on purpose: the document is read by stock
+    /// zenohd, whose structured sections refuse a field they do not know, so a key only wz reads
+    /// would stop the same file from starting there. It lives on this object instead, which is
+    /// what a wz host builds, and it survives every later key write: a write to one
+    /// `access_control/*` key replaces that slice of the interceptor config and leaves the rest,
+    /// this flag included. `false` is upstream's shape and the default.
+    #[cfg(all(feature = "routing-peer", feature = "access-acl-multicast"))]
+    #[must_use]
+    pub fn with_govern_multicast(mut self, govern: bool) -> Self {
+        self.interceptors = self.interceptors.with_govern_multicast(govern);
+        self
+    }
+
     /// R311y213 (transport-multilink) — set the aggregated-link budget (the
     /// `unicast.max_links` analogue), consumed at setup. The builder twin of the
     /// `pub max_links` field, mirroring [`Self::with_interceptors`]: the reference
@@ -3672,6 +3688,28 @@ mod tests {
     fn to_admin_json_acl_without_routing_is_the_base_shape() {
         // The ACL is enforced by the session, but the admin view of it is the router's
         // config store, which this build does not have: no `acl_*` field is invented.
+        assert_eq!(
+            router_config().to_admin_json(),
+            r#"{"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"whatami":"router"}"#
+        );
+    }
+
+    // The same hole, one level over: the downsampling and quota views read
+    // `WzConfig::interceptors`, which exists only with `routing-peer`, exactly as the ACL view
+    // does. Without it a downsampling- or quota-only build emits the base shape and no
+    // assertion said so, so `router_config` was dead code under `--all-targets` (the sweep that
+    // found it ran every access subset; the lane clippies each knob LIB-only and never would).
+    // Pinning the shape is what closes it, as it was for the ACL build above.
+    #[cfg(all(
+        not(feature = "routing-peer"),
+        any(feature = "access-downsampling", feature = "access-quota"),
+        not(feature = "access-acl"),
+        not(feature = "transport-multilink"),
+        not(feature = "transport-qos"),
+        not(feature = "adminspace-core")
+    ))]
+    #[test]
+    fn to_admin_json_downsampling_or_quota_without_routing_is_the_base_shape() {
         assert_eq!(
             router_config().to_admin_json(),
             r#"{"batch_size":65535,"connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000},"lease_ms":10000,"whatami":"router"}"#

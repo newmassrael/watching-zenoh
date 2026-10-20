@@ -1913,6 +1913,18 @@ pub struct RouterForwarder {
     /// a drive loop's sender (the reserved→active wiring, a later slice).
     #[cfg(feature = "router-multicast-faces")]
     mcast_groups: RefCell<Vec<McastGroup>>,
+    /// Whether the installed §5.16 pipeline also governs the multicast group, in both
+    /// directions (`InterceptorConfig::govern_multicast`). `false` is upstream's shape: its
+    /// interceptors are not installed on a multicast transport, so a policy written for the
+    /// router's unicast faces leaves the group alone. See
+    /// [`mcast_admits`](Self::mcast_admits).
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    mcast_governed: Cell<bool>,
+    /// The link the attached group runs over, as the pipeline's `link_protocols` and
+    /// `interfaces` axes read it. Unset reads as `LinkSubject::UNKNOWN`, which every scoped rule
+    /// matches, so a group whose link was never described is governed more strictly, not less.
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    mcast_link: RefCell<wz_session_core::link::LinkSubject>,
     /// The OTHER on-group ROUTER member zids for the attached multicast group —
     /// the Designated-Router (DR) election candidate set (I3b loop-safe
     /// federation). Learned from the group's JOIN beacons (whatami=Router) and
@@ -2406,6 +2418,10 @@ impl RouterForwarder {
             dial_tx: RefCell::new(None),
             #[cfg(feature = "router-multicast-faces")]
             mcast_groups: RefCell::new(Vec::new()),
+            #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+            mcast_governed: Cell::new(false),
+            #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+            mcast_link: RefCell::new(wz_session_core::link::LinkSubject::UNKNOWN),
             #[cfg(feature = "router-multicast-faces")]
             mcast_group_members: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
@@ -2994,10 +3010,83 @@ impl RouterForwarder {
         // same counter in `regen_interceptors` and hands it to every face.
         let version = self.interceptor_version.get().wrapping_add(1);
         self.interceptor_version.set(version);
+        // Whether the group is part of the policy is the host's choice, taken from the same
+        // config as the chains so the two cannot be changed apart.
+        #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+        self.mcast_governed.set(config.govern_multicast);
         *self.ingress_interceptors.borrow_mut() =
             config.build_chain_versioned(InterceptorFlow::Ingress, version);
         *self.egress_interceptors.borrow_mut() =
             config.build_chain_versioned(InterceptorFlow::Egress, version);
+        #[cfg(feature = "router-multicast-faces")]
+        self.note_ungoverned_group();
+    }
+
+    /// Say so, once per install and once per attach, when a policy is installed beside a
+    /// multicast group it does not govern: upstream leaves a group outside its interceptors
+    /// without a word, which is how an operator comes to believe a group is covered by an ACL
+    /// it is outside. Called from both places the two facts can become true together, because
+    /// a host is free to install the policy before or after it attaches the group.
+    #[cfg(feature = "router-multicast-faces")]
+    fn note_ungoverned_group(&self) {
+        #[cfg(feature = "access-acl-multicast")]
+        let governed = self.mcast_governed.get();
+        #[cfg(not(feature = "access-acl-multicast"))]
+        let governed = false;
+        let policy_installed = !self.ingress_interceptors.borrow().is_empty()
+            || !self.egress_interceptors.borrow().is_empty();
+        if let Some(notice) = crate::interceptor::group_policy_notice(
+            !self.mcast_groups.borrow().is_empty(),
+            policy_installed,
+            governed,
+        ) {
+            log::warn!("{notice}");
+        }
+    }
+
+    /// The link the multicast group runs over, for the pipeline's `link_protocols` and
+    /// `interfaces` axes. Read it from the same `#iface=` the group was joined on
+    /// ([`multicast_link_subject`](crate::link_interfaces::multicast_link_subject)).
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    pub fn set_mcast_group_link(&self, subject: wz_session_core::link::LinkSubject) {
+        *self.mcast_link.borrow_mut() = subject;
+    }
+
+    /// Whether the §5.16 chain for `flow` admits `msg` on the multicast GROUP. A group that the
+    /// host did not choose to govern admits everything (upstream's shape), as does an empty
+    /// chain, and neither builds a context. A governed group is judged by its link and the
+    /// message's key alone: it has no peer, so a rule scoped by a user, a certificate or a zid
+    /// never applies. A denial moves [`interceptor_dropped`](Self::interceptor_dropped).
+    ///
+    /// `keyexpr` is the literal the caller already resolved, or `None` to read it off `msg`.
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    fn mcast_admits(
+        &self,
+        flow: InterceptorFlow,
+        msg: &NetworkMessage,
+        keyexpr: Option<&str>,
+    ) -> bool {
+        if !self.mcast_governed.get() {
+            return true;
+        }
+        let chain = match flow {
+            InterceptorFlow::Ingress => self.ingress_interceptors.borrow(),
+            InterceptorFlow::Egress => self.egress_interceptors.borrow(),
+        };
+        if chain.is_empty() {
+            return true;
+        }
+        let link = self.mcast_link.borrow();
+        let ctx = match keyexpr {
+            Some(keyexpr) => crate::interceptor::GroupContext::resolved(&link, keyexpr),
+            None => crate::interceptor::GroupContext::of_message(&link, msg),
+        };
+        let verdict = chain.admit(&ctx, msg);
+        if !verdict.is_admitted() {
+            self.interceptor_dropped
+                .set(self.interceptor_dropped.get() + 1);
+        }
+        verdict.is_admitted()
     }
 
     /// The number of messages ANY interceptor has dropped so far (ACL denial on
@@ -5099,6 +5188,7 @@ impl RouterForwarder {
     #[cfg(feature = "router-multicast-faces")]
     pub fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer) {
         self.mcast_groups.borrow_mut().push(McastGroup { tx });
+        self.note_ungoverned_group();
     }
 
     /// Broadcast a routed `Push` to every attached multicast group. UNCONDITIONAL
@@ -5201,6 +5291,18 @@ impl RouterForwarder {
             }
             carrier
         };
+        // The §5.16 egress chain, when the host chose to govern the group: judged on the
+        // literal the group would receive, by the group's link, not by any peer.
+        #[cfg(feature = "access-acl-multicast")]
+        if self.mcast_governed.get()
+            && !self.mcast_admits(
+                InterceptorFlow::Egress,
+                &NetworkMessage::Push(Box::new(carrier.clone())),
+                Some(keyexpr),
+            )
+        {
+            return;
+        }
         for group in groups.iter() {
             // Fire-and-forget: a group with no room or no link drops it, the
             // same contract the drive loop's own reply backing carries.
@@ -8314,6 +8416,19 @@ impl FaceForwarder for RouterForwarder {
         // a non-qos group). The mesh federation + local-client delivery then ride
         // that band via `route_push`, closing the ingress half of the
         // "mcast-egress band" residual (the egress half is `broadcast_to_mcast_groups`).
+        // The §5.16 ingress chain, when the host chose to govern the group. Judged BEFORE the
+        // route is computed, so a denied Put reaches neither a local subscriber nor the mesh,
+        // and by the group's link, not by any peer: a group member has no authenticated identity.
+        #[cfg(feature = "access-acl-multicast")]
+        if self.mcast_governed.get()
+            && !self.mcast_admits(
+                InterceptorFlow::Ingress,
+                &NetworkMessage::Push(Box::new(push.clone())),
+                None,
+            )
+        {
+            return;
+        }
         // Item 751 — the south PEER region, where the pin places a ROUTER's multicast
         // transport (`zenoh/src/net/runtime/region.rs`
         // @ `WhatAmI::Router => Ok(Region::default_south(WhatAmI::Peer)),`) and the
@@ -8358,6 +8473,18 @@ impl FaceForwarder for RouterForwarder {
         request: &RequestOwned,
         from: Option<&MulticastPeerId>,
     ) {
+        // As the Push twin above: the group's chain, by the group's link, before anything counts
+        // or routes.
+        #[cfg(feature = "access-acl-multicast")]
+        if self.mcast_governed.get()
+            && !self.mcast_admits(
+                InterceptorFlow::Ingress,
+                &NetworkMessage::Request(Box::new(request.clone())),
+                None,
+            )
+        {
+            return;
+        }
         self.queries_seen.set(self.queries_seen.get() + 1);
         self.route_request(
             MCAST_INGRESS_FACE,
@@ -19949,6 +20076,169 @@ mod tests {
             "an aliased id-only mcast-ingress Push has no per-peer alias table (I1) \
              and is dropped, not mis-delivered"
         );
+    }
+
+    // ── §5.16 on the router's multicast GROUP: `access-acl-multicast` ──
+    //
+    // Upstream leaves a multicast transport outside its interceptors. These hold both halves of
+    // wz going past that: the group stays outside by default, and is judged by its link and its
+    // keys, in both directions, when the host says so.
+
+    /// A policy denying `admin/**` in `flow`, scoped to `links` (empty = every link).
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    fn mcast_deny_admin(
+        flow: crate::interceptor::AclFlow,
+        links: Vec<wz_session_core::link::InterceptorLink>,
+    ) -> InterceptorConfig {
+        use crate::interceptor::{
+            AclConfig, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+        };
+        InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["admin/**".to_owned()],
+                messages: vec![AclMessage::Put],
+                flow,
+                permission: Permission::Deny,
+                link_protocols: links,
+                interfaces: Vec::new(),
+                usernames: Vec::new(),
+                cert_common_names: Vec::new(),
+            }],
+        }))
+    }
+
+    /// Whether a routed Put on `key` reached the attached group.
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    fn group_got(
+        fwd: &RouterForwarder,
+        rx: &mut crate::multicast_pipeline::MulticastTxTap,
+        key: &str,
+    ) -> bool {
+        let push = wz_session_core::push_build::build_push_literal(key, b"x").expect("push");
+        fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, key, false, false);
+        group_push(rx).is_some()
+    }
+
+    /// Governed, the group does not RECEIVE a denied key from the router, and an allowed key under
+    /// the same policy still goes out; the denial is counted.
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    #[test]
+    fn a_governed_mcast_group_is_not_sent_a_denied_key() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        fwd.set_interceptors(
+            mcast_deny_admin(crate::interceptor::AclFlow::Egress, Vec::new())
+                .with_govern_multicast(true),
+        );
+        let (tx, mut rx) = group_tap();
+        fwd.attach_mcast_group(tx);
+
+        assert!(!group_got(&fwd, &mut rx, "admin/secret"));
+        assert_eq!(fwd.interceptor_dropped(), 1);
+        assert!(group_got(&fwd, &mut rx, "demo/data"));
+    }
+
+    /// Not governed (the default), the same policy leaves the group alone: upstream's shape, and
+    /// the control that says the drop above was the group's chain and not the fixture.
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    #[test]
+    fn an_ungoverned_mcast_group_is_sent_what_the_policy_would_deny() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        fwd.set_interceptors(mcast_deny_admin(
+            crate::interceptor::AclFlow::Egress,
+            Vec::new(),
+        ));
+        let (tx, mut rx) = group_tap();
+        fwd.attach_mcast_group(tx);
+
+        assert!(group_got(&fwd, &mut rx, "admin/secret"));
+        assert_eq!(fwd.interceptor_dropped(), 0);
+    }
+
+    /// Governed, a Put a group member sends on a denied key reaches neither a client
+    /// subscriber nor the mesh, and one on an allowed key does.
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    #[test]
+    fn a_governed_mcast_ingress_drops_a_denied_key() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        fwd.set_interceptors(
+            mcast_deny_admin(crate::interceptor::AclFlow::Ingress, Vec::new())
+                .with_govern_multicast(true),
+        );
+        let (cb, sink_cb) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &cb);
+        forward_one(&fwd, FaceId(0), declare_sub("admin/secret"));
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        sink_cb.reset();
+
+        let denied =
+            wz_session_core::push_build::build_push_literal("admin/secret", b"x").expect("push");
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &denied, None);
+        assert_eq!(sink_cb.frame_count(), 0, "the denied key is dropped");
+        assert_eq!(fwd.interceptor_dropped(), 1);
+
+        let allowed =
+            wz_session_core::push_build::build_push_literal("demo/data", b"x").expect("push");
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &allowed, None);
+        assert_eq!(sink_cb.frame_count(), 1, "the allowed key is delivered");
+    }
+
+    /// Not governed, the group's ingress delivers what the policy would deny.
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    #[test]
+    fn an_ungoverned_mcast_ingress_delivers_what_the_policy_would_deny() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        fwd.set_interceptors(mcast_deny_admin(
+            crate::interceptor::AclFlow::Ingress,
+            Vec::new(),
+        ));
+        let (cb, sink_cb) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &cb);
+        forward_one(&fwd, FaceId(0), declare_sub("admin/secret"));
+        sink_cb.reset();
+
+        let push =
+            wz_session_core::push_build::build_push_literal("admin/secret", b"x").expect("push");
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push, None);
+        assert_eq!(sink_cb.frame_count(), 1);
+    }
+
+    /// The group's LINK is the subject: a rule scoped to a protocol governs a group on that
+    /// protocol and not one on another; a group whose link was never described is governed by
+    /// every scoped rule (fail closed).
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    #[test]
+    fn a_mcast_rule_scoped_to_a_link_protocol_governs_the_group_on_that_link() {
+        use wz_session_core::link::{InterceptorLink, LinkKind, LinkSubject};
+
+        let udp = || LinkSubject {
+            kind: Some(LinkKind::Udp),
+            interfaces: Some(vec!["eth0".to_owned()]),
+            cert_common_name: None,
+        };
+        // (the link the router was told, the protocol the rule names, whether it is sent)
+        for (link, protocol, expected_sent) in [
+            (Some(udp()), InterceptorLink::Udp, false),
+            (Some(udp()), InterceptorLink::Tcp, true),
+            (None, InterceptorLink::Tcp, false),
+        ] {
+            let fwd = RouterForwarder::new(zid(0x01));
+            if let Some(link) = link.clone() {
+                fwd.set_mcast_group_link(link);
+            }
+            fwd.set_interceptors(
+                mcast_deny_admin(crate::interceptor::AclFlow::Egress, vec![protocol])
+                    .with_govern_multicast(true),
+            );
+            let (tx, mut rx) = group_tap();
+            fwd.attach_mcast_group(tx);
+            assert_eq!(
+                group_got(&fwd, &mut rx, "admin/secret"),
+                expected_sent,
+                "link {link:?}, rule scoped to {protocol:?}"
+            );
+        }
     }
 
     // ── R2912 — ported from the retired `RoutingForwarder` engine ──

@@ -65,8 +65,14 @@ pub(crate) mod keyexpr;
 pub mod low_pass;
 
 use std::any::Any;
+// The policy engine's types, nameable from the seam that takes them: `InterceptorConfig::with_acl`
+// is public, and a caller that cannot name its argument cannot call it. They were reachable only
+// through `linkstate_forward`, which is a routing build, so a host that governs a SESSION (the
+// multicast one, say) had to depend on the routing plane or on the engine crate directly.
 #[cfg(feature = "access-acl")]
-use wz_access_control::{AclFlow, AclPolicy};
+pub use wz_access_control::{
+    AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, AclUsername, Permission, SubjectSelector,
+};
 
 use wz_routing_graph::Zid;
 use wz_session_core::link::LinkSubject;
@@ -156,6 +162,101 @@ pub trait InterceptorContext {
     /// not UTF-8 (upstream keeps no username then either), and every face this
     /// node DIALED, since only the accepting side learns who connected.
     fn username(&self) -> Option<String>;
+}
+
+/// What an operator is told about a policy that is installed beside a multicast GROUP, or `None`
+/// when there is nothing to tell: a transport with a peer is governed as it always was, no policy
+/// governs nothing anywhere, and a group the host chose to govern is covered.
+///
+/// A group left outside its policy is the case with something to say. Upstream's own interceptors
+/// leave a multicast transport alone without a word, which is how an operator comes to believe a
+/// group is covered by an ACL it is outside. A pure function of three facts, so the decision is a
+/// thing a test can hold where a log line is not, and so the session (which knows its config) and
+/// the router (which knows its chains) ask the same question.
+///
+/// Compiled where one of those two asks, so a build that has neither (a downsampling-only one,
+/// say) carries no function nobody calls.
+#[cfg(any(feature = "access-acl", feature = "router-multicast-faces"))]
+pub(crate) fn group_policy_notice(
+    is_group: bool,
+    policy_installed: bool,
+    governed: bool,
+) -> Option<&'static str> {
+    if !is_group || !policy_installed || governed {
+        return None;
+    }
+    Some(if cfg!(feature = "access-acl-multicast") {
+        "a policy is installed beside a multicast group that it does not govern: access control, \
+         downsampling and low-pass apply to unicast sessions only, as upstream's do; set \
+         `InterceptorConfig::govern_multicast` to hold the group to it"
+    } else {
+        "a policy is installed beside a multicast group, and this build cannot hold the group to \
+         it: access control, downsampling and low-pass apply to unicast sessions only, as \
+         upstream's do; build with `access-acl-multicast` to govern the group"
+    })
+}
+
+/// The per-message [`InterceptorContext`] of a GROUP (a multicast transport): the group's link and
+/// the message's key, nothing more.
+///
+/// A group has no peer to ask. It answers no zid and no user, which under the chain's own rules
+/// means a rule scoped by either never applies to it, and it answers its LINK, which is what a
+/// rule scoped by `link_protocols` or `interfaces` reads. One type for the three places a group's
+/// traffic is judged (a multicast session's egress, the dispatcher's ingress gate, and the
+/// router's group face), so the three cannot disagree about who a group is.
+#[cfg(feature = "access-acl-multicast")]
+pub(crate) struct GroupContext<'a> {
+    link: &'a LinkSubject,
+    keyexpr: Option<String>,
+}
+
+#[cfg(feature = "access-acl-multicast")]
+impl<'a> GroupContext<'a> {
+    /// A context whose key the caller has already resolved to a literal (the router holds it).
+    /// Only the router's group face has the literal in hand, so only a build with that face
+    /// compiles this.
+    #[cfg(feature = "router-multicast-faces")]
+    pub(crate) fn resolved(link: &'a LinkSubject, keyexpr: &str) -> Self {
+        Self {
+            link,
+            keyexpr: Some(keyexpr.to_owned()),
+        }
+    }
+
+    /// A context for `msg`, whose key is read as the literal it carries. A group has no alias
+    /// table at the point it is judged (the dispatcher has already turned a member's declared
+    /// aliases into literals, and a session sends literals), so a key that does not resolve is
+    /// `None`, which the chain denies for a governed message, as everywhere in it.
+    pub(crate) fn of_message(link: &'a LinkSubject, msg: &NetworkMessage) -> Self {
+        let no_aliases = hashbrown::HashMap::new();
+        let keyexpr = keyexpr::resolve_governed_keyexpr_in(
+            msg,
+            wz_session_core::wireexpr_resolve::MappingSpaces::peer_only(&no_aliases),
+        );
+        Self { link, keyexpr }
+    }
+}
+
+#[cfg(feature = "access-acl-multicast")]
+impl InterceptorContext for GroupContext<'_> {
+    // A group member is not authenticated and its zid is not a routing identity here: no subject.
+    fn subject(&self) -> Option<Zid> {
+        None
+    }
+
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        Some(self.link)
+    }
+
+    // No handshake ran, so nobody authenticated as anyone: a rule naming a user does not apply.
+    fn username(&self) -> Option<String> {
+        None
+    }
+
+    // Resolved at construction; one message per context, so the argument is ignored.
+    fn full_keyexpr(&self, _msg: &NetworkMessage) -> Option<String> {
+        self.keyexpr.clone()
+    }
 }
 
 /// WHICH interceptor a chain verdict came from — R2371.
@@ -548,6 +649,30 @@ pub struct InterceptorConfig {
 }
 
 impl InterceptorConfig {
+    /// Whether this config asks for no interception at all, so a caller can keep every fast path
+    /// it has for a node that wants none.
+    ///
+    /// Moved here from `document`, which is gated on `zenoh-config`: the answer reads only this
+    /// struct's own fields, each under its own feature, and a session that wants to say a policy
+    /// it was handed governs nothing has no document to read.
+    pub fn is_inert(&self) -> bool {
+        #[allow(unused_mut)]
+        let mut inert = true;
+        #[cfg(feature = "access-acl")]
+        {
+            inert &= self.acl.is_none();
+        }
+        #[cfg(feature = "access-downsampling")]
+        {
+            inert &= self.downsampling.is_empty();
+        }
+        #[cfg(feature = "access-quota")]
+        {
+            inert &= self.low_pass.is_empty();
+        }
+        inert
+    }
+
     /// Set whether the pipeline also governs multicast sessions, returning `self` for chaining.
     /// See [`with_acl`](Self::with_acl) for why this is a builder.
     #[cfg(feature = "access-acl-multicast")]

@@ -99,6 +99,34 @@ pub fn ip_link_subject(kind: LinkKind, local: Option<SocketAddr>) -> LinkSubject
     }
 }
 
+/// The §5.16 subject of a UDP multicast GROUP link, from the `#iface=` the group was joined on.
+///
+/// A group socket is bound to the group's own address, which no NIC holds, so
+/// [`ip_link_subject`] on its local address would answer "no NIC" and a rule narrowed by
+/// `interfaces` would never match a group it was written for. The interface the membership
+/// was installed on is what the group is on, and the locator says which:
+///
+/// * a NAME (`eth0`) is the NIC, taken as written;
+/// * an ADDRESS (`192.0.2.7`) is resolved to the NIC(s) that hold it, live, as any other link's
+///   local address is;
+/// * no `#iface=` leaves the choice to the kernel's default route, which this does not read, so
+///   the set is INDETERMINATE (`None`), not empty: a rule narrowed by `interfaces` still applies,
+///   which is the fail-closed reading of "could not determine".
+pub fn multicast_link_subject(iface: Option<&str>) -> LinkSubject {
+    let interfaces = match iface {
+        None => None,
+        Some(selector) => match selector.parse::<IpAddr>() {
+            Ok(address) => interface_names_for(address),
+            Err(_) => Some(vec![selector.to_owned()]),
+        },
+    };
+    LinkSubject {
+        kind: Some(LinkKind::Udp),
+        interfaces,
+        cert_common_name: None,
+    }
+}
+
 /// The §5.16 subject of a link that has no IP address at all — a unix stream
 /// socket, a named pipe, a serial tty, an AF_VSOCK channel.
 ///
@@ -1351,6 +1379,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// A group joined on a named NIC is on that NIC; one joined with no `#iface=` is on a NIC
+    /// nobody here has read, which is "could not determine" and not "none"; one joined by
+    /// address is on whichever NIC holds the address. All three are UDP.
+    #[test]
+    fn a_group_link_is_on_the_interface_it_was_joined_on() {
+        let named = multicast_link_subject(Some("eth7"));
+        assert_eq!(named.kind, Some(LinkKind::Udp));
+        assert_eq!(named.interfaces, Some(vec!["eth7".to_owned()]));
+
+        let unspecified = multicast_link_subject(None);
+        assert_eq!(unspecified.kind, Some(LinkKind::Udp));
+        assert_eq!(
+            unspecified.interfaces, None,
+            "the default route is not read: indeterminate, so a scoped rule still applies"
+        );
+
+        let by_address = multicast_link_subject(Some("127.0.0.1"));
+        assert_eq!(
+            by_address.interfaces,
+            interface_names_for(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            "an address is resolved to the NIC that holds it, as any link's local address is"
+        );
+    }
 
     /// The loopback address must resolve to at least one interface on any host
     /// this test can run on, and the resolution must be a definite `Some`.

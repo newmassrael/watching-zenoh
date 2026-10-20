@@ -5718,6 +5718,37 @@ mod tests {
         );
     }
 
+    /// A policy handed to a group that does not govern it is TOLD about, once per install, and
+    /// the notice names the way out; a session with a peer, a config that asks for nothing, and a
+    /// group that IS governed are told nothing.
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    #[test]
+    fn a_policy_that_leaves_the_group_alone_says_so() {
+        use crate::interceptor::group_policy_notice;
+
+        let notice =
+            group_policy_notice(true, true, false).expect("a group left outside its policy");
+        assert!(
+            notice.contains("govern_multicast"),
+            "the notice must name the way to change it: {notice}"
+        );
+        assert_eq!(
+            group_policy_notice(true, true, true),
+            None,
+            "a governed group has nothing to be told"
+        );
+        assert_eq!(
+            group_policy_notice(false, true, false),
+            None,
+            "a transport with a peer is governed as it always was"
+        );
+        assert_eq!(
+            group_policy_notice(true, false, false),
+            None,
+            "no policy governs nothing anywhere"
+        );
+    }
+
     /// The link a session is told is the first one: a re-join of the same group repeats it.
     #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
     #[test]

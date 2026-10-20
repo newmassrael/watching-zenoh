@@ -173,26 +173,6 @@ impl InterceptorConfig {
         }
         Ok(config)
     }
-
-    /// Whether this config asks for no interception at all, so a caller can keep every fast path
-    /// it has for a node that wants none.
-    pub fn is_inert(&self) -> bool {
-        #[allow(unused_mut)]
-        let mut inert = true;
-        #[cfg(feature = "access-acl")]
-        {
-            inert &= self.acl.is_none();
-        }
-        #[cfg(feature = "access-downsampling")]
-        {
-            inert &= self.downsampling.is_empty();
-        }
-        #[cfg(feature = "access-quota")]
-        {
-            inert &= self.low_pass.is_empty();
-        }
-        inert
-    }
 }
 
 #[cfg(test)]
