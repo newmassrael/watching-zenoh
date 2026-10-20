@@ -321,6 +321,19 @@ pub(crate) fn print_usage() {
     eprintln!("                             matches, and every session announces the bound that");
     eprintln!("                             gives it. Requires --router-hat and the zenoh-config");
     eprintln!("                             build feature; refused on every other run mode.");
+    eprintln!(
+        "    --govern-multicast       hold this ROUTER's multicast group to the node's access"
+    );
+    eprintln!("                             control, rate and size policy, in both directions. A");
+    eprintln!("                             group has no peer identity, so only a rule scoped by");
+    eprintln!("                             link or interface and by key applies to it; a rule");
+    eprintln!(
+        "                             scoped by user, certificate or zid never does. Without"
+    );
+    eprintln!("                             it the group is left alone, as zenoh leaves it, and");
+    eprintln!("                             the log says so. Requires --router-hat and the");
+    eprintln!("                             `router-multicast-faces` and `access-acl-multicast`");
+    eprintln!("                             build features; refused otherwise.");
     eprintln!("    --zid <hex>              PIN this node's routing zid (else it is derived from");
     eprintln!("                             the listen port). REQUIRED for a non-IP listen, which");
     eprintln!("                             has no port to derive a distinct mesh id from.");

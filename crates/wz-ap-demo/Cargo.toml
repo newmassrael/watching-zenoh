@@ -288,6 +288,11 @@ preset-ap-full = [
     # Item 900 — the `--sessions` group session (already pulled by
     # `router-multicast-faces`; named for the rule that every demo key is).
     "transport-multicast",
+    # The demo key for `wz/access-acl-multicast`, which the facade preset carries: it is how a
+    # `--sessions` group takes an `access` block and how a `--router-hat` takes
+    # `--govern-multicast`. Without it the AP-full binary compiles the capability in and no
+    # argv reaches it, the state Layer A5 refuses.
+    "access-acl-multicast",
     "session-extcompression",
     "time-hlc",
     "storage-backend",
@@ -636,6 +641,13 @@ transport-lowlatency = ["wz/transport-lowlatency"]
 # group rides. NOT in `default` (preset-ap-client is unicast); a build without
 # it refuses a multicast session by its `transport` key before starting any.
 transport-multicast = ["wz/transport-multicast", "wz/transport-link-udp"]
+# A `--sessions` document's `access` block: a multicast group held to a policy
+# (`sessions_access.rs`, `sessions_run.rs` `serve_group`). Forwards the facade's
+# `access-acl-multicast`, which is the §5.16 pipeline on a multicast session, beyond upstream
+# (which installs none there). Pulls the demo's own `transport-multicast`: the group is the
+# thing governed. NOT in `default`; a build without it refuses an `access` block by its key
+# before starting any session.
+access-acl-multicast = ["transport-multicast", "wz/access-acl-multicast"]
 # R311y433 (session-extcompression) — opt-in per-batch lz4 COMPRESSION, forwarding
 # the wz facade's `session-extcompression` (which itself pulls
 # `transport-compression`, so ONE demo feature carries both atoms: the

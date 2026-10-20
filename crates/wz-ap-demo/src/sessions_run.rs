@@ -224,7 +224,18 @@ async fn run_session(spec: SessionSpec, zid: Vec<u8>, stop: watch::Receiver<bool
             endpoint,
             join_interval_ms,
             lease_ms,
-        } => run_group(&name, zid, endpoint, *join_interval_ms, *lease_ms, stop).await,
+        } => {
+            run_group(
+                &name,
+                zid,
+                endpoint,
+                *join_interval_ms,
+                *lease_ms,
+                spec.access.as_ref(),
+                stop,
+            )
+            .await
+        }
     };
     if end == SessionEnd::Closed {
         eprintln!("wz-ap-demo session {name}: closed");
@@ -542,6 +553,15 @@ async fn run_listen(
 #[cfg(feature = "transport-multicast")]
 const GROUP_PEER_TABLE: usize = 32;
 
+/// The policy a group session is held to, and the interface it joined on: the link the
+/// policy's `link_protocols` and `interfaces` axes read.
+#[cfg(feature = "transport-multicast")]
+#[derive(Clone, Copy)]
+struct GroupPolicy<'a> {
+    access: &'a crate::sessions_access::AccessSpec,
+    iface: Option<&'a str>,
+}
+
 /// A group session: join the group, then serve it for the life of the process
 /// (`serve_group`), re-joining whenever the link is lost.
 ///
@@ -555,6 +575,7 @@ async fn run_group(
     endpoint: &str,
     join_interval_ms: u64,
     lease_ms: u64,
+    access: Option<&crate::sessions_access::AccessSpec>,
     mut stop: watch::Receiver<bool>,
 ) -> SessionEnd {
     use wz::runtime_tokio::{McastSocketConfig, UdpDriver};
@@ -580,6 +601,10 @@ async fn run_group(
         endpoint,
         &group_params(zid, join_interval_ms, lease_ms),
         bind,
+        access.map(|access| GroupPolicy {
+            access,
+            iface: iface.as_deref(),
+        }),
         &mut stop,
         |line| eprintln!("wz-ap-demo session {name}: {line}"),
     )
@@ -606,6 +631,40 @@ fn group_params(
         is_qos: false,
         tx_queue: Default::default(),
     }
+}
+
+/// Install the policy a group session is held to, and tell the session which link the group
+/// runs over so the policy's `link_protocols` and `interfaces` axes read the right one.
+///
+/// The policy is the `--acl-deny` one (`sessions_access::deny_policy`). Whether the group obeys it
+/// is `access.govern_multicast`: left `false`, the policy is installed and the group is left
+/// alone, which is upstream's behaviour, and the line below says so, so a document that wrote a
+/// policy and sees nothing denied is told why.
+#[cfg(feature = "access-acl-multicast")]
+fn hold_to_policy(
+    session: &wz::runtime_tokio::session::TokioMulticastSession,
+    policy: GroupPolicy<'_>,
+    say: &mut impl FnMut(&str),
+) {
+    use wz::runtime_tokio::interceptor::{InterceptorConfig, InterceptorSink};
+
+    session.set_group_link_subject(wz::runtime_tokio::link_interfaces::multicast_link_subject(
+        policy.iface,
+    ));
+    session.set_interceptors(
+        InterceptorConfig::default()
+            .with_acl(crate::sessions_access::deny_policy(&policy.access.acl_deny))
+            .with_govern_multicast(policy.access.govern_multicast),
+    );
+    say(&format!(
+        "access: deny {} -- {}",
+        policy.access.acl_deny,
+        if policy.access.govern_multicast {
+            "the group is held to it"
+        } else {
+            "installed, and the group is left alone (govern_multicast is false)"
+        }
+    ));
 }
 
 /// Join a group and serve it until the process stops, re-joining after every
@@ -642,6 +701,9 @@ async fn serve_group<D, B, Fut>(
     endpoint: &str,
     params: &wz::runtime_tokio::multicast_glue::MulticastParams,
     bind: B,
+    #[cfg_attr(not(feature = "access-acl-multicast"), allow(unused_variables))] policy: Option<
+        GroupPolicy<'_>,
+    >,
     stop: &mut watch::Receiver<bool>,
     mut say: impl FnMut(&str),
 ) -> SessionEnd
@@ -667,9 +729,23 @@ where
         clock.clone(),
         producer.clone(),
     );
+    // The policy this session is held to, when the document asks for one: installed once, read
+    // by the group's egress check and by the ingress gate every dispatcher below carries.
+    #[cfg(feature = "access-acl-multicast")]
+    if let Some(policy) = policy {
+        hold_to_policy(&session, policy, &mut say);
+    }
     let mut rejoin = GroupRejoin::new();
-    let new_dispatcher =
-        || MulticastDispatcher::<GROUP_PEER_TABLE>::new(MulticastConfig::new(params.lease_ms));
+    // A dispatcher is built anew on every re-join, and the gate lives on the dispatcher, so
+    // each one is given it here rather than the first alone.
+    let new_dispatcher = || {
+        #[cfg_attr(not(feature = "access-acl-multicast"), allow(unused_mut))]
+        let mut dispatcher =
+            MulticastDispatcher::<GROUP_PEER_TABLE>::new(MulticastConfig::new(params.lease_ms));
+        #[cfg(feature = "access-acl-multicast")]
+        session.install_ingress_gate(&mut dispatcher);
+        dispatcher
+    };
     let mut dispatcher = Box::new(new_dispatcher());
     let mut link = MulticastLink::new(bind);
     if let Err(e) = open_multicast_session(&mut dispatcher, &mut link).await {
@@ -751,6 +827,7 @@ async fn run_group(
     _endpoint: &str,
     _join_interval_ms: u64,
     _lease_ms: u64,
+    _access: Option<&crate::sessions_access::AccessSpec>,
     _stop: watch::Receiver<bool>,
 ) -> SessionEnd {
     eprintln!("wz-ap-demo session {name}: failed: this build has no multicast transport");
@@ -1010,6 +1087,7 @@ mod group_rejoin_tests {
                     ENDPOINT,
                     &group_params(zid_a, 100, 1_000),
                     bind_a,
+                    None,
                     &mut stop,
                     |line| lines.borrow_mut().push(line.to_string()),
                 )
@@ -1033,6 +1111,7 @@ mod group_rejoin_tests {
                     ENDPOINT,
                     &group_params(zid_b, 100, 1_000),
                     bind_b,
+                    None,
                     &mut stop,
                     |line| lines.borrow_mut().push(line.to_string()),
                 )
@@ -1109,6 +1188,7 @@ mod group_rejoin_tests {
                     ENDPOINT,
                     &group_params(vec![0xC3], 100, 1_000),
                     bind,
+                    None,
                     &mut stop,
                     |line| lines.borrow_mut().push(line.to_string()),
                 )
@@ -1155,6 +1235,7 @@ mod group_rejoin_tests {
                 binds.set(binds.get() + 1);
                 std::future::ready(Err::<BusLink, _>(io::Error::other("no such interface")))
             },
+            None,
             &mut stop,
             |line| lines.borrow_mut().push(line.to_string()),
         )
@@ -1165,6 +1246,83 @@ mod group_rejoin_tests {
         assert_eq!(
             *lines.borrow(),
             [format!("failed: cannot join {ENDPOINT}: no such interface")]
+        );
+    }
+}
+
+/// The policy a group session is held to (`access`): installed on the session, and obeyed by the
+/// group only when the document says so.
+#[cfg(all(test, feature = "access-acl-multicast"))]
+mod group_access_tests {
+    use std::sync::Arc;
+
+    use wz::runtime_tokio::multicast_glue::MulticastTxTap;
+    use wz::runtime_tokio::session::{PublishOptions, TokioMulticastSession};
+
+    use super::*;
+    use crate::sessions_access::AccessSpec;
+
+    /// A group session over a tapped pipeline, and the tap that sees what it sends.
+    fn session_and_tap() -> (TokioMulticastSession, MulticastTxTap) {
+        let (producer, tap) =
+            MulticastTxTap::attach(&group_params(vec![0xAA, 0xBB, 0xCC, 0xDD], 100, 1_000));
+        let session = TokioMulticastSession::new_multicast(
+            Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+                ApplicationLayerObserver::new(),
+            )),
+            Arc::new(TokioTime::new()),
+            producer,
+        );
+        (session, tap)
+    }
+
+    /// Whether publishing `key` put a datagram on the group's pipeline.
+    fn sent(session: &TokioMulticastSession, tap: &mut MulticastTxTap, key: &str) -> bool {
+        session
+            .publish(key, b"x", PublishOptions::put())
+            .expect("a Put builds, and a denied one is consumed");
+        tap.try_next().is_some()
+    }
+
+    fn held_to(govern_multicast: bool) -> (TokioMulticastSession, MulticastTxTap, Vec<String>) {
+        let (session, tap) = session_and_tap();
+        let spec = AccessSpec {
+            acl_deny: "admin/**".into(),
+            govern_multicast,
+        };
+        let mut said = Vec::new();
+        hold_to_policy(
+            &session,
+            GroupPolicy {
+                access: &spec,
+                iface: Some("eth0"),
+            },
+            &mut |line: &str| said.push(line.to_string()),
+        );
+        (session, tap, said)
+    }
+
+    /// `govern_multicast: true`: the denied key does not reach the group, an allowed one does,
+    /// and the line says the group is held to the policy.
+    #[test]
+    fn a_governed_group_does_not_send_the_denied_key() {
+        let (session, mut tap, said) = held_to(true);
+        assert!(!sent(&session, &mut tap, "admin/secret"));
+        assert!(sent(&session, &mut tap, "demo/data"));
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains("the group is held to it"), "{said:?}");
+    }
+
+    /// `govern_multicast: false` (the default): the policy is installed and the group is left
+    /// alone, which is upstream's behaviour, and the line says so.
+    #[test]
+    fn an_ungoverned_group_sends_what_the_policy_would_deny() {
+        let (session, mut tap, said) = held_to(false);
+        assert!(sent(&session, &mut tap, "admin/secret"));
+        assert_eq!(said.len(), 1);
+        assert!(
+            said[0].contains("the group is left alone"),
+            "the line must explain why nothing is denied: {said:?}"
         );
     }
 }

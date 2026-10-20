@@ -331,11 +331,12 @@ fn known_keys() -> BTreeSet<&'static str> {
     keys
 }
 
-/// The session keys only this process knows: the validator has neither.
-const LOCAL_KEYS: &[&str] = &["driver", "scouting"];
+/// The session keys only this process knows: the validator has none of them.
+const LOCAL_KEYS: &[&str] = &["driver", "scouting", "access"];
 
-/// The document with every session's local keys (`driver`, and `scouting` of
-/// [`crate::sessions_scouting`]) removed: what the shared rules read.
+/// The document with every session's local keys (`driver`, `scouting` of
+/// [`crate::sessions_scouting`], and `access` of [`crate::sessions_access`]) removed: what the
+/// shared rules read.
 ///
 /// The rules are the validator's and the two are held to one case file, so a key
 /// only this process knows is taken out before they run and judged here instead.

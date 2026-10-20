@@ -4447,10 +4447,9 @@ async fn run_peer_until(
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
-        default_autoconnect_matcher, interval_from_freq, AclConfig, AclFlow, AclMessage, AclPolicy,
-        AclRule, AutoConnect, DownsamplingMessage, DownsamplingRule, InterceptorConfig,
-        InterceptorFlow, InterceptorLink, LinkstateForwarder, LowPassMessage, LowPassRule,
-        Permission, SubjectSelector, WhatAmI, Zid,
+        default_autoconnect_matcher, interval_from_freq, AutoConnect, DownsamplingMessage,
+        DownsamplingRule, InterceptorConfig, InterceptorFlow, InterceptorLink, LinkstateForwarder,
+        LowPassMessage, LowPassRule, WhatAmI, Zid,
     };
     // Per-peer routing zid: see `crate::args::resolve_node_zid`. (The periodic self-flood
     // cadence lives in the LinkstateForwarder itself — R311rf, on the
@@ -4637,49 +4636,12 @@ async fn run_peer_until(
     // control disabled, every message admitted).
     let mut interceptor_config = InterceptorConfig::default();
 
-    // R311y48 — the deny-policy SSOT: build the allow-default ACL that denies one
-    // keyexpr across the data AND query planes, both flows, for every subject (the
-    // smallest real ACL). BOTH the startup `--acl-deny` flag AND the runtime
-    // config-write drain (`@/<zid>/peer/config/acl-deny`) build their policy here,
-    // so the two paths produce byte-identical rules from one definition (the
-    // §5.16 rule set is not duplicated across setup and reconfigure). A rule per
-    // FLOW (a rule carries a single flow): the keyexpr is denied BOTH on ingress (a
-    // neighbour cannot push/subscribe/query/declare-a-queryable/reply on it through
-    // us) and on egress (we never relay it out, nor originate it toward a peer).
-    let acl_deny_policy = |deny_keyexpr: &str| -> AclPolicy {
-        let deny_rule = |flow| AclRule {
-            subject: SubjectSelector::Any,
-            key_exprs: vec![deny_keyexpr.to_owned()],
-            messages: vec![
-                AclMessage::Put,
-                AclMessage::Delete,
-                AclMessage::DeclareSubscriber,
-                // The query plane (R311ud): denying K also blocks querying it,
-                // declaring a queryable for it, and replying on it.
-                AclMessage::Query,
-                AclMessage::DeclareQueryable,
-                AclMessage::Reply,
-                // R311y458 — the liveliness plane, so `--acl-deny K` means what
-                // it says: a peer denied K cannot assert liveliness on it, nor
-                // register for its token stream, nor snapshot it. Omitting these
-                // would leave the three actions the enforcer now governs
-                // unreachable from the only CLI that installs a policy.
-                AclMessage::LivelinessToken,
-                AclMessage::DeclareLivelinessSubscriber,
-                AclMessage::LivelinessQuery,
-            ],
-            flow,
-            permission: Permission::Deny,
-            link_protocols: Vec::new(),
-            interfaces: Vec::new(),
-            usernames: Vec::new(),
-            cert_common_names: Vec::new(),
-        };
-        AclPolicy::new(AclConfig {
-            default_permission: Permission::Allow,
-            rules: vec![deny_rule(AclFlow::Ingress), deny_rule(AclFlow::Egress)],
-        })
-    };
+    // R311y48 — the deny-policy SSOT: BOTH the startup `--acl-deny` flag AND the runtime
+    // config-write drain (`@/<zid>/peer/config/acl-deny`) build their policy through
+    // `crate::sessions_access::deny_policy`, so the two paths produce byte-identical rules
+    // from one definition (the §5.16 rule set is not duplicated across setup and
+    // reconfigure), and a `--sessions` group's `access.acl_deny` is the same one.
+    let acl_deny_policy = |deny_keyexpr: &str| crate::sessions_access::deny_policy(deny_keyexpr);
 
     // `--acl-deny <keyexpr>`: opt this peer into §5.16 access control at STARTUP —
     // both dropped (not relayed onward), the wz analogue of a router carrying an
@@ -6048,6 +6010,14 @@ pub(crate) struct RouterHatOpts {
     /// honoured by the same parser every unicast locator uses. `None` keeps the
     /// demo's historical hardcoded group with no interface narrowing.
     pub multicast_locator: Option<String>,
+    /// `--govern-multicast`: hold this router's multicast GROUP to the node's
+    /// access-control, rate and size policy, in both directions. Off by default,
+    /// which is upstream's shape: it installs no interceptor on a multicast
+    /// transport, so a policy written for the router's unicast faces leaves the
+    /// group alone. Present only under `access-acl-multicast`; a build without it
+    /// refuses the flag (see `main`) instead of reading it and doing nothing.
+    #[cfg(feature = "access-acl-multicast")]
+    pub govern_multicast: bool,
     /// R311y781 (§5.23 adminspace-read) — `--no-admin-read` DENIES this router's
     /// admin GET gate, the router twin of the peer flag. Until this round the
     /// router admin host hardcoded `read: true`, so the gate existed and no
@@ -6383,6 +6353,10 @@ async fn run_router_hat_until(
             // R2758 — and the same for the session bound, so this host's loop
             // and its admin GET read one number.
             .with_max_sessions(opts.max_sessions);
+        // Whether the group is part of the policy: a wz switch carried on the config object
+        // and not in the zenoh document, so the same file still starts a stock zenohd.
+        #[cfg(feature = "access-acl-multicast")]
+        let cfg = cfg.with_govern_multicast(opts.govern_multicast);
         // Gated on the DEMO's admin feature (this crate has no `adminspace-core`
         // of its own; that is the wz-side name the permit type lives behind), so
         // the arm is present exactly where the admin host below is.
@@ -6614,6 +6588,12 @@ async fn run_router_hat_until(
             mcast_opts.clone(),
             node_stats.clone(),
         );
+        // The group's link, for the policy's `link_protocols` and `interfaces` axes: the NIC
+        // the group was joined on, from the same `#iface=` the socket was bound with.
+        #[cfg(feature = "access-acl-multicast")]
+        forwarder.set_mcast_group_link(wz::runtime_tokio::link_interfaces::multicast_link_subject(
+            mcast_opts.iface.as_deref(),
+        ));
         forwarder.attach_mcast_group(face.outbound);
         mcast_stops.push(("group", face.stop));
         // R2584 made the group either family; `SocketAddr` is what brackets a v6

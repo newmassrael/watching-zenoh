@@ -184,6 +184,7 @@ mod tests {
             multicast: false,
             iface: false,
             scouting_responder: false,
+            access_multicast: false,
             driver_roles: Vec::new(),
             schemes: vec!["tcp"],
         };

@@ -168,6 +168,9 @@ pub(crate) struct SessionSpec {
     /// The scouting group this session answers Scouts on (see
     /// [`crate::sessions_scouting`]); `None` for a session that is not to be found.
     pub(crate) scouting: Option<crate::args::ScoutSocketArgs>,
+    /// The policy a multicast session is held to (see [`crate::sessions_access`]); `None`
+    /// for a session that asks for none.
+    pub(crate) access: Option<crate::sessions_access::AccessSpec>,
 }
 
 /// Every session of a document that passed the rules, in start order.
@@ -185,6 +188,8 @@ pub(crate) struct BuildCapabilities {
     pub(crate) iface: bool,
     /// A session that answers Scouts (`scouting-responder`).
     pub(crate) scouting_responder: bool,
+    /// A multicast session held to a policy (`access-acl-multicast`).
+    pub(crate) access_multicast: bool,
     /// The driver roles this build plays (see [`crate::sessions_driver::roles`]).
     pub(crate) driver_roles: Vec<&'static str>,
     /// The unicast link schemes compiled in.
@@ -197,6 +202,7 @@ impl BuildCapabilities {
             multicast: cfg!(feature = "transport-multicast"),
             iface: cfg!(feature = "locator-iface"),
             scouting_responder: cfg!(feature = "scouting-responder"),
+            access_multicast: cfg!(feature = "access-acl-multicast"),
             driver_roles: crate::sessions_driver::available_words(),
             schemes: wz::runtime_tokio::compiled_in_link_schemes().to_vec(),
         }
@@ -298,6 +304,7 @@ pub(crate) fn read_sessions_document(text: &str) -> Result<SessionsPlan, Vec<Ref
     )));
     refusals.extend(crate::sessions_driver::driver_refusals(&doc));
     refusals.extend(crate::sessions_scouting::scouting_refusals(&doc));
+    refusals.extend(crate::sessions_access::access_refusals(&doc));
     if refusals.is_empty() {
         Ok(plan_of(&doc))
     } else {
@@ -316,6 +323,14 @@ impl SessionsPlan {
                     format!("{path}.scouting.multicast.listen"),
                     "answering Scouts needs the `scouting-responder` build feature (build: \
                      cargo build -p wz-ap-demo --features scouting-responder)",
+                ));
+            }
+            if s.access.is_some() && !caps.access_multicast {
+                out.push(Refusal::new(
+                    format!("{path}.access"),
+                    "holding a multicast group to a policy needs the `access-acl-multicast` \
+                     build feature (build: cargo build -p wz-ap-demo --features \
+                     access-acl-multicast)",
                 ));
             }
             for (j, entry) in s.driver.iter().enumerate() {
@@ -872,6 +887,7 @@ fn plan_of(doc: &Json5Value) -> SessionsPlan {
                 link,
                 driver: crate::sessions_driver::roles_of(s),
                 scouting: crate::sessions_scouting::scouting_of(s),
+                access: crate::sessions_access::access_of(s),
             }
         })
         .collect();
@@ -994,6 +1010,7 @@ mod reader_tests {
                     },
                     driver: Vec::new(),
                     scouting: None,
+                    access: None,
                 },
                 SessionSpec {
                     index: 1,
@@ -1007,6 +1024,7 @@ mod reader_tests {
                     },
                     driver: Vec::new(),
                     scouting: None,
+                    access: None,
                 },
                 SessionSpec {
                     index: 2,
@@ -1019,6 +1037,7 @@ mod reader_tests {
                     },
                     driver: Vec::new(),
                     scouting: None,
+                    access: None,
                 },
             ]
         );
@@ -1116,6 +1135,7 @@ mod reader_tests {
             multicast,
             iface,
             scouting_responder: true,
+            access_multicast: true,
             driver_roles: crate::sessions_driver::all_words(),
             schemes: vec!["tcp", "udp", "tls"],
         }

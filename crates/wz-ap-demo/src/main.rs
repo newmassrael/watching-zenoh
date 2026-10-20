@@ -92,6 +92,7 @@ use wz::runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 mod args;
 mod runner;
 mod sessions;
+mod sessions_access;
 mod sessions_driver;
 mod sessions_run;
 mod sessions_scouting;
@@ -435,6 +436,33 @@ fn demo_main() -> ExitCode {
              hat serves a partitioned south)"
         );
         return ExitCode::from(2);
+    }
+
+    // `--govern-multicast` holds the router's multicast GROUP to the node's policy, which
+    // upstream does not (it installs no interceptor on a multicast transport). Only the router
+    // hat has a group face, and only a build with both the group face and the governance can
+    // act on the flag, so every other case REFUSES it: a flag read and ignored is a node whose
+    // operator believes its group is covered by an ACL it is outside.
+    if rest.iter().any(|a| a == "--govern-multicast") {
+        let why = if parse_pair(rest, "--router-hat").is_none() {
+            Some("requires --router-hat (only the router hat has a multicast group face)")
+        } else if !cfg!(feature = "router-multicast-faces") {
+            Some(
+                "requires the `router-multicast-faces` build feature (without it the router \
+                 has no group to govern)",
+            )
+        } else if !cfg!(feature = "access-acl-multicast") {
+            Some(
+                "requires the `access-acl-multicast` build feature (build: cargo build -p \
+                 wz-ap-demo --features router-multicast-faces,access-acl-multicast)",
+            )
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            eprintln!("wz-ap-demo: --govern-multicast {why}");
+            return ExitCode::from(2);
+        }
     }
 
     // R311qg — `--peer <listen>` selects the peer-MESH mode (dial the configured
@@ -1148,6 +1176,9 @@ fn demo_main() -> ExitCode {
                         quic_ca: parse_pair(rest, "--quic-ca"),
                     },
                     multicast_qos,
+                    // `--govern-multicast`, refused above on every case that cannot act on it.
+                    #[cfg(feature = "access-acl-multicast")]
+                    govern_multicast: rest.iter().any(|a| a == "--govern-multicast"),
                     // R2633 — the router's configured link weights (see the
                     // parse above).
                     router_link_weights,

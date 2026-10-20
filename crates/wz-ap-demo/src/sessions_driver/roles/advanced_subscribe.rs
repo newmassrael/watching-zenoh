@@ -356,6 +356,7 @@ mod tests {
             multicast: true,
             iface: true,
             scouting_responder: true,
+            access_multicast: true,
             driver_roles: all_words()
                 .into_iter()
                 .filter(|w| *w != "advanced_subscribe")
