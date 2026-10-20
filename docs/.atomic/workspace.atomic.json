@@ -276468,6 +276468,64 @@
         "The footprint of the pushed tree is read by the hosted Layer Q.5 of the run that carries this push."
       ]
     },
+    "Round 3389": {
+      "decision_summary": "Run every featured crate's tests with all features on, which CI had done only for wz-session-core, and repay what it finds at the root. Of 25 crates, 23 pass; wz cannot build by design (SCE refuses no_std with http-send). With adminspace-fixed and session-slot but no adminspace-write, wz-session-mcu did not compile: a read-only admin node is upstream's default (write false), so its subscriber slot is NoSink. With the slim receive pool (256-byte datagrams) a 512-byte Put was refused NoTxSlot: the lwIP driver never declared its width as link_mtu, so the send budget stayed at 1024. It now declares SESSION_RX_SLOT_SIZE; a Put past the link is Oversize, or fragments. Also repaid: the Layer E reply-Del race, and run 39344495779's budget red, a cold cache: rust-cache hashes every installed toolchain, the image's unused stable alternated the key across images, so only the pinned one stays; and its C0 red, a Platform trigger path.",
+      "changes_bullets": [
+        "wz-session-mcu admin_fixed: AdminSinks' subscriber is NoSink without adminspace-write.",
+        "wz-session-lwip driver: LwipUdpDriver::link_mtu returns SESSION_RX_SLOT_SIZE; session_pump_allocations sends only sizes the link carries, asserts the budget is within the link and that a Put past it is refused Oversize.",
+        "run-ci C1m: session_pump_allocations on the slot profile with the slim pool; clippy of wz-session-mcu with adminspace-fixed and session-slot alone.",
+        "wz-integration-tests: the reply-Del z_get test reads pico's output once its drive ends.",
+        "wz-runtime-tokio serial_link_e2e: a wait that runs out prints both ends' last poll outcomes.",
+        "scripts/lib/rust-toolchain-pinned.sh: every CI and Platform toolchain step installs the pinned toolchain, makes it the default and removes the rest.",
+        "Platform workflow: the toolchain script and wz-access-control (in wz-capi-c's tree through interceptors) are trigger paths.",
+        "hosted-red-acks: R3389 for run 39344495779."
+      ],
+      "verification_bullets": [
+        "pc2: cargo test --all-features --no-fail-fast for 25 featured crates; a bisection of wz-session-lwip's extra features over the C1m slot leg named adminspace-* and the slim pool.",
+        "pc2: the slim leg red without the driver change (budget 1024 past 256) and green with it; the slot, reassembly, heap-control, fragmentation and admin legs, wz-session-lwip all features with clippy, wz-mcu-session-acceptor slim, wz-session-mcu clippy read-only and read-write; again after rebasing onto the newer tip.",
+        "pc2: the reply-Del test 30 runs with the pico CLI, all passed; serial_link_e2e 140 runs (idle, two starved cores, the hosted 82 features) without the timeout.",
+        "Hosted logs: run 39330620581 restored v0-rust-ci-Linux-x64-94b53446 in full, run 39329744722 saved 001454dd on the other image, run 39344495779 found no cache; the env hash inputs differ only in the image's stable rustc.",
+        "Local: platform_trigger_paths_gate red on the old tip as in that run's two C0 jobs and green after the entry, actionlint, workflow_cache_budget_gate, relicense_spdx, guarded_count_gate --range, test_discipline_gate, lane_reach_gate, hook_script_reference_gate, shellcheck, fmt."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The serial oversize-Put timeout of run 39330620581 is unattributed; the test now prints both ends' last poll outcomes, so the next occurrence carries its cause.",
+        "The batch size a handshake advertises is not capped by the link (pico's rule, against zenoh's); a slim lwIP node advertises 1024 and receives 256.",
+        "The toolchain script runs only on hosted runners; its first run moves every rust-cache key once, so that run builds cold and its budget margin is the check.",
+        "wz's own --all-features is not a build (SCE's no_std and http-send exclusion); no lane runs the facade's tests beyond its leg sets."
+      ],
+      "publishable_decision_summary": "Run every featured crate's tests with all features on, which CI had done only for wz-session-core, and repay what it finds at the root. Of 25 crates, 23 pass; wz cannot build by design (SCE refuses no_std with http-send). With adminspace-fixed and session-slot but no adminspace-write, wz-session-mcu did not compile: a read-only admin node is upstream's default (write false), so its subscriber slot is NoSink. With the slim receive pool (256-byte datagrams) a 512-byte Put was refused NoTxSlot: the lwIP driver never declared its width as link_mtu, so the send budget stayed at 1024. It now declares SESSION_RX_SLOT_SIZE; a Put past the link is Oversize, or fragments. Also repaid: the Layer E reply-Del race, and run 39344495779's budget red, a cold cache: rust-cache hashes every installed toolchain, the image's unused stable alternated the key across images, so only the pinned one stays; and its C0 red, a Platform trigger path.",
+      "publishable_changes_bullets": [
+        "wz-session-mcu admin_fixed: AdminSinks' subscriber is NoSink without adminspace-write.",
+        "wz-session-lwip driver: LwipUdpDriver::link_mtu returns SESSION_RX_SLOT_SIZE; session_pump_allocations sends only sizes the link carries, asserts the budget is within the link and that a Put past it is refused Oversize.",
+        "run-ci C1m: session_pump_allocations on the slot profile with the slim pool; clippy of wz-session-mcu with adminspace-fixed and session-slot alone.",
+        "wz-integration-tests: the reply-Del z_get test reads pico's output once its drive ends.",
+        "wz-runtime-tokio serial_link_e2e: a wait that runs out prints both ends' last poll outcomes.",
+        "scripts/lib/rust-toolchain-pinned.sh: every CI and Platform toolchain step installs the pinned toolchain, makes it the default and removes the rest.",
+        "Platform workflow: the toolchain script and wz-access-control (in wz-capi-c's tree through interceptors) are trigger paths.",
+        "hosted-red-acks: R3389 for run 39344495779."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: cargo test --all-features --no-fail-fast for 25 featured crates; a bisection of wz-session-lwip's extra features over the C1m slot leg named adminspace-* and the slim pool.",
+        "pc2: the slim leg red without the driver change (budget 1024 past 256) and green with it; the slot, reassembly, heap-control, fragmentation and admin legs, wz-session-lwip all features with clippy, wz-mcu-session-acceptor slim, wz-session-mcu clippy read-only and read-write; again after rebasing onto the newer tip.",
+        "pc2: the reply-Del test 30 runs with the pico CLI, all passed; serial_link_e2e 140 runs (idle, two starved cores, the hosted 82 features) without the timeout.",
+        "Hosted logs: run 39330620581 restored v0-rust-ci-Linux-x64-94b53446 in full, run 39329744722 saved 001454dd on the other image, run 39344495779 found no cache; the env hash inputs differ only in the image's stable rustc.",
+        "Local: platform_trigger_paths_gate red on the old tip as in that run's two C0 jobs and green after the entry, actionlint, workflow_cache_budget_gate, relicense_spdx, guarded_count_gate --range, test_discipline_gate, lane_reach_gate, hook_script_reference_gate, shellcheck, fmt."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The serial oversize-Put timeout of run 39330620581 is unattributed; the test now prints both ends' last poll outcomes, so the next occurrence carries its cause.",
+        "The batch size a handshake advertises is not capped by the link (pico's rule, against zenoh's); a slim lwIP node advertises 1024 and receives 256.",
+        "The toolchain script runs only on hosted runners; its first run moves every rust-cache key once, so that run builds cold and its budget margin is the check.",
+        "wz's own --all-features is not a build (SCE's no_std and http-send exclusion); no lane runs the facade's tests beyond its leg sets."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
