@@ -41,7 +41,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_capi_pico::advanced::z_entity_global_id_t;
+use wz_capi_pico::entity::z_entity_global_id_t;
 use wz_capi_pico::zid::z_id_t;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_sample, z_config_default,

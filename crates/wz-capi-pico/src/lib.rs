@@ -68,18 +68,23 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod abi;
+#[cfg(feature = "advanced")]
 pub mod advanced;
+#[cfg(feature = "advanced")]
 mod advanced_forms;
+#[cfg(feature = "advanced")]
 mod advanced_plane;
 pub mod bytes;
 pub mod codec;
 pub mod config;
 pub mod connectivity;
 pub mod encoding;
+pub mod entity;
 mod ffi;
 pub mod get;
 pub mod handlers;
 pub mod keyexpr;
+#[cfg(feature = "liveliness")]
 pub mod liveliness;
 pub mod matching;
 mod os;

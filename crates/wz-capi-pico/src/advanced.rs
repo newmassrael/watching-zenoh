@@ -62,6 +62,7 @@ use wz_runtime_tokio::sink::SampleView;
 use crate::abi::{handle_ref, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::advanced_forms::PicoSubscriberForms;
 use crate::advanced_plane::PicoPlane;
+use crate::entity::z_entity_global_id_t;
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::pubsub::{
@@ -74,42 +75,6 @@ use crate::write_filter::PicoSession;
 use crate::zid::z_id_t;
 use wz_capi_core::faces::{AdvSubId, SharedSession};
 use wz_capi_core::listeners::ListenerSet;
-
-// ---------------------------------------------------------------------------
-// entity global id
-// ---------------------------------------------------------------------------
-
-/// pico `z_entity_global_id_t` (`protocol/core.h:83-86`), 20 B / align 4
-/// measured: `{ z_id_t zid; uint32_t eid; }`.
-///
-/// `z_id_t` is a bare `uint8_t[16]`, so it is 1-aligned and the struct's
-/// alignment comes from `eid` alone — which is why this is 20 bytes and not
-/// the 24 an 8-aligned reading would predict. It crosses the boundary BY VALUE
-/// inside [`ze_miss_t`], so both facts are ABI.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct z_entity_global_id_t {
-    pub zid: z_id_t,
-    pub eid: u32,
-}
-
-/// The zid half of a global entity id (pico `z_entity_global_id_zid`).
-#[no_mangle]
-pub unsafe extern "C" fn z_entity_global_id_zid(gid: *const z_entity_global_id_t) -> z_id_t {
-    if gid.is_null() {
-        return z_id_t::empty();
-    }
-    (*gid).zid
-}
-
-/// The eid half of a global entity id (pico `z_entity_global_id_eid`).
-#[no_mangle]
-pub unsafe extern "C" fn z_entity_global_id_eid(gid: *const z_entity_global_id_t) -> u32 {
-    if gid.is_null() {
-        return 0;
-    }
-    (*gid).eid
-}
 
 // ---------------------------------------------------------------------------
 // the miss closure + ze_miss_t
@@ -1444,9 +1409,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
 // pinned pico headers with a real C compiler; a drift is a stack smash in the
 // caller's frame, not a Rust error, so it is pinned at build time.
 const _: () = {
-    use core::mem::{align_of, size_of};
-    assert!(size_of::<z_entity_global_id_t>() == 20);
-    assert!(align_of::<z_entity_global_id_t>() == 4);
+    use core::mem::size_of;
     assert!(size_of::<ze_miss_t>() == 24);
     assert!(size_of::<ze_owned_closure_miss_t>() == 24);
     assert!(size_of::<ze_owned_advanced_publisher_t>() == 224);

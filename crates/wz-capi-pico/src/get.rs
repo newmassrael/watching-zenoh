@@ -1824,13 +1824,13 @@ pub unsafe extern "C" fn z_reply_clone(
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_replier_id(
     reply: *const z_loaned_reply_t,
-    out_id: *mut crate::advanced::z_entity_global_id_t,
+    out_id: *mut crate::entity::z_entity_global_id_t,
 ) -> bool {
     guard_val(false, || {
         if out_id.is_null() {
             return false;
         }
-        *out_id = crate::advanced::z_entity_global_id_t {
+        *out_id = crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t::empty(),
             eid: 0,
         };

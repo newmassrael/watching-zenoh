@@ -49,6 +49,7 @@ use std::sync::Arc;
 
 use wz_capi_core::drive::SessionState;
 use wz_capi_core::faces::{FilterId, FilterPlane, SharedSession};
+#[cfg(feature = "advanced")]
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::session::InterestForm;
 use wz_runtime_tokio::session_glue::WhatAmI;
@@ -84,7 +85,9 @@ pub(crate) struct PicoSession {
     pub(crate) shared: Arc<SharedSession>,
     pub(crate) mode: WhatAmI,
     /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
-    /// not open, which no C entry point can hand it.
+    /// not open, which no C entry point can hand it. Read by the advanced plane alone, whose
+    /// publisher stamps with it.
+    #[cfg(feature = "advanced")]
     pub(crate) hlc: NodeHlc,
 }
 
@@ -94,6 +97,7 @@ impl PicoSession {
         Self {
             shared: state.shared.clone(),
             mode: session_mode(state),
+            #[cfg(feature = "advanced")]
             hlc: state
                 .abi_extension::<PicoSessionExt>()
                 .map(|ext| ext.hlc.clone())

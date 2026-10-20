@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use wz_capi_core::faces::SharedSession;
+#[cfg(feature = "advanced")]
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::session_glue::WhatAmI;
 
@@ -27,7 +28,8 @@ use crate::connectivity::Connectivity;
 pub(crate) struct PicoSessionExt {
     /// The session's own role — pico's `zn->_mode`.
     pub(crate) mode: WhatAmI,
-    /// The session's clock.
+    /// The session's clock, which the advanced plane's publisher stamps with.
+    #[cfg(feature = "advanced")]
     pub(crate) hlc: NodeHlc,
     /// The transport and link listeners a C program declared on this session.
     pub(crate) connectivity: Arc<Connectivity>,
@@ -57,8 +59,12 @@ impl PicoSessionExt {
         let watch_id = shared.watch_faces(Arc::new(move |kind, snapshot| {
             sink.on_face_event(kind, snapshot);
         }));
+        // Without the advanced plane nothing stamps, so there is no clock to build.
+        #[cfg(not(feature = "advanced"))]
+        let _ = zid;
         Self {
             mode,
+            #[cfg(feature = "advanced")]
             hlc: NodeHlc::for_node(zid, mode, TimestampingEnabled::all(true)),
             connectivity,
             watch: (Arc::clone(shared), watch_id),

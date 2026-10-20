@@ -676,8 +676,8 @@ pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult
 pub(crate) unsafe fn entity_global_id(
     zs: &SessionState,
     eid: u64,
-) -> crate::advanced::z_entity_global_id_t {
-    crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
+    crate::entity::z_entity_global_id_t {
         zid: crate::zid::z_id_t { id: zs.zid() },
         // TRUNCATING, and that is upstream's width rather than a loss: zenoh's
         // `_z_entity_global_id_t.eid` is a `uint32_t`, so the wire cannot carry
@@ -695,15 +695,15 @@ pub(crate) unsafe fn entity_global_id(
 #[no_mangle]
 pub unsafe extern "C" fn z_session_id(
     zs: *const z_loaned_session_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     crate::ffi::guard_val(
-        crate::advanced::z_entity_global_id_t {
+        crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t::empty(),
             eid: 0,
         },
         || match session_state(zs) {
             Some(state) => entity_global_id(state, 0),
-            None => crate::advanced::z_entity_global_id_t {
+            None => crate::entity::z_entity_global_id_t {
                 zid: crate::zid::z_id_t::empty(),
                 eid: 0,
             },
@@ -755,7 +755,7 @@ pub unsafe extern "C" fn z_publisher_keyexpr(
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_id(
     publisher: *const crate::pubsub::z_loaned_publisher_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     entity_id_of(
         crate::abi::handle_ref::<
             crate::pubsub::z_loaned_publisher_t,
@@ -792,7 +792,7 @@ pub unsafe extern "C" fn z_querier_keyexpr(
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_id(
     querier: *const crate::querier::z_loaned_querier_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     entity_id_of(
         crate::abi::handle_ref::<crate::querier::z_loaned_querier_t, crate::querier::QuerierState>(
             querier,
@@ -832,7 +832,7 @@ pub unsafe extern "C" fn z_subscriber_keyexpr(
 #[no_mangle]
 pub unsafe extern "C" fn z_subscriber_id(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     entity_id_of(
         crate::abi::handle_ref::<
             crate::pubsub::z_loaned_subscriber_t,
@@ -849,7 +849,7 @@ pub unsafe extern "C" fn z_subscriber_id(
 #[no_mangle]
 pub unsafe extern "C" fn z_queryable_id(
     queryable: *const crate::query::z_loaned_queryable_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     entity_id_of(crate::query::queryable_identity(queryable))
 }
 
@@ -857,10 +857,11 @@ pub unsafe extern "C" fn z_queryable_id(
 ///
 /// # Safety
 /// `pub_` must be null or a live loaned advanced publisher.
+#[cfg(feature = "advanced")]
 #[no_mangle]
 pub unsafe extern "C" fn ze_advanced_publisher_id(
     pub_: *const crate::advanced::ze_loaned_advanced_publisher_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     entity_id_of(crate::advanced::advanced_publisher_identity(pub_))
 }
 
@@ -869,6 +870,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_id(
 ///
 /// # Safety
 /// `pub_` must be null or a live loaned advanced publisher.
+#[cfg(feature = "advanced")]
 #[no_mangle]
 pub unsafe extern "C" fn ze_advanced_publisher_keyexpr(
     pub_: *const crate::advanced::ze_loaned_advanced_publisher_t,
@@ -881,10 +883,11 @@ pub unsafe extern "C" fn ze_advanced_publisher_keyexpr(
 ///
 /// # Safety
 /// `sub` must be null or a live loaned advanced subscriber.
+#[cfg(feature = "advanced")]
 #[no_mangle]
 pub unsafe extern "C" fn ze_advanced_subscriber_id(
     sub: *const crate::advanced::ze_loaned_advanced_subscriber_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     entity_id_of(crate::advanced::advanced_subscriber_identity(sub))
 }
 
@@ -893,6 +896,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_id(
 ///
 /// # Safety
 /// `sub` must be null or a live loaned advanced subscriber.
+#[cfg(feature = "advanced")]
 #[no_mangle]
 pub unsafe extern "C" fn ze_advanced_subscriber_keyexpr(
     sub: *const crate::advanced::ze_loaned_advanced_subscriber_t,
@@ -906,13 +910,13 @@ pub unsafe extern "C" fn ze_advanced_subscriber_keyexpr(
 /// One projection for all seven accessors above so the "what does a dead handle
 /// report" answer cannot differ between them — the class of asymmetry this
 /// crate has already paid for.
-fn entity_id_of(identity: Option<([u8; 16], u64)>) -> crate::advanced::z_entity_global_id_t {
+fn entity_id_of(identity: Option<([u8; 16], u64)>) -> crate::entity::z_entity_global_id_t {
     match identity {
-        Some((zid, eid)) => crate::advanced::z_entity_global_id_t {
+        Some((zid, eid)) => crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t { id: zid },
             eid: eid as u32,
         },
-        None => crate::advanced::z_entity_global_id_t {
+        None => crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t::empty(),
             eid: 0,
         },

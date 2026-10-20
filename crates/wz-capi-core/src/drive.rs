@@ -31,7 +31,6 @@ use wz_runtime_tokio::accept_loop::{
     accept_loop_offering_spawned, accept_loop_offering_spawned_local, DialIntent,
     DialIntentReceiver, DialIntentSender, FaceExecutor, SpawnedDrive,
 };
-use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -54,6 +53,7 @@ use wz_runtime_tokio::startup_phase::{
 use crate::faces::{
     CApiForwarder, GossipSetup, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID,
 };
+use crate::gossip::GossipPolicy;
 use crate::scouting_node::{
     bind_responder, Advertised, LateLocators, Responder, ScoutLink, ScoutingPlan,
 };

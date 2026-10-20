@@ -68,20 +68,28 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tokio::sync::Notify;
 
+#[cfg(feature = "group")]
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
+#[cfg(feature = "advanced")]
 use wz_runtime_tokio::advanced_publisher::{
     AdvancedPublisher, AdvancedPublisherError, AdvancedPublisherOptions,
 };
+#[cfg(feature = "advanced")]
 use wz_runtime_tokio::advanced_subscriber::{
     AdvancedSubscriber, AdvancedSubscriberOptions, DeclarationForms, EntityForm, Miss,
 };
 use wz_runtime_tokio::declare::LivelinessSample;
-use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, GossipPolicy, Outbound};
+#[cfg(feature = "gossip")]
+use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
+
+use crate::gossip::GossipPolicy;
+#[cfg(feature = "group")]
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
+#[cfg(feature = "group")]
 use wz_runtime_tokio::qos::Priority;
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
@@ -463,10 +471,12 @@ pub type QblId = u64;
 /// carries. Its own id space rather than a shared one with [`SubId`]: an
 /// advanced publisher is a distinct C type with its own undeclare, so nothing
 /// ever has to look it up in two maps.
+#[cfg(feature = "advanced")]
 pub type AdvPubId = u64;
 
 /// A C-level ADVANCED subscriber id — what a `ze_owned_advanced_subscriber_t`
 /// carries. Separate from [`SubId`] for the same reason as [`AdvPubId`].
+#[cfg(feature = "advanced")]
 pub type AdvSubId = u64;
 
 /// Mints one advanced-subscriber `(on_sample, on_miss)` callback PAIR per face.
@@ -475,6 +485,7 @@ pub type AdvSubId = u64;
 /// both at once and the two share the C program's one subscription: the sample
 /// closure it moved in, and the miss closure it may install afterwards through
 /// `ze_advanced_subscriber_declare_sample_miss_listener`.
+#[cfg(feature = "advanced")]
 #[allow(clippy::type_complexity)]
 pub type AdvancedSubscriberSink = Arc<
     dyn Fn() -> (
@@ -521,12 +532,15 @@ struct FaceEntry {
     filters: BTreeMap<FilterId, MatchingInterestHold<TokioRuntime, TokioTime>>,
     /// Per-face ADVANCED publishers. Dropping one tears down that face's `@adv`
     /// cache queryable + liveliness token (RAII inside `AdvancedPublisher`).
+    #[cfg(feature = "advanced")]
     adv_pubs: BTreeMap<AdvPubId, AdvancedPublisher<TokioRuntime, TokioTime>>,
     /// Per-face ADVANCED subscribers, same replay contract as `subs`.
+    #[cfg(feature = "advanced")]
     adv_subs: BTreeMap<AdvSubId, AdvancedSubscriber<TokioRuntime>>,
     /// R2932 — this session's copy of each C GROUP, same replay contract as
     /// `subs`. Each copy forwards what it hears into the C group's
     /// [`GroupAggregate`], which is what the C program reads.
+    #[cfg(feature = "group")]
     groups: BTreeMap<GroupId, FaceGroup>,
     /// R311y532 — the tokio runtime this face is DRIVEN by.
     ///
@@ -559,6 +573,7 @@ struct FaceEntry {
     /// spawner (the advanced publisher's beacon) onto the process partition,
     /// so it no longer asks the caller's thread for a runtime. A real face
     /// still captures `Some` at `face_up` and loses nothing.
+    #[cfg(feature = "advanced")]
     runtime: Option<tokio::runtime::Handle>,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
@@ -569,6 +584,16 @@ struct FaceEntry {
     /// named one. A session keeps ONE face per remote zid, as zenoh's transport
     /// manager keeps one transport per zid: see [`SharedSession::face_up`].
     peer_zid: Option<Vec<u8>>,
+}
+
+impl FaceEntry {
+    /// R2932 — retire this face's group copies: their members leave the union the way a
+    /// dead link's do, since nothing will carry a Leave over it. Outside the registry lock,
+    /// because it delivers. A build without the group plane has no copies to retire.
+    fn retire_groups(&mut self) {
+        #[cfg(feature = "group")]
+        retire_copies(std::mem::take(&mut self.groups).into_values());
+    }
 }
 
 /// A C-declared subscription — the SSOT replayed onto every face that comes
@@ -667,6 +692,7 @@ struct LiveSubEntry {
 /// A C-declared ADVANCED publisher — the sixth SSOT, replayed onto every face
 /// exactly as the others are. The options are `Copy`, so the entry stores them
 /// by value and every replay declares an identical publisher.
+#[cfg(feature = "advanced")]
 struct AdvPubEntry {
     id: AdvPubId,
     keyexpr: String,
@@ -677,6 +703,7 @@ struct AdvPubEntry {
 /// they were supplied for — its registry id, which is what the C handle reports.
 ///
 /// Every other question goes to the host unchanged.
+#[cfg(feature = "advanced")]
 struct IdentifiedForms {
     id: AdvSubId,
     host: Arc<dyn DeclarationForms>,
@@ -690,10 +717,13 @@ struct IdentifiedForms {
 /// for an entity no peer sees — and, since that declaration is shared with the
 /// wire face's entities, would hold it past the wire face's own, which is where
 /// a peer sees it retracted.
+#[cfg(feature = "advanced")]
 struct Unnamed;
 
+#[cfg(feature = "advanced")]
 impl DeclarationForms for Unnamed {}
 
+#[cfg(feature = "advanced")]
 impl DeclarationForms for IdentifiedForms {
     fn entity_id(&self) -> Option<u32> {
         // A counter that has outrun `u32` has no spelling in the detection
@@ -723,6 +753,7 @@ impl DeclarationForms for IdentifiedForms {
 }
 
 /// A C-declared ADVANCED subscriber — the seventh SSOT.
+#[cfg(feature = "advanced")]
 struct AdvSubEntry {
     id: AdvSubId,
     keyexpr: String,
@@ -733,6 +764,7 @@ struct AdvSubEntry {
 /// R2932 — a C-joined GROUP, the eighth SSOT. The aggregate carries the group
 /// id and the local member, so a replay joins the same group as the same
 /// member; `priority` is the one join knob the aggregate does not need.
+#[cfg(feature = "group")]
 struct GroupEntry {
     id: GroupId,
     agg: Arc<GroupAggregate>,
@@ -1303,11 +1335,17 @@ struct Inner {
     next_match_id: MatchId,
     filters: Vec<FilterEntry>,
     next_filter_id: FilterId,
+    #[cfg(feature = "advanced")]
     adv_pubs: Vec<AdvPubEntry>,
+    #[cfg(feature = "advanced")]
     next_adv_pub_id: AdvPubId,
+    #[cfg(feature = "advanced")]
     adv_subs: Vec<AdvSubEntry>,
+    #[cfg(feature = "advanced")]
     next_adv_sub_id: AdvSubId,
+    #[cfg(feature = "group")]
     groups: Vec<GroupEntry>,
+    #[cfg(feature = "group")]
     next_group_id: GroupId,
     kexprs: Vec<KexprEntry>,
     /// Next alias id to hand out. Starts at 0 and is PRE-incremented, so the
@@ -1385,6 +1423,7 @@ impl Inner {
     /// they answer different questions: they must always name the same set, and
     /// a `put` that skipped the plane would publish to every peer while the
     /// session's own advanced subscriber heard nothing.
+    #[cfg(feature = "advanced")]
     fn declaration_targets_ref(&self) -> impl Iterator<Item = &FaceEntry> {
         self.faces.values().chain(self.local_face.iter())
     }
@@ -1398,6 +1437,7 @@ impl Inner {
     /// [`SharedSession::declare_advanced_subscriber`]). The key is how the
     /// finished declaration finds its way back
     /// ([`SharedSession::attach_advanced_subscriber`]).
+    #[cfg(feature = "advanced")]
     fn declaration_target_handles(
         &self,
     ) -> Vec<(
@@ -1427,6 +1467,7 @@ impl Inner {
 
 /// Where a declaration made outside the registry lock is filed when it is done:
 /// a live face by id, or the session's own local plane.
+#[cfg(feature = "advanced")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeclarationTarget {
     Face(u64),
@@ -1511,6 +1552,7 @@ pub struct SharedSession {
     initial_interest: bool,
     /// R3074 -- the gossip plane, for a node that gossips: what introduces the nodes that
     /// each hold a face to this one. See [`SessionResources::gossip`].
+    #[cfg(feature = "gossip")]
     gossip: Option<Arc<GossipPlane>>,
     /// The authentication the node's config asks for, installed on every session the node opens
     /// before its first wire byte. See [`SessionResources::auth`].
@@ -1701,11 +1743,16 @@ impl SharedSession {
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
         // than failing the open: the session's own zid is random and never is one.
+        #[cfg(feature = "gossip")]
         let gossip = gossip
             .and_then(|setup| {
                 GossipPlane::with_policy(&zid, setup.whatami, setup.policy, setup.dials)
             })
             .map(Arc::new);
+        // Without the feature a setup cannot be made (its policy has no value), so there is
+        // nothing to build and nothing to keep.
+        #[cfg(not(feature = "gossip"))]
+        let _: Option<GossipSetup> = gossip;
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
         // the wire, and Peer is what a session that both publishes and answers
@@ -1760,11 +1807,15 @@ impl SharedSession {
                 // The plane asks nobody: a write filter counts what PEERS
                 // declare, and the plane's link is inert.
                 filters: BTreeMap::new(),
+                #[cfg(feature = "advanced")]
                 adv_pubs: BTreeMap::new(),
+                #[cfg(feature = "advanced")]
                 adv_subs: BTreeMap::new(),
+                #[cfg(feature = "group")]
                 groups: BTreeMap::new(),
                 // `None`: this constructor runs on the C application thread,
                 // where `Handle::current()` panics. See the field.
+                #[cfg(feature = "advanced")]
                 runtime: None,
                 // The plane's re-arm signal is `local_wake`, held beside the
                 // session for the same outside-the-lock reason; this one is
@@ -1784,6 +1835,7 @@ impl SharedSession {
             node_hlc,
             shm_clients,
             initial_interest,
+            #[cfg(feature = "gossip")]
             gossip,
             auth,
             policy,
@@ -1828,14 +1880,18 @@ impl SharedSession {
     /// before the first face comes up, so the first list a neighbour is sent carries them. A
     /// node that does not gossip ignores it.
     pub fn set_gossip_locators(&self, locators: Vec<String>) {
+        #[cfg(feature = "gossip")]
         if let Some(gossip) = &self.gossip {
             gossip.set_self_locators(locators);
         }
+        #[cfg(not(feature = "gossip"))]
+        let _ = locators;
     }
 
     /// Send what the gossip plane answered, each message on the face it names. `new_face` is
     /// the face a caller holds the registry lock for and has not inserted yet, with its actions;
     /// every other face is looked up in `faces`.
+    #[cfg(feature = "gossip")]
     fn send_gossip(
         faces: &BTreeMap<u64, FaceEntry>,
         new_face: Option<(u64, &Arc<SessionLinkActions>)>,
@@ -1924,6 +1980,7 @@ impl SharedSession {
         // sample's `SourceInfo` and renders it into the `@adv` keyexpr, so it
         // must be the identity this face actually negotiated rather than a
         // registry-wide copy.
+        #[cfg(feature = "advanced")]
         let zid = actions.params.zid.clone();
         // R311y554 — THE hand-off that makes `allowed_destination` honourable.
         //
@@ -2102,7 +2159,9 @@ impl SharedSession {
         // `@adv` cache queryable and liveliness token on the face it binds to,
         // so a per-face declaration is not merely convenient here — it is the
         // only shape in which those two reach the peer at all.
+        #[cfg(feature = "advanced")]
         let mut adv_pubs = BTreeMap::new();
+        #[cfg(feature = "advanced")]
         for entry in &guard.adv_pubs {
             if let Ok(pub_) = AdvancedPublisher::declare(
                 &session,
@@ -2122,6 +2181,7 @@ impl SharedSession {
         // here, with the face's identity read off its handshake (this runs past a completed
         // one), so a face that was refused above is never announced. The plane takes its own
         // lock for the decision and returns, so what is sent here is sent under this lock only.
+        #[cfg(feature = "gossip")]
         if let Some(gossip) = &self.gossip {
             let outbound = gossip.face_up(id, &FaceIdentity::of(actions));
             Self::send_gossip(&guard.faces, Some((id, actions)), outbound);
@@ -2141,6 +2201,7 @@ impl SharedSession {
         // this point finds the face in `declaration_target_handles`, and one
         // recorded before it is in the snapshot, so each is declared on this face
         // exactly once. See [`Self::declare_advanced_subscriber`].
+        #[cfg(feature = "advanced")]
         let adv_sub_replays: Vec<_> = guard
             .adv_subs
             .iter()
@@ -2157,13 +2218,17 @@ impl SharedSession {
                 )
             })
             .collect();
+        #[cfg(feature = "advanced")]
         let adv_subs = BTreeMap::new();
+        #[cfg(feature = "advanced")]
         let replay_session = session.clone();
         // R2932 — the groups, so a member joined before this peer connected
         // announces itself to it. Best-effort per face like every replay above:
         // the join's only fallible checks (canon, wildcards) already passed on
         // the local plane when the C program joined.
+        #[cfg(feature = "group")]
         let mut groups = BTreeMap::new();
+        #[cfg(feature = "group")]
         for entry in &guard.groups {
             if let Ok(copy) =
                 FaceGroup::join(&session, &entry.agg, Locality::Remote, entry.priority)
@@ -2186,12 +2251,16 @@ impl SharedSession {
                 live_subs,
                 matches,
                 filters,
+                #[cfg(feature = "advanced")]
                 adv_pubs,
+                #[cfg(feature = "advanced")]
                 adv_subs,
+                #[cfg(feature = "group")]
                 groups,
                 // `face_up` runs on the drive task, so this IS the runtime the
                 // face is driven by. Always `Some` for a real face; see the
                 // field for why the type admits `None`.
+                #[cfg(feature = "advanced")]
                 runtime: Some(tokio::runtime::Handle::current()),
                 revised: Arc::new(Notify::new()),
                 peer_zid,
@@ -2202,11 +2271,12 @@ impl SharedSession {
         // R2932 — a replaced entry's group copies are copies of a session that
         // is gone, so their members leave the union the way `face_down`'s do.
         if let Some(mut old) = replaced {
-            retire_copies(std::mem::take(&mut old.groups).into_values());
+            old.retire_groups();
         }
         // The advanced subscribers, outside the lock — see where the snapshot is
         // taken. This runs on the drive task, which is the runtime the face is
         // driven by, so a declaration that spawns has the one it needs.
+        #[cfg(feature = "advanced")]
         for (adv_id, keyexpr, options, sink) in adv_sub_replays {
             let (on_sample, on_miss) = (sink)();
             // R2814 — the seeded form: this is a replay of a subscriber the C
@@ -2288,6 +2358,7 @@ impl SharedSession {
     pub fn face_down(&self, id: u64) {
         // R3074 -- the node at the far end leaves the gossip graph with its face, so a node that
         // returns is told of as a new one. Upstream's gossip tells nobody that a link went.
+        #[cfg(feature = "gossip")]
         if let Some(gossip) = &self.gossip {
             gossip.face_down(id);
         }
@@ -2359,7 +2430,7 @@ impl SharedSession {
         // Leave over a dead link, so the members only this face could see
         // leave the union here. Outside the registry lock, because it delivers.
         if let Some(mut entry) = removed {
-            retire_copies(std::mem::take(&mut entry.groups).into_values());
+            entry.retire_groups();
             drop(entry);
         }
     }
@@ -2408,7 +2479,7 @@ impl SharedSession {
         // R2932 — a closed session sees no peer, so a C group's union loses
         // every member it heard over the wire, as `face_down` would take them.
         for mut entry in faces.into_values() {
-            retire_copies(std::mem::take(&mut entry.groups).into_values());
+            entry.retire_groups();
             drop(entry);
         }
     }
@@ -2458,6 +2529,7 @@ impl SharedSession {
             // answers (a node to be told of, a list to pass on) is sent on the faces it names.
             // The plane decides under its own lock and returns, so this holds no lock across a
             // send; the registry's is taken for the lookup of each target alone.
+            #[cfg(feature = "gossip")]
             if let (
                 Some(gossip),
                 IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }),
@@ -2488,6 +2560,7 @@ impl SharedSession {
             // directly above: firing a snapshot's synthetic timeout reply and
             // its final invokes C callbacks, and this is the one thread on
             // which that is allowed.
+            #[cfg(feature = "liveliness-get")]
             session.sweep_expired_liveliness_gets_staged();
             // R311y554 — the DRIVE-TASK half of the local-delivery hand-off.
             //
@@ -2537,11 +2610,12 @@ impl SharedSession {
                 return Some(self.clock.now_monotonic_ms());
             }
             let reply = session.next_reply_deadline_ms();
-            let liveliness = session.next_liveliness_get_deadline_ms();
-            match (reply, liveliness) {
+            #[cfg(feature = "liveliness-get")]
+            let reply = match (reply, session.next_liveliness_get_deadline_ms()) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (only, None) | (None, only) => only,
-            }
+            };
+            reply
         })
     }
 
@@ -3980,7 +4054,12 @@ impl SharedSession {
         drop(dropped_live);
         drop(dropped_live_entry);
     }
+}
 
+/// The advanced publisher and subscriber planes of the registry: the sixth and seventh SSOT.
+/// Their own impl, so a build without the `advanced` feature carries none of it.
+#[cfg(feature = "advanced")]
+impl SharedSession {
     /// Record a C ADVANCED publisher in the SSOT and declare it on every live
     /// face, with the same declare-before-peer semantics as every other plane
     /// here: no face yet -> the entry is still recorded and every future face
@@ -4341,7 +4420,9 @@ impl SharedSession {
             .find(|entry| entry.id == id)
             .map(|entry| entry.keyexpr.clone())
     }
+}
 
+impl SharedSession {
     /// R2932 — join the zenoh-ext GROUP `gid` as `member`: record it in the
     /// SSOT and join it on the local plane and on every live face. Returns
     /// the C-level id and the [`GroupAggregate`] the C program reads.
@@ -4352,6 +4433,7 @@ impl SharedSession {
     /// refusal the C program gets and nothing is recorded. The faces are then
     /// best-effort, like every other per-face declaration: a face mid-teardown
     /// is skipped, and `face_up` covers every face that arrives later.
+    #[cfg(feature = "group")]
     pub fn join_group(
         &self,
         gid: String,
@@ -4397,6 +4479,7 @@ impl SharedSession {
     /// runs before this returns — unless this is called from inside that
     /// group's own callback, where the sink falls with the aggregate instead
     /// (see `GroupAggregate::retire`).
+    #[cfg(feature = "group")]
     pub fn leave_group(&self, id: GroupId) {
         let mut copies = Vec::new();
         let agg = {
@@ -5518,7 +5601,7 @@ mod matching_aggregate_tests {
 /// holds the publisher it was declared on. The differential
 /// (`zenoh_c_advanced_publisher_declare_twice_and_diff`) is the proof against the real library; these
 /// are the registry-level cases that need no oracle and no drive thread.
-#[cfg(test)]
+#[cfg(all(test, feature = "advanced"))]
 mod advanced_declaration_tests {
     use super::*;
     use std::time::Duration;

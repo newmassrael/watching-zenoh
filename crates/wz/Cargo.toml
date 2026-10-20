@@ -1190,7 +1190,15 @@ api-compat-c = ["dep:wz-capi-c", "runtime-tokio"]
 # reserved placeholder to the real dep gate. Also turns on `runtime-tokio`
 # so the runtime-XOR guard (lib.rs, keyed on the runtime-tokio feature) still
 # fires against runtime-coop — the crate is inherently the AP/tokio profile.
-api-compat-pico = ["dep:wz-capi-pico", "runtime-tokio"]
+# The pico ABI's capabilities (liveliness, advanced pub/sub, gossip) are named here, as the
+# dependency takes no default features: the drop-in exports what the reference build does.
+api-compat-pico = [
+    "dep:wz-capi-pico",
+    "runtime-tokio",
+    "wz-capi-pico/liveliness",
+    "wz-capi-pico/advanced",
+    "wz-capi-pico/gossip",
+]
 
 # ----- §5.1 transport additions (4 atomic: 3 active, 1 reserved) -----
 # R311y8/y9/y10 built the LAYER-1 trio active, each forwarding the

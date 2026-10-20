@@ -506,6 +506,7 @@ unsafe fn declare_matching(
 /// # Safety
 /// `listener` must be null or valid and writable; `callback` must be a valid
 /// moved closure, which is consumed on every path.
+#[cfg(feature = "advanced")]
 pub(crate) unsafe fn declare_advanced_matching(
     target: Option<(Arc<SharedSession>, String)>,
     listener: Option<*mut z_owned_matching_listener_t>,

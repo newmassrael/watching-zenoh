@@ -29,6 +29,7 @@
 use std::ffi::{c_int, c_void};
 use std::sync::{Arc, Mutex as StdMutex};
 
+#[cfg(feature = "liveliness")]
 use wz_runtime_tokio::declare::LivelinessSample;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::sample::SampleKind;
@@ -475,6 +476,7 @@ unsafe impl Sync for CClosure {}
 /// and the kind carries the discriminator — a token appearing is `PUT`, one
 /// going away is `DELETE`. Upstream's `z_sub_liveliness.c` switches on exactly
 /// that to print "Alive"/"Dropped".
+#[cfg(feature = "liveliness")]
 pub(crate) fn make_liveliness_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(LivelinessSample<'_>) + Send + 'static {
@@ -908,11 +910,13 @@ impl PlainPublisher {
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
+    #[cfg(feature = "advanced")]
     pub(crate) fn entity_id(&self) -> u64 {
         self.eid
     }
 
     /// The publisher's key with its declaration.
+    #[cfg(feature = "advanced")]
     pub(crate) fn key(&self) -> &DeclaredKeyexpr {
         &self.key
     }
@@ -2172,13 +2176,13 @@ pub unsafe extern "C" fn z_sample_kind(sample: *const z_loaned_sample_t) -> z_sa
 /// The alignment is 4, not 8, and that is ABI rather than trivia: `z_id_t` is a
 /// bare `uint8_t[16]` and so contributes alignment 1, leaving `eid` / `_source_sn`
 /// to set it. The same reasoning that makes
-/// [`z_entity_global_id_t`](crate::advanced::z_entity_global_id_t) 20 bytes
+/// [`z_entity_global_id_t`](crate::entity::z_entity_global_id_t) 20 bytes
 /// rather than 24. This type crosses the boundary BY VALUE out of
 /// [`z_source_info_new`], so getting it wrong misplaces every field.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct z_source_info_t {
-    pub _source_id: crate::advanced::z_entity_global_id_t,
+    pub _source_id: crate::entity::z_entity_global_id_t,
     pub _source_sn: u32,
 }
 
@@ -2191,7 +2195,7 @@ impl z_source_info_t {
     /// The all-zero value, which is pico's `_z_source_info_null`.
     pub(crate) fn empty() -> Self {
         Self {
-            _source_id: crate::advanced::z_entity_global_id_t {
+            _source_id: crate::entity::z_entity_global_id_t {
                 zid: crate::zid::z_id_t::empty(),
                 eid: 0,
             },
@@ -2210,7 +2214,7 @@ impl z_source_info_t {
 /// `z_id_to_string` and every pico program do.
 pub(crate) fn source_info_of(info: &wz_runtime_tokio::sample::SourceInfo) -> z_source_info_t {
     z_source_info_t {
-        _source_id: crate::advanced::z_entity_global_id_t {
+        _source_id: crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t::from_wire(&info.zid),
             eid: info.eid,
         },
@@ -2225,7 +2229,7 @@ pub(crate) fn source_info_of(info: &wz_runtime_tokio::sample::SourceInfo) -> z_s
 /// `gid` must be valid and writable; `zid` must be null or a valid `z_id_t`.
 #[no_mangle]
 pub unsafe extern "C" fn z_entity_global_id_new(
-    gid: *mut crate::advanced::z_entity_global_id_t,
+    gid: *mut crate::entity::z_entity_global_id_t,
     zid: *const crate::zid::z_id_t,
     eid: u32,
 ) -> ZResult {
@@ -2233,7 +2237,7 @@ pub unsafe extern "C" fn z_entity_global_id_new(
         if gid.is_null() {
             return crate::result::Z_ERR_NULL;
         }
-        *gid = crate::advanced::z_entity_global_id_t {
+        *gid = crate::entity::z_entity_global_id_t {
             zid: if zid.is_null() {
                 crate::zid::z_id_t::empty()
             } else {
@@ -2251,7 +2255,7 @@ pub unsafe extern "C" fn z_entity_global_id_new(
 /// `source_id` must be null or a valid global entity id.
 #[no_mangle]
 pub unsafe extern "C" fn z_source_info_new(
-    source_id: *const crate::advanced::z_entity_global_id_t,
+    source_id: *const crate::entity::z_entity_global_id_t,
     source_sn: u32,
 ) -> z_source_info_t {
     crate::ffi::guard_val(z_source_info_t::empty(), || z_source_info_t {
@@ -2271,7 +2275,7 @@ pub unsafe extern "C" fn z_source_info_new(
 #[no_mangle]
 pub unsafe extern "C" fn z_source_info_id(
     info: *const z_source_info_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     crate::ffi::guard_val(z_source_info_t::empty()._source_id, || {
         if info.is_null() {
             z_source_info_t::empty()._source_id
