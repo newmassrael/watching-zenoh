@@ -11535,6 +11535,15 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,reassembly \
         --test session_pump_allocations --quiet || return 1
+    # The same pair over the slim receive pool, whose socket carries 256 bytes: the
+    # send budget must be bounded by the link, so a Put past it is refused as
+    # oversize rather than lent a slot too short (no leg ran this pool on the slot
+    # profile until a Put of 512 bytes was found refused as `NoTxSlot`): 2 = what
+    # that command PRINTED.
+    _runci_guarded_test "C1m session pump alloc slim" 2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,session-slot,buffer-pool-session-rx-slim \
+        --test session_pump_allocations --quiet || return 1
     _runci_guarded_test "C1m session pump alloc heap control" 1 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,transport-keepalive,codec-close,tx-lend-only,rx-in-place \
@@ -11621,6 +11630,9 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-mcu --all-targets \
             --features adminspace-core,adminspace-write,session-slot \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-mcu --all-targets \
+            --features adminspace-fixed,session-slot \
             --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-coop --all-targets \
             --features alloc,wz-session-core/alloc,session-slot,reassembly \
