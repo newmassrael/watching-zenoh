@@ -84,7 +84,51 @@ pub struct TcpRead(
     // Read by `poll_fd` alone, which is unix: a field a platform never reads is dead code there,
     // and a warning is an error in this tree.
     #[cfg(unix)] Option<std::net::TcpStream>,
+    // Whether the next wait should spin at all; see [`SpinGate`].
+    #[cfg(unix)] SpinGate,
 );
+
+/// Whether a read that is about to wait should busy-poll first, learned from how the last
+/// spins ended.
+///
+/// A spin pays when the reply comes back inside the budget and is pure waste when nothing does:
+/// a subscriber that never sends would otherwise burn the whole budget before every sleep. So a
+/// spin that finds nothing makes the next reads skip theirs, one, then three, seven, and so on up
+/// to a thousand and twenty-three, and a spin that finds something starts over. A link in a
+/// round trip spins every time; a link that only listens spins about once in a thousand waits.
+#[cfg(unix)]
+#[derive(Default)]
+struct SpinGate {
+    /// Spins in a row that found nothing, capped.
+    misses: u32,
+    /// Waits still to go without a spin.
+    skip: u32,
+}
+
+#[cfg(unix)]
+impl SpinGate {
+    /// The most doublings of the skip; 2^10 - 1 waits.
+    const MAX_MISSES: u32 = 10;
+
+    /// Whether the wait now beginning spins first. A wait that does not is counted off.
+    fn should_spin(&mut self) -> bool {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return false;
+        }
+        true
+    }
+
+    /// What the spin that `should_spin` allowed came to.
+    fn spun(&mut self, found_something: bool) {
+        if found_something {
+            self.misses = 0;
+            return;
+        }
+        self.misses = (self.misses + 1).min(Self::MAX_MISSES);
+        self.skip = (1u32 << self.misses) - 1;
+    }
+}
 
 enum TcpReadInner {
     /// The half `into_split` made, registered where the link was made.
@@ -100,6 +144,8 @@ impl TcpRead {
             TcpReadInner::Half(half),
             #[cfg(unix)]
             None,
+            #[cfg(unix)]
+            SpinGate::default(),
         )
     }
 
@@ -166,11 +212,11 @@ impl tokio::io::AsyncRead for TcpRead {
         #[cfg(unix)]
         if polled.is_pending() {
             let budget = rx_busy_poll();
-            if !budget.is_zero() {
-                if let Some(raw) = this.poll_fd() {
-                    if let Some(read) = busy_read(raw, buf, budget) {
-                        return std::task::Poll::Ready(read);
-                    }
+            if !budget.is_zero() && this.2.should_spin() {
+                let read = this.poll_fd().and_then(|raw| busy_read(raw, buf, budget));
+                this.2.spun(read.is_some());
+                if let Some(read) = read {
+                    return std::task::Poll::Ready(read);
                 }
             }
         }
@@ -212,6 +258,7 @@ where
         return None;
     }
     let began = std::time::Instant::now();
+    let mut tries = 0u32;
     loop {
         match io::Read::read(&mut &*raw, buf.initialize_unfilled()) {
             Ok(n) => {
@@ -225,7 +272,14 @@ where
         if began.elapsed() >= budget {
             return None;
         }
-        std::hint::spin_loop();
+        // The first reads are the reply arriving; after them the core may be wanted by another
+        // thread of this process (a writer, a pacer), which must not wait out the budget.
+        tries = tries.saturating_add(1);
+        if tries > 8 {
+            std::thread::yield_now();
+        } else {
+            std::hint::spin_loop();
+        }
     }
 }
 
@@ -710,6 +764,48 @@ mod tests {
         let (reader, writer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         reader.set_nonblocking(true).expect("non-blocking");
         (reader, writer)
+    }
+
+    /// A link in a round trip spins on every wait; a link that only listens backs off
+    /// geometrically to one spin in a thousand and twenty-four; and the first spin that finds
+    /// something starts the whole count over.
+    #[cfg(unix)]
+    #[test]
+    fn the_spin_gate_backs_off_on_misses_and_resets_on_a_find() {
+        let mut gate = SpinGate::default();
+        // A round trip: every spin finds the reply, every wait spins.
+        for _ in 0..1000 {
+            assert!(gate.should_spin());
+            gate.spun(true);
+        }
+        // A listener: the waits that spin are 1, 3, 7, ... apart, doubling each time.
+        let mut waits_between = Vec::new();
+        let mut since = 0u32;
+        let mut spins = 0;
+        while spins < 6 {
+            if gate.should_spin() {
+                gate.spun(false);
+                waits_between.push(since);
+                since = 0;
+                spins += 1;
+            } else {
+                since += 1;
+            }
+        }
+        assert_eq!(waits_between, [0, 1, 3, 7, 15, 31]);
+        // The backoff is capped: after many misses a spin is still due every 1024th wait.
+        for _ in 0..200 {
+            while !gate.should_spin() {}
+            gate.spun(false);
+        }
+        let mut skipped = 0u32;
+        while !gate.should_spin() {
+            skipped += 1;
+        }
+        assert_eq!(skipped, 1023);
+        // One find ends the backoff at once.
+        gate.spun(true);
+        assert!(gate.should_spin(), "after a find the next wait spins");
     }
 
     /// The busy read takes bytes that arrive inside its budget, and answers `None` when
