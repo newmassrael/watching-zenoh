@@ -13,7 +13,7 @@
 //! | the listener's lanes | `NODE.listener` | [`LANES`] |
 //! | the observer, with the admin queryable and the config subscriber | `NODE.app` | the registries' own capacities |
 //! | the interfaces | the static pools of `net_lwip` | `net_lwip::MAX_PORTS` |
-//! | the endpoints it dials, the sessions it reports | the connect manager, `NODE.status` | `caps::MAX_STATIC_CONNECT`, [`SESSIONS`] |
+//! | the endpoints it dials, the sessions it reports | the connect manager, `CONTROL.status` | `caps::MAX_STATIC_CONNECT`, [`SESSIONS`] |
 //!
 //! # What this build is, and is not
 //!
@@ -140,18 +140,27 @@ type Clock = ZephyrClock<TICK_HZ>;
 type Host = SessionHost<Clock, &'static LwipLink, ZephyrEntropy, SESSIONS, SESSIONS>;
 type Node<'a> = SlotAdminNode<'a, Clock, &'static LwipLink, Factory, SESSIONS, SESSIONS, LANES>;
 
-/// Everything the node declares, in one `static`.
+/// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the
+/// linker places it in `.bss` (RAM) and not in `.data` (RAM and a copy of it in flash).
+/// One non-zero byte anywhere in a `static` moves all of it: on the T2G image a flag set
+/// `true` and a function pointer in this table's initial value cost 131 KB of flash.
+/// What starts non-zero is in [`Control`], which is small.
 struct Statics {
     runtime: RuntimeCell<Clock, TASKS, TASK_BYTES, TIMERS>,
     sessions: Slots,
     pumps: PumpSlots<Clock, LwipSessionLink<&'static LwipLink>, SESSIONS>,
     listener: SessionListener<LANES>,
+    admin: AdminHost<1024>,
+    app: SlotApp<Sinks>,
+}
+
+/// What the node's control plane starts with, and which is not zero: the counters and the
+/// write permit. Small on purpose; see [`Statics`] for why it is not part of it.
+struct Control {
     status: FixedNodeStatus<SESSIONS>,
     /// Writes are PERMITTED on this node: upstream's default is to refuse, and the node
     /// opts in, because being reconfigured is what it is for.
     control: ConnectControl,
-    admin: AdminHost<1024>,
-    app: SlotApp<Sinks>,
 }
 
 /// The registrations the node's observer holds, all closed types: the config-write
@@ -162,6 +171,8 @@ type Sinks = AdminSinks<1024, SESSIONS>;
 // loop on one thread, which is the only thing that reaches these tables; each member is
 // `Sync` by the same rule.
 unsafe impl Sync for Statics {}
+// SAFETY: as above.
+unsafe impl Sync for Control {}
 
 impl Statics {
     const fn new() -> Self {
@@ -170,15 +181,23 @@ impl Statics {
             sessions: SessionSlots::new(),
             pumps: PumpSlots::new(),
             listener: SessionListener::new(),
-            status: FixedNodeStatus::new(true),
-            control: ConnectControl::new(true),
             admin: AdminHost::new(),
             app: SlotApp::new(),
         }
     }
 }
 
+impl Control {
+    const fn new() -> Self {
+        Self {
+            status: FixedNodeStatus::new(true),
+            control: ConnectControl::new(true),
+        }
+    }
+}
+
 static NODE: Statics = Statics::new();
+static CONTROL: Control = Control::new();
 
 /// What the node makes its sessions from: the entropy, the parameters and the
 /// application layer (the process-wide observer, with the node's own admin surface
@@ -244,18 +263,23 @@ fn install_observer(
     let identity = FixedNodeIdentity::new(zid_hex, "peer", VERSION, locators)
         .map_err(|_| c"wz: FAIL - the node's identity does not fit its fixed fields")?;
     let installed = NODE.app.install_with(|observer| {
-        if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &NODE.control)
-            .is_err()
+        if host_connect_writes_fixed(
+            &mut observer.subscribers,
+            zid_hex,
+            "peer",
+            &CONTROL.control,
+        )
+        .is_err()
         {
             return Err(c"wz: FAIL - the node's observer refused its config subscriber");
         }
         if host_admin_queryable_fixed(
             &mut observer.queryables,
             identity,
-            &NODE.status,
+            &CONTROL.status,
             &NODE.admin,
-            Some(&NODE.control),
-            Some(&NODE.control),
+            Some(&CONTROL.control),
+            Some(&CONTROL.control),
         )
         .is_err()
         {
@@ -333,8 +357,8 @@ pub fn run(mut net: LwipMacNet) -> i32 {
         &links,
         &factory,
         &NODE.listener,
-        &NODE.control,
-        &NODE.status,
+        &CONTROL.control,
+        &CONTROL.status,
         zid_hex,
         "peer",
         LISTEN_PORT,
@@ -377,14 +401,14 @@ pub fn run(mut net: LwipMacNet) -> i32 {
             }
         }
 
-        let (written, endpoints) = NODE.control.endpoints();
+        let (written, endpoints) = CONTROL.control.endpoints();
         if generation != Some(written) {
             generation = Some(written);
             log_args(format_args!(
                 "zephyr-admin-node: connect/endpoints = {endpoints:?}"
             ));
         }
-        let sessions = NODE.status.session_count();
+        let sessions = CONTROL.status.session_count();
         if sessions != reported {
             reported = sessions;
             log_args(format_args!("zephyr-admin-node: {reported} session(s)"));
