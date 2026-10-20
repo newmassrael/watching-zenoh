@@ -44,6 +44,9 @@ name = "wz_capi_core"
 path = "src/lib.rs"
 
 [features]
+# The receive busy-poll is on in a default build: it measured faster than zenoh-pico and
+# zenoh-c on a loopback round trip and costs a node that only listens nothing (see the feature).
+default = ["rx-busy-poll"]
 # The two link kinds the LISTEN role's accept-config arms are cfg'd on. They
 # forward to wz-runtime-tokio exactly as wz-capi-pico's twins do; the drive half
 # moved here carries the `#[cfg]`s, so the feature names must exist here or the
@@ -84,10 +87,14 @@ interceptors = [
 # a way to run its timers and spawned tasks beside them.
 serial-drive-own-thread = []
 # A TCP read that would wait first keeps reading its socket for a few microseconds, so a reply
-# that comes back inside that window is taken by a core that never went idle (loopback round trip
-# 22 -> 14 us measured against zenoh-pico's 18 us, with a worse 99th percentile and the budget's
-# CPU time spent on every read that waits). Off: a build that wants the short round trip turns it
-# on, and WZ_CAPI_RX_BUSY_POLL_US overrides it at run time in either direction.
+# that comes back inside that window is taken by a core that never went idle. On by default since
+# the two costs it had were removed: the spin yields to other threads of the process (a plain spin
+# held its core and gave a 35-85 us 99th percentile), and a spin that finds nothing makes the next
+# reads skip theirs, so a node that only listens pays no CPU for it (measured: 335 vs 337 ms over
+# 5 s at about 6k messages a second). Measured on a pinned loopback round trip of 8 bytes: against
+# zenoh-pico 14-15 us (99th 18 us) wz is 13-14 us (99th 17 us); against zenoh-c 31-32 us wz is
+# 17-18 us. A build that wants no spinning leaves the feature out, and WZ_CAPI_RX_BUSY_POLL_US
+# overrides the budget at run time in either direction (zero is off).
 rx-busy-poll = []
 # R2259 (open-debt item 593) — the QoS ext, named here for the same reason the
 # three link kinds above are: `FaceSnapshot::of` reads `SessionLinkActions::is_qos`,

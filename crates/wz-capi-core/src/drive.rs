@@ -3384,7 +3384,9 @@ fn drive_runs_on_its_own_thread(drive: FaceDrive, workers_requested: bool) -> bo
 /// this process: `WZ_CAPI_RX_BUSY_POLL_US` when it is set (zero turns it off), else what the
 /// build says, which is [`RX_BUSY_POLL_BUILD_US`] under the `rx-busy-poll` feature and nothing
 /// without it. Busy-polling takes a reply that comes back inside the budget on a core that
-/// never went idle, and costs the budget's CPU time for every read that has to wait.
+/// never went idle. A spin that finds nothing makes the next reads skip theirs (see
+/// `link_pipeline::SpinGate`), so the budget's CPU time is paid by a link that is in a round
+/// trip and by almost no other.
 fn rx_busy_poll_budget(configured: Option<&str>) -> Duration {
     let micros = configured
         .and_then(|text| text.trim().parse::<u64>().ok())
@@ -3396,10 +3398,11 @@ fn rx_busy_poll_budget(configured: Option<&str>) -> Duration {
     Duration::from_micros(micros)
 }
 
-/// The budget a build with the `rx-busy-poll` feature polls for: about the idle gap of a request
-/// and its reply between two processes of one host, measured (a longer budget shortened nothing
-/// more and lengthened the tail).
-const RX_BUSY_POLL_BUILD_US: u64 = 10;
+/// The budget a build with the `rx-busy-poll` feature polls for. Measured on a pinned loopback
+/// round trip of 8 bytes: 30, 50 and 100 us all gave the same median (13-14 us) and 99th
+/// percentile (17 us), 10 us left the median at 15 us, so the middle of the plateau is taken. The
+/// budget is only spent in full by a spin that finds nothing, and the gate then backs off.
+const RX_BUSY_POLL_BUILD_US: u64 = 50;
 
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
@@ -3625,7 +3628,7 @@ mod tests {
     #[test]
     fn the_busy_poll_budget_is_the_variable_then_the_build() {
         let built = if cfg!(feature = "rx-busy-poll") {
-            10
+            RX_BUSY_POLL_BUILD_US
         } else {
             0
         };
