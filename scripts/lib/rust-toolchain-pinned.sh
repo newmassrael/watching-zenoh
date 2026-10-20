@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# Install the toolchain rust-toolchain.toml pins and leave it the ONLY one on
-# the runner, so the build cache is keyed by the compiler the build uses.
+# R3389 (no register item) — install the toolchain rust-toolchain.toml pins and
+# leave it the ONLY one on the runner, so the build cache is keyed by the
+# compiler the build uses.
 #
 # WHAT HAPPENED. Run 39344495779: `validate + verify + test` passed every lane
 # and failed its budget margin at 1715 s of 1800 s, because its cargo cache was
