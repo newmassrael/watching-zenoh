@@ -276808,6 +276808,52 @@
         "The Zephyr client image has no capability features; MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
       ]
     },
+    "Round 3396": {
+      "decision_summary": "Pay the eleven red hosted jobs of the run on b63f7924b as one round. Ten shared four causes: wz-capi-core joined the cfg-gated-field hazard class (C1bf) and its tests, like wz-capi-c's, now name the features they need; the group filter selects ten tests where C1aw guarded nine; the anyke reader of the pico ABI moved to reply_keyexpr.rs; a multicast group policy is read only with access-acl-multicast. The eleventh was a wz-capture test that still said a run with a profile rule is never resumed, which R3393 made untrue. The access-acl-multicast inventory reason now starts with COMPLETE, as the A3 audit requires, and a fixed-node source is formatted.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: wz-capi-core in C1bf COVERED; C1aw group, group (query-consolidation) and group (pubsub-qos) count 10.",
+        "scripts/lib/anyke_reader_gate.py: the pico reader is reply_keyexpr.rs.",
+        "wz-capi-c Cargo.toml: required-features on 24 tests; wz-capi-core drive.rs: tests that need peer or scout carry the cfg; bytes.rs: Outbound::bytes is built for tests.",
+        "wz-capture e2e_row_tests: the profile-rule run is resumed on its second step (one resumption); wz-ap-demo: GroupPolicy fields read only with access-acl-multicast; zephyr fixed_node.rs formatted.",
+        "store: inventory entry access-acl-multicast reason tagged COMPLETE through set-inventory-status."
+      ],
+      "verification_bullets": [
+        "The 11 failing jobs of the hosted run were read per job from their own logs and each attributed to the sentence the gate printed; the other 18 jobs of that run were green.",
+        "pc2: wz-capture all-features lib 1525 passed; wz-ap-demo sessions_run with transport-multicast 6 passed and clippy clean; clippy -D warnings wz-capi-core and wz-capi-c with all features and all targets; reduced-features gate on the three ABI crates exit 0.",
+        "Local: the 218 gate invocations of Layer C0 exit 0 (twelve re-run after a runner fault of mine); audit-catalog-status exit 0 with WZ_A3_REQUIRE=1.",
+        "Not re-run locally: the Layer Z interop leg and the transport-MODE and routing lanes beyond the compile fix; their reds were the same dead-code error."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this round's push per job at the start of the next round; the Layer Z, C1bc and C1ax reds are repaired by one source change and are unproven until it runs.",
+        "A client-only build has not been run against zenohd.",
+        "The Zephyr client image has no capability features; MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
+      ],
+      "publishable_decision_summary": "Pay the eleven red hosted jobs of the run on b63f7924b as one round. Ten shared four causes: wz-capi-core joined the cfg-gated-field hazard class (C1bf) and its tests, like wz-capi-c's, now name the features they need; the group filter selects ten tests where C1aw guarded nine; the anyke reader of the pico ABI moved to reply_keyexpr.rs; a multicast group policy is read only with access-acl-multicast. The eleventh was a wz-capture test that still said a run with a profile rule is never resumed, which R3393 made untrue. The access-acl-multicast inventory reason now starts with COMPLETE, as the A3 audit requires, and a fixed-node source is formatted.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: wz-capi-core in C1bf COVERED; C1aw group, group (query-consolidation) and group (pubsub-qos) count 10.",
+        "scripts/lib/anyke_reader_gate.py: the pico reader is reply_keyexpr.rs.",
+        "wz-capi-c Cargo.toml: required-features on 24 tests; wz-capi-core drive.rs: tests that need peer or scout carry the cfg; bytes.rs: Outbound::bytes is built for tests.",
+        "wz-capture e2e_row_tests: the profile-rule run is resumed on its second step (one resumption); wz-ap-demo: GroupPolicy fields read only with access-acl-multicast; zephyr fixed_node.rs formatted.",
+        "store: inventory entry access-acl-multicast reason tagged COMPLETE through set-inventory-status."
+      ],
+      "publishable_verification_bullets": [
+        "The 11 failing jobs of the hosted run were read per job from their own logs and each attributed to the sentence the gate printed; the other 18 jobs of that run were green.",
+        "pc2: wz-capture all-features lib 1525 passed; wz-ap-demo sessions_run with transport-multicast 6 passed and clippy clean; clippy -D warnings wz-capi-core and wz-capi-c with all features and all targets; reduced-features gate on the three ABI crates exit 0.",
+        "Local: the 218 gate invocations of Layer C0 exit 0 (twelve re-run after a runner fault of mine); audit-catalog-status exit 0 with WZ_A3_REQUIRE=1.",
+        "Not re-run locally: the Layer Z interop leg and the transport-MODE and routing lanes beyond the compile fix; their reds were the same dead-code error."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this round's push per job at the start of the next round; the Layer Z, C1bc and C1ax reds are repaired by one source change and are unproven until it runs.",
+        "A client-only build has not been run against zenohd.",
+        "The Zephyr client image has no capability features; MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
@@ -281502,7 +281548,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "crates/wz/Cargo.toml",
-      "reason": "the pipeline on a multicast session, beyond upstream, off at run time until the host asks"
+      "reason": "COMPLETE: the access-control pipeline on a multicast session, beyond upstream (which leaves a group alone), off at run time until the host asks"
     },
     "access-downsampling": {
       "status": "active",
