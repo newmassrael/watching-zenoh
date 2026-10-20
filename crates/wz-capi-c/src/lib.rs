@@ -70,7 +70,7 @@ pub mod abi_origin;
 // compiled against the no-unstable header could never name — and it is what
 // makes the layout table's unstable half measurable, since on that arm there is
 // no upstream size to compare against.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
 pub mod advanced;
 pub mod bytes;
 // R2257 — MEASURED, not assumed: upstream's `nounstable` build defines no
@@ -97,6 +97,10 @@ pub mod config_verdict;
 // the config field it is about. Ungated for the reason `config_verdict` is.
 pub mod config_verdict_rows;
 pub mod encoding;
+// `z_entity_global_id_t`, which the advanced plane and the plain entities (publisher, subscriber,
+// queryable, querier, source info) all report: unstable upstream, and not the advanced plane's.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub mod entity;
 // The SENDING side of an end-to-end protected message: an owned sender that
 // keeps the message's counter and writes it into every frame it builds. A wz-own
 // surface like `config_verdict`, so ungated for the same reason: upstream has
@@ -109,29 +113,38 @@ pub mod e2e_sender;
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 pub mod events;
 mod ffi;
+#[cfg(feature = "query")]
 pub mod get;
 // R2932 — zenoh-ext's group membership, under wz's own `wz_capi_c_` prefix
 // (upstream zenoh-c has no group surface to be a drop-in for; the module doc
 // states the naming rule). On the unstable arm only, because zenoh-ext's
 // `Group` is `#[zenoh_macros::unstable]` upstream, which is the arm every
 // `ze_` door this crate exports sits behind.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(feature = "group", not(feature = "zenoh-c-no-unstable-api")))]
 pub mod group;
 pub mod handlers;
 pub mod keyexpr;
 // What one message may weigh, asked before it is sent. A wz-own door like
 // `config_verdict`, so ungated for the same reason: upstream reports no limit.
 pub mod limits;
+#[cfg(feature = "liveliness")]
 pub mod liveliness;
 pub mod log;
 pub mod matching;
 pub mod platform;
 pub mod publisher;
 pub mod put;
+#[cfg(feature = "query")]
 pub mod querier;
+#[cfg(feature = "queryable")]
 pub mod query;
+// The rule both ends of a query apply to the key of a reply: the requesting end before it accepts
+// one, the answering end before it queues one.
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub(crate) mod reply_keyexpr;
 pub mod result;
 pub mod sample;
+#[cfg(feature = "scout")]
 pub mod scout;
 pub mod serde;
 pub mod session;
@@ -141,7 +154,11 @@ pub mod session;
 // symbols would name types no header declares.
 /// The merge `zenoh_ext`'s querying subscriber makes between its queries' replies and
 /// the live samples that arrive meanwhile. Carries the same gate, for the same reason.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(
+    feature = "query",
+    feature = "queryable",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
 mod fetching;
 #[cfg(all(
     feature = "zenoh-c-shared-memory",
@@ -163,6 +180,7 @@ pub mod slice;
 #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
 pub mod source_info;
 pub mod string;
+pub mod string_array;
 pub mod sub;
 pub mod sync;
 /// R311y568 — the THREAD family (`z_owned_task_t` and its four operations), the
@@ -178,6 +196,10 @@ pub mod timestamp;
 /// symbols on the no-unstable arm — the direction R311y570's reverse census
 /// exists to catch, and the y536 rule read forwards: every user of the option
 /// structs' unstable fields is gated, so the module is.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(
+    feature = "query",
+    feature = "queryable",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
 pub mod zenoh_ext;
 pub mod zid;

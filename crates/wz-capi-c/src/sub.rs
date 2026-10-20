@@ -373,7 +373,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
 /// R311y568. UNSTABLE-gated as upstream gates it, and it has to be:
 /// `z_entity_global_id_t` lives in [`crate::advanced`], which is not compiled on
 /// the other arm. Built through the shared
-/// [`for_entity`](crate::advanced::z_entity_global_id_t::for_entity)
+/// [`for_entity`](crate::entity::z_entity_global_id_t::for_entity)
 /// constructor, so the zid / eid convention is stated once for all five
 /// entity-id accessors.
 ///
@@ -383,19 +383,19 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
 #[no_mangle]
 pub unsafe extern "C" fn z_subscriber_id(
     subscriber: *const crate::abi::z_loaned_subscriber_t,
-) -> crate::advanced::z_entity_global_id_t {
-    crate::ffi::guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+) -> crate::entity::z_entity_global_id_t {
+    crate::ffi::guard_val(crate::entity::z_entity_global_id_t::empty(), || {
         if subscriber.is_null() {
-            return crate::advanced::z_entity_global_id_t::empty();
+            return crate::entity::z_entity_global_id_t::empty();
         }
         // SAFETY: the caller's contract — a live `Box<SubscriberState>`.
         let handle = unsafe { (*subscriber).handle };
         if handle.is_null() {
-            return crate::advanced::z_entity_global_id_t::empty();
+            return crate::entity::z_entity_global_id_t::empty();
         }
         // SAFETY: as above.
         let state = unsafe { &*(handle as *const SubscriberState) };
-        crate::advanced::z_entity_global_id_t::for_entity(
+        crate::entity::z_entity_global_id_t::for_entity(
             &state.shared,
             subscriber as *const std::ffi::c_void,
         )

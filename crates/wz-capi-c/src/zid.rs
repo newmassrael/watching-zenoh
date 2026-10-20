@@ -369,15 +369,15 @@ pub unsafe extern "C" fn z_info_zid(session: *const z_loaned_session_t) -> z_id_
 #[no_mangle]
 pub unsafe extern "C" fn z_session_id(
     session: *const z_loaned_session_t,
-) -> crate::advanced::z_entity_global_id_t {
-    guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+) -> crate::entity::z_entity_global_id_t {
+    guard_val(crate::entity::z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract.
         match unsafe { session_state(session) } {
-            Some(state) => crate::advanced::z_entity_global_id_t {
+            Some(state) => crate::entity::z_entity_global_id_t {
                 zid: z_id_t { id: state.zid() },
                 eid: 0,
             },
-            None => crate::advanced::z_entity_global_id_t::empty(),
+            None => crate::entity::z_entity_global_id_t::empty(),
         }
     })
 }

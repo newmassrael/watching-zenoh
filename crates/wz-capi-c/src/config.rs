@@ -44,8 +44,10 @@ pub(crate) const CONNECT_KEY: &str = "connect/endpoints";
 pub(crate) const LISTEN_KEY: &str = "listen/endpoints";
 /// `scouting/multicast/address` (`Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY`, `:30`) —
 /// the group `z_scout` beacons onto.
+#[cfg(any(test, feature = "scout"))]
 pub(crate) const MULTICAST_LOCATOR_KEY: &str = "scouting/multicast/address";
 /// `scouting/timeout` (`Z_CONFIG_SCOUTING_TIMEOUT_KEY`, `:32`).
+#[cfg(any(test, feature = "scout"))]
 pub(crate) const SCOUTING_TIMEOUT_KEY: &str = "scouting/timeout";
 /// `id` — the session zid. NOT in `zenoh_constants.h`'s `Z_CONFIG_*` list (it is
 /// a plain json5 field of zenoh's own config schema), which is why it is spelled

@@ -57,9 +57,9 @@ use wz_capi_c::abi::{
     z_moved_session_t, z_moved_subscriber_t, z_owned_bytes_t, z_owned_closure_sample_t,
     z_owned_config_t, z_owned_session_t, z_owned_subscriber_t, z_view_keyexpr_t,
 };
-use wz_capi_c::advanced::z_entity_global_id_t;
 use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
+use wz_capi_c::entity::z_entity_global_id_t;
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::put::{z_put, z_put_options_default, z_put_options_t};
 use wz_capi_c::result::Z_OK;

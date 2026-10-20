@@ -114,10 +114,12 @@ const SHM: bool = cfg!(feature = "zenoh-c-shared-memory");
 const BYTES_SIZE: usize = if SHM { 40 } else { 32 };
 const PUBLISHER_SIZE: usize = if SHM { 120 } else { 112 };
 pub(crate) const ENCODING_SIZE: usize = if SHM { 48 } else { 40 };
+#[cfg(feature = "queryable")]
 const QUERY_SIZE: usize = if SHM { 144 } else { 136 };
 const BYTES_WRITER_SIZE: usize = if SHM { 64 } else { 56 };
 const SERIALIZER_SIZE: usize = BYTES_WRITER_SIZE;
 const SAMPLE_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 56 } else { 0 };
+#[cfg(feature = "query")]
 const REPLY_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 80 } else { 0 };
 // The reply ERROR. DERIVED rather than a measured literal, and the derivation
 // is upstream's own struct rather than a fitted delta: `ReplyError` is
@@ -132,11 +134,13 @@ const REPLY_SIZE: usize = 184 + if SHM { 16 } else { 0 } + if UNSTABLE { 80 } el
 // anything, which is why this one is also a row in
 // `crate::abi_origin::WZ_CAPI_C_ABI_COMPOSITION`, evaluated against upstream's
 // four generated tables on every §5.27 run.
+#[cfg(feature = "query")]
 const REPLY_ERR_SIZE: usize =
     BYTES_SIZE + ENCODING_SIZE + if UNSTABLE { TIMESTAMP_STACK_SIZE } else { 0 };
 /// `Option<TimestampStack>` — the THIRD field zenoh 1.10.0 gives `ReplyError`
 /// behind `feature = "unstable"`, and the reason `REPLY_ERR_SIZE` stopped being
 /// `BYTES_SIZE + ENCODING_SIZE` alone at that version.
+#[cfg(feature = "query")]
 const TIMESTAMP_STACK_SIZE: usize = 32;
 
 /// A raw pointer used as an FFI handle slot. Null = "gravestone / not present",
@@ -330,6 +334,7 @@ define_opaque!(
 );
 // The liveliness token family — 16 bytes at align 8 (`zenoh_opaque.h:345-347`),
 // and `z_liveliness.c` stack-allocates the owned one.
+#[cfg(feature = "liveliness")]
 define_opaque!(
     z_owned_liveliness_token_t,
     z_loaned_liveliness_token_t,
@@ -370,6 +375,7 @@ define_opaque!(
 // so the size is a size the C side genuinely depends on.
 define_opaque_owned!(z_owned_sample_t, z_moved_sample_t, SAMPLE_SIZE);
 // The queryable family; `z_queryable.c` stack-allocates the owned one.
+#[cfg(feature = "queryable")]
 define_opaque!(
     z_owned_queryable_t,
     z_loaned_queryable_t,
@@ -377,12 +383,15 @@ define_opaque!(
     56
 );
 // The querier family; `z_querier.c` stack-allocates the owned one.
+#[cfg(feature = "query")]
 define_opaque!(z_owned_querier_t, z_loaned_querier_t, z_moved_querier_t, 88);
 // The owned query; `z_queryable_with_channels.c` stack-allocates it to receive
 // an ESCAPED query off its fifo.
+#[cfg(feature = "queryable")]
 define_opaque_owned!(z_owned_query_t, z_moved_query_t, QUERY_SIZE);
 // The owned reply — the sample's moving partner; see `REPLY_SIZE`. Every
 // channel-based get stack-allocates it.
+#[cfg(feature = "query")]
 define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, REPLY_SIZE);
 // The reply ERROR — see `REPLY_ERR_SIZE` for why its size is a derivation from
 // upstream's field composition rather than a literal per arm.
@@ -398,6 +407,7 @@ define_opaque_owned!(z_owned_reply_t, z_moved_reply_t, REPLY_SIZE);
 // `z_loaned_reply_err_t` of the same footprint too, but every producer of one in
 // this crate aims it at a `ReplyMarshal`, so the loaned form stays the
 // zero-sized TAG defined below.
+#[cfg(feature = "query")]
 define_opaque_owned!(z_owned_reply_err_t, z_moved_reply_err_t, REPLY_ERR_SIZE);
 // The TASK — the one type whose size the TOOLCHAIN moves rather than a feature.
 // It is `Option<JoinHandle<()>>`, so its footprint is std's: 32 bytes under the
@@ -410,6 +420,7 @@ define_opaque_owned!(z_owned_task_t, z_moved_task_t, 24);
 // The hello family — 48 bytes; `z_scout.c` never stack-allocates one (the
 // callback receives a pointer), but the owned form is what a hello channel
 // would hand back and the size is measured either way.
+#[cfg(feature = "scout")]
 define_opaque!(z_owned_hello_t, z_loaned_hello_t, z_moved_hello_t, 48);
 // The string-array family — 24 bytes; `z_scout.c` stack-allocates the owned one
 // for `z_hello_locators`.
@@ -437,12 +448,14 @@ define_opaque!(
     SERIALIZER_SIZE
 );
 // The three CHANNEL handlers — 8 bytes each, a bare handle with no padding.
+#[cfg(feature = "query")]
 define_opaque!(
     z_owned_fifo_handler_reply_t,
     z_loaned_fifo_handler_reply_t,
     z_moved_fifo_handler_reply_t,
     8
 );
+#[cfg(feature = "queryable")]
 define_opaque!(
     z_owned_fifo_handler_query_t,
     z_loaned_fifo_handler_query_t,
@@ -465,12 +478,14 @@ define_opaque!(
     z_moved_fifo_handler_sample_t,
     8
 );
+#[cfg(feature = "queryable")]
 define_opaque!(
     z_owned_ring_handler_query_t,
     z_loaned_ring_handler_query_t,
     z_moved_ring_handler_query_t,
     8
 );
+#[cfg(feature = "query")]
 define_opaque!(
     z_owned_ring_handler_reply_t,
     z_loaned_ring_handler_reply_t,
@@ -578,6 +593,7 @@ const _: () = {
 /// [`QueryMarshal`](crate::query::QueryMarshal). The 136-byte `z_owned_query_t`
 /// above is the type that IS stack-allocated, and it carries a handle to the
 /// same marshal.
+#[cfg(feature = "queryable")]
 #[repr(C)]
 pub struct z_loaned_query_t {
     _opaque: [u8; 0],
@@ -585,23 +601,27 @@ pub struct z_loaned_query_t {
 
 /// The borrowed reply a get callback receives — the same tag shape, for the
 /// same reason.
+#[cfg(feature = "query")]
 #[repr(C)]
 pub struct z_loaned_reply_t {
     _opaque: [u8; 0],
 }
 
 /// The borrowed reply ERROR `z_reply_err` hands back.
+#[cfg(feature = "query")]
 #[repr(C)]
 pub struct z_loaned_reply_err_t {
     _opaque: [u8; 0],
 }
 
 /// The C callback a QUERY closure carries (`zenoh_commons.h:551`).
+#[cfg(feature = "queryable")]
 pub type z_closure_query_callback_t =
     Option<unsafe extern "C" fn(query: *mut z_loaned_query_t, context: *mut c_void)>;
 
 /// Owned query closure (zenoh-c `z_owned_closure_query_t`) — TRANSPARENT
 /// upstream, so it matches field for field.
+#[cfg(feature = "queryable")]
 #[repr(C)]
 pub struct z_owned_closure_query_t {
     pub(crate) context: *mut c_void,
@@ -610,11 +630,13 @@ pub struct z_owned_closure_query_t {
 }
 
 /// Moved query closure (zenoh-c `z_moved_closure_query_t`).
+#[cfg(feature = "queryable")]
 #[repr(C)]
 pub struct z_moved_closure_query_t {
     pub(crate) _this: z_owned_closure_query_t,
 }
 
+#[cfg(feature = "queryable")]
 impl z_owned_closure_query_t {
     /// Build one from its parts, with the channel drop already wired.
     ///
@@ -642,10 +664,12 @@ impl z_owned_closure_query_t {
 }
 
 /// The C callback a REPLY closure carries (`zenoh_commons.h:567`).
+#[cfg(feature = "query")]
 pub type z_closure_reply_callback_t =
     Option<unsafe extern "C" fn(reply: *mut z_loaned_reply_t, context: *mut c_void)>;
 
 /// Owned reply closure (zenoh-c `z_owned_closure_reply_t`), transparent.
+#[cfg(feature = "query")]
 #[repr(C)]
 pub struct z_owned_closure_reply_t {
     pub(crate) context: *mut c_void,
@@ -654,11 +678,13 @@ pub struct z_owned_closure_reply_t {
 }
 
 /// Moved reply closure (zenoh-c `z_moved_closure_reply_t`).
+#[cfg(feature = "query")]
 #[repr(C)]
 pub struct z_moved_closure_reply_t {
     pub(crate) _this: z_owned_closure_reply_t,
 }
 
+#[cfg(feature = "query")]
 impl z_owned_closure_reply_t {
     /// Build one from its parts, with the channel drop already wired.
     ///
@@ -686,10 +712,12 @@ impl z_owned_closure_reply_t {
 }
 
 /// The C callback a HELLO closure carries (`zenoh_commons.h:499`).
+#[cfg(feature = "scout")]
 pub type z_closure_hello_callback_t =
     Option<unsafe extern "C" fn(hello: *mut z_loaned_hello_t, context: *mut c_void)>;
 
 /// Owned hello closure (zenoh-c `z_owned_closure_hello_t`), transparent.
+#[cfg(feature = "scout")]
 #[repr(C)]
 pub struct z_owned_closure_hello_t {
     pub(crate) context: *mut c_void,
@@ -698,11 +726,13 @@ pub struct z_owned_closure_hello_t {
 }
 
 /// Moved hello closure (zenoh-c `z_moved_closure_hello_t`).
+#[cfg(feature = "scout")]
 #[repr(C)]
 pub struct z_moved_closure_hello_t {
     pub(crate) _this: z_owned_closure_hello_t,
 }
 
+#[cfg(feature = "scout")]
 impl z_owned_closure_hello_t {
     /// The gravestone: no context, no callbacks.
     #[inline]
@@ -715,12 +745,15 @@ impl z_owned_closure_hello_t {
     }
 }
 
+#[cfg(feature = "queryable")]
 const _: () = {
     assert!(std::mem::size_of::<z_owned_closure_query_t>() == 24);
-    assert!(std::mem::size_of::<z_owned_closure_reply_t>() == 24);
-    assert!(std::mem::size_of::<z_owned_closure_hello_t>() == 24);
     assert!(std::mem::align_of::<z_owned_closure_query_t>() == 8);
 };
+#[cfg(feature = "query")]
+const _: () = assert!(std::mem::size_of::<z_owned_closure_reply_t>() == 24);
+#[cfg(feature = "scout")]
+const _: () = assert!(std::mem::size_of::<z_owned_closure_hello_t>() == 24);
 
 /// The borrowed sample a subscriber callback receives.
 ///
@@ -862,6 +895,7 @@ impl z_owned_closure_sample_t {
 // upstream's header declares them as distinct types and a C program stores the
 // pointer in a variable of that exact type.
 /// Loaned query closure — the same footprint as the owned one.
+#[cfg(feature = "queryable")]
 #[repr(C)]
 pub struct z_loaned_closure_query_t {
     pub(crate) context: *mut c_void,
@@ -870,6 +904,7 @@ pub struct z_loaned_closure_query_t {
 }
 
 /// Loaned reply closure.
+#[cfg(feature = "query")]
 #[repr(C)]
 pub struct z_loaned_closure_reply_t {
     pub(crate) context: *mut c_void,
@@ -878,6 +913,7 @@ pub struct z_loaned_closure_reply_t {
 }
 
 /// Loaned hello closure.
+#[cfg(feature = "scout")]
 #[repr(C)]
 pub struct z_loaned_closure_hello_t {
     pub(crate) context: *mut c_void,
@@ -893,12 +929,13 @@ pub struct z_loaned_closure_sample_t {
     pub(crate) drop: z_closure_drop_callback_t,
 }
 
-const _: () = {
-    assert!(std::mem::size_of::<z_loaned_closure_query_t>() == 24);
-    assert!(std::mem::size_of::<z_loaned_closure_reply_t>() == 24);
-    assert!(std::mem::size_of::<z_loaned_closure_hello_t>() == 24);
-    assert!(std::mem::size_of::<z_loaned_closure_sample_t>() == 24);
-};
+#[cfg(feature = "queryable")]
+const _: () = assert!(std::mem::size_of::<z_loaned_closure_query_t>() == 24);
+#[cfg(feature = "query")]
+const _: () = assert!(std::mem::size_of::<z_loaned_closure_reply_t>() == 24);
+#[cfg(feature = "scout")]
+const _: () = assert!(std::mem::size_of::<z_loaned_closure_hello_t>() == 24);
+const _: () = assert!(std::mem::size_of::<z_loaned_closure_sample_t>() == 24);
 
 const _: () = {
     assert!(std::mem::size_of::<z_owned_closure_sample_t>() == 24);
@@ -1103,7 +1140,6 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     "z_owned_subscriber_t",
     "z_owned_string_t",
     "z_owned_closure_sample_t",
-    "z_owned_liveliness_token_t",
     "z_owned_publisher_t",
     "z_publisher_options_t",
     "z_publisher_put_options_t",
@@ -1113,20 +1149,12 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     "z_id_t",
     "z_id_t/align",
     "z_clock_t",
-    "z_liveliness_subscriber_options_t",
     "z_matching_status_t",
     // R311y539 — the query / reply / channel / sync / serialization planes.
     "z_owned_sample_t",
-    "z_owned_queryable_t",
-    "z_owned_querier_t",
-    "z_owned_query_t",
-    "z_owned_reply_t",
-    "z_owned_hello_t",
     "z_owned_string_array_t",
     "z_owned_bytes_writer_t",
     "ze_owned_serializer_t",
-    "z_owned_fifo_handler_reply_t",
-    "z_owned_fifo_handler_query_t",
     "z_owned_ring_handler_sample_t",
     "z_owned_mutex_t",
     "z_owned_condvar_t",
@@ -1134,19 +1162,9 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     "z_loaned_condvar_t",
     "z_loaned_condvar_t/align",
     "z_owned_slice_t",
-    "z_owned_closure_query_t",
-    "z_owned_closure_reply_t",
-    "z_owned_closure_hello_t",
     "z_bytes_reader_t",
     "z_bytes_slice_iterator_t",
     "ze_deserializer_t",
-    "z_get_options_t",
-    "z_queryable_options_t",
-    "z_query_reply_options_t",
-    "z_liveliness_get_options_t",
-    "z_querier_options_t",
-    "z_querier_get_options_t",
-    "z_scout_options_t",
     // R311y543 — the base subscriber options. NOT unstable-gated in upstream's
     // header (present on both installed oracles), and it is the struct
     // `ze_advanced_subscriber_options_t` embeds at offset 0.
@@ -1168,27 +1186,16 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_BASE: &[&str] = &[
     // `z_declare_keyexpr` have a result type. Same footprint as the view, and
     // the gate measures it rather than inheriting that claim.
     "z_owned_keyexpr_t",
-    // R311y565 — the DEL reply options, newly declared. Transparent and
-    // stack-allocated by the C side like its Put sibling, so it belongs here for
-    // the same reason `z_query_reply_options_t` does.
-    "z_query_reply_del_options_t",
     // R311y565 — the other three of upstream's six channel handlers. Stack-
     // allocated by every program that uses a channel, so their size is ABI.
     "z_owned_fifo_handler_sample_t",
-    "z_owned_ring_handler_query_t",
-    "z_owned_ring_handler_reply_t",
     // R311y568 — the seven types the DROP-IN CENSUS forced into existence. Each
     // is stack-allocated by a C program (or, for the two option structs and the
     // consolidation, written through by an `_options_default` / returned BY
     // VALUE), so every one of these sizes is ABI the C side depends on.
-    "z_owned_reply_err_t",
     "z_owned_task_t",
     "z_task_attr_t",
-    "z_query_reply_err_options_t",
     "z_publisher_delete_options_t",
-    // Returned by value into a C stack slot by the five `z_query_consolidation_*`
-    // constructors, so its size is what the caller's frame reserves.
-    "z_query_consolidation_t",
     // The log closure family — TRANSPARENT upstream, so the gate measures the
     // footprint the `zc_closure` macro writes through.
     "zc_owned_closure_log_t",
@@ -1207,6 +1214,81 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE: &[&str] = &[
     // The ALIGNMENT is the tell for this one — 4, not 8 — so it is pinned
     // beside the size rather than left to be implied by it.
     "z_entity_global_id_t/align",
+];
+
+/// The capability halves of the table: the types a capability's module declares, present when
+/// the capability is built. A build without it exports none of that module's doors, so the
+/// layout table it reads back names none of its types either.
+#[cfg(feature = "scout")]
+pub const WZ_CAPI_C_LAYOUT_NAMES_SCOUT: &[&str] = &[
+    "z_scout_options_t",
+    "z_owned_hello_t",
+    "z_owned_closure_hello_t",
+];
+/// Empty without the `scout` feature.
+#[cfg(not(feature = "scout"))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_SCOUT: &[&str] = &[];
+
+/// The liveliness subscriber's options.
+#[cfg(feature = "liveliness")]
+pub const WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS: &[&str] = &[
+    "z_liveliness_subscriber_options_t",
+    "z_owned_liveliness_token_t",
+];
+/// Empty without the `liveliness` feature.
+#[cfg(not(feature = "liveliness"))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS: &[&str] = &[];
+
+/// The snapshot get of the liveliness plane.
+#[cfg(feature = "liveliness-get")]
+pub const WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS_GET: &[&str] = &["z_liveliness_get_options_t"];
+/// Empty without the `liveliness-get` feature.
+#[cfg(not(feature = "liveliness-get"))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS_GET: &[&str] = &[];
+
+/// The requesting end of a query: `z_get`, the querier, and the consolidation `z_get` takes —
+/// returned by value into a C stack slot by the five `z_query_consolidation_*` constructors, so
+/// its size is what the caller's frame reserves.
+#[cfg(feature = "query")]
+pub const WZ_CAPI_C_LAYOUT_NAMES_QUERY: &[&str] = &[
+    "z_get_options_t",
+    "z_querier_options_t",
+    "z_querier_get_options_t",
+    "z_query_consolidation_t",
+    "z_owned_querier_t",
+    "z_owned_reply_t",
+    "z_owned_reply_err_t",
+    "z_owned_fifo_handler_reply_t",
+    "z_owned_ring_handler_reply_t",
+    "z_owned_closure_reply_t",
+];
+/// Empty without the `query` feature.
+#[cfg(not(feature = "query"))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_QUERY: &[&str] = &[];
+
+/// The answering end of a query: the queryable and its replies. R311y565 — the DEL reply
+/// options are transparent and stack-allocated by the C side like their Put sibling, so they
+/// belong here for the same reason `z_query_reply_options_t` does.
+#[cfg(feature = "queryable")]
+pub const WZ_CAPI_C_LAYOUT_NAMES_QUERYABLE: &[&str] = &[
+    "z_queryable_options_t",
+    "z_query_reply_options_t",
+    "z_query_reply_del_options_t",
+    "z_query_reply_err_options_t",
+    "z_owned_queryable_t",
+    "z_owned_query_t",
+    "z_owned_fifo_handler_query_t",
+    "z_owned_ring_handler_query_t",
+    "z_owned_closure_query_t",
+];
+/// Empty without the `queryable` feature.
+#[cfg(not(feature = "queryable"))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_QUERYABLE: &[&str] = &[];
+
+/// The `ze_advanced_*` plane [`crate::advanced`] declares: unstable upstream, and present when
+/// the `advanced` feature is built.
+#[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_ADVANCED: &[&str] = &[
     "ze_miss_t",
     "ze_owned_closure_miss_t",
     "ze_owned_advanced_publisher_t",
@@ -1221,6 +1303,9 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE: &[&str] = &[
     "ze_advanced_subscriber_recovery_options_t",
     "ze_advanced_subscriber_options_t",
 ];
+/// Empty without the `advanced` feature and on the no-unstable arm.
+#[cfg(not(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api"))))]
+pub const WZ_CAPI_C_LAYOUT_NAMES_ADVANCED: &[&str] = &[];
 
 /// The no-unstable arm's unstable half: empty, because upstream's header
 /// declares none of those types there.
@@ -1267,11 +1352,18 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_SHM: &[&str] = &[
 )))]
 pub const WZ_CAPI_C_LAYOUT_NAMES_SHM: &[&str] = &[];
 
-/// The full name table for THIS build: base half, then unstable, then SHM.
+/// The full name table for THIS build: base half, then unstable, then the capabilities built
+/// (scout, liveliness, query, queryable, advanced), then SHM.
 pub fn layout_names() -> Vec<&'static str> {
     WZ_CAPI_C_LAYOUT_NAMES_BASE
         .iter()
         .chain(WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE.iter())
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_SCOUT.iter())
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS.iter())
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS_GET.iter())
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_QUERY.iter())
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_QUERYABLE.iter())
+        .chain(WZ_CAPI_C_LAYOUT_NAMES_ADVANCED.iter())
         .chain(WZ_CAPI_C_LAYOUT_NAMES_SHM.iter())
         .copied()
         .collect()
@@ -1290,7 +1382,6 @@ fn layout_values() -> Vec<usize> {
         size_of::<z_owned_subscriber_t>(),
         size_of::<z_owned_string_t>(),
         size_of::<z_owned_closure_sample_t>(),
-        size_of::<z_owned_liveliness_token_t>(),
         size_of::<z_owned_publisher_t>(),
         size_of::<crate::publisher::z_publisher_options_t>(),
         size_of::<crate::publisher::z_publisher_put_options_t>(),
@@ -1300,19 +1391,11 @@ fn layout_values() -> Vec<usize> {
         size_of::<crate::zid::z_id_t>(),
         align_of::<crate::zid::z_id_t>(),
         size_of::<crate::platform::z_clock_t>(),
-        size_of::<crate::liveliness::z_liveliness_subscriber_options_t>(),
         size_of::<crate::matching::z_matching_status_t>(),
         size_of::<z_owned_sample_t>(),
-        size_of::<z_owned_queryable_t>(),
-        size_of::<z_owned_querier_t>(),
-        size_of::<z_owned_query_t>(),
-        size_of::<z_owned_reply_t>(),
-        size_of::<z_owned_hello_t>(),
         size_of::<z_owned_string_array_t>(),
         size_of::<z_owned_bytes_writer_t>(),
         size_of::<ze_owned_serializer_t>(),
-        size_of::<z_owned_fifo_handler_reply_t>(),
-        size_of::<z_owned_fifo_handler_query_t>(),
         size_of::<z_owned_ring_handler_sample_t>(),
         size_of::<z_owned_mutex_t>(),
         size_of::<z_owned_condvar_t>(),
@@ -1320,42 +1403,67 @@ fn layout_values() -> Vec<usize> {
         size_of::<z_loaned_condvar_t>(),
         align_of::<z_loaned_condvar_t>(),
         size_of::<z_owned_slice_t>(),
-        size_of::<z_owned_closure_query_t>(),
-        size_of::<z_owned_closure_reply_t>(),
-        size_of::<z_owned_closure_hello_t>(),
         size_of::<crate::bytes::z_bytes_reader_t>(),
         size_of::<crate::bytes::z_bytes_slice_iterator_t>(),
         size_of::<crate::serde::ze_deserializer_t>(),
-        size_of::<crate::get::z_get_options_t>(),
-        size_of::<crate::query::z_queryable_options_t>(),
-        size_of::<crate::query::z_query_reply_options_t>(),
-        size_of::<crate::liveliness::z_liveliness_get_options_t>(),
-        size_of::<crate::querier::z_querier_options_t>(),
-        size_of::<crate::querier::z_querier_get_options_t>(),
-        size_of::<crate::scout::z_scout_options_t>(),
         size_of::<crate::sub::z_subscriber_options_t>(),
         size_of::<crate::put::z_put_options_t>(),
         size_of::<crate::put::z_delete_options_t>(),
         size_of::<crate::timestamp::z_timestamp_t>(),
         align_of::<crate::timestamp::z_timestamp_t>(),
         size_of::<z_owned_keyexpr_t>(),
-        size_of::<crate::query::z_query_reply_del_options_t>(),
         size_of::<z_owned_fifo_handler_sample_t>(),
-        size_of::<z_owned_ring_handler_query_t>(),
-        size_of::<z_owned_ring_handler_reply_t>(),
-        size_of::<z_owned_reply_err_t>(),
         size_of::<z_owned_task_t>(),
         size_of::<crate::task::z_task_attr_t>(),
-        size_of::<crate::query::z_query_reply_err_options_t>(),
         size_of::<crate::publisher::z_publisher_delete_options_t>(),
-        size_of::<crate::get::z_query_consolidation_t>(),
         size_of::<crate::log::zc_owned_closure_log_t>(),
         size_of::<crate::matching::z_loaned_closure_matching_status_t>(),
     ];
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     values.extend_from_slice(&[
-        size_of::<crate::advanced::z_entity_global_id_t>(),
-        align_of::<crate::advanced::z_entity_global_id_t>(),
+        size_of::<crate::entity::z_entity_global_id_t>(),
+        align_of::<crate::entity::z_entity_global_id_t>(),
+    ]);
+    #[cfg(feature = "scout")]
+    values.extend_from_slice(&[
+        size_of::<crate::scout::z_scout_options_t>(),
+        size_of::<z_owned_hello_t>(),
+        size_of::<z_owned_closure_hello_t>(),
+    ]);
+    #[cfg(feature = "liveliness")]
+    values.extend_from_slice(&[
+        size_of::<crate::liveliness::z_liveliness_subscriber_options_t>(),
+        size_of::<z_owned_liveliness_token_t>(),
+    ]);
+    #[cfg(feature = "liveliness-get")]
+    values.push(size_of::<crate::liveliness::z_liveliness_get_options_t>());
+    #[cfg(feature = "query")]
+    values.extend_from_slice(&[
+        size_of::<crate::get::z_get_options_t>(),
+        size_of::<crate::querier::z_querier_options_t>(),
+        size_of::<crate::querier::z_querier_get_options_t>(),
+        size_of::<crate::get::z_query_consolidation_t>(),
+        size_of::<z_owned_querier_t>(),
+        size_of::<z_owned_reply_t>(),
+        size_of::<z_owned_reply_err_t>(),
+        size_of::<z_owned_fifo_handler_reply_t>(),
+        size_of::<z_owned_ring_handler_reply_t>(),
+        size_of::<z_owned_closure_reply_t>(),
+    ]);
+    #[cfg(feature = "queryable")]
+    values.extend_from_slice(&[
+        size_of::<crate::query::z_queryable_options_t>(),
+        size_of::<crate::query::z_query_reply_options_t>(),
+        size_of::<crate::query::z_query_reply_del_options_t>(),
+        size_of::<crate::query::z_query_reply_err_options_t>(),
+        size_of::<z_owned_queryable_t>(),
+        size_of::<z_owned_query_t>(),
+        size_of::<z_owned_fifo_handler_query_t>(),
+        size_of::<z_owned_ring_handler_query_t>(),
+        size_of::<z_owned_closure_query_t>(),
+    ]);
+    #[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
+    values.extend_from_slice(&[
         size_of::<crate::advanced::ze_miss_t>(),
         size_of::<crate::advanced::ze_owned_closure_miss_t>(),
         size_of::<crate::advanced::ze_owned_advanced_publisher_t>(),

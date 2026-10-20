@@ -104,7 +104,7 @@ transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
 # (`NodeAuth`). Off by default for the reason the TLS feature is: the pico ABI has no such
 # key and carries none of the credential machinery. The zenoh-c ABI turns it on.
 access-extauth-usrpwd = [
-    "peer",
+    "wz-runtime-tokio/routing-accept",
     "wz-runtime-tokio/access-extauth-usrpwd",
     "dep:wz-session-core",
     "wz-session-core/access-extauth-usrpwd",

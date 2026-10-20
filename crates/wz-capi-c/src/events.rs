@@ -742,7 +742,7 @@ pub unsafe extern "C" fn z_link_interfaces(
             .map(|s| s.interfaces.clone())
             .unwrap_or_default();
         // SAFETY: the caller's contract.
-        unsafe { *interfaces_out = crate::scout::owned_string_array_from(&names) };
+        unsafe { *interfaces_out = crate::string_array::owned_string_array_from(&names) };
     });
 }
 

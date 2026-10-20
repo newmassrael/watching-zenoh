@@ -37,13 +37,19 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex};
 
+#[cfg(feature = "queryable")]
 use crate::abi::{
-    z_loaned_fifo_handler_query_t, z_loaned_fifo_handler_reply_t, z_loaned_query_t,
-    z_loaned_reply_t, z_loaned_ring_handler_sample_t, z_loaned_sample_t,
-    z_moved_fifo_handler_query_t, z_moved_fifo_handler_reply_t, z_moved_ring_handler_sample_t,
-    z_owned_closure_query_t, z_owned_closure_reply_t, z_owned_closure_sample_t,
-    z_owned_fifo_handler_query_t, z_owned_fifo_handler_reply_t, z_owned_query_t, z_owned_reply_t,
-    z_owned_ring_handler_sample_t, z_owned_sample_t, Handle,
+    z_loaned_fifo_handler_query_t, z_loaned_query_t, z_moved_fifo_handler_query_t,
+    z_owned_closure_query_t, z_owned_fifo_handler_query_t, z_owned_query_t,
+};
+#[cfg(feature = "query")]
+use crate::abi::{
+    z_loaned_fifo_handler_reply_t, z_loaned_reply_t, z_moved_fifo_handler_reply_t,
+    z_owned_closure_reply_t, z_owned_fifo_handler_reply_t, z_owned_reply_t,
+};
+use crate::abi::{
+    z_loaned_ring_handler_sample_t, z_loaned_sample_t, z_moved_ring_handler_sample_t,
+    z_owned_closure_sample_t, z_owned_ring_handler_sample_t, z_owned_sample_t, Handle,
 };
 use crate::ffi::{guard_val, guarded, SendPtr};
 use crate::result::{ZResult, Z_CHANNEL_DISCONNECTED, Z_CHANNEL_NODATA, Z_ENULL, Z_OK};
@@ -199,6 +205,7 @@ unsafe fn free_sample(h: Handle) {
 ///
 /// # Safety
 /// `h` must be a live escaped query handle.
+#[cfg(feature = "queryable")]
 unsafe fn free_query(h: Handle) {
     // SAFETY: the caller's contract.
     drop(unsafe { Box::from_raw(h as *mut crate::query::QueryMarshal) });
@@ -208,6 +215,7 @@ unsafe fn free_query(h: Handle) {
 ///
 /// # Safety
 /// `h` must be a live escaped reply handle.
+#[cfg(feature = "query")]
 unsafe fn free_reply(h: Handle) {
     // SAFETY: the caller's contract.
     drop(unsafe { Box::from_raw(h as *mut crate::get::ReplyMarshal) });
@@ -434,6 +442,7 @@ pub unsafe extern "C" fn z_ring_handler_sample_drop(this_: *mut z_moved_ring_han
 /// # Safety
 /// `reply` is a borrowed reply valid for this call; `context` is a live
 /// [`Producer`].
+#[cfg(feature = "query")]
 unsafe extern "C" fn fifo_reply_call(reply: *mut z_loaned_reply_t, context: *mut c_void) {
     // SAFETY: the caller's contract.
     let Some(producer) = (unsafe { producer(context) }) else {
@@ -451,6 +460,7 @@ unsafe extern "C" fn fifo_reply_call(reply: *mut z_loaned_reply_t, context: *mut
 /// # Safety
 /// `callback` and `handler` must be valid and writable.
 #[no_mangle]
+#[cfg(feature = "query")]
 pub unsafe extern "C" fn z_fifo_channel_reply_new(
     callback: *mut z_owned_closure_reply_t,
     handler: *mut z_owned_fifo_handler_reply_t,
@@ -478,6 +488,7 @@ pub unsafe extern "C" fn z_fifo_channel_reply_new(
 /// # Safety
 /// `this_` must be null or a valid owned handler.
 #[no_mangle]
+#[cfg(feature = "query")]
 pub unsafe extern "C" fn z_fifo_handler_reply_loan(
     this_: *const z_owned_fifo_handler_reply_t,
 ) -> *const z_loaned_fifo_handler_reply_t {
@@ -491,6 +502,7 @@ pub unsafe extern "C" fn z_fifo_handler_reply_loan(
 /// `this_` must be null or a valid loaned handler; `reply` must be null or valid
 /// and writable.
 #[no_mangle]
+#[cfg(feature = "query")]
 pub unsafe extern "C" fn z_fifo_handler_reply_recv(
     this_: *const z_loaned_fifo_handler_reply_t,
     reply: *mut z_owned_reply_t,
@@ -530,6 +542,7 @@ pub unsafe extern "C" fn z_fifo_handler_reply_recv(
 /// `this_` must be null or a valid loaned handler; `reply` must be null or valid
 /// and writable.
 #[no_mangle]
+#[cfg(feature = "query")]
 pub unsafe extern "C" fn z_fifo_handler_reply_try_recv(
     this_: *const z_loaned_fifo_handler_reply_t,
     reply: *mut z_owned_reply_t,
@@ -565,6 +578,7 @@ pub unsafe extern "C" fn z_fifo_handler_reply_try_recv(
 /// # Safety
 /// `this_` must be null or a valid moved handler.
 #[no_mangle]
+#[cfg(feature = "query")]
 pub unsafe extern "C" fn z_fifo_handler_reply_drop(this_: *mut z_moved_fifo_handler_reply_t) {
     let _ = guarded(|| {
         if this_.is_null() {
@@ -589,6 +603,7 @@ pub unsafe extern "C" fn z_fifo_handler_reply_drop(this_: *mut z_moved_fifo_hand
 /// # Safety
 /// `query` is a borrowed query valid for this call; `context` is a live
 /// [`Producer`].
+#[cfg(feature = "queryable")]
 unsafe extern "C" fn fifo_query_call(query: *mut z_loaned_query_t, context: *mut c_void) {
     // SAFETY: the caller's contract.
     let Some(producer) = (unsafe { producer(context) }) else {
@@ -608,6 +623,7 @@ unsafe extern "C" fn fifo_query_call(query: *mut z_loaned_query_t, context: *mut
 /// # Safety
 /// `callback` and `handler` must be valid and writable.
 #[no_mangle]
+#[cfg(feature = "queryable")]
 pub unsafe extern "C" fn z_fifo_channel_query_new(
     callback: *mut z_owned_closure_query_t,
     handler: *mut z_owned_fifo_handler_query_t,
@@ -635,6 +651,7 @@ pub unsafe extern "C" fn z_fifo_channel_query_new(
 /// # Safety
 /// `this_` must be null or a valid owned handler.
 #[no_mangle]
+#[cfg(feature = "queryable")]
 pub unsafe extern "C" fn z_fifo_handler_query_loan(
     this_: *const z_owned_fifo_handler_query_t,
 ) -> *const z_loaned_fifo_handler_query_t {
@@ -648,6 +665,7 @@ pub unsafe extern "C" fn z_fifo_handler_query_loan(
 /// `this_` must be null or a valid loaned handler; `query` must be null or valid
 /// and writable.
 #[no_mangle]
+#[cfg(feature = "queryable")]
 pub unsafe extern "C" fn z_fifo_handler_query_recv(
     this_: *const z_loaned_fifo_handler_query_t,
     query: *mut z_owned_query_t,
@@ -685,6 +703,7 @@ pub unsafe extern "C" fn z_fifo_handler_query_recv(
 /// `this_` must be null or a valid loaned handler; `query` must be null or valid
 /// and writable.
 #[no_mangle]
+#[cfg(feature = "queryable")]
 pub unsafe extern "C" fn z_fifo_handler_query_try_recv(
     this_: *const z_loaned_fifo_handler_query_t,
     query: *mut z_owned_query_t,
@@ -720,6 +739,7 @@ pub unsafe extern "C" fn z_fifo_handler_query_try_recv(
 /// # Safety
 /// `this_` must be null or a valid moved handler.
 #[no_mangle]
+#[cfg(feature = "queryable")]
 pub unsafe extern "C" fn z_fifo_handler_query_drop(this_: *mut z_moved_fifo_handler_query_t) {
     let _ = guarded(|| {
         if this_.is_null() {
@@ -1012,6 +1032,7 @@ closure_ops!(
     z_internal_closure_sample_check,
     z_internal_closure_sample_null
 );
+#[cfg(feature = "queryable")]
 closure_ops!(
     z_owned_closure_query_t,
     crate::abi::z_loaned_closure_query_t,
@@ -1022,6 +1043,7 @@ closure_ops!(
     z_internal_closure_query_check,
     z_internal_closure_query_null
 );
+#[cfg(feature = "query")]
 closure_ops!(
     z_owned_closure_reply_t,
     crate::abi::z_loaned_closure_reply_t,
@@ -1032,6 +1054,7 @@ closure_ops!(
     z_internal_closure_reply_check,
     z_internal_closure_reply_null
 );
+#[cfg(feature = "scout")]
 closure_ops!(
     crate::abi::z_owned_closure_hello_t,
     crate::abi::z_loaned_closure_hello_t,
@@ -1230,11 +1253,13 @@ handler_internals!(
     z_internal_ring_handler_sample_check,
     z_internal_ring_handler_sample_null
 );
+#[cfg(feature = "query")]
 handler_internals!(
     crate::abi::z_owned_fifo_handler_reply_t,
     z_internal_fifo_handler_reply_check,
     z_internal_fifo_handler_reply_null
 );
+#[cfg(feature = "queryable")]
 handler_internals!(
     crate::abi::z_owned_fifo_handler_query_t,
     z_internal_fifo_handler_query_check,
@@ -1260,6 +1285,7 @@ channel_family!(
     z_internal_fifo_handler_sample_check,
     z_internal_fifo_handler_sample_null
 );
+#[cfg(feature = "queryable")]
 channel_family!(
     z_ring_channel_query_new,
     z_owned_closure_query_t,
@@ -1277,6 +1303,7 @@ channel_family!(
     z_internal_ring_handler_query_check,
     z_internal_ring_handler_query_null
 );
+#[cfg(feature = "query")]
 channel_family!(
     z_ring_channel_reply_new,
     z_owned_closure_reply_t,
@@ -1310,6 +1337,7 @@ unsafe extern "C" fn fifo_sample_call(sample: *const z_loaned_sample_t, context:
 ///
 /// # Safety
 /// `context` must be a live producer this module made.
+#[cfg(feature = "queryable")]
 unsafe extern "C" fn ring_query_call(query: *mut z_loaned_query_t, context: *mut c_void) {
     // SAFETY: the caller's contract, delegated.
     unsafe { fifo_query_call(query, context) };
@@ -1319,6 +1347,7 @@ unsafe extern "C" fn ring_query_call(query: *mut z_loaned_query_t, context: *mut
 ///
 /// # Safety
 /// `context` must be a live producer this module made.
+#[cfg(feature = "query")]
 unsafe extern "C" fn ring_reply_call(reply: *mut z_loaned_reply_t, context: *mut c_void) {
     // SAFETY: the caller's contract, delegated.
     unsafe { fifo_reply_call(reply, context) };

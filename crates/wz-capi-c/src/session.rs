@@ -15,10 +15,11 @@ use wz_capi_core::drive::{
     OpenStance, SessionState, DEFAULT_BATCH_SIZE,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
+use wz_capi_core::gossip::GossipPolicy;
 use wz_capi_core::node_auth::NodeAuth;
 use wz_capi_core::node_policy::NodePolicy;
+#[cfg(feature = "scout")]
 use wz_capi_core::scouting_node::ScoutingPlan;
-use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
@@ -59,11 +60,17 @@ pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<
 /// It said CLIENT until R2948 while claiming to match zenoh, and a config that
 /// named no mode dialled with a client's one-attempt budget where zenoh-c's
 /// peer keeps trying behind the open.
+///
+/// A build without the `peer` feature has no peer role to default to, so a config that names no
+/// mode is the client's there; one that names `peer` or `router` is still read as such, and is
+/// refused by [`open_session`] as a role the build does not have.
 fn dial_whatami(cfg: &ConfigState) -> WhatAmI {
     match cfg.first(MODE_KEY) {
         Some("client") => WhatAmI::Client,
         Some("router") => WhatAmI::Router,
-        _ => WhatAmI::Peer,
+        Some("peer") => WhatAmI::Peer,
+        _ if cfg!(feature = "peer") => WhatAmI::Peer,
+        _ => WhatAmI::Client,
     }
 }
 
@@ -392,6 +399,7 @@ pub(crate) unsafe fn open_session(
         //
         // R3070 -- before this a config that left scouting on and stated no endpoint was refused,
         // which is every config a program writes without `-e`.
+        #[cfg(feature = "scout")]
         let scouting = match node
             .as_ref()
             .map(|node| ScoutingPlan::resolve(node, whatami))
@@ -400,6 +408,18 @@ pub(crate) unsafe fn open_session(
             Ok(plan) => plan.flatten(),
             Err(_) => return Z_EINVAL,
         };
+        // Whether the session looks for a node to connect to. A build without `scout` does not.
+        #[cfg(feature = "scout")]
+        let scouts = scouting.as_ref().is_some_and(ScoutingPlan::scouts);
+        #[cfg(not(feature = "scout"))]
+        let scouts = false;
+        // A build without the `peer` feature is the client's: it dials the endpoints it is told
+        // of (or finds its router, with `scout`), and a listener or a role other than the
+        // client's is refused here and not run as a client it was not asked to be.
+        #[cfg(not(feature = "peer"))]
+        if !listen.is_empty() || whatami != WhatAmI::Client {
+            return Z_EINVAL;
+        }
 
         // How the session gossips, from the four `scouting/gossip` keys a C session reads, or
         // nothing when its config turns gossip off. A client has no gossip to configure (it is
@@ -409,6 +429,7 @@ pub(crate) unsafe fn open_session(
         //
         // R3075 -- before this the session gossiped under the shipped policy whatever the
         // config said.
+        #[cfg(feature = "gossip")]
         let gossip = if whatami == WhatAmI::Client {
             None
         } else {
@@ -420,6 +441,9 @@ pub(crate) unsafe fn open_session(
                 Err(_) => return Z_ENETWORK,
             }
         };
+        // Without the `gossip` feature a session has no policy to hold.
+        #[cfg(not(feature = "gossip"))]
+        let gossip: Option<GossipPolicy> = None;
 
         // A config that states no endpoint to DIAL. Measured on the real library: a client with
         // nothing to dial and nothing to scout for fails its open whether or not it states a
@@ -430,10 +454,7 @@ pub(crate) unsafe fn open_session(
         //
         // R3067 -- a config stating both a listener and a dial is a peer that does both, and is
         // opened as one: the roles are a set (see `open_blocking`).
-        if connect.is_empty()
-            && whatami == WhatAmI::Client
-            && !scouting.as_ref().is_some_and(ScoutingPlan::scouts)
-        {
+        if connect.is_empty() && whatami == WhatAmI::Client && !scouts {
             return Z_ENETWORK;
         }
         // Checked after the refusals above so a config that states no endpoint
@@ -468,6 +489,7 @@ pub(crate) unsafe fn open_session(
             // peer; a C program written for zenoh-c already tolerates both, and one that puts and
             // then reads what its callback set relies on the first.
             local_delivery: LocalDeliveryDrain::Caller,
+            #[cfg(feature = "scout")]
             scouting,
             // R3073 -- zenoh-c's peer ends what it sends a new peer with the initial interest's
             // Final, and the open of a zenoh peer that dials this one waits for it.

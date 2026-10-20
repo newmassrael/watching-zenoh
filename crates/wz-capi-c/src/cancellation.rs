@@ -159,6 +159,7 @@ pub unsafe extern "C" fn z_cancellation_token_cancel(
 ///
 /// # Safety
 /// `moved` must be null or a valid moved token this crate produced.
+#[cfg(any(feature = "query", feature = "liveliness-get"))]
 pub(crate) unsafe fn take_moved_cancellation_token(
     moved: *mut z_moved_cancellation_token_t,
 ) -> Option<Arc<TokenState>> {

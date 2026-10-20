@@ -40,7 +40,7 @@
 
 use wz_runtime_tokio::sample::SourceInfo;
 
-use crate::advanced::z_entity_global_id_t;
+use crate::entity::z_entity_global_id_t;
 use crate::ffi::guard_val;
 use crate::zid::Z_ID_SIZE;
 

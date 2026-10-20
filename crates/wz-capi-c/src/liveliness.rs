@@ -376,6 +376,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
 // --- R311y539: the liveliness GET ------------------------------------------
 
 /// zenoh-c `z_liveliness_get_options_t`, mirrored field for field on both arms.
+#[cfg(feature = "liveliness-get")]
 #[repr(C)]
 pub struct z_liveliness_get_options_t {
     /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
@@ -391,7 +392,7 @@ pub struct z_liveliness_get_options_t {
 ///
 /// # Safety
 /// `options` must be null or a valid liveliness-get-options struct.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(feature = "liveliness-get", not(feature = "zenoh-c-no-unstable-api")))]
 unsafe fn liveliness_get_token(
     options: *mut z_liveliness_get_options_t,
 ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
@@ -406,13 +407,14 @@ unsafe fn liveliness_get_token(
 ///
 /// # Safety
 /// `options` is unused; the signature matches the sibling above.
-#[cfg(feature = "zenoh-c-no-unstable-api")]
+#[cfg(all(feature = "liveliness-get", feature = "zenoh-c-no-unstable-api"))]
 unsafe fn liveliness_get_token(
     _options: *mut z_liveliness_get_options_t,
 ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
     None
 }
 
+#[cfg(feature = "liveliness-get")]
 const _: () = {
     // Two arms, because the unstable field is what makes them differ. Written
     // as `8 + one pointer` rather than as the literal so the arithmetic says
@@ -432,6 +434,7 @@ const _: () = {
 ///
 /// # Safety
 /// `this_` must be null or valid and writable.
+#[cfg(feature = "liveliness-get")]
 #[no_mangle]
 pub unsafe extern "C" fn z_liveliness_get_options_default(this_: *mut z_liveliness_get_options_t) {
     if this_.is_null() {
@@ -474,6 +477,7 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(this_: *mut z_liveline
 /// `session` must be a valid loaned session; `key_expr` must be a valid loaned
 /// keyexpr; `callback` must be a valid moved reply closure; `options` must be
 /// null or valid.
+#[cfg(feature = "liveliness-get")]
 #[no_mangle]
 pub unsafe extern "C" fn z_liveliness_get(
     session: *const crate::abi::z_loaned_session_t,

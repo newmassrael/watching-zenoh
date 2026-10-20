@@ -480,6 +480,13 @@ pub(crate) enum Outbound {
 impl Outbound {
     /// The bytes this payload holds, whichever way it is held: what a path that cannot
     /// carry a descriptor sends, and what the descriptor stands in for on one that can.
+    #[cfg(any(
+        feature = "queryable",
+        all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        )
+    ))]
     pub(crate) fn bytes(&self) -> &[u8] {
         match self {
             Outbound::Bytes(bytes) => bytes,
@@ -526,16 +533,20 @@ pub(crate) unsafe fn take_outbound(moved: *mut z_moved_bytes_t) -> Option<Outbou
 /// memory. `None` whenever the value is bytes, and on a build without that axis there is
 /// no chunk to be, so the type is uninhabited and the arm that would use it cannot exist.
 #[cfg(all(
+    feature = "query",
     feature = "zenoh-c-shared-memory",
     not(feature = "zenoh-c-no-unstable-api")
 ))]
 pub(crate) type ValueChunk =
     Option<std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>>;
 /// See the shared-memory spelling: there is no chunk on this arm.
-#[cfg(not(all(
-    feature = "zenoh-c-shared-memory",
-    not(feature = "zenoh-c-no-unstable-api")
-)))]
+#[cfg(all(
+    feature = "query",
+    not(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))
+))]
 pub(crate) type ValueChunk = Option<std::convert::Infallible>;
 
 /// Take the VALUE of a query out of a MOVED bytes, leaving a gravestone: the bytes to
@@ -547,6 +558,7 @@ pub(crate) type ValueChunk = Option<std::convert::Infallible>;
 ///
 /// # Safety
 /// `moved` must be null or a valid moved bytes whose handle is live.
+#[cfg(feature = "query")]
 pub(crate) unsafe fn take_query_value(
     moved: *mut z_moved_bytes_t,
 ) -> (Option<Vec<u8>>, ValueChunk) {

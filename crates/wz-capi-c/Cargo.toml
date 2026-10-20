@@ -61,6 +61,32 @@ crate-type = ["cdylib", "rlib"]
 wz-cdylib-build = { path = "../wz-cdylib-build" }
 
 [features]
+# The capabilities, each one feature of this crate and of the model under it: on in a default
+# build, so the drop-in exports what zenoh-c does, and off for a deployer who wants the textbook
+# minimum. A capability that is off is not linked: neither the ABI doors nor the plane behind
+# them are compiled in (`wz-capi-core` is taken without its default features, so a capability
+# reaches it only through the feature below). The names are `wz-capi-pico`'s, for the same
+# reason: one vocabulary across the C ABIs.
+default = ["peer", "scout", "query", "queryable", "liveliness", "liveliness-get", "advanced", "group", "gossip"]
+# The roles beyond the client: a listener, a router or a peer, and the gossip that introduces
+# the nodes of a mesh. A build without them opens a client session to the endpoints it dials.
+peer = ["scout", "wz-capi-core/peer"]
+# `z_scout`, the hello family, and a client finding its router by scouting.
+scout = ["wz-capi-core/scout"]
+# `z_get` and the querier, the requesting end of a query.
+query = ["wz-capi-core/query"]
+# `z_declare_queryable` and the replies, the answering end of a query.
+queryable = ["wz-capi-core/queryable"]
+# The liveliness token and subscriber.
+liveliness = ["wz-capi-core/liveliness"]
+# The snapshot get of the liveliness plane; it is a query.
+liveliness-get = ["liveliness", "query", "wz-capi-core/liveliness-get"]
+# The advanced publisher and subscriber, with the plane they replay through.
+advanced = ["liveliness", "queryable", "wz-capi-core/advanced"]
+# The group membership of zenoh-ext.
+group = ["wz-capi-core/group"]
+# A session told of a node by one it holds a link to dials it.
+gossip = ["peer", "wz-capi-core/gossip"]
 # zenoh-c's own build flags change its ABI, so wz's must be able to follow.
 # `Z_FEATURE_UNSTABLE_API` and `Z_FEATURE_SHARED_MEMORY` are INDEPENDENT axes,
 # so "zenoh-c" names one of FOUR builds; the id for each is the argument
@@ -155,7 +181,7 @@ libc = { version = "0.2", optional = true }
 # `access-extauth-usrpwd` and `interceptors`: the credentials and the traffic policy (`access_control`,
 # `low_pass_filter`, `downsampling`) a zenoh-c node's config states are enforced, not accepted and
 # dropped.
-wz-capi-core = { path = "../wz-capi-core", features = ["transport-qos", "access-extauth-usrpwd", "interceptors"] }
+wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "access-extauth-usrpwd", "interceptors"] }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and

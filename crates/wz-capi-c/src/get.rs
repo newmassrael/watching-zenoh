@@ -24,7 +24,7 @@
 //!
 //! A foreign peer is free to answer under a key the query does not cover, and
 //! upstream drops such a reply BEFORE building it — the callback never sees it.
-//! The gate is [`crate::query::reply_keyexpr_is_covered`], the same SSOT the
+//! The gate is [`crate::reply_keyexpr::reply_keyexpr_is_covered`], the same SSOT the
 //! responder side enforces, so the two halves cannot drift apart.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -479,7 +479,11 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     };
     // Dropped BEFORE the marshal is built — upstream's callback never sees a
     // reply the query does not accept.
-    if !crate::query::reply_keyexpr_is_covered(&gate.query_keyexpr, view.keyexpr(), gate.anyke) {
+    if !crate::reply_keyexpr::reply_keyexpr_is_covered(
+        &gate.query_keyexpr,
+        view.keyexpr(),
+        gate.anyke,
+    ) {
         return;
     }
     let mut marshal = ReplyMarshal::new(view);
@@ -941,7 +945,7 @@ pub unsafe extern "C" fn z_reply_take_from_loaned(
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_replier_id(
     this_: *const z_loaned_reply_t,
-    out_id: *mut crate::advanced::z_entity_global_id_t,
+    out_id: *mut crate::entity::z_entity_global_id_t,
 ) -> bool {
     guard_val(false, || {
         if out_id.is_null() {
@@ -954,7 +958,7 @@ pub unsafe extern "C" fn z_reply_replier_id(
         };
         // SAFETY: `out_id` is writable per the caller's contract.
         unsafe {
-            *out_id = crate::advanced::z_entity_global_id_t {
+            *out_id = crate::entity::z_entity_global_id_t {
                 zid: crate::zid::z_id_t { id: info.zid },
                 eid: info.eid,
             };
@@ -1062,7 +1066,7 @@ pub(crate) fn issue_get(
     let fan = fan.map(|(f, _)| f);
     let anyke = parameters
         .as_deref()
-        .is_some_and(crate::query::parameters_has_anyke);
+        .is_some_and(crate::reply_keyexpr::parameters_has_anyke);
     let gate = Arc::new(ReplyGate {
         query_keyexpr: keyexpr.clone(),
         anyke,

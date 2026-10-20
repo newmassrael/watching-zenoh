@@ -487,7 +487,7 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
 /// `publisher` must be null or a valid loaned advanced publisher;
 /// `matching_listener` must be valid and writable; `callback` must be a valid
 /// moved closure, which is consumed on every path.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
 #[no_mangle]
 pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
     publisher: *const crate::advanced::ze_loaned_advanced_publisher_t,
@@ -527,7 +527,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
 /// # Safety
 /// `publisher` must be null or a valid loaned advanced publisher; `callback` must
 /// be a valid moved closure, which is consumed on every path.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
 #[no_mangle]
 pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_listener(
     publisher: *const crate::advanced::ze_loaned_advanced_publisher_t,
@@ -544,7 +544,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
 /// # Safety
 /// `this_` must be null or a valid loaned advanced publisher; `matching_status`
 /// must be valid and writable.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
 #[no_mangle]
 pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
     this_: *const crate::advanced::ze_loaned_advanced_publisher_t,
@@ -580,6 +580,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
 /// # Safety
 /// `querier` must be null or a valid loaned querier; `matching_listener` must
 /// be valid and writable; `callback` must be a valid moved closure.
+#[cfg(feature = "query")]
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_declare_matching_listener(
     querier: *const crate::abi::z_loaned_querier_t,
@@ -644,6 +645,7 @@ pub unsafe extern "C" fn z_publisher_get_matching_status(
 /// # Safety
 /// `this_` must be null or a valid loaned querier; `matching_status` must be
 /// valid and writable.
+#[cfg(feature = "query")]
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_get_matching_status(
     this_: *const crate::abi::z_loaned_querier_t,

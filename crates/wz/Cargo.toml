@@ -1184,7 +1184,19 @@ rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 # against the wz cdylib). Pulls the wz-capi-c cdylib and the tokio runtime it
 # wraps, rather than the no-op `= []` facade it was — the
 # facade-forward-separate-edit dead-stub trap. AP/std-only.
-api-compat-c = ["dep:wz-capi-c", "runtime-tokio"]
+api-compat-c = [
+    "dep:wz-capi-c",
+    "runtime-tokio",
+    "wz-capi-c/peer",
+    "wz-capi-c/scout",
+    "wz-capi-c/query",
+    "wz-capi-c/queryable",
+    "wz-capi-c/liveliness",
+    "wz-capi-c/liveliness-get",
+    "wz-capi-c/advanced",
+    "wz-capi-c/group",
+    "wz-capi-c/gossip",
+]
 # R311y284 — api-compat-pico BUILT: pulls the wz-capi-pico cdylib and
 # re-exports it as `wz::capi_pico` (src/lib.rs). Promoted from the `= []`
 # reserved placeholder to the real dep gate. Also turns on `runtime-tokio`

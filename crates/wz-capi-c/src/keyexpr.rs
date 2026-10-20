@@ -98,6 +98,10 @@ impl DeclaredKeyexpr {
     /// One holder rather than two: a declaration that kept its own `String`
     /// beside this value could answer the accessor with a keyexpr it does not
     /// actually use.
+    #[cfg(any(
+        feature = "query",
+        all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api"))
+    ))]
     pub(crate) fn literal(&self) -> &str {
         &self.state.keyexpr
     }

@@ -105,6 +105,7 @@ impl SampleMeta {
     /// Override the attachment — for a marshal built from a view whose payload
     /// split differs (a reply's Err arm).
     #[must_use]
+    #[cfg(feature = "query")]
     pub(crate) fn with_attachment(mut self, attachment: Option<Vec<u8>>) -> Self {
         self.attachment = attachment;
         self
@@ -112,6 +113,7 @@ impl SampleMeta {
 
     /// Set the timestamp.
     #[must_use]
+    #[cfg(feature = "query")]
     pub(crate) fn with_timestamp(
         mut self,
         timestamp: Option<crate::timestamp::z_timestamp_t>,
@@ -122,6 +124,7 @@ impl SampleMeta {
 
     /// Set the source identity.
     #[must_use]
+    #[cfg(feature = "query")]
     pub(crate) fn with_source_info(
         mut self,
         source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
@@ -132,6 +135,7 @@ impl SampleMeta {
 
     /// Set the value encoding.
     #[must_use]
+    #[cfg(feature = "query")]
     pub(crate) fn with_encoding(mut self, encoding: Option<EncodingHint>) -> Self {
         self.encoding = encoding;
         self
@@ -249,7 +253,7 @@ impl SampleMarshal {
     /// R311y568 — the sample's source identity, for the REPLY plane's
     /// `z_reply_replier_id`, which reads the responder's `(zid, eid)` out of the
     /// same field `z_sample_source_info` exposes.
-    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    #[cfg(all(feature = "query", not(feature = "zenoh-c-no-unstable-api")))]
     pub(crate) fn source_info(&self) -> Option<&wz_runtime_tokio::sample::SourceInfo> {
         self.source_info.as_ref()
     }
@@ -1389,16 +1393,28 @@ pub(crate) unsafe fn escape_sample(src: *const z_loaned_sample_t) -> crate::abi:
 /// give it back to a user closure later, which wants a `z_loaned_sample_t`. The
 /// zenoh-ext querying subscriber is the first such holder: it parks live samples
 /// and replies until the queries in flight have ended.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(
+    feature = "query",
+    feature = "queryable",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
 pub(crate) struct EscapedSample(Box<SampleMarshal>);
 
 // SAFETY: the box is owned by this value alone and its cached views point only
 // into itself, so moving the value to another thread moves the whole closed
 // object. Whoever holds one reaches it through one lock at a time.
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(
+    feature = "query",
+    feature = "queryable",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
 unsafe impl Send for EscapedSample {}
 
-#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+#[cfg(all(
+    feature = "query",
+    feature = "queryable",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
 impl EscapedSample {
     /// A deep copy of a borrowed sample, or `None` for a null one.
     ///

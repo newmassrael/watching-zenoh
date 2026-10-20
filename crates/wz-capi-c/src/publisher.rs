@@ -864,17 +864,17 @@ pub unsafe extern "C" fn z_publisher_delete(
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_id(
     publisher: *const z_loaned_publisher_t,
-) -> crate::advanced::z_entity_global_id_t {
+) -> crate::entity::z_entity_global_id_t {
     // R311y568 — through the shared constructor, which is where the zid/eid
     // convention is now stated once for all five entity-id accessors.
-    guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+    guard_val(crate::entity::z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract.
         match unsafe { publisher_state(publisher) } {
-            Some(state) => crate::advanced::z_entity_global_id_t::for_entity(
+            Some(state) => crate::entity::z_entity_global_id_t::for_entity(
                 &state.shared,
                 publisher as *const c_void,
             ),
-            None => crate::advanced::z_entity_global_id_t::empty(),
+            None => crate::entity::z_entity_global_id_t::empty(),
         }
     })
 }

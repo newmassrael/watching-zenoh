@@ -368,15 +368,15 @@ pub unsafe extern "C" fn z_querier_loan_mut(
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_id(
     querier: *const z_loaned_querier_t,
-) -> crate::advanced::z_entity_global_id_t {
-    guard_val(crate::advanced::z_entity_global_id_t::empty(), || {
+) -> crate::entity::z_entity_global_id_t {
+    guard_val(crate::entity::z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract, delegated.
         match unsafe { querier_state(querier) } {
-            Some(state) => crate::advanced::z_entity_global_id_t::for_entity(
+            Some(state) => crate::entity::z_entity_global_id_t::for_entity(
                 &state.shared,
                 querier as *const std::ffi::c_void,
             ),
-            None => crate::advanced::z_entity_global_id_t::empty(),
+            None => crate::entity::z_entity_global_id_t::empty(),
         }
     })
 }
