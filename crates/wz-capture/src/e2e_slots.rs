@@ -183,9 +183,24 @@ impl Outcome {
 }
 
 /// The ledger of a run: a judge per slot seen.
+///
+/// # A ledger that goes on between walks
+///
+/// A walk that continues from where the last one stopped judges only the frames that
+/// arrived since, so the counters it judges them against are the ones the last walk
+/// left. That is the same sequence of frames per slot as one walk over everything
+/// ONLY while a slot's frames come from one list: a slot whose frames are spread
+/// over two lists is judged list by list in one walk and in the order the calls
+/// reached them in a continuing one. The ledger therefore remembers which list
+/// judged each slot ([`Self::crossed`]), and a caller that sees it say so walks the
+/// whole capture again.
 #[derive(Debug, Default)]
 pub struct SlotLedger {
     judges: BTreeMap<Slot, Judge>,
+    /// The list that judged each slot first.
+    owners: BTreeMap<Slot, usize>,
+    /// Some slot was judged from two lists.
+    crossed: bool,
 }
 
 impl SlotLedger {
@@ -199,8 +214,19 @@ impl SlotLedger {
         self.judges.len()
     }
 
+    /// Whether any slot has been judged from two different lists.
+    pub fn crossed(&self) -> bool {
+        self.crossed
+    }
+
     /// Read `reception.payload` under its profile and judge it against its slot.
     pub fn receive(&mut self, reception: &Reception<'_>) -> Outcome {
+        self.receive_from(0, reception)
+    }
+
+    /// [`Self::receive`], for a frame that came from the list numbered `list`, which
+    /// the ledger remembers as the owner of the slot (see the type's note).
+    pub fn receive_from(&mut self, list: usize, reception: &Reception<'_>) -> Outcome {
         let profile = reception.profile;
         let frame = match e2e_frame::open(profile, reception.payload) {
             Ok(frame) => frame,
@@ -245,6 +271,13 @@ impl SlotLedger {
                 previous: None,
                 step: None,
             }));
+        }
+        match self.owners.get(&slot) {
+            Some(&owner) if owner != list => self.crossed = true,
+            Some(_) => {}
+            None => {
+                self.owners.insert(slot.clone(), list);
+            }
         }
         let judge = self
             .judges

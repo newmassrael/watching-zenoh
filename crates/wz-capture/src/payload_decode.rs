@@ -64,6 +64,9 @@ pub struct Declarations<'a> {
     /// last was is a fact about the frames THIS walk has met, and a map is
     /// configuration that two analyses may share. See [`crate::e2e_slots`].
     e2e: RefCell<crate::e2e_slots::SlotLedger>,
+    /// The list the frames being judged now came from, which the ledger remembers as
+    /// the owner of each slot it judges them in. See [`Self::enter_list`].
+    list: core::cell::Cell<usize>,
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
     misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, (usize, MatchedRule)>>,
@@ -140,15 +143,41 @@ type RefusalKey = (String, String, RefusedUnder);
 impl<'a> Declarations<'a> {
     /// A fresh ledger over `map`, with nothing applied yet.
     pub fn new(map: &'a FormatMap<'a>) -> Self {
+        Self::with_ledger(map, crate::e2e_slots::SlotLedger::new())
+    }
+
+    /// A ledger over `map` that judges end-to-end frames against `ledger`'s counters,
+    /// the ones an earlier walk left, instead of against none. What a walk that goes
+    /// on from where the last one stopped is begun with; see
+    /// [`crate::e2e_slots::SlotLedger`].
+    pub fn with_ledger(map: &'a FormatMap<'a>, ledger: crate::e2e_slots::SlotLedger) -> Self {
         Self {
             map,
             used: RefCell::new(BTreeSet::new()),
-            e2e: RefCell::new(crate::e2e_slots::SlotLedger::new()),
+            e2e: RefCell::new(ledger),
+            list: core::cell::Cell::new(0),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
             refused: RefCell::new(alloc::collections::BTreeMap::new()),
             rescans: RefCell::new((0, 0)),
             unwalked: RefCell::new(0),
         }
+    }
+
+    /// The frames judged from here on come from the list numbered `list`. Called by
+    /// the walker at the start of each list, since the ledger keeps a slot's counter
+    /// by what a frame says and not by where it was read.
+    pub fn enter_list(&self, list: usize) {
+        self.list.set(list);
+    }
+
+    /// Whether any end-to-end slot has been judged from two different lists.
+    pub fn e2e_crossed(&self) -> bool {
+        self.e2e.borrow().crossed()
+    }
+
+    /// The end-to-end counters this run leaves, for a walk that goes on from it.
+    pub fn into_ledger(self) -> crate::e2e_slots::SlotLedger {
+        self.e2e.into_inner()
     }
 
     /// Round 2029 (item 298) — record that a listing cap held one message back,
@@ -278,13 +307,16 @@ impl<'a> Declarations<'a> {
         let matched = map.e2e_for_keyexpr(keyexpr)?;
         self.record_applied(matched.id);
         let outcome = match payload {
-            Some(payload) => self.e2e.borrow_mut().receive(&crate::e2e_slots::Reception {
-                profile: matched.format.profile(),
-                keyexpr,
-                payload,
-                sender,
-                observed_at_ns,
-            }),
+            Some(payload) => self.e2e.borrow_mut().receive_from(
+                self.list.get(),
+                &crate::e2e_slots::Reception {
+                    profile: matched.format.profile(),
+                    keyexpr,
+                    payload,
+                    sender,
+                    observed_at_ns,
+                },
+            ),
             None => crate::e2e_slots::Outcome::Unreadable {
                 why: crate::e2e_slots::UNREADABLE_PAYLOAD,
             },

@@ -372,12 +372,16 @@ pub fn fields_json_since_coordinated(
 /// inputs a trim took (a reference to a declaration that was trimmed, a final whose
 /// request was). A window that ends inside a list leaves the walk where the window
 /// ended, and the next window goes on from there, so reading a capture window by
-/// window visits each message once. Two things still begin the walk again, and each
-/// costs a pass over what is held: an end-to-end profile rule (its counters are a
-/// fact about the frames BEFORE a row, which a walk that skips the old rows does
-/// not move), and any state the prefix test refuses (a flow that left or appeared
-/// in front of one, a message that sorts before one already taken, a handshake that
-/// changes who owns a list).
+/// window visits each message once. An end-to-end profile rule does not end it
+/// either: the counters it judges by are a fact about the frames BEFORE a row, so
+/// the memory keeps the ones the last walk left and judges the frames that arrived
+/// against them. Two things still begin the walk again, and each costs a pass over
+/// what is held: a slot judged from two lists (a walk that went on would judge it
+/// in the order of the calls and one over everything judges it list by list, so the
+/// memory notices and walks the whole capture, as it did for every call before it
+/// kept the counters), and any state the prefix test refuses (a flow that left or
+/// appeared in front of one, a message that sorts before one already taken, a
+/// handshake that changes who owns a list).
 ///
 /// # What it does not claim
 ///
@@ -405,6 +409,10 @@ pub struct FieldsMemory {
     /// What the walker left: the keyexpr table, and for each list where it
     /// stopped and the folds it held. Meaningful only beside `saved`.
     walk: WalkState,
+    /// The end-to-end counters the last walk left, for a walk that goes on from where
+    /// it stopped to judge the frames that arrived against. Meaningful only beside
+    /// `saved` and `walk`, and `None` for a walk that judged nothing.
+    e2e: Option<crate::e2e_slots::SlotLedger>,
     digests: alloc::collections::BTreeMap<u64, Option<u64>>,
     stats: FieldsStats,
 }
@@ -442,6 +450,25 @@ impl FieldsMemory {
     /// A memory that has written nothing.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the end-to-end counters this memory holds may be gone on from: it holds
+    /// them, no slot in them was judged from two lists, and there are not so many
+    /// slots that they have outgrown what the lists hold.
+    ///
+    /// The slots a ledger keeps are those of the traffic it has judged, and a handle
+    /// under a ceiling holds a bounded part of it, so a ledger past a few per held
+    /// message is dropped and the next walk judges what is held and keeps only that:
+    /// one pass per that many new slots, as for the pairing.
+    fn e2e_may_continue(&self, d: &crate::Dissection) -> bool {
+        let Some(ledger) = &self.e2e else {
+            return false;
+        };
+        let held: usize = d
+            .message_lists_with_origin()
+            .map(|(_, _, list)| list.len())
+            .sum();
+        !ledger.crossed() && ledger.slots() <= 4 * held + 1024
     }
 
     /// What this memory has done since it was made.
@@ -629,7 +656,9 @@ pub fn fields_json_since_remembering_progress(
     }
 
     let sink = RowSink::new(revised);
-    let declared = map.map(Declarations::new);
+    // Whether a rule binds a key to an end-to-end profile, which makes the counters of
+    // the frames before a row part of what the walk's result depends on.
+    let judges_e2e = map.is_some_and(|m| m.has_e2e_rules());
 
     // WHETHER THE WALK MAY CONTINUE from where the last one stopped. Every
     // condition is one the walk's own result depends on:
@@ -641,8 +670,12 @@ pub fn fields_json_since_remembering_progress(
     //   the walk would skip is a row the cursor passes;
     // * no skipped row had no sequence number (one is written by every
     //   since-document) and none is a scouting row the list was trimmed under;
-    // * no end-to-end rule binds a key to a profile, because a counter is a fact
-    //   about the frames before a row and a row not visited would not move it;
+    // * when an end-to-end rule binds a key to a profile, the counters the last walk
+    //   left are held (a counter is a fact about the frames before a row, and a row
+    //   not visited would not move it), no slot has been judged from two lists (a
+    //   continuing walk reaches the lists in the order the calls did and not list by
+    //   list, so such a slot would be judged in another order than one walk over
+    //   everything judges it), and they have not outgrown what the lists hold;
     // * no QUIC list holds a message, because the datagram walk folds those into
     //   the table after each flow and that fold is not repeatable;
     // * the container is the one the saved cursor was walking.
@@ -650,7 +683,7 @@ pub fn fields_json_since_remembering_progress(
         let saved = memory.saved.as_ref()?;
         let (_, _) = advance.as_ref()?;
         if since.after_seq < saved.through_seq
-            || declared.as_ref().is_some_and(|d| d.has_e2e_rules())
+            || (judges_e2e && !memory.e2e_may_continue(d))
             || memory
                 .walk
                 .stream
@@ -720,6 +753,13 @@ pub fn fields_json_since_remembering_progress(
         Some(plans)
     })();
     let resume = resume_plans.is_some();
+    // The counters this walk judges against: the last walk's when it goes on from
+    // there, and none when it begins.
+    let ledger = match memory.e2e.take() {
+        Some(ledger) if resume && judges_e2e => ledger,
+        _ => crate::e2e_slots::SlotLedger::new(),
+    };
+    let declared = map.map(|m| Declarations::with_ledger(m, ledger));
     // The marks a prefix-extension handed back are the marks of the capture as it
     // stands, so the walk that follows does not make them again from the first
     // message (which is a sort of every message and would put the cost back).
@@ -753,7 +793,27 @@ pub fn fields_json_since_remembering_progress(
     if crate::progress::cancelled(progress) {
         memory.saved = None;
         memory.walk = WalkState::default();
+        memory.e2e = None;
         return None;
+    }
+    // A continuing walk that met a slot another list had judged first has judged it in
+    // the order of the calls and not of the lists. The document is not the one a walk
+    // over everything writes, so it is thrown away and the walk begun again, which
+    // judges list by list; the counters it leaves say the slot is shared, and no later
+    // call goes on from them.
+    if resume && judges_e2e && declared.as_ref().is_some_and(|d| d.e2e_crossed()) {
+        memory.walk = WalkState::default();
+        memory.e2e = None;
+        return fields_json_since_remembering_progress(
+            d,
+            capture,
+            map,
+            key,
+            coordinates,
+            since,
+            memory,
+            progress,
+        );
     }
     // What this call visited, which each list's producer recorded. Summed after
     // the call and not as a difference of two sums of lengths, because a front
@@ -780,10 +840,13 @@ pub fn fields_json_since_remembering_progress(
     // the held rows by a fraction, so the memory follows the handle's size and a
     // call does not pass over the whole map for the sake of a few rows.
     if memory.digests.len() > 256 {
-        if let Some(ranges) = coordinates.held_seq_ranges() {
-            let held: u64 = ranges.iter().map(|(first, last)| last - first + 1).sum();
+        // The count first: the ranges are only asked for when the digests have
+        // outgrown the rows held, which is once per fraction of them and not per call.
+        if let Some(held) = coordinates.held_row_count() {
             if memory.digests.len() as u64 > held + held / 4 + 256 {
-                memory.digests.retain(|seq, _| seq_in_ranges(&ranges, *seq));
+                if let Some(ranges) = coordinates.held_seq_ranges() {
+                    memory.digests.retain(|seq, _| seq_in_ranges(&ranges, *seq));
+                }
             }
         }
     }
@@ -795,6 +858,11 @@ pub fn fields_json_since_remembering_progress(
                 .1
         }
     };
+    // The counters the walk leaves, for the next one to judge the frames that arrive
+    // against. A walk that judged nothing leaves none.
+    memory.e2e = declared
+        .filter(|_| judges_e2e)
+        .map(Declarations::into_ledger);
     memory.saved = Some(FieldsSaved {
         marks,
         grouping,
@@ -994,6 +1062,16 @@ pub trait RowCoordinates {
     /// memory then keeps what it has.
     fn held_seq_ranges(&self) -> Option<Vec<(u64, u64)>> {
         None
+    }
+    /// How many rows the caller STILL HOLDS, or `None` for a numbering that cannot say.
+    ///
+    /// The count alone, for a memory that only needs to know whether it has outgrown
+    /// what is held before it asks for the ranges: the ranges are sorted and merged
+    /// from every run of every list, which grows with the number of calls, and a call
+    /// that wants no pruning should not pay for them. The default is the ranges' sum.
+    fn held_row_count(&self) -> Option<u64> {
+        self.held_seq_ranges()
+            .map(|ranges| ranges.iter().map(|(first, last)| last - first + 1).sum())
     }
 }
 
@@ -1761,6 +1839,7 @@ fn push_stream_flow(
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    tags.enter_list(declarations);
     // The produced-index of the OLDEST message still held, so a row's
     // sequence number is looked up by an index a front trim does not move.
     let first_produced = flow.frames.produced() - flow.frames.len() as u64;
@@ -2055,6 +2134,7 @@ fn push_datagram_flow(
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    tags.enter_list(declarations);
     // See the stream producer: a resumed walk starts where the last stopped, and
     // where that is is counted from the front of the list AS IT STANDS.
     //
@@ -4454,6 +4534,15 @@ struct RowNumbering<'a> {
 }
 
 impl RowTags<'_> {
+    /// Tell the declarations which list the rows written from here on are of, so that
+    /// the end-to-end counters they judge them against know whose slot each is. A list
+    /// this document does not number is told as one no other is.
+    fn enter_list(&self, declarations: Option<&Declarations<'_>>) {
+        if let Some(declarations) = declarations {
+            declarations.enter_list(self.numbering.and_then(|n| n.list).unwrap_or(usize::MAX));
+        }
+    }
+
     /// The sequence number of the message at produced-index `produced` of this
     /// flow's cleartext list.
     fn frame_seq(&self, produced: u64) -> Option<u64> {

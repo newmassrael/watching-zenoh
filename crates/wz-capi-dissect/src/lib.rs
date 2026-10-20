@@ -14693,6 +14693,215 @@ mod tests {
         }
     }
 
+    /// A TCP packet of the session whose client port is `client_port`, from the client
+    /// (the low end) or from the server, with `seq` and `payload`. [`tcp_packet`] and
+    /// [`tcp_packet_reverse`] are this for the one session on port 1111.
+    fn tcp_packet_on(client_port: u16, from_client: bool, seq: u32, payload: &[u8]) -> Vec<u8> {
+        let (src, dst) = if from_client {
+            (client_port, 7447)
+        } else {
+            (7447, client_port)
+        };
+        let (src_ip, dst_ip) = if from_client {
+            ([10, 0, 0, 1], [10, 0, 0, 2])
+        } else {
+            ([10, 0, 0, 2], [10, 0, 0, 1])
+        };
+        let mut tcp = Vec::new();
+        tcp.extend_from_slice(&src.to_be_bytes());
+        tcp.extend_from_slice(&dst.to_be_bytes());
+        tcp.extend_from_slice(&seq.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes());
+        tcp.push(5 << 4);
+        tcp.push(0x10); // ACK
+        tcp.extend_from_slice(&64u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(&0u16.to_be_bytes());
+        tcp.extend_from_slice(payload);
+        wz_packet_fixtures::fill_tcp_checksum(src_ip, dst_ip, &mut tcp);
+
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+        ip.extend_from_slice(&src_ip);
+        ip.extend_from_slice(&dst_ip);
+        wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
+        ip.extend_from_slice(&tcp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x08, 0x00]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// The packets of `flows` TCP sessions that each announce the zid `ZID_A` (and the
+    /// far end `ZID_B`, since a sender is named only once the link has been seen
+    /// opening) and then publish one end-to-end frame per entry of `frames` on
+    /// `demo/sensor`, one frame per packet, each entry naming the flow that sends it and
+    /// the counter it carries. The profile and the key are the same on every flow, so a
+    /// sender that is the same on every flow shares ONE slot between them. Flow 0 is the
+    /// first the capture sees, and so the first list.
+    fn e2e_live_packets(flows: usize, frames: &[(usize, u64)]) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        let mut next = Vec::new();
+        let mut sent = vec![0u8; flows];
+        for flow in 0..flows {
+            let port = 2000 + flow as u16;
+            let init = framed_init(&ZID_A);
+            packets.push(tcp_packet_on(port, true, 1000, &init));
+            packets.push(tcp_packet_on(port, false, 5000, &framed_init(&ZID_B)));
+            next.push(1000 + init.len() as u32);
+        }
+        for &(flow, counter) in frames {
+            let wrapped = call_e2e_wrap(
+                E2E_ROW_PROFILE,
+                &format!("{{\"counter\": {counter}}}"),
+                b"\x08\x96\x01",
+            )
+            .expect("wraps");
+            let frame = e2e_frame_of(&wrapped);
+            let sn = sent[flow];
+            sent[flow] += 1;
+            let record = framed_frame(
+                sn,
+                &wz_codecs::push::Push {
+                    header: wz_codecs::push::Push::default().header
+                        | wz_codecs::wire_const::FLAG_N_N,
+                    keyexpr: literal("demo/sensor"),
+                    body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
+                        wz_codecs::msg_put::MsgPut {
+                            payload_len: Some(frame.len() as u64),
+                            payload: Some(&frame),
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            packets.push(tcp_packet_on(2000 + flow as u16, true, next[flow], &record));
+            next[flow] += record.len() as u32;
+        }
+        packets
+    }
+
+    /// The rows of a document with their sequence numbers, in document order.
+    fn numbered_rows(doc: &str) -> Vec<(u64, wz_session_core::json5::Json5Value)> {
+        rows_of(&parsed(doc))
+            .into_iter()
+            .map(|row| (seq_of(row), row.clone()))
+            .collect()
+    }
+
+    /// AN END-TO-END PROFILE DOES NOT MAKE THE LIVE WALK BEGIN AGAIN AT EVERY STEP, AND
+    /// EVERY STEP IS STILL THE WHOLE DOCUMENT'S ROWS AFTER THE CURSOR.
+    ///
+    /// A reader that has registered a profile used to walk the whole handle at every
+    /// step, because a counter is a fact about the frames before a row and a walk that
+    /// skipped the old rows would not have moved it: the cost of a step grew with the
+    /// handle (measured: every step restarted, and the step time rose in step with the
+    /// rows held). The walk now keeps the counters the last step left and judges the
+    /// frames that arrived against them.
+    ///
+    /// Two captures, each read after every packet and each step compared with the
+    /// whole-document door of the same handle at the same state:
+    ///
+    /// * ONE flow, counters that repeat and skip: the walk must go on (few starts, each
+    ///   message visited once) and every verdict must be the whole document's;
+    /// * TWO flows that announce the same sender and publish the same key, so one
+    ///   slot is judged from two lists, and the LATER list publishes first. A walk that
+    ///   went on would judge the slot in the order of the calls (the later list's frames,
+    ///   then the earlier list's), which is not the order of one walk over everything
+    ///   (the earlier list's first). The walk must notice, begin again, and write the
+    ///   whole document's rows all the same.
+    #[test]
+    fn an_end_to_end_profile_goes_on_across_steps_and_a_shared_slot_begins_again() {
+        let one_flow: Vec<(usize, u64)> =
+            [5u64, 5, 6, 9, 9, 10, 11, 11, 12, 14, 15, 16, 16, 17, 18, 20]
+                .into_iter()
+                .map(|counter| (0, counter))
+                .collect();
+        // Flow 1 owns the slot for four frames; then flow 0, the earlier list, reaches it.
+        let two_flows: Vec<(usize, u64)> = vec![
+            (1, 5),
+            (1, 6),
+            (1, 6),
+            (1, 7),
+            (0, 20),
+            (0, 21),
+            (1, 8),
+            (0, 21),
+            (1, 9),
+            (0, 22),
+            (1, 10),
+            (0, 23),
+        ];
+        for (name, flows, frames, goes_on) in [
+            ("one flow", 1usize, one_flow, true),
+            ("two flows sharing a slot", 2usize, two_flows, false),
+        ] {
+            let packets = e2e_live_packets(flows, &frames);
+            let file = pcap_prefix(&packets, packets.len());
+            let ends = pcap_record_ends(&file);
+            let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+            let mut cursor = 0u64;
+            let mut steps = 0u64;
+            let mut with_verdicts = 0usize;
+            for &end in &ends {
+                unsafe { (*handle).follow(&file[..end]).expect("follows") };
+                let doc = live_fields_since_declaring(handle, &file[..end], cursor, E2E_RULES);
+                // The whole-document door of the SAME handle at the same state, so the
+                // list ids it minted are the ones the since-door wrote.
+                let whole = live_fields_declaring(handle, &file[..end], E2E_RULES);
+                let want: Vec<_> = numbered_rows(&whole)
+                    .into_iter()
+                    .filter(|(seq, _)| *seq > cursor)
+                    .collect();
+                let got = numbered_rows(&doc);
+                with_verdicts += got
+                    .iter()
+                    .filter(|(_, row)| format!("{row:?}").contains("counter_reason"))
+                    .count();
+                assert_eq!(
+                    got, want,
+                    "{name} step {steps}: the rows after the cursor are not the whole document's"
+                );
+                cursor = through_seq_of(&doc);
+                steps += 1;
+            }
+            let work = unsafe { (*handle).fields_work() };
+            unsafe { wz_dissect_live_close(handle) };
+
+            assert!(
+                with_verdicts >= frames.len(),
+                "{name}: {with_verdicts} rows carry a verdict for {} frames; the profile judged nothing",
+                frames.len()
+            );
+            if goes_on {
+                assert!(
+                    work.restarted <= 3,
+                    "{name}: the walk began {} times over {steps} steps: {work:?}",
+                    work.restarted
+                );
+                assert!(
+                    work.messages_walked <= 2 * cursor,
+                    "{name}: {} messages visited for {cursor} rows; a walk that began \
+                     again at every step visits about {} ({work:?})",
+                    work.messages_walked,
+                    steps * cursor / 2
+                );
+            } else {
+                assert!(
+                    work.restarted >= 2,
+                    "{name}: a slot judged from two lists must make the walk begin again: {work:?}"
+                );
+            }
+        }
+    }
+
     /// Two handshakes and `n` keep-alives, as a pcap: enough messages that a walk is
     /// asked how it is going more than once (it is asked every 256 steps).
     fn long_capture(n: usize) -> Vec<u8> {

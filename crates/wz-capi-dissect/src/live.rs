@@ -1465,6 +1465,25 @@ impl wz_capture::fields_json::RowCoordinates for HandleIds {
         seq_in_runs(&self.scouting.get(flow)?.runs, produced)
     }
 
+    /// How many rows this handle still holds: the lengths of the runs of every list,
+    /// summed in place, with no list of ranges made or sorted. The runs of two lists
+    /// never share a number, so the sum is the size of the merged ranges.
+    fn held_row_count(&self) -> Option<u64> {
+        Some(
+            self.lists
+                .iter()
+                .flatten()
+                .flat_map(|numbers| numbers.runs.iter())
+                .chain(
+                    self.scouting
+                        .values()
+                        .flat_map(|numbers| numbers.runs.iter()),
+                )
+                .map(|run| run.len)
+                .sum(),
+        )
+    }
+
     /// The numbers of the rows this handle still holds: the runs of every list,
     /// which a front trim has already cut down to what is held, merged into
     /// ascending ranges.
