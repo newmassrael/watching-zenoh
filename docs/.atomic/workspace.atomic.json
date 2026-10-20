@@ -276608,6 +276608,60 @@
         "The multicast policy is a wz-only switch, not a JSON5 key: stock zenohd rejects unknown keys."
       ]
     },
+    "Round 3392": {
+      "decision_summary": "Cap the batch a session advertises by the largest frame its link receives, as zenoh 1.10.1 does (open.rs:652-656, accept.rs:781; the acceptor then mins the InitSyn, accept.rs:218-222). wz advertised the configured size, so lwIP slim said 1024 over 256-byte datagrams. The cap is not link_mtu, wz's send fragment budget (pico's zl->_mtu): 1450 on tokio UDP, whose reads hold a 65507-byte datagram. BoxedLinkDriver gains link_rx_capacity (default unbounded), declared by lwIP, serial and tokio UDP; own_batch_advertisement is the one value the InitSyn, the InitAck cap and validator and the send budget read. pico needs no cap: its receive buffer is the size it advertises. Also: json_integer_cell_gate stood red from e2e_open 3 (repaid by R3391's header) because only pre-push gate 2z ran it, which the hook defers; Layer C0 now runs it and the multicast collision gate, the two 2z members no hosted layer reached.",
+      "changes_bullets": [
+        "wz-session-core link: BoxedLinkDriver::link_rx_capacity, the largest frame the link receives, default DEFAULT_LINK_MTU; both swappable links forward it.",
+        "wz-session-core session_actions: own_batch_advertisement = min(effective_batch_size, link_rx_capacity); init_caps builds the InitSyn and InitAck sizes for both senders; init_ack_sizes, init_ack_caps_acceptable and batch_mtu_for read the capped value.",
+        "wz-session-core handshake_encode: encode_init_with_caps, which encode_init delegates to; encode_init_with_role sends the capped caps instead of the bundle's own.",
+        "Drivers: LwipUdpDriver returns SESSION_RX_SLOT_SIZE, SerialWriteDriver SERIAL_MTU, UdpWriteDriver MAX_UDP_PAYLOAD; link_mtu (the send budget) is unchanged. The QUIC datagram link keeps the default: its read takes whatever datagram quinn delivers, so no wz buffer bounds it.",
+        "wz-runtime-tokio session_glue: the_advertised_batch_is_capped_by_what_the_link_receives (a 256-byte link under a 1024 config: InitSyn and InitAck say 256, an InitAck of 257 is refused, the send budget is 256).",
+        "The upstream citations these comments carry are in the root-and-needle form the citation anchor gate grades.",
+        "run-ci.sh Layer C0: json_integer_cell_gate and multicast_address_collision_gate, selftest and check; they were the two members of pre-push gate 2z that no hosted layer ran."
+      ],
+      "verification_bullets": [
+        "Upstream read at the pinned 1.10.1 tree: open.rs:652-656 and accept.rs:781 cap the advertised batch by the link mtu, accept.rs:218-222 mins the InitSyn; pico transport.c advertises Z_BATCH_UNICAST_SIZE, the size of its receive buffer.",
+        "pc2, before and again after the rebase over R3391: wz-session-core lib 546 passed; wz-runtime-tokio init_advertisement_tests 2 (the new test ran), session_fsm_accepting_path 18; wz-session-lwip lib 9.",
+        "pc2: the legs that pin the send budget per link, at their CI counts: C1l layer3_reassembly_tx 3 and udp_frag_e2e 1, C1t serial_link_e2e 16, C1m slim session_pump_allocations 2, C1n slim host_acceptor_e2e 1.",
+        "pc2: clippy --all-targets -D warnings for wz-session-core, wz-runtime-tokio and wz-session-lwip, each alone; negotiated_axis_witness_gate 9 of 9; cargo fmt --check.",
+        "Pre-push gate 2z array run by hand: 104 members, one red (json_integer_cell_gate on open_expecting_document, standing since e2e_open 3), 104 of 104 with the cells named. Every 2z member is now named in run-ci.sh or a workflow; shellcheck on run-ci.sh reports the same findings as its parent. The gates the hook calls directly pass, the citation anchor gate with its needles resolved against the pin.",
+        "Hosted, read per job before the push: CI 39384720595 on 4ea5fe5fc complete, 30 of 30 jobs success, including the first hosted Layer C0 run in full. Platform 39384720521 cancelled in one job, C ABI windows-latest: its first gated step stayed in progress past its own 35-minute limit and the job's 45, and the log blob is absent; the delta from the green f19f8f08e is a comment in rust-toolchain-pinned.sh, which no cache key hashes. Attributed to the runner."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "serial oversize-Put intermittent timeout (run 39330620581): attribute from the next occurrence's last-poll-outcome dump.",
+        "Nothing holds the 2z array to hosted reach: two members ran nowhere by default until this round, found by hand. A gate that every 2z member is named in run-ci.sh or a workflow would hold it."
+      ],
+      "publishable_decision_summary": "Cap the batch a session advertises by the largest frame its link receives, as zenoh 1.10.1 does (open.rs:652-656, accept.rs:781; the acceptor then mins the InitSyn, accept.rs:218-222). wz advertised the configured size, so lwIP slim said 1024 over 256-byte datagrams. The cap is not link_mtu, wz's send fragment budget (pico's zl->_mtu): 1450 on tokio UDP, whose reads hold a 65507-byte datagram. BoxedLinkDriver gains link_rx_capacity (default unbounded), declared by lwIP, serial and tokio UDP; own_batch_advertisement is the one value the InitSyn, the InitAck cap and validator and the send budget read. pico needs no cap: its receive buffer is the size it advertises. Also: json_integer_cell_gate stood red from e2e_open 3 (repaid by R3391's header) because only pre-push gate 2z ran it, which the hook defers; Layer C0 now runs it and the multicast collision gate, the two 2z members no hosted layer reached.",
+      "publishable_changes_bullets": [
+        "wz-session-core link: BoxedLinkDriver::link_rx_capacity, the largest frame the link receives, default DEFAULT_LINK_MTU; both swappable links forward it.",
+        "wz-session-core session_actions: own_batch_advertisement = min(effective_batch_size, link_rx_capacity); init_caps builds the InitSyn and InitAck sizes for both senders; init_ack_sizes, init_ack_caps_acceptable and batch_mtu_for read the capped value.",
+        "wz-session-core handshake_encode: encode_init_with_caps, which encode_init delegates to; encode_init_with_role sends the capped caps instead of the bundle's own.",
+        "Drivers: LwipUdpDriver returns SESSION_RX_SLOT_SIZE, SerialWriteDriver SERIAL_MTU, UdpWriteDriver MAX_UDP_PAYLOAD; link_mtu (the send budget) is unchanged. The QUIC datagram link keeps the default: its read takes whatever datagram quinn delivers, so no wz buffer bounds it.",
+        "wz-runtime-tokio session_glue: the_advertised_batch_is_capped_by_what_the_link_receives (a 256-byte link under a 1024 config: InitSyn and InitAck say 256, an InitAck of 257 is refused, the send budget is 256).",
+        "The upstream citations these comments carry are in the root-and-needle form the citation anchor gate grades.",
+        "run-ci.sh Layer C0: json_integer_cell_gate and multicast_address_collision_gate, selftest and check; they were the two members of pre-push gate 2z that no hosted layer ran."
+      ],
+      "publishable_verification_bullets": [
+        "Upstream read at the pinned 1.10.1 tree: open.rs:652-656 and accept.rs:781 cap the advertised batch by the link mtu, accept.rs:218-222 mins the InitSyn; pico transport.c advertises Z_BATCH_UNICAST_SIZE, the size of its receive buffer.",
+        "pc2, before and again after the rebase over R3391: wz-session-core lib 546 passed; wz-runtime-tokio init_advertisement_tests 2 (the new test ran), session_fsm_accepting_path 18; wz-session-lwip lib 9.",
+        "pc2: the legs that pin the send budget per link, at their CI counts: C1l layer3_reassembly_tx 3 and udp_frag_e2e 1, C1t serial_link_e2e 16, C1m slim session_pump_allocations 2, C1n slim host_acceptor_e2e 1.",
+        "pc2: clippy --all-targets -D warnings for wz-session-core, wz-runtime-tokio and wz-session-lwip, each alone; negotiated_axis_witness_gate 9 of 9; cargo fmt --check.",
+        "Pre-push gate 2z array run by hand: 104 members, one red (json_integer_cell_gate on open_expecting_document, standing since e2e_open 3), 104 of 104 with the cells named. Every 2z member is now named in run-ci.sh or a workflow; shellcheck on run-ci.sh reports the same findings as its parent. The gates the hook calls directly pass, the citation anchor gate with its needles resolved against the pin.",
+        "Hosted, read per job before the push: CI 39384720595 on 4ea5fe5fc complete, 30 of 30 jobs success, including the first hosted Layer C0 run in full. Platform 39384720521 cancelled in one job, C ABI windows-latest: its first gated step stayed in progress past its own 35-minute limit and the job's 45, and the log blob is absent; the delta from the green f19f8f08e is a comment in rust-toolchain-pinned.sh, which no cache key hashes. Attributed to the runner."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "serial oversize-Put intermittent timeout (run 39330620581): attribute from the next occurrence's last-poll-outcome dump.",
+        "Nothing holds the 2z array to hosted reach: two members ran nowhere by default until this round, found by hand. A gate that every 2z member is named in run-ci.sh or a workflow would hold it."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
