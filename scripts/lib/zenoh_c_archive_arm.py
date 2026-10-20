@@ -242,6 +242,16 @@ MANIFEST_FEATURES = {
     "zenoh-c-shared-memory": ("SHARED_MEMORY", True),
 }
 
+# The manifest features that select no arm: the CAPABILITIES a build exports. Each decides which
+# doors the library has, not which footprint its types take, so none of them moves an axis. The
+# default turns them all on, which keeps every build one that adds to the default and leaves the
+# default at the origin of both axes; they are classified here, by name, so that a feature the
+# manifest gains is still a decision a round has to make and not a name this gate waves through.
+CAPABILITY_FEATURES = frozenset({
+    "peer", "scout", "query", "queryable", "liveliness", "liveliness-get", "advanced", "group",
+    "gossip",
+})
+
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"
 
 # Where the arm is SELECTED and where it is RUN. Both are read rather than
@@ -604,7 +614,7 @@ def check_lattice(manifest: pathlib.Path,
     # No exemption list on purpose. An unclassified feature is a decision a
     # round has to make -- the lattice below is SIZED from MANIFEST_FEATURES,
     # so a feature that table does not know makes it the wrong size.
-    for extra in sorted(declared - set(MANIFEST_FEATURES)):
+    for extra in sorted(declared - set(MANIFEST_FEATURES) - CAPABILITY_FEATURES):
         fail.append(f"  archive-arm FAIL: {CAPI_C_MANIFEST} declares `{extra}`, "
                     f"which\n    MANIFEST_FEATURES does not classify. The arm "
                     f"lattice is sized from that\n    table, so an unclassified "
@@ -616,7 +626,10 @@ def check_lattice(manifest: pathlib.Path,
                     f"the\n    manifest no longer declares it.")
         rc = 1
 
-    closure = default_closure(table)
+    # The arm lattice is over the arm axes alone: a capability the default turns on is neither
+    # an axis nor a way out of additive reach, so it is left out of the closure the arms are
+    # compared against. (Its forwards to `wz-capi-core/...` are left out for the same reason.)
+    closure = default_closure(table) & set(MANIFEST_FEATURES)
     default_arm = arm_of(closure)
     lost = sorted(arm for arm in ARMS if not arm_features(arm) >= closure)
     if lost:
