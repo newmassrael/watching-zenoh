@@ -276758,6 +276758,56 @@
         "MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
       ]
     },
+    "Round 3395": {
+      "decision_summary": "Give the zenoh-c ABI the same capability features the pico ABI has, and run both client-only builds against a node that listens. wz-capi-c gains peer, scout, query, queryable, liveliness, liveliness-get, advanced, group and gossip (default on, wz-capi-core taken without defaults), and a build without peer refuses a listener, a peer or a router at z_open. The default build keeps its 835 exported symbols; the client-only build is 3,192,320 bytes of text against 5,078,248, measured on one host. The pico and zenoh-c client-only builds each dial a node of the full build, publish to it and hear from it, which the previous round listed as not run. The archive-arm gate now classifies the capabilities as no arm axis and reads the arm lattice over the two axes alone.",
+      "changes_bullets": [
+        "wz-capi-c: features peer, scout, query, queryable, liveliness, liveliness-get, advanced, group, gossip forward to the core's; modules, opaque types, closures, handlers, matching and layout-table rows are cfg'd by them; a build without peer reads an absent mode as client and refuses a listener or another role.",
+        "wz-capi-c: entity.rs (z_entity_global_id_t), string_array.rs (the string array) and reply_keyexpr.rs (the rule both ends of a query apply) hold what several planes share; the layout table is split into per-capability name tables chained after the base.",
+        "wz-capi-core: access-extauth-usrpwd no longer implies peer (a client presents credentials), and takes routing-accept itself.",
+        "tests: wz-capi-pico and wz-capi-c each have hold_a_listener (an example of the full build) and client_only_dials_a_listener, which runs only without peer.",
+        "scripts/lib/zenoh_c_archive_arm.py: CAPABILITY_FEATURES classifies the capabilities; the additive-reach check reads the arm axes alone."
+      ],
+      "verification_bullets": [
+        "pc2, release, libwz_capi_c.so text: 5,074,500 before, 5,078,248 default after, 3,192,320 no features, 3,404,760 scout, 4,157,046 peer, 4,448,001 peer with query and queryable; the default's exported dynamic symbols are 835 before and after with no difference.",
+        "clippy -D warnings clean for wz-capi-c over no features, each of scout, peer, query, queryable, liveliness, liveliness-get, advanced, group, gossip, five pairs and the full set, both zenoh-c-no-unstable-api arms, and the default with all targets; wz-capi-c tests with defaults 29 binaries ok, 281 passed.",
+        "pico and zenoh-c client-only: client_only_dials_a_listener passes against the hold_a_listener process of the full build (publication in both directions); the pico refusal tests pass.",
+        "The round-fed static gates: 104 of 105 exit 0 on the tree before the last test commit; the one that failed, zenoh_c_archive_arm.py, exits 0 after its correction and its selftest passes 33 of 33.",
+        "Not measured: the client-only build against zenohd (none is built on the build host); wz-capi-c tests under a subset (they are built for the default)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Client-only sizes: pico 2.12 MB of text against libzenohpico 1.48 MB (1.43 times); zenoh-c 3.19 MB against a libzenohc of far larger text; what remains is the engine (session core, tokio, codecs) and std's backtrace support, and the UDP and TLS link kinds are not features of their own.",
+        "A client-only build has not been run against zenohd; building it needs a toolchain the build host lacks.",
+        "The wz-capi-c tests other than the new one are built for the default; a subset build runs `--lib` and the one test.",
+        "The Zephyr client image has no capability features; MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
+      ],
+      "publishable_decision_summary": "Give the zenoh-c ABI the same capability features the pico ABI has, and run both client-only builds against a node that listens. wz-capi-c gains peer, scout, query, queryable, liveliness, liveliness-get, advanced, group and gossip (default on, wz-capi-core taken without defaults), and a build without peer refuses a listener, a peer or a router at z_open. The default build keeps its 835 exported symbols; the client-only build is 3,192,320 bytes of text against 5,078,248, measured on one host. The pico and zenoh-c client-only builds each dial a node of the full build, publish to it and hear from it, which the previous round listed as not run. The archive-arm gate now classifies the capabilities as no arm axis and reads the arm lattice over the two axes alone.",
+      "publishable_changes_bullets": [
+        "wz-capi-c: features peer, scout, query, queryable, liveliness, liveliness-get, advanced, group, gossip forward to the core's; modules, opaque types, closures, handlers, matching and layout-table rows are cfg'd by them; a build without peer reads an absent mode as client and refuses a listener or another role.",
+        "wz-capi-c: entity.rs (z_entity_global_id_t), string_array.rs (the string array) and reply_keyexpr.rs (the rule both ends of a query apply) hold what several planes share; the layout table is split into per-capability name tables chained after the base.",
+        "wz-capi-core: access-extauth-usrpwd no longer implies peer (a client presents credentials), and takes routing-accept itself.",
+        "tests: wz-capi-pico and wz-capi-c each have hold_a_listener (an example of the full build) and client_only_dials_a_listener, which runs only without peer.",
+        "scripts/lib/zenoh_c_archive_arm.py: CAPABILITY_FEATURES classifies the capabilities; the additive-reach check reads the arm axes alone."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, release, libwz_capi_c.so text: 5,074,500 before, 5,078,248 default after, 3,192,320 no features, 3,404,760 scout, 4,157,046 peer, 4,448,001 peer with query and queryable; the default's exported dynamic symbols are 835 before and after with no difference.",
+        "clippy -D warnings clean for wz-capi-c over no features, each of scout, peer, query, queryable, liveliness, liveliness-get, advanced, group, gossip, five pairs and the full set, both zenoh-c-no-unstable-api arms, and the default with all targets; wz-capi-c tests with defaults 29 binaries ok, 281 passed.",
+        "pico and zenoh-c client-only: client_only_dials_a_listener passes against the hold_a_listener process of the full build (publication in both directions); the pico refusal tests pass.",
+        "The round-fed static gates: 104 of 105 exit 0 on the tree before the last test commit; the one that failed, zenoh_c_archive_arm.py, exits 0 after its correction and its selftest passes 33 of 33.",
+        "Not measured: the client-only build against zenohd (none is built on the build host); wz-capi-c tests under a subset (they are built for the default)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Client-only sizes: pico 2.12 MB of text against libzenohpico 1.48 MB (1.43 times); zenoh-c 3.19 MB against a libzenohc of far larger text; what remains is the engine (session core, tokio, codecs) and std's backtrace support, and the UDP and TLS link kinds are not features of their own.",
+        "A client-only build has not been run against zenohd; building it needs a toolchain the build host lacks.",
+        "The wz-capi-c tests other than the new one are built for the default; a subset build runs `--lib` and the one test.",
+        "The Zephyr client image has no capability features; MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
