@@ -3445,6 +3445,16 @@ layer_c0_test_discipline() {
     python3 scripts/lib/workflow_cache_budget_gate.py --selftest || return 1
     python3 scripts/lib/workflow_cache_budget_gate.py || return 1
     python3 scripts/lib/cache_prune.py --selftest || return 1
+    # R3013 — every JSON cell that takes the integer door is named in the
+    # header's integer paragraph and in its document's revision row. R2672
+    # (item 774) — no two tests join the same multicast (group, port). Both ran
+    # only at pre-push gate 2z, which the hook defers since 2026-09-23, so no
+    # default push and no hosted layer graded them: the first stood red from
+    # e2e_open 3 (the `expectation` differences) until the header named them.
+    python3 scripts/lib/json_integer_cell_gate.py --selftest || return 1
+    python3 scripts/lib/json_integer_cell_gate.py || return 1
+    python3 scripts/lib/multicast_address_collision_gate.py --selftest || return 1
+    python3 scripts/lib/multicast_address_collision_gate.py || return 1
     # R3082 — the Zephyr board table and what its grades may claim. The refusal
     # arms run first on fixtures; the real table is then read against the
     # per-board settings, this file's lanes and the hosted jobs. Layer Qzb builds
