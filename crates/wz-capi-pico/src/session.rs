@@ -769,6 +769,7 @@ pub unsafe extern "C" fn z_publisher_id(
 ///
 /// # Safety
 /// `querier` must be null or a live loaned querier.
+#[cfg(feature = "query")]
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_keyexpr(
     querier: *const crate::querier::z_loaned_querier_t,
@@ -789,6 +790,7 @@ pub unsafe extern "C" fn z_querier_keyexpr(
 ///
 /// # Safety
 /// `querier` must be null or a live loaned querier.
+#[cfg(feature = "query")]
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_id(
     querier: *const crate::querier::z_loaned_querier_t,
@@ -846,6 +848,7 @@ pub unsafe extern "C" fn z_subscriber_id(
 ///
 /// # Safety
 /// `queryable` must be null or a live loaned queryable.
+#[cfg(feature = "queryable")]
 #[no_mangle]
 pub unsafe extern "C" fn z_queryable_id(
     queryable: *const crate::query::z_loaned_queryable_t,
@@ -1077,7 +1080,7 @@ pub unsafe extern "C" fn zp_lease_task_is_running(zs: *const z_loaned_session_t)
 /// pico's default priority (pico `z_priority_default`) — `Z_PRIORITY_DATA`.
 #[no_mangle]
 pub extern "C" fn z_priority_default() -> std::ffi::c_int {
-    crate::query::Z_PRIORITY_DEFAULT
+    crate::qos::Z_PRIORITY_DEFAULT
 }
 
 /// pico's default reliability (pico `z_reliability_default`) —

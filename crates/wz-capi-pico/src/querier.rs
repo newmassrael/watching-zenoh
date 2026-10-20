@@ -56,10 +56,8 @@ use crate::matching::{
     consume_matching_closure, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t, MatchingListenerState,
 };
-use crate::query::{
-    z_reply_keyexpr_t, Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT,
-    Z_REPLY_KEYEXPR_MATCHING_QUERY,
-};
+use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
+use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
 use crate::write_filter::{PicoSession, WriteFilter};

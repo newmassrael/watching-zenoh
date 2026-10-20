@@ -2545,6 +2545,7 @@ impl SharedSession {
             // The sweeps only STAGE what they expire; the one drain at the end of
             // this call runs it, so a frame that expires nothing pays one drain
             // and not three.
+            #[cfg(feature = "query")]
             session.sweep_expired_queries_staged();
             // R311y533 — the LIVELINESS-GET table has the same deadline
             // contract and, until this line, no enforcer under the C ABI.
@@ -2609,7 +2610,11 @@ impl SharedSession {
                 use wz_runtime_core::TimeSource as _;
                 return Some(self.clock.now_monotonic_ms());
             }
+            #[cfg(feature = "query")]
             let reply = session.next_reply_deadline_ms();
+            // No get, no pending reply to expire.
+            #[cfg(not(feature = "query"))]
+            let reply: Option<u64> = None;
             #[cfg(feature = "liveliness-get")]
             let reply = match (reply, session.next_liveliness_get_deadline_ms()) {
                 (Some(a), Some(b)) => Some(a.min(b)),

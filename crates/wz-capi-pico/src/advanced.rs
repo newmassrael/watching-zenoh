@@ -329,8 +329,8 @@ pub unsafe extern "C" fn ze_advanced_publisher_cache_options_default(
     (*options).max_samples = 1;
     // `z_internal_congestion_control_default_push()` = DROP, the push-side
     // default (NOT the request-side BLOCK `z_get` uses).
-    (*options).congestion_control = crate::query::Z_CONGESTION_CONTROL_DROP;
-    (*options).priority = crate::query::Z_PRIORITY_DEFAULT;
+    (*options).congestion_control = crate::qos::Z_CONGESTION_CONTROL_DROP;
+    (*options).priority = crate::qos::Z_PRIORITY_DEFAULT;
     (*options).is_express = false;
     (*options)._liveliness = false;
 }
@@ -488,8 +488,8 @@ unsafe fn advanced_publisher_options(
         out.cache = Some(CacheConfig {
             max_samples: (*options).cache.max_samples.max(1),
             replies_config: RepliesConfig {
-                priority: crate::query::priority_from_pico((*options).cache.priority),
-                congestion_control: crate::query::congestion_from_pico(
+                priority: crate::qos::priority_from_pico((*options).cache.priority),
+                congestion_control: crate::qos::congestion_from_pico(
                     (*options).cache.congestion_control,
                 ),
                 is_express: (*options).cache.is_express,
@@ -1725,8 +1725,8 @@ mod tests {
         unsafe { ze_advanced_publisher_options_default(&mut options) };
         options.cache.is_enabled = true;
         options.cache.max_samples = 4;
-        options.cache.congestion_control = crate::query::Z_CONGESTION_CONTROL_BLOCK;
-        options.cache.priority = crate::query::Z_PRIORITY_DEFAULT;
+        options.cache.congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
+        options.cache.priority = crate::qos::Z_PRIORITY_DEFAULT;
         options.cache.is_express = true;
 
         // SAFETY: `options` is live and fully initialised on this frame.
@@ -1900,9 +1900,9 @@ mod tests {
         unsafe { ze_advanced_publisher_cache_options_default(&mut cache) };
         assert_eq!(
             cache.congestion_control,
-            crate::query::Z_CONGESTION_CONTROL_DROP
+            crate::qos::Z_CONGESTION_CONTROL_DROP
         );
-        assert_eq!(cache.priority, crate::query::Z_PRIORITY_DEFAULT);
+        assert_eq!(cache.priority, crate::qos::Z_PRIORITY_DEFAULT);
         assert!(!cache.is_express);
     }
 }

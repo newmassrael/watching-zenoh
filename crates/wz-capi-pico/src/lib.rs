@@ -81,6 +81,7 @@ pub mod connectivity;
 pub mod encoding;
 pub mod entity;
 mod ffi;
+#[cfg(feature = "query")]
 pub mod get;
 pub mod handlers;
 pub mod keyexpr;
@@ -90,8 +91,13 @@ pub mod matching;
 mod os;
 pub mod platform;
 pub mod pubsub;
+pub mod qos;
+#[cfg(feature = "query")]
 pub mod querier;
+#[cfg(feature = "queryable")]
 pub mod query;
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub mod reply_keyexpr;
 pub mod result;
 pub mod scout;
 pub mod serde;
@@ -113,11 +119,17 @@ pub use abi::{
 pub use bytes::*;
 pub use config::*;
 pub use encoding::*;
+#[cfg(feature = "query")]
 pub use get::*;
 pub use keyexpr::*;
 pub use pubsub::*;
+pub use qos::*;
+#[cfg(feature = "query")]
 pub use querier::*;
+#[cfg(feature = "queryable")]
 pub use query::*;
+#[cfg(any(feature = "query", feature = "queryable"))]
+pub use reply_keyexpr::*;
 pub use result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 pub use serde::*;
 pub use session::*;
@@ -136,10 +148,15 @@ const _: () = {
     assert!(size_of::<abi::z_view_keyexpr_t>() == 48);
     assert!(size_of::<abi::z_view_string_t>() == 32);
     assert!(size_of::<pubsub::z_owned_closure_sample_t>() == 24);
-    // R3 query plane. The closure families share `{ context, call, drop }`
-    // (`~/zenoh-pico/include/zenoh-pico/api/types.h:730-750`), so 24 B like
-    // closure_sample; `z_queryable_options_t` is `{ bool complete; }` in a
-    // default pico build (`Z_FEATURE_LOCAL_QUERYABLE` = 0, CMakeLists.txt:353).
+};
+
+// The answering end of a query. The closure families share `{ context, call, drop }`
+// (`~/zenoh-pico/include/zenoh-pico/api/types.h:730-750`), so 24 B like
+// closure_sample; `z_queryable_options_t` is `{ bool complete; }` in a
+// default pico build (`Z_FEATURE_LOCAL_QUERYABLE` = 0, CMakeLists.txt:353).
+#[cfg(feature = "queryable")]
+const _: () = {
+    use core::mem::size_of;
     assert!(size_of::<query::z_owned_closure_query_t>() == 24);
     assert!(size_of::<query::z_queryable_options_t>() == 1);
     assert!(size_of::<query::z_query_reply_err_options_t>() == 8);
@@ -166,6 +183,12 @@ const _: () = {
     // `z_source_info_t*`.
     assert!(size_of::<query::z_query_reply_options_t>() == 48);
     assert!(size_of::<query::z_query_reply_del_options_t>() == 40);
+};
+
+// The requesting end of a query.
+#[cfg(feature = "query")]
+const _: () = {
+    use core::mem::size_of;
     // R3b get plane. `z_owned_closure_reply_t` is the same
     // `{ context, call, drop }` shape (`api/types.h:745-749`).
     assert!(size_of::<get::z_owned_closure_reply_t>() == 24);

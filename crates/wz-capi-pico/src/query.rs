@@ -64,7 +64,7 @@
 //! could not check.
 
 use std::cell::UnsafeCell;
-use std::ffi::{c_int, c_void};
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
@@ -80,62 +80,17 @@ use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL,
 use crate::session::{session_state, z_loaned_session_t};
 use wz_capi_core::faces::{QblId, SharedSession};
 
-// --- pico enum-typed option fields -----------------------------------------
-//
-// pico's `z_congestion_control_t` / `z_priority_t` are plain C enums, so each
-// occupies an `int` in the option structs below. Both are documented
-// "Deprecated: ignored, taken from query" on the reply options
-// (`~/zenoh-pico/include/zenoh-pico/api/types.h:318-321`), so they are carried
-// for layout only.
-pub type z_congestion_control_t = c_int;
-pub type z_priority_t = c_int;
-
-/// pico `Z_CONGESTION_CONTROL_BLOCK` (`api/constants.h:216`) — the value pico's
-/// `z_query_reply_options_default` writes (`src/api/api.c:2118,2181`). NOT 0:
-/// that is `Z_CONGESTION_CONTROL_DROP`, a different documented default.
-pub(crate) const Z_CONGESTION_CONTROL_BLOCK: z_congestion_control_t = 1;
-
-/// pico `Z_PRIORITY_DEFAULT` = `Z_PRIORITY_DATA` = 5 (`api/constants.h:247-250`).
-pub(crate) const Z_PRIORITY_DEFAULT: z_priority_t = 5;
-
-/// pico `Z_CONGESTION_CONTROL_DROP` (`api/constants.h:215`) = 0. Named because
-/// this file's sibling ABI (`wz-capi-c`) INVERTS both values, and R311y545 paid
-/// for reading one crate's constant while writing the other's — the two enums
-/// look identical and are not.
-pub(crate) const Z_CONGESTION_CONTROL_DROP: z_congestion_control_t = 0;
-
-/// pico's `z_congestion_control_t` as wz's typed [`CongestionControl`].
-///
-/// R311y551. pico has no `BLOCK_FIRST`, so the mapping is total over its enum;
-/// an out-of-range value takes pico's own request-side default (BLOCK) rather
-/// than panicking, matching the permissive-decode spirit of
-/// [`priority_from_pico`].
-pub(crate) fn congestion_from_pico(
-    c: z_congestion_control_t,
-) -> wz_runtime_tokio::qos::CongestionControl {
-    use wz_runtime_tokio::qos::CongestionControl;
-    match c {
-        Z_CONGESTION_CONTROL_DROP => CongestionControl::Drop,
-        // BLOCK (1) and anything unrecognised — pico's `z_get_options_default`
-        // writes BLOCK, so an unknown int degrades to the default rather than
-        // silently downgrading delivery.
-        _ => CongestionControl::Block,
-    }
-}
-
-/// pico's `z_priority_t` as wz's typed [`Priority`].
-///
-/// R311y551. pico's enum spans 1..=7 (`Z_PRIORITY_REAL_TIME` .. `BACKGROUND`);
-/// wire priority 0 (`Control`) is zenoh's own control traffic and has no pico
-/// spelling, so it is accepted on the wire and never produced from a C option.
-/// Anything outside 0..=7 cannot fit the 3-bit field and clamps to the default.
-pub(crate) fn priority_from_pico(p: z_priority_t) -> wz_runtime_tokio::qos::Priority {
-    use wz_runtime_tokio::qos::Priority;
-    match u8::try_from(p) {
-        Ok(byte) if byte <= 7 => Priority::from_wire(byte),
-        _ => Priority::DEFAULT,
-    }
-}
+// The enum-typed option fields (`z_congestion_control_t`, `z_priority_t`) are in
+// `crate::qos`. Both are documented "Deprecated: ignored, taken from query" on the
+// reply options (`~/zenoh-pico/include/zenoh-pico/api/types.h:318-321`), so the reply
+// options below carry them for layout only.
+use crate::qos::{
+    z_congestion_control_t, z_priority_t, Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT,
+};
+use crate::reply_keyexpr::{
+    parameters_has_anyke, reply_keyexpr_is_covered, z_reply_keyexpr_t, Z_REPLY_KEYEXPR_ANY,
+    Z_REPLY_KEYEXPR_MATCHING_QUERY,
+};
 
 // --- opaque loaned query ---------------------------------------------------
 
@@ -146,80 +101,6 @@ pub(crate) fn priority_from_pico(p: z_priority_t) -> wz_runtime_tokio::qos::Prio
 #[repr(C)]
 pub struct z_loaned_query_t {
     _opaque: [u8; 0],
-}
-
-/// pico's `_anyke` selector-parameter key (`Z_SELECTOR_QUERY_MATCH`,
-/// `~/zenoh-pico/include/zenoh-pico/api/constants.h:18`).
-pub(crate) const ANYKE_PARAM: &[u8] = b"_anyke";
-
-/// pico's selector-parameter list separator (`_Z_QUERY_PARAMS_LIST_SEPARATOR`,
-/// `~/zenoh-pico/include/zenoh-pico/utils/query_params.h`).
-pub(crate) const PARAM_SEPARATOR: u8 = b';';
-
-/// Whether a query's selector parameters carry the `_anyke` key — pico's
-/// [`_z_parameters_has_anyke`](https://github.com/eclipse-zenoh/zenoh-pico)
-/// (`src/utils/query_params.c:46-70`), ported chunk-boundary rules and all.
-///
-/// This is how the RESPONDER learns `_anyke`: it is not a wire field but a
-/// SELECTOR PARAMETER. The querier's `accept_replies = Z_REPLY_KEYEXPR_ANY`
-/// makes the sender append `_anyke` to the parameter list
-/// (`src/protocol/codec/message.c:399-423`), and on reception `_implicit_anyke`
-/// is unconditionally false — pico's own comment says the flag "is signaled by
-/// the presence of the _anyke key in the parameters list, which is parsed
-/// later" (`codec/message.c:488-490`). So the responder-side derivation
-/// reduces to exactly this parse:
-/// `dst->_anyke = implicit_anyke || _z_parameters_has_anyke(...)`
-/// (`include/zenoh-pico/net/query.h:104`) with `implicit_anyke == false`.
-///
-/// The boundary checks are load-bearing and are why this is a real parse rather
-/// than a substring search: `_anyke` must start the list or follow a `;`, and
-/// must end the list or precede a `;`. Without them a parameter such as
-/// `no_anyke` or `_anykey=1` would be read as the flag.
-pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
-    let mut start = 0usize;
-    while start <= parameters.len() {
-        let Some(offset) = parameters[start..]
-            .windows(ANYKE_PARAM.len())
-            .position(|window| window == ANYKE_PARAM)
-        else {
-            return false;
-        };
-        let pos = start + offset;
-        let end = pos + ANYKE_PARAM.len();
-        let left_ok = pos == 0 || parameters[pos - 1] == PARAM_SEPARATOR;
-        let right_ok = end == parameters.len() || parameters[end] == PARAM_SEPARATOR;
-        if left_ok && right_ok {
-            return true;
-        }
-        start = end + 1;
-    }
-    false
-}
-
-/// Whether `reply` is covered by the query — zenoh's `reply ⊆ query` contract as
-/// pico enforces it: `!query->_anyke && !_z_declared_keyexpr_intersects(...)`
-/// → `_Z_ERR_KEYEXPR_NOT_MATCH` (`~/zenoh-pico/src/net/primitives.c:437-440`).
-///
-/// INTERSECTION, never string equality. The query keyexpr a queryable is asked
-/// under is routinely a PATTERN (a queryable declared on `a/**` sees the
-/// querier's `a/**`), while its replies carry CONCRETE keys — so equality would
-/// reject the ordinary wildcard case, not an edge case. Routed through the one
-/// matching SSOT ([`wz_runtime_tokio::keyexpr_match`](wz_runtime_tokio::keyexpr_match))
-/// rather than re-derived.
-///
-/// R311y833 — the intersection half now DELEGATES to
-/// [`wz_runtime_tokio::reply_acceptance::reply_keyexpr_intersects`] rather than
-/// re-deriving it. The rule was correct here and absent from the native
-/// runtime, which is the asymmetry y833 removed: one codebase had two getters
-/// with opposite default behaviour because this function was `pub(crate)` and
-/// structurally unreachable from `Session::query`. It stays as the RESPONDER
-/// gate pico spells at `vendor/zenoh-pico/src/net/primitives.c:438` — a
-/// different seam from the requester gate, kept because pico enforces both.
-pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: bool) -> bool {
-    if anyke {
-        return true;
-    }
-    wz_runtime_tokio::reply_acceptance::reply_keyexpr_intersects(query_keyexpr, reply)
 }
 
 /// R311y562 — the value metadata a staged reply carries, in the wz hint types
@@ -1443,15 +1324,6 @@ pub unsafe extern "C" fn z_query_payload(
         None => std::ptr::null(),
     }
 }
-
-/// pico `z_reply_keyexpr_t` (`api/constants.h:288-290`): the reply-keyexpr
-/// policy a query accepts.
-pub type z_reply_keyexpr_t = c_int;
-/// pico `Z_REPLY_KEYEXPR_ANY` — accept replies on any key (`constants.h:289`).
-pub const Z_REPLY_KEYEXPR_ANY: z_reply_keyexpr_t = 0;
-/// pico `Z_REPLY_KEYEXPR_MATCHING_QUERY` — accept only replies whose key
-/// intersects the query's (`constants.h:290`).
-pub const Z_REPLY_KEYEXPR_MATCHING_QUERY: z_reply_keyexpr_t = 1;
 
 /// Which replies this query accepts (pico `z_query_accepts_replies`,
 /// `src/api/api.c:469`): `_anyke ? ANY : MATCHING_QUERY`.

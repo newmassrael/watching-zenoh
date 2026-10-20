@@ -54,21 +54,39 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 # 15 -> 12 us on the loopback ping/pong, no worker-thread hop). Default on;
 # build with `--no-default-features` for the multi-thread runtime, or set
 # WZ_CAPI_WORKER_THREADS at run time (see wz-capi-core's feature of this name).
-default = ["serial-drive-own-thread", "rx-busy-poll", "liveliness", "advanced", "gossip"]
-# The capabilities pico's own CMake switches name (`Z_FEATURE_LIVELINESS`,
-# `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature of this crate: on in
-# a default build, so the drop-in exports what the reference build does, and off for a deployer
-# who wants the textbook minimum. A capability that is off is not linked: the session model
-# and the runtime plane behind it are not compiled in either (`wz-capi-core` is taken without
-# its default features, so each capability reaches it only through the feature below).
+default = [
+    "serial-drive-own-thread",
+    "rx-busy-poll",
+    "query",
+    "queryable",
+    "liveliness",
+    "liveliness-get",
+    "advanced",
+    "gossip",
+]
+# The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
+# `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
+# of this crate: on in a default build, so the drop-in exports what the reference build does,
+# and off for a deployer who wants the textbook minimum. A capability that is off is not
+# linked: the session model and the runtime plane behind it are not compiled in either
+# (`wz-capi-core` is taken without its default features, so each capability reaches it only
+# through the feature below).
 #
-# `liveliness`: token, subscriber and get. The get half is `wz-capi-core`'s `liveliness-get`
-# (its drive loop sweeps the get deadlines) and the runtime's feature behind it.
-liveliness = ["wz-capi-core/liveliness-get"]
+# `query`: `z_get` and the querier, the requesting end of a query.
+query = ["wz-capi-core/query"]
+# `queryable`: `z_declare_queryable` and the replies, the answering end of a query.
+queryable = ["wz-capi-core/queryable"]
+# `liveliness`: the token and the subscriber.
+liveliness = ["wz-capi-core/liveliness"]
+# `liveliness-get`: the snapshot get of the liveliness plane. It is a query, so it needs the
+# requesting end of one; the get half is `wz-capi-core`'s `liveliness-get` (its drive loop
+# sweeps the get deadlines) and the runtime's feature behind it.
+liveliness-get = ["liveliness", "query", "wz-capi-core/liveliness-get"]
 # `advanced`: the advanced publisher and subscriber and the plane they replay through.
-# It implies `liveliness`: an advanced subscriber's publisher detection is a liveliness
-# subscription, and the module declares it through the liveliness plane.
-advanced = ["liveliness", "wz-capi-core/advanced"]
+# It implies `liveliness`, because an advanced subscriber's publisher detection is a liveliness
+# subscription declared through the liveliness plane, and `queryable`, because the publisher's
+# cache is a queryable.
+advanced = ["liveliness", "queryable", "wz-capi-core/advanced"]
 # `gossip`: a session that is told of a node by one it holds a link to dials it (see the
 # runtime's feature of the same name). Pico itself has no such plane.
 gossip = ["wz-capi-core/gossip"]
@@ -115,14 +133,43 @@ transport-link-tls = ["wz-runtime-tokio/transport-link-tls", "wz-capi-core/trans
 name = "advanced_subscriber_faces"
 required-features = ["advanced"]
 
-# It drives the advanced publisher and the liveliness subscriber together.
+# It drives the advanced publisher, the liveliness subscriber and a get together.
 [[test]]
 name = "pubsub_roundtrip"
-required-features = ["advanced"]
+required-features = ["advanced", "query"]
 
 [[test]]
 name = "liveliness_face_death"
 required-features = ["liveliness"]
+
+[[test]]
+name = "get_roundtrip"
+required-features = ["query"]
+
+# These ask with a get or a querier and answer with a queryable, so they need both ends.
+[[test]]
+name = "querier_declared_encoding_roundtrip"
+required-features = ["query", "queryable"]
+
+[[test]]
+name = "reply_err_options_roundtrip"
+required-features = ["query", "queryable"]
+
+[[test]]
+name = "reply_options_roundtrip"
+required-features = ["query", "queryable"]
+
+[[test]]
+name = "remote_only_queryable"
+required-features = ["query", "queryable"]
+
+[[test]]
+name = "matching_multiface"
+required-features = ["query", "queryable"]
+
+[[test]]
+name = "queryable_roundtrip"
+required-features = ["query", "queryable"]
 
 [lints]
 workspace = true
@@ -216,21 +263,21 @@ wz-capi-core = { path = "../wz-capi-core", default-features = false }
 # `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION` are both 1 in the pinned
 # pico CMake config, so upstream's `z_advanced_pub.c` / `z_advanced_sub.c`
 # compile their advanced half unconditionally and a drop-in must export it.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+#
+# The dependency takes NO default features: the runtime's default bundle names every plane
+# (query, liveliness, ...) and would make each of them this ABI's whatever its features say.
+# What every session is made of comes through `wz-capi-core`, and each capability through the
+# feature of this crate that forwards to the core's. Three of the features the notes above
+# justify are therefore no longer named here, because the capability that needs them names
+# them: `query-timeout` is part of `wz-capi-core/query` (a get without it keeps no deadline,
+# the silent shape described above), and `reply-source-info` is part of
+# `wz-capi-core/queryable` (R311y562: `z_query_reply_options_t` declares a `source_info`, and
+# without the emit gate it is read, staged and silently dropped at the codec, measured by
+# `tests/reply_options_roundtrip.rs`). `liveliness-get` is `wz-capi-core/liveliness-get`.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
     "routing-accept",
-    "query-timeout",
     "transport-fragmentation",
     "scouting-active",
-    # R311y562 — the reply-side source-info EMIT gate, needed because this ABI
-    # exposes the field. `z_query_reply_options_t` / `z_query_reply_del_options_t`
-    # each declare `z_source_info_t *source_info` in the reference build
-    # (`Z_FEATURE_UNSTABLE_API` is defined there), and pico's own
-    # `z_query_reply` hands it to `_z_send_reply`, which encodes the body ext.
-    # Without this the field is read, staged, and then silently dropped at the
-    # codec — measured exactly that way by
-    # `tests/reply_options_roundtrip.rs`, which saw the timestamp and the
-    # attachment arrive while the source_info did not.
-    "reply-source-info",
 ] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions

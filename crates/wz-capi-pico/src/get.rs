@@ -140,7 +140,7 @@ use crate::keyexpr::{keyexpr_str, wire_key_of};
 use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
-use crate::query::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
+use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
 use wz_capi_core::faces::{SharedSession, WireKey};
@@ -489,7 +489,7 @@ unsafe impl Sync for CReplyClosure {}
 /// it is the deployment the crate exists for.
 ///
 /// Routed through the SAME intersection SSOT the responder side uses
-/// ([`crate::query::reply_keyexpr_is_covered`]) rather than re-derived, so the
+/// ([`crate::reply_keyexpr::reply_keyexpr_is_covered`]) rather than re-derived, so the
 /// two halves cannot drift apart.
 pub(crate) struct ReplyGate {
     /// The keyexpr the get asked under — pico's `pen_qry->_key`.
@@ -512,7 +512,11 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     };
     // pico drops a reply the query does not accept BEFORE building it
     // (`query.c:121-127`) — the callback never sees it.
-    if !crate::query::reply_keyexpr_is_covered(&gate.query_keyexpr, view.keyexpr(), gate.anyke) {
+    if !crate::reply_keyexpr::reply_keyexpr_is_covered(
+        &gate.query_keyexpr,
+        view.keyexpr(),
+        gate.anyke,
+    ) {
         return;
     }
     let mut marshal = ReplyMarshal::new(view);
@@ -768,15 +772,15 @@ pub unsafe extern "C" fn z_get_options_default(options: *mut z_get_options_t) {
     };
     // `z_internal_congestion_control_default_request()` = BLOCK
     // (`api/constants.h:224-226`) — NOT the DROP the push-side default uses.
-    (*options).congestion_control = crate::query::Z_CONGESTION_CONTROL_BLOCK;
-    (*options).priority = crate::query::Z_PRIORITY_DEFAULT;
+    (*options).congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
+    (*options).priority = crate::qos::Z_PRIORITY_DEFAULT;
     (*options).is_express = false;
     (*options).target = Z_QUERY_TARGET_BEST_MATCHING;
     (*options).timeout_ms = 0;
     (*options).attachment = std::ptr::null_mut();
     (*options).source_info = std::ptr::null_mut();
     (*options).cancellation_token = std::ptr::null_mut();
-    (*options).accept_replies = crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY;
+    (*options).accept_replies = crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 }
 
 // --- query-option constructors ---------------------------------------------
@@ -804,7 +808,7 @@ pub extern "C" fn z_query_target_default() -> z_query_target_t {
 /// which is `Z_REPLY_KEYEXPR_MATCHING_QUERY` (`api/constants.h:291`), NOT ANY.
 #[no_mangle]
 pub extern "C" fn z_reply_keyexpr_default() -> z_reply_keyexpr_t {
-    crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY
+    crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY
 }
 
 /// pico `z_query_consolidation_auto` (`api.c:446-448`).
@@ -907,8 +911,8 @@ fn get_options(
         // closed rather than re-stated: they map onto pico's `_z_n_qos_t` on
         // the Request (`api.c:1773`), which is the same packed byte
         // `QueryMetadata::qos` now emits.
-        .with_priority(crate::query::priority_from_pico(qos.priority))
-        .with_congestion_control(crate::query::congestion_from_pico(qos.congestion_control))
+        .with_priority(crate::qos::priority_from_pico(qos.priority))
+        .with_congestion_control(crate::qos::congestion_from_pico(qos.congestion_control))
         .with_express(qos.is_express);
 
     // R311y562 — the query's own VALUE metadata. Both fields were carried and
@@ -1027,7 +1031,7 @@ fn parameters_has_time_selector(parameters: &[u8]) -> bool {
 /// by hand AND asked for ANY does not get it twice.
 fn transmit_parameters(parameters: &[u8], accept_replies: z_reply_keyexpr_t) -> Vec<u8> {
     let mut out = parameters.to_vec();
-    let anyke_option = accept_replies == crate::query::Z_REPLY_KEYEXPR_ANY;
+    let anyke_option = accept_replies == crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY;
     if anyke_option && !parameters_has_anyke(&out) {
         if !out.is_empty() {
             out.push(PARAM_SEPARATOR);
@@ -1118,7 +1122,7 @@ unsafe fn get_inner(
             Z_QUERY_TARGET_BEST_MATCHING,
             Z_CONSOLIDATION_MODE_AUTO,
             0u64,
-            crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY,
+            crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
             PicoQueryQos::defaults(),
         )
     } else {
@@ -1211,9 +1215,9 @@ pub(crate) struct PicoQueryValueMeta {
 pub(crate) struct PicoQueryQos {
     /// pico `z_congestion_control_t` — BLOCK is **1** here (inverted vs
     /// zenoh-c).
-    pub(crate) congestion_control: crate::query::z_congestion_control_t,
+    pub(crate) congestion_control: crate::qos::z_congestion_control_t,
     /// pico `z_priority_t` — 1..=7, default `Z_PRIORITY_DATA` (5).
-    pub(crate) priority: crate::query::z_priority_t,
+    pub(crate) priority: crate::qos::z_priority_t,
     /// Bypass batching for lower latency.
     pub(crate) is_express: bool,
 }
@@ -1227,8 +1231,8 @@ impl PicoQueryQos {
     /// `z_get` does put a QoS ext on the wire, which is what pico itself does.
     pub(crate) fn defaults() -> Self {
         Self {
-            congestion_control: crate::query::Z_CONGESTION_CONTROL_BLOCK,
-            priority: crate::query::Z_PRIORITY_DEFAULT,
+            congestion_control: crate::qos::Z_CONGESTION_CONTROL_BLOCK,
+            priority: crate::qos::Z_PRIORITY_DEFAULT,
             is_express: false,
         }
     }
@@ -1256,7 +1260,7 @@ pub(crate) fn issue_get(
     target: z_query_target_t,
     consolidation: z_consolidation_mode_t,
     timeout_ms: u64,
-    accept_replies: crate::query::z_reply_keyexpr_t,
+    accept_replies: crate::reply_keyexpr::z_reply_keyexpr_t,
     payload: Option<crate::bytes::ByteBuf>,
     attachment: Option<crate::bytes::ByteBuf>,
     qos: PicoQueryQos,
@@ -1898,7 +1902,7 @@ mod tests {
         // 0 is DROP in pico and BLOCK in zenoh-c. A mapping cribbed from the
         // sibling inverts the `nodrop` bit, and this assertion is what sees it.
         let qos = PicoQueryQos {
-            congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
+            congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
             priority: 1, // Z_PRIORITY_REAL_TIME, distinct from the default (5).
             is_express: true,
         };
@@ -1944,8 +1948,8 @@ mod tests {
     /// This is the querier half of that round-trip.
     #[test]
     fn accept_replies_any_appends_picos_implicit_anyke() {
-        let any = crate::query::Z_REPLY_KEYEXPR_ANY;
-        let matching = crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY;
+        let any = crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY;
+        let matching = crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 
         // Empty selector → the bare key (pico's no-params encoder arm).
         assert_eq!(transmit_parameters(b"", any), b"_anyke".to_vec());
@@ -1973,12 +1977,15 @@ mod tests {
     #[test]
     fn transmitted_anyke_is_recovered_by_the_responder_parse() {
         for selector in [&b""[..], b"a=1", b"a=1;b=2", b"no_anyke", b"_anykey=1"] {
-            let sent = transmit_parameters(selector, crate::query::Z_REPLY_KEYEXPR_ANY);
+            let sent = transmit_parameters(selector, crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY);
             assert!(
                 parameters_has_anyke(&sent),
                 "an ANY get's selector {sent:?} must parse as _anyke on the responder"
             );
-            let sent = transmit_parameters(selector, crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY);
+            let sent = transmit_parameters(
+                selector,
+                crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY,
+            );
             assert!(
                 !parameters_has_anyke(&sent),
                 "a MATCHING_QUERY get's selector {sent:?} must NOT parse as _anyke"
@@ -1995,8 +2002,8 @@ mod tests {
     /// also pins the two halves against drifting apart.
     #[test]
     fn the_reply_gate_drops_what_the_query_does_not_accept() {
-        let matching = crate::query::Z_REPLY_KEYEXPR_MATCHING_QUERY;
-        let any = crate::query::Z_REPLY_KEYEXPR_ANY;
+        let matching = crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY;
+        let any = crate::reply_keyexpr::Z_REPLY_KEYEXPR_ANY;
 
         // The default is MATCHING_QUERY, so the gate is ON by default.
         let gate = |ke: &str, accept| ReplyGate {
@@ -2009,13 +2016,13 @@ mod tests {
             !g.anyke,
             "MATCHING_QUERY is the default and leaves anyke off"
         );
-        assert!(crate::query::reply_keyexpr_is_covered(
+        assert!(crate::reply_keyexpr::reply_keyexpr_is_covered(
             &g.query_keyexpr,
             "a/b",
             g.anyke
         ));
         assert!(
-            !crate::query::reply_keyexpr_is_covered(&g.query_keyexpr, "z/b", g.anyke),
+            !crate::reply_keyexpr::reply_keyexpr_is_covered(&g.query_keyexpr, "z/b", g.anyke),
             "a reply on a disjoint key must be dropped — pico's query.c:121"
         );
 
@@ -2025,7 +2032,7 @@ mod tests {
             g.anyke,
             "Z_REPLY_KEYEXPR_ANY must reach the receive gate too"
         );
-        assert!(crate::query::reply_keyexpr_is_covered(
+        assert!(crate::reply_keyexpr::reply_keyexpr_is_covered(
             &g.query_keyexpr,
             "z/b",
             g.anyke

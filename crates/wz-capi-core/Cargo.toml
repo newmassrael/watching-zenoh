@@ -51,7 +51,16 @@ path = "src/lib.rs"
 # so this crate builds and tests on its own; an ABI crate takes this crate with
 # `default-features = false` and names the ones it exports, so a capability its ABI leaves out
 # is compiled into neither the ABI nor this model.
-default = ["rx-busy-poll", "liveliness-get", "advanced", "group", "gossip"]
+default = [
+    "rx-busy-poll",
+    "query",
+    "queryable",
+    "liveliness",
+    "liveliness-get",
+    "advanced",
+    "group",
+    "gossip",
+]
 # The two link kinds the LISTEN role's accept-config arms are cfg'd on. They
 # forward to wz-runtime-tokio exactly as wz-capi-pico's twins do; the drive half
 # moved here carries the `#[cfg]`s, so the feature names must exist here or the
@@ -122,7 +131,48 @@ session-extshm = ["transport-shm", "wz-runtime-tokio/session-extshm"]
 # `sweep_expired_liveliness_gets` and the wake arm folds in `next_liveliness_get_deadline_ms`.
 # The two are one switch with the ABI's `z_liveliness_get`, so a build never arms a deadline
 # no loop enforces (which blocks the C caller in `z_recv` forever).
-liveliness-get = ["wz-runtime-tokio/liveliness-get"]
+liveliness-get = ["liveliness", "query", "wz-runtime-tokio/liveliness-get"]
+# The liveliness token and subscriber of the runtime: the declarations a token and a presence
+# subscription are made of, and the history replay a subscriber can ask for.
+liveliness = [
+    "wz-runtime-tokio/liveliness-token",
+    "wz-runtime-tokio/liveliness-subscriber",
+    "wz-runtime-tokio/liveliness-history",
+    "wz-runtime-tokio/declare-token",
+]
+# The requesting end of a query: the get and everything a reply carries back to it.
+query = [
+    "wz-runtime-tokio/query-get",
+    "wz-runtime-tokio/query-reply",
+    "wz-runtime-tokio/query-target",
+    "wz-runtime-tokio/query-timeout",
+    "wz-runtime-tokio/query-consolidation",
+    "wz-runtime-tokio/query-attachment",
+    "wz-runtime-tokio/query-selector-parameters",
+    "wz-runtime-tokio/query-reply-err",
+    "wz-runtime-tokio/query-source-info",
+    "wz-runtime-tokio/query-value",
+    "wz-runtime-tokio/codec-request",
+    "wz-runtime-tokio/codec-response",
+    "wz-runtime-tokio/codec-response-final",
+]
+# The answering end of a query: the queryable and its replies.
+queryable = [
+    "wz-runtime-tokio/query-queryable",
+    "wz-runtime-tokio/declare-queryable",
+    # The reply-side source-info EMIT gate: `z_query_reply_options_t` declares a
+    # `source_info` in the reference build, and without this the field is read, staged and
+    # silently dropped at the codec.
+    "wz-runtime-tokio/reply-source-info",
+    "wz-runtime-tokio/query-reply-err",
+    "wz-runtime-tokio/query-source-info",
+    "wz-runtime-tokio/query-attachment",
+    "wz-runtime-tokio/query-selector-parameters",
+    "wz-runtime-tokio/query-value",
+    "wz-runtime-tokio/codec-request",
+    "wz-runtime-tokio/codec-response",
+    "wz-runtime-tokio/codec-response-final",
+]
 # The advanced publisher and subscriber planes the face registry replays through.
 # `-history` is the widest of the subscriber chain (it implies `-recovery`, which implies
 # `-subscriber`), so it composes the whole plane the C option structs can ask for. Pico-native
@@ -177,7 +227,51 @@ getrandom = "0.2"
 # for zenoh-c must be able to hold one; whether a given session does is the config's. The
 # feature brings zenoh's own `uhlc` and the storage module, and a role that does not stamp
 # (a peer or client by default, as upstream ships) holds no clock and pays nothing per message.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
+    # What every session is made of, however slim: the handshake and frame codecs, the
+    # declarations a subscriber needs, the TCP and UDP unicast links with their keep-alive and
+    # batching, the publication path, the session's open, accept and reconnect, and the key
+    # expression algebra. The capabilities a deployer can leave out are the features above.
+    "codec-init-body",
+    "codec-open-body",
+    "codec-keep-alive",
+    "codec-close",
+    "codec-scout",
+    "codec-hello",
+    "codec-join",
+    "codec-fragment",
+    "codec-frame",
+    "codec-push",
+    "codec-declare",
+    "declare-final",
+    "declare-interest",
+    "declare-keyexpr",
+    "declare-subscriber",
+    "declare-undeclare",
+    "transport-link-tcp",
+    "transport-link-udp",
+    "transport-unicast",
+    "transport-keepalive",
+    "transport-batching",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-allow-loop",
+    "pubsub-attachment",
+    "pubsub-timestamp",
+    "pubsub-encoding",
+    "pubsub-source-info",
+    "pubsub-priority",
+    "pubsub-congestion-control",
+    "pubsub-express",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "session-reconnect",
+    "session-matching",
+    "keyexpr-canon",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "keyexpr-includes",
     "routing-accept",
     "scouting-active",
     "link-interfaces",

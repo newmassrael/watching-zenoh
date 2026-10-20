@@ -406,6 +406,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
 /// The defect survived R311y565's mechanical layout gate because that gate pins
 /// the structs its `PINNED` table names and this type was not in it. Adding it
 /// there is the half of this fix that keeps the next one from happening.
+#[cfg(feature = "liveliness-get")]
 #[repr(C)]
 pub struct z_liveliness_get_options_t {
     /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
@@ -426,6 +427,7 @@ pub struct z_liveliness_get_options_t {
 /// (`crates/wz-integration-tests/tests/pico_abi_option_layout.rs`) is what
 /// notices upstream MOVING the field; this const is the compile-time floor under
 /// it.
+#[cfg(feature = "liveliness-get")]
 const _: () = {
     assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 16);
     assert!(std::mem::align_of::<z_liveliness_get_options_t>() == 8);
@@ -434,6 +436,7 @@ const _: () = {
 
 /// Fill default liveliness-get options (pico `z_liveliness_get_options_default`,
 /// `src/api/liveliness.c:111`).
+#[cfg(feature = "liveliness-get")]
 #[no_mangle]
 pub unsafe extern "C" fn z_liveliness_get_options_default(
     options: *mut z_liveliness_get_options_t,
@@ -474,6 +477,7 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
 /// its own clone across the loop so a face that answers and finalises early
 /// cannot complete the get while later faces are still being issued — the same
 /// `guard` discipline as [`crate::get`]'s fan.
+#[cfg(feature = "liveliness-get")]
 #[no_mangle]
 pub unsafe extern "C" fn z_liveliness_get(
     zs: *const z_loaned_session_t,

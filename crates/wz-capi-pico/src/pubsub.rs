@@ -216,6 +216,7 @@ impl SampleMarshal {
     /// is what it did until a real zenoh-pico `z_queryable_attachment` replied
     /// with an attachment and upstream's `z_get_attachment.c` on wz printed the
     /// value with no attachment line under it.
+    #[cfg(feature = "query")]
     pub(crate) fn with_reply_metadata(
         mut self,
         attachment: Option<&[u8]>,
@@ -784,8 +785,8 @@ impl PublisherQos {
     pub(crate) fn pico_default() -> Self {
         Self {
             encoding: None,
-            congestion_control: push_congestion_from_pico(crate::query::Z_CONGESTION_CONTROL_DROP),
-            priority: crate::query::priority_from_pico(crate::query::Z_PRIORITY_DEFAULT),
+            congestion_control: push_congestion_from_pico(crate::qos::Z_CONGESTION_CONTROL_DROP),
+            priority: crate::qos::priority_from_pico(crate::qos::Z_PRIORITY_DEFAULT),
             is_express: false,
             reliability: reliability_from_pico(Z_RELIABILITY_RELIABLE),
         }
@@ -807,7 +808,7 @@ impl PublisherQos {
         Self {
             encoding: crate::encoding::take_moved_encoding(options.encoding),
             congestion_control: push_congestion_from_pico(options.congestion_control),
-            priority: crate::query::priority_from_pico(options.priority),
+            priority: crate::qos::priority_from_pico(options.priority),
             is_express: options.is_express,
             reliability: reliability_from_pico(options.reliability),
         }
@@ -1336,8 +1337,8 @@ pub unsafe extern "C" fn z_put_options_default(options: *mut z_put_options_t) {
     }
     *options = z_put_options_t {
         encoding: std::ptr::null_mut(),
-        congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
-        priority: crate::query::Z_PRIORITY_DEFAULT,
+        congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
+        priority: crate::qos::Z_PRIORITY_DEFAULT,
         timestamp: std::ptr::null_mut(),
         is_express: false,
         attachment: std::ptr::null_mut(),
@@ -1356,8 +1357,8 @@ pub unsafe extern "C" fn z_delete_options_default(options: *mut z_delete_options
         return;
     }
     *options = z_delete_options_t {
-        congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
-        priority: crate::query::Z_PRIORITY_DEFAULT,
+        congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
+        priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
         timestamp: std::ptr::null_mut(),
         reliability: Z_RELIABILITY_RELIABLE,
@@ -1390,7 +1391,7 @@ pub const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
 
 /// A caller's PUSH-side `z_congestion_control_t` as wz's.
 ///
-/// Distinct from [`crate::query::congestion_from_pico`] in ONE way, and it is
+/// Distinct from [`crate::qos::congestion_from_pico`] in ONE way, and it is
 /// the reason this is not a call to that function: the two differ in what an
 /// UNRECOGNISED value degrades to. pico's request-side default is BLOCK
 /// (`z_get_options_default`) and its push-side default is DROP
@@ -1400,7 +1401,7 @@ pub const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
 /// R311y545 paid for exactly that.
 fn push_congestion_from_pico(c: c_int) -> wz_runtime_tokio::qos::CongestionControl {
     match c {
-        crate::query::Z_CONGESTION_CONTROL_BLOCK => wz_runtime_tokio::qos::CongestionControl::Block,
+        crate::qos::Z_CONGESTION_CONTROL_BLOCK => wz_runtime_tokio::qos::CongestionControl::Block,
         _ => wz_runtime_tokio::qos::CongestionControl::Drop,
     }
 }
@@ -1499,7 +1500,7 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
     let attachment = take_moved_bytes((*options).attachment);
     let encoding = crate::encoding::take_moved_encoding((*options).encoding);
     opts = opts
-        .with_priority(crate::query::priority_from_pico((*options).priority))
+        .with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
         .with_reliability(reliability_from_pico((*options).reliability));
@@ -1530,7 +1531,7 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
         return opts;
     }
     opts = opts
-        .with_priority(crate::query::priority_from_pico((*options).priority))
+        .with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
         .with_reliability(reliability_from_pico((*options).reliability));
@@ -1711,8 +1712,8 @@ pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_o
     }
     *options = z_publisher_options_t {
         encoding: std::ptr::null_mut(),
-        congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
-        priority: crate::query::Z_PRIORITY_DEFAULT,
+        congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
+        priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
         reliability: Z_RELIABILITY_RELIABLE,
     };

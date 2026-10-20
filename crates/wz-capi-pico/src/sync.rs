@@ -528,6 +528,7 @@ pub(crate) use wz_capi_core::cancellation::CancellationToken;
 ///
 /// # Safety
 /// `moved` must be null or a valid moved token this crate produced.
+#[cfg(feature = "query")]
 pub(crate) unsafe fn take_moved_cancellation_token(
     moved: *mut z_moved_cancellation_token_t,
 ) -> Option<Arc<CancellationToken>> {
