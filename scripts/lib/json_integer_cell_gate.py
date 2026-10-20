@@ -231,6 +231,24 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             "`length_expected`",
         ),
     ),
+    # The two numbers of one difference in an `expectation` block (e2e_open 3), written
+    # by the one door that compares a frame with the header values a caller expects.
+    ("crates/wz-capture/src/e2e_json.rs", "open_expecting_document"): (
+        Cell(
+            "e2e_open",
+            "a difference's expected",
+            "the `expected` and `found` of a difference in the `expectation` of an `e2e_open` document",
+            "the `expected` and the `found` value of a difference",
+            born=3,
+        ),
+        Cell(
+            "e2e_open",
+            "a difference's found",
+            "the `expected` and `found` of a difference in the `expectation` of an `e2e_open` document",
+            "the `expected` and the `found` value of a difference",
+            born=3,
+        ),
+    ),
     # ONE call writes every integer a field of a typed body listing holds (a
     # signed one mirrors the door at the same line on the negative side), so the
     # value is declared as the one cell the call is.

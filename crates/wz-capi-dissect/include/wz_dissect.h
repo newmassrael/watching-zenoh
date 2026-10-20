@@ -881,7 +881,11 @@
  * about); to the integer `value` of a field in the `body` listing of an
  * `e2e_open` document (a key that exists from e2e_open 2 and takes the rule from
  * its first appearance: an int64, a uint64 or a fixed64 passes the line, and a
- * negative value is a string past -(2^53 - 1)); to the `crc_computed`, `length_field`, `length_expected`, `counter`
+ * negative value is a string past -(2^53 - 1)); to the `expected` and `found`
+ * of a difference in the `expectation` of an `e2e_open` document (keys that
+ * exist from e2e_open 3 and take the rule from their first appearance: each is
+ * the logical value of a header field or of one of its parts, which can be 64
+ * bits wide); to the `crc_computed`, `length_field`, `length_expected`, `counter`
  * and `silence_ms` of an `e2e` block and the `value` of each entry of its
  * `slot.identity` (keys that exist from field document 34 and take the rule
  * from their first appearance: the block's `header` fields are the cells the
