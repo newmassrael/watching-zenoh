@@ -276662,6 +276662,56 @@
         "Nothing holds the 2z array to hosted reach: two members ran nowhere by default until this round, found by hand. A gate that every 2z member is named in run-ci.sh or a workflow would hold it."
       ]
     },
+    "Round 3393": {
+      "decision_summary": "Let the pico C ABI leave capabilities out by configuration, and make the live and window field doors cost what arrived. wz-capi-core and wz-capi-pico gain query, queryable, liveliness, liveliness-get, advanced, group and gossip features (default on, runtime taken without defaults, the ABI's 803 symbols unchanged); pub/sub only is 24 percent less text than before, measured on one host. A window that ended inside a list left the list to be walked again from its first message and the container to be read whole: windows now go on where the last ended, with chunked second reads from checkpoints (11 windows over 40,004 rows walked 400,040 messages, now 40,004). A registered end-to-end profile restarted every live step: the counters now go on across steps, and a slot judged from two lists still walks the whole capture (103 of 103 steps restarted, now 1).",
+      "changes_bullets": [
+        "wz-capi-core: features query, queryable, liveliness, liveliness-get, advanced, group, gossip; the runtime dependency takes no defaults and a base list; gossip policy type in gossip.rs.",
+        "wz-capi-pico: features query, queryable, liveliness, liveliness-get, advanced, gossip forward to the core's; entity.rs, qos.rs, reply_keyexpr.rs hold what both ends of a plane read; tests that need a capability declare it; the facade api-compat-pico forwards all.",
+        "wz-capture fields_json: a window's end is the walk's saved place; the capture order is made for the window only; the container's second read goes by chunks from checkpoints (RereadResume), pruned by the oldest held packet.",
+        "wz-capture e2e_slots, payload_decode, fields_json: the end-to-end slot ledger goes on across since-steps; the ledger records which list judged each slot and a shared slot restarts the walk; held rows are counted before ranges are sorted.",
+        "wz-capi-dissect: tests pin windows equal to the whole document row for row and each message visited once, and the e2e continuation against the same handle's whole document; two measurements print per-step cost.",
+        "discard_site_lint: the checkpoint prune and the chunk eviction are registered as owing nothing."
+      ],
+      "verification_bullets": [
+        "pc2, release: libwz_capi_pico.so text 4,063,665 (baseline), 3,950,937 (default), 3,376,004 (query and queryable), 3,094,707 (pub/sub only); exported dynamic symbols 803 before and after; clippy -D warnings over 16 capi-core and 9 pico feature subsets with tests; wz-capi-core and wz-capi-pico tests 221 passed.",
+        "pc2: windows over a 40,004-row flow walked 400,040 messages and restarted 10 times before, 40,004 and once after; 40 interleaved flows with a profile registered restarted 103 of 103 steps and walked 18,928 messages per step at 19.4k rows before, restarted once and walked 195 after, step 3.7 ms to 0.55 ms.",
+        "Mutations: saved position set to everything produced (windows hold 3 of 124 rows), forced restart (42 starts), shared-slot check off (differs from the whole document at the crossing step), counters never carried (differs at step 3); each reverted and the file byte-identical.",
+        "Debug profile: wz-capture lib and wz-capi-dissect 1425 passed, 0 failed; the 105 round-fed static gates exit 0 on the tree before the rebase."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The pico library is still 2.1 times libzenohpico on the AP profile (3.09 MB against 1.48 MB); the engine (drive, accept, scouting, tokio) is what remains, and a same-condition size needs the no_std MCU profile.",
+        "MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified.",
+        "wz-capi-c and the Zephyr client image have no capability features yet.",
+        "An end-to-end slot judged from two lists walks the whole capture at every step; held-row pruning of the checkpoints uses the first held message of each list."
+      ],
+      "publishable_decision_summary": "Let the pico C ABI leave capabilities out by configuration, and make the live and window field doors cost what arrived. wz-capi-core and wz-capi-pico gain query, queryable, liveliness, liveliness-get, advanced, group and gossip features (default on, runtime taken without defaults, the ABI's 803 symbols unchanged); pub/sub only is 24 percent less text than before, measured on one host. A window that ended inside a list left the list to be walked again from its first message and the container to be read whole: windows now go on where the last ended, with chunked second reads from checkpoints (11 windows over 40,004 rows walked 400,040 messages, now 40,004). A registered end-to-end profile restarted every live step: the counters now go on across steps, and a slot judged from two lists still walks the whole capture (103 of 103 steps restarted, now 1).",
+      "publishable_changes_bullets": [
+        "wz-capi-core: features query, queryable, liveliness, liveliness-get, advanced, group, gossip; the runtime dependency takes no defaults and a base list; gossip policy type in gossip.rs.",
+        "wz-capi-pico: features query, queryable, liveliness, liveliness-get, advanced, gossip forward to the core's; entity.rs, qos.rs, reply_keyexpr.rs hold what both ends of a plane read; tests that need a capability declare it; the facade api-compat-pico forwards all.",
+        "wz-capture fields_json: a window's end is the walk's saved place; the capture order is made for the window only; the container's second read goes by chunks from checkpoints (RereadResume), pruned by the oldest held packet.",
+        "wz-capture e2e_slots, payload_decode, fields_json: the end-to-end slot ledger goes on across since-steps; the ledger records which list judged each slot and a shared slot restarts the walk; held rows are counted before ranges are sorted.",
+        "wz-capi-dissect: tests pin windows equal to the whole document row for row and each message visited once, and the e2e continuation against the same handle's whole document; two measurements print per-step cost.",
+        "discard_site_lint: the checkpoint prune and the chunk eviction are registered as owing nothing."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, release: libwz_capi_pico.so text 4,063,665 (baseline), 3,950,937 (default), 3,376,004 (query and queryable), 3,094,707 (pub/sub only); exported dynamic symbols 803 before and after; clippy -D warnings over 16 capi-core and 9 pico feature subsets with tests; wz-capi-core and wz-capi-pico tests 221 passed.",
+        "pc2: windows over a 40,004-row flow walked 400,040 messages and restarted 10 times before, 40,004 and once after; 40 interleaved flows with a profile registered restarted 103 of 103 steps and walked 18,928 messages per step at 19.4k rows before, restarted once and walked 195 after, step 3.7 ms to 0.55 ms.",
+        "Mutations: saved position set to everything produced (windows hold 3 of 124 rows), forced restart (42 starts), shared-slot check off (differs from the whole document at the crossing step), counters never carried (differs at step 3); each reverted and the file byte-identical.",
+        "Debug profile: wz-capture lib and wz-capi-dissect 1425 passed, 0 failed; the 105 round-fed static gates exit 0 on the tree before the rebase."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pico library is still 2.1 times libzenohpico on the AP profile (3.09 MB against 1.48 MB); the engine (drive, accept, scouting, tokio) is what remains, and a same-condition size needs the no_std MCU profile.",
+        "MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified.",
+        "wz-capi-c and the Zephyr client image have no capability features yet.",
+        "An end-to-end slot judged from two lists walks the whole capture at every step; held-row pruning of the checkpoints uses the first held message of each list."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
