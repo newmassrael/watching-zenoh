@@ -90,7 +90,12 @@ struct SlotHead {
     refs: Cell<usize>,
     /// Drop the body in place and mark the slot free. Called ONCE, when `refs`
     /// reaches zero, with the head of the slot the pointer was made for.
-    release: unsafe fn(&'static SlotHead),
+    ///
+    /// `None` while the slot is free, and set by `claim`: a table is a `static`, and a
+    /// function pointer in its initial value is a non-zero byte, which makes the linker
+    /// place the WHOLE table in `.data` (flash and RAM) where an all-zero one is `.bss`
+    /// (RAM only). On the T2G image that was 73 KB of flash for two slots.
+    release: Cell<Option<unsafe fn(&'static SlotHead)>>,
 }
 
 impl SlotHead {
@@ -104,11 +109,15 @@ impl SlotHead {
         let left = self.refs.get() - 1;
         self.refs.set(left);
         if left == 0 {
-            // SAFETY: `release` is the one the cell was built with, called with
-            // that cell's own head, and exactly once: the count has just reached
-            // zero, no handle holds the slot, and the slot cannot be claimed
-            // again until `release` marks it free.
-            unsafe { (self.release)(self) }
+            // `claim` set it before the first handle existed, so a handle that
+            // reaches zero always finds it.
+            if let Some(release) = self.release.get() {
+                // SAFETY: `release` is the one `claim` set for this cell, called with
+                // that cell's own head, and exactly once: the count has just reached
+                // zero, no handle holds the slot, and the slot cannot be claimed
+                // again until `release` marks it free.
+                unsafe { release(self) }
+            }
         }
     }
 }
@@ -168,7 +177,7 @@ impl<R: SessionRuntime, T: TimeSource, D, E> SlotCell<R, T, D, E> {
         Self {
             head: SlotHead {
                 refs: Cell::new(0),
-                release: release_cell::<R, T, D, E>,
+                release: Cell::new(None),
             },
             state: Cell::new(CellState::Free),
             driver: UnsafeCell::new(MaybeUninit::uninit()),
@@ -312,6 +321,7 @@ where
         }
         cell.state.set(CellState::Claimed);
         cell.head.refs.set(1);
+        cell.head.release.set(Some(release_cell::<R, T, D, E>));
         Ok(SlotClaim { cell })
     }
 }
