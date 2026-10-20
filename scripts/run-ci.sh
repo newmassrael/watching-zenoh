@@ -9193,6 +9193,8 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,adminspace-write --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features "$access" --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-acl --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features access-acl-multicast --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features multicast-ingress-gate --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-downsampling --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-quota --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --lib --no-default-features --features access-acl,zenoh-config --quiet -- -D warnings \

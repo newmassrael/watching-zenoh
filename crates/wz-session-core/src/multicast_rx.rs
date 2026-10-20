@@ -459,7 +459,13 @@ where
                             // fieldless enum), so the dispatcher is free to
                             // re-borrow here for the §5.21 routing-namespace
                             // ingress strip.
-                            #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
+                            #[cfg_attr(
+                                not(any(
+                                    feature = "routing-namespace",
+                                    feature = "multicast-ingress-gate"
+                                )),
+                                allow(unused_mut)
+                            )]
                             let mut outcome = DriverLoopOutcome::FramePayload {
                                 reliable,
                                 sn,
@@ -514,6 +520,11 @@ where
                             );
                             #[cfg(feature = "routing-namespace")]
                             dispatcher.apply_namespace_ingress(src, &mut outcome);
+                            // The host's admission gate (access control), AFTER the strip so it
+                            // judges the key the application would receive. No gate installed,
+                            // or the feature off, is no work at all.
+                            #[cfg(feature = "multicast-ingress-gate")]
+                            dispatcher.apply_ingress_gate(&mut outcome);
                             // Item 751 — name the member the data is from, so the
                             // observer's `Poll` is not anonymous.
                             if let Some(zid) = dispatcher.peer_zid_by_src(src) {

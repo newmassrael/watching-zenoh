@@ -148,6 +148,9 @@ default = []
 # forward. extauth-jwt = a zenoh PHANTOM (no transport JWT method exists) and
 # extauth-pubkey (RSA) stay reserved until built.
 access-acl = ["wz-runtime-tokio?/access-acl"]
+# The §5.16 pipeline on a multicast session, beyond upstream (which installs none there). Off at
+# run time until the host asks (`InterceptorConfig::govern_multicast`).
+access-acl-multicast = ["access-acl", "wz-runtime-tokio?/access-acl-multicast"]
 access-downsampling = ["wz-runtime-tokio?/access-downsampling"]
 access-extauth-jwt = ["session-extauth"]
 access-extauth-pubkey = ["session-extauth", "wz-runtime-tokio?/access-extauth-pubkey"]
@@ -1215,6 +1218,7 @@ transport-stats = ["wz-runtime-tokio?/transport-stats"]
 
 domain-access = [
     "access-acl",
+    "access-acl-multicast",
     "access-downsampling",
     "access-extauth-jwt",
     "access-extauth-pubkey",
@@ -2021,6 +2025,7 @@ preset-ap-full = [
     "storage-history",
     "storage-replication",
     "access-acl",
+    "access-acl-multicast",
     "access-downsampling",
     "access-quota",
     "access-extauth-jwt",

@@ -201,8 +201,30 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// upstream has no unattributable governed transport of this shape to
     /// mirror. A `None` here means the session installs no enforcer, not that it
     /// enforces vacuously.
+    ///
+    /// Upstream's own interceptors install nothing on a multicast transport either
+    /// (`zenoh/src/net/routing/interceptor/access_control.rs` @ `fn new_transport_multicast`
+    /// and `fn new_peer_multicast`, which both return `None`). A group the host CHOOSES to
+    /// govern is judged by its link instead of a peer: see [`Self::acl_group_link`].
     #[cfg(feature = "access-acl")]
     fn acl_subject_source(payload: &Self::Payload) -> Option<&Arc<SessionLinkActions<R, T>>>;
+
+    /// The §5.16 subject of a GROUP transport, or `None` for one that is not a group.
+    ///
+    /// A group has no peer to be a subject, which is why [`Self::acl_subject_source`] answers
+    /// `None` for it; what it does have is the LINK it runs over, and the interceptors' `link_protocols`
+    /// and `interfaces` axes read exactly that. `Some` therefore means "this transport can be
+    /// governed by its link and its keys alone", and the session installs a policy on it only
+    /// when the host also asked for that (`InterceptorConfig::govern_multicast`): upstream
+    /// installs none on a group, so the default stays upstream's.
+    ///
+    /// Always `Some` for a group once the feature is on, even before the session was told its link:
+    /// an unknown link is [`LinkSubject::UNKNOWN`], which the matchers treat as matching every
+    /// scoped rule, so a group whose link was never described is governed MORE strictly, not less.
+    #[cfg(feature = "access-acl-multicast")]
+    fn acl_group_link(_payload: &Self::Payload) -> Option<&wz_session_core::link::LinkSubject> {
+        None
+    }
 }
 
 /// Typestate marker for a UNICAST session: the payload is the per-peer
@@ -335,11 +357,27 @@ pub struct MulticastPayload {
     /// build (RX-only).
     #[cfg(feature = "codec-push")]
     pub(crate) tx: crate::multicast_pipeline::MulticastTxProducer,
+    /// The link the group runs over, as the §5.16 interceptors see it: set ONCE by
+    /// [`Session::set_group_link_subject`](super::Session::set_group_link_subject) when the host
+    /// has the group's link, shared with the ingress gate the dispatcher holds. Unset reads as
+    /// [`LinkSubject::UNKNOWN`](wz_session_core::link::LinkSubject::UNKNOWN).
+    #[cfg(feature = "access-acl-multicast")]
+    pub(crate) link: std::sync::Arc<std::sync::OnceLock<wz_session_core::link::LinkSubject>>,
 }
+
+/// What a group's link reads as before the session is told it: every axis indeterminate.
+#[cfg(feature = "access-acl-multicast")]
+pub(crate) static GROUP_LINK_UNKNOWN: wz_session_core::link::LinkSubject =
+    wz_session_core::link::LinkSubject::UNKNOWN;
 
 #[cfg(feature = "transport-multicast")]
 impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
     type Payload = MulticastPayload;
+
+    #[cfg(feature = "access-acl-multicast")]
+    fn acl_group_link(payload: &Self::Payload) -> Option<&wz_session_core::link::LinkSubject> {
+        Some(payload.link.get().unwrap_or(&GROUP_LINK_UNKNOWN))
+    }
 
     // A multicast session is handshake-free: there is no peer, hence no subject.
     // See the trait method's docs for why that is upstream's shape and not a

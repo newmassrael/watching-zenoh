@@ -400,6 +400,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         liveliness-subscriber,\
         liveliness-token,\
         multicast-declarations,\
+        multicast-ingress-gate,\
         no_macrostep_diagnostics,\
         no_std,\
         pubsub-attachment,\
@@ -833,6 +834,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # each name carries what was measured about it.
     "wz-runtime-tokio|lane|\
         access-acl,\
+        access-acl-multicast,\
         access-downsampling,\
         access-extauth-pubkey,\
         access-extauth-usrpwd,\

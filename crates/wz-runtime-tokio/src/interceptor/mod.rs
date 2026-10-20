@@ -537,9 +537,26 @@ pub struct InterceptorConfig {
     /// interceptor. Present only under `access-quota`.
     #[cfg(feature = "access-quota")]
     pub low_pass: Vec<LowPassRule>,
+    /// Whether this config governs a MULTICAST session too. `false` (the default) is upstream's
+    /// shape: it installs no interceptor on a multicast transport, so a policy written for the
+    /// node's unicast sessions leaves its groups alone. `true` applies the whole pipeline above
+    /// to the group's traffic, in both directions, with the group's link as the only subject (a
+    /// group has no peer identity, so a rule scoped by a user, a certificate or a zid never
+    /// matches there). Present only under `access-acl-multicast`; a unicast session ignores it.
+    #[cfg(feature = "access-acl-multicast")]
+    pub govern_multicast: bool,
 }
 
 impl InterceptorConfig {
+    /// Set whether the pipeline also governs multicast sessions, returning `self` for chaining.
+    /// See [`with_acl`](Self::with_acl) for why this is a builder.
+    #[cfg(feature = "access-acl-multicast")]
+    #[must_use]
+    pub fn with_govern_multicast(mut self, govern: bool) -> Self {
+        self.govern_multicast = govern;
+        self
+    }
+
     /// R311y453 — set the ACL policy, returning `self` for chaining.
     ///
     /// These three builders exist because a STRUCT LITERAL of this type cannot be

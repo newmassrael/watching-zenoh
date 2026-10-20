@@ -1285,6 +1285,68 @@ fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
     R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
 }
 
+/// The §5.16 verdict on one message of a GROUP, in either direction: the one body the egress
+/// check of the session and the ingress gate the dispatcher holds both answer through, so the two
+/// cannot disagree about the same message.
+///
+/// A group has no peer to ask, so the subject is the group's LINK and the message's key, nothing
+/// more: [`GroupAclContext`] answers no zid and no user, which under the chain's own rules means a
+/// rule scoped by either never applies, and a rule scoped by `link_protocols` or `interfaces`
+/// applies when the link matches. A key that does not resolve to a literal is denied, as
+/// everywhere in the chain: a group carries no alias table of its own at this point (the
+/// dispatcher has already turned a member's declared aliases into literals before its gate runs,
+/// and the session sends literals).
+#[cfg(feature = "access-acl-multicast")]
+fn acl_admits_group<R: SessionRuntime>(
+    chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+    link: &wz_session_core::link::LinkSubject,
+    msg: &wz_session_core::network_message::NetworkMessage,
+) -> bool {
+    if R::with_mutex_mut(chain_slot, |chain| chain.is_empty()) {
+        return true;
+    }
+    let no_aliases = hashbrown::HashMap::new();
+    let keyexpr = crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
+        msg,
+        wz_session_core::wireexpr_resolve::MappingSpaces::peer_only(&no_aliases),
+    );
+    let ctx = GroupAclContext { link, keyexpr };
+    R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
+}
+
+/// The per-message [`InterceptorContext`] of a group: its link and the already-resolved key. See
+/// [`acl_admits_group`].
+#[cfg(feature = "access-acl-multicast")]
+struct GroupAclContext<'a> {
+    link: &'a wz_session_core::link::LinkSubject,
+    keyexpr: Option<String>,
+}
+
+#[cfg(feature = "access-acl-multicast")]
+impl crate::interceptor::InterceptorContext for GroupAclContext<'_> {
+    // A group member is not authenticated and its zid is not a routing identity here: no subject.
+    fn subject(&self) -> Option<wz_routing_graph::Zid> {
+        None
+    }
+
+    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+        Some(self.link)
+    }
+
+    // No handshake ran, so nobody authenticated as anyone: a rule naming a user does not apply.
+    fn username(&self) -> Option<String> {
+        None
+    }
+
+    // Resolved by the caller; one message per context, as `SessionAclContext`'s.
+    fn full_keyexpr(
+        &self,
+        _msg: &wz_session_core::network_message::NetworkMessage,
+    ) -> Option<String> {
+        self.keyexpr.clone()
+    }
+}
+
 #[cfg(feature = "access-acl")]
 struct SessionAclContext<'a, R: SessionRuntime, T: TimeSource> {
     actions: &'a Arc<wz_session_core::session_actions::SessionLinkActions<R, T>>,
@@ -1348,6 +1410,17 @@ where
         // enforcer to its flow and gives the downsampler its own timers — so
         // installing one and leaving the other empty is not "half configured",
         // it is a policy that silently governs one direction.
+        //
+        // A GROUP session is governed only when the host asked for it. Upstream installs no
+        // interceptor on a multicast transport, so a config written for the node's unicast
+        // sessions must leave a group's traffic alone unless it says otherwise; an inert config
+        // here keeps both chains empty, which is the fast path and the flag staying false.
+        #[cfg(feature = "access-acl-multicast")]
+        let config = if Tp::acl_group_link(&self.transport).is_some() && !config.govern_multicast {
+            crate::interceptor::InterceptorConfig::default()
+        } else {
+            config
+        };
         R::with_mutex_mut(&self.interceptors_egress, |chain| {
             let version = chain.version().wrapping_add(1);
             *chain =
@@ -1955,10 +2028,16 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         if empty {
             return true;
         }
-        // No authenticated peer on this transport means no subject to govern by,
+        // No authenticated peer on this transport means no peer subject to govern by,
         // and a multicast session is the case that answers `None`. See
-        // `TransportState::acl_subject_source`.
+        // `TransportState::acl_subject_source`. A group that the host governs still has its
+        // link and its keys, and is judged by those; any other transport without a peer is
+        // admitted, as upstream does.
         let Some(actions) = Tp::acl_subject_source(&self.transport) else {
+            #[cfg(feature = "access-acl-multicast")]
+            if let Some(link) = Tp::acl_group_link(&self.transport) {
+                return acl_admits_group::<R>(chain_slot, link, msg);
+            }
             return true;
         };
         // FIRST lock: the alias tables, for the governed keyexpr. Released here.
@@ -2561,6 +2640,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             transport: transport::MulticastPayload {
                 #[cfg(feature = "codec-push")]
                 tx,
+                #[cfg(feature = "access-acl-multicast")]
+                link: Arc::new(std::sync::OnceLock::new()),
             },
             observer,
             local_live,
@@ -2614,6 +2695,50 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 crate::interceptor::InterceptorChain::new(),
             )),
         })
+    }
+
+    /// Tell this session the link its group runs over, for the interceptors' `link_protocols` and
+    /// `interfaces` axes. Read it off the joined link, e.g. `link.driver().and_then(|d|
+    /// d.link_subject())`, once the group is open. Set ONCE: a re-join of the same group keeps the
+    /// same link description, so a second call is refused (`false`) and changes nothing. Until it
+    /// is called the link reads as [`LinkSubject::UNKNOWN`](wz_session_core::link::LinkSubject::UNKNOWN),
+    /// which every scoped rule matches, so a session that never calls this is governed more
+    /// strictly, not less.
+    #[cfg(feature = "access-acl-multicast")]
+    pub fn set_group_link_subject(&self, subject: wz_session_core::link::LinkSubject) -> bool {
+        self.transport.link.set(subject).is_ok()
+    }
+
+    /// The admission gate over this group's INBOUND messages, to install on the dispatcher that
+    /// builds them (`MulticastDispatcher::set_ingress_gate`); [`Self::install_ingress_gate`] is
+    /// the one call. It answers through the same body as this session's egress check, reads the
+    /// live ingress chain (a later `set_interceptors` takes effect without reinstalling), and is
+    /// the empty-chain fast path when no policy governs the group.
+    #[cfg(feature = "access-acl-multicast")]
+    pub fn ingress_gate(&self) -> wz_session_core::multicast_dispatch::MulticastIngressGate
+    where
+        R: 'static,
+        Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>: Send + Sync + 'static,
+    {
+        let chain = self.interceptors_ingress.clone();
+        let link = self.transport.link.clone();
+        Box::new(move |msg| {
+            let link = link.get().unwrap_or(&transport::GROUP_LINK_UNKNOWN);
+            acl_admits_group::<R>(&chain, link, msg)
+        })
+    }
+
+    /// Install [`Self::ingress_gate`] on `dispatcher`. A dispatcher is built anew on every
+    /// re-join, so call this on each one before its drive loop spins.
+    #[cfg(feature = "access-acl-multicast")]
+    pub fn install_ingress_gate<const MAX_PEERS: usize>(
+        &self,
+        dispatcher: &mut wz_session_core::multicast_dispatch::MulticastDispatcher<MAX_PEERS>,
+    ) where
+        R: 'static,
+        Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>: Send + Sync + 'static,
+    {
+        dispatcher.set_ingress_gate(Some(self.ingress_gate()));
     }
 
     /// R311mq (Level B, B5a) — the MULTICAST dispatch SSOT: fan one drive-loop

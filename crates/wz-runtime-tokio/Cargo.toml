@@ -1247,6 +1247,20 @@ access-acl = [
     "codec-declare",
     "codec-response",
 ]
+# The §5.16 pipeline on a MULTICAST session. Upstream installs NO interceptor on a multicast
+# transport (every factory's `new_transport_multicast` and `new_peer_multicast` return `None`), so
+# an access-control build governs unicast sessions only and a group is outside it. This knob is
+# wz going beyond that, and it stays off at run time unless the host asks
+# (`InterceptorConfig::govern_multicast`): compiling it in changes no behaviour on its own.
+# A group has no peer identity, so what a rule can be scoped by on it is the link (`link_protocols`,
+# `interfaces`) and the key; a rule scoped by a user, a certificate or a zid never matches there.
+# Pulls the dispatcher's ingress gate, because the inbound batch of a group is judged where the
+# dispatcher builds it.
+access-acl-multicast = [
+    "access-acl",
+    "transport-multicast",
+    "wz-session-core/multicast-ingress-gate",
+]
 # R311y508 — the version-keyed per-(face, keyexpr) interceptor cache. Depends on
 # `routing-peer` because the cache lives on the linkstate forwarder's INGRESS
 # admit path, which is that feature's code; it does NOT depend on `access-acl`,

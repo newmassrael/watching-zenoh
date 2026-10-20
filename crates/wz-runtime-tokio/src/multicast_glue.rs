@@ -5540,4 +5540,299 @@ mod tests {
             "publish pushed exactly one datagram"
         );
     }
+
+    // ── §5.16 on a GROUP: `access-acl-multicast` ──
+    //
+    // Upstream installs no interceptor on a multicast transport. These tests hold both halves of
+    // wz going past that: it stays upstream's by default, and governs the group's link and keys
+    // when the host says so.
+
+    /// A policy denying a Put on `admin/**` in `flow`, scoped to `links` (empty = every link).
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    fn group_deny_admin(
+        flow: wz_access_control::AclFlow,
+        links: Vec<wz_session_core::link::InterceptorLink>,
+        usernames: Vec<wz_access_control::AclUsername>,
+    ) -> crate::interceptor::InterceptorConfig {
+        use wz_access_control::{
+            AclConfig, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+        };
+        crate::interceptor::InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["admin/**".to_owned()],
+                messages: vec![AclMessage::Put],
+                flow,
+                permission: Permission::Deny,
+                link_protocols: links,
+                interfaces: Vec::new(),
+                usernames,
+                cert_common_names: Vec::new(),
+            }],
+        }))
+    }
+
+    /// A multicast session over a tapped pipeline, and the tap that sees what it sends.
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    fn tapped_group_session() -> (
+        crate::session::TokioMulticastSession,
+        crate::multicast_pipeline::MulticastTxTap,
+    ) {
+        use crate::observer::ApplicationLayerObserver;
+        use std::sync::Arc;
+        let (producer, tap) =
+            crate::multicast_pipeline::MulticastTxTap::attach(&params(&[0xAA, 0xBB, 0xCC, 0xDD]));
+        let session = crate::session::TokioMulticastSession::new_multicast(
+            Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new())),
+            Arc::new(TokioTime::new()),
+            producer,
+        );
+        (session, tap)
+    }
+
+    /// A UDP group link, as the matchers read it.
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    fn udp_group_link() -> wz_session_core::link::LinkSubject {
+        wz_session_core::link::LinkSubject {
+            kind: Some(wz_session_core::link::LinkKind::Udp),
+            interfaces: Some(vec!["eth0".to_owned()]),
+            cert_common_name: None,
+        }
+    }
+
+    /// Whether publishing `key` on `session` put a datagram on the group's pipeline.
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    fn group_sent(
+        session: &crate::session::TokioMulticastSession,
+        tap: &mut crate::multicast_pipeline::MulticastTxTap,
+        key: &str,
+    ) -> bool {
+        session
+            .publish(key, b"x", crate::session::PublishOptions::put())
+            .expect("a Put builds within codec capacity, and a denied one is consumed");
+        tap.try_next().is_some()
+    }
+
+    /// DEFAULT = upstream: a policy installed on a group session governs nothing unless the host
+    /// asked, and the session is as unencumbered as one with no policy (the plain-put lane stays
+    /// open, which a held policy would close).
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    #[test]
+    fn a_policy_does_not_govern_a_group_unless_the_host_asks() {
+        use crate::interceptor::InterceptorSink;
+        use wz_access_control::AclFlow;
+
+        let (session, mut tap) = tapped_group_session();
+        session.set_interceptors(group_deny_admin(AclFlow::Egress, Vec::new(), Vec::new()));
+
+        assert!(
+            group_sent(&session, &mut tap, "admin/secret"),
+            "upstream installs no interceptor on a group: the deny rule is not consulted"
+        );
+        assert!(
+            session.plain_put_lane_open(),
+            "no policy governs the group, so no send is held to be judged"
+        );
+    }
+
+    /// Governed: the deny rule applies to what the group SENDS, and the ungoverned key still goes
+    /// out under the same policy (the policy was consulted, not a blanket stop).
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    #[test]
+    fn a_governed_group_does_not_send_a_denied_key() {
+        use crate::interceptor::InterceptorSink;
+        use wz_access_control::AclFlow;
+
+        let (session, mut tap) = tapped_group_session();
+        session.set_interceptors(
+            group_deny_admin(AclFlow::Egress, Vec::new(), Vec::new()).with_govern_multicast(true),
+        );
+
+        assert!(
+            !group_sent(&session, &mut tap, "admin/secret"),
+            "the governed key must not reach the group"
+        );
+        assert!(
+            group_sent(&session, &mut tap, "demo/data"),
+            "a key no rule names still goes out"
+        );
+        assert!(
+            !session.plain_put_lane_open(),
+            "a held policy closes the lane that sends a Put unjudged"
+        );
+    }
+
+    /// The group's LINK is the subject: a rule scoped to a protocol governs a group on that
+    /// protocol and not one on another; a group whose link was never described is governed by
+    /// every scoped rule (fail closed), because nothing says it is outside it.
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    #[test]
+    fn a_rule_scoped_to_a_link_protocol_governs_the_group_on_that_link() {
+        use crate::interceptor::InterceptorSink;
+        use wz_access_control::AclFlow;
+        use wz_session_core::link::InterceptorLink;
+
+        // (the link the session was told, the protocol the rule names, whether it is sent)
+        let table = [
+            (Some(udp_group_link()), InterceptorLink::Udp, false),
+            (Some(udp_group_link()), InterceptorLink::Tcp, true),
+            (None, InterceptorLink::Tcp, false),
+        ];
+        for (link, rule_protocol, expected_sent) in table {
+            let (session, mut tap) = tapped_group_session();
+            if let Some(link) = link.clone() {
+                assert!(session.set_group_link_subject(link));
+            }
+            session.set_interceptors(
+                group_deny_admin(AclFlow::Egress, vec![rule_protocol], Vec::new())
+                    .with_govern_multicast(true),
+            );
+            assert_eq!(
+                group_sent(&session, &mut tap, "admin/secret"),
+                expected_sent,
+                "link {link:?}, rule scoped to {rule_protocol:?}"
+            );
+        }
+    }
+
+    /// A group has no authenticated member, so a rule that names a user governs nobody on it.
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    #[test]
+    fn a_rule_scoped_to_a_user_never_matches_a_group() {
+        use crate::interceptor::InterceptorSink;
+        use wz_access_control::{AclFlow, AclUsername};
+
+        let (session, mut tap) = tapped_group_session();
+        session.set_interceptors(
+            group_deny_admin(
+                AclFlow::Egress,
+                Vec::new(),
+                vec![AclUsername::new("alice").expect("a name")],
+            )
+            .with_govern_multicast(true),
+        );
+        assert!(
+            group_sent(&session, &mut tap, "admin/secret"),
+            "no member authenticated as alice, so her rule does not apply to the group"
+        );
+    }
+
+    /// The link a session is told is the first one: a re-join of the same group repeats it.
+    #[cfg(all(feature = "access-acl-multicast", feature = "codec-push"))]
+    #[test]
+    fn a_group_link_is_set_once() {
+        let (session, _tap) = tapped_group_session();
+        assert!(session.set_group_link_subject(udp_group_link()));
+        assert!(
+            !session.set_group_link_subject(wz_session_core::link::LinkSubject::UNKNOWN),
+            "the second description is refused and changes nothing"
+        );
+    }
+
+    /// Drive a group whose one member sends a Put on `admin/secret` and then one on `demo/mc`,
+    /// through the REAL loop and the dispatcher's gate, and return the keys a `**` subscriber on
+    /// the session received, in order.
+    #[cfg(all(
+        feature = "access-acl-multicast",
+        feature = "codec-push",
+        feature = "pubsub-put"
+    ))]
+    async fn group_ingress_delivered(config: crate::interceptor::InterceptorConfig) -> Vec<String> {
+        use crate::interceptor::InterceptorSink;
+        use std::sync::{Arc, Mutex};
+        use wz_session_core::frame_encode::encode_frame_with_push;
+        use wz_session_core::push_build::build_push_literal;
+
+        let peer = [0x01, 0x02, 0x03, 0x04];
+        let join = join0(&params(&peer)); // next reliable SN = 0
+        let frames = [
+            encode_frame_with_push(
+                0,
+                build_push_literal("admin/secret", b"s").expect("push fixture"),
+                true,
+            ),
+            encode_frame_with_push(
+                1,
+                build_push_literal("demo/mc", b"d").expect("push fixture"),
+                true,
+            ),
+        ];
+        let mut link = FakeDriver::link_with([
+            (join, src(2)),
+            (frames[0].clone(), src(2)),
+            (frames[1].clone(), src(2)),
+        ]);
+
+        let (session, _tap) = tapped_group_session();
+        let delivered = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let delivered = delivered.clone();
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .register("**", move |sample| {
+                    delivered.lock().unwrap().push(sample.keyexpr().to_owned());
+                });
+        }
+        assert!(session.set_group_link_subject(udp_group_link()));
+        session.set_interceptors(config);
+
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        session.install_ingress_gate(&mut dispatcher);
+        let clock = TokioTime::new();
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut link,
+            &clock,
+            |event| session.dispatch_multicast_iteration_event(event),
+            &MulticastTxProducer::new(),
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 1, "the member was admitted");
+        let delivered = delivered.lock().unwrap().clone();
+        delivered
+    }
+
+    /// Governed, a member's Put on a denied key never reaches the application, and the next
+    /// frame's Put on an allowed key does (the sequence gate admitted both frames).
+    #[cfg(all(
+        feature = "access-acl-multicast",
+        feature = "codec-push",
+        feature = "pubsub-put"
+    ))]
+    #[tokio::test]
+    async fn a_governed_group_drops_a_denied_inbound_key() {
+        use wz_access_control::AclFlow;
+        let delivered = group_ingress_delivered(
+            group_deny_admin(AclFlow::Ingress, Vec::new(), Vec::new()).with_govern_multicast(true),
+        )
+        .await;
+        assert_eq!(delivered, ["demo/mc"]);
+    }
+
+    /// Not governed, the same policy leaves the group alone and both Puts arrive: upstream's
+    /// shape, and the control that says the drop above was the gate and not the fixture.
+    #[cfg(all(
+        feature = "access-acl-multicast",
+        feature = "codec-push",
+        feature = "pubsub-put"
+    ))]
+    #[tokio::test]
+    async fn an_ungoverned_group_delivers_what_a_policy_would_deny() {
+        use wz_access_control::AclFlow;
+        let delivered =
+            group_ingress_delivered(group_deny_admin(AclFlow::Ingress, Vec::new(), Vec::new()))
+                .await;
+        assert_eq!(delivered, ["admin/secret", "demo/mc"]);
+    }
 }

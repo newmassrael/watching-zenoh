@@ -748,6 +748,16 @@ routing-namespace = ["alloc", "keyexpr-prefix"]
 # compiles neither the table nor the decorator: no per-peer alias state, no cost.
 multicast-declarations = ["session-multicast", "alloc", "codec-declare", "codec-push"]
 
+# multicast-ingress-gate — an admission gate on the multicast dispatcher's inbound batches: the
+# host installs a predicate (`MulticastDispatcher::set_ingress_gate`) and every `NetworkMessage` of
+# an admitted frame, or of a completed fragment chain, is kept only if it passes, BEFORE the
+# observer fan. The access-control twin of `routing-namespace`'s strip, at the same two seams
+# (`multicast_rx` whole frame, `ingest_multicast_fragment` reassembled chain), and after it, so
+# the predicate sees the key the application would. Pulls `alloc` (the boxed predicate and the
+# owned batch). Fully cfg-gated, so a build without it, including the no-alloc MCU multicast loop,
+# has neither the field nor the call: no gate state, no cost.
+multicast-ingress-gate = ["session-multicast", "alloc"]
+
 # R311dx — query-side dispatch gates for the migrated QueryableRegistry
 # (`wz-session-core::query`). `query-queryable` forwards to the
 # codec-request (Request/Query dispatch) + codec-response (reply-build)

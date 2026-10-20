@@ -495,6 +495,13 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # refusal stayed invisible because Layer C1bn is fail-fast and
                 # an intermittent uring red ahead of this gate kept it
                 # unreached (hosted run 36064882812: 3 of 13 legs).
+                #
+                # `access-acl-multicast` gates `InterceptorConfig::with_govern_multicast`
+                # and its field, and three methods of the multicast `Session`
+                # (`set_group_link_subject`, `ingress_gate`, `install_ingress_gate`):
+                # all inside `impl` blocks, none at module level, so there is no
+                # `module::name` for a probe to import.
+                "access-acl-multicast",
                 "liveliness-get",
                 "router-multicast-faces",
                 "routing-interceptor-hotreload",

@@ -813,7 +813,18 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     /// egress/ingress prefix can never diverge.
     #[cfg(feature = "routing-namespace")]
     namespace: Option<OwnedNonWildKeyExpr>,
+    /// The admission gate over every inbound batch, or `None` for a group that admits all. See
+    /// [`Self::set_ingress_gate`].
+    #[cfg(feature = "multicast-ingress-gate")]
+    ingress_gate: Option<MulticastIngressGate>,
 }
+
+/// The predicate a host installs on a [`MulticastDispatcher`] to admit or drop each inbound
+/// message of the group: `true` keeps the message. `Send + Sync` because the dispatcher moves into
+/// the drive task and the host keeps the state the predicate reads (its policy) on another thread.
+#[cfg(feature = "multicast-ingress-gate")]
+pub type MulticastIngressGate =
+    alloc::boxed::Box<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
 
 impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Build a Router with an Idle session and `MAX_PEERS` free slots over
@@ -829,6 +840,34 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             running: false,
             #[cfg(feature = "routing-namespace")]
             namespace: None,
+            #[cfg(feature = "multicast-ingress-gate")]
+            ingress_gate: None,
+        }
+    }
+
+    /// Install the admission gate over this group's inbound messages (call on the owned
+    /// dispatcher before the drive loop spins, as [`Self::set_namespace`] is). `None` removes it.
+    ///
+    /// The gate sees each message AFTER the alias pass and the namespace strip, so it judges the
+    /// key the application would receive, and a message it refuses never reaches the observer.
+    /// Frame bookkeeping is not affected: the frame was admitted by the sequence gate before its
+    /// messages are judged, so a refused message costs the group's sequence numbers nothing.
+    #[cfg(feature = "multicast-ingress-gate")]
+    pub fn set_ingress_gate(&mut self, gate: Option<MulticastIngressGate>) {
+        self.ingress_gate = gate;
+    }
+
+    /// Drop from one owned inbound outcome the messages the installed gate refuses, in place and
+    /// in order, BEFORE the observer fan. Only a `FramePayload` carries application messages; any
+    /// other outcome passes. No gate installed is a no-op, so a host that never calls
+    /// [`Self::set_ingress_gate`] is byte-identical to a build without the feature.
+    #[cfg(feature = "multicast-ingress-gate")]
+    pub fn apply_ingress_gate(&self, outcome: &mut crate::driver_loop::DriverLoopOutcome) {
+        let Some(gate) = self.ingress_gate.as_ref() else {
+            return;
+        };
+        if let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome {
+            messages.retain(|message| gate(message));
         }
     }
 
@@ -1918,6 +1957,14 @@ pub(crate) fn ingest_multicast_fragment_counted<
             dispatcher.apply_namespace_ingress(src, &mut o);
             o
         };
+        // The host's admission gate over the REASSEMBLED batch, symmetric with the whole-Frame
+        // seam in `multicast_rx`: a message split across fragments is judged once, whole.
+        #[cfg(feature = "multicast-ingress-gate")]
+        let o = {
+            let mut o = o;
+            dispatcher.apply_ingress_gate(&mut o);
+            o
+        };
         // Item 751 — name the member the reassembled data is from, as the
         // whole-Frame seam in `multicast_rx` does, so the `Poll` is not anonymous.
         if let Some(zid) = dispatcher.peer_zid_by_src(src) {
@@ -2455,6 +2502,74 @@ mod tests {
             1,
             "no namespace installed -> no strip, no drop"
         );
+    }
+
+    /// An installed ingress gate drops exactly the messages it refuses from an inbound batch,
+    /// keeps the rest IN ORDER, and leaves an outcome that carries no application message
+    /// alone.
+    #[cfg(all(feature = "multicast-ingress-gate", feature = "codec-push"))]
+    #[test]
+    fn ingress_gate_drops_the_refused_messages_and_keeps_the_rest_in_order() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::network_message::NetworkMessage;
+        use alloc::boxed::Box;
+        use alloc::vec;
+
+        let push = |key: &str| {
+            NetworkMessage::Push(Box::new(
+                crate::push_build::build_push_literal(key, b"v").unwrap(),
+            ))
+        };
+        // A literal key: id 0 and the whole key as the suffix.
+        fn key_of(m: &NetworkMessage) -> alloc::string::String {
+            match m {
+                NetworkMessage::Push(p) => crate::wireexpr_resolve::id_and_suffix(&p.keyexpr.body)
+                    .1
+                    .unwrap_or_default()
+                    .into(),
+                _ => alloc::string::String::new(),
+            }
+        }
+        let keys = |o: &DriverLoopOutcome| -> alloc::vec::Vec<alloc::string::String> {
+            let DriverLoopOutcome::FramePayload { messages, .. } = o else {
+                panic!("a frame payload")
+            };
+            messages.iter().map(key_of).collect()
+        };
+        let frame = |messages| DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages,
+            has_ext: false,
+            extensions: vec![],
+        };
+
+        let mut d = running_dispatcher::<4>(5_000);
+
+        // No gate installed: nothing is dropped.
+        let mut open = frame(vec![push("a/1"), push("secret/2"), push("a/3")]);
+        d.apply_ingress_gate(&mut open);
+        assert_eq!(keys(&open), ["a/1", "secret/2", "a/3"]);
+
+        // A gate that refuses `secret/**` removes that one and keeps the order of the others.
+        d.set_ingress_gate(Some(Box::new(|m: &NetworkMessage| {
+            !key_of(m).starts_with("secret/")
+        })));
+        let mut gated = frame(vec![push("a/1"), push("secret/2"), push("a/3")]);
+        d.apply_ingress_gate(&mut gated);
+        assert_eq!(keys(&gated), ["a/1", "a/3"]);
+
+        // An outcome that is not a frame payload is not touched.
+        let mut other = DriverLoopOutcome::SideEffectOnly;
+        d.apply_ingress_gate(&mut other);
+        assert!(matches!(other, DriverLoopOutcome::SideEffectOnly));
+
+        // Removing the gate restores the pass-through.
+        d.set_ingress_gate(None);
+        let mut open_again = frame(vec![push("secret/2")]);
+        d.apply_ingress_gate(&mut open_again);
+        assert_eq!(keys(&open_again), ["secret/2"]);
     }
 
     /// R311y107 §5.21 routing-namespace — the per-peer ingress state is CLEARED
