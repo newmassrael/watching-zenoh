@@ -350,6 +350,46 @@ where
     })
 }
 
+/// The last few poll outcomes one drive loop produced, so a delivery that never
+/// comes says what each end last saw (a reassembly dropped, a link lost, or nothing
+/// at all) rather than only that the wait ran out. Bounded: a healthy run makes
+/// thousands, and the question is always what the last ones were.
+#[derive(Clone, Default)]
+struct PollTrace(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl PollTrace {
+    const DEPTH: usize = 8;
+
+    fn note(&self, event: &IterationEvent<'_>) {
+        if let IterationEvent::Poll(outcome) = event {
+            let mut tail = self.0.lock().expect("poll trace");
+            if tail.len() == Self::DEPTH {
+                tail.pop_front();
+            }
+            tail.push_back(format!("{outcome:?}"));
+        }
+    }
+
+    fn render(&self) -> String {
+        let tail = self.0.lock().expect("poll trace");
+        if tail.is_empty() {
+            String::from("(none: the loop never polled)")
+        } else {
+            tail.iter().cloned().collect::<Vec<_>>().join("\n  ")
+        }
+    }
+}
+
+/// Both ends' traces, as the tail of a failed wait's message.
+fn render_traces(acceptor: &PollTrace, initiator: &PollTrace) -> String {
+    format!(
+        ".\nThe acceptor's last poll outcomes, oldest first:\n  {}\n\
+         The initiator's last poll outcomes, oldest first:\n  {}",
+        acceptor.render(),
+        initiator.render()
+    )
+}
+
 /// A Push published over a wz<->wz serial link reaches the peer's subscriber
 /// byte-exact. The body is generic over the stream so it is instantiated over a
 /// memory pair on every host and over a pty pair on a Unix.
@@ -398,8 +438,19 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
     // Both sides driven continuously so steady state persists across the
     // publish + delivery, each on a task of its own ([`on_own_tasks`] says why);
     // they are ended once the scenario observes the delivery.
-    let mut drive_acc = drive_on_own_task(opened_acc, move |event| observer.dispatch_event(event));
-    let mut drive_init = drive_on_own_task(opened_init, |_| {});
+    let acc_trace = PollTrace::default();
+    let init_trace = PollTrace::default();
+    let mut drive_acc = drive_on_own_task(opened_acc, {
+        let trace = acc_trace.clone();
+        move |event| {
+            trace.note(&event);
+            observer.dispatch_event(event)
+        }
+    });
+    let mut drive_init = drive_on_own_task(opened_init, {
+        let trace = init_trace.clone();
+        move |event| trace.note(&event)
+    });
 
     let fired_probe = fired.clone();
     let scenario = async move {
@@ -417,7 +468,10 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        panic!("subscriber did not fire within the ~3s budget");
+        panic!(
+            "subscriber did not fire within the ~3s budget{}",
+            render_traces(&acc_trace, &init_trace)
+        );
     };
 
     tokio::select! {
@@ -540,8 +594,19 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
         Arc::new(opened_init.clock),
     );
 
-    let mut drive_acc = drive_on_own_task(opened_acc, move |event| observer.dispatch_event(event));
-    let mut drive_init = drive_on_own_task(opened_init, |_| {});
+    let acc_trace = PollTrace::default();
+    let init_trace = PollTrace::default();
+    let mut drive_acc = drive_on_own_task(opened_acc, {
+        let trace = acc_trace.clone();
+        move |event| {
+            trace.note(&event);
+            observer.dispatch_event(event)
+        }
+    });
+    let mut drive_init = drive_on_own_task(opened_init, {
+        let trace = init_trace.clone();
+        move |event| trace.note(&event)
+    });
 
     let fired_probe = fired.clone();
     let scenario = async move {
@@ -556,7 +621,10 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        panic!("subscriber did not fire within the ~3s budget");
+        panic!(
+            "subscriber did not fire within the ~3s budget{}",
+            render_traces(&acc_trace, &init_trace)
+        );
     };
 
     tokio::select! {
@@ -1406,6 +1474,8 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
     );
 
     let timeouts = SessionTimeouts::spec_defaults();
+    let acc_trace = PollTrace::default();
+    let init_trace = PollTrace::default();
     let drive_acc = drive_session_until_terminal(
         &mut opened_acc.inbound,
         &opened_acc.actions,
@@ -1413,7 +1483,13 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
         None,
         &opened_acc.clock,
         &timeouts,
-        |event| observer.dispatch_event(event),
+        {
+            let (trace, observer) = (acc_trace.clone(), &mut observer);
+            move |event| {
+                trace.note(&event);
+                observer.dispatch_event(event)
+            }
+        },
     );
     let drive_init = drive_session_until_terminal(
         &mut opened_init.inbound,
@@ -1422,7 +1498,10 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
         None,
         &opened_init.clock,
         &timeouts,
-        |_| {},
+        {
+            let trace = init_trace.clone();
+            move |event| trace.note(&event)
+        },
     );
 
     let fired_probe = fired.clone();
@@ -1438,7 +1517,10 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        panic!("subscriber did not fire within the ~3s budget");
+        panic!(
+            "subscriber did not fire within the ~3s budget{}",
+            render_traces(&acc_trace, &init_trace)
+        );
     };
 
     tokio::select! {
