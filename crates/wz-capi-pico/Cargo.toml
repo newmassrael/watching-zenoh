@@ -234,6 +234,12 @@ required-features = ["peer"]
 name = "unixpipe_listen_multiclient"
 required-features = ["peer"]
 
+# The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
+# the full build to talk to.
+[[example]]
+name = "hold_a_listener"
+required-features = ["peer"]
+
 [lints]
 workspace = true
 
