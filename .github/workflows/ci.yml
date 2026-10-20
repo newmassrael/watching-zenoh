@@ -349,7 +349,11 @@ jobs:
         # actually builds — and run-ci.sh SKIPs a target it cannot find, so the
         # footprint gate would go quietly GREEN instead of failing. A SKIP is
         # green; the pin owns components + targets so it cannot happen.
-        run: rustup show
+        #
+        # The script then removes every other toolchain the image preinstalled:
+        # rust-cache hashes them all into its key, and the image's floating
+        # `stable` made the key alternate between images (run 39344495779).
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # THE workspace dependency cache for the Linux feature-set jobs (class
@@ -831,7 +835,7 @@ jobs:
           bash scripts/lib/apt-install.sh cmake perl pkg-config
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of `codegen-verify`'s entry (class `rust-codegen-verify`):
@@ -1122,7 +1126,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # The SAVER of class `rust-codegen-verify`: this job's build set is
@@ -1267,7 +1271,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # Its OWN key: this lane's build set differs from every other job's, so
@@ -1411,7 +1415,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `rust-ci` class (.github/cache-classes.json): `ci` is
@@ -1640,7 +1644,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`): it restores and
@@ -1809,7 +1813,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`); see there.
@@ -1881,7 +1885,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`); see there.
@@ -2030,7 +2034,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`); see there. Warm
@@ -2206,7 +2210,7 @@ jobs:
         # `ci` job's step of the same name. It matters MORE here than there:
         # a floating compiler moves codegen size, and this job is the one
         # that gates on bytes (y267's ~20-push red streak).
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry (NOT this job's build tree — see below)
         # The REGISTRY half is what this buys: Layer F's lanes resolve the same
@@ -2336,7 +2340,7 @@ jobs:
         # pinned 1.10.1) is installed separately below and selected explicitly
         # with `cargo +<that channel>`, which overrides the toolchain file and
         # is unaffected by it.
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Install Rust toolchain 1.97.1 (zenoh 1.10.1's pinned channel)
         # scripts/build-zenohd.sh REQUIRES this exact channel and hard-errors
@@ -3278,7 +3282,7 @@ jobs:
         # installed on a toolchain cargo does not use, leaving the real one
         # without the targets, and run-ci.sh SKIPs a missing target: the gate
         # would report green having measured nothing. See the `ci` job's step.
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       # No rust-cache in this job (it had a private 303 MB entry). Measured over
       # 18 runs a warm entry saved about one minute of a 13 minute job whose
@@ -3424,7 +3428,7 @@ jobs:
 
       - name: Install Rust toolchain + thumbv7m (pinned by rust-toolchain.toml)
         # thumbv7m comes from the pin's `targets` list. See the `ci` job's step.
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
         # R311y892 — `id` so the RESOLVED patch version can be named in the
@@ -3683,7 +3687,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain + thumb targets (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
         id: setuppy
@@ -3978,7 +3982,7 @@ jobs:
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # Same reasoning as the ci job: `rustup show` materialises the PINNED
         # toolchain. Never a floating `stable` — see that job's note.
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`); see there.
@@ -4438,7 +4442,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`); see there. A
@@ -4612,7 +4616,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`); see there.
@@ -4863,7 +4867,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of the `ci` job's entry (class `rust-ci`); see there.
@@ -5082,7 +5086,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # Class `rust-isolated-crates`: a private SAVER. Of every job it has the
@@ -5260,7 +5264,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Build zenoh-pico CLI binaries (Layer C1ce foreign-counterparty dep)
         # The FOREIGN half of two C1ce legs: `z_pub` drives upstream's
@@ -5713,7 +5717,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       # No rust-cache in this job, deliberately. Over 18 runs it was 9.0 minutes
       # with a warm private entry and 9.5 without, against an 11 minute budget
@@ -5876,7 +5880,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       # No rust-cache in this job, for the reason `e2e-demo` records.
       - name: Reuse the RocksDB native engine across feature sets
@@ -5956,7 +5960,7 @@ jobs:
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -5997,7 +6001,7 @@ jobs:
         # compiler here also removes a lint-drift class this job was exposed to:
         # a floating `stable` can newly fail `-D warnings` on a lint the new
         # rustc introduced, on a commit that changed nothing. See the `ci` job.
-        run: rustup show
+        run: bash scripts/lib/rust-toolchain-pinned.sh
 
       - name: Cache Cargo registry + build artifacts
         # A READER of class `rust-host-workspace` (one entry per host: the host
