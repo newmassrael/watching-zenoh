@@ -1202,6 +1202,8 @@ api-compat-pico = [
     "wz-capi-pico/liveliness-get",
     "wz-capi-pico/advanced",
     "wz-capi-pico/gossip",
+    "wz-capi-pico/peer",
+    "wz-capi-pico/scout",
 ]
 
 # ----- §5.1 transport additions (4 atomic: 3 active, 1 reserved) -----

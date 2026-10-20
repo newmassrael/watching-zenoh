@@ -287,6 +287,15 @@ pub unsafe extern "C" fn z_open(
         if connect.is_none() && listen.is_none() {
             return crate::result::Z_ERR_INVALID;
         }
+        // A build without the `peer` feature is a client build: it opens to the endpoint it is
+        // given, and a listener or `mode=peer` is a role it does not have. (zenoh-pico's own
+        // `Z_FEATURE_UNICAST_PEER` gates less: a build without it still takes a lone listener,
+        // refusing only the combined listen and connect and a second connect locator. This
+        // feature is the stronger cut, for a device that only ever dials out.)
+        #[cfg(not(feature = "peer"))]
+        if listen.is_some() || dial_whatami != WhatAmI::Client {
+            return crate::result::Z_ERR_INVALID;
+        }
         // A config carrying BOTH connect and listen is pico's dual-role listen-and-dial peer:
         // `_z_locators_by_config` refuses the pair only in a build without unicast peers and
         // otherwise forces the mode to peer for any listen config and goes on
@@ -353,6 +362,7 @@ pub unsafe extern "C" fn z_open(
                 // session makes to itself is staged and run there, never inside the call.
                 local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
                 // pico scouts when a program calls `z_scout`, never inside `z_open`.
+                #[cfg(feature = "scout")]
                 scouting: None,
                 // zenoh-pico ends its push to every peer link it adds as a PEER, accepted or
                 // opened, with that Final (`_z_interest_push_declarations_to_peer`), and none in

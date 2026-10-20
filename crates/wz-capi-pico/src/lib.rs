@@ -99,11 +99,14 @@ pub mod query;
 #[cfg(any(feature = "query", feature = "queryable"))]
 pub mod reply_keyexpr;
 pub mod result;
+#[cfg(feature = "scout")]
 pub mod scout;
 pub mod serde;
 pub mod session;
 mod session_ext;
+pub mod string_array;
 pub mod sync;
+pub mod whatami;
 mod write_filter;
 pub mod zid;
 

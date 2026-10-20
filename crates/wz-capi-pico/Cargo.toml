@@ -57,6 +57,8 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 default = [
     "serial-drive-own-thread",
     "rx-busy-poll",
+    "peer",
+    "scout",
     "query",
     "queryable",
     "liveliness",
@@ -72,6 +74,15 @@ default = [
 # (`wz-capi-core` is taken without its default features, so each capability reaches it only
 # through the feature below).
 #
+# `peer`: the roles beyond the client's: `z_open` with a `listen` endpoint, or in `mode=peer`,
+# which accept the sessions of others. A build without it opens a client session to the
+# endpoints it is given and refuses a config that asks for more. This is a stronger cut than
+# pico's `Z_FEATURE_UNICAST_PEER`, which leaves a lone listener in and takes out only the
+# combined listen and connect and a second connect locator.
+peer = ["scout", "wz-capi-core/peer"]
+# `scout` (`Z_FEATURE_SCOUTING`): `z_scout`, the one-shot survey of the group and the
+# `z_hello` family that reads its answers.
+scout = ["wz-capi-core/scout"]
 # `query`: `z_get` and the querier, the requesting end of a query.
 query = ["wz-capi-core/query"]
 # `queryable`: `z_declare_queryable` and the replies, the answering end of a query.
@@ -89,7 +100,7 @@ liveliness-get = ["liveliness", "query", "wz-capi-core/liveliness-get"]
 advanced = ["liveliness", "queryable", "wz-capi-core/advanced"]
 # `gossip`: a session that is told of a node by one it holds a link to dials it (see the
 # runtime's feature of the same name). Pico itself has no such plane.
-gossip = ["wz-capi-core/gossip"]
+gossip = ["peer", "wz-capi-core/gossip"]
 serial-drive-own-thread = ["wz-capi-core/serial-drive-own-thread"]
 # Receive busy-poll: on in a default build through wz-capi-core's own default, and named here so a
 # build that lists its features can say so; see wz-capi-core's feature of this name.
@@ -129,47 +140,99 @@ transport-link-tls = ["wz-runtime-tokio/transport-link-tls", "wz-capi-core/trans
 
 # The tests of a capability exist only where the capability does: a build that leaves the
 # plane out has no symbol for them to call, so they are not compiled there (and not run).
+#
+# Every test below meets its session through a listener of this same library (a router is not
+# a thing a unit test can start), so each needs `peer` beside what it exercises. A build
+# without `peer` is covered by `client_only_refuses_a_listener`, which runs only there.
 [[test]]
 name = "advanced_subscriber_faces"
-required-features = ["advanced"]
+required-features = ["peer", "advanced"]
 
 # It drives the advanced publisher, the liveliness subscriber and a get together.
 [[test]]
 name = "pubsub_roundtrip"
-required-features = ["advanced", "query"]
+required-features = ["peer", "advanced", "query"]
 
 [[test]]
 name = "liveliness_face_death"
-required-features = ["liveliness"]
+required-features = ["peer", "liveliness"]
 
 [[test]]
 name = "get_roundtrip"
-required-features = ["query"]
+required-features = ["peer", "query"]
 
 # These ask with a get or a querier and answer with a queryable, so they need both ends.
 [[test]]
 name = "querier_declared_encoding_roundtrip"
-required-features = ["query", "queryable"]
+required-features = ["peer", "query", "queryable"]
 
 [[test]]
 name = "reply_err_options_roundtrip"
-required-features = ["query", "queryable"]
+required-features = ["peer", "query", "queryable"]
 
 [[test]]
 name = "reply_options_roundtrip"
-required-features = ["query", "queryable"]
+required-features = ["peer", "query", "queryable"]
 
 [[test]]
 name = "remote_only_queryable"
-required-features = ["query", "queryable"]
+required-features = ["peer", "query", "queryable"]
 
 [[test]]
 name = "matching_multiface"
-required-features = ["query", "queryable"]
+required-features = ["peer", "query", "queryable"]
 
 [[test]]
 name = "queryable_roundtrip"
-required-features = ["query", "queryable"]
+required-features = ["peer", "query", "queryable"]
+
+[[test]]
+name = "blocking_callback_keeps_session"
+required-features = ["peer"]
+
+[[test]]
+name = "connectivity_events"
+required-features = ["peer"]
+
+[[test]]
+name = "fragmentation_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "listen_and_connect"
+required-features = ["peer"]
+
+[[test]]
+name = "listener_multipeer"
+required-features = ["peer"]
+
+[[test]]
+name = "payload_release"
+required-features = ["peer"]
+
+[[test]]
+name = "publisher_declared_options_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "put_source_info_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "quic_listen_cert"
+required-features = ["peer"]
+
+[[test]]
+name = "remote_only_local_delivery"
+required-features = ["peer"]
+
+[[test]]
+name = "teardown_drain"
+required-features = ["peer"]
+
+[[test]]
+name = "unixpipe_listen_multiclient"
+required-features = ["peer"]
 
 [lints]
 workspace = true
@@ -275,9 +338,7 @@ wz-capi-core = { path = "../wz-capi-core", default-features = false }
 # without the emit gate it is read, staged and silently dropped at the codec, measured by
 # `tests/reply_options_roundtrip.rs`). `liveliness-get` is `wz-capi-core/liveliness-get`.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
-    "routing-accept",
     "transport-fragmentation",
-    "scouting-active",
 ] }
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions

@@ -367,7 +367,7 @@ pub unsafe extern "C" fn _z_id_len(id: z_id_t) -> u8 {
 /// `z_closure_zid`).
 ///
 /// R311y559 — the constructor of a family whose `_call` half already existed,
-/// exactly as [`crate::scout::z_closure_hello`] was.
+/// exactly as `z_closure_hello` was.
 ///
 /// # Safety
 /// `closure` must be null or valid and writable.

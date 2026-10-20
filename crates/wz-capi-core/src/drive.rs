@@ -27,9 +27,12 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
+#[cfg(feature = "scout")]
+use wz_runtime_tokio::accept_loop::DialIntent;
+#[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{
-    accept_loop_offering_spawned, accept_loop_offering_spawned_local, DialIntent,
-    DialIntentReceiver, DialIntentSender, FaceExecutor, SpawnedDrive,
+    accept_loop_offering_spawned, accept_loop_offering_spawned_local, DialIntentReceiver,
+    DialIntentSender, FaceExecutor, SpawnedDrive,
 };
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::retry_period::RetryPolicy;
@@ -40,23 +43,28 @@ use wz_runtime_tokio::session_glue::{
     IterationEvent, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey, TxQueueConf,
     WhatAmI,
 };
+#[cfg(feature = "peer")]
+use wz_runtime_tokio::session_open::{bind_endpoint_with_config, AcceptConfig, BoundListener};
 use wz_runtime_tokio::session_open::{
-    bind_endpoint_with_config, dial_endpoint, initiate_and_open_session_with_staging,
-    offer_for_connect, AcceptConfig, BoundListener, DialConfig, OpenedSession, OpenedSessionParts,
-    SessionOffer, DEFAULT_OPEN_TICK_MS,
+    dial_endpoint, initiate_and_open_session_with_staging, offer_for_connect, DialConfig,
+    OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
+};
+#[cfg(feature = "peer")]
+use wz_runtime_tokio::startup_phase::{
+    drive_bind_phase, drive_phase, endpoint_policy, retry_until_bound, PhaseArm,
 };
 use wz_runtime_tokio::startup_phase::{
-    drive_bind_phase, drive_connect_phase, drive_phase, endpoint_policy, endpoint_schedule,
-    retry_until_bound, PhaseArm, PhaseBudget, PhasePolicy,
+    drive_connect_phase, endpoint_schedule, PhaseBudget, PhasePolicy,
 };
 
-use crate::faces::{
-    CApiForwarder, GossipSetup, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID,
-};
+#[cfg(feature = "peer")]
+use crate::faces::{CApiForwarder, GossipSetup};
+use crate::faces::{OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
 use crate::gossip::GossipPolicy;
-use crate::scouting_node::{
-    bind_responder, Advertised, LateLocators, Responder, ScoutLink, ScoutingPlan,
-};
+#[cfg(feature = "scout")]
+use crate::scouting_node::{ScoutLink, ScoutingPlan};
+#[cfg(feature = "peer")]
+use crate::scouting_responder::{bind_responder, Advertised, LateLocators, Responder};
 
 /// How the dial half of an open treats an attempt that fails — zenoh's
 /// `connect/timeout_ms` and `connect/exit_on_failure` ([`PhasePolicy`]) with the
@@ -146,6 +154,7 @@ struct Dialer {
     clock: TokioTime,
     /// R3070 -- the trust material every dial is built from, kept so a locator the session
     /// FINDS (one no `dial_cfgs` entry was built for) is dialled the way a configured one is.
+    #[cfg(feature = "scout")]
     tls: CapiTlsConfig,
     /// What the node presents to a peer it dials (`transport/auth/usrpwd/{user,password}`),
     /// installed on every session this dialer opens before its first wire byte.
@@ -170,6 +179,7 @@ impl Dialer {
     /// Dial a locator the session found by scouting and open a session to `expected`, the node
     /// that answered from it. Upstream's `open_transport_unicast_with_zid`: a link that opens to
     /// another node than the Hello named is not the connection that was wanted, and is closed.
+    #[cfg(feature = "scout")]
     async fn open_scouted(&self, locator: &str, expected: &[u8]) -> Result<OpenedSession, ()> {
         let dial_cfg = dial_config(&self.tls, locator).map_err(|_| ())?;
         let session = self.open_with(locator, &dial_cfg).await?;
@@ -622,6 +632,7 @@ impl<F> Pausable<F> {
     /// Nothing is lost by not waiting for it. The parent's place parks at the start of a poll
     /// on the same thread that runs the nested future, so when it has parked the nested
     /// future is not running, and it is not polled again until a start.
+    #[cfg(feature = "peer")]
     fn nested(gate: Arc<ReadGate>, inner: F) -> Self {
         Self {
             gate,
@@ -692,6 +703,7 @@ impl<F> Drop for Pausable<F> {
 ///
 /// What a face that is not driven by the accept loop (a dialled endpoint's leg) uses to be a
 /// task of its own and not a share of the drive thread.
+#[cfg(feature = "peer")]
 fn spawn_gated<F>(gate: &Arc<ReadGate>, future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
@@ -709,6 +721,7 @@ where
 /// by [`drive_face_on`] and which is otherwise idle (it dials, and waits).
 ///
 /// Called on the drive thread's `LocalSet`, which `Serial` needs.
+#[cfg(feature = "peer")]
 fn spawn_leg<F>(gate: &Arc<ReadGate>, future: F) -> tokio::task::JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -1074,6 +1087,7 @@ fn minted_zids(minted: [u8; ZID_LENGTH]) -> ([u8; ZID_LENGTH], Vec<u8>) {
 /// Whether the node a link opened to is the one that was dialled. The expected id comes from
 /// the routing graph, which holds an id trimmed; the link holds the bytes the peer sent; the
 /// comparison is of the id, not of its spelling.
+#[cfg(feature = "scout")]
 fn is_expected_peer(peer: Option<&[u8]>, expected: &[u8]) -> bool {
     peer.is_some_and(|peer| wz_runtime_tokio::zid_hex::same_zid(peer, expected))
 }
@@ -1211,16 +1225,20 @@ struct DriveContext {
     gate: Arc<ReadGate>,
     /// R3070 -- what the session does with multicast scouting, when it scouts at all: see
     /// [`OpenStance::scouting`].
+    #[cfg(feature = "scout")]
     scouting: Option<ScoutingPlan>,
     /// R3074 -- where the nodes a peer is told of are posted to be dialled, and the end the
     /// connector reads them from. Scouting posts the nodes a Hello names and the gossip plane
     /// (which holds a sender of its own, in the registry) posts the nodes a list names, so one
     /// task dials both and the two cannot dial the same node twice.
+    #[cfg(feature = "peer")]
     dials: (DialIntentSender, DialIntentReceiver),
     /// Whether the session gossips, as [`OpenStance::gossip`] says and its role allows.
+    #[cfg(feature = "peer")]
     gossiping: bool,
     /// R3076 -- what an endpoint of `listen` that cannot be bound does to the open, and R3089 --
     /// how long and how often it is tried; see [`OpenStance::listen_phase`].
+    #[cfg(feature = "peer")]
     listen_phase: ListenPhase,
 }
 
@@ -1233,6 +1251,112 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
     shutdown.notified().await;
 }
 
+/// What a dial needs before its first attempt: the dialer, and each endpoint on its schedule.
+struct DialSetup {
+    scheduled: Vec<(String, RetryPolicy)>,
+    dialer: Arc<Dialer>,
+}
+
+/// Build what the `connect` role dials with, or `None` when the open cannot go on and the caller
+/// reports it.
+///
+/// R311y534 — the dial config is BUILT from the caller's TLS material rather than defaulted.
+/// Everything that can fail it runs before the handshake, so a bad trust bundle reports an open
+/// failure to the C caller.
+///
+/// R2948 — for EVERY connect endpoint, not only the first: zenoh-c dials the whole
+/// `connect/endpoints` list, and each endpoint carries its own schedule, the global
+/// `connect/retry` with its `#retry_period_*` tail on top (`endpoint_schedule`).
+fn prepare_dial(
+    ctx: &DriveContext,
+    endpoints: &[String],
+    tls: &CapiTlsConfig,
+    phase: &DialPhase,
+    whatami: WhatAmI,
+) -> Option<DialSetup> {
+    let mut dial_cfgs: Vec<(String, DialConfig)> = Vec::with_capacity(endpoints.len());
+    for endpoint in endpoints {
+        dial_cfgs.push((endpoint.clone(), dial_config(tls, endpoint).ok()?));
+    }
+    let scheduled: Vec<(String, RetryPolicy)> = endpoints
+        .iter()
+        .map(|e| (e.clone(), endpoint_schedule(phase.schedule, e)))
+        .collect();
+    // R311y820 — fallible the way the step above is: report the open failure to the C caller
+    // rather than dial with a cookie key anybody could forge. Minted ONCE, before the phase: it
+    // is not a connect failure, so it is not what `connect/retry` re-attempts.
+    let params = init_params(whatami, ctx.zid.to_vec(), ctx.link_tx).ok()?;
+    let dialer = Arc::new(Dialer {
+        dial_cfgs,
+        params,
+        offer: ctx.offer,
+        clock: ctx.clock,
+        #[cfg(feature = "scout")]
+        tls: tls.clone(),
+        auth: ctx.shared.node_auth().cloned(),
+    });
+    Some(DialSetup { scheduled, dialer })
+}
+
+/// A client with nothing to dial scouts for the first node it can open a session to; one with an
+/// endpoint dials only that (R3070, upstream's `connect_first`).
+#[cfg(feature = "scout")]
+fn client_scouting(
+    scouting: Option<ScoutingPlan>,
+    endpoints: &[String],
+    zid: &[u8],
+) -> Option<(ScoutingPlan, Vec<u8>)> {
+    scouting
+        .filter(ScoutingPlan::scouts)
+        .filter(|_| endpoints.is_empty())
+        .map(|plan| (plan, zid.to_vec()))
+}
+
+/// The `connect` role of a build that has no `peer` feature: the client's. The session is
+/// opened to ONE endpoint of the list (or, with `scout`, to the first node found), held, and
+/// dialled again when it is lost. There is no listener to bind, no responder, no walk over
+/// several endpoints and no accept loop in such a build, and [`open_blocking`] has refused the
+/// config that would have asked for them.
+#[cfg(not(feature = "peer"))]
+async fn drive_dial(
+    endpoints: Vec<String>,
+    whatami: WhatAmI,
+    tls: CapiTlsConfig,
+    phase: DialPhase,
+    ctx: DriveContext,
+) {
+    let Some(DialSetup { scheduled, dialer }) =
+        prepare_dial(&ctx, &endpoints, &tls, &phase, whatami)
+    else {
+        let _ = ctx.tx.send(false);
+        return;
+    };
+    #[cfg(feature = "scout")]
+    let scouting = client_scouting(ctx.scouting, &endpoints, &ctx.zid);
+    let DriveContext {
+        shared,
+        tx,
+        shutdown,
+        stop,
+        gate,
+        ..
+    } = ctx;
+    drive_client(
+        endpoints,
+        scheduled,
+        #[cfg(feature = "scout")]
+        scouting,
+        phase,
+        dialer,
+        shared,
+        tx,
+        shutdown,
+        stop,
+        gate,
+    )
+    .await;
+}
+
 /// The `connect` role: dial, run the outbound handshake, land the one peer in
 /// the registry, then pump it until `z_close`. `tx` unblocks `z_open` once the
 /// handshake has settled — pico's blocking client open — unless `phase` says
@@ -1242,6 +1366,7 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 /// dials. A peer or router accepts on it beside its dials; a client binds it
 /// and serves nothing on it (see where the client branch holds it), which is
 /// what the real library does with one stated beside a `connect`.
+#[cfg(feature = "peer")]
 async fn drive_dial(
     endpoints: Vec<String>,
     listen: Vec<String>,
@@ -1250,6 +1375,12 @@ async fn drive_dial(
     phase: DialPhase,
     ctx: DriveContext,
 ) {
+    let Some(DialSetup { scheduled, dialer }) =
+        prepare_dial(&ctx, &endpoints, &tls, &phase, whatami)
+    else {
+        let _ = ctx.tx.send(false);
+        return;
+    };
     let DriveContext {
         zid,
         shared,
@@ -1265,47 +1396,6 @@ async fn drive_dial(
         gossiping,
         listen_phase,
     } = ctx;
-    // R311y534 — the dial config is BUILT from the caller's TLS material rather
-    // than defaulted. Everything that can fail it runs before the handshake, so a
-    // bad trust bundle reports an open failure to the C caller.
-    //
-    // R2948 — for EVERY connect endpoint, not only the first: zenoh-c dials the
-    // whole `connect/endpoints` list, and each endpoint carries its own
-    // schedule, the global `connect/retry` with its `#retry_period_*` tail on
-    // top (`endpoint_schedule`).
-    let mut dial_cfgs: Vec<(String, DialConfig)> = Vec::with_capacity(endpoints.len());
-    for endpoint in &endpoints {
-        match dial_config(&tls, endpoint) {
-            Ok(cfg) => dial_cfgs.push((endpoint.clone(), cfg)),
-            Err(_) => {
-                let _ = tx.send(false);
-                return;
-            }
-        }
-    }
-    let scheduled: Vec<(String, RetryPolicy)> = endpoints
-        .iter()
-        .map(|e| (e.clone(), endpoint_schedule(phase.schedule, e)))
-        .collect();
-    // R311y820 — fallible the way the step above is: report the open failure to
-    // the C caller rather than dial with a cookie key anybody could forge.
-    // Minted ONCE, before the phase: it is not a connect failure, so it is not
-    // what `connect/retry` re-attempts.
-    let params = match init_params(whatami, zid.to_vec(), link_tx) {
-        Ok(p) => p,
-        Err(_) => {
-            let _ = tx.send(false);
-            return;
-        }
-    };
-    let dialer = Arc::new(Dialer {
-        dial_cfgs,
-        params,
-        offer,
-        clock,
-        tls: tls.clone(),
-        auth: shared.node_auth().cloned(),
-    });
     // R2950 — the two ROLES connect differently upstream, and each is built
     // here as upstream builds it. A client connects through
     // `connect_peers_single_link` and holds ONE session ("the client mode only
@@ -1405,10 +1495,7 @@ async fn drive_dial(
     let _bound_and_unserved = listen;
     // R3070 -- a client with no endpoint of its own scouts for the first node it can open a
     // session to (upstream's `connect_first`); one with an endpoint dials only that.
-    let scouting = scouting
-        .filter(ScoutingPlan::scouts)
-        .filter(|_| endpoints.is_empty())
-        .map(|plan| (plan, zid.clone()));
+    let scouting = client_scouting(scouting, &endpoints, &zid);
     // R3071 -- and a client that SEARCHES answers no Scout until it has connected, where one that
     // was told its endpoint answers from the start (see [`Responder`]).
     let (_findable, after_connecting) = if scouting.is_some() {
@@ -1444,6 +1531,7 @@ async fn drive_dial(
 /// once it has connected (see [`Responder`]). The started responder is held by the role's drive
 /// for the session's life and dropped with it. A bind that fails is an open failure, as the
 /// listener's is: a session that was told to be findable is never silently not.
+#[cfg(feature = "peer")]
 async fn bound_responder(
     plan: Option<&ScoutingPlan>,
     whatami: WhatAmI,
@@ -1466,6 +1554,7 @@ async fn bound_responder(
 /// that connects ends the search, and a search that outlives `scouting/timeout` fails the open.
 /// The scouting stops when this returns, as upstream's does: a client does not autoconnect to a
 /// second node.
+#[cfg(feature = "scout")]
 async fn connect_first(
     plan: &ScoutingPlan,
     zid: &[u8],
@@ -1494,6 +1583,7 @@ async fn connect_first(
 
 /// Open a session to the node `intent` names, through the first of its locators that opens to
 /// that node, as upstream's `connect` walks them.
+#[cfg(feature = "scout")]
 async fn dial_scouted(dialer: &Dialer, intent: &DialIntent) -> Option<OpenedSession> {
     for locator in &intent.locators {
         if let Ok(session) = dialer.open_scouted(locator, &intent.zid).await {
@@ -1512,8 +1602,8 @@ async fn dial_scouted(dialer: &Dialer, intent: &DialIntent) -> Option<OpenedSess
 async fn drive_client(
     endpoints: Vec<String>,
     scheduled: Vec<(String, RetryPolicy)>,
-    scouting: Option<(ScoutingPlan, Vec<u8>)>,
-    answer_after_connecting: Option<Responder>,
+    #[cfg(feature = "scout")] scouting: Option<(ScoutingPlan, Vec<u8>)>,
+    #[cfg(feature = "peer")] answer_after_connecting: Option<Responder>,
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
@@ -1547,10 +1637,19 @@ async fn drive_client(
     // scouted one instead (`connect_first`), and nothing is re-dialled behind it: `rescheduled`
     // is empty because `endpoints` is, so a lost link ends the session as it would on the real
     // library, which scouts for no second node.
-    let first = match &scouting {
-        Some((plan, zid)) => connect_first(plan, zid, &dialer)
-            .await
-            .map_err(|e| log_open_failure("scouted connect", &e)),
+    #[cfg(feature = "scout")]
+    let scouted = match &scouting {
+        Some((plan, zid)) => Some(
+            connect_first(plan, zid, &dialer)
+                .await
+                .map_err(|e| log_open_failure("scouted connect", &e)),
+        ),
+        None => None,
+    };
+    #[cfg(not(feature = "scout"))]
+    let scouted: Option<Result<OpenedSession, ()>> = None;
+    let first = match scouted {
+        Some(first) => first,
         None => drive_connect_phase(phase.policy.budget, &scheduled, &attempt)
             .await
             .map_err(|e| log_open_failure(&format!("connect to {endpoints:?}"), &e)),
@@ -1564,6 +1663,7 @@ async fn drive_client(
     };
     // R3071 -- connected, so findable, as upstream's client spawns its responder after
     // `connect_first`. Held until the session ends.
+    #[cfg(feature = "peer")]
     let _findable = answer_after_connecting.map(Responder::start);
     let mut released = false;
 
@@ -1846,6 +1946,7 @@ async fn drive_face(
 /// the walk has ended and has not failed, where upstream's `start_scout` spawns it. `router_hold`
 /// is `Some` for a router, whose open is held for `scouting/delay` in full after that, where a
 /// peer's ends as soon as its start conditions are met.
+#[cfg(feature = "peer")]
 #[allow(clippy::too_many_arguments)]
 async fn drive_peer(
     endpoints: Vec<String>,
@@ -2057,6 +2158,7 @@ async fn drive_peer(
 /// `EndPoint::to_locator` drops it (`commons/zenoh-protocol/src/core/endpoint.rs` @
 /// `pub const CONFIG_SEPARATOR: char = '#';`). The `?` metadata stays, so two endpoints that
 /// differ in it are two locators.
+#[cfg(feature = "peer")]
 fn endpoint_locator(endpoint: &str) -> &str {
     endpoint
         .split_once('#')
@@ -2076,6 +2178,7 @@ fn endpoint_locator(endpoint: &str) -> &str {
 /// having answered first) the endpoint went back to its retry schedule and the open ran out
 /// `scouting/delay`, 513 ms against 25. Compared as strings, as upstream compares `Locator`s, so
 /// a name and the address it resolves to are two locators there and here.
+#[cfg(feature = "peer")]
 fn scouted_locators_to_dial(configured: &[String], scouted: &[String]) -> Vec<String> {
     scouted
         .iter()
@@ -2089,10 +2192,12 @@ fn scouted_locators_to_dial(configured: &[String], scouted: &[String]) -> Vec<St
 }
 
 /// The zids of the scouted nodes being dialled right now, shared by the connector and its legs.
+#[cfg(feature = "peer")]
 type DialingSet = Arc<StdMutex<std::collections::BTreeSet<Vec<u8>>>>;
 
 /// The set under its lock. A holder that panicked left a set that is still a set, so a poisoned
 /// lock is read through.
+#[cfg(feature = "peer")]
 fn dialing_zids(
     set: &DialingSet,
 ) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<Vec<u8>>> {
@@ -2100,6 +2205,7 @@ fn dialing_zids(
 }
 
 /// What the task that dials the nodes a peer's scouting finds is given.
+#[cfg(feature = "peer")]
 struct ScoutedPeers {
     /// The endpoints the config states to connect to: scouting does not dial their locators.
     configured: Vec<String>,
@@ -2124,6 +2230,7 @@ struct ScoutedPeers {
 /// window: a node this session already holds a face to, or is already dialling, is not dialled
 /// again, and one whose face was lost is dialled the next time it answers. That is the whole of
 /// the recovery for a scouted link, so a face that ends is not re-dialled here.
+#[cfg(feature = "peer")]
 async fn scouted_connector(peers: ScoutedPeers) {
     let ScoutedPeers {
         configured,
@@ -2187,6 +2294,7 @@ async fn scouted_connector(peers: ScoutedPeers) {
 
 /// One scouted node's face: dial it, then drive the face until the session closes or the link
 /// ends. The first scouted connection of the session releases the open's start window.
+#[cfg(feature = "peer")]
 #[allow(clippy::too_many_arguments)]
 async fn scouted_leg(
     face: u64,
@@ -2232,6 +2340,7 @@ async fn scouted_leg(
 }
 
 /// Pay what a leg owes the open, from wherever its face runs. Idempotent, as [`FaceOwed::pay`].
+#[cfg(feature = "peer")]
 fn pay(owed: &StdMutex<FaceOwed>) {
     if let Ok(mut owed) = owed.lock() {
         owed.pay();
@@ -2239,6 +2348,7 @@ fn pay(owed: &StdMutex<FaceOwed>) {
 }
 
 /// `fut`, bounded by `deadline` when there is one.
+#[cfg(feature = "peer")]
 async fn within<T>(
     deadline: Option<tokio::time::Instant>,
     fut: impl std::future::Future<Output = T>,
@@ -2251,12 +2361,14 @@ async fn within<T>(
 
 /// The background endpoints a peer's open waits for, and the wake that tells
 /// it one connected — upstream's `start_conditions`.
+#[cfg(feature = "peer")]
 #[derive(Default)]
 struct StartWindow {
     pending: std::sync::atomic::AtomicUsize,
     connected: Notify,
 }
 
+#[cfg(feature = "peer")]
 impl StartWindow {
     fn expect_one(&self) {
         self.pending.fetch_add(1, Ordering::SeqCst);
@@ -2296,6 +2408,7 @@ impl StartWindow {
 /// Paid by [`drive_face`]'s `on_up`, which runs after the registration, and on drop, which
 /// covers a face the registry refused (a node already held) and a leg that ended before
 /// connecting: neither may keep the open waiting. Paying is idempotent.
+#[cfg(feature = "peer")]
 struct FaceOwed {
     /// The in-walk dial's signal: the walk waits for it before it releases the open.
     registered: Option<tokio::sync::oneshot::Sender<()>>,
@@ -2303,6 +2416,7 @@ struct FaceOwed {
     window: Option<Arc<StartWindow>>,
 }
 
+#[cfg(feature = "peer")]
 impl FaceOwed {
     fn none() -> Self {
         Self {
@@ -2333,6 +2447,7 @@ impl FaceOwed {
     }
 }
 
+#[cfg(feature = "peer")]
 impl Drop for FaceOwed {
     fn drop(&mut self) {
         self.pay();
@@ -2341,6 +2456,7 @@ impl Drop for FaceOwed {
 
 /// One peer endpoint's face for the session's life: connect, drive, drain,
 /// re-dial.
+#[cfg(feature = "peer")]
 struct FaceLeg {
     face: u64,
     endpoint: String,
@@ -2353,6 +2469,7 @@ struct FaceLeg {
     gate: Arc<ReadGate>,
 }
 
+#[cfg(feature = "peer")]
 impl FaceLeg {
     /// Drive this endpoint's face from `first` (already connected) or by
     /// connecting on `schedule` (a background endpoint), until the session
@@ -2535,6 +2652,7 @@ fn locator_host(endpoint: &str) -> Option<&str> {
 ///
 /// Both-or-neither on the pair: a listener told to present a cert with no key is
 /// a configuration error, not a cert-free listener.
+#[cfg(feature = "peer")]
 fn listen_accept_config(tls: &CapiTlsConfig) -> std::io::Result<AcceptConfig> {
     let cfg = AcceptConfig::default();
     let (cert, key) = match (&tls.listen_cert_pem, &tls.listen_key_pem) {
@@ -2631,6 +2749,7 @@ fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfi
 /// A bound `listen` endpoint, and the parameters its accept loop mints the
 /// sessions it accepts from: everything the `listen` role has decided before
 /// it announces anything to the caller.
+#[cfg(feature = "peer")]
 struct Listening {
     listener: BoundListener,
     params: SessionInitParams,
@@ -2638,6 +2757,7 @@ struct Listening {
 
 /// A bound listener together with what [`accept_faces`] needs beside it, as one
 /// leg of a session that also dials. See [`drive_peer`].
+#[cfg(feature = "peer")]
 struct ListenLeg {
     listening: Listening,
     offer: SessionOffer,
@@ -2650,6 +2770,7 @@ struct ListenLeg {
 
 /// Run `leg`'s accept loop as a local task, until `closing` is set. Called on a
 /// `LocalSet`, because the accept loop's drive futures are not `Send`.
+#[cfg(feature = "peer")]
 fn spawn_accept_leg(
     leg: ListenLeg,
     shared: &Arc<SharedSession>,
@@ -2674,6 +2795,7 @@ fn spawn_accept_leg(
 
 /// An endpoint of `listen` the bind phase left to the background: still to be bound, on its own
 /// schedule, while the session is already open.
+#[cfg(feature = "peer")]
 struct PendingBind {
     /// The endpoint's place in the `listen` list; see [`ListenLeg::index`].
     index: u64,
@@ -2683,6 +2805,7 @@ struct PendingBind {
 
 /// What [`bind_listeners`] made of a `listen` list: the legs bound before the open went on, and
 /// the endpoints still being bound after it.
+#[cfg(feature = "peer")]
 struct BoundListeners {
     legs: Vec<ListenLeg>,
     /// R3089 -- bound by [`LateBinds::spawn`] once a role is running them.
@@ -2696,6 +2819,7 @@ struct BoundListeners {
 /// then on: the next Hello names it, and so does the next list gossip sends (MEASURED on the real
 /// library: a Scout asked before the bind is answered with no locator and one asked after it with
 /// the new one). A neighbour that already holds the list gossip sent before is not sent a new one.
+#[cfg(feature = "peer")]
 struct LateBinds {
     pending: Vec<PendingBind>,
     tls: CapiTlsConfig,
@@ -2711,6 +2835,7 @@ struct LateBinds {
     gossiped: Option<Vec<String>>,
 }
 
+#[cfg(feature = "peer")]
 impl LateBinds {
     /// Tell the scouting responder, and the gossip plane when the session has one, the locators of
     /// a listener that has just bound.
@@ -2858,6 +2983,7 @@ fn log_open_failure(what: &str, why: &dyn core::fmt::Debug) {
 
 /// One attempt to bind `endpoint`, as the runtime's phase drivers ask for it: the listener, or
 /// nothing.
+#[cfg(feature = "peer")]
 async fn bind_one(
     endpoint: &str,
     tls: &CapiTlsConfig,
@@ -2889,6 +3015,7 @@ async fn bind_one(
 /// `None` is an open failure, which the caller reports. The legs come back in the order that
 /// they were bound; each carries the place its endpoint was stated at, and that is what names its
 /// face ids.
+#[cfg(feature = "peer")]
 async fn bind_listeners(
     endpoints: &[String],
     phase: ListenPhase,
@@ -2945,6 +3072,7 @@ async fn bind_listeners(
 /// its listener the same way, and first, as upstream does
 /// (`zenoh/src/net/runtime/orchestrator.rs` @
 /// `self.bind_listeners(&listeners).await?;` before `self.connect_peers`).
+#[cfg(feature = "peer")]
 async fn bind_listener(
     endpoint: &str,
     tls: &CapiTlsConfig,
@@ -3001,10 +3129,12 @@ async fn bind_listener(
 /// The [`FaceExecutor`] of a [`FaceDrive::PerFace`] node: every face's drive runs on a thread of
 /// its own ([`run_on_own_thread`]), polled only while the node's read task may run, as the
 /// top-level drive is ([`Pausable`]), and is one of the futures a stop waits for.
+#[cfg(feature = "peer")]
 struct GateFaces {
     gate: Arc<ReadGate>,
 }
 
+#[cfg(feature = "peer")]
 impl FaceExecutor for GateFaces {
     fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
         run_on_own_thread(self.gate.clone(), drive)
@@ -3018,10 +3148,12 @@ impl FaceExecutor for GateFaces {
 /// runs every callback, so a program's callbacks stay serial; what each face no longer shares
 /// is the accept loop's task, which would otherwise be polled again, with all its arms, for
 /// every frame of every face.
+#[cfg(feature = "peer")]
 struct SerialFaces {
     gate: Arc<ReadGate>,
 }
 
+#[cfg(feature = "peer")]
 impl FaceExecutor for SerialFaces {
     fn wrap(&self, drive: SpawnedDrive) -> SpawnedDrive {
         Box::pin(Pausable::nested(self.gate.clone(), drive))
@@ -3044,6 +3176,7 @@ impl FaceExecutor for SerialFaces {
 /// numbered inside its own range of the registry's face ids ([`CApiForwarder::listening`]): each
 /// accept loop counts its faces from zero, so two listeners that shared the registry unshifted
 /// would each hand it a face 0.
+#[cfg(feature = "peer")]
 async fn accept_faces(
     listening: Listening,
     offer: SessionOffer,
@@ -3096,6 +3229,7 @@ async fn accept_faces(
 ///
 /// R3076 -- over every endpoint the session states, each with its own accept loop on a
 /// `LocalSet` (the loops' drive futures are not `Send`), as [`drive_peer`] runs its own.
+#[cfg(feature = "peer")]
 async fn drive_listen(
     endpoints: Vec<String>,
     tls: CapiTlsConfig,
@@ -3186,6 +3320,7 @@ async fn drive_listen(
 /// its own publishers and subscribers still meet (measured on the real library,
 /// `open` answers 0 and a same-session subscriber is delivered). Before this a
 /// config like that was refused, which no program written for zenoh-c expects.
+#[cfg(feature = "peer")]
 async fn drive_idle(whatami: WhatAmI, ctx: DriveContext) {
     let DriveContext {
         zid,
@@ -3285,7 +3420,9 @@ pub struct OpenStance {
     /// not scout: zenoh-pico's ABI, whose scouting is a call a program makes, and a config that
     /// turned it off. A peer or router that has a plan dials what it finds beside its endpoints;
     /// a client with no endpoint scouts for the first node it can open to. A plan whose matcher
-    /// is empty (a router's default) looks for nobody and is the same as `None`.
+    /// is empty (a router's default) looks for nobody and is the same as `None`. A build without
+    /// the `scout` feature has no such field: it scouts for nothing.
+    #[cfg(feature = "scout")]
     pub scouting: Option<ScoutingPlan>,
     /// R3073 -- whether a face this node reaches as a north-bound peer is ended with the
     /// `DeclareFinal` of the initial interest; see [`SessionResources::initial_interest`].
@@ -3434,14 +3571,33 @@ pub fn open_blocking(
         timestamping,
         shm_clients,
         local_delivery,
+        #[cfg(feature = "scout")]
         scouting,
         initial_interest,
+        #[cfg(feature = "peer")]
         gossip,
+        #[cfg(feature = "peer")]
         listen_phase,
         face_drive,
         auth,
         policy,
+        ..
     } = stance;
+    // R3070 -- a session that scouts for nodes to connect to dials them with the dial role,
+    // whether or not it was also told an endpoint, so the plan decides the route alongside the
+    // endpoints: a router's empty one scouts for nobody and routes as before.
+    #[cfg(feature = "scout")]
+    let scouts = scouting.as_ref().is_some_and(ScoutingPlan::scouts);
+    #[cfg(not(feature = "scout"))]
+    let scouts = false;
+    // A build without the `peer` feature is the client's: it opens to the endpoints it is told
+    // of (or finds its router, with `scout`), and has no listener, no accept loop and no role
+    // but the client's to open as. A config that asks for more is refused here, before any
+    // thread or socket exists, and not run as the client it is not.
+    #[cfg(not(feature = "peer"))]
+    if !listen.is_empty() || dial_whatami != WhatAmI::Client || (connect.is_empty() && !scouts) {
+        return Err(OpenError::DriveFailed);
+    }
     let link_tx = LinkTx {
         queue: tx_queue,
         batch_size,
@@ -3450,8 +3606,11 @@ pub fn open_blocking(
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
     // needed before the drive thread starts: the registry's plane holds the sender, and the
     // role that dials holds the receiver.
+    #[cfg(feature = "peer")]
     let (dial_tx, dial_rx) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(feature = "peer")]
     let gossip = gossip.filter(|_| dial_whatami != WhatAmI::Client);
+    #[cfg(feature = "peer")]
     let gossiping = gossip.is_some();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
@@ -3473,6 +3632,7 @@ pub fn open_blocking(
                 shm_clients,
                 local_delivery,
                 initial_interest,
+                #[cfg(feature = "peer")]
                 gossip: gossip.map(|policy| GossipSetup {
                     whatami: dial_whatami,
                     policy,
@@ -3554,21 +3714,23 @@ pub fn open_blocking(
                 link_tx,
                 offer,
                 gate: drive_gate.clone(),
+                #[cfg(feature = "scout")]
                 scouting,
+                #[cfg(feature = "peer")]
                 dials: (dial_tx, dial_rx),
+                #[cfg(feature = "peer")]
                 gossiping,
+                #[cfg(feature = "peer")]
                 listen_phase,
             };
-            // R3070 -- a session that scouts for nodes to connect to dials them with the dial
-            // role, whether or not it was also told an endpoint, so the plan decides the route
-            // alongside the endpoints: a router's empty one scouts for nobody and routes as before.
-            let scouts = ctx.scouting.as_ref().is_some_and(ScoutingPlan::scouts);
             // R3074 -- and a listener that gossips is a peer that dials what it is told of, so
             // it takes the dial role as one that scouts does. A session that gossips with no
             // listener and nothing to connect to has nobody to be told of by, and stays alone.
+            #[cfg(feature = "peer")]
             let gossips_with_a_listener = ctx.gossiping && !listen.is_empty();
             // Polled only while the read task may run ([`Pausable`]): a stopped
             // task is a session nobody is driving, which is what pico's is.
+            #[cfg(feature = "peer")]
             rt.block_on(Pausable::new(drive_gate, async move {
                 if !connect.is_empty() || scouts || gossips_with_a_listener {
                     drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
@@ -3582,6 +3744,13 @@ pub fn open_blocking(
                     drive_idle(dial_whatami, ctx).await;
                 }
             }));
+            // The client's build has the one role, and `open_blocking` has refused any config
+            // that has nothing to dial or find.
+            #[cfg(not(feature = "peer"))]
+            rt.block_on(Pausable::new(
+                drive_gate,
+                drive_dial(connect, dial_whatami, tls, dial_phase, ctx),
+            ));
             // `rt` is dropped here, after the drive loop has returned.
         })
         .map_err(|_| OpenError::DriveFailed)?;

@@ -64,5 +64,9 @@ pub mod group;
 pub mod listeners;
 pub mod node_auth;
 pub mod node_policy;
+#[cfg(feature = "scout")]
 pub mod scouting;
+#[cfg(feature = "scout")]
 pub mod scouting_node;
+#[cfg(feature = "peer")]
+pub mod scouting_responder;

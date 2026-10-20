@@ -70,6 +70,7 @@ use tokio::sync::Notify;
 
 #[cfg(feature = "group")]
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
+#[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
 #[cfg(feature = "advanced")]
 use wz_runtime_tokio::advanced_publisher::{
@@ -83,6 +84,7 @@ use wz_runtime_tokio::declare::LivelinessSample;
 #[cfg(feature = "gossip")]
 use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
 
+#[cfg(feature = "peer")]
 use crate::gossip::GossipPolicy;
 #[cfg(feature = "group")]
 use wz_runtime_tokio::group::Member;
@@ -101,9 +103,11 @@ use wz_runtime_tokio::session::{
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
 };
+#[cfg(feature = "peer")]
+use wz_runtime_tokio::session_glue::WhatAmI;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, BoxedLinkDriver, DriverLoopOutcome, IterationEvent, LinkKind,
-    LinkSendOutcome, SessionLinkActions, WhatAmI,
+    LinkSendOutcome, SessionLinkActions,
 };
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
@@ -1620,7 +1624,8 @@ pub struct SessionResources {
     /// config's gossip switch being on, and it is what makes two peers that each reached a third
     /// reach each other when no scouting finds them. `None` for a node that does not, which is
     /// zenoh-pico's ABI (its peers are introduced by scouting alone) and any role that is a
-    /// client.
+    /// client. A build without the `peer` feature has no such field.
+    #[cfg(feature = "peer")]
     pub gossip: Option<GossipSetup>,
     /// The authentication the node's config asks for (`transport/auth/usrpwd/dictionary_file`):
     /// a listener that holds one admits only the peers that hold a user of it. `None` is a node
@@ -1635,6 +1640,7 @@ pub struct SessionResources {
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
 /// it dials), and where the nodes it learns of are posted to be dialled. The drive role drains
 /// the other end of the channel, since dialling is its work and not the registry's.
+#[cfg(feature = "peer")]
 #[derive(Clone)]
 pub struct GossipSetup {
     pub whatami: WhatAmI,
@@ -1651,6 +1657,7 @@ impl Default for SessionResources {
             shm_clients: no_shm_clients(),
             local_delivery: LocalDeliveryDrain::DriveTask,
             initial_interest: false,
+            #[cfg(feature = "peer")]
             gossip: None,
             auth: None,
             policy: crate::node_policy::NodePolicy::default(),
@@ -1736,6 +1743,7 @@ impl SharedSession {
             shm_clients,
             local_delivery,
             initial_interest,
+            #[cfg(feature = "peer")]
             gossip,
             auth,
             policy,
@@ -1751,7 +1759,7 @@ impl SharedSession {
             .map(Arc::new);
         // Without the feature a setup cannot be made (its policy has no value), so there is
         // nothing to build and nothing to keep.
-        #[cfg(not(feature = "gossip"))]
+        #[cfg(all(feature = "peer", not(feature = "gossip")))]
         let _: Option<GossipSetup> = gossip;
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
@@ -4655,6 +4663,7 @@ fn queryable_options(complete: bool, allowed_origin: Locality) -> QueryableOptio
 /// callback. It holds `Arc<SharedSession>` (so it is `Send`, unlike the
 /// `Rc`/`RefCell` routing forwarders) because the same registry is reachable
 /// from the C thread.
+#[cfg(feature = "peer")]
 pub struct CApiForwarder {
     shared: Arc<SharedSession>,
     /// R3076 -- added to every face id this forwarder is handed, so the faces of the session's
@@ -4666,8 +4675,10 @@ pub struct CApiForwarder {
 /// R3076 -- how far apart the face ids of two listeners of one session are. An accept loop's own
 /// ids are small and it counts them upward; `1 << 40` of room is more faces than a listener will
 /// ever accept, and 2^22 listeners fit below [`DIAL_FACE_ID`].
+#[cfg(feature = "peer")]
 const LISTENER_FACE_STRIDE: u64 = 1 << 40;
 
+#[cfg(feature = "peer")]
 impl CApiForwarder {
     /// The forwarder of the session's FIRST (and, for most sessions, only) listener.
     pub fn new(shared: Arc<SharedSession>) -> Self {
@@ -4684,6 +4695,7 @@ impl CApiForwarder {
     }
 }
 
+#[cfg(feature = "peer")]
 impl FaceForwarder for CApiForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
         // Admitted already: the loop asked `holds_peer` before it got here, and it

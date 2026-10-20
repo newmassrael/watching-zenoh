@@ -53,6 +53,8 @@ path = "src/lib.rs"
 # is compiled into neither the ABI nor this model.
 default = [
     "rx-busy-poll",
+    "peer",
+    "scout",
     "query",
     "queryable",
     "liveliness",
@@ -60,6 +62,30 @@ default = [
     "advanced",
     "group",
     "gossip",
+]
+# The roles beyond the CLIENT: a session that listens, that accepts the sessions of others, that
+# is a peer or a router, and what those roles bring with them: the accept loop, the listener's
+# bind (with its late retry), the faces it serves, the peer's walk over several endpoints, the
+# answering of a Scout and the gossip that introduces the nodes of a mesh. A build without it
+# opens a session in client mode to the endpoints it dials (or finds, with `scout`), and refuses
+# a config that states a listener or a role it does not have.
+peer = [
+    "scout",
+    "wz-runtime-tokio/session-unicast-accept",
+    "wz-runtime-tokio/scouting-responder",
+]
+# Scouting: the one-shot survey of the group that `z_scout` makes, and a session's own looking
+# for the nodes it should connect to (a client with nothing to dial scouts for its router): the
+# scout, its fan-out over the interfaces, the reading of the answers, the plan the config
+# resolves to, and the dial a finding turns into (`routing-accept` is for `DialIntent`, the type
+# that dial is, and `zenoh-config` for the types the plan reads).
+scout = [
+    "dep:wz-routing-graph",
+    "wz-runtime-tokio/routing-accept",
+    "wz-runtime-tokio/scouting-active",
+    "wz-runtime-tokio/link-interfaces",
+    "wz-runtime-tokio/locator-iface",
+    "wz-runtime-tokio/zenoh-config",
 ]
 # The two link kinds the LISTEN role's accept-config arms are cfg'd on. They
 # forward to wz-runtime-tokio exactly as wz-capi-pico's twins do; the drive half
@@ -78,6 +104,7 @@ transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
 # (`NodeAuth`). Off by default for the reason the TLS feature is: the pico ABI has no such
 # key and carries none of the credential machinery. The zenoh-c ABI turns it on.
 access-extauth-usrpwd = [
+    "peer",
     "wz-runtime-tokio/access-extauth-usrpwd",
     "dep:wz-session-core",
     "wz-session-core/access-extauth-usrpwd",
@@ -188,7 +215,7 @@ group = ["wz-runtime-tokio/ext-pubsub-group-membership"]
 # R3074 -- the gossip plane: a session that is told of a node by one it holds a link to dials
 # it, which is how two peers that each reached a third come to meet when multicast scouting
 # reaches nobody.
-gossip = ["wz-runtime-tokio/routing-gossip"]
+gossip = ["peer", "wz-runtime-tokio/routing-gossip"]
 
 [dependencies]
 # OS entropy for the per-session zid, as zenoh-pico does at `z_open`
@@ -197,7 +224,11 @@ getrandom = "0.2"
 # Same reasoning as wz-capi-pico's: depend on wz-runtime-tokio DIRECTLY, never
 # the `wz` facade, which re-exports the ABI crates and would form a cycle.
 # `routing-accept` is not in the default bundle and gates `accept_loop`, which
-# the listen role needs.
+# the listen role needs and which also carries `DialIntent`, the dial a scouted node becomes:
+# it is the `scout` feature's, with the scouting runtime features (`scouting-active`,
+# `link-interfaces`, `locator-iface`, `zenoh-config`). The accepting half (`session-unicast-accept`,
+# `scouting-responder`) is the `peer` feature's. The comments below keep the reasons the
+# features were chosen.
 # The capabilities a deployer can leave out (`liveliness-get`, the advanced pub/sub trio,
 # the group membership, the gossip) are this crate's features of the names above, not an
 # unconditional list here: a dependency that names a capability unconditionally makes it every
@@ -264,7 +295,6 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "pubsub-congestion-control",
     "pubsub-express",
     "session-unicast-open",
-    "session-unicast-accept",
     "session-reconnect",
     "session-matching",
     "keyexpr-canon",
@@ -272,25 +302,12 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "keyexpr-wildcard-double",
     "keyexpr-dollar-star",
     "keyexpr-includes",
-    "routing-accept",
-    "scouting-active",
-    "link-interfaces",
-    "locator-iface",
-    # R3071 -- the responder: a session that is told to answer a Scout (`scouting/multicast/
-    # listen`, on by default) is findable. Named here and not folded into `scouting-active`
-    # for the reason the runtime states: discovering and being discoverable are opposite
-    # directions, and this crate is the build that owes both.
-    "scouting-responder",
     "time-hlc",
-    # R3070 -- the autoconnect loop and the config types it reads. `zenoh-config` is what lets
-    # `scouting_autoconnect` build here without `routing-peer` (see the module's gate): this
-    # crate drains the intents itself, on its drive task, and wants the dial and not the mesh.
-    "zenoh-config",
 ] }
 # R3070 -- the autoconnect POLICY (`AutoConnect`, its per-target strategies) a session that
 # scouts is built with, named here because the plan a host hands this crate carries it. A pure
-# host crate, already in the graph through `zenoh-config` above.
-wz-routing-graph = { path = "../wz-routing-graph" }
+# host crate, already in the graph through `zenoh-config` (the `scout` feature's).
+wz-routing-graph = { path = "../wz-routing-graph", optional = true }
 # R311y529 — the `TimeSource` trait, so this crate can read the clock it already
 # holds (`SharedSession::now_monotonic_ms`, which `z_timestamp_new` stamps
 # from). Already in the graph via wz-runtime-tokio; named here because a trait
