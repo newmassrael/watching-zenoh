@@ -370,12 +370,14 @@ pub fn fields_json_since_coordinated(
 /// handle and the whole-document door is the capture it HOLDS, so they can read
 /// differently in the cells [`REVISABLE_ROW_CELLS`] names, and only for a row whose
 /// inputs a trim took (a reference to a declaration that was trimmed, a final whose
-/// request was). Three things still begin the walk again, and each costs a pass over
-/// what is held: an end-to-end profile rule (its counters are a fact about the
-/// frames BEFORE a row, which a walk that skips the old rows does not move), a
-/// window that ended inside a list, and any state the prefix test refuses (a flow
-/// that left or appeared in front of one, a message that sorts before one already
-/// taken, a handshake that changes who owns a list).
+/// request was). A window that ends inside a list leaves the walk where the window
+/// ended, and the next window goes on from there, so reading a capture window by
+/// window visits each message once. Two things still begin the walk again, and each
+/// costs a pass over what is held: an end-to-end profile rule (its counters are a
+/// fact about the frames BEFORE a row, which a walk that skips the old rows does
+/// not move), and any state the prefix test refuses (a flow that left or appeared
+/// in front of one, a message that sorts before one already taken, a handshake that
+/// changes who owns a list).
 ///
 /// # What it does not claim
 ///
@@ -654,7 +656,7 @@ pub fn fields_json_since_remembering_progress(
                 .stream
                 .iter()
                 .chain(memory.walk.datagram.iter())
-                .any(|w| w.unnumbered || w.truncated)
+                .any(|w| w.unnumbered)
             || d.message_lists_with_origin().any(|(_, origin, list)| {
                 matches!(
                     origin,
@@ -683,23 +685,36 @@ pub fn fields_json_since_remembering_progress(
                 return None;
             }
         }
+        let stream_lists = crate::node::stream_list_indices(d);
         let mut plans = Vec::with_capacity(d.flows().len());
         for (i, flow) in d.flows().iter().enumerate() {
-            plans.push(match memory.walk.stream.get(i) {
+            let first_held = flow.frames.produced() - flow.frames.len() as u64;
+            let (start, packet, after) = match memory.walk.stream.get(i) {
                 // A flow the last walk did not see: nothing walked of it yet.
-                None => flow.capture_order_from(0, 0, None),
+                None => (0, 0, None),
                 Some(walk) => {
                     if walk.produced > flow.frames.produced() {
                         return None;
                     }
-                    let first_held = flow.frames.produced() - flow.frames.len() as u64;
-                    flow.capture_order_from(
+                    (
                         walk.resume_position(first_held),
                         walk.order_packet,
                         walk.order_last,
                     )
                 }
-            });
+            };
+            // The order is made for the messages THIS document covers and no more, so
+            // the cost of a window is the size of the window and not of the list
+            // behind it. The walker finds the same end by the same rule.
+            let end = window_end(
+                coordinates,
+                stream_lists.get(i).copied(),
+                first_held,
+                start,
+                flow.frames.len(),
+                since.through_seq,
+            );
+            plans.push(flow.capture_order_from(start, packet, after, end));
             plans.last()?.as_ref()?;
         }
         Some(plans)
@@ -982,6 +997,35 @@ pub trait RowCoordinates {
     }
 }
 
+/// The position, in a list whose oldest held message has produced-index
+/// `first_held` and which holds `len` messages, of the first message from
+/// `start` that is numbered past `through_seq`: where a window ends in it, or
+/// `len` when the window covers the rest.
+///
+/// ONE rule for the two places that need it, and the same one [`RowTags`] applies
+/// to a row: a message with no sequence number is never past the window. A list
+/// numbers its messages in order, so everything from the first one past it is
+/// past it too, and the scan stops there: it costs the size of the window.
+fn window_end(
+    coordinates: &dyn RowCoordinates,
+    list: Option<usize>,
+    first_held: u64,
+    start: usize,
+    len: usize,
+    through_seq: u64,
+) -> usize {
+    let Some(list) = list else {
+        return len;
+    };
+    (start..len)
+        .find(|&position| {
+            coordinates
+                .row_seq(list, first_held + position as u64)
+                .is_some_and(|seq| seq > through_seq)
+        })
+        .unwrap_or(len)
+}
+
 /// Whether `seq` lies in one of `ranges`, which are ascending and disjoint (see
 /// [`RowCoordinates::held_seq_ranges`]).
 fn seq_in_ranges(ranges: &[(u64, u64)], seq: u64) -> bool {
@@ -1067,11 +1111,12 @@ pub(crate) struct ListWalk {
     /// Messages this walk visited (a message a cursor passed without visiting is
     /// not counted): what the memory's work counter sums.
     visited: usize,
-    /// How many messages the list had ever produced when the walk stopped. The
-    /// messages BELOW this were walked, so a walk that continues starts at the
-    /// first held message at or past it ([`Self::resume_position`]), wherever a
-    /// front trim has since put the front. A produced-index and not a position,
-    /// because a position is counted from the front and the front moves.
+    /// How many messages of the list the walk had been over when it stopped: all it
+    /// had produced, or the ones before the end of the window when the window ended
+    /// inside it. The messages BELOW this were walked, so a walk that continues
+    /// starts at the first held message at or past it ([`Self::resume_position`]),
+    /// wherever a front trim has since put the front. A produced-index and not a
+    /// position, because a position is counted from the front and the front moves.
     produced: u64,
     /// Pass one's running packet, which a message with no packet of its own
     /// inherits.
@@ -1092,12 +1137,6 @@ pub(crate) struct ListWalk {
     /// every since-document (dropping one is not recoverable), so a walk that
     /// skipped the old rows would not write what a whole one does.
     unnumbered: bool,
-    /// The document's window ended inside this list, so the walk stopped at the
-    /// first row past it and the rest was not visited. Where it stopped is not
-    /// where a continuing walk could pick up (the capture-order plan and its
-    /// running key assume every new message was visited), so the next call begins
-    /// the list again instead of continuing it.
-    truncated: bool,
     /// The scouting list's own mark, for the same purpose.
     scouting_produced: u64,
 }
@@ -1117,15 +1156,125 @@ impl ListWalk {
     }
 }
 
+/// How many packets of the container one chunk of the second read holds, and so how
+/// far apart its checkpoints stand: a packet is found by the checkpoint before it
+/// and at most this many record headers.
+const REREAD_CHUNK: usize = 256;
+
 /// Where the capture container's own walk stopped, so that a walk that continues
-/// reads the packets after it and not the whole container again.
+/// reads the packets after it and not the whole container again, and a CHECKPOINT of
+/// that walk every [`REREAD_CHUNK`] packets, so that a packet behind it can be read
+/// again without walking from the start.
+///
+/// # Why checkpoints
+///
+/// A row is written from the packet its message came in, and a document that covers
+/// a WINDOW of a list writes rows whose packets the walk passed in an earlier call.
+/// A walk that kept only where it stopped could read the packets after that and no
+/// others, so the rows of a window behind it came out without the link layer and
+/// the frame offset; a walk that began the container again at every window read the
+/// whole of it each time. A checkpoint is a copy of the container walk at a packet
+/// boundary (a few words), so the packets a window names are read from the one
+/// before the first of them, and a chunk costs [`REREAD_CHUNK`] headers.
+///
+/// What a checkpoint holds is the walk's state before a packet, not the packet, so
+/// the memory is one cursor per chunk and not one entry per packet; those before the
+/// oldest packet a held message names are given up ([`Self::prune_before`]).
 #[derive(Clone, Debug)]
 pub(crate) struct RereadResume {
+    /// The walk, standing where the last call left it: past the last whole record.
     cursor: crate::CaptureCursor,
     /// A digest of the first bytes of the container and of the bytes just
     /// before the cursor: what says the bytes handed over now are the container
     /// the cursor was walking.
     fingerprint: u64,
+    /// The number of the first chunk `checkpoints` holds.
+    first_chunk: usize,
+    /// The walk standing before packet `chunk * REREAD_CHUNK`, for each chunk from
+    /// `first_chunk` on that the walk has reached the start of.
+    checkpoints: alloc::collections::VecDeque<crate::CaptureCursor>,
+}
+
+impl RereadResume {
+    /// A walk at the start of a container, with nothing read.
+    fn new() -> Self {
+        let start = crate::CaptureCursor::new();
+        Self {
+            cursor: start.clone(),
+            fingerprint: 0,
+            first_chunk: 0,
+            checkpoints: alloc::collections::VecDeque::from([start]),
+        }
+    }
+
+    /// Walk `capture` from where the last call stopped to where its bytes end,
+    /// leaving a checkpoint at the start of every chunk it passes. `false` when the
+    /// bytes are not a container this can read a second time (see
+    /// [`Reread::of`]), in which case nothing of it is to be kept.
+    fn advance(&mut self, capture: &[u8]) -> bool {
+        loop {
+            let mut chunk_ended = false;
+            let walk = self.cursor.walk(capture, |event| {
+                if let crate::CaptureEvent::Frame(frame) = event {
+                    if (frame.index + 1) % REREAD_CHUNK == 0 {
+                        chunk_ended = true;
+                        return core::ops::ControlFlow::Break(());
+                    }
+                }
+                core::ops::ControlFlow::Continue(())
+            });
+            match walk {
+                // The cursor stands past the record of the chunk's last packet, which
+                // is the start of the next chunk.
+                Ok(crate::CaptureWalk::Stopped) if chunk_ended => {
+                    self.checkpoints.push_back(self.cursor.clone());
+                }
+                // To where the bytes end, on a boundary or inside a record, once the
+                // container has begun (see [`Reread::of`]).
+                Ok(crate::CaptureWalk::Halted { .. }) if self.cursor.consumed() > 0 => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Give up the checkpoints of the chunks that end before `packet`: nothing a
+    /// held message names is in them.
+    fn prune_before(&mut self, packet: usize) {
+        let keep_from = packet / REREAD_CHUNK;
+        while self.first_chunk < keep_from && self.checkpoints.len() > 1 {
+            self.checkpoints.pop_front();
+            self.first_chunk += 1;
+        }
+    }
+}
+
+/// The number of the oldest packet any message the dissection still holds names: the
+/// first held message of each list, which is the oldest of it. A message whose packet
+/// cannot be named counts as packet 0, since nothing can be said of what it needs.
+fn oldest_held_packet(d: &crate::Dissection) -> usize {
+    let streams = d.flows().iter().map(|flow| {
+        flow.frames.first().map_or(usize::MAX, |frame| {
+            flow.packet_for(frame.direction, frame.stream_offset)
+                .unwrap_or(0)
+        })
+    });
+    let datagrams = d.datagram_flows().iter().flat_map(|flow| {
+        [
+            flow.frames
+                .first()
+                .map_or(usize::MAX, |frame| frame.stream_offset),
+            flow.scouting
+                .iter()
+                .next()
+                .map_or(usize::MAX, |datagram| datagram.packet_index),
+        ]
+    });
+    // Nothing held names no packet, and a message that arrives next may name any.
+    streams
+        .chain(datagrams)
+        .min()
+        .filter(|&packet| packet != usize::MAX)
+        .unwrap_or(0)
 }
 
 /// What the field walker keeps of the capture between calls.
@@ -1291,18 +1440,23 @@ fn fields_json_selected(
     // addresses, which only the capture's own bytes can say.
     //
     // A walk that keeps its state also keeps where the container's own walk
-    // stopped, and reads only the packets after it.
+    // stopped and a checkpoint of it every chunk of packets, walks only the packets
+    // after it, and reads a packet a row names from the chunk that holds it: the
+    // packets the rows of THIS call name, wherever in the container they are.
     let reread = if tracking {
-        let mut cursor = match (resume, reread_slot.take()) {
-            (true, Some(kept)) => kept.cursor,
-            _ => crate::CaptureCursor::new(),
+        let mut kept = match (resume, reread_slot.take()) {
+            (true, Some(kept)) => kept,
+            _ => RereadResume::new(),
         };
-        let reread = Reread::extend(capture, &mut cursor);
-        *reread_slot = reread.as_ref().map(|_| RereadResume {
-            fingerprint: container_fingerprint(capture, cursor.consumed()),
-            cursor,
-        });
-        reread
+        let readable = kept.advance(capture);
+        if readable {
+            kept.fingerprint = container_fingerprint(capture, kept.cursor.consumed());
+            kept.prune_before(oldest_held_packet(d));
+        }
+        *reread_slot = readable.then_some(kept);
+        reread_slot
+            .as_ref()
+            .map(|kept| Reread::indexed(capture, kept))
     } else {
         Reread::of(capture)
     };
@@ -1714,27 +1868,28 @@ fn push_stream_flow(
     // resuming (the caller computed it, from where the last one stopped, to know
     // the walk may resume at all), and makes it whole otherwise, so that it
     // can say where it stopped.
+    //
+    // Only the messages inside the window are ordered, from where the walk began to
+    // `end`, so the order, the running packet and the largest key it leaves are those
+    // of the window's last message: where the next window continues from.
     let (order, order_packet, order_last) = match run.as_mut().and_then(|r| r.plan.take()) {
         Some(plan) => plan,
-        None => match run.as_ref() {
-            Some(_) => flow
-                .capture_order_from(0, 0, None)
-                .expect("an order from the first message has nothing before it"),
-            None => (flow.capture_order(), 0, None),
-        },
+        None => flow
+            .capture_order_from(0, 0, None, end)
+            .expect("an order from the first message has nothing before it"),
     };
+    debug_assert!(
+        order.iter().all(|&position| position < end),
+        "an order made for one window holds a message past it"
+    );
     // Messages past the window were not examined: say so in the tally a payload
     // reader reads, as a cap does, and leave them to the next window.
-    let truncated = end < flow.frames.len();
-    if truncated {
+    if end < flow.frames.len() {
         if let Some(d) = declarations {
             d.note_unwalked_n(flow.frames.len() - end);
         }
     }
     for position in order {
-        if position >= end {
-            continue;
-        }
         // A walk someone told to stop writes no more rows; its caller reads
         // that from the progress and throws the document away.
         if !tags.keep_going() {
@@ -1864,16 +2019,18 @@ fn push_stream_flow(
         }
     }
     if let Some(r) = run.as_mut() {
-        // Where this walk stopped, for the next one to start from.
-        r.walk.visited = flow.frames.len().saturating_sub(start);
-        r.walk.produced = flow.frames.produced();
+        // Where this walk stopped, for the next one to start from: the first message
+        // it did not visit, which is the end of the window when the window ended inside
+        // the list. Everything every piece of state here was folded over is what came
+        // before it.
+        r.walk.visited = end.saturating_sub(start);
+        r.walk.produced = first_produced + end as u64;
         r.walk.last_packet = last_packet;
         r.walk.order_packet = order_packet;
         r.walk.order_last = order_last;
         r.walk.chains = chains;
         r.walk.requests = requests;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
-        r.walk.truncated = truncated;
     }
     let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
 }
@@ -1938,10 +2095,12 @@ fn push_datagram_flow(
     // half; see `absorb_every_declaration`.
     // Where the document's window ends in this list, as the stream half has it:
     // the first message numbered past the last row, from which nothing is visited.
-    let mut truncated = false;
+    // The walk's place is saved at it, so the next window goes on from there.
+    let mut frames_end = flow.frames.len();
+    let mut scouting_end = flow.scouting.len();
     for (position, frame) in flow.frames.iter().enumerate().skip(start) {
         if tags.beyond_window(tags.frame_seq(first_produced + position as u64)) {
-            truncated = true;
+            frames_end = position;
             if let Some(d) = declarations {
                 d.note_unwalked_n(flow.frames.len() - position);
             }
@@ -2098,7 +2257,7 @@ fn push_datagram_flow(
         let seq = tags.scouting_seq(&flow.flow, scouting_first + position as u64);
         unnumbered |= seq.is_none();
         if tags.beyond_window(seq) {
-            truncated = true;
+            scouting_end = position;
             break;
         }
         if !tags.keep_going() {
@@ -2199,14 +2358,14 @@ fn push_datagram_flow(
         let _ = write!(out, "{{\"at\":{at},\"why\":\"{why}\"}}");
     }
     if let Some(r) = run.as_mut() {
-        // Where this walk stopped, for the next one to start from.
-        r.walk.visited = flow.frames.len().saturating_sub(start);
-        r.walk.produced = flow.frames.produced();
+        // Where this walk stopped, for the next one to start from: the first message of
+        // each list it did not visit.
+        r.walk.visited = frames_end.saturating_sub(start);
+        r.walk.produced = first_produced + frames_end as u64;
         r.walk.chains = chains;
         r.walk.requests = requests;
-        r.walk.scouting_produced = flow.scouting.produced();
+        r.walk.scouting_produced = scouting_first + scouting_end as u64;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
-        r.walk.truncated = truncated;
     }
     out.push_str("]}}");
 }
@@ -4807,11 +4966,36 @@ fn walk_agrees(walked: &str, framed: &str) -> bool {
 /// MALFORMED is still refused, as before — a file that is not there yet and a
 /// file that is broken are different facts, and the cursor is what tells them
 /// apart.
+///
+/// # Two shapes, one answer
+///
+/// A document that keeps nothing between calls reads the whole container into
+/// memory ([`Self::of`]). One that keeps its walk reads a packet from the chunk of
+/// the container that holds it, from the checkpoint before the chunk
+/// ([`RereadResume`]), so what a call costs is the chunks its rows name and not the
+/// container, and a window in the middle of a long capture finds its packets as
+/// well as the first one does.
 struct Reread<'a> {
+    packets: RereadPackets<'a>,
+}
+
+enum RereadPackets<'a> {
     /// Every whole packet, in the order the container holds them, which is
     /// ascending in `index`.
-    frames: Vec<crate::CapturedFrame<'a>>,
+    All(Vec<crate::CapturedFrame<'a>>),
+    /// Chunks read on demand.
+    Chunked {
+        capture: &'a [u8],
+        resume: &'a RereadResume,
+        /// The chunks read so far in this call, most recent last: the rows of a
+        /// document name packets in near-ascending order, so a few chunks cover
+        /// them.
+        loaded: core::cell::RefCell<Vec<(usize, Vec<crate::CapturedFrame<'a>>)>>,
+    },
 }
+
+/// How many chunks one call keeps read at a time.
+const REREAD_CHUNKS_KEPT: usize = 4;
 
 struct RereadPacket<'a> {
     link_type: u32,
@@ -4820,16 +5004,10 @@ struct RereadPacket<'a> {
 }
 
 impl<'a> Reread<'a> {
+    /// The whole container, read once.
     fn of(capture: &'a [u8]) -> Option<Self> {
-        Self::extend(capture, &mut crate::CaptureCursor::new())
-    }
-
-    /// The packets of `capture` from where `cursor` stopped, and the cursor moved
-    /// past them. From a new cursor this is the whole container, which is
-    /// [`Self::of`]; from a cursor a walk left, it is only the packets that
-    /// arrived since, and [`Self::packet`] answers for those and no others.
-    fn extend(capture: &'a [u8], cursor: &mut crate::CaptureCursor) -> Option<Self> {
         let mut frames = Vec::new();
+        let mut cursor = crate::CaptureCursor::new();
         let walk = cursor.walk(capture, |event| {
             if let crate::CaptureEvent::Frame(frame) = event {
                 frames.push(frame);
@@ -4846,7 +5024,9 @@ impl<'a> Reread<'a> {
             // from bytes that have not become one: the second is not a capture
             // this could be said to have re-read, which is what the whole-file
             // parse always answered.
-            Ok(crate::CaptureWalk::Halted { .. }) if cursor.consumed() > 0 => Some(Self { frames }),
+            Ok(crate::CaptureWalk::Halted { .. }) if cursor.consumed() > 0 => Some(Self {
+                packets: RereadPackets::All(frames),
+            }),
             Ok(crate::CaptureWalk::Halted { .. }) => None,
             // Fewer than four bytes: the format is not known and nothing was
             // read, which is the empty slice's answer as it always was.
@@ -4858,17 +5038,72 @@ impl<'a> Reread<'a> {
         }
     }
 
-    fn packet(&self, index: usize) -> Option<RereadPacket<'_>> {
+    /// The packets of `capture`, read from the checkpoints `resume` holds as the
+    /// rows ask for them. `resume` has walked `capture` to its end
+    /// ([`RereadResume::advance`]).
+    fn indexed(capture: &'a [u8], resume: &'a RereadResume) -> Self {
+        Self {
+            packets: RereadPackets::Chunked {
+                capture,
+                resume,
+                loaded: core::cell::RefCell::new(Vec::new()),
+            },
+        }
+    }
+
+    fn packet(&self, index: usize) -> Option<RereadPacket<'a>> {
         // By the packet's own number and not by position: the number is the
         // coordinate a row names, and the two agree only while nothing in the
         // container is skipped.
-        let at = self.frames.binary_search_by_key(&index, |f| f.index).ok()?;
-        let frame = &self.frames[at];
-        Some(RereadPacket {
+        let found = |frame: &crate::CapturedFrame<'a>| RereadPacket {
             link_type: frame.link_type,
             index: frame.index,
             data: frame.data,
-        })
+        };
+        match &self.packets {
+            RereadPackets::All(frames) => {
+                let at = frames.binary_search_by_key(&index, |f| f.index).ok()?;
+                Some(found(&frames[at]))
+            }
+            RereadPackets::Chunked {
+                capture,
+                resume,
+                loaded,
+            } => {
+                let chunk = index / REREAD_CHUNK;
+                let mut loaded = loaded.borrow_mut();
+                let at = match loaded.iter().position(|(held, _)| *held == chunk) {
+                    Some(at) => at,
+                    None => {
+                        // A chunk before the first checkpoint was given up, and one
+                        // after the walk's end was never reached.
+                        let checkpoint = resume
+                            .checkpoints
+                            .get(chunk.checked_sub(resume.first_chunk)?)?;
+                        let last = (chunk + 1) * REREAD_CHUNK;
+                        let mut frames = Vec::with_capacity(REREAD_CHUNK);
+                        let mut cursor = checkpoint.clone();
+                        let _ = cursor.walk(capture, |event| {
+                            if let crate::CaptureEvent::Frame(frame) = event {
+                                frames.push(frame);
+                                if frame.index + 1 >= last {
+                                    return core::ops::ControlFlow::Break(());
+                                }
+                            }
+                            core::ops::ControlFlow::Continue(())
+                        });
+                        if loaded.len() >= REREAD_CHUNKS_KEPT {
+                            loaded.remove(0);
+                        }
+                        loaded.push((chunk, frames));
+                        loaded.len() - 1
+                    }
+                };
+                let frames = &loaded[at].1;
+                let at = frames.binary_search_by_key(&index, |f| f.index).ok()?;
+                Some(found(&frames[at]))
+            }
+        }
     }
 }
 

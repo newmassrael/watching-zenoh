@@ -2358,20 +2358,29 @@ impl FlowDissection {
     /// The positions are indexes into [`Self::frames`] as it stands, which move
     /// when a ceiling trims the list.
     pub fn capture_order(&self) -> Vec<usize> {
-        self.capture_order_from(0, 0, None)
+        self.capture_order_from(0, 0, None, usize::MAX)
             .map(|(order, _, _)| order)
             .expect("an order from the first message has nothing before it to disagree with")
     }
 
-    /// [`Self::capture_order`] for the messages from position `start` on, given
-    /// the running packet `last` the messages before `start` left and the key
-    /// `after` of the last of them, or `None` when the first message from `start`
-    /// does not sort after `after`.
+    /// [`Self::capture_order`] for the messages from position `start` up to, not
+    /// including, position `end`, given the running packet `last` the messages
+    /// before `start` left and the key `after` of the last of them, or `None` when
+    /// the first message from `start` does not sort after `after`.
     ///
     /// Returns the positions from `start` in capture order, the running packet
-    /// at the end, and the largest key. From `start` 0 with nothing before it this
-    /// IS [`Self::capture_order`], which is defined by it, so a caller that
-    /// continues an order and one that makes it whole use one rule.
+    /// at the end, and the largest key. From `start` 0 with nothing before it and
+    /// an `end` past the list this IS [`Self::capture_order`], which is defined by
+    /// it, so a caller that continues an order and one that makes it whole use one
+    /// rule.
+    ///
+    /// # `end`, and what it saves
+    ///
+    /// A document that covers a WINDOW of a list orders only the messages inside
+    /// it, and the running packet and the largest key it hands back are those of the
+    /// window's last message, which is where the next window continues from. Without
+    /// the bound every window ordered everything after it, so the cost of one window
+    /// grew with the size of the list behind it.
     ///
     /// # The key is `(packet, produced-index)`, and why not the position
     ///
@@ -2390,11 +2399,18 @@ impl FlowDissection {
         start: usize,
         mut last: usize,
         after: Option<(usize, u64)>,
+        end: usize,
     ) -> Option<OrderRun> {
         let base = self.frames.produced() - self.frames.len() as u64;
-        let mut keyed: Vec<(usize, u64)> =
-            Vec::with_capacity(self.frames.len().saturating_sub(start));
-        for (position, frame) in self.frames.iter().enumerate().skip(start) {
+        let end = end.min(self.frames.len());
+        let mut keyed: Vec<(usize, u64)> = Vec::with_capacity(end.saturating_sub(start));
+        for (position, frame) in self
+            .frames
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(end.saturating_sub(start))
+        {
             let first_byte = if frame.decompressed.is_some() {
                 frame.stream_offset + frame.prefix_width
             } else {

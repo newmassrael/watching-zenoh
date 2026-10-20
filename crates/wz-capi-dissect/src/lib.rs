@@ -14593,6 +14593,106 @@ mod tests {
         unsafe { wz_dissect_live_close(whole) };
     }
 
+    /// THE WINDOWS OF A CAPTURE COST WHAT THEY COVER, AND WRITE WHAT THE WHOLE
+    /// DOCUMENT WRITES.
+    ///
+    /// A window that ended inside a list used to leave that list to be walked again
+    /// from its first message, so reading a capture window by window folded the
+    /// messages before each window once per window: the cost of one step grew with
+    /// the position and the whole read with its square. The walk now stays where the
+    /// window ended. Two captures are read in windows of several sizes (a stream
+    /// flow whose fragment chains straddle the cuts, and a datagram flow), and each
+    /// read must (1) give the rows of the whole document, in the whole document's
+    /// order, chain identities included; (2) begin the walk once; and (3) visit each
+    /// message once. The counts are the proof and not a clock: a walk that began
+    /// again at every window visits about `windows * rows / 2` messages.
+    ///
+    /// ANTI-VACUITY: the cuts are shorter than the chains and the captures hold many
+    /// times the window, so most windows end inside a list and inside a chain.
+    #[test]
+    fn windows_visit_each_message_once_and_write_the_whole_documents_rows() {
+        use wz_session_core::json5::Json5Value as V;
+        let captures = [
+            (
+                "stream",
+                wz_capture::fixtures::stream_chain_sequence_capture(60),
+            ),
+            ("datagram", wz_capture::fixtures::chain_sequence_capture(60)),
+        ];
+        for (name, file) in captures {
+            let whole = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+            unsafe { (*whole).follow(&file).expect("follows") };
+            let all = parsed(&live_fields_since(whole, &file, 0));
+            let want: Vec<(u64, V)> = rows_of(&all)
+                .into_iter()
+                .map(|row| (seq_of(row), row.clone()))
+                .collect();
+            let issued = through_seq_of(&live_fields_since(whole, &file, 0));
+            unsafe { wz_dissect_live_close(whole) };
+            assert!(
+                issued > 100,
+                "{name}: {issued} rows is too few for a window to end inside a chain"
+            );
+
+            for size in [3u64, 5, 8, 13] {
+                let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+                unsafe { (*handle).follow(&file).expect("follows") };
+                let (mut cursor, mut calls) = (0u64, 0u64);
+                let mut got: Vec<(u64, V)> = Vec::new();
+                while cursor < issued {
+                    let doc = live_fields_window(handle, &file, cursor, size);
+                    got.extend(
+                        rows_of(&parsed(&doc))
+                            .into_iter()
+                            .map(|row| (seq_of(row), row.clone())),
+                    );
+                    cursor = through_seq_of(&doc);
+                    calls += 1;
+                    assert!(calls <= issued, "{name} size {size}: the cursor stalled");
+                }
+                let work = unsafe { (*handle).fields_work() };
+                unsafe { wz_dissect_live_close(handle) };
+
+                // Where the first differing pair differs, by cell: a whole row printed
+                // twice hides the one cell that moved.
+                let first_difference = got.iter().zip(&want).position(|(a, b)| a != b).map(|at| {
+                    let mut cells = std::collections::BTreeSet::new();
+                    changed_paths("", &got[at].1, &want[at].1, &mut cells);
+                    (at, got[at].0, want[at].0, cells)
+                });
+                assert_eq!(
+                    got.len(),
+                    want.len(),
+                    "{name} size {size}: the windows hold {} rows, the document {}; first difference {first_difference:?}",
+                    got.len(),
+                    want.len()
+                );
+                assert!(
+                    first_difference.is_none(),
+                    "{name} size {size}: the windows are not the document, row for row and in order; \
+                     first difference (position, window row, document row): {first_difference:?}"
+                );
+                assert_eq!(
+                    work.restarted, 1,
+                    "{name} size {size}: the walk began {} times; only the first call may begin it: {work:?}",
+                    work.restarted
+                );
+                assert_eq!(
+                    work.resumed + 1,
+                    calls,
+                    "{name} size {size}: every window after the first went on from the last: {work:?}"
+                );
+                assert!(
+                    work.messages_walked <= issued,
+                    "{name} size {size}: {} messages visited for {issued} rows over {calls} windows; \
+                     a window that began the list again visits about {} ({work:?})",
+                    work.messages_walked,
+                    calls * issued / 2
+                );
+            }
+        }
+    }
+
     /// Two handshakes and `n` keep-alives, as a pcap: enough messages that a walk is
     /// asked how it is going more than once (it is asked every 256 steps).
     fn long_capture(n: usize) -> Vec<u8> {
@@ -15591,6 +15691,194 @@ mod tests {
                 "row {seq} written by the bounded handle differs from the one nothing was trimmed from"
             );
         }
+    }
+
+    /// MEASUREMENT, NOT A GATE (run with `--ignored --nocapture`): what each step of the
+    /// two since-doors costs as the handle grows, by the work counter and by the clock.
+    #[test]
+    #[ignore = "a measurement, printed"]
+    fn measure_since_step_cost_against_handle_size() {
+        let chains: usize = std::env::var("WZ_BENCH_CHAINS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20_000);
+        let window: u64 = std::env::var("WZ_BENCH_WINDOW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4_096);
+        let file = wz_capture::fixtures::stream_chain_sequence_capture(chains);
+        let ends = pcap_record_ends(&file);
+
+        // The file-open door: the whole capture is in, and the windows are read in order.
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        unsafe { (*handle).follow(&file).expect("follows") };
+        let (mut cursor, mut calls) = (0u64, 0usize);
+        let before = unsafe { (*handle).fields_work() };
+        let mut last = before;
+        let started = std::time::Instant::now();
+        loop {
+            let t = std::time::Instant::now();
+            let doc = live_fields_window(handle, &file, cursor, window);
+            let took = t.elapsed();
+            let next = through_seq_of(&doc);
+            let work = unsafe { (*handle).fields_work() };
+            if calls % 8 == 0 {
+                println!(
+                    "window {calls:>4} after_seq {cursor:>8} walked {:>8} restarted {} took {:?}",
+                    work.messages_walked - last.messages_walked,
+                    work.restarted - last.restarted,
+                    took
+                );
+            }
+            last = work;
+            calls += 1;
+            if next == cursor {
+                break;
+            }
+            cursor = next;
+        }
+        println!(
+            "FILE-OPEN: {calls} windows, {} rows, walked {} messages, restarted {}, {:?}",
+            cursor,
+            last.messages_walked,
+            last.restarted,
+            started.elapsed()
+        );
+        unsafe { wz_dissect_live_close(handle) };
+
+        // The live door: a packet or a few at a time, asked at the cursor of the last answer.
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        let (mut cursor, mut steps) = (0u64, 0usize);
+        let mut last = unsafe { (*handle).fields_work() };
+        let stride = (ends.len() / 40).max(1);
+        let started = std::time::Instant::now();
+        for (i, &end) in ends.iter().enumerate() {
+            unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            if i % 50 != 49 && i + 1 != ends.len() {
+                continue;
+            }
+            let t = std::time::Instant::now();
+            let doc = live_fields_since(handle, &file[..end], cursor);
+            let took = t.elapsed();
+            cursor = through_seq_of(&doc);
+            let work = unsafe { (*handle).fields_work() };
+            if steps % (stride / 50).max(1) == 0 {
+                println!(
+                    "step {steps:>5} packets {i:>7} rows {cursor:>8} walked {:>6} restarted {} took {:?}",
+                    work.messages_walked - last.messages_walked,
+                    work.restarted - last.restarted,
+                    took
+                );
+            }
+            last = work;
+            steps += 1;
+        }
+        println!(
+            "LIVE: {steps} steps, {} rows, walked {} messages, restarted {}, {:?}",
+            cursor,
+            last.messages_walked,
+            last.restarted,
+            started.elapsed()
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// MEASUREMENT, NOT A GATE (run with `--ignored --nocapture`): the live door over MANY
+    /// interleaved flows, asked every `WZ_BENCH_STRIDE` packets at the cursor of its last
+    /// answer; what one step costs as the handle grows.
+    #[test]
+    #[ignore = "a measurement, printed"]
+    fn measure_live_steps_over_many_flows() {
+        let env = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let (flows, rounds, stride) = (
+            env("WZ_BENCH_FLOWS", 40),
+            env("WZ_BENCH_ROUNDS", 500),
+            env("WZ_BENCH_STRIDE", 200),
+        );
+        let ceiling = env("WZ_BENCH_CEILING", 0);
+        // With `WZ_BENCH_E2E=1` the reader has registered an end-to-end profile and bound
+        // keys to it, as the analyzer's profile-aware reads do.
+        let declarations = if env("WZ_BENCH_E2E", 0) == 1 {
+            E2E_RULES
+        } else {
+            ""
+        };
+        let keepalive = [1u8, 0, 0x04];
+        let mut next: Vec<u32> = (0..flows).map(|f| 1000 + 10_000 * f as u32).collect();
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        for (f, seq) in next.iter_mut().enumerate() {
+            let init = framed_init(&[1, 2, 3, (f % 250) as u8]);
+            let mut p = tcp_packet(*seq, &init);
+            wz_packet_fixtures::set_tcp_source_port(&mut p, 2000 + f as u16);
+            *seq += init.len() as u32;
+            packets.push(p);
+        }
+        for _ in 0..rounds {
+            for (f, seq) in next.iter_mut().enumerate() {
+                let mut p = tcp_packet(*seq, &keepalive);
+                wz_packet_fixtures::set_tcp_source_port(&mut p, 2000 + f as u16);
+                *seq += keepalive.len() as u32;
+                packets.push(p);
+            }
+            packets.push(scout_to_group([192, 168, 1, 5], 43210));
+        }
+        let file = pcap_prefix(&packets, packets.len());
+        let ends = pcap_record_ends(&file);
+        println!(
+            "{} flows, {} packets, a step every {stride} packets, ceiling {ceiling}",
+            flows,
+            ends.len()
+        );
+
+        let handle = if ceiling == 0 {
+            open_live(WZ_DISSECT_LIMITS_NONE).expect("opens")
+        } else {
+            let limits = wz_capture::DissectionLimits {
+                frames_per_flow: Some(ceiling),
+                ..Default::default()
+            };
+            Box::into_raw(Box::new(live::LiveDissection::new(limits)))
+        };
+        let (mut cursor, mut steps) = (0u64, 0usize);
+        let mut last = unsafe { (*handle).fields_work() };
+        let report_every = (ends.len() / stride / 12).max(1);
+        let started = std::time::Instant::now();
+        for (i, &end) in ends.iter().enumerate() {
+            let t_follow = std::time::Instant::now();
+            unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            let followed = t_follow.elapsed();
+            if i % stride != stride - 1 && i + 1 != ends.len() {
+                continue;
+            }
+            let t = std::time::Instant::now();
+            let doc = live_fields_since_declaring(handle, &file[..end], cursor, declarations);
+            let took = t.elapsed();
+            cursor = through_seq_of(&doc);
+            let work = unsafe { (*handle).fields_work() };
+            if steps % report_every == 0 {
+                println!(
+                    "step {steps:>5} packets {i:>7} rows {cursor:>8} walked {:>6} restarted {} follow {followed:?} fields_since {took:?} doc {} B",
+                    work.messages_walked - last.messages_walked,
+                    work.restarted - last.restarted,
+                    doc.len()
+                );
+            }
+            last = work;
+            steps += 1;
+        }
+        println!(
+            "LIVE-MANY: {steps} steps, {} rows, walked {} messages, restarted {}, {:?}",
+            cursor,
+            last.messages_walked,
+            last.restarted,
+            started.elapsed()
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     // ── which cells of an issued row can differ at a later state ────────────────

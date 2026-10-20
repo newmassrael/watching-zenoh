@@ -1112,13 +1112,14 @@ impl LiveDissection {
     ///
     /// # What a window costs
     ///
-    /// The rows past the window are not touched, but a window that ends inside a
-    /// list leaves that list to be walked again from its first message at the next
-    /// call: the walk's saved position assumes every new message was visited. So a
-    /// call costs the light fold of the messages up to the window's end plus the
-    /// writing of the window's rows, where one document of the whole capture costs
-    /// the writing of every row at once. The windows of a finished capture, taken
-    /// in order, write each row once.
+    /// The rows past the window are not touched, and the walk is left where the
+    /// window ended: the next window, asked from the cursor this one gave, goes on
+    /// from there and visits the messages after it. So a call costs the fold and the
+    /// writing of the messages in its window, whatever lies before or after, and the
+    /// windows of a finished capture, taken in order, visit and write each row once.
+    /// The walk begins again only where it must (see
+    /// [`wz_capture::fields_json::FieldsMemory`]), and then costs what a first call
+    /// costs.
     pub fn fields_since_windowed(
         &mut self,
         capture: &[u8],
