@@ -57,6 +57,7 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 default = [
     "serial-drive-own-thread",
     "rx-busy-poll",
+    "link-udp",
     "peer",
     "scout",
     "query",
@@ -80,9 +81,12 @@ default = [
 # pico's `Z_FEATURE_UNICAST_PEER`, which leaves a lone listener in and takes out only the
 # combined listen and connect and a second connect locator.
 peer = ["scout", "wz-capi-core/peer"]
+# `link-udp` (`Z_FEATURE_LINK_UDP_UNICAST`): a `udp/` endpoint to dial. `scout` implies it, the
+# scouting group being a UDP one.
+link-udp = ["wz-capi-core/link-udp"]
 # `scout` (`Z_FEATURE_SCOUTING`): `z_scout`, the one-shot survey of the group and the
 # `z_hello` family that reads its answers.
-scout = ["wz-capi-core/scout"]
+scout = ["link-udp", "wz-capi-core/scout"]
 # `query`: `z_get` and the querier, the requesting end of a query.
 query = ["wz-capi-core/query"]
 # `queryable`: `z_declare_queryable` and the replies, the answering end of a query.

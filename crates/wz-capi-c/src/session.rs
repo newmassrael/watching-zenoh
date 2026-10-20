@@ -420,6 +420,12 @@ pub(crate) unsafe fn open_session(
         if !listen.is_empty() || whatami != WhatAmI::Client {
             return Z_EINVAL;
         }
+        // A build without `timestamping` holds no clock, so a config that enables one for this
+        // role is refused here and not run with the stamping it asked for silently dropped.
+        #[cfg(not(feature = "timestamping"))]
+        if timestamping.get(whatami) {
+            return Z_EINVAL;
+        }
 
         // How the session gossips, from the four `scouting/gossip` keys a C session reads, or
         // nothing when its config turns gossip off. A client has no gossip to configure (it is

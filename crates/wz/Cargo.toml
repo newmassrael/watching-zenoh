@@ -1187,6 +1187,8 @@ rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 api-compat-c = [
     "dep:wz-capi-c",
     "runtime-tokio",
+    "wz-capi-c/link-udp",
+    "wz-capi-c/timestamping",
     "wz-capi-c/peer",
     "wz-capi-c/scout",
     "wz-capi-c/query",
@@ -1214,6 +1216,7 @@ api-compat-pico = [
     "wz-capi-pico/liveliness-get",
     "wz-capi-pico/advanced",
     "wz-capi-pico/gossip",
+    "wz-capi-pico/link-udp",
     "wz-capi-pico/peer",
     "wz-capi-pico/scout",
 ]

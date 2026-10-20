@@ -157,7 +157,7 @@ required-features = ["peer"]
 
 [[test]]
 name = "timestamp_roundtrip"
-required-features = ["peer"]
+required-features = ["peer", "timestamping"]
 
 [[test]]
 name = "transport_events_roundtrip"
@@ -177,12 +177,18 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 # them are compiled in (`wz-capi-core` is taken without its default features, so a capability
 # reaches it only through the feature below). The names are `wz-capi-pico`'s, for the same
 # reason: one vocabulary across the C ABIs.
-default = ["peer", "scout", "query", "queryable", "liveliness", "liveliness-get", "advanced", "group", "gossip"]
+default = ["link-udp", "timestamping", "peer", "scout", "query", "queryable", "liveliness", "liveliness-get", "advanced", "group", "gossip"]
 # The roles beyond the client: a listener, a router or a peer, and the gossip that introduces
 # the nodes of a mesh. A build without them opens a client session to the endpoints it dials.
 peer = ["scout", "wz-capi-core/peer"]
+# A `udp/` endpoint to dial; `scout` implies it, the scouting group being a UDP one.
+link-udp = ["wz-capi-core/link-udp"]
+# The node's clock, which a role that stamps its messages holds (a zenoh router does by default,
+# a peer or client when its `timestamping` config enables it). Off, a node holds no clock and
+# the config key that asks for one is refused where upstream's would be honoured.
+timestamping = ["wz-capi-core/timestamping"]
 # `z_scout`, the hello family, and a client finding its router by scouting.
-scout = ["wz-capi-core/scout"]
+scout = ["link-udp", "wz-capi-core/scout"]
 # `z_get` and the querier, the requesting end of a query.
 query = ["wz-capi-core/query"]
 # `z_declare_queryable` and the replies, the answering end of a query.
@@ -315,10 +321,17 @@ wz-capi-core = { path = "../wz-capi-core", default-features = false, features = 
 # negotiated batch.
 # A value larger than the reassembly slot (1 MiB) is REFUSED before it is sent
 # rather than fragmented into a chain no peer of this build could stage.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+#
+# `default-features = false`, as `wz-capi-pico` takes it and for the same reason: the runtime's
+# default bundle is the whole of query, liveliness and accepting, and a dependency that names
+# them makes them every build's, however slim the ABI asks to be. Each capability reaches the
+# runtime through the feature of this crate that stands for it (`query`, `queryable`,
+# `peer`, ...), which forwards to the core's, and `query-reply-err` with them: the core's
+# `queryable` and `query` features name it, so the R311y568 hazard (a reply that links and
+# answers nothing) is closed where the capability is chosen and not here.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
     "routing-accept",
     "transport-fragmentation",
-    "query-reply-err",
     # R2172 (open-debt item 548) — `zenoh_config`, which is where
     # `HONOURED_CONFIG_KEYS` lives. Named UNCONDITIONALLY on purpose: the door
     # this feeds (`wz_capi_c_config_honoured`) reports which config keys wz's

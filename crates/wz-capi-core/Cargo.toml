@@ -53,6 +53,8 @@ path = "src/lib.rs"
 # is compiled into neither the ABI nor this model.
 default = [
     "rx-busy-poll",
+    "link-udp",
+    "timestamping",
     "peer",
     "scout",
     "query",
@@ -80,13 +82,26 @@ peer = [
 # resolves to, and the dial a finding turns into (`routing-accept` is for `DialIntent`, the type
 # that dial is, and `zenoh-config` for the types the plan reads).
 scout = [
+    "link-udp",
     "dep:wz-routing-graph",
     "wz-runtime-tokio/routing-accept",
+    "wz-runtime-tokio/codec-scout",
+    "wz-runtime-tokio/codec-hello",
     "wz-runtime-tokio/scouting-active",
     "wz-runtime-tokio/link-interfaces",
     "wz-runtime-tokio/locator-iface",
     "wz-runtime-tokio/zenoh-config",
 ]
+# The UDP unicast link: dialled by a `udp/` endpoint, and the transport the scouting group
+# rides, which is why `scout` implies it. A build without it dials TCP (and what its own link
+# features add) alone.
+link-udp = ["wz-runtime-tokio/transport-link-udp"]
+# The node's clock, the HLC a role that stamps its messages holds (zenoh's router does by
+# default; a peer or client does not unless its config says). It is the runtime's `time-hlc`,
+# which brings zenoh's `uhlc` and the storage module, and with that module the whole query
+# plane: a build that stamps nothing and answers no query carries none of it. The advanced
+# publisher's cache sequences by timestamp, so `advanced` implies it.
+timestamping = ["wz-runtime-tokio/time-hlc"]
 # The two link kinds the LISTEN role's accept-config arms are cfg'd on. They
 # forward to wz-runtime-tokio exactly as wz-capi-pico's twins do; the drive half
 # moved here carries the `#[cfg]`s, so the feature names must exist here or the
@@ -206,6 +221,7 @@ queryable = [
 # rather than superset: `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION` are 1 in the pinned
 # pico CMake config, and a build that turns them off links neither the ABI nor the plane.
 advanced = [
+    "timestamping",
     "wz-runtime-tokio/ext-pubsub-advanced-publisher",
     "wz-runtime-tokio/ext-pubsub-advanced-history",
     "wz-runtime-tokio/ext-pubsub-sample-miss-detection",
@@ -267,9 +283,6 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "codec-open-body",
     "codec-keep-alive",
     "codec-close",
-    "codec-scout",
-    "codec-hello",
-    "codec-join",
     "codec-fragment",
     "codec-frame",
     "codec-push",
@@ -280,7 +293,6 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "declare-subscriber",
     "declare-undeclare",
     "transport-link-tcp",
-    "transport-link-udp",
     "transport-unicast",
     "transport-keepalive",
     "transport-batching",
@@ -302,7 +314,8 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "keyexpr-wildcard-double",
     "keyexpr-dollar-star",
     "keyexpr-includes",
-    "time-hlc",
+    # `z_timestamp_new` of both ABIs reads the wall clock, whatever the node's clock is.
+    "timestamp-wall-clock",
 ] }
 # R3070 -- the autoconnect POLICY (`AutoConnect`, its per-target strategies) a session that
 # scouts is built with, named here because the plan a host hands this crate carries it. A pure

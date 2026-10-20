@@ -1590,6 +1590,10 @@ pubsub-express = ["pubsub-qos", "wz-session-core/pubsub-express"]
 # (byte-identical to the prior behavior). NOT default — an opt-in
 # alternative timestamp source, like the other advanced composition knobs.
 time-hlc = ["storage-backend", "dep:uhlc"]
+# The wall-clock NTP64 source alone (`timestamp_source::wall_clock_ntp64`), with none of the
+# stamper seams or the storage module the other features of that module bring: what a C ABI's
+# `z_timestamp_new` reads, in a build that holds no node clock and answers no query.
+timestamp-wall-clock = []
 # R311gi gc-2c — statechart switchboard (the AP dynamic keyexpr -> SCXML
 # domain-event inbound adapter). Forwards to wz-session-core/switchboard
 # (the `ApplicationLayerObserver::switchboard` field + `dispatch_switchboard`

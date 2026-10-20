@@ -2018,7 +2018,8 @@ pub fn compiled_in_link_schemes() -> &'static [&'static str] {
 #[cfg(any(
     feature = "storage-backend",
     feature = "ext-pubsub-advanced-cache",
-    feature = "time-hlc"
+    feature = "time-hlc",
+    feature = "timestamp-wall-clock"
 ))]
 pub mod timestamp_source;
 
