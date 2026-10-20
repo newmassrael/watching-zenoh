@@ -276712,6 +276712,52 @@
         "An end-to-end slot judged from two lists walks the whole capture at every step; held-row pruning of the checkpoints uses the first held message of each list."
       ]
     },
+    "Round 3394": {
+      "decision_summary": "Let the pico C ABI be built as a client that only dials out, by configuration. wz-capi-core and wz-capi-pico gain a peer feature (listen, accept, the scouting responder, the walk over several endpoints, gossip) and a scout feature (z_scout, the hello family, and a client finding its router by scouting); both default on, so the default build keeps the same 803 exported symbols. A build without peer refuses at z_open a config that states a listener or mode=peer, with Z_ERR_INVALID, before any thread or socket exists. This is a stronger cut than pico's Z_FEATURE_UNICAST_PEER, which keeps a lone listener; the manifest says so. Client-only text is 2,122,663 bytes against 3,095,111 with peer and 3,951,853 for the default, measured on one host; libzenohpico is 1,481,734, so the library is 1.43 times pico for a pub/sub client where it was 2.1 times for the pub/sub build with peer.",
+      "changes_bullets": [
+        "wz-capi-core: features peer and scout (peer implies scout; gossip and access-extauth-usrpwd imply peer); drive.rs gates the listen, accept, bind, responder, walk and gossip items and has a client-only drive_dial; prepare_dial and client_scouting are shared by both builds; open_blocking refuses a listener, a role other than client, or nothing to dial when peer is off.",
+        "wz-capi-core: scouting_node.rs keeps the plan and the scout link (scout); scouting_responder.rs holds Advertised, Responder and bind_responder (peer); faces.rs gates the accept forwarder and the gossip setup on peer.",
+        "wz-capi-pico: features peer and scout forward to the core's; scout.rs is the scout feature's; string_array.rs and whatami.rs hold what the connectivity plane also reads; z_open refuses a listener or mode=peer without peer; every test that opens a listener declares peer; tests/client_only_refuses_a_listener.rs runs only without it.",
+        "The facade api-compat-pico forwards peer and scout."
+      ],
+      "verification_bullets": [
+        "pc2, release: libwz_capi_pico.so text 2,122,663 (client only), 2,343,593 (scout), 3,095,111 (peer), 3,376,504 (peer with query and queryable), 3,951,853 (default); exported dynamic symbols of the default build 803 before and after, none lost, none gained.",
+        "clippy -D warnings clean for wz-capi-core with no features, scout, peer and gossip, and with defaults over all targets; wz-capi-pico with no features, scout, peer, gossip and defaults; wz-capi-c with all targets; wz with api-compat-pico.",
+        "wz-capi-core and wz-capi-pico tests with defaults: 27 test binaries ok; client-only pico: 75 unit tests and 4 tests of the refusal ok.",
+        "Not measured: a client-only build opening to a real router (no test in this change starts one); the same feature split for wz-capi-c."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The pico library for a client that only publishes and subscribes is 1.43 times libzenohpico on the AP profile (2.12 MB against 1.48 MB); what remains is drive, session, tokio and the panic and backtrace support, and the UDP and TLS link kinds are not yet features of their own.",
+        "A client-only build has not been run against a real router in this tree; the existing differential legs use the full build.",
+        "wz-capi-c and the Zephyr client image have no capability features yet.",
+        "MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
+      ],
+      "publishable_decision_summary": "Let the pico C ABI be built as a client that only dials out, by configuration. wz-capi-core and wz-capi-pico gain a peer feature (listen, accept, the scouting responder, the walk over several endpoints, gossip) and a scout feature (z_scout, the hello family, and a client finding its router by scouting); both default on, so the default build keeps the same 803 exported symbols. A build without peer refuses at z_open a config that states a listener or mode=peer, with Z_ERR_INVALID, before any thread or socket exists. This is a stronger cut than pico's Z_FEATURE_UNICAST_PEER, which keeps a lone listener; the manifest says so. Client-only text is 2,122,663 bytes against 3,095,111 with peer and 3,951,853 for the default, measured on one host; libzenohpico is 1,481,734, so the library is 1.43 times pico for a pub/sub client where it was 2.1 times for the pub/sub build with peer.",
+      "publishable_changes_bullets": [
+        "wz-capi-core: features peer and scout (peer implies scout; gossip and access-extauth-usrpwd imply peer); drive.rs gates the listen, accept, bind, responder, walk and gossip items and has a client-only drive_dial; prepare_dial and client_scouting are shared by both builds; open_blocking refuses a listener, a role other than client, or nothing to dial when peer is off.",
+        "wz-capi-core: scouting_node.rs keeps the plan and the scout link (scout); scouting_responder.rs holds Advertised, Responder and bind_responder (peer); faces.rs gates the accept forwarder and the gossip setup on peer.",
+        "wz-capi-pico: features peer and scout forward to the core's; scout.rs is the scout feature's; string_array.rs and whatami.rs hold what the connectivity plane also reads; z_open refuses a listener or mode=peer without peer; every test that opens a listener declares peer; tests/client_only_refuses_a_listener.rs runs only without it.",
+        "The facade api-compat-pico forwards peer and scout."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, release: libwz_capi_pico.so text 2,122,663 (client only), 2,343,593 (scout), 3,095,111 (peer), 3,376,504 (peer with query and queryable), 3,951,853 (default); exported dynamic symbols of the default build 803 before and after, none lost, none gained.",
+        "clippy -D warnings clean for wz-capi-core with no features, scout, peer and gossip, and with defaults over all targets; wz-capi-pico with no features, scout, peer, gossip and defaults; wz-capi-c with all targets; wz with api-compat-pico.",
+        "wz-capi-core and wz-capi-pico tests with defaults: 27 test binaries ok; client-only pico: 75 unit tests and 4 tests of the refusal ok.",
+        "Not measured: a client-only build opening to a real router (no test in this change starts one); the same feature split for wz-capi-c."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pico library for a client that only publishes and subscribes is 1.43 times libzenohpico on the AP profile (2.12 MB against 1.48 MB); what remains is drive, session, tokio and the panic and backtrace support, and the UDP and TLS link kinds are not yet features of their own.",
+        "A client-only build has not been run against a real router in this tree; the existing differential legs use the full build.",
+        "wz-capi-c and the Zephyr client image have no capability features yet.",
+        "MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
