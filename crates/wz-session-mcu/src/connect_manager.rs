@@ -308,6 +308,10 @@ impl<D: Dialer> ConnectManager<D> {
         }
     }
 
+    // Out of line: it runs when the list moves, which for an image-built list is once, and it holds
+    // the list, the rows that stay and the rows it builds, a few KB. Inlined into `tick` those sit
+    // under the loop of the node for its whole life, beneath every receive.
+    #[inline(never)]
     fn reconcile(&mut self, list: &ConnectEndpoints, now_ms: u64) {
         // An empty group names nothing to dial.
         let dialable = |e: &ConnectEntry| !e.endpoint.is_empty();

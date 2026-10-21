@@ -1498,6 +1498,11 @@ where
 /// The copying path for a unit [`dispatch_datagram`] does not read in place:
 /// the unit copied onto the heap and dispatched by [`dispatch_link_event`].
 #[cfg(feature = "codec-frame")]
+// Out of line: it is the path of a handshake, a KeepAlive and a Close and of the units that are not
+// read as a Frame, which is not the path of the traffic. Inlined into the dispatch of a unit, the
+// decode of a handshake body and its extension chain (a few KB of arrays) is part of the frame of
+// every Frame the session receives.
+#[inline(never)]
 fn dispatch_copied<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     reason: CopyReason,
