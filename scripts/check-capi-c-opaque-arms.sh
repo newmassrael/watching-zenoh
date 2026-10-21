@@ -76,7 +76,7 @@ if [[ ! -f "$MANIFEST" ]]; then
         # measuring the gap (open-debt item 47), and the 1.10.1 bump would have
         # made it wrong. Naming where the pin lives cannot go stale.
         say "       archive: git clone --depth 1 --branch <ZENOH_C_VERSION, in \\"
-        say "       scripts/install-zenoh-c.sh> \\"
+        say "       scripts/zenoh-c-oracle.pin> \\"
         say "       https://github.com/eclipse-zenoh/zenoh-c $REF"
         exit 1
     fi
@@ -84,7 +84,7 @@ if [[ ! -f "$MANIFEST" ]]; then
     say "       The release archive install-zenoh-c.sh provisions does NOT carry"
     say "       build-resources/opaque-types, so this check needs the repo:"
     say "       git clone --depth 1 --branch <ZENOH_C_VERSION, in \\"
-    say "       scripts/install-zenoh-c.sh> \\"
+    say "       scripts/zenoh-c-oracle.pin> \\"
     say "       https://github.com/eclipse-zenoh/zenoh-c $REF"
     exit 0
 fi

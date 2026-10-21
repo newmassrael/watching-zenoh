@@ -709,7 +709,7 @@ def cmd_check() -> int:
     pin = installer_pin()
     if pin != PIN:
         print(
-            f"  archive-arm FAIL: install-zenoh-c.sh pins zenoh-c {pin} and this\n"
+            f"  archive-arm FAIL: zenoh-c-oracle.pin pins zenoh-c {pin} and this\n"
             f"    file's arm was derived at {PIN}. Which build upstream publishes is\n"
             f"    a per-release fact: re-derive with `--derive --require` against a\n"
             f"    {pin} checkout and move PIN and ARCHIVE_ARM together.",

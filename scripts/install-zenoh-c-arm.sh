@@ -155,7 +155,7 @@ if [[ ! -f "$REF/CMakeLists.txt" ]]; then
     # check-capi-c-opaque-arms.sh. It was a second copy of
     # install-zenoh-c.sh's ZENOH_C_VERSION (open-debt item 47).
     say "      git clone --depth 1 --branch <ZENOH_C_VERSION, in \\"
-    say "      scripts/install-zenoh-c.sh> \\"
+    say "      scripts/zenoh-c-oracle.pin> \\"
     say "      https://github.com/eclipse-zenoh/zenoh-c $REF"
     exit 1
 fi
