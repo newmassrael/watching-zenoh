@@ -561,8 +561,7 @@ fn undeclare_from_inside_a_subscriber_callback_does_not_deadlock() {
         entered: entered.clone(),
         returned: returned.clone(),
         dropped: dropped.clone(),
-        after: after.clone(),
-        done: AtomicBool::new(false),
+        gate: ReentryGate::new(after.clone()),
     })) as *mut c_void;
 
     unsafe {
@@ -588,6 +587,7 @@ fn undeclare_from_inside_a_subscriber_callback_does_not_deadlock() {
             ),
             Z_OK
         );
+        (*(ctx as *const SelfUndeclareCtx)).gate.publish();
     }
 
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -663,6 +663,57 @@ fn undeclare_from_inside_a_subscriber_callback_does_not_deadlock() {
     acceptor.join().expect("acceptor thread panicked");
 }
 
+/// Which delivery a re-entrancy probe's callback acts on, and which it only
+/// counts. Every probe in this file shares it so the rule lives in one place.
+///
+/// A declare call registers the callback BEFORE it writes the owned handle
+/// out, so a delivery can land in between (a liveliness subscriber receives
+/// the live token the moment it is registered). A callback that undeclared
+/// then would retire a still-zeroed handle, which is a no-op, and the declare
+/// would go on to overwrite the handle with a live one: the probe would report
+/// "the undeclare did nothing" about a call that never saw the registration. A
+/// C caller cannot hand its own callback a handle it has not received yet
+/// either, so the probe is only meaningful once the handle is published.
+struct ReentryGate {
+    /// Set by [`ReentryGate::publish`] after the declare call returned.
+    published: AtomicBool,
+    /// The undeclare runs at most ONCE.
+    done: AtomicBool,
+    /// Deliveries seen after the one that undeclared. In the REAL arm this
+    /// must be 0; in the CALIBRATION arm it must be > 0, which is what makes
+    /// the 0 a measurement. Shared with the test body that reads it.
+    after: Arc<AtomicUsize>,
+}
+
+impl ReentryGate {
+    fn new(after: Arc<AtomicUsize>) -> Self {
+        Self {
+            published: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            after,
+        }
+    }
+
+    /// Call right after the declare returned `Z_OK` and the handle is written.
+    fn publish(&self) {
+        self.published.store(true, Ordering::SeqCst);
+    }
+
+    /// `true` for the one delivery that must perform the undeclare. A delivery
+    /// before [`ReentryGate::publish`] is ignored and not counted (the stream
+    /// keeps coming); every delivery after the first is counted in `after`.
+    fn claim(&self) -> bool {
+        if !self.published.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.done.swap(true, Ordering::SeqCst) {
+            self.after.fetch_add(1, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+}
+
 /// Context for [`undeclare_from_inside_a_subscriber_callback_does_not_deadlock`].
 struct SelfUndeclareCtx {
     handle: *mut z_owned_subscriber_t,
@@ -671,19 +722,13 @@ struct SelfUndeclareCtx {
     /// Set by the C drop callback — the observable that the undeclare released
     /// the LAST `Arc<CClosure>` rather than merely returning.
     dropped: Arc<AtomicBool>,
-    /// Deliveries seen AFTER the undeclare returned. Must stay 0.
-    after: Arc<AtomicUsize>,
-    /// The undeclare runs ONCE. A second delivery must not touch a handle the
-    /// first one already moved.
-    done: AtomicBool,
+    /// Deliveries seen AFTER the undeclare returned must stay 0.
+    gate: ReentryGate,
 }
 
 unsafe extern "C" fn on_sample_self_undeclare(_sample: *const z_loaned_sample_t, ctx: *mut c_void) {
     let ctx = &*(ctx as *const SelfUndeclareCtx);
-    if ctx.done.swap(true, Ordering::SeqCst) {
-        // Every delivery past the first one is a delivery to a subscriber that
-        // has been undeclared, which is what the `after` assertion reads.
-        ctx.after.fetch_add(1, Ordering::SeqCst);
+    if !ctx.gate.claim() {
         return;
     }
     ctx.entered.store(true, Ordering::SeqCst);
@@ -748,11 +793,8 @@ struct ReentrantCtx {
     /// Set by the C drop callback — the observable that the undeclare released
     /// the LAST `Arc<CClosure>` rather than merely returning.
     dropped: Arc<AtomicBool>,
-    /// Deliveries seen after the first. In the REAL arm this must be 0; in the
-    /// CALIBRATION arm it must be > 0, which is what makes the 0 a measurement.
-    after: Arc<AtomicUsize>,
-    /// The undeclare runs at most ONCE.
-    done: AtomicBool,
+    /// Which delivery undeclares and which are counted in `after`.
+    gate: ReentryGate,
     /// CALIBRATION arm: fire the observables but SKIP the undeclare, so the
     /// window measures what an un-retired registration receives.
     calibrate: bool,
@@ -934,8 +976,7 @@ unsafe extern "C" fn on_query_self_undeclare(
     ctx: *mut c_void,
 ) {
     let ctx = &*(ctx as *const ReentrantCtx);
-    if ctx.done.swap(true, Ordering::SeqCst) {
-        ctx.after.fetch_add(1, Ordering::SeqCst);
+    if !ctx.gate.claim() {
         return;
     }
     ctx.entered.store(true, Ordering::SeqCst);
@@ -991,8 +1032,7 @@ fn run_queryable_reentrancy_probe(calibrate: bool) {
         entered: entered.clone(),
         returned: returned.clone(),
         dropped: dropped.clone(),
-        after: after.clone(),
-        done: AtomicBool::new(false),
+        gate: ReentryGate::new(after.clone()),
         calibrate,
     }));
 
@@ -1019,6 +1059,7 @@ fn run_queryable_reentrancy_probe(calibrate: bool) {
             ),
             Z_OK
         );
+        (*ctx).gate.publish();
     }
 
     assert_reentrant_undeclare(
@@ -1071,8 +1112,7 @@ unsafe extern "C" fn on_liveliness_self_undeclare(
     ctx: *mut c_void,
 ) {
     let ctx = &*(ctx as *const ReentrantCtx);
-    if ctx.done.swap(true, Ordering::SeqCst) {
-        ctx.after.fetch_add(1, Ordering::SeqCst);
+    if !ctx.gate.claim() {
         return;
     }
     ctx.entered.store(true, Ordering::SeqCst);
@@ -1119,8 +1159,7 @@ fn run_liveliness_reentrancy_probe(calibrate: bool) {
         entered: entered.clone(),
         returned: returned.clone(),
         dropped: dropped.clone(),
-        after: after.clone(),
-        done: AtomicBool::new(false),
+        gate: ReentryGate::new(after.clone()),
         calibrate,
     }));
 
@@ -1147,6 +1186,7 @@ fn run_liveliness_reentrancy_probe(calibrate: bool) {
             ),
             Z_OK
         );
+        (*ctx).gate.publish();
     }
 
     assert_reentrant_undeclare(
@@ -1190,8 +1230,7 @@ unsafe extern "C" fn on_advanced_self_undeclare(
     ctx: *mut c_void,
 ) {
     let ctx = &*(ctx as *const ReentrantCtx);
-    if ctx.done.swap(true, Ordering::SeqCst) {
-        ctx.after.fetch_add(1, Ordering::SeqCst);
+    if !ctx.gate.claim() {
         return;
     }
     ctx.entered.store(true, Ordering::SeqCst);
@@ -1237,8 +1276,7 @@ fn run_advanced_reentrancy_probe(calibrate: bool) {
         entered: entered.clone(),
         returned: returned.clone(),
         dropped: dropped.clone(),
-        after: after.clone(),
-        done: AtomicBool::new(false),
+        gate: ReentryGate::new(after.clone()),
         calibrate,
     }));
 
@@ -1267,6 +1305,7 @@ fn run_advanced_reentrancy_probe(calibrate: bool) {
             ),
             Z_OK
         );
+        (*ctx).gate.publish();
     }
 
     assert_reentrant_undeclare(
