@@ -502,7 +502,14 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                     E::InitSynReceived => {
                         actions.half_open_cap_available() && actions.accept_rate_token()
                     }
+                    #[cfg(feature = "session-unicast-accept")]
                     E::OpenSynReceived => actions.cookie_valid(),
+                    // A build with no accept side has no cookie to verify and no handshake to
+                    // admit: an OpenSyn is denied silently, like every inadmissible frame here.
+                    // Naming `cookie_valid` only under the accept feature is also what leaves
+                    // the cookie decoder and its HMAC out of an initiator-only image.
+                    #[cfg(not(feature = "session-unicast-accept"))]
+                    E::OpenSynReceived => false,
                     // R2782 — the initiator's twin: an OpenAck is admitted
                     // only while one is awaited. A replay after
                     // `Established` was measured to reset the RX baseline.
