@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""The limits an image can state for itself, declared once and offered to Kconfig.
+"""R3403 (no register item) -- the limits an image can state for itself, declared once and offered to Kconfig.
 
 ## What this is
 
