@@ -30,6 +30,35 @@ config WZ_NET_BACKEND_LWIP_MAC
 
 endchoice
 
+choice WZ_NODE_ROLE
+	prompt "What the node is"
+	default WZ_NODE_ADMIN
+	help
+	  The admin node is the node a zenoh host reconfigures at runtime. The client node is a
+	  client of a router that answers queries and nothing else: it is what zenoh-pico is as a
+	  client with a queryable, and what a comparison with it is made against.
+
+config WZ_NODE_ADMIN
+	bool "Admin node: listens, hosts upstream's admin space, dials what it is told to"
+
+config WZ_NODE_CLIENT
+	bool "Client node: dials a router and answers queries"
+	depends on WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	help
+	  No listener, no admin space, no config write, no accepted session. The router it dials
+	  is WZ_CLIENT_ENDPOINT; the queries it answers are two documents under a fixed key, the
+	  same two zenoh-pico's comparison image (deploy/zephyr-pico-compare) answers.
+
+endchoice
+
+config WZ_CLIENT_ENDPOINT
+	string "The router the client node dials"
+	default "udp/192.168.100.1:7447"
+	depends on WZ_NODE_CLIENT
+	help
+	  `udp/<ipv4>:<port>`, the only scheme the node's dialer reads. It is read when the image is
+	  built: an endpoint longer than a locator row does not build.
+
 # What the Zephyr-sockets backend needs of Zephyr is stated HERE, as defaults of
 # the symbols it needs, rather than as lines in prj.conf: the other backend then
 # does not inherit a network stack it does not use, and a board conf never has to

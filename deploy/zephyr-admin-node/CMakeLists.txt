@@ -40,6 +40,15 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     list(APPEND backend_feature rx-in-place)
   endif()
 
+  # The client node is a build of its own: the crate's defaults (the admin node, with its
+  # accept path and its admin space) are off, and the router it dials is stated here, once, as
+  # a constant the Rust side checks when it compiles.
+  if(CONFIG_WZ_NODE_CLIENT)
+    list(APPEND backend_feature client-node)
+    set(no_default_features NO_DEFAULT_FEATURES)
+    list(APPEND backend_env WZ_CLIENT_ENDPOINT=${CONFIG_WZ_CLIENT_ENDPOINT})
+  endif()
+
   # The CYT4BF's ETH0 under Zephyr's own stack: the Ethernet driver over the wz MAC crate
   # and the TRNG as the entropy device (overlays/t2g_zeth.overlay states both). The
   # board's pieces they call are the ones the lwIP backend compiles below.

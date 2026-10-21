@@ -25,7 +25,7 @@
 // S9e -- the heap profile's: the growable node, the Zephyr sockets' stack and the console
 // lines built on the heap. A build of the fixed-memory profile with the defaults off links
 // no `alloc` crate, and declares no allocator (`zephyr_image_no_heap!` below).
-#[cfg(feature = "heap")]
+#[cfg(any(feature = "heap", feature = "client-node"))]
 extern crate alloc;
 
 // The growable node's imports (S9c: the `fixed-memory` profile runs `fixed_node`'s
@@ -68,12 +68,20 @@ use wz_session_core::signing_key::SigningKey;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 #[cfg(not(feature = "fixed-memory"))]
 use wz_session_core::WhatAmI;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
 use wz_session_mcu::admin_host::ConnectControl;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
 use wz_session_mcu::admin_node::AdminNode;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
 use wz_session_mcu::admin_status::{NodeIdentity, NodeStatus};
+#[cfg(feature = "client-node")]
+use wz_session_core::query_sink::BoxedQuerySink;
+#[cfg(feature = "client-node")]
+use wz_session_core::sample::EncodingHint;
+#[cfg(feature = "client-node")]
+use wz_session_mcu::client_node::ClientNode;
+#[cfg(feature = "client-node")]
+use wz_session_mcu::connect_manager::StaticEndpoints;
 
 #[cfg(feature = "fixed-memory")]
 mod fixed_node;
@@ -94,11 +102,11 @@ mod spi_cyt4bf;
 mod zeth_exports;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
-#[cfg(feature = "heap")]
+#[cfg(any(feature = "heap", feature = "client-node"))]
 wz::runtime_zephyr::zephyr_image!();
 // The same without the allocator: a build that allocates anywhere in its graph does not
 // link, which is what the no-allocator link gate takes as its proof.
-#[cfg(not(feature = "heap"))]
+#[cfg(not(any(feature = "heap", feature = "client-node")))]
 wz::runtime_zephyr::zephyr_image_no_heap!();
 
 /// How often the node reads its stack's high-water mark. The read walks the whole
@@ -166,9 +174,9 @@ const BATCH_SIZE: u16 = (ETHERNET_MTU - IPV4_HEADER - UDP_HEADER) as u16;
 
 /// Writes are PERMITTED on this node: upstream's default is to refuse, and the
 /// node opts in, because being reconfigured is what it is for.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
 static CONTROL: ConnectControl = ConnectControl::new(true);
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
 static STATUS: NodeStatus = NodeStatus::new(true);
 
 /// What a board's network stack gives the node, beyond the links themselves.
@@ -212,9 +220,9 @@ pub trait NodeNet {
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
 #[cfg(not(feature = "fixed-memory"))]
-fn params(zid: &[u8], signing_key: &[u8]) -> SessionInitParams {
+fn params(whatami: WhatAmI, zid: &[u8], signing_key: &[u8]) -> SessionInitParams {
     SessionInitParams {
-        whatami: WhatAmI::Peer,
+        whatami,
         zid: zid.to_vec(),
         seq_num_res: 2,
         req_id_res: 2,
@@ -227,7 +235,7 @@ fn params(zid: &[u8], signing_key: &[u8]) -> SessionInitParams {
     }
 }
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
 fn locator(address: [u8; 4]) -> String {
     let [a, b, c, d] = address;
     format!("udp/{a}.{b}.{c}.{d}:{LISTEN_PORT}")
@@ -235,7 +243,7 @@ fn locator(address: [u8; 4]) -> String {
 
 /// Assemble the node over `net` and run it. Returns only when it cannot start;
 /// the value is the reason, as a nonzero code the C `main()` prints.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
 fn run<N: NodeNet>(mut net: N) -> i32 {
     // The cookie-signing key is a secret, so it comes from the board's entropy
     // source and a board that cannot supply it stops the node: a predictable key
@@ -267,11 +275,11 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         },
         LISTEN_PORT,
         SessionTimeouts::spec_defaults(),
-        move || params(&dial_zid, &key),
+        move || params(WhatAmI::Peer, &dial_zid, &key),
         move |sink| {
             new_session_actions(
                 sink,
-                params(&accept_zid, &key),
+                params(WhatAmI::Peer, &accept_zid, &key),
                 CoopTime::new(&accept_runtime),
                 ZephyrEntropy,
             )
@@ -350,6 +358,114 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     }
 }
 
+/// The router the client node dials, as the build's Kconfig states it
+/// (`CONFIG_WZ_CLIENT_ENDPOINT`, handed to cargo as `WZ_CLIENT_ENDPOINT`). Checked when this
+/// compiles: an endpoint longer than a locator row does not build.
+#[cfg(feature = "client-node")]
+static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&[env!("WZ_CLIENT_ENDPOINT")]);
+
+/// The identifier the client's keys carry: twelve hex digits, as zenoh-pico's comparison image
+/// (`deploy/zephyr-pico-compare`) uses, so that a key and every message that names one are as
+/// long in the two.
+#[cfg(feature = "client-node")]
+const NODE_ID: &str = "5a1c0ffee001";
+/// The two keys the client answers, and the bodies it answers with, verbatim: they are the
+/// admin node's `status/connect` and `config` documents, which the pico image answers the same.
+#[cfg(feature = "client-node")]
+const STATUS_KEY: &str = "@/5a1c0ffee001/peer/status/connect";
+#[cfg(feature = "client-node")]
+const STATUS_BODY: &str = "{\"endpoints\":[],\"last_write\":null,\"permissions\":{\"write\":true}}";
+#[cfg(feature = "client-node")]
+const CONFIG_KEY: &str = "@/5a1c0ffee001/peer/config";
+#[cfg(feature = "client-node")]
+const CONFIG_BODY: &str = "{\"adminspace\":{\"permissions\":{\"write\":true}},\"connect\":{\"endpoints\":[]}}";
+
+/// A queryable that answers every query with `body`, JSON, under the key the query asked
+/// (`z_query_keyexpr`, as the pico image replies).
+#[cfg(feature = "client-node")]
+fn answer(body: &'static str) -> BoxedQuerySink {
+    BoxedQuerySink::new(move |query, out| {
+        let _ = out.reply_keyed_encoded(
+            query.keyexpr(),
+            body.as_bytes(),
+            Some(&EncodingHint::APPLICATION_JSON),
+        );
+    })
+}
+
+/// Assemble the client node over `net` and run it: a session towards the router of
+/// `CONFIG_WZ_CLIENT_ENDPOINT`, two queryables declared on it, and the same loop as the admin
+/// node's. Returns only when it cannot start.
+#[cfg(feature = "client-node")]
+fn run_client<N: NodeNet>(mut net: N) -> i32 {
+    let mut key = [0u8; 32];
+    if ZephyrEntropy.try_fill_bytes(&mut key).is_err() {
+        log(c"wz: FAIL - the board's entropy source could not fill the signing key");
+        return 2;
+    }
+
+    let clock = ZephyrClock::<TICK_HZ>;
+    let runtime = CoopRuntime::new(clock);
+    let local = CoopLocalSet::new(&runtime);
+    let zid = net.zid();
+    let zid_hex = zid_to_zenoh_hex(&zid);
+    let mut node = ClientNode::new(
+        &local,
+        net.links(),
+        &ENDPOINTS,
+        SessionTimeouts::spec_defaults(),
+        move || params(WhatAmI::Client, &zid, &key),
+    );
+    if node.queryable(STATUS_KEY, answer(STATUS_BODY)).is_err()
+        || node.queryable(CONFIG_KEY, answer(CONFIG_BODY)).is_err()
+    {
+        log(c"wz: FAIL - the node's observer refused a queryable");
+        return 3;
+    }
+    log_line(format!(
+        "ZEPHYR-WZ-CLIENT READY {} {} {}",
+        NODE_ID,
+        zid_hex,
+        env!("WZ_CLIENT_ENDPOINT")
+    ));
+
+    let mut established = false;
+    let mut stack = StackWatch::new();
+    let mut next_stack_check_ms = 0u64;
+    let mut busy_passes = 0u32;
+    loop {
+        local.run_until_idle();
+        let worked = net.pump();
+        let now_ms = clock.now_us() / 1000;
+        node.tick(now_ms);
+        if now_ms >= next_stack_check_ms {
+            next_stack_check_ms = now_ms + STACK_CHECK_MS;
+            if let Some(line) = stack.observe(stack_usage()) {
+                log_line(line);
+            }
+        }
+        // A line when the session comes and goes, which is all a lab waits for.
+        if node.is_established() != established {
+            established = !established;
+            log_line(format!(
+                "zephyr-wz-client: session {}",
+                if established { "established" } else { "lost" }
+            ));
+        }
+        // See the admin node's loop: a pass that took a frame in does not wait first, for at most
+        // BUSY_PASSES_MAX in a row.
+        if worked && busy_passes < BUSY_PASSES_MAX {
+            busy_passes += 1;
+        } else {
+            busy_passes = 0;
+            let sleep_us = net.idle_sleep_us();
+            if sleep_us > 0 {
+                yield_us(sleep_us);
+            }
+        }
+    }
+}
+
 #[cfg(not(any(feature = "net-zephyr-sockets", feature = "net-lwip-mac")))]
 compile_error!(
     "no network backend: CMakeLists.txt turns on exactly one `net-*` feature from the \
@@ -362,11 +478,21 @@ compile_error!(
      one `net-*` feature"
 );
 
-#[cfg(not(any(feature = "heap", feature = "fixed-memory")))]
+#[cfg(not(any(feature = "heap", feature = "client-node", feature = "fixed-memory")))]
 compile_error!(
-    "no memory profile: `heap` (the growable node over the kernel heap, the default) or \
-     `fixed-memory` (the slot profile's node over statics, with the defaults off)"
+    "no memory profile: `heap` (the growable admin node over the kernel heap, the default), \
+     `client-node` (the growable client node, with the defaults off) or `fixed-memory` (the \
+     slot profile's node over statics, with the defaults off)"
 );
+
+#[cfg(all(feature = "client-node", feature = "admin-node"))]
+compile_error!(
+    "two nodes: a build is the admin node (`heap`) or the client node (`client-node`), and \
+     CMakeLists.txt turns on one of them from CONFIG_WZ_NODE_*"
+);
+
+#[cfg(all(feature = "client-node", not(feature = "net-zephyr-sockets")))]
+compile_error!("the client node runs over Zephyr's sockets: it needs CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS");
 
 #[cfg(all(feature = "fixed-memory", not(feature = "net-lwip-mac")))]
 compile_error!(
@@ -465,7 +591,10 @@ fn probe_tc6() {
 #[cfg(feature = "net-zephyr-sockets")]
 fn start() -> i32 {
     match net_zephyr::ZephyrNet::bring_up() {
+        #[cfg(feature = "admin-node")]
         Ok(net) => run(net),
+        #[cfg(feature = "client-node")]
+        Ok(net) => run_client(net),
         Err(why) => {
             log(why);
             1

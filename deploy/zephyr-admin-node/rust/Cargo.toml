@@ -42,15 +42,38 @@ default = ["heap"]
 # dependency is named here and nowhere else, so a build of the fixed-memory profile, which
 # turns the defaults off, names none of them.
 heap = [
+    "heap-base",
+    "admin-node",
+]
+# What the growable profile is, whichever node runs on it: the heap runtime and session forms,
+# the Zephyr profile's seams, and the kernel-heap allocator the image declares.
+heap-base = [
     "wz/runtime-coop",
     "wz/platform-zephyr",
-    "wz/adminspace-core",
     "wz-session-core/alloc",
     "wz-session-mcu/alloc",
-    "wz-session-mcu/adminspace-core",
     # The lwIP session crate's heap forms, when the lwIP backend is on (`net-lwip-mac`
     # names the crate; a weak forward leaves it out of a build of the sockets backend).
     "wz-session-lwip?/alloc",
+]
+# The ADMIN NODE: a node a zenoh host reconfigures at runtime. It listens, hosts upstream's
+# admin space, applies a config write that names an endpoint to dial, and holds `AdminNode`'s
+# whole accept path. `heap` has always been this; it is a feature of its own so that the other
+# node can leave it out.
+admin-node = [
+    "wz/adminspace-core",
+    "wz/adminspace-write",
+    "wz-session-mcu/adminspace-core",
+    "wz-session-mcu/adminspace-write",
+]
+# The CLIENT NODE: a client of a router that answers queries, with no listener, no admin space and
+# no config write (`wz-session-mcu`'s `ClientNode`). The router it dials is `CONFIG_WZ_CLIENT_
+# ENDPOINT`. It is what zenoh-pico is when `z_open` is given mode `client` and a queryable is
+# declared, so it is the wz side of a comparison of the two on one board. Built with the defaults
+# off (`CONFIG_WZ_NODE_CLIENT`).
+client-node = [
+    "heap-base",
+    "wz-session-mcu/client-node",
 ]
 # The network stack the board's Kconfig chose (`CONFIG_WZ_NET_BACKEND_*`);
 # deploy/zephyr-admin-node/CMakeLists.txt turns exactly one on.
@@ -128,6 +151,8 @@ fixed-memory = [
     "dep:wz-runtime-coop",
     "dep:wz-runtime-zephyr",
     "wz/platform-zephyr-fixed",
+    "wz/adminspace-write",
+    "wz-session-mcu/adminspace-write",
     "wz/adminspace-fixed",
     "wz-runtime-zephyr/session-slot",
     "wz-link-lwip/static-link-storage",
@@ -160,7 +185,6 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # them with the heap, `fixed-memory` without it. keepalive and close keep the zenoh
 # host's lease and teardown honest.
 wz = { path = "../../../crates/wz", default-features = false, features = [
-    "adminspace-write",
     "codec-frame",
     "codec-keep-alive",
     "codec-close",
@@ -169,7 +193,6 @@ wz = { path = "../../../crates/wz", default-features = false, features = [
 # The session shell: application layer, admin node, connection manager, dialer,
 # generic over the stack's `SessionLinks`. Names no link crate.
 wz-session-mcu = { path = "../../../crates/wz-session-mcu", default-features = false, features = [
-    "adminspace-write",
     "transport-keepalive",
 ] }
 # The chip's MAC driver, a crate of its own that depends on the trait tier alone:
