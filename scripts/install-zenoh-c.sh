@@ -20,14 +20,18 @@
 # None of them is a wz dependency, so this script provisions them on demand,
 # mirroring `build-zenohd.sh`'s role for the zenohd oracle.
 #
-# The version is PINNED, and the pin is the `ZENOH_C_VERSION` default below --
-# read it there. R2256 found this sentence still saying 1.5.0 long
-# after the constant moved, which is the failure mode a pin written twice
-# always has: the reader believes the prose and the script obeys the constant.
+# The version is PINNED, and the pin is the `ZENOH_C_VERSION` line of
+# `scripts/zenoh-c-oracle.pin` -- read it there. R2256 found this sentence still
+# saying 1.5.0 long after the constant moved, which is the failure mode a pin
+# written twice always has: the reader believes the prose and the script obeys
+# the constant.
 # R2527 struck the restated number this sentence still carried: it said "1.10.0
 # as this is written" one clause before telling the reader not to do that, and
 # the bump to 1.10.1 would have made it wrong for the third time.
-# Do not restate the number here again; the assertion at the bottom reads it. A
+# The pin moved out of this script into that data file so that a host which
+# cannot run this script (Windows has no bash) reads the same line instead of
+# parsing a shell default. Do not restate the number here again; the assertion
+# at the bottom reads it. A
 # different zenoh-c is not a worse oracle, it is a DIFFERENT ABI — `zenoh_opaque.h`
 # is generated per version and per `Z_FEATURE_*` set, and Layer C1cc's layout leg
 # compares wz's footprints against whatever is installed. So the pin is asserted
@@ -36,7 +40,21 @@
 
 set -euo pipefail
 
-ZENOH_C_VERSION="${ZENOH_C_VERSION:-1.10.1}"
+PIN_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zenoh-c-oracle.pin"
+
+# One key of the pin file. An absent or empty key FAILS: a pin read as empty
+# would turn the fetch below into a request for no version at all.
+pin_get() {
+    local value
+    value="$(sed -n "/^$1=/{s/^$1=//p;q;}" "$PIN_FILE")"
+    if [[ -z "$value" ]]; then
+        printf '[install-zenoh-c] FAIL: %s has no %s\n' "$PIN_FILE" "$1" >&2
+        exit 1
+    fi
+    printf '%s' "$value"
+}
+
+ZENOH_C_VERSION="${ZENOH_C_VERSION:-$(pin_get ZENOH_C_VERSION)}"
 PREFIX="${WZ_ZENOH_C_PREFIX:-$HOME/.local}"
 EXAMPLES_PARENT="${WZ_ZENOH_C_REF:-$HOME/zenoh-c-ref}"
 
@@ -60,7 +78,12 @@ else
         aarch64) target="aarch64-unknown-linux-gnu" ;;
         *) say "FAIL: no published zenoh-c archive for arch $arch"; exit 1 ;;
     esac
-    url="https://github.com/eclipse-zenoh/zenoh-c/releases/download/${ZENOH_C_VERSION}/zenoh-c-${ZENOH_C_VERSION}-${target}-standalone.zip"
+    archive="$(pin_get ZENOH_C_ARCHIVE)"
+    archive="${archive//@VERSION@/$ZENOH_C_VERSION}"
+    archive="${archive//@TARGET@/$target}"
+    url="$(pin_get ZENOH_C_RELEASE_URL)"
+    url="${url//@VERSION@/$ZENOH_C_VERSION}"
+    url="${url//@ARCHIVE@/$archive}"
     say "fetching $url"
     # R2781 — retried, as every other release fetch here is; the mbedtls
     # installer's unretried twin lost hosted run 35614359072 to one 504.

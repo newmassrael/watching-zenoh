@@ -2658,7 +2658,7 @@ jobs:
             ~/.local/include
             ~/.local/lib/libzenohc.so
             ~/zenoh-c-ref
-          key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
+          key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh', 'scripts/zenoh-c-oracle.pin') }}
 
       - name: Provision the zenoh-c oracle (cache miss only)
         id: zenoh-c-provision
@@ -5352,7 +5352,7 @@ jobs:
             ~/.local/include
             ~/.local/lib/libzenohc.so
             ~/zenoh-c-ref
-          key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
+          key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh', 'scripts/zenoh-c-oracle.pin') }}
 
       - name: Provision the zenoh-c oracle (cache miss only)
         id: zenoh-c-provision

@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The zenoh-c ORACLE pin, as data. This file is the one place the version and
+# the release archive's name are written; every reader parses it and none keeps
+# a copy:
+#
+#   * scripts/install-zenoh-c.sh      -- the Linux installer (bash)
+#   * scripts/lib/zenoh_c_archive_arm.py  -- the gate that binds the arm table
+#                                        to this version
+#   * a host with no bash (Windows) installs from these lines directly
+#
+# Format: one KEY=VALUE per line, no spaces around `=`, no quoting, no
+# expansion. A line starting with `#` and a blank line are comments. A reader
+# that finds a key missing or empty must FAIL: an absent pin read as "no pin"
+# would install whatever is newest.
+#
+# Placeholders in a value are the literal text between the `@` signs:
+#   @VERSION@  the ZENOH_C_VERSION value below
+#   @TARGET@   the Rust target triple of the host, e.g. x86_64-unknown-linux-gnu
+#              or x86_64-pc-windows-msvc (the triples upstream publishes an
+#              archive for are listed on its release page)
+#   @ARCHIVE@  the expanded ZENOH_C_ARCHIVE value
+#
+# The environment variable ZENOH_C_VERSION overrides the version for one run of
+# the installer; the installer then asserts the version it installed, so an
+# override that does not match what the archive carries fails there.
+ZENOH_C_VERSION=1.10.1
+ZENOH_C_ARCHIVE=zenoh-c-@VERSION@-@TARGET@-standalone.zip
+ZENOH_C_RELEASE_URL=https://github.com/eclipse-zenoh/zenoh-c/releases/download/@VERSION@/@ARCHIVE@

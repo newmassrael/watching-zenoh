@@ -47,7 +47,7 @@ The derivation's inputs are a source checkout and an install prefix. Neither
 is in any clone, so a gate that required them would SKIP on the fast lane —
 green, having read nothing. So the fact is DATA here, judged by upstream where
 upstream is present, and BOUND to the version pin everywhere: `--check` reads
-`ZENOH_C_VERSION`'s default out of `scripts/install-zenoh-c.sh` and refuses
+`ZENOH_C_VERSION` out of `scripts/zenoh-c-oracle.pin` and refuses
 when it has moved. A pin bump therefore cannot land without re-deriving this,
 which is the ratchet the 1.5.0-to-1.10.0 move did not have.
 
@@ -573,14 +573,26 @@ def derive_from_install(prefix: pathlib.Path) -> str:
     return proc.stdout.strip()
 
 
+PIN_FILE = ROOT / "scripts" / "zenoh-c-oracle.pin"
+
+
+def pin_value(text: str, key: str) -> str:
+    """`key`'s value in the pin file's text: its first `KEY=VALUE` line.
+
+    A missing or empty key is an error, never an empty answer -- a pin read as
+    empty would let every comparison below pass against nothing.
+    """
+    for line in text.splitlines():
+        if line.startswith(key + "="):
+            value = line[len(key) + 1:]
+            if value:
+                return value
+            break
+    raise ValueError(f"{PIN_FILE.name}: no {key}")
+
+
 def installer_pin() -> str:
-    text = (ROOT / "scripts" / "install-zenoh-c.sh").read_text(encoding="utf-8")
-    m = re.search(r'ZENOH_C_VERSION="\$\{ZENOH_C_VERSION:-([^}"]+)\}"', text)
-    if not m:
-        raise ValueError(
-            "install-zenoh-c.sh: could not read ZENOH_C_VERSION's default"
-        )
-    return m.group(1)
+    return pin_value(PIN_FILE.read_text(encoding="utf-8"), "ZENOH_C_VERSION")
 
 
 # ── the arm lattice (open-debt item 616) ─────────────────────────────────────
@@ -1142,6 +1154,23 @@ def cmd_selftest() -> int:
              all(arm_of(arm_features(a)) == a for a in ARMS))
         case("the shipped default is the origin",
              arm_features("unstable") == set())
+
+        # The pin file. A comment that mentions the key must not be read as the
+        # key, and an absent or empty key must raise rather than answer "".
+        pin_text = "# ZENOH_C_VERSION=0.0.0\nZENOH_C_VERSION=9.9.9\nOTHER=x\n"
+        case("the pin is the KEY= line, not a comment naming it",
+             pin_value(pin_text, "ZENOH_C_VERSION") == "9.9.9")
+        for label, text in (("absent", "OTHER=x\n"), ("empty", "ZENOH_C_VERSION=\n")):
+            try:
+                pin_value(text, "ZENOH_C_VERSION")
+                refused = False
+            except ValueError:
+                refused = True
+            case(f"a {label} pin key is refused", refused)
+        case("the shipped pin file names every key its readers use",
+             all(pin_value(PIN_FILE.read_text(encoding="utf-8"), k)
+                 for k in ("ZENOH_C_VERSION", "ZENOH_C_ARCHIVE",
+                           "ZENOH_C_RELEASE_URL")))
 
     print(f"  archive-arm selftest: {passed}/{passed + failed} arm(s) pass")
     return 1 if failed else 0
