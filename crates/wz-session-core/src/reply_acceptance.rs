@@ -187,19 +187,15 @@ impl ReplyAcceptanceStored {
 /// R311y833 that gate was a `pub(crate)` copy inside `wz-capi-pico`, which left
 /// one codebase with two getters and opposite default behaviour: the C ABI
 /// enforced the contract and the native Rust `Session::query` did not.
-/// The query side is split into a STACK buffer rather than a heap `Vec<&str>`
-/// so the gate stays `no_alloc`: this runs once per pending entry per inbound
-/// reply, and a per-message allocation is not available on the MCU profile at
-/// all. A query deeper than [`keyexpr_match::MAX_KEYEXPR_CHUNKS`] is
+/// A query and a reply with no wildcard are compared as text and nothing is
+/// split. Otherwise the query side is split into a STACK buffer rather than a
+/// heap `Vec<&str>` so the gate stays `no_alloc`: this runs once per pending
+/// entry per inbound reply, and a per-message allocation is not available on
+/// the MCU profile at all. A query deeper than [`keyexpr_match::MAX_KEYEXPR_CHUNKS`] is
 /// conservatively a non-match on that backing, the same rule every other scan
 /// in [`keyexpr_match`] takes; the alloc backing grows past the bound.
 pub fn reply_keyexpr_intersects(query_keyexpr: &str, reply: &str) -> bool {
-    // Built where it is used: a split RETURNED from a function is a copy of the whole buffer.
-    let mut query_chunks = keyexpr_match::KeyChunks::empty();
-    if !query_chunks.split_into(query_keyexpr) {
-        return false;
-    }
-    keyexpr_match::keyexpr_intersects_target(reply, &query_chunks)
+    keyexpr_match::keyexpr_intersects_text(reply, query_keyexpr)
 }
 
 #[cfg(test)]

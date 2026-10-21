@@ -557,6 +557,17 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
     if !target_chunks_well_formed(target_chunks) {
         return false;
     }
+    // Two keys with no wildcard intersect exactly when they are the same text: every chunk is a
+    // literal, and a literal chunk meets only itself. Most candidates a scan tries are such keys
+    // against such a target, and the walk below would split each of them only to compare them
+    // chunk by chunk, so the text is compared where it lies. A target with no chunks is not a
+    // key a split yields; it goes the long way, which refuses it.
+    if !target_chunks.is_empty()
+        && !is_wild(candidate)
+        && !target_chunks.iter().any(|chunk| is_wild(chunk))
+    {
+        return chunks_spell(target_chunks, candidate);
+    }
     // No-alloc backing: a candidate deeper than the declared bound cannot be
     // represented, so it is conservatively no-match (the alloc backing never
     // takes this arm). Same shape as keyexpr_pattern_matches' target split.
@@ -565,6 +576,66 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
         return false;
     }
     keyexpr_intersect_patterns(&candidate_chunks, target_chunks)
+}
+
+/// Whether the keyexpr `candidate` intersects the keyexpr `target`, both as text: the question
+/// [`keyexpr_intersects_target`] asks, for a caller that holds the target unsplit.
+///
+/// A target is split for the walk only when a wildcard makes the walk necessary. Two keys with no
+/// wildcard intersect exactly when they are the same text, and then no chunk of either is
+/// looked at: the target is only checked to be a key the walk would accept (no empty chunk, and
+/// not deeper than the backing holds), which are the two refusals the walk makes before it
+/// compares anything.
+pub fn keyexpr_intersects_text(candidate: &str, target: &str) -> bool {
+    if !is_wild(candidate) && !is_wild(target) {
+        return candidate == target && text_is_a_key(target);
+    }
+    // No-alloc backing: a target deeper than the declared bound cannot be represented, so it is
+    // conservatively no-match (the alloc backing never takes this arm).
+    let mut target_chunks = KeyChunks::empty();
+    if !target_chunks.split_into(target) {
+        return false;
+    }
+    keyexpr_intersects_target(candidate, &target_chunks)
+}
+
+/// Whether `text` splits into chunks the matchers accept: none empty (so not the empty text, not
+/// a leading or trailing `/`, no `//`), and on the fixed backing no more than it holds.
+fn text_is_a_key(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes[0] == b'/' || bytes[bytes.len() - 1] == b'/' {
+        return false;
+    }
+    let mut slashes = 0usize;
+    let mut previous = 0u8;
+    for &byte in bytes {
+        if byte == b'/' {
+            if previous == b'/' {
+                return false;
+            }
+            slashes += 1;
+        }
+        previous = byte;
+    }
+    !crate::bounded::ENFORCES_CAPACITY || slashes < MAX_KEYEXPR_CHUNKS
+}
+
+/// Whether `chunks` joined by `/` is `text`, compared without building the join.
+fn chunks_spell(chunks: &[&str], text: &str) -> bool {
+    let mut rest = text.as_bytes();
+    for (index, chunk) in chunks.iter().enumerate() {
+        if index > 0 {
+            match rest.split_first() {
+                Some((&b'/', tail)) => rest = tail,
+                _ => return false,
+            }
+        }
+        match rest.strip_prefix(chunk.as_bytes()) {
+            Some(tail) => rest = tail,
+            None => return false,
+        }
+    }
+    rest.is_empty()
 }
 
 /// [`keyexpr_intersects_target`] for a candidate that is already split: the same question, the
@@ -908,6 +979,77 @@ mod tests {
         assert!(!is_wild("demo/a"));
         assert!(!is_wild("demo/a/b"));
         assert!(!is_wild(""));
+    }
+
+    /// The candidate scan answers what the split-and-intersect walk answers, for every pair of a
+    /// corpus that holds both kinds of key (with and without a wildcard), the malformed ones (an
+    /// empty chunk, a leading or trailing `/`, the empty key) and keys that differ only by a
+    /// prefix, a suffix or one chunk. The walk is the oracle: the shortcut for two keys with no
+    /// wildcard must never answer differently.
+    #[test]
+    fn intersects_target_agrees_with_the_walk_over_a_corpus() {
+        let corpus = [
+            "",
+            "a",
+            "a/b",
+            "a/b/",
+            "/a/b",
+            "a//b",
+            "a/b/c",
+            "ab/c",
+            "a/bc",
+            "a/b/c/d",
+            "@/5a1c0ffee001/peer/status/connect",
+            "@/5a1c0ffee001/peer/status/config",
+            "@/5a1c0ffee001/peer/status",
+            "@/5a1c0ffee001/peer/status/connect/x",
+            "a/*",
+            "*/b",
+            "a/**",
+            "**",
+            "a/b$*",
+            "$*",
+            "a/$b",
+            "a/b$",
+            "a/*/c",
+            "@/5a1c0ffee001/**",
+        ];
+        // The walk, spelled out: split both, refuse a malformed target, intersect the chunks.
+        let walk = |candidate: &str, target: &str| {
+            KeyChunks::split(target).is_some_and(|chunks| {
+                target_chunks_well_formed(&chunks)
+                    && KeyChunks::split(candidate)
+                        .is_some_and(|split| keyexpr_intersect_patterns(&split, &chunks))
+            })
+        };
+        let deep = "a/".repeat(MAX_KEYEXPR_CHUNKS) + "a";
+        let deep_other = "a/".repeat(MAX_KEYEXPR_CHUNKS) + "b";
+        let mut keys: alloc::vec::Vec<&str> = corpus.to_vec();
+        keys.push(&deep);
+        keys.push(&deep_other);
+        for &candidate in &keys {
+            for &target in &keys {
+                let want = walk(candidate, target);
+                assert_eq!(
+                    keyexpr_intersects_text(candidate, target),
+                    want,
+                    "text: candidate {candidate:?} against target {target:?}"
+                );
+                if let Some(chunks) = KeyChunks::split(target) {
+                    assert_eq!(
+                        keyexpr_intersects_target(candidate, &chunks),
+                        want,
+                        "chunks: candidate {candidate:?} against target {target:?}"
+                    );
+                }
+            }
+        }
+        // No chunks at all is not a key the split yields; the walk refuses the empty candidate
+        // against it, and so must the scan.
+        assert_eq!(
+            keyexpr_intersects_target("", &[]),
+            keyexpr_intersect_patterns(&KeyChunks::split("").expect("one chunk"), &[])
+        );
     }
 
     #[test]

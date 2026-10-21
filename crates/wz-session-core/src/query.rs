@@ -100,7 +100,7 @@ use alloc::vec::Vec;
 // no-alloc control plane (queryable table + per-row keyexpr pattern).
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
-use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
+use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 use crate::query_mode::QueryTarget;
 use crate::registry_error::RegisterError;
 // R311y834 — the only consumers are `QueryResponder` and the dispatcher, both
@@ -499,15 +499,12 @@ impl<C: QuerySink> Queryable<C> {
         // Discovery, which must reach a queryable declared on the concrete
         // `@zid/<zid>/<fp>/aligner` — so the inbound `keyexpr` cannot be treated
         // as a concrete literal (the prior `keyexpr_pattern_matches(self, query)`
-        // matched the query's `*` character-literally and missed it). Split the
-        // query into target chunks and intersect against this queryable's
-        // pattern, the same seam `declare::declared_intersects` already uses. For
-        // a concrete query this is identical to the prior pattern match.
-        let mut target = crate::keyexpr_match::KeyChunks::empty();
-        if !target.split_into(keyexpr) {
-            return false;
-        }
-        keyexpr_intersects_target(&self.pattern, &target)
+        // matched the query's `*` character-literally and missed it). Intersect the
+        // query with this queryable's pattern, the same question
+        // `declare::declared_intersects` asks; the query is split only when a
+        // wildcard makes the walk necessary. For a concrete query this is
+        // identical to the prior pattern match.
+        crate::keyexpr_match::keyexpr_intersects_text(&self.pattern, keyexpr)
     }
 }
 
