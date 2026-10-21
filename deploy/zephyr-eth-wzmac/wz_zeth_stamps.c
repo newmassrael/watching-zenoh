@@ -372,6 +372,7 @@ static void trace_print(void)
 	}
 }
 
+#ifdef CONFIG_WZ_ZETH_STAMPS_COUNTS
 void *__wrap_k_malloc(size_t size)
 {
 	if (!in_window()) {
@@ -442,6 +443,7 @@ void __real___aeabi_memcpy8(void *dst, const void *src, size_t len);
 WZ_STAMPS_EABI_COPY(__aeabi_memcpy)
 WZ_STAMPS_EABI_COPY(__aeabi_memcpy4)
 WZ_STAMPS_EABI_COPY(__aeabi_memcpy8)
+#endif /* CONFIG_WZ_ZETH_STAMPS_COUNTS */
 
 ssize_t __wrap_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *from,
 			socklen_t_ *fromlen)

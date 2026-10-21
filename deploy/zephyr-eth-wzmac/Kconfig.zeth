@@ -64,6 +64,18 @@ config WZ_ZETH_STAMPS
 	  diagnostic: the lines are writes to a UART, so no timing measured by anything else is
 	  taken from an image that has it on.
 
+config WZ_ZETH_STAMPS_COUNTS
+	bool "Count the heap calls and the copies of a query, and name the sites of the big copies"
+	depends on WZ_ZETH_STAMPS
+	default y
+	help
+	  Wraps the heap's allocate and free and every copy function, so the line shows how many
+	  of each a query makes and what they cost. Each wrapped call costs about 0.4 us itself,
+	  and a query makes dozens, so an image that has it on is slower than one that does not and
+	  a profile taken from it over-reads the wrappers. Off, the window is still marked (between
+	  the application's recvfrom and sendto) and only the four gaps are measured, which is the
+	  image to take a program-counter profile from.
+
 endif # WZ_ZETH
 
 # Set by whatever drives ETH0 (this driver, or the lwIP backend's MAC), so the pin routing
