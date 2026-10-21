@@ -76,6 +76,17 @@ config WZ_ZETH_STAMPS_COUNTS
 	  the application's recvfrom and sendto) and only the four gaps are measured, which is the
 	  image to take a program-counter profile from.
 
+config WZ_ZETH_STAMPS_RESOURCES
+	bool "Print the kernel heap's peak and every thread's stack use with the stamps"
+	depends on WZ_ZETH_STAMPS && SYS_HEAP_RUNTIME_STATS && INIT_STACKS && THREAD_STACK_INFO \
+		   && THREAD_MONITOR
+	help
+	  Adds, to the line printed every 500 queries, the system heap's allocated and peak bytes
+	  since boot and, for each thread, its stack's size and how much of it was ever used. The
+	  same instrument for a wz node and a zenoh-pico application: it reads the kernel's own
+	  records and changes neither application. The kernel options it reads are dependencies,
+	  so an image that lacks one fails at configuration and does not print nothing.
+
 endif # WZ_ZETH
 
 # Set by whatever drives ETH0 (this driver, or the lwIP backend's MAC), so the pin routing

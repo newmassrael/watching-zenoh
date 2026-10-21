@@ -26,6 +26,9 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
+#ifdef CONFIG_WZ_ZETH_STAMPS_RESOURCES
+#include <zephyr/sys/sys_heap.h>
+#endif
 
 struct sockaddr;
 typedef unsigned int socklen_t_;
@@ -251,8 +254,43 @@ static void print_copy_sites(uint32_t n)
 	}
 }
 
+#ifdef CONFIG_WZ_ZETH_STAMPS_RESOURCES
+/* What the kernel records of the image's memory: the system heap's allocated and peak bytes since
+ * boot, and each thread's stack (size, and how much of the paint the thread ever reached). The
+ * peak is the true high water mark, boot and the session's open included. */
+extern struct k_heap _system_heap;
+
+static void print_thread_stack(const struct k_thread *thread, void *user_data)
+{
+	size_t unused = 0;
+	const char *name = k_thread_name_get((k_tid_t)thread);
+
+	ARG_UNUSED(user_data);
+	if (k_thread_stack_space_get(thread, &unused) != 0) {
+		return;
+	}
+	printk("wz: res: thread %s stack used %u of %u\n", (name != NULL && name[0] != '\0') ? name : "?",
+	       (unsigned int)(thread->stack_info.size - unused), (unsigned int)thread->stack_info.size);
+}
+
+static void print_resources(void)
+{
+	struct sys_memory_stats stats;
+
+	if (sys_heap_runtime_stats_get(&_system_heap.heap, &stats) == 0) {
+		printk("wz: res: heap allocated %u, peak %u, free %u\n",
+		       (unsigned int)stats.allocated_bytes, (unsigned int)stats.max_allocated_bytes,
+		       (unsigned int)stats.free_bytes);
+	}
+	k_thread_foreach_unlocked(print_thread_stack, NULL);
+}
+#endif /* CONFIG_WZ_ZETH_STAMPS_RESOURCES */
+
 static void report_buckets(uint32_t n, uint32_t hz)
 {
+#ifdef CONFIG_WZ_ZETH_STAMPS_RESOURCES
+	print_resources();
+#endif
 	printk("wz: stamps:   sampler ticks %u, in window %u, on the app thread %u, in code %u\n",
 	       prof_ticks, prof_in_window, prof_on_app, prof_in_code);
 	print_bucket("poll", &b_poll, n, hz, false);
