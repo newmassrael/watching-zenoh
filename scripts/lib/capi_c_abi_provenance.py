@@ -127,6 +127,16 @@ def layout_names(text: str) -> list[str]:
         empty = re.match(r"\s*\];", rest)
         if empty:
             continue
+        # A table written on ONE line (`= &["z_x_t"];`) closes on the line it
+        # opens, so the column-zero scan below would run past it into the next
+        # constant and take the `#[cfg(feature = "...")]` strings between them
+        # for footprint names. `liveliness-get` and `query` were read that way.
+        # Row comments hold `[24];` but never inside the opening line's own
+        # brackets, so the first `];` of that line is its terminator.
+        opening_line = rest.split("\n", 1)[0]
+        if "];" in opening_line:
+            names.extend(re.findall(r'"([^"]+)"', opening_line[: opening_line.index("];")]))
+            continue
         end = re.search(r"^\];", rest, re.M)
         if end is None:
             continue
@@ -412,6 +422,23 @@ def selftest() -> int:
                 _FIX_ORIGIN_OK, flags=re.S), 1),
     ]
     failures = 0
+    # The one-line table is a parser question, not a table question: it must yield its own
+    # name and none of the `#[cfg]` strings that sit between it and the next constant.
+    one_line = (
+        '#[cfg(feature = "liveliness-get")]\n'
+        'pub const WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS_GET: &[&str] = &["z_a_t"];\n'
+        '#[cfg(not(feature = "liveliness-get"))]\n'
+        'pub const WZ_CAPI_C_LAYOUT_NAMES_LIVELINESS_GET: &[&str] = &[];\n'
+        '#[cfg(feature = "query")]\n'
+        'pub const WZ_CAPI_C_LAYOUT_NAMES_QUERY: &[&str] = &[\n'
+        '    "z_b_t", // uint8_t _0[24]; }\n'
+        '];\n'
+    )
+    got_names = layout_names(one_line)
+    if got_names != ["z_a_t", "z_b_t"]:
+        print(f"  selftest FAIL: a one-line layout table leaked cfg strings: {got_names}",
+              file=sys.stderr)
+        failures += 1
     for label, origin_src, want in cases:
         with tempfile.TemporaryDirectory() as d:
             up, tabs, src = _write_fixture(pathlib.Path(d), origin_src)
