@@ -276896,6 +276896,46 @@
         "The ap profile and the Zephyr images have no capability features; MCU GET is 1.4 times slower than pico."
       ]
     },
+    "Round 3398": {
+      "decision_summary": "Declare the capabilities of the C ABI builds once, and derive the Kconfig and the cargo arguments from the declaration. deploy/capabilities.toml names eleven capabilities with their Kconfig symbol, the ABIs that export each, what each implies and zenoh-pico's own switch where there is one. capability_config.py prints deploy/Kconfig.capabilities (a menu of WZ_CAP_* with select for every implication), turns a Kconfig .config or a pico config.h into the cargo arguments of an ABI crate, and holds the committed Kconfig and the three manifests to the declaration. The first run found a real inconsistency: wz-capi-c advanced did not imply timestamping, so a build with advanced alone compiled the clock and still refused a config that enabled it. The manifest now implies it.",
+      "changes_bullets": [
+        "deploy/capabilities.toml, deploy/Kconfig.capabilities (generated), scripts/lib/capability_config.py with --check, --selftest, --emit-kconfig and --features; both checks run in Layer C0.",
+        "wz-capi-c: advanced implies timestamping."
+      ],
+      "verification_bullets": [
+        "capability_config selftest 20 of 20, including that a Kconfig selection of nothing derives the features of the pico-client and capic-client cases the size gate grades; --check exits 0 over the three manifests.",
+        "pc2: wz-capi-c with advanced alone clippy clean after the manifest fix.",
+        "gate_provenance_lint and round_fed_gate_reach exit 0. The full gate sweep was not re-run, at the owner's request.",
+        "Not done: a Zephyr or Linux build that reads the Kconfig; the .config to cargo path is a command, not yet a build step."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The Kconfig is an input nothing builds from yet: wire capability_config.py --features into the CMake of a Zephyr image and into a Linux build script, and gate that a build from the Kconfig has the size the cost gate grades.",
+        "Declare the link kinds beyond TCP and UDP and the locator parsers as capabilities, then the ap profile and the Zephyr images.",
+        "The hosted capability-cost job has not run; read it per job first."
+      ],
+      "publishable_decision_summary": "Declare the capabilities of the C ABI builds once, and derive the Kconfig and the cargo arguments from the declaration. deploy/capabilities.toml names eleven capabilities with their Kconfig symbol, the ABIs that export each, what each implies and zenoh-pico's own switch where there is one. capability_config.py prints deploy/Kconfig.capabilities (a menu of WZ_CAP_* with select for every implication), turns a Kconfig .config or a pico config.h into the cargo arguments of an ABI crate, and holds the committed Kconfig and the three manifests to the declaration. The first run found a real inconsistency: wz-capi-c advanced did not imply timestamping, so a build with advanced alone compiled the clock and still refused a config that enabled it. The manifest now implies it.",
+      "publishable_changes_bullets": [
+        "deploy/capabilities.toml, deploy/Kconfig.capabilities (generated), scripts/lib/capability_config.py with --check, --selftest, --emit-kconfig and --features; both checks run in Layer C0.",
+        "wz-capi-c: advanced implies timestamping."
+      ],
+      "publishable_verification_bullets": [
+        "capability_config selftest 20 of 20, including that a Kconfig selection of nothing derives the features of the pico-client and capic-client cases the size gate grades; --check exits 0 over the three manifests.",
+        "pc2: wz-capi-c with advanced alone clippy clean after the manifest fix.",
+        "gate_provenance_lint and round_fed_gate_reach exit 0. The full gate sweep was not re-run, at the owner's request.",
+        "Not done: a Zephyr or Linux build that reads the Kconfig; the .config to cargo path is a command, not yet a build step."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The Kconfig is an input nothing builds from yet: wire capability_config.py --features into the CMake of a Zephyr image and into a Linux build script, and gate that a build from the Kconfig has the size the cost gate grades.",
+        "Declare the link kinds beyond TCP and UDP and the locator parsers as capabilities, then the ap profile and the Zephyr images.",
+        "The hosted capability-cost job has not run; read it per job first."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [

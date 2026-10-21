@@ -198,7 +198,7 @@ liveliness = ["wz-capi-core/liveliness"]
 # The snapshot get of the liveliness plane; it is a query.
 liveliness-get = ["liveliness", "query", "wz-capi-core/liveliness-get"]
 # The advanced publisher and subscriber, with the plane they replay through.
-advanced = ["liveliness", "queryable", "wz-capi-core/advanced"]
+advanced = ["liveliness", "queryable", "timestamping", "wz-capi-core/advanced"]
 # The group membership of zenoh-ext.
 group = ["wz-capi-core/group"]
 # A session told of a node by one it holds a link to dials it.

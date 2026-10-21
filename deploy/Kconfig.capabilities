@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# GENERATED from deploy/capabilities.toml by scripts/lib/capability_config.py --emit-kconfig.
+# Do not edit: `capability_config.py --check` fails when this file is stale.
+
+menu "wz C ABI capabilities"
+
+config WZ_CAP_LINK_UDP
+	bool "link-udp"
+	default y
+	help
+	  A udp/ endpoint to dial, and the transport the scouting group rides.
+	  zenoh-pico's switch for it: Z_FEATURE_LINK_UDP_UNICAST.
+	  Exported by: pico, c.
+
+config WZ_CAP_TIMESTAMPING
+	bool "timestamping"
+	default y
+	help
+	  The node clock a role that stamps its messages holds (zenoh's router does by default).
+	  Exported by: c.
+
+config WZ_CAP_SCOUT
+	bool "scout"
+	default y
+	select WZ_CAP_LINK_UDP
+	help
+	  z_scout, the hello family, and a client finding its router by scouting.
+	  zenoh-pico's switch for it: Z_FEATURE_SCOUTING.
+	  Exported by: pico, c.
+
+config WZ_CAP_PEER
+	bool "peer"
+	default y
+	select WZ_CAP_SCOUT
+	help
+	  A listener, a router or a peer: the roles beyond the client. Off, z_open refuses them.
+	  zenoh-pico's switch for it: Z_FEATURE_UNICAST_PEER.
+	  Exported by: pico, c.
+
+config WZ_CAP_QUERY
+	bool "query"
+	default y
+	help
+	  z_get and the querier: the requesting end of a query.
+	  zenoh-pico's switch for it: Z_FEATURE_QUERY.
+	  Exported by: pico, c.
+
+config WZ_CAP_QUERYABLE
+	bool "queryable"
+	default y
+	help
+	  z_declare_queryable and the replies: the answering end of a query.
+	  zenoh-pico's switch for it: Z_FEATURE_QUERYABLE.
+	  Exported by: pico, c.
+
+config WZ_CAP_LIVELINESS
+	bool "liveliness"
+	default y
+	help
+	  The liveliness token and subscriber.
+	  zenoh-pico's switch for it: Z_FEATURE_LIVELINESS.
+	  Exported by: pico, c.
+
+config WZ_CAP_LIVELINESS_GET
+	bool "liveliness-get"
+	default y
+	select WZ_CAP_LIVELINESS
+	select WZ_CAP_QUERY
+	help
+	  The snapshot get of the liveliness plane; it is a query.
+	  Exported by: pico, c.
+
+config WZ_CAP_ADVANCED
+	bool "advanced"
+	default y
+	select WZ_CAP_LIVELINESS
+	select WZ_CAP_QUERYABLE
+	select WZ_CAP_TIMESTAMPING
+	help
+	  The advanced publisher and subscriber (cache, history, miss detection).
+	  zenoh-pico's switch for it: Z_FEATURE_ADVANCED_PUBLICATION.
+	  Exported by: pico, c.
+
+config WZ_CAP_GROUP
+	bool "group"
+	default y
+	help
+	  zenoh-ext group membership.
+	  Exported by: c.
+
+config WZ_CAP_GOSSIP
+	bool "gossip"
+	default y
+	select WZ_CAP_PEER
+	help
+	  A session told of a node by one it holds a link to dials it.
+	  Exported by: pico, c.
+
+endmenu

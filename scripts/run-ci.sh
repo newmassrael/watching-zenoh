@@ -3235,6 +3235,11 @@ layer_c0_test_discipline() {
     # synthetic input: its matcher, its budget arithmetic and the control that every plane it
     # forbids somewhere it requires somewhere else.
     python3 scripts/lib/capability_cost_gate.py --selftest || return 1
+    # R3398 -- the capability graph is declared once (deploy/capabilities.toml); the generated
+    # Kconfig and the three C ABI manifests are held to it. The selftest also pins that a
+    # Kconfig selection derives the very features the size gate above grades.
+    python3 scripts/lib/capability_config.py --selftest || return 1
+    python3 scripts/lib/capability_config.py --check || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.

@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The capabilities of the C ABI builds, declared ONCE.
+#
+# A capability is a plane a build either has or does not: the doors it exports and the runtime
+# behind them. This file is the single declaration. Three things derive from it, and
+# `scripts/lib/capability_config.py` holds each to it:
+#
+#   * `deploy/Kconfig.capabilities`   the Kconfig a Zephyr or Linux deployer selects from
+#                                     (generated; `--check` fails when it is stale);
+#   * the Cargo features               `--features <abi> <.config>` turns a Kconfig result into
+#                                     the `cargo build` arguments of an ABI crate;
+#   * the three manifests              wz-capi-core, wz-capi-pico and wz-capi-c each spell the
+#                                     same capability graph by hand in `[features]`; `--check`
+#                                     fails when a manifest drifts from it.
+#
+# `implies` is a capability that must be on when this one is. `abis` is where the capability is
+# exported (core is the model under both ABIs and always has it). `default` is whether a build
+# that names nothing has it (every capability is on by default: the drop-in exports what the
+# reference build does). `pico_flag` is zenoh-pico's own switch for it, where it has one, so a
+# deployer who already writes a pico `config.h` can state the same intent.
+#
+# `base` is what an ABI build needs that is not a capability.
+
+[base]
+core = ["rx-busy-poll"]
+pico = ["serial-drive-own-thread", "rx-busy-poll"]
+c = []
+
+[[capability]]
+id = "link-udp"
+kconfig = "WZ_CAP_LINK_UDP"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_LINK_UDP_UNICAST"
+implies = []
+help = "A udp/ endpoint to dial, and the transport the scouting group rides."
+
+[[capability]]
+id = "timestamping"
+kconfig = "WZ_CAP_TIMESTAMPING"
+abis = ["core", "c"]
+implies = []
+help = "The node clock a role that stamps its messages holds (zenoh's router does by default)."
+
+[[capability]]
+id = "scout"
+kconfig = "WZ_CAP_SCOUT"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_SCOUTING"
+implies = ["link-udp"]
+help = "z_scout, the hello family, and a client finding its router by scouting."
+
+[[capability]]
+id = "peer"
+kconfig = "WZ_CAP_PEER"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_UNICAST_PEER"
+implies = ["scout"]
+help = "A listener, a router or a peer: the roles beyond the client. Off, z_open refuses them."
+
+[[capability]]
+id = "query"
+kconfig = "WZ_CAP_QUERY"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_QUERY"
+implies = []
+help = "z_get and the querier: the requesting end of a query."
+
+[[capability]]
+id = "queryable"
+kconfig = "WZ_CAP_QUERYABLE"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_QUERYABLE"
+implies = []
+help = "z_declare_queryable and the replies: the answering end of a query."
+
+[[capability]]
+id = "liveliness"
+kconfig = "WZ_CAP_LIVELINESS"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_LIVELINESS"
+implies = []
+help = "The liveliness token and subscriber."
+
+[[capability]]
+id = "liveliness-get"
+kconfig = "WZ_CAP_LIVELINESS_GET"
+abis = ["core", "pico", "c"]
+implies = ["liveliness", "query"]
+help = "The snapshot get of the liveliness plane; it is a query."
+
+[[capability]]
+id = "advanced"
+kconfig = "WZ_CAP_ADVANCED"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_ADVANCED_PUBLICATION"
+implies = ["liveliness", "queryable", "timestamping"]
+help = "The advanced publisher and subscriber (cache, history, miss detection)."
+
+[[capability]]
+id = "group"
+kconfig = "WZ_CAP_GROUP"
+abis = ["core", "c"]
+implies = []
+help = "zenoh-ext group membership."
+
+[[capability]]
+id = "gossip"
+kconfig = "WZ_CAP_GOSSIP"
+abis = ["core", "pico", "c"]
+implies = ["peer"]
+help = "A session told of a node by one it holds a link to dials it."
