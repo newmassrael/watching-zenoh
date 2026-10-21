@@ -61,13 +61,14 @@ use crate::{
 
 /// Sessions the node holds at most: the one it dials.
 const SESSIONS: usize = 1;
-/// The runtime's task table: a pump task per session, with room beside it.
-const TASKS: usize = SESSIONS + 1;
+/// The runtime's task table: a pump task per session, and nothing else runs as a task.
+const TASKS: usize = SESSIONS;
 /// Bytes of one task cell: the pump's handle and the application layer's state. The layer is a
 /// few pointers, because a node that asks nothing keeps no table of requests (`Requests`, with the
-/// pending-query limits at 0), and an `async fn` holds a by-value argument twice; the cell is sized
-/// well past that, and a task the cell could not hold is refused and counted rather than run.
-const TASK_BYTES: usize = 1024;
+/// pending-query limits at 0), and an `async fn` holds a by-value argument twice. A task the cell
+/// cannot hold is refused and counted, and the loop says so on the console ("wz: FAIL - ...")
+/// rather than run a node that never starts a session.
+const TASK_BYTES: usize = 384;
 /// Timers the runtime holds: the handshake and lease deadlines of the session.
 const TIMERS: usize = 4;
 /// Extra bytes a link's receive buffer holds beyond one batch, so a datagram that carries a batch
@@ -312,12 +313,23 @@ pub fn run() -> i32 {
     let mut established = false;
     let mut stack_watch = StackWatch::new();
     let mut next_stack_check_ms = 0u64;
+    let mut refused = (runtime.task_refusals(), runtime.timer_refusals());
     loop {
         local.run_until_idle();
         let now_ms = clock.now_us() / 1000;
         node.tick(now_ms);
         if now_ms >= next_stack_check_ms {
             next_stack_check_ms = now_ms + STACK_CHECK_MS;
+            // A table the image sized too small refuses what it cannot hold and counts it; the
+            // count moving is a firmware that is not doing what it was built to, so it is said.
+            let now = (runtime.task_refusals(), runtime.timer_refusals());
+            if now != refused {
+                refused = now;
+                log_args(format_args!(
+                    "wz: FAIL - the runtime refused a task or a timer: no cell {}, too large {}, timers {}",
+                    now.0.no_task_cell, now.0.too_large, now.1
+                ));
+            }
             if let Some(usage) = stack_watch.observe_peak(stack_usage()) {
                 log_args(format_args!(
                     "stack: peak {} of {} bytes",
