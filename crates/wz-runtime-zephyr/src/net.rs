@@ -20,21 +20,25 @@
 //! iterations and a datagram that arrives is taken the moment it is queued, not at
 //! the end of a sleep.
 
-use alloc::format;
-use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use core::cell::{Cell, OnceCell, RefCell};
 use core::ffi::{c_int, c_void};
+use core::fmt::Write;
 use core::mem::size_of;
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_runtime_coop::group_transport::GroupTransport;
 use wz_runtime_coop::session_drive::SessionDatagramLink;
-use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, RxFrame,
-};
+#[cfg(feature = "session-slot")]
+use wz_runtime_coop::session_drive::{DriverPump, LinkOpenError, SlotStack, UdpPeer};
+use wz_session_core::caps::MAX_LOCATOR_LEN;
+#[cfg(feature = "alloc")]
+use wz_session_core::link::RxFrame;
+use wz_session_core::link::{BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome};
 use wz_session_core::reliability::Reliability;
 use zephyr_sys::socket::{
     bind, close, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
@@ -98,12 +102,19 @@ pub fn board_ipv4() -> Option<[u8; 4]> {
 /// The node's zenoh id as the board gives it, 1 to [`ZID_MAX`] bytes, or `None`
 /// when it has none. Never a constant of the firmware: two boards running the
 /// same image must not claim the same id on one network.
+#[cfg(feature = "alloc")]
 pub fn board_zid() -> Option<Vec<u8>> {
+    board_zid_fixed().map(|(id, len)| id[..len].to_vec())
+}
+
+/// [`board_zid`] with no allocator: the id's bytes in an array of [`ZID_MAX`], and how many of
+/// them are the id. The one place the hook is called.
+pub fn board_zid_fixed() -> Option<([u8; ZID_MAX], usize)> {
     let mut id = [0u8; ZID_MAX];
     // SAFETY: the hook writes at most `ZID_MAX` bytes through a pointer to a
     // live local of that size, and returns how many.
     let len = unsafe { wzApplicationGetZid(id.as_mut_ptr(), ZID_MAX) };
-    (1..=ZID_MAX).contains(&len).then(|| id[..len].to_vec())
+    (1..=ZID_MAX).contains(&len).then_some((id, len))
 }
 
 /// Wait up to `budget_ms` for the board to have an IPv4 address, yielding to the
@@ -424,13 +435,20 @@ impl Drop for ZephyrUdpSocket {
     }
 }
 
-/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator.
-fn udp_locator(addr: [u8; 4], port: u16) -> String {
+/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed text: the longest
+/// one, `udp/255.255.255.255:65535`, is 25 bytes of the [`MAX_LOCATOR_LEN`] the text has.
+fn udp_locator(addr: [u8; 4], port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
     let [a, b, c, d] = addr;
-    format!("udp/{a}.{b}.{c}.{d}:{port}")
+    let mut text = heapless::String::new();
+    // Cannot fail: the longest rendering is shorter than the text's capacity.
+    let _ = write!(text, "udp/{a}.{b}.{c}.{d}:{port}");
+    text
 }
 
-/// The session's link over one [`ZephyrUdpSocket`].
+/// The session's link over one [`ZephyrUdpSocket`], with its receive buffer in `B`: a `Vec<u8>`
+/// on the heap profile ([`ZephyrUdpDriver`]), an array of the batch size on the fixed one
+/// ([`FixedUdpDriver`]), where the buffer is part of the driver and the driver is a value in the
+/// session's slot, so a datagram costs no allocation.
 ///
 /// Outbound sends target the peer captured from the most recent inbound
 /// datagram: an acceptor is built with no peer and learns it from the
@@ -438,13 +456,13 @@ fn udp_locator(addr: [u8; 4], port: u16) -> String {
 /// so replies go to whoever just spoke. UDP is connectionless, so
 /// `open_blocking` / `close_blocking` are no-ops — the zenoh handshake and
 /// Close frame are the session's open and close.
-pub struct ZephyrUdpDriver {
+pub struct UdpDriver<B: AsMut<[u8]>> {
     socket: ZephyrUdpSocket,
     peer: Cell<Option<([u8; 4], u16)>>,
     /// The link's two ends, `udp/<ip>:<port>` each, written once — when the
     /// peer is first known.
     endpoints: OnceCell<LinkEndpoints>,
-    rx_buf: RefCell<Vec<u8>>,
+    rx_buf: RefCell<B>,
     /// A datagram [`SessionDatagramLink::service`] already read into `rx_buf` while it waited
     /// (length and source), for the next receive to hand out without another call into the stack.
     stash: Cell<Option<(usize, [u8; 4], u16)>>,
@@ -454,7 +472,18 @@ pub struct ZephyrUdpDriver {
     rx_error: Cell<Option<ZephyrNetError>>,
 }
 
-impl ZephyrUdpDriver {
+/// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
+/// given.
+#[cfg(feature = "alloc")]
+pub type ZephyrUdpDriver = UdpDriver<Vec<u8>>;
+
+/// The fixed-memory profile's driver: its receive buffer is an array of `RX` bytes inside the
+/// value, sized to the batch the session advertises. A datagram longer than `RX` is truncated by
+/// the stack, which the session reads as a bad frame.
+pub type FixedUdpDriver<const RX: usize> = UdpDriver<[u8; RX]>;
+
+#[cfg(feature = "alloc")]
+impl UdpDriver<Vec<u8>> {
     /// An acceptor's link: no peer until the first datagram names one.
     pub fn acceptor(socket: ZephyrUdpSocket) -> Self {
         Self::acceptor_with_capacity(socket, UDP_RX_CAPACITY)
@@ -471,7 +500,7 @@ impl ZephyrUdpDriver {
     /// A datagram longer than that is truncated by the stack, which the session
     /// reads as a bad frame.
     pub fn acceptor_with_capacity(socket: ZephyrUdpSocket, rx_capacity: usize) -> Self {
-        Self::with_peer(socket, None, rx_capacity)
+        Self::acceptor_in(socket, vec![0u8; rx_capacity])
     }
 
     /// [`ZephyrUdpDriver::initiator`] with a receive buffer of `rx_capacity` bytes.
@@ -480,19 +509,29 @@ impl ZephyrUdpDriver {
         peer: ([u8; 4], u16),
         rx_capacity: usize,
     ) -> Self {
-        Self::with_peer(socket, Some(peer), rx_capacity)
+        Self::initiator_in(socket, peer, vec![0u8; rx_capacity])
+    }
+}
+
+impl<B: AsMut<[u8]>> UdpDriver<B> {
+    /// An acceptor's link over the receive buffer `rx_buf`: no peer until the first datagram
+    /// names one.
+    pub fn acceptor_in(socket: ZephyrUdpSocket, rx_buf: B) -> Self {
+        Self::with_peer(socket, None, rx_buf)
     }
 
-    fn with_peer(
-        socket: ZephyrUdpSocket,
-        peer: Option<([u8; 4], u16)>,
-        rx_capacity: usize,
-    ) -> Self {
+    /// An initiator's link over the receive buffer `rx_buf`: replies and first sends go to
+    /// `peer`.
+    pub fn initiator_in(socket: ZephyrUdpSocket, peer: ([u8; 4], u16), rx_buf: B) -> Self {
+        Self::with_peer(socket, Some(peer), rx_buf)
+    }
+
+    fn with_peer(socket: ZephyrUdpSocket, peer: Option<([u8; 4], u16)>, rx_buf: B) -> Self {
         let driver = Self {
             socket,
             peer: Cell::new(None),
             endpoints: OnceCell::new(),
-            rx_buf: RefCell::new(vec![0u8; rx_capacity]),
+            rx_buf: RefCell::new(rx_buf),
             stash: Cell::new(None),
             rx_error: Cell::new(None),
         };
@@ -519,8 +558,8 @@ impl ZephyrUdpDriver {
         if self.endpoints.get().is_none() {
             let (addr, port) = self.socket.local();
             let _ = self.endpoints.set(LinkEndpoints::new(
-                udp_locator(addr, port),
-                udp_locator(peer.0, peer.1),
+                udp_locator(addr, port).as_str(),
+                udp_locator(peer.0, peer.1).as_str(),
             ));
         }
     }
@@ -536,7 +575,7 @@ impl ZephyrUdpDriver {
     }
 }
 
-impl BoxedLinkDriver for ZephyrUdpDriver {
+impl<B: AsMut<[u8]> + 'static> BoxedLinkDriver for UdpDriver<B> {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         // UDP is unreliable; the session's reliable channel recovers a drop.
         // A send with no peer yet, or one the stack refuses, is REPORTED
@@ -559,7 +598,7 @@ impl BoxedLinkDriver for ZephyrUdpDriver {
     }
 }
 
-impl SessionDatagramLink for ZephyrUdpDriver {
+impl<B: AsMut<[u8]> + 'static> SessionDatagramLink for UdpDriver<B> {
     fn service(&self) {
         // Zephyr's net stack runs its own threads: all this thread owes it is the CPU. It gives
         // it by waiting for the socket, so a datagram is taken the moment it is queued, and a
@@ -582,18 +621,20 @@ impl SessionDatagramLink for ZephyrUdpDriver {
             self.socket.wait_readable(SERVICE_WAIT_MS);
             return;
         };
-        match self.socket.recv_waiting(&mut buf) {
+        match self.socket.recv_waiting(buf.as_mut()) {
             Ok(held) => self.stash.set(held),
             Err(e) => self.rx_error.set(Some(e)),
         }
     }
 
+    #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
         let mut buf = self.rx_buf.borrow_mut();
-        match self.next_datagram(&mut buf) {
+        let bytes: &mut [u8] = buf.as_mut();
+        match self.next_datagram(bytes) {
             Ok(Some((len, addr, port))) => {
                 self.set_peer((addr, port));
-                Some(RxFrame::new(buf[..len].to_vec()))
+                Some(RxFrame::new(bytes[..len].to_vec()))
             }
             Ok(None) => None,
             Err(e) => {
@@ -609,10 +650,11 @@ impl SessionDatagramLink for ZephyrUdpDriver {
     // it, and a receive from inside `f` would be refused by the `RefCell`.
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         let mut buf = self.rx_buf.borrow_mut();
-        match self.next_datagram(&mut buf) {
+        let bytes: &mut [u8] = buf.as_mut();
+        match self.next_datagram(bytes) {
             Ok(Some((len, addr, port))) => {
                 self.set_peer((addr, port));
-                f(&buf[..len]);
+                f(&bytes[..len]);
                 true
             }
             Ok(None) => false,
@@ -621,6 +663,56 @@ impl SessionDatagramLink for ZephyrUdpDriver {
                 false
             }
         }
+    }
+}
+
+/// Zephyr's sockets as a stack of the slot profile's session host: the driver in the session's
+/// slot is a [`FixedUdpDriver`], and the drive loop pumps it through the driver itself
+/// ([`DriverPump`]), because the kernel's threads run the net stack and there is no input path
+/// of its own for the loop to advance. `RX` is the receive buffer of each session's driver, the
+/// batch the session advertises.
+///
+/// Nothing is kept for a listener (`Lane` is `()`): the client node dials, and a node that
+/// accepts on Zephyr's sockets would bring a lane of its own. The sockets are the kernel's file
+/// descriptors, counted by `CONFIG_ZVFS_OPEN_MAX`, so no pool of them is declared here; a
+/// descriptor the kernel cannot give is the dial's [`LinkOpenError::Exhausted`], and the
+/// session host's tables bound how many are open at once.
+#[cfg(feature = "session-slot")]
+pub struct ZephyrStack<const RX: usize> {
+    local: [u8; 4],
+}
+
+#[cfg(feature = "session-slot")]
+impl<const RX: usize> ZephyrStack<RX> {
+    /// The stack of a node whose own address is `local`, as its interface holds it.
+    pub const fn new(local: [u8; 4]) -> Self {
+        Self { local }
+    }
+
+    /// The link of a dial to `peer`: a socket on a port the stack picks, with replies and first
+    /// sends going to `peer`. What the session host's `dial` is given to open its socket.
+    pub fn bind_initiator(&self, peer: UdpPeer) -> Result<FixedUdpDriver<RX>, LinkOpenError> {
+        let socket = ZephyrUdpSocket::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
+        Ok(UdpDriver::initiator_in(
+            socket,
+            (peer.addr, peer.port),
+            [0u8; RX],
+        ))
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<const RX: usize> SlotStack for ZephyrStack<RX> {
+    type Driver = FixedUdpDriver<RX>;
+    type Pump = DriverPump<FixedUdpDriver<RX>>;
+    type Lane = ();
+
+    fn pump(
+        &self,
+        driver: wz_session_core::session_slot::SlotDriver<FixedUdpDriver<RX>>,
+        _lane: Option<()>,
+    ) -> Self::Pump {
+        DriverPump(driver)
     }
 }
 

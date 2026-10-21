@@ -64,7 +64,6 @@ pub mod core_clock;
 pub mod glue;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub mod links;
-#[cfg(feature = "alloc")]
 pub mod net;
 pub mod stack;
 

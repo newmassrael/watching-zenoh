@@ -868,6 +868,7 @@ dependencies = [
 name = "wz-runtime-zephyr"
 version = "0.1.0"
 dependencies = [
+ "heapless",
  "wz-runtime-coop",
  "wz-session-core",
  "zephyr-sys",
