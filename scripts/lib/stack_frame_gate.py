@@ -107,6 +107,16 @@ IMAGES = (
         unit=1,
         entry="fixed_node::run",
     ),
+    # The Zephyr CLIENT on the fixed-memory profile: the same rule, over the overlay of its own.
+    # Its `run` is inlined into the board's `wz_app_main`, which is the thread's entry symbol.
+    Image(
+        key="zephyr-client-fixed",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_client_fixed.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="wz_app_main",
+    ),
 )
 
 _HEAD = re.compile(r"^([0-9a-f]{8}) <(.*)>:$")
