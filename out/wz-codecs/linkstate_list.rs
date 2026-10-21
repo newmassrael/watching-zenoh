@@ -53,6 +53,22 @@ impl<'a> LinkstateList<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -66,18 +82,16 @@ impl<'a> LinkstateList<'a> {
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let num_link_states = cursor.read_vle_u64()?;
-        let link_states = {
-            let mut _vec: HeaplessVec<Linkstate<'a>, 64> = HeaplessVec::new();
+        {
+            let _vec = &mut _out.link_states;
+            _vec.clear();
             for _ in 0..num_link_states {
                 _vec.push(Linkstate::decode(cursor)?)
                     .map_err(|_| CodecError::TooManyElements)?;
             }
-            _vec
-        };
-        Ok(Self {
-            num_link_states,
-            link_states,
-        })
+        }
+        _out.num_link_states = num_link_states;
+        Ok(())
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -209,10 +223,25 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateListOwned<S> {
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
     pub fn try_as_borrowed(&self) -> Result<LinkstateList<'_>, CodecError> {
-        Ok(LinkstateList {
-            num_link_states: self.num_link_states,
-            link_states: ::sce_forge_runtime::codec::try_project_bounded(&self.link_states, |_e| _e.try_as_borrowed())?,
-        })
+        let mut _out = LinkstateList::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut LinkstateList<'o>) -> Result<(), CodecError> {
+        _out.num_link_states = self.num_link_states;
+        ::sce_forge_runtime::codec::try_project_bounded_into(&mut _out.link_states, &self.link_states, |_e| _e.try_as_borrowed())?;
+        Ok(())
     }
 
     /// Move this value to a different storage profile — growable to inline

@@ -76,6 +76,22 @@ impl<'a> ExtEntry<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
         // Decode fixed prefix (RFC §synth-5-B variant primitive: fields
         // sit before the variant suffix on the wire).
         let raw = cursor.peek_slice(1)?;
@@ -85,19 +101,40 @@ impl<'a> ExtEntry<'a> {
         // from the cursor. The default arm (when declared) carries the
         // runtime tag value so encode can round-trip it back onto the
         // wire.
-        let body = match (header >> 5) & 0x03 {
-            0u8 => ExtEntryVariant::CodecZenohExtUnit(ExtUnit::decode(cursor)?),
-            1u8 => ExtEntryVariant::CodecZenohExtZint(ExtZint::decode(cursor)?),
-            2u8 => ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf::decode(cursor)?),
-            other => ExtEntryVariant::Default {
-                tag: other,
-                body: ExtUnit::decode(cursor)?,
-            },
-        };
-        Ok(Self {
-            header,
-            body,
-        })
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match (header >> 5) & 0x03 {
+            0u8 => {
+                _out.body = ExtEntryVariant::CodecZenohExtUnit(ExtUnit::default());
+                if let ExtEntryVariant::CodecZenohExtUnit(_b) = &mut _out.body {
+                    ExtUnit::decode_into(cursor, _b)?;
+                }
+            }
+            1u8 => {
+                _out.body = ExtEntryVariant::CodecZenohExtZint(ExtZint::default());
+                if let ExtEntryVariant::CodecZenohExtZint(_b) = &mut _out.body {
+                    ExtZint::decode_into(cursor, _b)?;
+                }
+            }
+            2u8 => {
+                _out.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf::default());
+                if let ExtEntryVariant::CodecZenohExtZbuf(_b) = &mut _out.body {
+                    ExtZbuf::decode_into(cursor, _b)?;
+                }
+            }
+            other => {
+                _out.body = ExtEntryVariant::Default {
+                    tag: other,
+                    body: ExtUnit::default(),
+                };
+                if let ExtEntryVariant::Default { body: _b, .. } = &mut _out.body {
+                    ExtUnit::decode_into(cursor, _b)?;
+                }
+            }
+        }
+        _out.header = header;
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -316,12 +353,48 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwnedVariant<S> {
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
     pub fn as_borrowed(&self) -> ExtEntryVariant<'_> {
+        let mut _out = ExtEntryVariant::default();
+        self.as_borrowed_into(&mut _out);
+        _out
+    }
+
+    /// [`Self::as_borrowed`] into a destination the caller
+    /// owns: the active arm is installed in `_out` holding its body's default
+    /// and that body is projected where it sits, so the arm body is never
+    /// returned up through the variant wrapper.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through. A caller on a path where that shows projects into a
+    /// destination it owns. On `Err`, `_out` holds what was projected so far.
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut ExtEntryVariant<'o>) {
         match self {
-            ExtEntryOwnedVariant::CodecZenohExtUnit(_b) => ExtEntryVariant::CodecZenohExtUnit(_b.clone()),
-            ExtEntryOwnedVariant::CodecZenohExtZint(_b) => ExtEntryVariant::CodecZenohExtZint(_b.clone()),
-            ExtEntryOwnedVariant::CodecZenohExtZbuf(_b) => ExtEntryVariant::CodecZenohExtZbuf(_b.as_borrowed()),
-            ExtEntryOwnedVariant::Default { tag, body } => ExtEntryVariant::Default { tag: *tag, body: body.clone() },
+            ExtEntryOwnedVariant::CodecZenohExtUnit(_b) => {
+                *_out = ExtEntryVariant::CodecZenohExtUnit(Default::default());
+                if let ExtEntryVariant::CodecZenohExtUnit(_o) = _out {
+                    *_o = _b.clone();
+                }
+            }
+            ExtEntryOwnedVariant::CodecZenohExtZint(_b) => {
+                *_out = ExtEntryVariant::CodecZenohExtZint(Default::default());
+                if let ExtEntryVariant::CodecZenohExtZint(_o) = _out {
+                    *_o = _b.clone();
+                }
+            }
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(_b) => {
+                *_out = ExtEntryVariant::CodecZenohExtZbuf(Default::default());
+                if let ExtEntryVariant::CodecZenohExtZbuf(_o) = _out {
+                    _b.as_borrowed_into(_o);
+                }
+            }
+            ExtEntryOwnedVariant::Default { tag, body } => {
+                *_out = ExtEntryVariant::Default { tag: *tag, body: Default::default() };
+                if let ExtEntryVariant::Default { body: _o, .. } = _out {
+                    *_o = body.clone();
+                }
+            }
         }
+        
     }
 }
 
@@ -360,10 +433,25 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ExtEntryOwned<S> {
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
     pub fn as_borrowed(&self) -> ExtEntry<'_> {
-        ExtEntry {
-            header: self.header,
-            body: self.body.as_borrowed(),
-        }
+        let mut _out = ExtEntry::default();
+        self.as_borrowed_into(&mut _out);
+        _out
+    }
+
+    /// [`Self::as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut ExtEntry<'o>) {
+        _out.header = self.header;
+        self.body.as_borrowed_into(&mut _out.body);
+        
     }
 
     /// Move this value to a different storage profile — growable to inline

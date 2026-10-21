@@ -83,6 +83,15 @@ impl<'a> StreamEnvelope<'a> {
         Ok(value)
     }
 
+    /// [`Self::decode`] into a destination the caller owns, so a codec that
+    /// embeds or dispatches to this one decodes it where it will live (see
+    /// `decode_into` on a codec that holds a bounded list). This body has no
+    /// list of its own to build in place, so it decodes and stores.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+        *_out = Self::decode(cursor)?;
+        Ok(())
+    }
+
     /// Worst-case encoded byte count for this codec — the upper bound
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
@@ -199,10 +208,25 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> StreamEnvelopeOwned<S> {
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
     pub fn as_borrowed(&self) -> StreamEnvelope<'_> {
-        StreamEnvelope {
-            payload_len: self.payload_len,
-            payload: ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload),
-        }
+        let mut _out = StreamEnvelope::default();
+        self.as_borrowed_into(&mut _out);
+        _out
+    }
+
+    /// [`Self::as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut StreamEnvelope<'o>) {
+        _out.payload_len = self.payload_len;
+        _out.payload = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload);
+        
     }
 
     /// Move this value to a different storage profile — growable to inline

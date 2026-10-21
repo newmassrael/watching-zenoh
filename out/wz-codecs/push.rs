@@ -102,6 +102,22 @@ impl<'a> Push<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
         // RFC §synth-5-B peek-byte / streaming-prefix:
         // streaming prefix decode (variable-length fields supported via
         // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
@@ -115,9 +131,9 @@ impl<'a> Push<'a> {
             cursor.advance(1)?;
             _v
         };
-        let keyexpr = Wireexpr::decode(cursor, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
-        let extensions = if (header & 0x80u8) != 0 {
-            let mut _vec: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
+        Wireexpr::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
+        if (header & 0x80u8) != 0 {
+            let _vec = _out.extensions.insert(HeaplessVec::<ExtEntry<'a>, 8>::new());
             let mut _more = false;
             for _ in 0..8u32 {
                 if cursor.remaining() == 0 { break; }
@@ -135,29 +151,42 @@ impl<'a> Push<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            Some(_vec)
         } else {
-            None
-        };
+            _out.extensions = None;
+        }
         let _peek = cursor.peek_slice(1)?[0];
         // Dispatch on the tag field; each arm decodes its body codec
         // from the cursor. The default arm (when declared) carries the
         // runtime tag value so encode can round-trip it back onto the
         // wire.
-        let body = match _peek & 0x1F {
-            1u8 => PushVariant::CodecZenohMsgPut(MsgPut::decode(cursor)?),
-            2u8 => PushVariant::CodecZenohMsgDel(MsgDel::decode(cursor)?),
-            other => PushVariant::Default {
-                tag: other,
-                body: MsgPut::decode(cursor)?,
-            },
-        };
-        Ok(Self {
-            header,
-            keyexpr,
-            extensions,
-            body,
-        })
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match _peek & 0x1F {
+            1u8 => {
+                _out.body = PushVariant::CodecZenohMsgPut(MsgPut::default());
+                if let PushVariant::CodecZenohMsgPut(_b) = &mut _out.body {
+                    MsgPut::decode_into(cursor, _b)?;
+                }
+            }
+            2u8 => {
+                _out.body = PushVariant::CodecZenohMsgDel(MsgDel::default());
+                if let PushVariant::CodecZenohMsgDel(_b) = &mut _out.body {
+                    MsgDel::decode_into(cursor, _b)?;
+                }
+            }
+            other => {
+                _out.body = PushVariant::Default {
+                    tag: other,
+                    body: MsgPut::default(),
+                };
+                if let PushVariant::Default { body: _b, .. } = &mut _out.body {
+                    MsgPut::decode_into(cursor, _b)?;
+                }
+            }
+        }
+        _out.header = header;
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -394,11 +423,42 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> PushOwnedVariant<S> {
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
     pub fn try_as_borrowed(&self) -> Result<PushVariant<'_>, CodecError> {
-        Ok(match self {
-            PushOwnedVariant::CodecZenohMsgPut(_b) => PushVariant::CodecZenohMsgPut(_b.try_as_borrowed()?),
-            PushOwnedVariant::CodecZenohMsgDel(_b) => PushVariant::CodecZenohMsgDel(_b.try_as_borrowed()?),
-            PushOwnedVariant::Default { tag, body } => PushVariant::Default { tag: *tag, body: body.try_as_borrowed()? },
-        })
+        let mut _out = PushVariant::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller
+    /// owns: the active arm is installed in `_out` holding its body's default
+    /// and that body is projected where it sits, so the arm body is never
+    /// returned up through the variant wrapper.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through. A caller on a path where that shows projects into a
+    /// destination it owns. On `Err`, `_out` holds what was projected so far.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut PushVariant<'o>) -> Result<(), CodecError> {
+        match self {
+            PushOwnedVariant::CodecZenohMsgPut(_b) => {
+                *_out = PushVariant::CodecZenohMsgPut(Default::default());
+                if let PushVariant::CodecZenohMsgPut(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            PushOwnedVariant::CodecZenohMsgDel(_b) => {
+                *_out = PushVariant::CodecZenohMsgDel(Default::default());
+                if let PushVariant::CodecZenohMsgDel(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            PushOwnedVariant::Default { tag, body } => {
+                *_out = PushVariant::Default { tag: *tag, body: Default::default() };
+                if let PushVariant::Default { body: _o, .. } = _out {
+                    body.try_as_borrowed_into(_o)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -443,12 +503,30 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> PushOwned<S> {
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
     pub fn try_as_borrowed(&self) -> Result<Push<'_>, CodecError> {
-        Ok(Push {
-            header: self.header,
-            keyexpr: self.keyexpr.as_borrowed(),
-            extensions: self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
-            body: self.body.try_as_borrowed()?,
-        })
+        let mut _out = Push::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Push<'o>) -> Result<(), CodecError> {
+        _out.header = self.header;
+        self.keyexpr.as_borrowed_into(&mut _out.keyexpr);
+        match &self.extensions {
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            None => _out.extensions = None,
+        }
+        self.body.try_as_borrowed_into(&mut _out.body)?;
+        Ok(())
     }
 
     /// Move this value to a different storage profile — growable to inline

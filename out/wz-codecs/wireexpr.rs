@@ -69,6 +69,22 @@ impl<'a> Wireexpr<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>, n: u8, tag: u8) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out, n, tag)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, n: u8, tag: u8) -> Result<(), CodecError> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -82,16 +98,27 @@ impl<'a> Wireexpr<'a> {
         // from the cursor. The default arm (when declared) carries the
         // runtime tag value so encode can round-trip it back onto the
         // wire.
-        let body = match tag {
-            0u8 => WireexprVariant::WireexprNonlocal(WireexprNonlocal::decode(cursor, n)?),
-            1u8 => WireexprVariant::WireexprLocal(WireexprLocal::decode(cursor, n)?),
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match tag {
+            0u8 => {
+                _out.body = WireexprVariant::WireexprNonlocal(WireexprNonlocal::default());
+                if let WireexprVariant::WireexprNonlocal(_b) = &mut _out.body {
+                    WireexprNonlocal::decode_into(cursor, _b, n)?;
+                }
+            }
+            1u8 => {
+                _out.body = WireexprVariant::WireexprLocal(WireexprLocal::default());
+                if let WireexprVariant::WireexprLocal(_b) = &mut _out.body {
+                    WireexprLocal::decode_into(cursor, _b, n)?;
+                }
+            }
             // Build-time `codec/variant-arm-unreachable` proves the
             // arm set covers the tag domain without a default.
             _ => unreachable!("variant exhaustiveness gated by codec/variant-arm-unreachable at parse time"),
-        };
-        Ok(Self {
-            body,
-        })
+        }
+        Ok(())
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -228,10 +255,36 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprOwnedVariant<S> {
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
     pub fn as_borrowed(&self) -> WireexprVariant<'_> {
+        let mut _out = WireexprVariant::default();
+        self.as_borrowed_into(&mut _out);
+        _out
+    }
+
+    /// [`Self::as_borrowed`] into a destination the caller
+    /// owns: the active arm is installed in `_out` holding its body's default
+    /// and that body is projected where it sits, so the arm body is never
+    /// returned up through the variant wrapper.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through. A caller on a path where that shows projects into a
+    /// destination it owns. On `Err`, `_out` holds what was projected so far.
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut WireexprVariant<'o>) {
         match self {
-            WireexprOwnedVariant::WireexprNonlocal(_b) => WireexprVariant::WireexprNonlocal(_b.as_borrowed()),
-            WireexprOwnedVariant::WireexprLocal(_b) => WireexprVariant::WireexprLocal(_b.as_borrowed()),
+            WireexprOwnedVariant::WireexprNonlocal(_b) => {
+                *_out = WireexprVariant::WireexprNonlocal(Default::default());
+                if let WireexprVariant::WireexprNonlocal(_o) = _out {
+                    _b.as_borrowed_into(_o);
+                }
+            }
+            WireexprOwnedVariant::WireexprLocal(_b) => {
+                *_out = WireexprVariant::WireexprLocal(Default::default());
+                if let WireexprVariant::WireexprLocal(_o) = _out {
+                    _b.as_borrowed_into(_o);
+                }
+            }
         }
+        
     }
 }
 
@@ -269,9 +322,24 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprOwned<S> {
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
     pub fn as_borrowed(&self) -> Wireexpr<'_> {
-        Wireexpr {
-            body: self.body.as_borrowed(),
-        }
+        let mut _out = Wireexpr::default();
+        self.as_borrowed_into(&mut _out);
+        _out
+    }
+
+    /// [`Self::as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut Wireexpr<'o>) {
+        self.body.as_borrowed_into(&mut _out.body);
+        
     }
 
     /// Move this value to a different storage profile — growable to inline

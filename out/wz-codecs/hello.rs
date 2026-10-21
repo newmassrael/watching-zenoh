@@ -56,6 +56,22 @@ impl<'a> Hello<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>, l: u8) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out, l)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, l: u8) -> Result<(), CodecError> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -98,24 +114,21 @@ impl<'a> Hello<'a> {
         } else {
             None
         };
-        let locators = if (l & 0x01u8) != 0 {
+        if (l & 0x01u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            let mut _vec: HeaplessVec<Locator<'a>, 64> = HeaplessVec::new();
+            let _vec = _out.locators.insert(HeaplessVec::<Locator<'a>, 64>::new());
             for _ in 0.._n {
                 _vec.push(Locator::decode(cursor)?)
                     .map_err(|_| CodecError::TooManyElements)?;
             }
-            Some(_vec)
         } else {
-            None
-        };
-        Ok(Self {
-            version,
-            cbyte,
-            zid,
-            num_locators,
-            locators,
-        })
+            _out.locators = None;
+        }
+        _out.version = version;
+        _out.cbyte = cbyte;
+        _out.zid = zid;
+        _out.num_locators = num_locators;
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -302,13 +315,31 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> HelloOwned<S> {
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
     pub fn try_as_borrowed(&self) -> Result<Hello<'_>, CodecError> {
-        Ok(Hello {
-            version: self.version,
-            cbyte: self.cbyte,
-            zid: ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid),
-            num_locators: self.num_locators,
-            locators: self.locators.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
-        })
+        let mut _out = Hello::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Hello<'o>) -> Result<(), CodecError> {
+        _out.version = self.version;
+        _out.cbyte = self.cbyte;
+        _out.zid = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.zid);
+        _out.num_locators = self.num_locators;
+        match &self.locators {
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.locators.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            None => _out.locators = None,
+        }
+        Ok(())
     }
 
     /// Move this value to a different storage profile — growable to inline

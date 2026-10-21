@@ -64,6 +64,22 @@ impl<'a> Linkstate<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -113,50 +129,44 @@ impl<'a> Linkstate<'a> {
         } else {
             None
         };
-        let locators = if (options & 0x04u8) != 0 {
+        if (options & 0x04u8) != 0 {
             let _n = num_locators.expect("co-gating: count present-if matches repeat");
-            let mut _vec: HeaplessVec<Locator<'a>, 64> = HeaplessVec::new();
+            let _vec = _out.locators.insert(HeaplessVec::<Locator<'a>, 64>::new());
             for _ in 0.._n {
                 _vec.push(Locator::decode(cursor)?)
                     .map_err(|_| CodecError::TooManyElements)?;
             }
-            Some(_vec)
         } else {
-            None
-        };
+            _out.locators = None;
+        }
         let links_len = cursor.read_vle_u64()?;
-        let links = {
-            let mut _vec: HeaplessVec<LinkstateLink, 64> = HeaplessVec::new();
+        {
+            let _vec = &mut _out.links;
+            _vec.clear();
             for _ in 0..links_len {
                 _vec.push(LinkstateLink::decode(cursor)?)
                     .map_err(|_| CodecError::TooManyElements)?;
             }
-            _vec
-        };
-        let weights = if (options & 0x08u8) != 0 {
+        }
+        if (options & 0x08u8) != 0 {
             let _n = links_len;
-            let mut _vec: HeaplessVec<LinkstateWeight, 64> = HeaplessVec::new();
+            let _vec = _out.weights.insert(HeaplessVec::<LinkstateWeight, 64>::new());
             for _ in 0.._n {
                 _vec.push(LinkstateWeight::decode(cursor)?)
                     .map_err(|_| CodecError::TooManyElements)?;
             }
-            Some(_vec)
         } else {
-            None
-        };
-        Ok(Self {
-            options,
-            psid,
-            sn,
-            zid_len,
-            zid,
-            whatami,
-            num_locators,
-            locators,
-            links_len,
-            links,
-            weights,
-        })
+            _out.weights = None;
+        }
+        _out.options = options;
+        _out.psid = psid;
+        _out.sn = sn;
+        _out.zid_len = zid_len;
+        _out.zid = zid;
+        _out.whatami = whatami;
+        _out.num_locators = num_locators;
+        _out.links_len = links_len;
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -426,19 +436,40 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateOwned<S> {
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
     pub fn try_as_borrowed(&self) -> Result<Linkstate<'_>, CodecError> {
-        Ok(Linkstate {
-            options: self.options,
-            psid: self.psid,
-            sn: self.sn,
-            zid_len: self.zid_len,
-            zid: self.zid.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice),
-            whatami: self.whatami,
-            num_locators: self.num_locators,
-            locators: self.locators.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
-            links_len: self.links_len,
-            links: ::sce_forge_runtime::codec::try_project_bounded(&self.links, |_e| Ok(_e.clone()))?,
-            weights: self.weights.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.clone()))).transpose()?,
-        })
+        let mut _out = Linkstate::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Linkstate<'o>) -> Result<(), CodecError> {
+        _out.options = self.options;
+        _out.psid = self.psid;
+        _out.sn = self.sn;
+        _out.zid_len = self.zid_len;
+        _out.zid = self.zid.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice);
+        _out.whatami = self.whatami;
+        _out.num_locators = self.num_locators;
+        match &self.locators {
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.locators.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            None => _out.locators = None,
+        }
+        _out.links_len = self.links_len;
+        ::sce_forge_runtime::codec::try_project_bounded_into(&mut _out.links, &self.links, |_e| Ok(_e.clone()))?;
+        match &self.weights {
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.weights.insert(Default::default()), _l, |_e| Ok(_e.clone()))?,
+            None => _out.weights = None,
+        }
+        Ok(())
     }
 
     /// Move this value to a different storage profile — growable to inline

@@ -46,6 +46,22 @@ impl<'a> Encoding<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -75,11 +91,10 @@ impl<'a> Encoding<'a> {
         } else {
             None
         };
-        Ok(Self {
-            packed_id,
-            schema_len,
-            schema,
-        })
+        _out.packed_id = packed_id;
+        _out.schema_len = schema_len;
+        _out.schema = schema;
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -242,11 +257,26 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingOwned<S> {
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
     pub fn as_borrowed(&self) -> Encoding<'_> {
-        Encoding {
-            packed_id: self.packed_id,
-            schema_len: self.schema_len,
-            schema: self.schema.as_ref().map(::sce_forge_runtime::codec::SceStr::as_str),
-        }
+        let mut _out = Encoding::default();
+        self.as_borrowed_into(&mut _out);
+        _out
+    }
+
+    /// [`Self::as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut Encoding<'o>) {
+        _out.packed_id = self.packed_id;
+        _out.schema_len = self.schema_len;
+        _out.schema = self.schema.as_ref().map(::sce_forge_runtime::codec::SceStr::as_str);
+        
     }
 
     /// Move this value to a different storage profile — growable to inline

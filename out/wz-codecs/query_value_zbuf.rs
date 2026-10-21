@@ -57,6 +57,22 @@ impl<'a> QueryValueZbuf<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>, after_shm: u8) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out, after_shm)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, after_shm: u8) -> Result<(), CodecError> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -84,35 +100,31 @@ impl<'a> QueryValueZbuf<'a> {
         } else {
             None
         };
-        let encoding = if (after_shm & 0x01u8) != 0 {
-            Some(Encoding::decode(cursor)?)
+        if (after_shm & 0x01u8) != 0 {
+            Encoding::decode_into(cursor, _out.encoding.insert(Encoding::default()))?;
         } else {
-            None
-        };
+            _out.encoding = None;
+        }
         let slice_count = if (after_shm & 0x01u8) != 0 {
             let _v = cursor.read_vle_u32()?;
             Some(_v)
         } else {
             None
         };
-        let slices = if (after_shm & 0x01u8) != 0 {
+        if (after_shm & 0x01u8) != 0 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
-            let mut _vec: HeaplessVec<ZbufSlice<'a>, 4> = HeaplessVec::new();
+            let _vec = _out.slices.insert(HeaplessVec::<ZbufSlice<'a>, 4>::new());
             for _ in 0.._n {
                 _vec.push(ZbufSlice::decode(cursor)?)
                     .map_err(|_| CodecError::TooManyElements)?;
             }
-            Some(_vec)
         } else {
-            None
-        };
-        Ok(Self {
-            value_len,
-            value,
-            encoding,
-            slice_count,
-            slices,
-        })
+            _out.slices = None;
+        }
+        _out.value_len = value_len;
+        _out.value = value;
+        _out.slice_count = slice_count;
+        Ok(())
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -265,13 +277,34 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryValueZbufOwned<S> {
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
     pub fn try_as_borrowed(&self) -> Result<QueryValueZbuf<'_>, CodecError> {
-        Ok(QueryValueZbuf {
-            value_len: self.value_len,
-            value: self.value.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice),
-            encoding: self.encoding.as_ref().map(|_v| _v.as_borrowed()),
-            slice_count: self.slice_count,
-            slices: self.slices.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
-        })
+        let mut _out = QueryValueZbuf::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut QueryValueZbuf<'o>) -> Result<(), CodecError> {
+        _out.value_len = self.value_len;
+        _out.value = self.value.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice);
+        match &self.encoding {
+            Some(_v) => _v.as_borrowed_into(_out.encoding.insert(Default::default())),
+            None => _out.encoding = None,
+        }
+        _out.slice_count = self.slice_count;
+        match &self.slices {
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.slices.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            None => _out.slices = None,
+        }
+        Ok(())
     }
 
     /// Move this value to a different storage profile — growable to inline

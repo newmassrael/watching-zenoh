@@ -50,6 +50,22 @@ impl<'a> TempPayload<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
         // Streaming cursor decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -85,13 +101,12 @@ impl<'a> TempPayload<'a> {
             cursor.advance(_n)?;
             _v
         };
-        Ok(Self {
-            celsius_centi,
-            sensor_id_len,
-            sensor_id,
-            raw_len,
-            raw,
-        })
+        _out.celsius_centi = celsius_centi;
+        _out.sensor_id_len = sensor_id_len;
+        _out.sensor_id = sensor_id;
+        _out.raw_len = raw_len;
+        _out.raw = raw;
+        Ok(())
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -226,13 +241,28 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> TempPayloadOwned<S> {
     /// reaches it via `as_borrowed` then `encode` / `encode_to_vec`.
     /// Each field is projected by reference — a cheap re-borrow, not a copy.
     pub fn as_borrowed(&self) -> TempPayload<'_> {
-        TempPayload {
-            celsius_centi: self.celsius_centi,
-            sensor_id_len: self.sensor_id_len,
-            sensor_id: ::sce_forge_runtime::codec::SceStr::as_str(&self.sensor_id),
-            raw_len: self.raw_len,
-            raw: ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.raw),
-        }
+        let mut _out = TempPayload::default();
+        self.as_borrowed_into(&mut _out);
+        _out
+    }
+
+    /// [`Self::as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn as_borrowed_into<'o>(&'o self, _out: &mut TempPayload<'o>) {
+        _out.celsius_centi = self.celsius_centi;
+        _out.sensor_id_len = self.sensor_id_len;
+        _out.sensor_id = ::sce_forge_runtime::codec::SceStr::as_str(&self.sensor_id);
+        _out.raw_len = self.raw_len;
+        _out.raw = ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.raw);
+        
     }
 
     /// Move this value to a different storage profile — growable to inline

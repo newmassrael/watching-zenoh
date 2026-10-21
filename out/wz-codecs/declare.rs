@@ -115,6 +115,22 @@ impl<'a> Declare<'a> {
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    /// On `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
         // RFC §synth-5-B peek-byte / streaming-prefix:
         // streaming prefix decode (variable-length fields supported via
         // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
@@ -134,8 +150,8 @@ impl<'a> Declare<'a> {
         } else {
             None
         };
-        let extensions = if (header & 0x80u8) != 0 {
-            let mut _vec: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
+        if (header & 0x80u8) != 0 {
+            let _vec = _out.extensions.insert(HeaplessVec::<ExtEntry<'a>, 8>::new());
             let mut _more = false;
             for _ in 0..8u32 {
                 if cursor.remaining() == 0 { break; }
@@ -153,36 +169,85 @@ impl<'a> Declare<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            Some(_vec)
         } else {
-            None
-        };
+            _out.extensions = None;
+        }
         let _peek = cursor.peek_slice(1)?[0];
         // Dispatch on the tag field; each arm decodes its body codec
         // from the cursor. The default arm (when declared) carries the
         // runtime tag value so encode can round-trip it back onto the
         // wire.
-        let body = match _peek & 0x1F {
-            0u8 => DeclareVariant::CodecZenohDeclKexpr(DeclKexpr::decode(cursor)?),
-            1u8 => DeclareVariant::CodecZenohUndeclKexpr(UndeclKexpr::decode(cursor)?),
-            2u8 => DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber::decode(cursor)?),
-            3u8 => DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber::decode(cursor)?),
-            4u8 => DeclareVariant::CodecZenohDeclQueryable(DeclQueryable::decode(cursor)?),
-            5u8 => DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable::decode(cursor)?),
-            6u8 => DeclareVariant::CodecZenohDeclToken(DeclToken::decode(cursor)?),
-            7u8 => DeclareVariant::CodecZenohUndeclToken(UndeclToken::decode(cursor)?),
-            26u8 => DeclareVariant::CodecZenohDeclFinal(DeclFinal::decode(cursor)?),
-            other => DeclareVariant::Default {
-                tag: other,
-                body: DeclFinal::decode(cursor)?,
-            },
-        };
-        Ok(Self {
-            header,
-            interest_id,
-            extensions,
-            body,
-        })
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match _peek & 0x1F {
+            0u8 => {
+                _out.body = DeclareVariant::CodecZenohDeclKexpr(DeclKexpr::default());
+                if let DeclareVariant::CodecZenohDeclKexpr(_b) = &mut _out.body {
+                    DeclKexpr::decode_into(cursor, _b)?;
+                }
+            }
+            1u8 => {
+                _out.body = DeclareVariant::CodecZenohUndeclKexpr(UndeclKexpr::default());
+                if let DeclareVariant::CodecZenohUndeclKexpr(_b) = &mut _out.body {
+                    UndeclKexpr::decode_into(cursor, _b)?;
+                }
+            }
+            2u8 => {
+                _out.body = DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber::default());
+                if let DeclareVariant::CodecZenohDeclSubscriber(_b) = &mut _out.body {
+                    DeclSubscriber::decode_into(cursor, _b)?;
+                }
+            }
+            3u8 => {
+                _out.body = DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber::default());
+                if let DeclareVariant::CodecZenohUndeclSubscriber(_b) = &mut _out.body {
+                    UndeclSubscriber::decode_into(cursor, _b)?;
+                }
+            }
+            4u8 => {
+                _out.body = DeclareVariant::CodecZenohDeclQueryable(DeclQueryable::default());
+                if let DeclareVariant::CodecZenohDeclQueryable(_b) = &mut _out.body {
+                    DeclQueryable::decode_into(cursor, _b)?;
+                }
+            }
+            5u8 => {
+                _out.body = DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable::default());
+                if let DeclareVariant::CodecZenohUndeclQueryable(_b) = &mut _out.body {
+                    UndeclQueryable::decode_into(cursor, _b)?;
+                }
+            }
+            6u8 => {
+                _out.body = DeclareVariant::CodecZenohDeclToken(DeclToken::default());
+                if let DeclareVariant::CodecZenohDeclToken(_b) = &mut _out.body {
+                    DeclToken::decode_into(cursor, _b)?;
+                }
+            }
+            7u8 => {
+                _out.body = DeclareVariant::CodecZenohUndeclToken(UndeclToken::default());
+                if let DeclareVariant::CodecZenohUndeclToken(_b) = &mut _out.body {
+                    UndeclToken::decode_into(cursor, _b)?;
+                }
+            }
+            26u8 => {
+                _out.body = DeclareVariant::CodecZenohDeclFinal(DeclFinal::default());
+                if let DeclareVariant::CodecZenohDeclFinal(_b) = &mut _out.body {
+                    DeclFinal::decode_into(cursor, _b)?;
+                }
+            }
+            other => {
+                _out.body = DeclareVariant::Default {
+                    tag: other,
+                    body: DeclFinal::default(),
+                };
+                if let DeclareVariant::Default { body: _b, .. } = &mut _out.body {
+                    DeclFinal::decode_into(cursor, _b)?;
+                }
+            }
+        }
+        _out.header = header;
+        _out.interest_id = interest_id;
+        Ok(())
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -440,18 +505,84 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwnedVariant<S> {
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
     pub fn try_as_borrowed(&self) -> Result<DeclareVariant<'_>, CodecError> {
-        Ok(match self {
-            DeclareOwnedVariant::CodecZenohDeclKexpr(_b) => DeclareVariant::CodecZenohDeclKexpr(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohUndeclKexpr(_b) => DeclareVariant::CodecZenohUndeclKexpr(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohDeclSubscriber(_b) => DeclareVariant::CodecZenohDeclSubscriber(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b) => DeclareVariant::CodecZenohUndeclSubscriber(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohDeclQueryable(_b) => DeclareVariant::CodecZenohDeclQueryable(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => DeclareVariant::CodecZenohUndeclQueryable(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohDeclToken(_b) => DeclareVariant::CodecZenohDeclToken(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohUndeclToken(_b) => DeclareVariant::CodecZenohUndeclToken(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::CodecZenohDeclFinal(_b) => DeclareVariant::CodecZenohDeclFinal(_b.try_as_borrowed()?),
-            DeclareOwnedVariant::Default { tag, body } => DeclareVariant::Default { tag: *tag, body: body.try_as_borrowed()? },
-        })
+        let mut _out = DeclareVariant::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller
+    /// owns: the active arm is installed in `_out` holding its body's default
+    /// and that body is projected where it sits, so the arm body is never
+    /// returned up through the variant wrapper.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through. A caller on a path where that shows projects into a
+    /// destination it owns. On `Err`, `_out` holds what was projected so far.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut DeclareVariant<'o>) -> Result<(), CodecError> {
+        match self {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(_b) => {
+                *_out = DeclareVariant::CodecZenohDeclKexpr(Default::default());
+                if let DeclareVariant::CodecZenohDeclKexpr(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(_b) => {
+                *_out = DeclareVariant::CodecZenohUndeclKexpr(Default::default());
+                if let DeclareVariant::CodecZenohUndeclKexpr(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_b) => {
+                *_out = DeclareVariant::CodecZenohDeclSubscriber(Default::default());
+                if let DeclareVariant::CodecZenohDeclSubscriber(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b) => {
+                *_out = DeclareVariant::CodecZenohUndeclSubscriber(Default::default());
+                if let DeclareVariant::CodecZenohUndeclSubscriber(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_b) => {
+                *_out = DeclareVariant::CodecZenohDeclQueryable(Default::default());
+                if let DeclareVariant::CodecZenohDeclQueryable(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => {
+                *_out = DeclareVariant::CodecZenohUndeclQueryable(Default::default());
+                if let DeclareVariant::CodecZenohUndeclQueryable(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohDeclToken(_b) => {
+                *_out = DeclareVariant::CodecZenohDeclToken(Default::default());
+                if let DeclareVariant::CodecZenohDeclToken(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohUndeclToken(_b) => {
+                *_out = DeclareVariant::CodecZenohUndeclToken(Default::default());
+                if let DeclareVariant::CodecZenohUndeclToken(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::CodecZenohDeclFinal(_b) => {
+                *_out = DeclareVariant::CodecZenohDeclFinal(Default::default());
+                if let DeclareVariant::CodecZenohDeclFinal(_o) = _out {
+                    _b.try_as_borrowed_into(_o)?;
+                }
+            }
+            DeclareOwnedVariant::Default { tag, body } => {
+                *_out = DeclareVariant::Default { tag: *tag, body: Default::default() };
+                if let DeclareVariant::Default { body: _o, .. } = _out {
+                    body.try_as_borrowed_into(_o)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -496,12 +627,30 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwned<S> {
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
     pub fn try_as_borrowed(&self) -> Result<Declare<'_>, CodecError> {
-        Ok(Declare {
-            header: self.header,
-            interest_id: self.interest_id,
-            extensions: self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
-            body: self.body.try_as_borrowed()?,
-        })
+        let mut _out = Declare::default();
+        self.try_as_borrowed_into(&mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::try_as_borrowed`] into a destination the caller owns, each
+    /// bounded list and embedded body projected in the field where it sits.
+    ///
+    /// A bounded list moves by copying its whole declared capacity, so a
+    /// projection that returns one copies the declared maximum at every layer
+    /// it passes through (the optional wrapper, the borrowed struct, the
+    /// variant, the caller's binding), however few entries the list holds. A
+    /// caller on a path where that shows projects into a destination it owns,
+    /// then encodes from it. On `Err`, `_out` holds what was projected so far
+    /// and is not to be read.
+    pub fn try_as_borrowed_into<'o>(&'o self, _out: &mut Declare<'o>) -> Result<(), CodecError> {
+        _out.header = self.header;
+        _out.interest_id = self.interest_id;
+        match &self.extensions {
+            Some(_l) => ::sce_forge_runtime::codec::try_project_bounded_into(_out.extensions.insert(Default::default()), _l, |_e| Ok(_e.as_borrowed()))?,
+            None => _out.extensions = None,
+        }
+        self.body.try_as_borrowed_into(&mut _out.body)?;
+        Ok(())
     }
 
     /// Move this value to a different storage profile — growable to inline
