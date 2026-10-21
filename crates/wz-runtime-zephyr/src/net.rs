@@ -583,8 +583,13 @@ impl<const RX: usize> GroupTransport for ZephyrGroupTransport<RX> {
 
     fn service(&self) {
         // Zephyr's net stack runs its own threads: all this thread owes it is
-        // the CPU, as for the unicast link, and it gives it the same way.
-        self.socket.wait_readable(SERVICE_WAIT_MS);
+        // the CPU, as for the unicast link, and it gives it the same way. A transport that has
+        // left its group holds no socket to wait on and yields one tick instead.
+        match &self.socket {
+            Some(socket) => socket.wait_readable(SERVICE_WAIT_MS),
+            // SAFETY: the board's `k_msleep` seam; blocks this thread one tick.
+            None => unsafe { wz_yield_ms(1) },
+        }
     }
 
     /// The interface has a carrier while it holds an address: the board's
