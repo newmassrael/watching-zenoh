@@ -800,7 +800,7 @@ transport-shm = ["wz-session-core/transport-shm", "posix-shm-segment", "dep:talc
 # of exactly these segments — and must NOT turn on SHM transport negotiation
 # for its sessions, which is what `transport-shm` also means. It names `libc`
 # itself because the lock is `flock`. On Windows the segment is a named file mapping
-# (upstream's `shm/windows.rs`), which takes `windows-sys` instead of `memmap2` and
+# (the one upstream makes on Windows), which takes `windows-sys` instead of `memmap2` and
 # `libc`; each of the three is a dependency of one platform's table, and a feature
 # may name a dependency its target does not have.
 posix-shm-segment = ["dep:memmap2", "dep:libc", "dep:windows-sys"]
