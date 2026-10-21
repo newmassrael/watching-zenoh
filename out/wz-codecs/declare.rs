@@ -667,6 +667,84 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwned<S> {
 }
 
 #[allow(dead_code)]
+impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwned<S> {
+    /// Encode `self` into the caller-owned sink, straight from the owned
+    /// fields: the bytes `try_as_borrowed` followed by
+    /// [`Declare::encode`] writes, without the projection.
+    ///
+    /// The projection builds the whole borrowed record (every list and
+    /// embedded body in it, by value) only for `encode` to read it once. A
+    /// sender that holds an owned value encodes it from here. The same
+    /// refusals as the projection's: a list longer than the borrowed view
+    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// borrowed form could not carry is an error and never a frame its own
+    /// decoder would reject.
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
+        // RFC §synth-5-B peek-byte / streaming-prefix:
+        // streaming prefix encode (per-field present_if/tlv-chain/embed/
+        // repeat helpers). Peek-byte mode: the arm body's encode prepends
+        // its own header byte (which the decoder peeked); no separate
+        // tag byte is emitted here. Streaming-prefix mode (own-field
+        // variant): the carrier is part of the prefix fields and emits
+        // through the same per-field path.
+        w.write_u8(self.header)?;
+        if let Some(_v) = self.interest_id {
+        w.write_vle_u64(_v)?;
+        }
+        if let Some(_list) = &self.extensions {
+            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
+                _e.encode(w)?;
+            }
+        }
+        // Append the active arm's encoded bytes.
+        match &self.body {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohDeclQueryable(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohDeclToken(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohUndeclToken(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::CodecZenohDeclFinal(b) => {
+                b.encode(w)?;
+            }
+            DeclareOwnedVariant::Default { body, .. } => {
+                body.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
+    /// past the bound the borrowed view declares is refused, and so is a
+    /// presence the chain predicates disagree with.
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Declare::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
+    }
+}
+
+#[allow(dead_code)]
 impl<'a> DeclareVariant<'a> {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.

@@ -103,6 +103,11 @@ use crate::reassembly_slot::{
 };
 use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::Engine;
+
+/// The id every reassembly slot machine is built under (SCE ADR 0045: the host gives a machine
+/// its id, and the generated constructor refuses a text that is not an XML Nmtoken). A constant,
+/// so that refusal is never met.
+const REASSEMBLY_SLOT_SESSION_ID: &str = "wz-reassembly-slot";
 // R311mh — `sweep_reporting` (below) raises an IterationEvent on a timed-out
 // chain; the event surface is the `driver_loop` module's, which a storage profile
 // (heap or per-session slot) compiles, so the reporting wrapper is gated on that
@@ -534,7 +539,13 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
 
 impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
     fn new() -> Self {
-        let mut engine = Engine::new(ReassemblySlotPolicy::new(SlotBinding::default()));
+        let mut engine = Engine::new(
+            ReassemblySlotPolicy::new_with_session_id(
+                REASSEMBLY_SLOT_SESSION_ID,
+                SlotBinding::default(),
+            )
+            .expect("the reassembly slot session id is a constant Nmtoken"),
+        );
         // W3C SCXML 3.3: enter the initial `Empty` leaf.
         engine.initialize();
         Self {

@@ -356,6 +356,51 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprOwned<S> {
 }
 
 #[allow(dead_code)]
+impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprOwned<S> {
+    /// Encode `self` into the caller-owned sink, straight from the owned
+    /// fields: the bytes `as_borrowed` followed by
+    /// [`Wireexpr::encode`] writes, without the projection.
+    ///
+    /// The projection builds the whole borrowed record (every list and
+    /// embedded body in it, by value) only for `encode` to read it once. A
+    /// sender that holds an owned value encodes it from here. The same
+    /// refusals as the projection's: a list longer than the borrowed view
+    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// borrowed form could not carry is an error and never a frame its own
+    /// decoder would reject.
+    pub fn encode<K: SceSink>(&self, w: &mut K, n: u8) -> Result<(), CodecError> {
+        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
+        // declared `<sce:flag-input>`.
+        let _ = n;
+        // Encode fixed prefix (tag field is part of the prefix). The
+        // tag value is read from the struct field, NOT derived from
+        // the body discriminant — keeping author-set msg_id / body in
+        // sync is the caller's responsibility (v1 keeps the layout
+        // simple; future extensions may auto-sync via a typed setter).
+        // Append the active arm's encoded bytes.
+        match &self.body {
+            WireexprOwnedVariant::WireexprNonlocal(b) => {
+                b.encode(w, n)?;
+            }
+            WireexprOwnedVariant::WireexprLocal(b) => {
+                b.encode(w, n)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`].
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self, n: u8) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Wireexpr::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink, n)
+            .expect("VecSink is infallible");
+        _sce_v
+    }
+}
+
+#[allow(dead_code)]
 impl<'a> WireexprVariant<'a> {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.

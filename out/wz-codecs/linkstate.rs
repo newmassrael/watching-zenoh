@@ -486,6 +486,73 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateOwned<S> {
 }
 
 #[allow(dead_code)]
+impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateOwned<S> {
+    /// Encode `self` into the caller-owned sink, straight from the owned
+    /// fields: the bytes `try_as_borrowed` followed by
+    /// [`Linkstate::encode`] writes, without the projection.
+    ///
+    /// The projection builds the whole borrowed record (every list and
+    /// embedded body in it, by value) only for `encode` to read it once. A
+    /// sender that holds an owned value encodes it from here. The same
+    /// refusals as the projection's: a list longer than the borrowed view
+    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// borrowed form could not carry is an error and never a frame its own
+    /// decoder would reject.
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
+        // Streaming cursor encode (SSOT selection: `needs_streaming`).
+        // Mirrors the streaming decode: every field appends its own bytes
+        // in declaration order through the per-field encode blocks, so a
+        // gated field skips its append when absent, and a fixed field after
+        // a variable-length payload lands after the payload (the positional
+        // path appends variable fields last, placing it ahead on the wire).
+        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
+        // dedicated helpers; everything else uses `present_if_encode_block`
+        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
+        w.write_u8(self.options)?;
+        w.write_vle_u64(self.psid)?;
+        w.write_vle_u64(self.sn)?;
+        if let Some(_v) = self.zid_len {
+        w.write_vle_u64(_v)?;
+        }
+        if let Some(_v) = &self.zid {
+            w.write_bytes(::sce_forge_runtime::codec::SceByteBuf::as_slice(_v))?;
+        }
+        if let Some(_v) = self.whatami {
+            w.write_u8(_v)?;
+        }
+        if let Some(_v) = self.num_locators {
+        w.write_vle_u64(_v)?;
+        }
+        if let Some(_list) = &self.locators {
+            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 64>(_list)? {
+                _e.encode(w)?;
+            }
+        }
+        w.write_vle_u64(self.links_len)?;
+        for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 64>(&self.links)? {
+            _e.encode(w)?;
+        }
+        if let Some(_list) = &self.weights {
+            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 64>(_list)? {
+                _e.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
+    /// past the bound the borrowed view declares is refused, and so is a
+    /// presence the chain predicates disagree with.
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Linkstate::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
+    }
+}
+
+#[allow(dead_code)]
 impl<'a> Linkstate<'a> {
     /// Project this borrowed view into an owned [`LinkstateOwned`]
     /// whose byte and text containers are made by the profile's

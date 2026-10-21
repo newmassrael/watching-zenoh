@@ -29,10 +29,10 @@
 // warning on a real fixture and recording it in the same form. Removing an
 // allow is safe whenever its justifying pattern stops being emitted.
 
-// Source-faithful identifier names: W3C SCXML 6.4.1 lets users supply
-// arbitrary id strings (e.g. `<invoke id="invokedChild">`); preserving the
-// camelCase verbatim into Rust field names like `child_invokedChild`
-// keeps the generated code traceable back to the SCXML source.
+// Source-faithful identifier names: generated names embed names the document
+// wrote, which need not be snake case. An `<invoke id>` is the exception: its
+// identifier (`crate::model::invoke_identifier` in sce-build) is lowercase,
+// so `<invoke id="invokedChild">` gives `child_0zinvokedzuchild`.
 // Codegen always emits `use core::time::Duration` and the umbrella
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
@@ -195,36 +195,61 @@ pub struct SessionFsmUnicastPolicy<A: SessionFsmUnicastActions + 'static> {
     // The generated machine dispatches each native action through this field
     // (`self.actions.<op>(…)`) instead of a runtime script engine.
     actions: A,
+    // W3C SCXML 5.10: the session's id, bound when the machine is built and
+    // never empty (docs/adr/0045). SCE Protocol-Synthesis RFC §synth-5-J-2:
+    // under `--no-std` it is the text the host gave, held rather than copied,
+    // so it costs the policy a pointer and a length and no allocator.
+    pub session_id: &'static str,
 }
 
 impl<A: SessionFsmUnicastActions + 'static> SessionFsmUnicastPolicy<A> {
-fn construct(actions: A) -> Self {
+    fn build(session_id: &'static str, actions: A) -> Self {
         Self {
             actions,
+            session_id,
         }
     }
 
     /// docs/adr/0038: the compile-time refusal of a host that only simulates the
     /// duties this machine states. Evaluated where a machine is built with a
     /// host type, so a recorder or a test double does not reach production
-    /// by accident; build one on purpose with [`Self::new_simulated`].
+    /// by accident; build one on purpose with
+    /// [`Self::new_simulated_with_session_id`].
     const HOST_PERFORMS_DUTIES: () = assert!(
         A::REALIZATION.is_performing(),
         "this machine states a duty and its host declares REALIZATION = Simulates: \
-         build it with `new_simulated` to run it on a test double on purpose"
+         build it with a `_simulated` constructor to run it on a test double on purpose"
     );
 
-    /// Build the machine with a host that performs its duties. A host whose
-    /// `REALIZATION` is `Simulates` does not compile here.
-    pub fn new(actions: A) -> Self {
+
+    /// Build the machine under the session id its host gives: the host's own
+    /// name for the machine, say, or a fixed id a test holds a saved text to
+    /// (docs/adr/0045, "Questions the owner answered" 2). `_sessionid` is bound
+    /// here and kept until the session ends; a restore binds the saved id in
+    /// its place, since the session carries on. A host whose
+    /// `REALIZATION` is `Simulates` does not compile here.    ///
+    /// The one way this machine is built: a `no_std` target has no source of
+    /// randomness the runtime reads, and takes the id from its host as it
+    /// takes the time. The id is held, not copied.
+    ///
+    /// # Errors
+    ///
+    /// An id that is not an XML Nmtoken (the empty text, a space, a `#`) is
+    /// refused with the reason, and no machine is built.
+    pub fn new_with_session_id(session_id: &'static str, actions: A) -> Result<Self, ::sce_rust_runtime::helpers::session_id::SessionIdRefusal> {
         let () = Self::HOST_PERFORMS_DUTIES;
-        Self::construct(actions)
+        Ok(Self::build(::sce_rust_runtime::helpers::session_id::checked(session_id)?, actions))
     }
 
-    /// Build the machine with a host that only simulates its duties — a
-    /// recorder, a test double — as the caller's statement that it means to.
-    pub fn new_simulated(actions: A) -> Self {
-        Self::construct(actions)
+    /// [`new_with_session_id`](Self::new_with_session_id) with a host that only
+    /// simulates its duties — a recorder, a test double — as the caller's
+    /// statement that it means to.
+    ///
+    /// # Errors
+    ///
+    /// As [`new_with_session_id`](Self::new_with_session_id).
+    pub fn new_simulated_with_session_id(session_id: &'static str, actions: A) -> Result<Self, ::sce_rust_runtime::helpers::session_id::SessionIdRefusal> {
+        Ok(Self::build(::sce_rust_runtime::helpers::session_id::checked(session_id)?, actions))
     }
 
     /// W3C SCXML G.7: the host the `<sce:action>` operations are dispatched
@@ -1163,4 +1188,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         }
     }
 
+
+    // docs/adr/0045: this session's own id, the one its host gave.
+    fn own_session_id(&self) -> &str {
+        self.session_id
+    }
 }

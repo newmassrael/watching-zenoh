@@ -483,8 +483,16 @@ pub fn new_scouting_engine(
     let binding = ScoutActionsBinding {
         inner: actions.clone(),
     };
-    Engine::new(ScoutingPolicy::new(binding))
+    Engine::new(
+        ScoutingPolicy::new_with_session_id(SCOUTING_SESSION_ID, binding)
+            .expect("the scouting session id is a constant Nmtoken"),
+    )
 }
+
+/// The id the scouting machine is built under (SCE ADR 0045: the host gives a machine its id,
+/// and the generated constructor refuses a text that is not an XML Nmtoken). A constant, so that
+/// refusal is never met.
+const SCOUTING_SESSION_ID: &str = "wz-scouting";
 
 /// Outcome of one active-scouting cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]

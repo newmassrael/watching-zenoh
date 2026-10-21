@@ -342,7 +342,7 @@ impl<'a> Response<'a> {
 // types, which cannot be run backwards to recover the profile from a value.
 // Naming it once is also what lets each field's declared capacity infer,
 // so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::wireexpr::WireexprOwned;
+use super::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use super::ext_entry::ExtEntryOwned;
 use super::reply::ReplyOwned;
 use super::err::ErrOwned;
@@ -547,6 +547,68 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseOwned<S> {
     /// than truncated.
     pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<ResponseOwned<D>, CodecError> {
         self.try_as_borrowed()?.try_into_owned_in::<D>()
+    }
+}
+
+#[allow(dead_code)]
+impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseOwned<S> {
+    /// Encode `self` into the caller-owned sink, straight from the owned
+    /// fields: the bytes `try_as_borrowed` followed by
+    /// [`Response::encode`] writes, without the projection.
+    ///
+    /// The projection builds the whole borrowed record (every list and
+    /// embedded body in it, by value) only for `encode` to read it once. A
+    /// sender that holds an owned value encodes it from here. The same
+    /// refusals as the projection's: a list longer than the borrowed view
+    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// borrowed form could not carry is an error and never a frame its own
+    /// decoder would reject.
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
+        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
+        // parent-tag variant's active arm before the carrier byte is
+        // emitted. Each `_derived_<carrier>` local is OR'd into the
+        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
+        let _derived_header: u8 = match &self.keyexpr.body { WireexprOwnedVariant::WireexprNonlocal(_) => 0x00u8, WireexprOwnedVariant::WireexprLocal(_) => 0x40u8 };
+
+        // RFC §synth-5-B peek-byte / streaming-prefix:
+        // streaming prefix encode (per-field present_if/tlv-chain/embed/
+        // repeat helpers). Peek-byte mode: the arm body's encode prepends
+        // its own header byte (which the decoder peeked); no separate
+        // tag byte is emitted here. Streaming-prefix mode (own-field
+        // variant): the carrier is part of the prefix fields and emits
+        // through the same per-field path.
+        w.write_u8(self.header | _derived_header)?;
+        w.write_vle_u64(self.request_id)?;
+        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
+        if let Some(_list) = &self.extensions {
+            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
+                _e.encode(w)?;
+            }
+        }
+        // Append the active arm's encoded bytes.
+        match &self.body {
+            ResponseOwnedVariant::CodecZenohReply(b) => {
+                b.encode(w)?;
+            }
+            ResponseOwnedVariant::CodecZenohErr(b) => {
+                b.encode(w)?;
+            }
+            ResponseOwnedVariant::Default { body, .. } => {
+                body.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
+    /// past the bound the borrowed view declares is refused, and so is a
+    /// presence the chain predicates disagree with.
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Response::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
 

@@ -526,7 +526,12 @@ fn main() -> ! {
         use sce_rust_runtime::Engine;
         use thermostat::{ThermostatPolicy, ThermostatState};
 
-        let mut engine = Engine::new(ThermostatPolicy::new());
+        // SCE ADR 0045: a machine is built under the id its host gives; the id is held, not
+        // copied, so this costs the no-heap path nothing.
+        let policy = ThermostatPolicy::new_with_session_id("thermostat");
+        require("thermostat session id", policy.is_ok());
+        let Ok(policy) = policy else { loop {} };
+        let mut engine = Engine::new(policy);
         engine.initialize();
         require(
             "switchboard init",

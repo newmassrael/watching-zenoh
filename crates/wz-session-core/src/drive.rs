@@ -2712,15 +2712,22 @@ trait BuildSessionPolicy<A: SessionFsmUnicastActions + 'static> {
     fn build(self, actions: A) -> SessionFsmUnicastPolicy<A>;
 }
 
+/// The id the unicast session machine is built under (SCE ADR 0045: a machine takes the id its
+/// host gives, and the generated constructor refuses a text that is not an XML Nmtoken). One
+/// constant, so the refusal below can never be met.
+const UNICAST_SESSION_ID: &str = "wz-session-unicast";
+
 impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<true> {
     fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
-        SessionFsmUnicastPolicy::new(actions)
+        SessionFsmUnicastPolicy::new_with_session_id(UNICAST_SESSION_ID, actions)
+            .expect("the unicast session id is a constant Nmtoken")
     }
 }
 
 impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<false> {
     fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
-        SessionFsmUnicastPolicy::new_simulated(actions)
+        SessionFsmUnicastPolicy::new_simulated_with_session_id(UNICAST_SESSION_ID, actions)
+            .expect("the unicast session id is a constant Nmtoken")
     }
 }
 

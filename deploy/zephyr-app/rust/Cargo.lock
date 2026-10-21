@@ -519,6 +519,7 @@ dependencies = [
 name = "sce-rust-runtime"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "heapless",
  "log",
  "portable-atomic",

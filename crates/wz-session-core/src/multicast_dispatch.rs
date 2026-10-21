@@ -126,6 +126,12 @@ use crate::sn;
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::Engine;
+
+/// The ids the multicast machines are built under (SCE ADR 0045: the host gives a machine its
+/// id, and the generated constructor refuses a text that is not an XML Nmtoken). Constants, so
+/// that refusal is never met.
+const MULTICAST_PEER_SESSION_ID: &str = "wz-multicast-peer";
+const MULTICAST_SESSION_ID: &str = "wz-session-multicast";
 // §5.21 routing-namespace — the per-session egress prefix + the per-PEER stateful
 // ingress decorator live ON the dispatcher (the only always-`&mut` per-session
 // multicast handle, the multicast mirror of the unicast `SessionLinkActions`
@@ -604,7 +610,13 @@ struct PeerSlot {
 
 impl PeerSlot {
     fn new() -> Self {
-        let mut engine = Engine::new(MulticastPeerPolicy::new(PeerBinding::default()));
+        let mut engine = Engine::new(
+            MulticastPeerPolicy::new_with_session_id(
+                MULTICAST_PEER_SESSION_ID,
+                PeerBinding::default(),
+            )
+            .expect("the multicast peer session id is a constant Nmtoken"),
+        );
         // W3C SCXML 3.3: enter the initial `Free` leaf.
         engine.initialize();
         Self {
@@ -830,7 +842,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Build a Router with an Idle session and `MAX_PEERS` free slots over
     /// `config`.
     pub fn new(config: MulticastConfig) -> Self {
-        let mut session = Engine::new(SessionFsmMulticastPolicy::new(SessionBinding::default()));
+        let mut session = Engine::new(
+            SessionFsmMulticastPolicy::new_with_session_id(
+                MULTICAST_SESSION_ID,
+                SessionBinding::default(),
+            )
+            .expect("the multicast session id is a constant Nmtoken"),
+        );
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
         session.initialize();
         Self {
