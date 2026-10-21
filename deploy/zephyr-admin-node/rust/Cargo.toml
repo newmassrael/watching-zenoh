@@ -164,6 +164,26 @@ fixed-memory = [
     "wz-session-mcu/adminspace-fixed",
     "wz-session-core/session-slot",
 ]
+# The FIXED-MEMORY CLIENT: the client node (`CONFIG_WZ_NODE_CLIENT`) over Zephyr's sockets on the slot
+# profile (`fixed_client.rs`), the memory profile `CONFIG_WZ_FIXED_MEMORY` selects for it. The same
+# client as `client-node` with its sessions, tables and texts in statics the image declares: the
+# session host and the dialler every stack shares (`wz-session-mcu`'s `slot_host`, `slot_dial`,
+# `slot_client`) over `wz_runtime_zephyr::net::ZephyrStack`, a driver whose receive buffer is an
+# array in the session's slot. Built with the defaults off it has NO allocator: the image
+# declares none (`zephyr_image_no_heap!`), `wz-runtime-zephyr` is built without its `alloc`, and
+# no crate of the graph names `alloc` (the no-allocator link gate). The crates named here are
+# named only to turn their selectors on, and are the same instances the facade pulls.
+fixed-client = [
+    "net-zephyr-sockets",
+    "dep:wz-runtime-coop",
+    "dep:wz-runtime-zephyr",
+    "wz/platform-zephyr-fixed",
+    "wz/runtime-coop-fixed",
+    "wz-runtime-zephyr/session-slot",
+    "wz-runtime-coop/session-slot",
+    "wz-session-mcu/client-slot",
+    "wz-session-core/session-slot",
+]
 # The measurement of one typed session slot (`scripts/lib/session_slot_bytes.py`): with
 # it the fixed-memory image declares `WZ_SESSION_SLOT_BYTES`, a symbol whose SIZE is the
 # slot's size. Off by default, because the array is that size again in RAM.

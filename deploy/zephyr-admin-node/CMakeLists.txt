@@ -33,6 +33,7 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   # two board hooks that read the interface (wz_board_hooks.c).
   set(backend_undefined
     socket bind getsockname sendto recvfrom poll close
+    wz_net_set_rcvtimeo_ms wz_net_recv_timed_out
     wzApplicationGetIpv4Address wzApplicationGetZid)
 
   # The session reads each datagram where the link holds it (CONFIG_WZ_RX_IN_PLACE).
@@ -44,7 +45,13 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   # accept path and its admin space) are off, and the router it dials is stated here, once, as
   # a constant the Rust side checks when it compiles.
   if(CONFIG_WZ_NODE_CLIENT)
-    list(APPEND backend_feature client-node)
+    # Whether the Rust image has an allocator is the memory profile's, not the node's: the same
+    # client, on the heap or over statics (CONFIG_WZ_FIXED_MEMORY).
+    if(CONFIG_WZ_FIXED_MEMORY)
+      list(APPEND backend_feature fixed-client)
+    else()
+      list(APPEND backend_feature client-node)
+    endif()
     set(no_default_features NO_DEFAULT_FEATURES)
     list(APPEND backend_env WZ_CLIENT_ENDPOINT=${CONFIG_WZ_CLIENT_ENDPOINT})
   endif()

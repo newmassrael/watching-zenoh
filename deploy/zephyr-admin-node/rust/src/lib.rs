@@ -30,59 +30,79 @@ extern crate alloc;
 
 // The growable node's imports (S9c: the `fixed-memory` profile runs `fixed_node`'s
 // instead, over statics, and the heap node does not exist in it).
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use alloc::format;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use alloc::rc::Rc;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use alloc::string::String;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use wz::runtime_coop::session_drive::SessionLinks;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use wz::runtime_coop::session_runtime::new_session_actions;
-#[cfg(any(not(feature = "fixed-memory"), feature = "mac-cyt4bf"))]
+#[cfg(any(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "mac-cyt4bf"
+))]
 use wz::runtime_coop::ClockSource;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
-use wz::runtime_zephyr::glue::{core_clock_hz, log, log_args};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(feature = "fixed-client"))]
+use wz::runtime_zephyr::glue::log;
+use wz::runtime_zephyr::glue::{core_clock_hz, log_args};
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use wz::runtime_zephyr::glue::{log_line, stack_usage, yield_us};
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use wz::runtime_zephyr::stack::StackWatch;
-#[cfg(any(not(feature = "fixed-memory"), feature = "mac-cyt4bf"))]
+#[cfg(any(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "mac-cyt4bf"
+))]
 use wz::runtime_zephyr::ZephyrClock;
+#[cfg(not(feature = "fixed-client"))]
 use wz::runtime_zephyr::ZephyrEntropy;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 use wz_session_core::entropy::EntropySource;
-#[cfg(not(feature = "fixed-memory"))]
-use wz_session_core::session_init_params::SessionInitParams;
-#[cfg(not(feature = "fixed-memory"))]
-use wz_session_core::session_timeouts::SessionTimeouts;
-#[cfg(not(feature = "fixed-memory"))]
-use wz_session_core::signing_key::SigningKey;
-#[cfg(not(feature = "fixed-memory"))]
-use wz_session_core::zid_hex::zid_to_zenoh_hex;
-#[cfg(not(feature = "fixed-memory"))]
-use wz_session_core::WhatAmI;
-#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
-use wz_session_mcu::admin_host::ConnectControl;
-#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
-use wz_session_mcu::admin_node::AdminNode;
-#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
-use wz_session_mcu::admin_status::{NodeIdentity, NodeStatus};
 #[cfg(feature = "client-node")]
 use wz_session_core::query_sink::BoxedQuerySink;
 #[cfg(feature = "client-node")]
 use wz_session_core::sample::EncodingHint;
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
+use wz_session_core::session_init_params::SessionInitParams;
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
+use wz_session_core::session_timeouts::SessionTimeouts;
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
+use wz_session_core::signing_key::SigningKey;
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
+use wz_session_core::zid_hex::zid_to_zenoh_hex;
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
+use wz_session_core::WhatAmI;
+#[cfg(all(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "admin-node"
+))]
+use wz_session_mcu::admin_host::ConnectControl;
+#[cfg(all(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "admin-node"
+))]
+use wz_session_mcu::admin_node::AdminNode;
+#[cfg(all(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "admin-node"
+))]
+use wz_session_mcu::admin_status::{NodeIdentity, NodeStatus};
 #[cfg(feature = "client-node")]
 use wz_session_mcu::client_node::ClientNode;
-#[cfg(feature = "client-node")]
+#[cfg(any(feature = "client-node", feature = "fixed-client"))]
 use wz_session_mcu::connect_manager::StaticEndpoints;
 
+#[cfg(feature = "fixed-client")]
+mod fixed_client;
 #[cfg(feature = "fixed-memory")]
 mod fixed_node;
 #[cfg(feature = "mac-cyt4bf")]
@@ -91,7 +111,9 @@ mod mac_cyt4bf;
 mod mac_lan865x;
 #[cfg(feature = "net-lwip-mac")]
 mod net_lwip;
-#[cfg(feature = "net-zephyr-sockets")]
+// The heap profile's board net: `Rc` links, a `Vec` zid. The fixed client reads the board's
+// address and identity into arrays (`fixed_client`).
+#[cfg(all(feature = "net-zephyr-sockets", not(feature = "fixed-client")))]
 mod net_zephyr;
 #[cfg(any(feature = "spi-probe", feature = "t1s-lan865x"))]
 mod spi_cyt4bf;
@@ -174,13 +196,19 @@ const BATCH_SIZE: u16 = (ETHERNET_MTU - IPV4_HEADER - UDP_HEADER) as u16;
 
 /// Writes are PERMITTED on this node: upstream's default is to refuse, and the
 /// node opts in, because being reconfigured is what it is for.
-#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
+#[cfg(all(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "admin-node"
+))]
 static CONTROL: ConnectControl = ConnectControl::new(true);
-#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
+#[cfg(all(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "admin-node"
+))]
 static STATUS: NodeStatus = NodeStatus::new(true);
 
 /// What a board's network stack gives the node, beyond the links themselves.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 pub trait NodeNet {
     /// The links the node opens: one that accepts, one per endpoint it dials.
     type Links: SessionLinks + 'static;
@@ -219,7 +247,7 @@ pub trait NodeNet {
 }
 
 /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
 fn params(whatami: WhatAmI, zid: &[u8], signing_key: &[u8]) -> SessionInitParams {
     SessionInitParams {
         whatami,
@@ -235,7 +263,10 @@ fn params(whatami: WhatAmI, zid: &[u8], signing_key: &[u8]) -> SessionInitParams
     }
 }
 
-#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
+#[cfg(all(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "admin-node"
+))]
 fn locator(address: [u8; 4]) -> String {
     let [a, b, c, d] = address;
     format!("udp/{a}.{b}.{c}.{d}:{LISTEN_PORT}")
@@ -243,7 +274,10 @@ fn locator(address: [u8; 4]) -> String {
 
 /// Assemble the node over `net` and run it. Returns only when it cannot start;
 /// the value is the reason, as a nonzero code the C `main()` prints.
-#[cfg(all(not(feature = "fixed-memory"), feature = "admin-node"))]
+#[cfg(all(
+    not(any(feature = "fixed-memory", feature = "fixed-client")),
+    feature = "admin-node"
+))]
 fn run<N: NodeNet>(mut net: N) -> i32 {
     // The cookie-signing key is a secret, so it comes from the board's entropy
     // source and a board that cannot supply it stops the node: a predictable key
@@ -361,24 +395,26 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
 /// The router the client node dials, as the build's Kconfig states it
 /// (`CONFIG_WZ_CLIENT_ENDPOINT`, handed to cargo as `WZ_CLIENT_ENDPOINT`). Checked when this
 /// compiles: an endpoint longer than a locator row does not build.
-#[cfg(feature = "client-node")]
+#[cfg(any(feature = "client-node", feature = "fixed-client"))]
 static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&[env!("WZ_CLIENT_ENDPOINT")]);
 
 /// The identifier the client's keys carry: twelve hex digits, as zenoh-pico's comparison image
 /// (`deploy/zephyr-pico-compare`) uses, so that a key and every message that names one are as
 /// long in the two.
-#[cfg(feature = "client-node")]
+#[cfg(any(feature = "client-node", feature = "fixed-client"))]
 const NODE_ID: &str = "5a1c0ffee001";
 /// The two keys the client answers, and the bodies it answers with, verbatim: they are the
 /// admin node's `status/connect` and `config` documents, which the pico image answers the same.
-#[cfg(feature = "client-node")]
+/// The heap client and the fixed one answer the same two.
+#[cfg(any(feature = "client-node", feature = "fixed-client"))]
 const STATUS_KEY: &str = "@/5a1c0ffee001/peer/status/connect";
-#[cfg(feature = "client-node")]
+#[cfg(any(feature = "client-node", feature = "fixed-client"))]
 const STATUS_BODY: &str = "{\"endpoints\":[],\"last_write\":null,\"permissions\":{\"write\":true}}";
-#[cfg(feature = "client-node")]
+#[cfg(any(feature = "client-node", feature = "fixed-client"))]
 const CONFIG_KEY: &str = "@/5a1c0ffee001/peer/config";
-#[cfg(feature = "client-node")]
-const CONFIG_BODY: &str = "{\"adminspace\":{\"permissions\":{\"write\":true}},\"connect\":{\"endpoints\":[]}}";
+#[cfg(any(feature = "client-node", feature = "fixed-client"))]
+const CONFIG_BODY: &str =
+    "{\"adminspace\":{\"permissions\":{\"write\":true}},\"connect\":{\"endpoints\":[]}}";
 
 /// A queryable that answers every query with `body`, JSON, under the key the query asked
 /// (`z_query_keyexpr`, as the pico image replies).
@@ -485,11 +521,23 @@ compile_error!(
      one `net-*` feature"
 );
 
-#[cfg(not(any(feature = "heap", feature = "client-node", feature = "fixed-memory")))]
+#[cfg(not(any(
+    feature = "heap",
+    feature = "client-node",
+    feature = "fixed-memory",
+    feature = "fixed-client"
+)))]
 compile_error!(
     "no memory profile: `heap` (the growable admin node over the kernel heap, the default), \
-     `client-node` (the growable client node, with the defaults off) or `fixed-memory` (the \
-     slot profile's node over statics, with the defaults off)"
+     `client-node` (the growable client node, with the defaults off), `fixed-memory` (the \
+     slot profile's admin node over statics, with the defaults off) or `fixed-client` (the \
+     slot profile's client node over statics, with the defaults off)"
+);
+
+#[cfg(all(feature = "fixed-client", feature = "client-node"))]
+compile_error!(
+    "two memory profiles for the client: it is `client-node` (the growable one) or \
+     `fixed-client` (over statics), and CMakeLists.txt turns on one from CONFIG_WZ_FIXED_MEMORY"
 );
 
 #[cfg(all(feature = "client-node", feature = "admin-node"))]
@@ -499,12 +547,14 @@ compile_error!(
 );
 
 #[cfg(all(feature = "client-node", not(feature = "net-zephyr-sockets")))]
-compile_error!("the client node runs over Zephyr's sockets: it needs CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS");
+compile_error!(
+    "the client node runs over Zephyr's sockets: it needs CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS"
+);
 
 #[cfg(all(feature = "fixed-memory", not(feature = "net-lwip-mac")))]
 compile_error!(
-    "the fixed-memory node is the lwIP one: its sessions are opened by the slot profile's \
-     session host, which owns the tables of one stack, and Zephyr's sockets have none yet"
+    "the fixed-memory admin node is the lwIP one (its listener is lwIP's); over Zephyr's \
+     sockets the fixed-memory node is the client, `fixed-client`"
 );
 
 #[cfg(all(feature = "net-lwip-mac", not(feature = "mac-cyt4bf")))]
@@ -595,7 +645,13 @@ fn probe_tc6() {
 }
 
 /// Bring the board's network up and run the node over it.
-#[cfg(feature = "net-zephyr-sockets")]
+#[cfg(all(feature = "net-zephyr-sockets", feature = "fixed-client"))]
+fn start() -> i32 {
+    fixed_client::run()
+}
+
+/// Bring the board's network up and run the node over it.
+#[cfg(all(feature = "net-zephyr-sockets", not(feature = "fixed-client")))]
 fn start() -> i32 {
     match net_zephyr::ZephyrNet::bring_up() {
         #[cfg(feature = "admin-node")]
@@ -774,7 +830,7 @@ fn start() -> i32 {
         log(why);
         return 1;
     }
-    #[cfg(not(feature = "fixed-memory"))]
+    #[cfg(not(any(feature = "fixed-memory", feature = "fixed-client")))]
     return run(net);
     // S9c -- the same node over the statics of `fixed_node`.
     #[cfg(feature = "fixed-memory")]

@@ -59,6 +59,31 @@ config WZ_CLIENT_ENDPOINT
 	  `udp/<ipv4>:<port>`, the only scheme the node's dialer reads. It is read when the image is
 	  built: an endpoint longer than a locator row does not build.
 
+# The memory profile is the node's and not a network backend's: whether the Rust image has an
+# allocator is a setting made beside the role and the stack, and what it is available to is
+# what has the slot profile's pieces (the stack's driver and how it opens a socket).
+config WZ_FIXED_MEMORY
+	bool "Build the node on the fixed-memory profile (no allocator in the Rust image)"
+	depends on (WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF) || \
+		   (WZ_NET_BACKEND_ZEPHYR_SOCKETS && WZ_NODE_CLIENT)
+	help
+	  Every table the node holds (sessions, sockets, the observer, the interfaces) is a
+	  static the image declares, the session tier is the slot profile's, and the Rust
+	  staticlib is built with its default features off, so it links no allocator. The
+	  session host and the dialler are the ones every stack shares
+	  (wz_session_mcu::slot_host); a stack supplies its driver and how it opens a socket.
+
+	  Two nodes have the profile. The admin node over lwIP is fixed_node.rs: its listener
+	  reads only the datagrams of the peer each session was accepted from and drops and
+	  counts the rest, where the growable node's one accepting session takes the source of
+	  every datagram it reads as its peer. The client node over Zephyr's sockets is
+	  fixed_client.rs. Not the admin node over Zephyr's sockets: that node accepts, and the
+	  socket stack has no listener of the slot profile yet.
+
+	  Off by default. This kernel's own heap is a separate matter: what the Rust image does
+	  not allocate, Zephyr's network stack and POSIX layer still may, and
+	  CONFIG_HEAP_MEM_POOL_SIZE is what the kernel is given for it.
+
 # What the Zephyr-sockets backend needs of Zephyr is stated HERE, as defaults of
 # the symbols it needs, rather than as lines in prj.conf: the other backend then
 # does not inherit a network stack it does not use, and a board conf never has to
@@ -247,22 +272,6 @@ config WZ_CYT4BF_RX_POOL
 	  moved, the counts that tell a frame read in its slot from a copy
 	  (HARDWARE_VERDICT.md, steps HW.31 to HW.35). Off by default: nothing
 	  has run on silicon with it.
-
-config WZ_FIXED_MEMORY
-	bool "Build the node on the fixed-memory profile (no allocator in the Rust image)"
-	depends on WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF
-	help
-	  The node of fixed_node.rs: every table it holds (sessions, sockets, the
-	  listener's lanes, the observer, the interfaces) is a static the image
-	  declares, the session tier is the slot profile's, and the Rust staticlib is
-	  built with its default features off, so it links no allocator. The
-	  listener reads only the datagrams of the peer each session was accepted
-	  from and drops and counts the rest, where the growable node's one accepting
-	  session takes the source of every datagram it reads as its peer.
-
-	  The lwIP backend only: the slot profile's session host owns the tables of
-	  one stack, and Zephyr's sockets have none. Off by default: the image has
-	  not been booted on silicon with it.
 
 # The ETH0 pin routing (WZ_CYT4BF_PINS_*) is the Ethernet driver's, which the Zephyr-sockets
 # backend uses too; it is in ../zephyr-eth-wzmac/Kconfig.zeth.
