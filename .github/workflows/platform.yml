@@ -612,6 +612,26 @@ jobs:
               [ "$integrated" = PASS ] || overall=FAIL
             fi
           done
+          # The shared-memory arm of `wz-capi-c`, on Windows only. The zenoh-c archive a
+          # Windows consumer pairs with is the `unstable-shm` build, so the arm that
+          # matches it is this one, and its segment is a named file mapping where the Unix
+          # one is a `/dev/shm` file. macOS is left out on purpose: its segments would
+          # be named under `/dev/shm`, which that host does not have, and upstream makes
+          # them with `shm_open` there, so a red from it would measure a different gap.
+          # The unit tests make a segment through the runtime and attach it through the
+          # C client registry, so a pass is the mapping created, opened and read.
+          if [ "$RUNNER_OS" = Windows ]; then
+            shm_built=FAIL
+            (cd crates && cargo build -p wz-capi-c --features zenoh-c-shared-memory) && shm_built=PASS
+            verdict "wz-capi-c shared-memory arm builds:" "$shm_built"
+            shm_tested=SKIPPED
+            if [ "$shm_built" = PASS ]; then
+              shm_tested=FAIL
+              (cd crates && cargo test -p wz-capi-c --features zenoh-c-shared-memory --lib) && shm_tested=PASS
+            fi
+            verdict "wz-capi-c shared-memory arm unit tests:" "$shm_tested"
+            [ "$shm_tested" = PASS ] || overall=FAIL
+          fi
           [ "$overall" = PASS ]
 
       # The Windows layouts, measured by a C compiler on this host. A GATE since two
