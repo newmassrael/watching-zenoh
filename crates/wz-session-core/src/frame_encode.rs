@@ -407,15 +407,11 @@ pub(crate) fn declare_body(
 pub(crate) fn request_body(
     request: &RequestOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| {
-        // Projected into a binding of this frame's own: `try_as_borrowed` returns the record
-        // (over a kilobyte, its extension vectors inline) and each hop it takes is a copy of it.
-        let mut borrowed = Request::default();
-        match request.try_as_borrowed_into(&mut borrowed) {
-            Ok(()) => borrowed.encode(sink),
-            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
-        }
-    }
+    // Written straight from the owned fields (SCE `{Codec}Owned::encode`, the bytes the borrowed
+    // projection and its `encode` write): the record over a kilobyte that the projection builds,
+    // its extension vectors inline, is never made. An extension list past the bound is an error
+    // here, as the projection refused it; wz builders do not emit one.
+    move |sink| request.encode(sink)
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
@@ -427,13 +423,7 @@ pub(crate) fn request_body(
 pub(crate) fn response_body(
     response: &ResponseOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| {
-        let mut borrowed = Response::default();
-        match response.try_as_borrowed_into(&mut borrowed) {
-            Ok(()) => borrowed.encode(sink),
-            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
-        }
-    }
+    move |sink| response.encode(sink)
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
@@ -445,13 +435,7 @@ pub(crate) fn response_body(
 pub(crate) fn response_final_body(
     response_final: &ResponseFinalOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
-    move |sink| {
-        let mut borrowed = ResponseFinal::default();
-        match response_final.try_as_borrowed_into(&mut borrowed) {
-            Ok(()) => borrowed.encode(sink),
-            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
-        }
-    }
+    move |sink| response_final.encode(sink)
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
@@ -1911,6 +1895,33 @@ mod tests {
             wire_const::T_MID_FRAME,
             "best-effort Frame must omit FLAG_T_FRAME_R",
         );
+    }
+
+    /// The Frame's body is written from the owned fields (SCE `{Codec}Owned::encode`) and must be
+    /// the bytes the borrowed projection and its `encode` wrote before (`.wire()` still takes that
+    /// path), for a reply that carries the envelope extensions too: the QoS entry and the
+    /// responder, which are the lists the projection bounded.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn encode_frame_with_response_writes_what_the_projection_wrote_with_extensions() {
+        let build = || {
+            crate::response_build::ResponseReplyBuilder::new(42, 0, Some("k/x"), b"payload")
+                .qos(crate::sample::QosLevel::DEFAULT.with_express(true))
+                .responder(&[1, 2, 3, 4], 9)
+                .build()
+                .unwrap()
+        };
+        let want = build().wire();
+        let frame = encode_frame_with_response(0, build(), true);
+        assert!(
+            want.len()
+                > build_response_reply_literal(42, "k/x", b"payload")
+                    .unwrap()
+                    .wire()
+                    .len(),
+            "the extensions are on the wire, or this test compares nothing",
+        );
+        assert_eq!(&frame[2..], want.as_slice());
     }
 
     #[cfg(feature = "codec-request")]
