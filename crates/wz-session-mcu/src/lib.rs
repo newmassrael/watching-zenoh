@@ -69,6 +69,11 @@ pub mod group_drive;
 // `connect/endpoints` config write on that application layer.
 #[cfg(feature = "adminspace-write")]
 pub mod admin_host;
+// How a node of the slot profile opens a session out of the tables its image declared,
+// written once over whichever stack carries it (`SlotStack`). It was `wz-session-lwip`'s
+// and named lwIP's driver, pump link and socket pool for what it needs of a stack.
+#[cfg(feature = "session-slot")]
+pub mod slot_host;
 // R2830 — the node keeps a session with every endpoint the control names and
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
 #[cfg(feature = "dial")]
