@@ -1415,7 +1415,7 @@ pub fn confirmed_chunks() -> usize {
 
 /// Whether the reader's cache holds the data segment named `id`. A diagnostic for the sweep's
 /// witness.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn is_cached_data_segment(id: u64) -> bool {
     peer_data_cache()
         .lock()

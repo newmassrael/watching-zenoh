@@ -6573,12 +6573,11 @@ mod foreign_backend_tests {
 // ## What makes this NOT a dead arm, measured rather than argued
 //
 // `z_posix_shm_client_new` is the POSIX member of the default client set, and
-// wz already owns a POSIX segment naming convention: `wz-runtime-tokio`'s
-// `shm_provider.rs` @ `fn shm_path` maps a `segment_id` to
-// `/dev/shm/wz-shm-{id:08x}.wz`, and its `PosixShmResolver` opens exactly that.
-// wz's POSIX client attaches by THE SAME rule, so a segment one half of this
+// wz already owns the segment protocol it attaches by: `wz-runtime-tokio`'s
+// `posix_shm` makes and opens a segment the way upstream does (`{id}.zenoh`).
+// wz's POSIX client attaches through THAT type, so a segment one half of this
 // workspace publishes is one the other half can read. The test proves that with
-// a real `/dev/shm` file rather than a mock.
+// a segment the runtime made rather than a file written by hand.
 //
 // ⚠ The item 607 premise this round REFUTED, recorded where the next reader of
 // this plane will be standing: the register said the client half's witness is
@@ -6940,77 +6939,33 @@ fn storage_state(storage: &z_loaned_shm_client_storage_t) -> Option<&ShmClientSt
 
 /// A POSIX segment this process has mapped read-only.
 ///
-/// The naming rule is wz's OWN, not an invention of this module:
-/// `wz-runtime-tokio`'s `shm_provider.rs` @ `fn shm_path` publishes at
-/// `/dev/shm/wz-shm-{id:08x}.wz` and its `PosixShmResolver` opens exactly that.
-/// Repeating the rule here rather than depending on that crate's private
-/// function is deliberate -- it is a WIRE-side convention shared by two
-/// independent halves, and a test in this module pins the two spellings
-/// together so a change to either is a red rather than a silent divergence.
+/// The segment is opened by the runtime's one implementation of upstream's segment
+/// (`wz_runtime_tokio::posix_shm`), so the NAME is upstream's `{id}.zenoh` on every
+/// platform: a `/dev/shm` file on Unix, a named file mapping on Windows. A segment a
+/// zenoh peer or this workspace's own provider publishes is therefore one this client
+/// finds. An earlier form of this type mapped `/dev/shm/wz-shm-{id:08x}.wz` by hand,
+/// a naming the runtime stopped publishing when it adopted upstream's (R2862), so it
+/// attached the files its own test wrote and none a provider made.
 struct PosixSegment {
-    base: *mut u8,
-    len: usize,
+    segment: wz_runtime_tokio::posix_shm::PeerSegment,
 }
 
 impl PosixSegment {
-    /// wz's segment path for `segment_id`.
-    fn path(segment_id: z_segment_id_t) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!("/dev/shm/wz-shm-{segment_id:08x}.wz"))
-    }
-
-    /// Map the segment read-only, or `None` when it is not there.
+    /// Map the segment read-only, or `None` when it is not there or is empty.
     fn open(segment_id: z_segment_id_t) -> Option<Self> {
-        let file = std::fs::File::open(Self::path(segment_id)).ok()?;
-        let len = file.metadata().ok()?.len() as usize;
-        if len == 0 {
+        let segment = wz_runtime_tokio::posix_shm::PeerSegment::open(u64::from(segment_id)).ok()?;
+        if segment.bytes().is_empty() {
             return None;
         }
-        // SAFETY: a read-only shared view of a same-host segment the peer owns.
-        // The `mmap` outlives every `map_fn` call because `delete_fn` runs only
-        // after the last holder of the context drops, and the file descriptor is
-        // not needed past the call (Linux keeps the mapping alive).
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                std::os::unix::io::AsRawFd::as_raw_fd(&file),
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return None;
-        }
-        Some(Self {
-            base: base as *mut u8,
-            len,
-        })
+        Some(Self { segment })
     }
 
-    /// The segment's first byte.
+    /// The segment's first byte. The mapping is read-only, so a write through the
+    /// pointer faults, as it did when this type called `mmap` itself.
     fn base(&self) -> *mut u8 {
-        self.base
+        self.segment.bytes().as_ptr().cast_mut()
     }
 }
-
-impl Drop for PosixSegment {
-    fn drop(&mut self) {
-        if self.base.is_null() || self.len == 0 {
-            return;
-        }
-        // SAFETY: `base`/`len` are exactly what `mmap` returned in `open`, and
-        // nothing maps this segment twice.
-        unsafe { libc::munmap(self.base as *mut c_void, self.len) };
-    }
-}
-
-// SAFETY: the mapping is read-only and immutable for this type's whole life;
-// `map_fn` hands out a raw pointer whose use is the caller's contract, which is
-// the same promise every other pointer in this module carries.
-unsafe impl Send for PosixSegment {}
-// SAFETY: as above.
-unsafe impl Sync for PosixSegment {}
 
 /// wz's POSIX protocol id.
 ///
@@ -7059,9 +7014,9 @@ pub unsafe extern "C" fn z_shm_client_new(
 /// Create the POSIX client (zenoh-c `z_posix_shm_client_new`,
 /// `zenoh_commons.h:4784`).
 ///
-/// It attaches by wz's own segment naming -- `wz-runtime-tokio`'s
-/// `shm_provider.rs` @ `fn shm_path` -- so a segment either half of this
-/// workspace publishes is one this client can read.
+/// It attaches by upstream's segment naming through `wz-runtime-tokio`'s
+/// `posix_shm`, so a segment either half of this workspace publishes is one this
+/// client can read.
 ///
 /// # Safety
 /// `this_` must be valid and writable.
@@ -7098,7 +7053,7 @@ unsafe extern "C" fn posix_id(_context: *mut c_void) -> z_protocol_id_t {
     POSIX_PROTOCOL_ID
 }
 
-/// Map a POSIX segment by wz's naming rule.
+/// Map a POSIX segment by upstream's naming rule.
 ///
 /// # Safety
 /// `out_segment` must be valid and writable; called only through
@@ -7542,51 +7497,29 @@ pub unsafe extern "C" fn z_internal_shm_client_storage_null(
 #[cfg(test)]
 mod client_registry_tests {
     use super::*;
-    use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use wz_runtime_tokio::posix_shm::{next_candidate_id, OwnedSegment};
 
-    /// A segment file at wz's naming rule, removed when the guard drops.
+    /// A segment the RUNTIME makes, with `bytes` written into it, and the id a peer
+    /// is told. It is gone when the returned segment drops.
     ///
-    /// The fixture WRITES the input rather than borrowing one a session made,
-    /// which is the shape R2289 and R2294 both had to reach for: the producing
-    /// half is not reachable from this crate's build (`session-extshm` is not
-    /// among the features `wz-capi-c` enables), so a test that waited for one
-    /// would be measuring nothing.
-    struct SegmentFile(std::path::PathBuf);
-
-    impl SegmentFile {
-        fn create(id: z_segment_id_t, bytes: &[u8]) -> Self {
-            let path = PosixSegment::path(id);
-            let mut f = std::fs::File::create(&path).expect("create the /dev/shm segment");
-            f.write_all(bytes).expect("write the segment");
-            Self(path)
-        }
+    /// The fixture makes the segment with the runtime's own `posix_shm` rather than
+    /// borrowing one a session made, which is the shape R2289 and R2294 both had to
+    /// reach for: the producing half is not reachable from this crate's build
+    /// (`session-extshm` is not among the features `wz-capi-c` enables), so a test
+    /// that waited for one would be measuring nothing. It does NOT write a file of
+    /// its own: a path spelled in this test would be one more place the segment's
+    /// name is decided, which is how the attacher once came to look for a name the
+    /// runtime no longer published.
+    fn publish(bytes: &[u8]) -> (OwnedSegment, z_segment_id_t) {
+        let mut seg = OwnedSegment::create(bytes.len(), || u64::from(next_candidate_id()))
+            .expect("make a segment through the runtime");
+        seg.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        let id = z_segment_id_t::try_from(seg.id()).expect("candidate ids are 32 bits");
+        (seg, id)
     }
 
-    impl Drop for SegmentFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    /// wz's TWO halves spell the segment path the same way.
-    ///
-    /// `wz-runtime-tokio`'s `shm_provider.rs` @ `fn shm_path` is the publisher's
-    /// spelling and [`PosixSegment::path`] is the attacher's. They are separate
-    /// crates with no shared constant, so this pins the format string itself --
-    /// a change to either half is a red here rather than a segment that exists
-    /// and cannot be found.
-    #[test]
-    fn both_halves_name_a_segment_the_same_way() {
-        assert_eq!(
-            PosixSegment::path(0x0000_002a),
-            std::path::PathBuf::from("/dev/shm/wz-shm-0000002a.wz"),
-            "the attacher's rule is `wz-shm-{{id:08x}}.wz`, which is what \
-             wz-runtime-tokio's `shm_path` publishes at"
-        );
-    }
-
-    /// The default client set attaches a real /dev/shm segment and its bytes
+    /// The default client set attaches a segment the runtime made and its bytes
     /// come back through `map_fn`.
     ///
     /// This is the plane's REASON: a storage is not a container of clients, it
@@ -7594,7 +7527,7 @@ mod client_registry_tests {
     #[test]
     fn the_default_client_set_maps_a_real_segment() {
         let payload = b"attached-through-the-registry";
-        let _seg = SegmentFile::create(0x00ab_cdef, payload);
+        let (_seg, segment_id) = publish(payload);
 
         let mut storage = z_owned_shm_client_storage_t::null_value();
         // SAFETY: a live local out-parameter.
@@ -7604,7 +7537,7 @@ mod client_registry_tests {
 
         // SAFETY: `storage` is live and holds a registry.
         let loaned = unsafe { &*z_shm_client_storage_loan(&storage) };
-        let attached = z_shm_client_storage_attach(loaned, POSIX_PROTOCOL_ID, 0x00ab_cdef)
+        let attached = z_shm_client_storage_attach(loaned, POSIX_PROTOCOL_ID, segment_id)
             .expect("the POSIX client attaches a segment that is there");
         let base = attached.map(0);
         assert!(!base.is_null(), "chunk 0 is the segment's first byte");

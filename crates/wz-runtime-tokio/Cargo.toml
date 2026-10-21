@@ -799,8 +799,11 @@ transport-shm = ["wz-session-core/transport-shm", "posix-shm-segment", "dep:talc
 # needs the protocol — `zc_cleanup_orphaned_shm_segments` is upstream's cleanup
 # of exactly these segments — and must NOT turn on SHM transport negotiation
 # for its sessions, which is what `transport-shm` also means. It names `libc`
-# itself because the lock is `flock`.
-posix-shm-segment = ["dep:memmap2", "dep:libc"]
+# itself because the lock is `flock`. On Windows the segment is a named file mapping
+# (upstream's `shm/windows.rs`), which takes `windows-sys` instead of `memmap2` and
+# `libc`; each of the three is a dependency of one platform's table, and a feature
+# may name a dependency its target does not have.
+posix-shm-segment = ["dep:memmap2", "dep:libc", "dep:windows-sys"]
 
 # session-extshm — the scoped Z_EXT_SHM establishment handshake (a UNIT capability
 # offer/`&=`, NOT zenoh's full challenge-response); forwards the session-core
@@ -1894,12 +1897,6 @@ x509-parser = { version = "0.18", optional = true }
 # No feature knobs to choose: the crate declares no `[features]` at all and is
 # `#![no_std]` (`webpki-roots-1.0.9/src/lib.rs:25`) — it is one const table.
 webpki-roots = { version = "1", optional = true }
-# transport-shm — the AP POSIX shared-memory provider (behind the optional
-# `transport-shm` feature). A /dev/shm tmpfs file mmap'd MAP_SHARED is exactly
-# POSIX shared memory for the same-host scoped proof; memmap2 is the stable,
-# version-steady mmap wrapper (vs nix's shifting mman API). The wire carries the
-# descriptor, not the local mmap mechanism, so this is faithful for same-host.
-memmap2 = { version = "0.9", optional = true }
 # R3057 — talc is the allocator zenoh's default shared-memory backend carves chunks out
 # of a pool with (`commons/zenoh-shm/Cargo.toml` @ `talc = { workspace = true }`, pinned
 # at its workspace root `talc = { version = "4.4.3", default-features = false }`). wz
@@ -2181,9 +2178,21 @@ features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    # `posix_shm`'s Windows segment: `CreateFileMappingW`, `MapViewOfFile`, `VirtualQuery`,
+    # and the `SECURITY_ATTRIBUTES` type the first one names.
+    "Win32_System_Memory",
+    "Win32_Security",
 ]
 
 [target.'cfg(unix)'.dependencies]
+# transport-shm — the AP POSIX shared-memory provider (behind the optional
+# `transport-shm` feature). A /dev/shm tmpfs file mmap'd MAP_SHARED is exactly
+# POSIX shared memory for the same-host scoped proof; memmap2 is the stable,
+# version-steady mmap wrapper (vs nix's shifting mman API). The wire carries the
+# descriptor, not the local mmap mechanism, so this is faithful for same-host.
+# A Windows build maps a named file mapping with `windows-sys` instead, so this is a
+# Unix-only dependency.
+memmap2 = { version = "0.9", optional = true }
 # R311y10 — `libc` for the one `mkfifo` FFI call the unixpipe backend needs to
 # create the named-FIFO-pair rendezvous nodes (tokio's `pipe` module opens
 # existing FIFOs but does not create them). Optional, pulled by

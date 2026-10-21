@@ -132,12 +132,14 @@ const SEGMENT_BYTES: usize = PROTOCOLS_OFFSET
 // NAME, the mode and the shared advisory lock moved to `crate::posix_shm`, the
 // one implementation every segment kind is made through. The payload provider's
 // metadata and data segments share this namespace, so they share its counter.
-#[cfg(test)]
+// The tests below open a segment as a FILE, by its `/dev/shm` path, so they exist where that is
+// what a segment is (`unix`); a Windows segment has no path to open.
+#[cfg(all(test, unix))]
 use crate::posix_shm::candidate_id;
 use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
 
 /// This segment kind's `/dev/shm` path, for the tests that open one by hand.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn auth_segment_path(segment_id: u32) -> std::path::PathBuf {
     crate::posix_shm::segment_path(u64::from(segment_id))
 }
@@ -634,7 +636,7 @@ impl ShmAuthenticator for PosixShmAuthenticator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use memmap2::MmapOptions;

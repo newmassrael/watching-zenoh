@@ -265,11 +265,12 @@ zenoh-c-no-unstable-api = []
 # match: the published standalone archive is the `unstable-shm` build, which
 # carries this axis. See the ⚠⚠ paragraph at the head of this table.
 #
-# R2299 (open-debt item 607) — this arm pulls `libc` in. The SHM CLIENT
-# registry's POSIX member ATTACHES to a segment another process published, and
-# an attach is `mmap` — there is no std spelling for a shared read-only view of
-# a file. The dependency is optional and named only here, so the default build's
-# footprint is unchanged, which is what Layer F measures.
+# R2299 (open-debt item 607) — the SHM CLIENT registry's POSIX member ATTACHES to a
+# segment another process published. It first did so with `mmap` through `libc` of its
+# own; it now attaches through the runtime's `posix_shm`, the one implementation of
+# upstream's segment, which is a `/dev/shm` mapping on Unix and a named file mapping on
+# Windows. This arm therefore names no platform dependency, and builds on
+# `x86_64-pc-windows-msvc`, where the published zenoh-c archive carries this axis too.
 # R2954 — and the runtime's POSIX segment PROTOCOL: `zc_cleanup_orphaned_shm_segments`
 # is that protocol's own orphan cleanup. R2954 and R2970 took it WITHOUT the SHM
 # transport, because a zenoh peer that agreed on SHM would have sent Puts laid out
@@ -281,13 +282,9 @@ zenoh-c-no-unstable-api = []
 # dependency below: the transport snapshot reads `is_shm` from the session's actions only
 # when it is built, so `z_transport_is_shm` read `false` for every session whatever it had
 # negotiated; and the model's SHM publish (`publish_shm_all`) exists only when it is.
-zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/session-extshm", "wz-capi-core/session-extshm"]
+zenoh-c-shared-memory = ["wz-runtime-tokio/session-extshm", "wz-capi-core/session-extshm"]
 
 [dependencies]
-# R2299 — `mmap`/`munmap` for the SHM client registry's POSIX attach. Optional:
-# only `zenoh-c-shared-memory` needs it. Same major as wz-runtime-tokio's, which
-# is the other half of this workspace that maps a /dev/shm segment.
-libc = { version = "0.2", optional = true }
 # The ABI-neutral session model, shared with wz-capi-pico.
 #
 # R2970 — `transport-qos` so its transport snapshot reports what a zenoh-c
