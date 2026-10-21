@@ -128,9 +128,10 @@ image, so a change that moves one is a visible, recorded change.
 
 ## 5. Status
 
-Steps 1 to 4 are done and run on the T2G kit (the Zephyr-sockets client,
-`CONFIG_WZ_FIXED_MEMORY` with `overlays/t2g_client_fixed.conf`). What each step
-turned out to need beyond its plan:
+Steps 1 to 5 are done and run on the T2G kit (the Zephyr-sockets client,
+`CONFIG_WZ_FIXED_MEMORY` with `overlays/t2g_client_fixed.conf`; step 5 is the
+heap client with `overlays/t2g_client.conf`). What each step turned out to need
+beyond its plan:
 
 - **Step 2** needed the driver to lend a transmit slot. A session on the
   lend-only profile (`session-slot` implies `tx-lend-only`) builds no frame
@@ -150,10 +151,23 @@ turned out to need beyond its plan:
   frames of the loop and of the receive path.
 - **Step 4**: `runtime-coop-core` in the facade is the runtime tier without
   lwIP's link crate, so a sockets image has none in its graph.
+- **Step 5**: an answered query on the heap client went from 6 allocations
+  (2,816 B) to none. The staged reply is drained by parts into the response
+  writer, and the frame is written into a slot the link lends: `HeapTx` holds
+  two (a session that batches keeps one open while it encodes into the other).
+  Two things the plan did not name: `wz/transport-tx-lend` only forwards to the
+  lwIP crate, so the client node selects `wz-session-core/transport-tx-lend`
+  itself; and the heap client needs the role's limits too, because with the
+  default capacities the arena tables overflowed the main stack. A gated or
+  counted egress (`transport-stats`, an egress reply gate, a namespace) still
+  takes the owned reply, as the parts writer does not apply them.
 
 Measured on the kit with the same method for each image (wire turnaround,
-alternating order, 12 boots each): fixed client 0.204 ms, heap client 0.214 ms,
-zenoh-pico 0.214 ms. Against a zenoh-pico built in its smallest working
+alternating order, 12 boots each): fixed client 0.203 ms, heap client before
+step 5 0.215 ms, heap client after step 5 0.210 ms, zenoh-pico 0.213 ms (the
+ranges of the heap client and of zenoh-pico overlap; no ordering between them
+is claimed). The step 5 image is 52 bytes larger in text (221,248 B) and the
+same in data and bss. Against a zenoh-pico built in its smallest working
 configuration: text 155 KB against 162 KB, data and bss 118 KB against 114 KB.
 Main stack peak 9.8 KB of 16 KB; splitting the observer's planes into frames of
 their own did not move it, so what sets it is not the part that was split.
