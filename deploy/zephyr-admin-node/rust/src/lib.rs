@@ -453,12 +453,19 @@ fn run_client<N: NodeNet>(mut net: N) -> i32 {
             ));
         }
         // See the admin node's loop: a pass that took a frame in does not wait first, for at most
-        // BUSY_PASSES_MAX in a row.
+        // BUSY_PASSES_MAX in a row. The stack's own wait on a socket is what gives the CPU away
+        // there, and between two dials of a router that is not up the node holds no socket: it
+        // sleeps the tick itself then, or it spins above the network stack's threads and starves
+        // them (the pings of a bench were dropped and delayed by seconds until it did).
         if worked && busy_passes < BUSY_PASSES_MAX {
             busy_passes += 1;
         } else {
             busy_passes = 0;
-            let sleep_us = net.idle_sleep_us();
+            let sleep_us = if node.holds_session() {
+                net.idle_sleep_us()
+            } else {
+                IDLE_SLEEP_US
+            };
             if sleep_us > 0 {
                 yield_us(sleep_us);
             }

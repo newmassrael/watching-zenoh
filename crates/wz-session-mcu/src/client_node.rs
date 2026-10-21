@@ -129,6 +129,17 @@ where
         Ok(())
     }
 
+    /// Whether the node holds a session at all, established or still being opened, and so a link
+    /// that waits on its socket.
+    ///
+    /// A loop that leans on that wait to give the CPU away (Zephyr's does: a pass waits on its
+    /// socket for up to a millisecond) has nothing to lean on while the node holds none, between
+    /// two dials of a router that is not up. It must give the CPU away itself then, or it spins at
+    /// its own priority and starves the network stack's threads, which are below it.
+    pub fn holds_session(&self) -> bool {
+        self.manager.sessions().next().is_some()
+    }
+
     /// Whether a session towards a router is established.
     pub fn is_established(&self) -> bool {
         self.manager
@@ -354,7 +365,15 @@ mod tests {
         };
 
         // CONTROL: nothing registered, so a session that establishes has nothing to declare.
+        std::assert!(
+            !node.holds_session(),
+            "before its first tick the node holds no session"
+        );
         settle(&mut node);
+        std::assert!(
+            node.holds_session(),
+            "the tick that dials leaves the node holding one"
+        );
         std::assert!(
             node.is_established(),
             "the node dialled the endpoint it was built with"
