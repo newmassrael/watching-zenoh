@@ -87,14 +87,38 @@ codec-response-final = ["wz-session-core/codec-response-final"]
 liveliness-token = ["wz-session-core/liveliness-token"]
 query-queryable = ["wz-session-core/query-queryable"]
 pubsub-put = ["wz-session-core/pubsub-put"]
+# The dialer and the connection manager: a node that holds an initiator session with each endpoint
+# of an `EndpointSource` and re-dials the ones that drop. Nothing in it is the admin space's, so a
+# firmware that dials a router it was built to know takes this and not `adminspace-write`.
+dial = [
+    "wz-session-core/connect-endpoints",
+    "wz-session-core/session-unicast-open",
+    "wz-session-core/codec-init-body",
+    "wz-session-core/codec-open-body",
+]
+# A node that is a CLIENT of a router and answers queries: the dialer, an observer to register
+# queryables and subscribers on, and their declarations sent on every session as it establishes
+# (`client_node`). The pico side of the same function is `Z_FEATURE_QUERYABLE` over a UDP client
+# session; no listener, no admin space, no config write.
+client-node = [
+    "alloc",
+    "dial",
+    "pubsub-put",
+    "query-queryable",
+    "codec-response",
+    "codec-response-final",
+    "wz-session-core/pubsub-delete",
+    "wz-session-core/pubsub-encoding",
+    "wz-session-core/query-reply-err",
+    "wz-session-core/declare-subscriber",
+    "wz-session-core/declare-queryable",
+]
 adminspace-write = [
+    "dial",
     "wz-session-core/adminspace-write",
     "pubsub-put",
     "wz-session-core/pubsub-delete",
-    "wz-session-core/session-unicast-open",
     "wz-session-core/session-unicast-accept",
-    "wz-session-core/codec-init-body",
-    "wz-session-core/codec-open-body",
     # R2838 — a router forwards a PUT only to a face that DECLARED a matching
     # subscriber, so the node declares `<root>/config/**` on every session,
     # as upstream's admin space does. Measured against a stock zenohd: the
@@ -147,6 +171,12 @@ critical-section = { version = "1", features = ["std"] }
 # Builds the Push / Request records the shell's tests feed the observer.
 # Dev-only: the library names no wz_codecs type.
 wz-codecs = { path = "../wz-codecs", default-features = false }
+# The far end of the client node's tests is an ACCEPTOR session, which the client build itself
+# does not carry: a client never accepts. Dev-only, so a test build has the accept path and the
+# build that ships does not.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "session-unicast-accept",
+] }
 
 [lints]
 workspace = true

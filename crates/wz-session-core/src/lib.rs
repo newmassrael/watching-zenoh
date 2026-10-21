@@ -678,6 +678,12 @@ pub mod retry_period;
 #[cfg(any(feature = "adminspace-fixed", feature = "adminspace-write"))]
 pub mod admin_config_space;
 
+/// The list of endpoints a node holds sessions with, with no allocator. Filled by upstream's
+/// `connect/endpoints` config write (`admin_connect`) or by a firmware that dials a router it was
+/// built to know; nothing in it is the admin space's, so it has a feature of its own.
+#[cfg(any(feature = "connect-endpoints", feature = "adminspace-write"))]
+pub mod connect_endpoints;
+
 /// R2824 (§5.23 `adminspace-write`) — upstream's `connect/endpoints` config
 /// write, decided with no allocator, so an MCU can be told which peers to hold
 /// sessions with. The AP half of the write surface is `adminspace`.

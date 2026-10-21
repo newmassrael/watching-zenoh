@@ -169,6 +169,17 @@ impl ConnectControl {
     }
 }
 
+/// What a host wrote is what the connection manager holds sessions with.
+impl crate::connect_manager::EndpointSource for ConnectControl {
+    fn generation(&self) -> u32 {
+        ConnectControl::generation(self)
+    }
+
+    fn endpoints(&self) -> (u32, ConnectEndpoints) {
+        ConnectControl::endpoints(self)
+    }
+}
+
 /// R2829 — the control IS the config the `config` leg of the admin GET
 /// reports, so a host that wrote `connect/endpoints` can read it back at
 /// `@/<zid>/<whatami>/config`. Keys are spelled as upstream's config document

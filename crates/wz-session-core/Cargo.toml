@@ -155,6 +155,11 @@ adminspace-fixed = [
     "pubsub-encoding",
 ]
 
+# connect-endpoints — the endpoint list a node dials (`connect_endpoints`), without the config
+# write that can fill it. `adminspace-write` has the module too, through the same `cfg`: it is
+# the list its parser writes into.
+connect-endpoints = []
+
 # adminspace-write (§5.23) — R2824: upstream's config-WRITE surface for
 # `connect/endpoints` WITHOUT an allocator (`admin_connect`), so an MCU can be
 # told at runtime which peers to hold sessions with. It composes the same two

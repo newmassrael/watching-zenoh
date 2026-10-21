@@ -71,12 +71,17 @@ pub mod group_drive;
 pub mod admin_host;
 // R2830 — the node keeps a session with every endpoint the control names and
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
-#[cfg(feature = "adminspace-write")]
+#[cfg(feature = "dial")]
 pub mod connect_manager;
 // R2831 — the dialer: a written `udp/<ipv4>:<port>` becomes an initiator
 // session on the firmware's task set, over whichever stack opens the link.
-#[cfg(feature = "adminspace-write")]
+#[cfg(feature = "dial")]
 pub mod dial;
+// A node that is a client of a router and answers queries: the dialer over a fixed list of
+// endpoints, an observer for the application's queryables and subscribers, and their
+// declarations sent on every session as it establishes.
+#[cfg(all(feature = "client-node", not(feature = "session-slot")))]
+pub mod client_node;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
 // through the shared answerer, on the same application layer.
 #[cfg(feature = "adminspace-fixed")]

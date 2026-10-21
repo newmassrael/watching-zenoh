@@ -60,97 +60,17 @@
 use crate::admin_config_space::{
     subkey_in_config_space, write_config_space_pattern, ConfigSpaceRefusal,
 };
-use crate::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
+use crate::caps::MAX_STATIC_CONNECT;
 use crate::json5_lex::{Json5Error, Lexer};
 
 /// The config sub-key this surface carries, as upstream spells it.
 pub const CONNECT_ENDPOINTS_SUBKEY: &str = "connect/endpoints";
 
-/// One endpoint, copied out of the write. Owned, because the buffer the
-/// write arrived in is reused before the connection is made.
-///
-/// `heapless` on EVERY backing, not the crate's `BoundedString`: that type's
-/// capacity is advisory when `alloc` is on, so the same write would be
-/// refused as too long on an MCU and accepted on an AP. A verdict on the wire
-/// must not depend on which allocator the node was built with.
-pub type EndpointText = heapless::String<MAX_LOCATOR_LEN>;
-
-/// R2841 — how a group of locators is to be used: upstream's
-/// `LocatorsStrategy`, spelled `allOf` / `oneOf` on the wire:
-/// `commons/zenoh-protocol/src/core/endpoint.rs` @ `pub enum LocatorsStrategy {`
-/// Upstream's runtime implements only `AllOf` (open links to all locators of
-/// the group) and reserves `OneOf`; both are accepted, as upstream accepts
-/// both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocatorsStrategy {
-    /// `allOf`.
-    AllOf,
-    /// `oneOf`.
-    OneOf,
-}
-
-impl LocatorsStrategy {
-    /// The wire spelling.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            LocatorsStrategy::AllOf => "allOf",
-            LocatorsStrategy::OneOf => "oneOf",
-        }
-    }
-}
-
-/// R2841 — the group an entry came from, when the list element was
-/// upstream's object form `{ strategy, locators: [...] }` rather than a
-/// string. `index` numbers the groups of one list from 0, so consecutive
-/// entries with the same index are one group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EndpointGroup {
-    /// Which group of the list.
-    pub index: u8,
-    /// How the group's locators are to be used.
-    pub strategy: LocatorsStrategy,
-}
-
-/// R2841 — one element of the written list, flattened: an endpoint, and the
-/// group it was written in, if any. An EMPTY group (`locators: []`, which
-/// upstream accepts) is one entry with an empty endpoint, so the list reads
-/// back as it was written; it names nothing to dial.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectEntry {
-    /// The endpoint text, `<proto>/<address>[?..][#..]`; empty only for an
-    /// empty group.
-    pub endpoint: EndpointText,
-    /// The group this entry was written in; `None` for a bare string.
-    pub group: Option<EndpointGroup>,
-}
-
-impl ConnectEntry {
-    /// A bare endpoint, not in a group.
-    pub fn single(endpoint: EndpointText) -> Self {
-        Self {
-            endpoint,
-            group: None,
-        }
-    }
-
-    /// The endpoint text.
-    pub fn as_str(&self) -> &str {
-        &self.endpoint
-    }
-}
-
-/// The endpoint list a write carries, groups flattened into their entries.
-/// `heapless` for the same reason as [`EndpointText`]: `BoundedVec::push`
-/// never refuses under `alloc`. The capacity counts entries, so a group of
-/// three takes three.
-pub type ConnectEndpoints = heapless::Vec<ConnectEntry, MAX_STATIC_CONNECT>;
-
-/// R2841 — how many entries of `list` belong to group `index`.
-pub fn group_len(list: &[ConnectEntry], index: u8) -> usize {
-    list.iter()
-        .filter(|e| e.group.map(|g| g.index) == Some(index) && !e.endpoint.is_empty())
-        .count()
-}
+// The list the write fills is not the write's: it is `connect_endpoints`'s, and a node that learns its
+// endpoints some other way holds the same type. The names stay reachable from here.
+pub use crate::connect_endpoints::{
+    group_len, ConnectEndpoints, ConnectEntry, EndpointGroup, EndpointText, LocatorsStrategy,
+};
 
 /// A config write as it arrived: a PUT with its payload, or a DEL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +100,7 @@ pub enum ConnectWriteOutcome {
     Malformed(Json5Error),
     /// More endpoints than [`MAX_STATIC_CONNECT`].
     TooMany,
-    /// One endpoint is longer than [`MAX_LOCATOR_LEN`] bytes.
+    /// One endpoint is longer than [`MAX_LOCATOR_LEN`](crate::caps::MAX_LOCATOR_LEN) bytes.
     EndpointTooLong,
     /// An endpoint is not `<proto>/<address>`.
     NotAnEndpoint,
@@ -575,6 +495,7 @@ fn endpoint_shape_ok(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::MAX_LOCATOR_LEN;
     // `std`, not `alloc`: this module builds without an allocator, and the
     // crate links `std` for tests only (lib.rs).
     use std::format;

@@ -4,8 +4,9 @@
 //! R2830 (§5.23 `adminspace-write`) — the MCU node holds a session with every
 //! endpoint its connection control names, and re-dials the ones that drop.
 //!
-//! [`crate::admin_host::ConnectControl`] is what a host writes; this module is
-//! what makes the write mean something. [`crate::connect_manager::ConnectManager`]
+//! The control is an [`EndpointSource`]: `ConnectControl` (`adminspace-write`) is what a host
+//! writes, `StaticEndpoints` is what an image was built with; this module is
+//! what makes either mean something. [`crate::connect_manager::ConnectManager`]
 //! is ticked by the firmware's main loop. On every tick it
 //!
 //! 1. notices a new generation on the control and reconciles: an endpoint no
@@ -29,12 +30,68 @@
 //! schedule exists to prevent. It is tried again only when the list is
 //! written again, since that is the only event that can change it.
 
-use wz_session_core::admin_connect::{group_len, ConnectEndpoints, ConnectEntry};
 use wz_session_core::bounded::BoundedVec;
-use wz_session_core::caps::MAX_STATIC_CONNECT;
+use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
+use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::retry_period::{RetryPeriod, RetryPolicy};
 
-use crate::admin_host::ConnectControl;
+/// Where a [`ConnectManager`] reads the endpoints it should hold sessions with.
+///
+/// The manager used to read [`crate::admin_host::ConnectControl`] only, the list a host writes at
+/// runtime, which made every node that dials an admin node. A firmware that dials a router it was
+/// built to know has no list to write: it names the endpoints once. Both are sources.
+pub trait EndpointSource {
+    /// The generation of the list, which moves whenever the list does. The manager asks this
+    /// every tick and takes the list only when it has moved, so an idle node copies nothing.
+    fn generation(&self) -> u32;
+
+    /// The list and the generation it was read at.
+    fn endpoints(&self) -> (u32, ConnectEndpoints);
+}
+
+/// Endpoints fixed when the image is built: `udp/192.168.100.1:7447`, once, for the life of the
+/// node. A `static` of this type is checked at compile time (an endpoint over `MAX_LOCATOR_LEN`
+/// bytes, or more than `MAX_STATIC_CONNECT` of them, does not build), so the list the manager
+/// reads can never be the truncation of the one the image was written with.
+pub struct StaticEndpoints {
+    list: &'static [&'static str],
+}
+
+impl StaticEndpoints {
+    /// The endpoints the node holds sessions with, in the order it dials them.
+    pub const fn new(list: &'static [&'static str]) -> Self {
+        assert!(
+            list.len() <= MAX_STATIC_CONNECT,
+            "more endpoints than the node holds rows for"
+        );
+        let mut i = 0;
+        while i < list.len() {
+            assert!(
+                list[i].len() <= MAX_LOCATOR_LEN,
+                "an endpoint longer than a locator row"
+            );
+            i += 1;
+        }
+        Self { list }
+    }
+}
+
+impl EndpointSource for StaticEndpoints {
+    fn generation(&self) -> u32 {
+        0
+    }
+
+    fn endpoints(&self) -> (u32, ConnectEndpoints) {
+        let mut out = ConnectEndpoints::new();
+        for text in self.list {
+            let mut endpoint = EndpointText::new();
+            // `new` checked the length, so neither push can refuse.
+            let _ = endpoint.push_str(text);
+            let _ = out.push(ConnectEntry::single(endpoint));
+        }
+        (0, out)
+    }
+}
 
 /// Why a dial could not even be attempted. Permanent for this endpoint text
 /// in this build, so it is not retried.
@@ -139,9 +196,9 @@ struct Slot<S> {
 /// only be a defect and is hung up and refused rather than grown (`reconcile`).
 type Slots<S> = BoundedVec<Slot<S>, MAX_STATIC_CONNECT>;
 
-/// Keeps a node's sessions in step with its [`ConnectControl`].
+/// Keeps a node's sessions in step with its [`EndpointSource`].
 pub struct ConnectManager<D: Dialer> {
-    control: &'static ConnectControl,
+    control: &'static dyn EndpointSource,
     dialer: D,
     policy: RetryPolicy,
     generation: Option<u32>,
@@ -151,12 +208,16 @@ pub struct ConnectManager<D: Dialer> {
 impl<D: Dialer> ConnectManager<D> {
     /// A manager over `control`, dialling with `dialer`, on upstream's
     /// default retry schedule.
-    pub fn new(control: &'static ConnectControl, dialer: D) -> Self {
+    pub fn new(control: &'static dyn EndpointSource, dialer: D) -> Self {
         Self::with_policy(control, dialer, RetryPolicy::ZENOH_DEFAULT)
     }
 
     /// The same, on an explicit retry schedule.
-    pub fn with_policy(control: &'static ConnectControl, dialer: D, policy: RetryPolicy) -> Self {
+    pub fn with_policy(
+        control: &'static dyn EndpointSource,
+        dialer: D,
+        policy: RetryPolicy,
+    ) -> Self {
         Self {
             control,
             dialer,
@@ -197,8 +258,8 @@ impl<D: Dialer> ConnectManager<D> {
     /// Advance to `now_ms`: reconcile a new list, notice ended sessions, and
     /// dial what is due.
     pub fn tick(&mut self, now_ms: u64) {
-        let (generation, list) = self.control.endpoints();
-        if self.generation != Some(generation) {
+        if self.generation != Some(self.control.generation()) {
+            let (generation, list) = self.control.endpoints();
             self.reconcile(&list, now_ms);
             self.generation = Some(generation);
         }
@@ -320,9 +381,10 @@ impl<D: Dialer> ConnectManager<D> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "adminspace-write"))]
 mod tests {
     use super::*;
+    use crate::admin_host::ConnectControl;
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
