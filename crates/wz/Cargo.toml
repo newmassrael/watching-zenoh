@@ -564,6 +564,13 @@ runtime-coop = [
     "wz-runtime-coop/alloc",
     "wz-runtime-core/alloc",
 ]
+# The runtime tier alone: the cooperative runtime and the traits its links and MACs implement
+# (`wz::runtime_coop`, `wz::runtime_core`), with no link crate. What an image on Zephyr's own
+# sockets names, which has no lwIP to bundle (`runtime-coop-fixed` is this plus lwIP's link tier).
+runtime-coop-core = [
+    "dep:wz-runtime-coop",
+    "dep:wz-runtime-core",
+]
 # S9e — the same runtime and link pair WITHOUT the heap: what a build on the
 # per-session slot profile (`session-slot`) names, so that no crate in its graph
 # carries `alloc` and the toolchain's own check that a program with no allocator
@@ -572,8 +579,7 @@ runtime-coop = [
 # heap, as feature unification says. Alone it has no task pool: it composes with
 # `wz-runtime-coop/session-slot`, which a fixed-memory image names itself.
 runtime-coop-fixed = [
-    "dep:wz-runtime-coop",
-    "dep:wz-runtime-core",
+    "runtime-coop-core",
     # R311az-3a / R311az-3b-ii — runtime-coop pulls the §5.C link tier
     # sibling. The MCU profile bundles runtime + link as a pair:
     # `CoopRuntime` (task pool + cooperative poll) + `LwipUdpSocket`

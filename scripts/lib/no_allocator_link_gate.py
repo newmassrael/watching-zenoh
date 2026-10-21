@@ -461,6 +461,42 @@ IMAGES: dict[str, Image] = {
         ),
         ci=False,
     ),
+    # The client node of the same image on the fixed-memory profile, over Zephyr's sockets
+    # (`CONFIG_WZ_NODE_CLIENT` with `CONFIG_WZ_FIXED_MEMORY`, `overlays/t2g_client_fixed.conf`):
+    # sessions, the driver's receive and send buffers, the observer and the runtime's tables are
+    # statics the staticlib declares, so the Rust side has no allocator and the proof is that no
+    # crate of its graph names `alloc`. The kernel's own heap is the C side's and is measured on the
+    # board, not here. Booted on the T2G kit, which answered 4000 GETs of its two documents.
+    "zephyr-client-fixed": Image(
+        "deploy/zephyr-admin-node/rust/Cargo.toml",
+        "staticlib",
+        "wz-zephyr-admin-node",
+        "gated",
+        (
+            Build(
+                V7EMHF,
+                None,
+                ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver"),
+                env=ZEPHYR_BUILD_VALUES + (("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),),
+                label="cyt4bf-sockets-client-fixed",
+                no_default_features=True,
+            ),
+        ),
+        ci=False,
+    ),
+    # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet
+    # driver and nothing else. It takes the heap form of the Zephyr profile (the crates that carry
+    # the seams name a task pool of their own), and the allocator is the kernel's.
+    "zephyr-pico-compare": Image(
+        "deploy/zephyr-pico-compare/rust/Cargo.toml",
+        "staticlib",
+        "wz-zephyr-pico-compare",
+        "pending",
+        (Build(V7EMHF, env=ZEPHYR_BUILD_VALUES, label="cyt4bf"),),
+        "the comparison image's Rust half takes the heap form of the Zephyr profile and the"
+        " kernel's allocator, as the admin node's heap profile does",
+        ci=False,
+    ),
     "zephyr-app": Image(
         "deploy/zephyr-app/rust/Cargo.toml",
         "staticlib",

@@ -178,7 +178,7 @@ fixed-client = [
     "dep:wz-runtime-coop",
     "dep:wz-runtime-zephyr",
     "wz/platform-zephyr-fixed",
-    "wz/runtime-coop-fixed",
+    "wz/runtime-coop-core",
     "wz-runtime-zephyr/session-slot",
     "wz-runtime-coop/session-slot",
     "wz-session-mcu/client-slot",
