@@ -953,6 +953,33 @@ type LiteralKey<'a> = alloc::borrow::Cow<'a, str>;
 ))]
 type LiteralKey<'a> = &'a str;
 
+/// The text of a responder's keyexpr, whichever form the build holds it in (`Cow` or the borrow
+/// itself): both reach `&str` by deref coercion, so a call site names neither and has no borrow
+/// that is needed in one form and redundant in the other.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+fn key_str<'k>(key: &'k LiteralKey<'_>) -> &'k str {
+    key
+}
+
+/// A borrowed keyexpr as a responder holds it: the `Cow`'s borrow where the build has a heap, the
+/// borrow itself where it has none.
+#[cfg(all(
+    feature = "codec-request",
+    feature = "storage-profile",
+    feature = "alloc"
+))]
+fn literal_key(keyexpr: &str) -> LiteralKey<'_> {
+    alloc::borrow::Cow::Borrowed(keyexpr)
+}
+#[cfg(all(
+    feature = "codec-request",
+    feature = "storage-profile",
+    not(feature = "alloc")
+))]
+fn literal_key(keyexpr: &str) -> LiteralKey<'_> {
+    keyexpr
+}
+
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<'a> QueryResponder<'a> {
     /// R311li — public constructor: the Session-tier deferred queryable
@@ -1005,7 +1032,7 @@ impl<'a> QueryResponder<'a> {
     ) -> Self {
         Self {
             rid,
-            keyexpr_literal: keyexpr.into(),
+            keyexpr_literal: literal_key(keyexpr),
             replies,
             responder: None,
             accept,
@@ -1029,7 +1056,10 @@ impl<'a> QueryResponder<'a> {
     /// that count, and the handler that made the mistake could not.
     fn admit(&self, keyexpr: &str) -> Result<(), ReplyError> {
         if self.accept == ReplyKeyExpr::Any
-            || crate::reply_acceptance::reply_keyexpr_intersects(&self.keyexpr_literal, keyexpr)
+            || crate::reply_acceptance::reply_keyexpr_intersects(
+                key_str(&self.keyexpr_literal),
+                keyexpr,
+            )
         {
             return Ok(());
         }
@@ -1049,7 +1079,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr: &self.keyexpr_literal,
+            keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
             kind: PartsKind::Reply {
@@ -1265,7 +1295,7 @@ impl<'a> QueryResponder<'a> {
     pub fn send_reply_del(&mut self) -> Result<(), ReplyError> {
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr: &self.keyexpr_literal,
+            keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
             kind: PartsKind::Reply {
@@ -1337,7 +1367,7 @@ impl<'a> QueryResponder<'a> {
     ) -> Result<(), ReplyError> {
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr: &self.keyexpr_literal,
+            keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
             kind: PartsKind::Reply {
@@ -1506,7 +1536,7 @@ impl<'a> QueryResponder<'a> {
     ) -> Result<(), ReplyError> {
         self.replies.stage_parts(ReplyParts {
             rid: self.rid,
-            keyexpr: &self.keyexpr_literal,
+            keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
             kind: PartsKind::Err {
@@ -1570,7 +1600,7 @@ impl<'a> QueryResponder<'a> {
     /// effects (e.g. log lines, metrics labels) without having to
     /// re-resolve the inbound Request keyexpr themselves.
     pub fn keyexpr_literal(&self) -> &str {
-        &self.keyexpr_literal
+        key_str(&self.keyexpr_literal)
     }
 
     /// Current responder identity (read-only view). `None` until

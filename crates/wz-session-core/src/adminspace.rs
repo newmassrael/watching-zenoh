@@ -2082,10 +2082,10 @@ impl<'a> PreparedQuery<'a> {
                 // the query to be `a/b` or to continue it, and one that does not is refused
                 // here, by text, without splitting either side. This only refuses what the
                 // chunk rule would refuse; a key that passes is decided by the rule below.
-                KeyShape::Wild { literal_end } if literal_end > 0 => {
-                    if !starts_with_chunks(self.text, &key[..literal_end]) {
-                        return false;
-                    }
+                KeyShape::Wild { literal_end }
+                    if literal_end > 0 && !starts_with_chunks(self.text, &key[..literal_end]) =>
+                {
+                    return false;
                 }
                 _ => {}
             }
