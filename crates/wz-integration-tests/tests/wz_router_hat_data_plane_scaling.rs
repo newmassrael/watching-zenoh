@@ -37,7 +37,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -94,6 +94,9 @@ struct Router {
     port: u16,
     up: Arc<AtomicUsize>,
     down: Arc<AtomicUsize>,
+    /// The router's own DOWN lines (the first few), which name why each face went down; a count
+    /// alone says a face fell and not whether the lease expired, the peer closed, or a write failed.
+    down_lines: Arc<Mutex<Vec<String>>>,
     refused: Arc<AtomicUsize>,
     pushes: Arc<AtomicU64>,
 }
@@ -176,13 +179,15 @@ fn spawn_router(demo: &Path, pin: Option<usize>) -> Router {
 
     let up = Arc::new(AtomicUsize::new(0));
     let down = Arc::new(AtomicUsize::new(0));
+    let down_lines = Arc::new(Mutex::new(Vec::new()));
     let refused = Arc::new(AtomicUsize::new(0));
     let pushes = Arc::new(AtomicU64::new(0));
     let (port_tx, port_rx) = mpsc::channel();
     {
-        let (up, down, refused, pushes) = (
+        let (up, down, down_lines, refused, pushes) = (
             Arc::clone(&up),
             Arc::clone(&down),
+            Arc::clone(&down_lines),
             Arc::clone(&refused),
             Arc::clone(&pushes),
         );
@@ -202,6 +207,11 @@ fn spawn_router(demo: &Path, pin: Option<usize>) -> Router {
                     up.fetch_add(1, Ordering::Relaxed);
                 } else if line.contains(" DOWN (peer ") {
                     down.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut kept) = down_lines.lock() {
+                        if kept.len() < 8 {
+                            kept.push(line.clone());
+                        }
+                    }
                 } else if line.contains("REFUSED") {
                     refused.fetch_add(1, Ordering::Relaxed);
                 } else if let Some(total) = forwarded_pushes(&line) {
@@ -219,6 +229,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>) -> Router {
         port,
         up,
         down,
+        down_lines,
         refused,
         pushes,
     }
@@ -443,9 +454,15 @@ fn measure(scenario: Scenario) -> Window {
     );
     if !churn {
         assert_eq!(
-            window.down, 0,
-            "{} faces went DOWN in a steady window; the run measured a collapse",
-            window.down
+            window.down,
+            0,
+            "{} faces went DOWN in a steady window; the run measured a collapse\n{}",
+            window.down,
+            router
+                .down_lines
+                .lock()
+                .map(|lines| lines.join("\n"))
+                .unwrap_or_default()
         );
     }
     // A starved router is overloaded on purpose, so how much it forwards is the answer there and
