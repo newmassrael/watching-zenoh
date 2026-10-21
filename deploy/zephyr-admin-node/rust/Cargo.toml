@@ -71,9 +71,16 @@ admin-node = [
 # ENDPOINT`. It is what zenoh-pico is when `z_open` is given mode `client` and a queryable is
 # declared, so it is the wz side of a comparison of the two on one board. Built with the defaults
 # off (`CONFIG_WZ_NODE_CLIENT`).
+# Its tables are the fixed backing (`bounded-heapless`, a selector for a final binary): every limit
+# of `caps` a refusal, and the replies staged as rows of an arena and written from their parts, so a
+# reply builds no owned record. Its sessions encode each frame into the buffer their link lends
+# (`transport-tx-lend`; the link allocates it once). What remains of the heap is the node's own: the
+# sessions, the sockets and the sinks it registers.
 client-node = [
     "heap-base",
     "wz-session-mcu/client-node",
+    "wz-session-core/bounded-heapless",
+    "wz-session-core/transport-tx-lend",
 ]
 # The network stack the board's Kconfig chose (`CONFIG_WZ_NET_BACKEND_*`);
 # deploy/zephyr-admin-node/CMakeLists.txt turns exactly one on.
