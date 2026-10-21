@@ -1921,13 +1921,16 @@ jobs:
   # ITS OWN JOB, because it is eight release builds of two cdylibs (each case replaces the
   # previous one's artifact in the same target directory, so they cannot overlap) and no other
   # job owes that time. Measured on the build host, warm: about 70-90 s per case, so ~12 min
-  # cold on a hosted runner, which is the 40% of the 1800 s budget below that this job is
-  # shaped for. It reads a BINARY, so nothing here is cached by key: the rust-cache entry it
-  # reads is the `ci` job's (class `rust-ci`) and it never writes one.
+  # cold on a hosted runner. MEASURED on the hosted runner (runs 39520157857, 39543071425,
+  # 39557807679): 378 s, 384 s and 313 s, which is 17-21% of the 1800 s this job was given and
+  # tripped the margin step's 20% floor ("Nothing failed"). 1200 s puts those at 26-32% and the
+  # cold 12 min at 60%, between the floor and the 90% alarm. It reads a BINARY, so nothing here
+  # is cached by key: the rust-cache entry it reads is the `ci` job's (class `rust-ci`) and it
+  # never writes one.
   capability-cost:
     name: capability cost of the C ABI builds (Layer C1cs)
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Budget stamp — start this job's own clock
         run: date +%s > "$RUNNER_TEMP/wz_job_start"
@@ -1977,7 +1980,7 @@ jobs:
 
       - name: Budget margin — this job's own clock
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1200 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R2165 — the PASSIVE-DISSECTION job, peeled off `feature-gates` when that
