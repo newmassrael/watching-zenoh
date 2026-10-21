@@ -515,6 +515,35 @@ def submodule_pins() -> dict[str, str]:
     return pins
 
 
+PIN_GET = re.compile(r"\$\(pin_get (\w+)\)")
+
+
+def pin_file_value(script: str, text: str, value: str) -> str:
+    """`value` with a `$(pin_get KEY)` default resolved through the script's pin file.
+
+    A script whose version default is `$(pin_get KEY)` keeps the pin in a data file
+    (`install-zenoh-c.sh` and `scripts/zenoh-c-oracle.pin`) so that a host with no bash reads
+    the same line. Left unresolved the default is the placeholder text itself, which the
+    release-distance check then looks up as if it were a tag: the pin dropped out of every
+    gate that derives the live pins, silently. The file is the one the script names in its own
+    `PIN_FILE=` line, beside the script. A key the file does not hold leaves the placeholder
+    in place, which is loud downstream rather than a quiet empty answer.
+    """
+    got = PIN_GET.fullmatch(value)
+    named = re.search(r'^PIN_FILE=.*?/([\w.-]+\.pin)"', text, re.M)
+    if not got or not named:
+        return value
+    try:
+        lines = (ROOT / script).parent.joinpath(named.group(1)).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return value
+    prefix = got.group(1) + "="
+    for line in lines:
+        if line.startswith(prefix) and line[len(prefix):]:
+            return line[len(prefix):]
+    return value
+
+
 def script_pins(paths: list[str]) -> dict[str, str]:
     """`url -> pinned ref`, from a `git clone` whose ref is a shell/YAML variable.
 
@@ -537,6 +566,7 @@ def script_pins(paths: list[str]) -> dict[str, str]:
         joined = text.replace("\\\n", " ")
         defaults = dict(re.findall(r'(\w+)="\$\{\1:-([^}"]+)\}"', joined))
         defaults.update(dict(re.findall(r"^\s*(\w+):\s*([0-9a-zA-Z._-]+)\s*$", joined, re.M)))
+        defaults = {k: pin_file_value(path, joined, v) for k, v in defaults.items()}
         for clone in re.findall(r"git\s+clone[^\n]*", joined):
             urls = re.findall(r"(?:https://|git@)\S+", clone)
             if not urls:
@@ -857,6 +887,20 @@ def selftest() -> int:
         if got != want:
             bad += 1
             print(f"  selftest FAIL: judge({pin!r}, {tags!r}) = {got}, want {want}")
+
+    # A pin kept in a data file is a pin: the installer's default is `$(pin_get KEY)`, and the
+    # derived ref must be the file's version, not that placeholder.
+    pin_text = (ROOT / "scripts" / "zenoh-c-oracle.pin").read_text(encoding="utf-8")
+    want_version = next(
+        line.split("=", 1)[1] for line in pin_text.splitlines() if line.startswith("ZENOH_C_VERSION=")
+    )
+    derived = script_pins(["scripts/install-zenoh-c.sh"])
+    if list(derived.values()) != [want_version]:
+        bad += 1
+        print(f"  selftest FAIL: the installer's pin derives {derived}, want [{want_version!r}]")
+    if pin_file_value("scripts/install-zenoh-c.sh", "no PIN_FILE line here", "$(pin_get X)") != "$(pin_get X)":
+        bad += 1
+        print("  selftest FAIL: a script that names no pin file resolved a placeholder anyway")
 
     # R2521 (open-debt item 711) — THE THRESHOLD IS GRADED, not merely declared.
     #

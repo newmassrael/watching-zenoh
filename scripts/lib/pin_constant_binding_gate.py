@@ -137,6 +137,20 @@ def ssot_names(texts: dict[str, str]) -> set[str]:
     }
 
 
+def pin_file_names() -> set[str]:
+    """Basenames of the tracked `scripts/*.pin` files: a pin kept as DATA.
+
+    `scripts/zenoh-c-oracle.pin` is the declaration of the zenoh-c pin, and a host with no bash
+    reads it directly, so it is a SSOT exactly as a script's `VAR="${VAR:-x}"` default is. A
+    reader of it is bound by the same test: it must READ the file, not name it.
+    """
+    return {
+        pathlib.PurePosixPath(rel).name
+        for rel in urd.tracked_paths()
+        if rel.startswith("scripts/") and rel.endswith(".pin")
+    }
+
+
 def reads_a_pin(text: str, ssots: set[str]) -> bool:
     """Does this module obtain a pin, rather than merely mention one?
 
@@ -148,16 +162,23 @@ def reads_a_pin(text: str, ssots: set[str]) -> bool:
         tree = ast.parse(text)
     except SyntaxError:
         return False
-    # Module-level `NAME = "some/path.sh"` bindings, so a read spelled through
-    # a constant resolves the same as one spelled inline.
-    consts = {
-        t.id: node.value.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-        and isinstance(node.value.value, str)
-        for t in node.targets
-        if isinstance(t, ast.Name)
-    }
+    # `NAME = "some/path.sh"` and `NAME = ROOT / "scripts" / "x.pin"` bindings, so a
+    # read spelled through a constant resolves the same as one spelled inline. The
+    # path form is built with `/`, so every string inside the assigned expression
+    # counts, not only a bare literal.
+    consts: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        strings = [
+            n.value for n in ast.walk(node.value)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        ]
+        if not strings:
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                consts[t.id] = " ".join(strings)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -242,8 +263,9 @@ def classify_sh(path: str, text: str, literals: list[str]) -> list[Site]:
     return out
 
 
-def classify(texts: dict[str, str], literals: list[str]) -> list[Site]:
-    ssots = ssot_names(texts)
+def classify(texts: dict[str, str], literals: list[str],
+             data_ssots: frozenset[str] = frozenset()) -> list[Site]:
+    ssots = ssot_names(texts) | set(data_ssots)
     sites: list[Site] = []
     for path in sorted(texts):
         text = texts[path]
@@ -317,7 +339,7 @@ def check() -> int:
         )
         return 1
     texts = tree_texts(literals)
-    sites = classify(texts, literals)
+    sites = classify(texts, literals, frozenset(pin_file_names()))
     rc, lines = report(sites, literals, len(texts))
     for ln in lines:
         print(ln, file=sys.stderr if rc else sys.stdout)
@@ -367,6 +389,30 @@ def selftest() -> int:
     want("a file that reads the SSOT is bound", kinds("reading.py", reading), [BOUND])
     want("naming the SSOT in a message is NOT reading it",
          kinds("naming.py", naming), [UNBOUND])
+
+    # A pin kept as a DATA file is a SSOT too: reading it through a path constant binds, naming
+    # it in a message does not, and without the file declared the same read binds nothing.
+    data = frozenset({"fake-oracle.pin"})
+    data_reading = (
+        f'PIN = "{FAKE}"\n'
+        'PIN_FILE = ROOT / "scripts" / "fake-oracle.pin"\n'
+        "def arm():\n"
+        "    return PIN_FILE.read_text()\n"
+    )
+    data_naming = (
+        f'PIN = "{FAKE}"\n'
+        "def arm():\n"
+        "    return 'see scripts/fake-oracle.pin'\n"
+    )
+
+    def data_kinds(body: str, declared: frozenset[str]) -> list[str]:
+        return [s.kind for s in classify({"scripts/lib/d.py": body}, [FAKE], declared)]
+
+    want("a read of a pin data file through a path constant is bound",
+         data_kinds(data_reading, data), [BOUND])
+    want("naming a pin data file is NOT reading it", data_kinds(data_naming, data), [UNBOUND])
+    want("a data file nobody declared binds nothing",
+         data_kinds(data_reading, frozenset()), [UNBOUND])
 
     # The shared deriver is the other legitimate binding.
     via = f'PIN = "{FAKE}"\ndef arm():\n    return urd.script_pins(urd.tracked_paths())\n'
