@@ -1236,19 +1236,14 @@ fn lend_request(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    // The decoded record is over a kilobyte (its extension vectors are inline), so it is read
-    // where `decode` left it: through a reference to the `Result`, not moved out of it by
-    // `map_err(..)?` or by a binding, each of which is a copy of the record per query.
-    let decoded = wz_codecs::request::Request::decode(cursor);
-    let Ok(request) = &decoded else {
-        return Err(crate::parse_error::InboundParseError::Codec(
-            decoded
-                .err()
-                .expect("not Ok, or the let-else would have bound it"),
-        ));
-    };
-    admit_lent(request_view_admission(request))?;
-    each(WalkedRecord::Request(request))
+    // The decoded record is over a kilobyte (its extension vectors are inline), so it is decoded
+    // into the binding that lends it: `decode` returns it, and every hop a returned record takes
+    // (the `Ok(..)`, the caller's binding) is a copy of the whole record per query.
+    let mut request = wz_codecs::request::Request::default();
+    wz_codecs::request::Request::decode_into(cursor, &mut request)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(request_view_admission(&request))?;
+    each(WalkedRecord::Request(&request))
 }
 
 #[cfg(all(
@@ -1265,16 +1260,11 @@ fn lend_response(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    let decoded = wz_codecs::response::Response::decode(cursor);
-    let Ok(response) = &decoded else {
-        return Err(crate::parse_error::InboundParseError::Codec(
-            decoded
-                .err()
-                .expect("not Ok, or the let-else would have bound it"),
-        ));
-    };
-    admit_lent(response_view_admission(response))?;
-    each(WalkedRecord::Response(response))
+    let mut response = wz_codecs::response::Response::default();
+    wz_codecs::response::Response::decode_into(cursor, &mut response)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    admit_lent(response_view_admission(&response))?;
+    each(WalkedRecord::Response(&response))
 }
 
 /// Whether the walk goes on after a lent record: the record was one of a run

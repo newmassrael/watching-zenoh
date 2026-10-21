@@ -408,9 +408,11 @@ pub(crate) fn request_body(
     request: &RequestOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
-        let projected = request.try_as_borrowed();
-        match &projected {
-            Ok(borrowed) => borrowed.encode(sink),
+        // Projected into a binding of this frame's own: `try_as_borrowed` returns the record
+        // (over a kilobyte, its extension vectors inline) and each hop it takes is a copy of it.
+        let mut borrowed = Request::default();
+        match request.try_as_borrowed_into(&mut borrowed) {
+            Ok(()) => borrowed.encode(sink),
             Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
         }
     }
@@ -426,9 +428,9 @@ pub(crate) fn response_body(
     response: &ResponseOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
-        let projected = response.try_as_borrowed();
-        match &projected {
-            Ok(borrowed) => borrowed.encode(sink),
+        let mut borrowed = Response::default();
+        match response.try_as_borrowed_into(&mut borrowed) {
+            Ok(()) => borrowed.encode(sink),
             Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
         }
     }
@@ -444,9 +446,9 @@ pub(crate) fn response_final_body(
     response_final: &ResponseFinalOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
-        let projected = response_final.try_as_borrowed();
-        match &projected {
-            Ok(borrowed) => borrowed.encode(sink),
+        let mut borrowed = ResponseFinal::default();
+        match response_final.try_as_borrowed_into(&mut borrowed) {
+            Ok(()) => borrowed.encode(sink),
             Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
         }
     }
