@@ -587,8 +587,16 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
 /// not deeper than the backing holds), which are the two refusals the walk makes before it
 /// compares anything.
 pub fn keyexpr_intersects_text(candidate: &str, target: &str) -> bool {
-    if !is_wild(candidate) && !is_wild(target) {
-        return candidate == target && text_is_a_key(target);
+    // Same text first: a candidate of another length is told apart from the target at once, and
+    // when they are the same text one look for a wildcard answers for both.
+    let same = candidate == target;
+    let wild = if same {
+        has_star(candidate)
+    } else {
+        has_star(candidate) || has_star(target)
+    };
+    if !wild {
+        return same && text_is_a_key(target);
     }
     // No-alloc backing: a target deeper than the declared bound cannot be represented, so it is
     // conservatively no-match (the alloc backing never takes this arm).
@@ -597,6 +605,12 @@ pub fn keyexpr_intersects_text(candidate: &str, target: &str) -> bool {
         return false;
     }
     keyexpr_intersects_target(candidate, &target_chunks)
+}
+
+/// [`is_wild`] for a caller that is not in a `const` context: the slice search reads a word at a
+/// time, where the `const` loop reads a byte.
+fn has_star(text: &str) -> bool {
+    text.as_bytes().contains(&b'*')
 }
 
 /// Whether `text` splits into chunks the matchers accept: none empty (so not the empty text, not
