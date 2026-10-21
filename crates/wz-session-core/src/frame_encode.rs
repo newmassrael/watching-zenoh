@@ -315,10 +315,15 @@ where
 pub(crate) fn push_body(
     push: &PushOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
+    // Read through a reference to the projection: `Result::expect` moves the borrowed record out
+    // of its `Result`, and the record is a kilobyte (its extension vectors are inline), a copy
+    // of it per message that nothing needs.
     move |sink| {
-        push.try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
+        let projected = push.try_as_borrowed();
+        match &projected {
+            Ok(borrowed) => borrowed.encode(sink),
+            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
+        }
     }
 }
 
@@ -403,10 +408,11 @@ pub(crate) fn request_body(
     request: &RequestOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
-        request
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
+        let projected = request.try_as_borrowed();
+        match &projected {
+            Ok(borrowed) => borrowed.encode(sink),
+            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
+        }
     }
 }
 
@@ -420,10 +426,11 @@ pub(crate) fn response_body(
     response: &ResponseOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
-        response
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
+        let projected = response.try_as_borrowed();
+        match &projected {
+            Ok(borrowed) => borrowed.encode(sink),
+            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
+        }
     }
 }
 
@@ -437,10 +444,11 @@ pub(crate) fn response_final_body(
     response_final: &ResponseFinalOwned,
 ) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
-        response_final
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
+        let projected = response_final.try_as_borrowed();
+        match &projected {
+            Ok(borrowed) => borrowed.encode(sink),
+            Err(e) => panic!("wz builders emit <=N exts by construction: {e:?}"),
+        }
     }
 }
 
