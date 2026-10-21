@@ -64,9 +64,9 @@ const SESSIONS: usize = 1;
 /// The runtime's task table: a pump task per session, with room beside it.
 const TASKS: usize = SESSIONS + 1;
 /// Bytes of one task cell: the pump's handle and the application layer's state. The layer is a
-/// few pointers, because a node that asks nothing keeps no table of requests (`Requests`), and
-/// an `async fn` holds a by-value argument twice; the cell is sized well past that, and a task
-/// the cell could not hold is refused and counted rather than run.
+/// few pointers, because a node that asks nothing keeps no table of requests (`Requests`, with the
+/// pending-query limits at 0), and an `async fn` holds a by-value argument twice; the cell is sized
+/// well past that, and a task the cell could not hold is refused and counted rather than run.
 const TASK_BYTES: usize = 1024;
 /// Timers the runtime holds: the handshake and lease deadlines of the session.
 const TIMERS: usize = 4;
@@ -83,9 +83,10 @@ const TX: usize = BATCH_SIZE as usize;
 const ADDRESS_WAIT_MS: u32 = 30_000;
 
 type Clock = ZephyrClock<TICK_HZ>;
-/// The requests a session of this node holds: none. It answers queries and asks none, so it keeps
-/// no table of pending gets, and the application layer its task holds is a few pointers.
-type Requests = Requesters<NoReplies, NoReplies, 0, 0>;
+/// The requests a session of this node holds: as many as the image's limits say, and the overlay of
+/// this node (`overlays/t2g_client_fixed.conf`) says none. It answers queries and asks none, so it
+/// keeps no table of pending gets, and the application layer its task holds is a few pointers.
+type Requests = Requesters<NoReplies, NoReplies>;
 type Driver = FixedUdpDriver;
 type Stack = ZephyrStack;
 
@@ -187,7 +188,7 @@ struct Factory {
 
 impl SessionFactory<Clock> for Factory {
     type Entropy = ZephyrEntropy;
-    type Events = SlotDispatch<Clock, NoReplies, NoReplies, DocumentSinks, 0, 0>;
+    type Events = SlotDispatch<Clock, NoReplies, NoReplies, DocumentSinks>;
 
     fn entropy(&mut self) -> ZephyrEntropy {
         ZephyrEntropy

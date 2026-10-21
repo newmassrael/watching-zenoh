@@ -1,0 +1,261 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# GENERATED from crates/wz-session-core/src/caps.rs by scripts/lib/limit_config.py --emit-kconfig.
+# Do not edit: `limit_config.py --check` fails when this file is stale.
+
+menu "wz limits"
+
+comment "Each limit sizes a table of every session of the image; a build states its own."
+
+config WZ_LIMIT_MAX_KEYEXPR_BYTES
+	int "MAX_KEYEXPR_BYTES"
+	default 256
+	help
+	  Maximum byte length of a canonicalized keyexpr stored by a registry
+	  (subscription pattern, resolved peer mapping). Bounds
+	  [`crate::keyexpr_canon::canonize_keyexpr`]'s output buffer on the
+	  no-alloc backing; a pattern whose canonical form exceeds this is
+	  rejected with [`crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity`]
+	  rather than silently truncated.
+
+config WZ_LIMIT_MAX_SUBSCRIPTIONS
+	int "MAX_SUBSCRIPTIONS"
+	default 16
+	help
+	  Maximum number of concurrently-registered local subscriptions in a
+	  [`crate::pubsub::SubscriberRegistry`]. Bounds the registry's
+	  subscriber table on the no-alloc backing; a `register` past this is
+	  rejected (`RegisterError::TableFull`) rather than growing the table.
+
+config WZ_LIMIT_MAX_QUERYABLES
+	int "MAX_QUERYABLES"
+	default 16
+	help
+	  Maximum number of concurrently-registered local queryables in a
+	  [`crate::query::QueryableRegistry`]. Bounds the registry's queryable
+	  table on the no-alloc backing; a `register` past this is rejected
+	  (`RegisterError::TableFull`) rather than growing the table.
+
+config WZ_LIMIT_MAX_PENDING_QUERIES
+	int "MAX_PENDING_QUERIES"
+	default 16
+	help
+	  Maximum number of concurrently-outstanding pending z_get queries in a
+	  [`crate::reply::ReplyRegistry`]. Bounds the registry's pending table
+	  on the no-alloc backing; a `register` past this is rejected
+	  (`RegisterError::TableFull`) rather than growing the table. Also
+	  bounds the `keep` / `fired` partitions the no-alloc `fire_final_for` /
+	  `sweep_timed_out` build on the stack.
+
+config WZ_LIMIT_MAX_DECL_OBSERVERS
+	int "MAX_DECL_OBSERVERS"
+	default 8
+	help
+	  Maximum number of installed declaration observers per list
+	  (`on_decl` / `on_undecl`) in each of the remote-declaration
+	  registries ([`crate::declare::subscriber::RemoteSubscriberRegistry`],
+	  [`crate::declare::queryable::RemoteQueryableRegistry`],
+	  [`crate::declare::liveliness::LivelinessRegistry`]). Bounds each
+	  observer list on the no-alloc backing; an `on_*_declared_sink` past
+	  this is rejected (`RegisterError::TableFull`) rather than
+	  growing the list. Observers are installed once at startup, so the
+	  default is small.
+
+config WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS
+	int "MAX_LIVELINESS_SUBSCRIPTIONS"
+	default 8
+	help
+	  Maximum number of concurrently-registered liveliness-subscriber
+	  interest slots in a
+	  [`crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry`].
+	  Bounds the registry's slot table on the no-alloc backing; a `register`
+	  past this is rejected rather than growing the table.
+
+config WZ_LIMIT_MAX_LOCAL_TOKENS
+	int "MAX_LOCAL_TOKENS"
+	default 8
+	help
+	  Maximum number of liveliness tokens wz itself can declare and hold
+	  concurrently in a [`crate::declare::local_token::LocalTokenRegistry`]
+	  (the declarer-side mirror of [`MAX_LIVELINESS_SUBSCRIPTIONS`]). Bounds
+	  the registry's token table on the no-alloc backing; a `register` past
+	  this is rejected (`RegisterError::TableFull`) rather than growing the
+	  table. R311hn (Track 2, Decision 2 no-heap emit) — was an unbounded
+	  `HashMap` on the prior alloc-only backing.
+
+config WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS
+	int "MAX_PENDING_LIVELINESS_GETS"
+	default 8
+	help
+	  Maximum number of concurrently-outstanding pending liveliness GET
+	  (snapshot) queries in a
+	  [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the
+	  registry's pending table on the no-alloc backing; a `register` past
+	  this is rejected (`RegisterError::TableFull`) rather than growing the
+	  table. Also bounds the `keep` / `fired` partitions the no-alloc
+	  `dispatch_final` / `sweep_timed_out` build on the stack. A liveliness
+	  snapshot get is short-lived (one CURRENT Interest, drained on the
+	  terminating `Declare(DeclFinal)`), so few are outstanding at once;
+	  the default mirrors [`MAX_LIVELINESS_SUBSCRIPTIONS`].
+
+config WZ_LIMIT_MAX_PENDING_DECLARES
+	int "MAX_PENDING_DECLARES"
+	default 32
+	help
+	  Maximum number of [`crate::declare::local_token::DeclResponseItem`]
+	  records the application-layer observer stages for one drain cycle
+	  (the declarer-side liveliness interest-response buffer). One inbound
+	  CURRENT Interest stages up to [`MAX_LOCAL_TOKENS`] `DeclToken` items
+	  plus one `DeclFinal` — 9 items per chain. R311hn (Track 2) — replaces
+	  the prior unbounded `Vec<DeclareOwned>` staging.
+
+config WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS
+	int "MAX_INBOUND_SUB_INTERESTS"
+	default 16
+	help
+	  Maximum number of inbound SUBSCRIBER `Interest`s one
+	  [`crate::pubsub::SubscriberRegistry`] remembers — zenoh's per-face
+	  `remote-interests` table, session-local half.
+
+config WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES
+	int "MAX_PEER_KEYEXPR_ALIASES"
+	default 16
+	help
+	  Maximum number of keyexpr aliases ONE peer may have declared to this session
+	  at a time (`DeclKexpr.id -> keyexpr`, the deploy `limits` key
+	  `peer_keyexpr_aliases`). Bounds [`crate::id_map::PeerAliases`] on the fixed
+	  backing: a `DeclKexpr` for a NEW id with the table full is refused and
+	  counted, the alias is not recorded, and a later reference to it resolves to
+	  nothing (the message naming it is dropped, as one naming an undeclared id
+	  always was) rather than growing a table the peer controls.
+
+config WZ_LIMIT_MAX_REMOTE_DECLS
+	int "MAX_REMOTE_DECLS"
+	default 16
+	help
+	  Maximum number of declarations of ONE kind (subscribers, queryables, liveliness
+	  tokens) a peer may hold open to this session at a time (the deploy `limits`
+	  key `remote_decls`). Bounds each of [`crate::id_map::DeclaredKeys`] and
+	  [`crate::id_map::DeclaredQueryables`] on the fixed backing: a `Decl*` for a NEW
+	  id with its table full is refused and counted and is not announced to the
+	  application, as one whose keyexpr does not resolve never was.
+
+config WZ_LIMIT_MAX_PENDING_REPLIES
+	int "MAX_PENDING_REPLIES"
+	default 8
+	help
+	  Maximum number of data replies a queryable's handlers may have staged for ONE
+	  session between two drains (the deploy `limits` key `pending_replies`). On the
+	  fixed backing a reply past it is refused with
+	  [`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
+	  made it is told, and nothing is built on the heap in its place.
+
+config WZ_LIMIT_MAX_PENDING_FINALS
+	int "MAX_PENDING_FINALS"
+	default 8
+	help
+	  Maximum number of `ResponseFinal`s ONE session may owe between two drains (the
+	  deploy `limits` key `pending_finals`). A Request that would need a Final the
+	  table cannot hold is refused BEFORE its queryables run, and counted: a query
+	  that cannot be terminated is not answered, because a reply with no `Final`
+	  after it leaves the peer's `get` open until its own timeout.
+
+config WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES
+	int "MAX_REPLY_PAYLOAD_BYTES"
+	default 1024
+	help
+	  Maximum byte length of the payload of ONE staged reply, and the bytes of an
+	  attachment it carries beside it (the deploy `limits` key
+	  `reply_payload_bytes`). A reply that does not fit is refused with
+	  [`crate::query_sink::ReplyError::PayloadTooLarge`], never truncated.
+
+config WZ_LIMIT_MAX_ADMIN_REPLY_BYTES
+	int "MAX_ADMIN_REPLY_BYTES"
+	default 1024
+	help
+	  Maximum byte length of ONE admin reply body (the deploy
+	  `session_pool.process.admin_reply_bytes` key): the buffer every admin leg is
+	  written into before it is handed to the session's reply stage
+	  (`admin_reply::AdminReplyArena`, under `adminspace-core`). A body that does not
+	  fit is refused, counted, and answered to the querier as a typed error; it is
+	  never cut short.
+
+config WZ_LIMIT_MAX_ADMIN_LOCATORS
+	int "MAX_ADMIN_LOCATORS"
+	default 4
+	help
+	  Maximum number of listening locators a node with no allocator reports in its
+	  admin `local_data` (the deploy `session_pool.process.admin_locators` key). The
+	  node's identity holds that many locator rows of [`MAX_LOCATOR_LEN`] bytes; one
+	  more is refused when the identity is built, never dropped.
+
+config WZ_LIMIT_MAX_ADMIN_SESSION_LINKS
+	int "MAX_ADMIN_SESSION_LINKS"
+	default 2
+	help
+	  Maximum number of links one admin `sessions[]` row lists (the deploy
+	  `session_pool.process.admin_session_links` key). A unicast transport has one;
+	  the number covers a session that holds a second. A row with more links than this
+	  is refused and counted, not listed in part.
+
+config WZ_LIMIT_MAX_MULTICAST_REPLIES
+	int "MAX_MULTICAST_REPLIES"
+	default 8
+	help
+	  Maximum number of replies a multicast pump of a node with no allocator holds
+	  between the observer that stages one and the loop that frames and sends it (the
+	  deploy `session_pool.process.multicast_replies` key). A reply past it is dropped and
+	  counted by the queue (`wz_session_lwip::multicast_drive::MulticastReplyQueue`),
+	  never queued without bound: multicast to a group is best effort, and a querier
+	  whose reply was dropped asks again.
+
+config WZ_LIMIT_MAX_TASKS
+	int "MAX_TASKS"
+	default 8
+	help
+	  The most tasks a fixed-memory machine's runtime may hold (the deploy
+	  `session_pool.process.max_tasks` key): a CEILING on the task table an image
+	  declares for itself (`RuntimeCell`'s `TASKS`), not the size of that table. An
+	  image's table is the pump per session it holds and room beside them, so it is
+	  smaller than this; the images assert `TASKS <= MAX_TASKS` at compile time, and
+	  a host test holds this number equal to the deploy file's, so a deploy file that
+	  raises the ceiling and an image that outgrows it are each a red build.
+
+config WZ_LIMIT_MAX_TIMERS
+	int "MAX_TIMERS"
+	default 16
+	help
+	  The most timers a fixed-memory machine's runtime may hold (the deploy
+	  `session_pool.process.max_timers` key): the ceiling on an image's `RuntimeCell`
+	  `TIMERS`, held the same way as [`MAX_TASKS`].
+
+config WZ_LIMIT_MAX_LOCATOR_LEN
+	int "MAX_LOCATOR_LEN"
+	default 64
+	help
+	  Maximum byte length of one static-scouting peer locator string
+	  (`deploy.connect[]` entry, e.g. `"udp/192.168.1.10:7447"`). Bounds the
+	  [`crate::bounded::BoundedString`] each
+	  [`crate::scout_static::synth_static_locators`] entry is built into on
+	  the no-alloc backing; a configured locator longer than this is rejected
+	  (skipped) rather than truncated. Matches the conservative per-locator
+	  length the scouting Hello sizing uses (docs/scouting-fsm.md §2.6,
+	  "per-locator length of 64 bytes") — long enough for an `ipv6` locator
+	  with a `proto/` prefix and port, with margin.
+
+config WZ_LIMIT_MAX_STATIC_CONNECT
+	int "MAX_STATIC_CONNECT"
+	default 8
+	help
+	  Maximum number of static-scouting peer locators
+	  ([`crate::scout_static::synth_static_locators`] output capacity =
+	  `deploy.connect[]` length). Bounds the no-alloc synthesis on the MCU
+	  backing; a `connect[]` longer than this stops at the cap (a future
+	  `deploy.yaml` -> caps codegen step enforces the bound at build time, the
+	  same hard-error model as docs/scouting-fsm.md §2.6 hello_max_peers).
+	  Mirrors the MCU `hello_max_peers` discovery capacity (deploy
+	  `mcu_target.yaml:263 = 8`): a static deploy is a small fixed peer set
+	  (e.g. one AP for a fixed AP<->MCU pair), so few configured locators.
+
+endmenu

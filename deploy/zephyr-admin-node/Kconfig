@@ -5,6 +5,7 @@ mainmenu "wz Zephyr admin node"
 
 rsource "../zephyr-common/Kconfig.wz"
 rsource "../zephyr-eth-wzmac/Kconfig.zeth"
+rsource "../Kconfig.limits"
 
 choice WZ_NET_BACKEND
 	prompt "Network stack the admin node runs over"

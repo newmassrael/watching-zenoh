@@ -117,6 +117,18 @@ function(wz_zephyr_rust_app)
     list(APPEND cargo_features --features ${joined})
   endif()
 
+  # The limits the image states for itself (deploy/Kconfig.limits): every CONFIG_WZ_LIMIT_<NAME>
+  # of the build's Kconfig becomes WZ_LIMIT_<NAME> in the cargo build's environment, where
+  # wz-session-core's caps.rs reads it. An application whose Kconfig does not include the limits
+  # has none, and its crates are sized by their defaults.
+  set(wz_limit_env "")
+  get_cmake_property(wz_all_variables VARIABLES)
+  foreach(wz_variable ${wz_all_variables})
+    if(wz_variable MATCHES "^CONFIG_WZ_LIMIT_(.+)$")
+      list(APPEND wz_limit_env "WZ_LIMIT_${CMAKE_MATCH_1}=${${wz_variable}}")
+    endif()
+  endforeach()
+
   # Always-run (ALL + no OUTPUT) so Rust source edits are picked up; cargo's own
   # incremental check keeps the no-change case cheap. BYPRODUCTS registers the
   # archive as this target's product so ninja can depend on it. The environment
@@ -127,6 +139,7 @@ function(wz_zephyr_rust_app)
     COMMAND ${CMAKE_COMMAND} -E env
             WZ_TICKS_PER_SEC=${CONFIG_SYS_CLOCK_TICKS_PER_SEC}
             WZ_CORE_CLOCK_HZ=${CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC}
+            ${wz_limit_env}
             ${WZ_CARGO_ENV}
             cargo build --release --target ${rust_target}
             --manifest-path ${WZ_RUST_DIR}/Cargo.toml ${cargo_features}

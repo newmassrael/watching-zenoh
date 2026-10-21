@@ -3240,6 +3240,10 @@ layer_c0_test_discipline() {
     # Kconfig selection derives the very features the size gate above grades.
     python3 scripts/lib/capability_config.py --selftest || return 1
     python3 scripts/lib/capability_config.py --check || return 1
+    # The limits an image can state for itself are declared once, as the rows of caps.rs; the
+    # Kconfig that offers them is derived from those rows and held to them.
+    python3 scripts/lib/limit_config.py --selftest || return 1
+    python3 scripts/lib/limit_config.py --check || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.
