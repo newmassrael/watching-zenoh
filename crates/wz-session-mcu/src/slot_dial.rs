@@ -17,9 +17,8 @@
 
 use core::cell::{Cell, RefCell};
 
-use wz_runtime_coop::session_drive::{
-    LinkOpenError, SessionDriveConfig, SessionRole, SlotStack, UdpPeer,
-};
+pub use wz_runtime_coop::session_drive::Bind;
+use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle};
 use wz_session_core::close_reason::CloseReason;
@@ -120,15 +119,6 @@ impl<C: ClockSource + 'static> SlotSession<C> {
     pub fn task(&self) -> &CoopLocalJoinHandle<DriverOutcome> {
         &self.opened.task
     }
-}
-
-/// How a stack opens the driver of a dial: a socket on a port it picks, with replies and first
-/// sends going to `peer`. The socket comes out of whatever the stack keeps for it (lwIP's pool the
-/// image declared; Zephyr's descriptors), and a stack with none left answers
-/// [`LinkOpenError::Exhausted`].
-pub trait Bind<D> {
-    /// The driver of a link that dials `peer`.
-    fn bind(&mut self, peer: UdpPeer) -> Result<D, LinkOpenError>;
 }
 
 /// The [`Dialer`] of the slot profile over the session host of a stack `T`, binding its sockets

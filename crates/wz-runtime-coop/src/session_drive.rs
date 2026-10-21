@@ -924,6 +924,16 @@ pub trait SlotStack: 'static {
     ) -> Self::Pump;
 }
 
+/// How a stack opens the driver of a dial: a socket on a port it picks, with replies and first
+/// sends going to `peer`. The socket comes out of whatever the stack keeps for it (lwIP's pool the
+/// image declared; Zephyr's descriptors), and a stack with none left answers
+/// [`LinkOpenError::Exhausted`]. Written beside [`SlotStack`] for the reason that one is.
+#[cfg(feature = "session-slot")]
+pub trait Bind<D> {
+    /// The driver of a link that dials `peer`.
+    fn bind(&mut self, peer: UdpPeer) -> Result<D, LinkOpenError>;
+}
+
 /// The pump of a stack whose driver is itself the datagram link: the drive loop's calls go to
 /// the driver in the slot, through the handle that keeps the slot for as long as the loop
 /// reads. What a stack with no input path of its own to advance (Zephyr's sockets: the kernel's

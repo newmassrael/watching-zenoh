@@ -34,7 +34,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use wz_runtime_coop::group_transport::GroupTransport;
 use wz_runtime_coop::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
-use wz_runtime_coop::session_drive::{DriverPump, LinkOpenError, SlotStack, UdpPeer};
+use wz_runtime_coop::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack, UdpPeer};
 use wz_session_core::caps::MAX_LOCATOR_LEN;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
@@ -678,6 +678,7 @@ impl<B: AsMut<[u8]> + 'static> SessionDatagramLink for UdpDriver<B> {
 /// descriptor the kernel cannot give is the dial's [`LinkOpenError::Exhausted`], and the
 /// session host's tables bound how many are open at once.
 #[cfg(feature = "session-slot")]
+#[derive(Debug, Clone, Copy)]
 pub struct ZephyrStack<const RX: usize> {
     local: [u8; 4],
 }
@@ -698,6 +699,13 @@ impl<const RX: usize> ZephyrStack<RX> {
             (peer.addr, peer.port),
             [0u8; RX],
         ))
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<const RX: usize> Bind<FixedUdpDriver<RX>> for ZephyrStack<RX> {
+    fn bind(&mut self, peer: UdpPeer) -> Result<FixedUdpDriver<RX>, LinkOpenError> {
+        self.bind_initiator(peer)
     }
 }
 
