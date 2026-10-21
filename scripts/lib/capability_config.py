@@ -45,10 +45,13 @@ Usage:
 
 from __future__ import annotations
 
+import functools
+import importlib
+import json
 import pathlib
 import re
+import subprocess
 import sys
-import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DECL = ROOT / "deploy" / "capabilities.toml"
@@ -61,8 +64,48 @@ MANIFESTS = {
 ABIS = ("core", "pico", "c")
 
 
+def read_decl_toml(text: str) -> dict:
+    """The declaration file's TOML, read without `tomllib`.
+
+    `tomllib` is stdlib from python 3.11 and the hosted floor is 3.10, so importing it here
+    died in Layer C0 on the first hosted run. The declaration uses one small shape and this
+    reads exactly that: `[table]` and `[[array of tables]]` headers, and `key = "string"` or
+    `key = ["string", ...]` on ONE line, with `#` comments on lines of their own. Anything else
+    is refused by line number rather than skipped, so the file cannot grow a shape this reader
+    silently drops. `--selftest` holds it to `tomllib` wherever the interpreter has one.
+    """
+    root: dict = {}
+    table = root
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        header = re.fullmatch(r"\[\[([A-Za-z0-9_-]+)\]\]|\[([A-Za-z0-9_-]+)\]", line)
+        if header:
+            if header.group(1):
+                table = {}
+                root.setdefault(header.group(1), []).append(table)
+            else:
+                table = root.setdefault(header.group(2), {})
+            continue
+        pair = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.+)", line)
+        if not pair:
+            raise ValueError(f"line {number}: not a shape this reader knows: {line!r}")
+        try:
+            value = json.loads(pair.group(2))
+        except ValueError:
+            raise ValueError(f"line {number}: value is not a one-line string or string array") from None
+        if not (isinstance(value, str)
+                or (isinstance(value, list) and all(isinstance(x, str) for x in value))):
+            raise ValueError(f"line {number}: value is not a string or an array of strings")
+        if pair.group(1) in table:
+            raise ValueError(f"line {number}: key `{pair.group(1)}` is set twice")
+        table[pair.group(1)] = value
+    return root
+
+
 def load_decl(path: pathlib.Path = DECL) -> dict:
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    data = read_decl_toml(path.read_text(encoding="utf-8"))
     caps = {c["id"]: c for c in data["capability"]}
     problems = validate_decl(data, caps)
     if problems:
@@ -180,8 +223,33 @@ def cargo_args(decl: dict, abi: str, on: set[str]) -> str:
     return "--no-default-features" + (f" --features {','.join(feats)}" if feats else "")
 
 
+@functools.cache
+def workspace_features() -> dict:
+    """Every workspace package's `[features]` table, keyed by manifest path.
+
+    Cargo is asked rather than the manifest text parsed: the manifests carry multi-line arrays
+    with comments between the entries, which is not worth a hand-rolled reader, and cargo is
+    the reader that decides what a feature means.
+    """
+    proc = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"],
+        cwd=ROOT / "crates",
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise OSError(f"`cargo metadata` failed, so the manifests have no input: {proc.stderr.strip()}")
+    return {
+        pathlib.Path(p["manifest_path"]).resolve(): p["features"]
+        for p in json.loads(proc.stdout)["packages"]
+    }
+
+
 def manifest_features(path: pathlib.Path) -> dict:
-    return tomllib.loads(path.read_text(encoding="utf-8"))["features"]
+    feats = workspace_features().get(path.resolve())
+    if feats is None:
+        raise KeyError(f"{path} is not a package of the crates workspace")
+    return feats
 
 
 def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
@@ -227,7 +295,12 @@ def cmd_check() -> int:
     elif KCONFIG.read_text(encoding="utf-8") != want:
         findings.append(f"{KCONFIG.relative_to(ROOT)} is stale: regenerate it with --emit-kconfig")
     for abi, path in MANIFESTS.items():
-        findings += check_manifest(decl, abi, manifest_features(path))
+        try:
+            feats = manifest_features(path)
+        except (KeyError, OSError) as exc:
+            print(f"  capability-config FAIL: {abi}: {exc}", file=sys.stderr)
+            return 1
+        findings += check_manifest(decl, abi, feats)
     for finding in findings:
         print(f"  capability-config FAIL: {finding}", file=sys.stderr)
     if findings:
@@ -312,6 +385,31 @@ def cmd_selftest() -> int:
     expect("peer is the graded capic-peer",
            derived("c", {"peer"}) >= {"peer", "scout", "link-udp"}
            and graded_features("capic-peer") == {"peer"})
+    # The reader that replaced `tomllib` must refuse what it does not read, and must agree with
+    # `tomllib` on the shipped file wherever the interpreter has one (3.11+; the hosted floor
+    # does not, which is why the import is by name and not a statement the floor lint reads).
+    def refuses(text: str) -> bool:
+        try:
+            read_decl_toml(text)
+        except ValueError:
+            return False
+        return True
+
+    expect("a multi-line array is refused, not skipped", not refuses('a = [\n  "x",\n]\n'))
+    expect("an inline table is refused", not refuses('a = { b = "c" }\n'))
+    expect("a number is refused", not refuses("a = 1\n"))
+    expect("a key set twice is refused", not refuses('a = "x"\na = "y"\n'))
+    expect("a table, a table array and both value shapes are read",
+           read_decl_toml('[t]\nk = "v"\n[[c]]\nx = ["a", "b"]\n[[c]]\nx = []\n')
+           == {"t": {"k": "v"}, "c": [{"x": ["a", "b"]}, {"x": []}]})
+    try:
+        stdlib_toml = importlib.import_module("tomllib")
+    except ImportError:
+        stdlib_toml = None
+    if stdlib_toml is not None:
+        text = DECL.read_text(encoding="utf-8")
+        expect("the declaration reads the same as tomllib reads it",
+               read_decl_toml(text) == stdlib_toml.loads(text))
     cyc = {"capability": [
         {"id": "a", "kconfig": "WZ_CAP_A", "abis": ["core"], "implies": ["b"]},
         {"id": "b", "kconfig": "WZ_CAP_B", "abis": ["core"], "implies": ["a"]}]}

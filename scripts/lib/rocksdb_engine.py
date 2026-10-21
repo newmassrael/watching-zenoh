@@ -50,9 +50,12 @@ def locked_engine(lock: Path) -> tuple[str, str]:
 
 
 def identity() -> dict:
+    # The engine is the WORKSPACE's lock. The upstream filesystem oracle keeps upstream's own
+    # engine on purpose: zenoh-backend-filesystem pins `librocksdb-sys = "=0.17.1"` exactly, so
+    # oracles/Cargo.lock cannot follow the workspace, and Layer E16 builds that oracle with
+    # ROCKSDB_LIB_DIR unset so it links its own. wz and upstream therefore run DIFFERENT engines
+    # over one directory, which is what makes E16 a cross-engine witness and not a self-check.
     version, checksum = locked_engine(ROOT / "crates/Cargo.lock")
-    if locked_engine(ROOT / "oracles/Cargo.lock") != (version, checksum):
-        raise ValueError("workspace and upstream oracle need different engines")
     if platform.system() != "Linux":
         raise ValueError("the shared engine is only provisioned for native Linux")
     return dict(version=version, checksum=checksum, arch=platform.machine(),

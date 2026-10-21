@@ -14251,8 +14251,22 @@ mod tx_limits_cache_tests {
             .map(|_| {
                 let cache = cache.clone();
                 std::thread::spawn(move || {
+                    // A fixed number of reads can all finish before the writer is first
+                    // scheduled, or all land in its invalidated window, and then nothing
+                    // was compared. So the reader goes on past the fixed count until it
+                    // has been handed a value, and a deadline turns a writer that never
+                    // keeps one into a failure instead of a hang.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     let mut seen = 0u32;
-                    for _ in 0..200_000 {
+                    let mut reads = 0u64;
+                    while reads < 200_000 || seen == 0 {
+                        reads += 1;
+                        if reads >= 200_000 {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "no value was handed to this reader in 60 s"
+                            );
+                        }
                         if let Some(pair) = cache.get() {
                             assert!(
                                 pair == (1000, 1) || pair == (2000, 2),

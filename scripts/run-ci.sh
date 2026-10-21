@@ -22818,7 +22818,11 @@ layer_e15_apfull_reconcile_federation_pico() {
 # dropped leg fails the lane instead of shrinking it. Every leg carries the
 # `fs_shared_dir` token that keeps Layer E's sweep off them.
 layer_e16_fs_backend_shares_a_directory_with_upstream() {
-    (cd oracles && cargo build -p wz-oracle-fs-backend --release --quiet) || return 1
+    # ROCKSDB_LIB_DIR names the WORKSPACE's shared engine (RocksDB 10.4.2). This oracle links
+    # upstream's backend, which pins librocksdb-sys =0.17.1 (RocksDB 9.9.3) exactly, so it must
+    # build its own engine: linked against the shared one it would pair 9.9.3 bindings with a
+    # 10.4.2 library. It also means the two sides of every leg below run different engines.
+    (cd oracles && env -u ROCKSDB_LIB_DIR cargo build -p wz-oracle-fs-backend --release --quiet) || return 1
     for leg in \
         fs_shared_dir_a_value_upstream_wrote_is_served_by_wz_with_its_encoding_and_timestamp \
         fs_shared_dir_a_value_wz_wrote_is_served_by_upstream_with_its_encoding_and_timestamp \
