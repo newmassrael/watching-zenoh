@@ -561,12 +561,14 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
     // literal, and a literal chunk meets only itself. Most candidates a scan tries are such keys
     // against such a target, and the walk below would split each of them only to compare them
     // chunk by chunk, so the text is compared where it lies. A target with no chunks is not a
-    // key a split yields; it goes the long way, which refuses it.
+    // key a split yields; it goes the long way, which refuses it. Same text has the target's
+    // depth, so the fixed backing's refusal of a key deeper than it holds is the target's length.
     if !target_chunks.is_empty()
         && !is_wild(candidate)
         && !target_chunks.iter().any(|chunk| is_wild(chunk))
     {
-        return chunks_spell(target_chunks, candidate);
+        return (!crate::bounded::ENFORCES_CAPACITY || target_chunks.len() <= MAX_KEYEXPR_CHUNKS)
+            && chunks_spell(target_chunks, candidate);
     }
     // No-alloc backing: a candidate deeper than the declared bound cannot be
     // represented, so it is conservatively no-match (the alloc backing never
