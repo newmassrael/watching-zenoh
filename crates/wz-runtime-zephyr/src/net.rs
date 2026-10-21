@@ -456,40 +456,91 @@ fn udp_locator(addr: [u8; 4], port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
 /// encode a frame into ([`BoxedLinkDriver::tx_slot_acquire`]), so the frame is written once, where
 /// the socket reads it, and no buffer is allocated for it.
 ///
-/// A driver over [`NoTx`] lends nothing: the session builds each frame in a buffer of its own (the
-/// heap) and hands the bytes to `send_blocking`. A driver over a [`ByteBuf`] is the fixed-memory
-/// profile's, whose sessions have no heap to build a frame on (`tx-lend-only`), and whose link then
-/// also states the frames it carries ([`BoxedLinkDriver::link_mtu`], `link_rx_capacity`), because
-/// its buffers are the bound.
+/// A driver whose storage is empty (a [`HeapTx`] of no bytes) lends nothing: the session builds
+/// each frame in a buffer of its own (the heap) and hands the bytes to `send_blocking`. A driver
+/// with storage lends it, and its link then also states the frames it
+/// carries ([`BoxedLinkDriver::link_mtu`], `link_rx_capacity`), because its buffers are the bound.
+/// The storage is a buffer of a table the image declares ([`ByteBuf`], the fixed-memory profile's,
+/// whose sessions have no heap to build a frame on) or buffers the link allocated once
+/// ([`HeapTx`]).
+///
+/// The storage is some number of slots of one length. A session that batches holds one slot open
+/// while it fills a batch and encodes the next message that does not join it into another, so a
+/// batching session needs two; one that does not batch needs one. The driver lends a slot at a
+/// time and takes it back at its send or abort.
 pub trait TxStore {
-    /// Whether the driver lends this storage, and bounds its link by its buffers.
-    const LENDS: bool;
+    /// How many slots there are to lend, all of the length [`Self::slot_len`].
+    fn slots(&self) -> usize;
 
-    /// The storage's first byte and its length. The driver reads and writes it only through the
-    /// one slot it lends, one at a time.
-    fn storage(&self) -> (*mut u8, usize);
-}
+    /// The length of every slot.
+    fn slot_len(&self) -> usize;
 
-/// The heap profile's outbound storage: none.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoTx;
+    /// The first byte of slot `slot` (below [`Self::slots`]). The driver reads and writes it only
+    /// while it has lent the slot, and to one holder.
+    fn slot_base(&self, slot: usize) -> *mut u8;
 
-impl TxStore for NoTx {
-    const LENDS: bool = false;
-
-    fn storage(&self) -> (*mut u8, usize) {
-        (core::ptr::null_mut(), 0)
+    /// Whether there is storage to lend.
+    fn lends(&self) -> bool {
+        self.slots() != 0 && self.slot_len() != 0
     }
 }
 
-/// The fixed-memory profile's outbound storage: a buffer lent by a table the image declares. The
-/// socket writes a frame before the session builds the next, so one slot is every frame there is
-/// room for at a time.
+/// The fixed-memory profile's outbound storage: a buffer lent by a table the image declares, one
+/// slot. The socket writes a frame before the session builds the next, and a session that does not
+/// batch has no frame open beside it.
 impl TxStore for ByteBuf {
-    const LENDS: bool = true;
+    fn slots(&self) -> usize {
+        1
+    }
 
-    fn storage(&self) -> (*mut u8, usize) {
-        self.raw()
+    fn slot_len(&self) -> usize {
+        self.raw().1
+    }
+
+    fn slot_base(&self, _slot: usize) -> *mut u8 {
+        self.raw().0
+    }
+}
+
+/// The heap profile's outbound storage: `slots` buffers of `slot_len` bytes, allocated together
+/// when the link is made and never again, so the frames of the link are encoded into them and a
+/// frame costs no allocation. Of no bytes it lends nothing, which is the link as it was before the
+/// profile lent.
+#[cfg(feature = "alloc")]
+pub struct HeapTx {
+    cells: Vec<core::cell::UnsafeCell<u8>>,
+    slot_len: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl HeapTx {
+    /// `slots` slots of `slot_len` bytes each (none, with either 0).
+    pub fn new(slots: usize, slot_len: usize) -> Self {
+        let len = slots.saturating_mul(slot_len);
+        Self {
+            cells: (0..len).map(|_| core::cell::UnsafeCell::new(0)).collect(),
+            slot_len,
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl TxStore for HeapTx {
+    fn slots(&self) -> usize {
+        self.cells.len().checked_div(self.slot_len).unwrap_or(0)
+    }
+
+    fn slot_len(&self) -> usize {
+        self.slot_len
+    }
+
+    fn slot_base(&self, slot: usize) -> *mut u8 {
+        // `UnsafeCell<u8>` is a `u8`, and a pointer to a cell may be written through.
+        self.cells
+            .as_ptr()
+            .cast::<u8>()
+            .cast_mut()
+            .wrapping_add(slot * self.slot_len)
     }
 }
 
@@ -504,7 +555,7 @@ impl TxStore for ByteBuf {
 /// so replies go to whoever just spoke. UDP is connectionless, so
 /// `open_blocking` / `close_blocking` are no-ops — the zenoh handshake and
 /// Close frame are the session's open and close.
-pub struct UdpDriver<B: AsMut<[u8]>, T: TxStore = NoTx> {
+pub struct UdpDriver<B: AsMut<[u8]>, T: TxStore> {
     socket: ZephyrUdpSocket,
     peer: Cell<Option<([u8; 4], u16)>>,
     /// The link's two ends, `udp/<ip>:<port>` each, written once — when the
@@ -515,8 +566,9 @@ pub struct UdpDriver<B: AsMut<[u8]>, T: TxStore = NoTx> {
     rx_len: usize,
     /// The memory the session encodes its frames into.
     tx: T,
-    /// Whether the slot of `tx` is out with the session, between its grant and its send or abort.
-    tx_lent: Cell<bool>,
+    /// Which slots of `tx` are out with the session, bit by slot number, between a slot's grant and
+    /// its send or abort.
+    tx_lent: Cell<u8>,
     /// A datagram [`SessionDatagramLink::service`] already read into `rx_buf` while it waited
     /// (length and source), for the next receive to hand out without another call into the stack.
     stash: Cell<Option<(usize, [u8; 4], u16)>>,
@@ -527,9 +579,9 @@ pub struct UdpDriver<B: AsMut<[u8]>, T: TxStore = NoTx> {
 }
 
 /// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
-/// given.
+/// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
 #[cfg(feature = "alloc")]
-pub type ZephyrUdpDriver = UdpDriver<Vec<u8>>;
+pub type ZephyrUdpDriver = UdpDriver<Vec<u8>, HeapTx>;
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in
 /// are each lent by a table the image declares
@@ -540,7 +592,7 @@ pub type ZephyrUdpDriver = UdpDriver<Vec<u8>>;
 pub type FixedUdpDriver = UdpDriver<ByteBuf, ByteBuf>;
 
 #[cfg(feature = "alloc")]
-impl UdpDriver<Vec<u8>, NoTx> {
+impl UdpDriver<Vec<u8>, HeapTx> {
     /// An acceptor's link: no peer until the first datagram names one.
     pub fn acceptor(socket: ZephyrUdpSocket) -> Self {
         Self::acceptor_with_capacity(socket, UDP_RX_CAPACITY)
@@ -551,13 +603,30 @@ impl UdpDriver<Vec<u8>, NoTx> {
         Self::initiator_with_capacity(socket, peer, UDP_RX_CAPACITY)
     }
 
+    /// [`Self::acceptor_with_capacity`] that also lends the session the slots of `tx` to encode its
+    /// frames into.
+    pub fn acceptor_with_buffers(socket: ZephyrUdpSocket, rx_capacity: usize, tx: HeapTx) -> Self {
+        Self::acceptor_in(socket, vec![0u8; rx_capacity], tx)
+    }
+
+    /// [`Self::initiator_with_capacity`] that also lends the session the slots of `tx` to encode
+    /// its frames into.
+    pub fn initiator_with_buffers(
+        socket: ZephyrUdpSocket,
+        peer: ([u8; 4], u16),
+        rx_capacity: usize,
+        tx: HeapTx,
+    ) -> Self {
+        Self::initiator_in(socket, peer, vec![0u8; rx_capacity], tx)
+    }
+
     /// An acceptor's link whose receive buffer holds `rx_capacity` bytes: what a
     /// node that runs several links at once sizes to the batch it negotiates,
     /// rather than to the largest datagram UDP can carry ([`UDP_RX_CAPACITY`]).
     /// A datagram longer than that is truncated by the stack, which the session
     /// reads as a bad frame.
     pub fn acceptor_with_capacity(socket: ZephyrUdpSocket, rx_capacity: usize) -> Self {
-        Self::acceptor_in(socket, vec![0u8; rx_capacity], NoTx)
+        Self::acceptor_in(socket, vec![0u8; rx_capacity], HeapTx::new(0, 0))
     }
 
     /// [`ZephyrUdpDriver::initiator`] with a receive buffer of `rx_capacity` bytes.
@@ -566,7 +635,7 @@ impl UdpDriver<Vec<u8>, NoTx> {
         peer: ([u8; 4], u16),
         rx_capacity: usize,
     ) -> Self {
-        Self::initiator_in(socket, peer, vec![0u8; rx_capacity], NoTx)
+        Self::initiator_in(socket, peer, vec![0u8; rx_capacity], HeapTx::new(0, 0))
     }
 }
 
@@ -597,7 +666,7 @@ impl<B: AsMut<[u8]>, T: TxStore> UdpDriver<B, T> {
             rx_buf: RefCell::new(rx_buf),
             rx_len,
             tx,
-            tx_lent: Cell::new(false),
+            tx_lent: Cell::new(0),
             stash: Cell::new(None),
             rx_error: Cell::new(None),
         };
@@ -664,46 +733,51 @@ impl<B: AsMut<[u8]> + 'static, T: TxStore + 'static> BoxedLinkDriver for UdpDriv
 
     // The session encodes a frame straight into the driver's own storage, and the socket reads it
     // from there: the frame is written once and no buffer is allocated for it. The socket takes a
-    // datagram whole and synchronously, so the one slot is back before the session builds its next
-    // frame; a second ask while it is out (a frame built from inside another's encode) is refused,
-    // which the lend-only profile counts rather than answering from the heap.
+    // datagram whole and synchronously, so a slot is back at its send; a session that batches
+    // holds one open beside the message it encodes next, which is why there can be two. An ask
+    // with every slot out is refused, which the lend-only profile counts rather than answering
+    // from the heap.
     fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
-        if !T::LENDS || self.tx_lent.replace(true) {
+        let slots = self.tx.slots().min(u8::BITS as usize);
+        if self.tx.slot_len() == 0 {
             return None;
         }
+        let lent = self.tx_lent.get();
+        let free = (0..slots).find(|slot| lent & (1 << slot) == 0)?;
+        self.tx_lent.set(lent | (1 << free));
         // The socket writes the datagram's own headers, so the frame starts at the slot's front.
         Some(TxSlotGrant {
-            slot: TxSlot(0),
+            slot: TxSlot(free as u32),
             headroom: 0,
         })
     }
 
-    fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
-        self.tx.storage()
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        (self.tx.slot_base(slot.0 as usize), self.tx.slot_len())
     }
 
     fn tx_slot_send(
         &self,
-        _slot: TxSlot,
+        slot: TxSlot,
         start: usize,
         len: usize,
         _reliability: Reliability,
         _priority: Priority,
     ) -> LinkSendOutcome {
-        let (base, capacity) = self.tx.storage();
-        self.tx_lent.set(false);
+        let (base, capacity) = self.tx_slot_storage(slot);
+        self.tx_slot_abort(slot);
         if start.checked_add(len).map_or(true, |end| end > capacity) {
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        // SAFETY: `base` is the storage of `self.tx`, `capacity` bytes long, and `start + len` is
-        // within it. The slot was granted to the session alone and has just been taken back by
-        // this call, so nothing else writes the bytes while the socket reads them.
+        // SAFETY: `base` is the first byte of a slot of `self.tx`, `capacity` bytes long, and
+        // `start + len` is within it. The slot was granted to the session alone and has just been
+        // taken back by this call, so nothing else writes the bytes while the socket reads them.
         let frame = unsafe { core::slice::from_raw_parts(base.add(start), len) };
         self.send_datagram(frame)
     }
 
-    fn tx_slot_abort(&self, _slot: TxSlot) {
-        self.tx_lent.set(false);
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        self.tx_lent.set(self.tx_lent.get() & !(1 << slot.0));
     }
 
     fn open_blocking(&self) {}
@@ -719,15 +793,15 @@ impl<B: AsMut<[u8]> + 'static, T: TxStore + 'static> BoxedLinkDriver for UdpDriv
     // lwIP's session socket declares its slot (`link_mtu` bounds the session's send budget, so a
     // message past it fragments instead of being encoded into a slot too short for it).
     fn link_mtu(&self) -> usize {
-        if T::LENDS {
-            self.tx.storage().1
+        if self.tx.lends() {
+            self.tx.slot_len()
         } else {
             DEFAULT_LINK_MTU
         }
     }
 
     fn link_rx_capacity(&self) -> usize {
-        if T::LENDS {
+        if self.tx.lends() {
             self.rx_len
         } else {
             DEFAULT_LINK_MTU

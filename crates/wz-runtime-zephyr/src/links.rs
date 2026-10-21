@@ -19,22 +19,38 @@ use alloc::rc::Rc;
 
 use wz_runtime_coop::session_drive::{LinkOpenError, OpenedLink, SessionLinks, UdpPeer};
 
-use crate::net::{ZephyrUdpDriver, ZephyrUdpSocket, UDP_RX_CAPACITY};
+use crate::net::{HeapTx, ZephyrUdpDriver, ZephyrUdpSocket, UDP_RX_CAPACITY};
 
 /// The links of a node whose network stack is Zephyr's own.
 pub struct ZephyrLinks {
     local: [u8; 4],
     rx_capacity: usize,
+    tx_slots: usize,
+    tx_capacity: usize,
 }
 
 impl ZephyrLinks {
     /// Links bound on the node's own address `local`, each with a receive
-    /// buffer that holds the largest UDP datagram.
+    /// buffer that holds the largest UDP datagram and no buffer of its own to
+    /// encode frames into (the session builds each in a buffer it allocates).
     pub fn new(local: [u8; 4]) -> Self {
         Self {
             local,
             rx_capacity: UDP_RX_CAPACITY,
+            tx_slots: 0,
+            tx_capacity: 0,
         }
+    }
+
+    /// Links that lend the session `slots` buffers of `bytes` each to encode its frames into,
+    /// allocated once with the link: a frame then costs no allocation, and the link states the
+    /// largest frame it carries (these `bytes`) and the largest batch it receives (its receive
+    /// buffer). `bytes` is the batch the sessions negotiate; a session that batches holds one slot
+    /// open while it encodes the next message into another, so it needs two.
+    pub fn with_tx_buffers(mut self, slots: usize, bytes: usize) -> Self {
+        self.tx_slots = slots;
+        self.tx_capacity = bytes;
+        self
     }
 
     /// Links whose receive buffers hold `bytes` each. A node runs one accepting
@@ -59,9 +75,10 @@ impl SessionLinks for ZephyrLinks {
         // The peer is whoever speaks first; the driver learns it on receive.
         let socket =
             ZephyrUdpSocket::bind(self.local, port).map_err(|_| LinkOpenError::Exhausted)?;
-        let driver = Rc::new(ZephyrUdpDriver::acceptor_with_capacity(
+        let driver = Rc::new(ZephyrUdpDriver::acceptor_with_buffers(
             socket,
             self.rx_capacity,
+            HeapTx::new(self.tx_slots, self.tx_capacity),
         ));
         Ok(OpenedLink {
             sink: driver.clone(),
@@ -72,10 +89,11 @@ impl SessionLinks for ZephyrLinks {
     fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // Port 0 has the stack choose a free one, one per initiator session.
         let socket = ZephyrUdpSocket::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
-        let driver = Rc::new(ZephyrUdpDriver::initiator_with_capacity(
+        let driver = Rc::new(ZephyrUdpDriver::initiator_with_buffers(
             socket,
             (peer.addr, peer.port),
             self.rx_capacity,
+            HeapTx::new(self.tx_slots, self.tx_capacity),
         ));
         Ok(OpenedLink {
             sink: driver.clone(),
