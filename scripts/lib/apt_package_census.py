@@ -241,6 +241,9 @@ _add(
         # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
         # the same list as that job, so it takes the same rows.
         "gate-provenance",
+        # R3397 -- Layer C1cs, the C ABI builds' cost. It builds `wz-capi-pico` and
+        # `wz-capi-c` only, so it takes the rows a member build takes and not `cmake`.
+        "capability-cost",
         "footprint",
         "interop",
         "cross-mcu",
@@ -285,6 +288,9 @@ _add(
         # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
         # the same list as that job, so it takes the same rows.
         "gate-provenance",
+        # R3397 -- Layer C1cs, the C ABI builds' cost. It builds `wz-capi-pico` and
+        # `wz-capi-c` only, so it takes the rows a member build takes and not `cmake`.
+        "capability-cost",
         "footprint",
         "interop",
         "cross-mcu",
@@ -332,6 +338,9 @@ _add(
         # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
         # the same list as that job, so it takes the same rows.
         "gate-provenance",
+        # R3397 -- Layer C1cs, the C ABI builds' cost. It builds `wz-capi-pico` and
+        # `wz-capi-c` only, so it takes the rows a member build takes and not `cmake`.
+        "capability-cost",
         "footprint",
         "feature-gates",
         # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
@@ -519,6 +528,9 @@ _add(
         # R3363 — Layer C0, split out of `defaults-off` for its budget. It installs
         # the same list as that job, so it takes the same rows.
         "gate-provenance",
+        # R3397 -- Layer C1cs, the C ABI builds' cost. It builds `wz-capi-pico` and
+        # `wz-capi-c` only, so it takes the rows a member build takes and not `cmake`.
+        "capability-cost",
         "footprint",
         "interop",
         "cross-mcu",

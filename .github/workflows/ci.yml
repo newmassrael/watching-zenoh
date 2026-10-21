@@ -1916,6 +1916,69 @@ jobs:
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
+  # R3397 -- Layer C1cs, what a capability costs in the two C ABI binaries.
+  #
+  # ITS OWN JOB, because it is eight release builds of two cdylibs (each case replaces the
+  # previous one's artifact in the same target directory, so they cannot overlap) and no other
+  # job owes that time. Measured on the build host, warm: about 70-90 s per case, so ~12 min
+  # cold on a hosted runner, which is the 40% of the 1800 s budget below that this job is
+  # shaped for. It reads a BINARY, so nothing here is cached by key: the rust-cache entry it
+  # reads is the `ci` job's (class `rust-ci`) and it never writes one.
+  capability-cost:
+    name: capability cost of the C ABI builds (Layer C1cs)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # No `cmake`: nothing this job builds reaches `zenoh-pico-sys`.
+        run: |
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        # The pin matters here as it does for `footprint`: a floating compiler moves codegen
+        # size, and this job is one that gates on bytes.
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Layer C1cs — what a capability costs in the C ABI binaries
+        run: bash scripts/run-ci.sh --layer C1cs
+
+      - name: Budget margin — this job's own clock
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
   # ─────────────────────────────────────────────────────────────────
   # R2165 — the PASSIVE-DISSECTION job, peeled off `feature-gates` when that
   # job's margin step fired at 97% of 2700s on run 33087340444.

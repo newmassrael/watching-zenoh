@@ -249,7 +249,7 @@ MANIFEST_FEATURES = {
 # manifest gains is still a decision a round has to make and not a name this gate waves through.
 CAPABILITY_FEATURES = frozenset({
     "peer", "scout", "query", "queryable", "liveliness", "liveliness-get", "advanced", "group",
-    "gossip",
+    "gossip", "link-udp", "timestamping",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

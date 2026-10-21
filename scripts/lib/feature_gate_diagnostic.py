@@ -431,6 +431,9 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # its one public site was compound, and a probe can now name it.
                 "storage-mgr-dynamic-volume-loading",
                 "time-hlc",
+                # R3397 -- `timestamp-wall-clock` gates the SAME `pub mod timestamp_source`
+                # as `time-hlc` above, whose cfg is an `any(..)` over four features.
+                "timestamp-wall-clock",
                 "transport-link-raweth",
                 "transport-link-unixpipe",
                 # R2973 — `transport-link-unixsock` JOINED this list, and the

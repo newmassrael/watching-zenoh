@@ -276854,6 +276854,48 @@
         "The Zephyr client image has no capability features; MCU GET is 1.4 times slower than pico and needs a query fast path from SCE; the kit boot of the fixed-memory image is unverified."
       ]
     },
+    "Round 3397": {
+      "decision_summary": "Grade the C ABI binaries instead of believing the feature graph. A new gate, capability_cost_gate.py (Layer C1cs, its own hosted job), builds eight cases of wz-capi-pico and wz-capi-c with exactly their features and checks four facts of each: the text size is under a budget, no symbol of a plane the build leaves out is present, a symbol of every plane it has is present, and the default build exports the pinned 803 and 835 C symbols. Writing it found two defects the feature graph hid: peer alone did not compile, because the accept loop got its request codec only through the node clock's leak into the query plane, and routing-accept now names codec-request itself. Restoring the leak (time-hlc unconditionally on) reds both client cases, +145 KB of pico text and uhlc symbols.",
+      "changes_bullets": [
+        "scripts/lib/capability_cost_gate.py: eight cases, --check, --measure and an 11-arm selftest; Layer C1cs in run-ci.sh, its selftest in Layer C0, and the hosted job capability-cost (no cmake, a reader of the rust-ci cache).",
+        "wz-runtime-tokio: routing-accept names codec-request.",
+        "Registries: apt census rows, cache-classes.json owner and reader, feature_gate_diagnostic list, zenoh_c_archive_arm CAPABILITY_FEATURES (link-udp, timestamping)."
+      ],
+      "verification_bullets": [
+        "pc2: the eight cases pass; mutation (time-hlc restored in wz-capi-core) reds pico-client 2,060,091 over 1,915,000 and capic-client 3,032,260 over 3,000,000 with uhlc symbols; reverted and byte-identical.",
+        "Every single-capability build of both ABIs compiles (10 pico, 12 zenoh-c).",
+        "Gates exit 0: feature_gate_diagnostic, feature_public_surface_census, zenoh_c_archive_arm (selftest 33 of 33), workflow_cache_budget_gate, apt_package_census, gate_provenance_lint. The full 105 and C0 sweep was stopped at the owner's request before it finished.",
+        "Not run: the hosted job; its budgets are measured on one host and a hosted runner's compiler build is the pinned one."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The hosted capability-cost job has not run; read it per job at the start of the next round, and expect the first run to be cold.",
+        "A Kconfig input and a single feature declaration that derives the Cargo features are not built; the capability features are still written by hand in three manifests.",
+        "The ap profile and the Zephyr images have no capability features; MCU GET is 1.4 times slower than pico."
+      ],
+      "publishable_decision_summary": "Grade the C ABI binaries instead of believing the feature graph. A new gate, capability_cost_gate.py (Layer C1cs, its own hosted job), builds eight cases of wz-capi-pico and wz-capi-c with exactly their features and checks four facts of each: the text size is under a budget, no symbol of a plane the build leaves out is present, a symbol of every plane it has is present, and the default build exports the pinned 803 and 835 C symbols. Writing it found two defects the feature graph hid: peer alone did not compile, because the accept loop got its request codec only through the node clock's leak into the query plane, and routing-accept now names codec-request itself. Restoring the leak (time-hlc unconditionally on) reds both client cases, +145 KB of pico text and uhlc symbols.",
+      "publishable_changes_bullets": [
+        "scripts/lib/capability_cost_gate.py: eight cases, --check, --measure and an 11-arm selftest; Layer C1cs in run-ci.sh, its selftest in Layer C0, and the hosted job capability-cost (no cmake, a reader of the rust-ci cache).",
+        "wz-runtime-tokio: routing-accept names codec-request.",
+        "Registries: apt census rows, cache-classes.json owner and reader, feature_gate_diagnostic list, zenoh_c_archive_arm CAPABILITY_FEATURES (link-udp, timestamping)."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: the eight cases pass; mutation (time-hlc restored in wz-capi-core) reds pico-client 2,060,091 over 1,915,000 and capic-client 3,032,260 over 3,000,000 with uhlc symbols; reverted and byte-identical.",
+        "Every single-capability build of both ABIs compiles (10 pico, 12 zenoh-c).",
+        "Gates exit 0: feature_gate_diagnostic, feature_public_surface_census, zenoh_c_archive_arm (selftest 33 of 33), workflow_cache_budget_gate, apt_package_census, gate_provenance_lint. The full 105 and C0 sweep was stopped at the owner's request before it finished.",
+        "Not run: the hosted job; its budgets are measured on one host and a hosted runner's compiler build is the pinned one."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted capability-cost job has not run; read it per job at the start of the next round, and expect the first run to be cold.",
+        "A Kconfig input and a single feature declaration that derives the Cargo features are not built; the capability features are still written by hand in three manifests.",
+        "The ap profile and the Zephyr images have no capability features; MCU GET is 1.4 times slower than pico."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [

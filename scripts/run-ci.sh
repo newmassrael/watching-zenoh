@@ -3231,6 +3231,10 @@ layer_c0_test_discipline() {
     # too. `--selftest` first, on the count-guard gate's reasoning.
     python3 scripts/lib/anyke_reader_gate.py --selftest >/dev/null || return 1
     python3 scripts/lib/anyke_reader_gate.py || return 1
+    # R3397 -- the gate that reads the C ABI binaries (Layer C1cs) is graded here first, on
+    # synthetic input: its matcher, its budget arithmetic and the control that every plane it
+    # forbids somewhere it requires somewhere else.
+    python3 scripts/lib/capability_cost_gate.py --selftest || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.
@@ -10546,6 +10550,25 @@ layer_c1ch_capi_c_config_surface() {
 # touched, which is exactly what a changed-crate filter cannot reach.
 layer_c1cf_reduced_features() {
     bash scripts/lib/reduced-features-gate.sh || return 1
+}
+
+# ─── Layer C1cs — what a capability COSTS in the C ABI binaries ──────
+#
+# R3397. The pico and zenoh-c libraries are composed from capability features, and the claim
+# that a build without one links neither its doors nor the runtime plane behind it is a claim
+# about the BINARY. C1cf asks whether a crate builds with its defaults off; nothing asked
+# whether the build that results is the size it should be. It was not once: the node-clock
+# feature pulled the runtime's storage module, and with it the whole query plane, into a
+# client that answers no query (+145 KB of pico text), and the accept loop's request codec had
+# been arriving through that same leak, so `peer` alone did not compile. Both were found by
+# reading a symbol table by hand.
+#
+# `capability_cost_gate.py` builds each case in its table with exactly its features and grades
+# size, the absence of the planes it leaves out, the presence of the planes it has, and the
+# pinned export count of the default build. Eight release builds of two cdylibs, run as ONE
+# lane because each case replaces the previous one's artifact in the same target directory.
+layer_c1cs_capability_cost() {
+    python3 scripts/lib/capability_cost_gate.py --check || return 1
 }
 
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
@@ -23372,6 +23395,7 @@ run_layer C1cb layer_c1cb_cargo_test_init_ack_admission || overall=1
 run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1
 run_layer C1ch layer_c1ch_capi_c_config_surface || overall=1
 run_layer C1cf layer_c1cf_reduced_features || overall=1
+run_layer C1cs layer_c1cs_capability_cost || overall=1
 run_layer C1cn layer_c1cn_nondefault_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
