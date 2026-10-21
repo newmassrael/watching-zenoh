@@ -154,6 +154,11 @@ pub enum ZephyrNetError {
 pub struct ZephyrUdpSocket {
     fd: c_int,
     local: ([u8; 4], u16),
+    /// The last [`Self::wait_readable`] returned with a datagram queued, and no receive has taken
+    /// it since: the next [`Self::try_recv`] reads it without asking `poll` again. Only the one
+    /// thread that drives the link touches the socket, so nothing else takes the datagram
+    /// between the wait and the read.
+    readable: Cell<bool>,
 }
 
 fn sockaddr(addr: [u8; 4], port: u16) -> SockaddrIn {
@@ -177,6 +182,7 @@ impl ZephyrUdpSocket {
         let mut this = Self {
             fd,
             local: (addr, port),
+            readable: Cell::new(false),
         };
         let local = sockaddr(addr, port);
         // SAFETY: `local` is a live `sockaddr_in` of the length passed.
@@ -291,7 +297,8 @@ impl ZephyrUdpSocket {
             revents: 0,
         };
         // SAFETY: one live `pollfd`; the timeout bounds the wait.
-        let _ = unsafe { poll(&mut pfd, 1, timeout_ms) };
+        let ready = unsafe { poll(&mut pfd, 1, timeout_ms) };
+        self.readable.set(ready > 0 && pfd.revents & POLLIN != 0);
     }
 
     /// Take one queued datagram into `buf` without blocking: `Ok(None)` when
@@ -305,18 +312,23 @@ impl ZephyrUdpSocket {
         &self,
         buf: &mut [u8],
     ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
-        let mut pfd = PollFd {
-            fd: self.fd,
-            events: POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one live `pollfd`, zero timeout.
-        let ready = unsafe { poll(&mut pfd, 1, 0) };
-        if ready < 0 {
-            return Err(ZephyrNetError::Poll(ready));
-        }
-        if ready == 0 || pfd.revents & POLLIN == 0 {
-            return Ok(None);
+        // A wait that just reported a datagram has answered the question: the read below cannot
+        // block, and asking `poll` again is a second pass through the stack for nothing. The
+        // flag is spent by this read, so the next receive asks.
+        if !self.readable.replace(false) {
+            let mut pfd = PollFd {
+                fd: self.fd,
+                events: POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one live `pollfd`, zero timeout.
+            let ready = unsafe { poll(&mut pfd, 1, 0) };
+            if ready < 0 {
+                return Err(ZephyrNetError::Poll(ready));
+            }
+            if ready == 0 || pfd.revents & POLLIN == 0 {
+                return Ok(None);
+            }
         }
         let mut src = SockaddrIn::default();
         let mut src_len = size_of::<SockaddrIn>() as SockLen;
