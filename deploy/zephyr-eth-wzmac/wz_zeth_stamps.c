@@ -208,6 +208,49 @@ static void print_bucket(const char *name, struct bucket *b, uint32_t n, uint32_
 	b->calls = b->cycles = b->bytes = 0;
 }
 
+/* The copies of 128 bytes or more that the window makes, by the address that called the copy and
+ * the length: which sites copy, how much, and how often per query. The caller's address is
+ * resolved against the image on the host (addr2line), so the instrument names no function.
+ */
+#define COPY_SITES 64
+static struct {
+	uint32_t lr;
+	uint32_t len;
+	uint32_t count;
+} copy_sites[COPY_SITES];
+
+static void note_copy(uint32_t lr, size_t len)
+{
+	if (len < 128) {
+		return;
+	}
+	for (unsigned int i = 0; i < COPY_SITES; i++) {
+		if (copy_sites[i].count != 0 && copy_sites[i].lr == lr && copy_sites[i].len == len) {
+			copy_sites[i].count++;
+			return;
+		}
+	}
+	for (unsigned int i = 0; i < COPY_SITES; i++) {
+		if (copy_sites[i].count == 0) {
+			copy_sites[i].lr = lr;
+			copy_sites[i].len = (uint32_t)len;
+			copy_sites[i].count = 1;
+			return;
+		}
+	}
+}
+
+static void print_copy_sites(uint32_t n)
+{
+	for (unsigned int i = 0; i < COPY_SITES; i++) {
+		if (copy_sites[i].count != 0) {
+			printk("wz: copysite %x %u %u\n", copy_sites[i].lr, copy_sites[i].len,
+			       (unsigned int)(copy_sites[i].count * 100 / n));
+			copy_sites[i].count = 0;
+		}
+	}
+}
+
 static void report_buckets(uint32_t n, uint32_t hz)
 {
 	printk("wz: stamps:   sampler ticks %u, in window %u, on the app thread %u, in code %u\n",
@@ -217,6 +260,7 @@ static void report_buckets(uint32_t n, uint32_t hz)
 	print_bucket("malloc", &b_malloc, n, hz, true);
 	print_bucket("free", &b_free, n, hz, false);
 	print_bucket("memcpy", &b_memcpy, n, hz, true);
+	print_copy_sites(n);
 }
 
 struct pollfd;
@@ -361,6 +405,7 @@ void *__wrap_memcpy(void *dst, const void *src, size_t len)
 	if (!in_window()) {
 		return __real_memcpy(dst, src, len);
 	}
+	note_copy((uint32_t)(uintptr_t)__builtin_return_address(0), len);
 	uint32_t t0 = k_cycle_get_32();
 	void *rc = __real_memcpy(dst, src, len);
 
@@ -369,6 +414,34 @@ void *__wrap_memcpy(void *dst, const void *src, size_t len)
 	b_memcpy.cycles += (uint32_t)(k_cycle_get_32() - t0);
 	return rc;
 }
+
+/* Rust code (and the compiler's own struct moves) call the ARM EABI entry points, not `memcpy`, so
+ * the wrap above never sees them: a wz node showed 0.0 copies per query while a quarter of its
+ * time was in the copy function. Counted into the same bucket, so the figure is every copy.
+ */
+void __real___aeabi_memcpy(void *dst, const void *src, size_t len);
+void __real___aeabi_memcpy4(void *dst, const void *src, size_t len);
+void __real___aeabi_memcpy8(void *dst, const void *src, size_t len);
+
+#define WZ_STAMPS_EABI_COPY(name)                                                                  \
+	void __wrap_##name(void *dst, const void *src, size_t len)                                 \
+	{                                                                                          \
+		if (!in_window()) {                                                                \
+			__real_##name(dst, src, len);                                              \
+			return;                                                                    \
+		}                                                                                  \
+		note_copy((uint32_t)(uintptr_t)__builtin_return_address(0), len);                  \
+		uint32_t t0 = k_cycle_get_32();                                                    \
+                                                                                                   \
+		__real_##name(dst, src, len);                                                      \
+		b_memcpy.calls++;                                                                  \
+		b_memcpy.bytes += len;                                                             \
+		b_memcpy.cycles += (uint32_t)(k_cycle_get_32() - t0);                              \
+	}
+
+WZ_STAMPS_EABI_COPY(__aeabi_memcpy)
+WZ_STAMPS_EABI_COPY(__aeabi_memcpy4)
+WZ_STAMPS_EABI_COPY(__aeabi_memcpy8)
 
 ssize_t __wrap_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *from,
 			socklen_t_ *fromlen)
