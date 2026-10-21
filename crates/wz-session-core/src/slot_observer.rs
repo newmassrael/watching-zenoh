@@ -71,18 +71,29 @@ use crate::switchboard::{EventInjector, SwitchboardRegistry};
 /// request and interest ids this session minted, so two sessions' ids collide in
 /// one registry: each session has its own, placed beside its slot by whoever owns
 /// the session.
-pub struct Requesters<R: ReplySink, G: ReplySink> {
-    /// The pending queries (`z_get`), bounded by [`crate::caps::MAX_PENDING_QUERIES`].
-    pub replies: ReplyRegistry<R>,
-    /// The pending liveliness snapshots, bounded by
-    /// [`crate::caps::MAX_PENDING_LIVELINESS_GETS`].
+///
+/// How many it holds is a type parameter: `Q` pending queries and `L` pending liveliness
+/// snapshots, [`crate::caps::MAX_PENDING_QUERIES`] and
+/// [`crate::caps::MAX_PENDING_LIVELINESS_GETS`] unless the image states others. A node that asks
+/// nothing (a client that only answers queries) states `0` for both, and its requesters take no
+/// bytes of its session's task, which they otherwise do several times over, as a value the task
+/// is built from.
+pub struct Requesters<
+    R: ReplySink,
+    G: ReplySink,
+    const Q: usize = { crate::caps::MAX_PENDING_QUERIES },
+    const L: usize = { crate::caps::MAX_PENDING_LIVELINESS_GETS },
+> {
+    /// The pending queries (`z_get`), at most `Q`.
+    pub replies: ReplyRegistry<R, Q>,
+    /// The pending liveliness snapshots, at most `L`.
     #[cfg(feature = "liveliness-get")]
-    pub liveliness_gets: LivelinessGetRegistry<G>,
+    pub liveliness_gets: LivelinessGetRegistry<G, L>,
     #[cfg(not(feature = "liveliness-get"))]
     _gets: core::marker::PhantomData<G>,
 }
 
-impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
+impl<R: ReplySink, G: ReplySink, const Q: usize, const L: usize> Requesters<R, G, Q, L> {
     /// No query pending.
     pub fn new() -> Self {
         Self {
@@ -95,7 +106,9 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G> {
     }
 }
 
-impl<R: ReplySink, G: ReplySink> Default for Requesters<R, G> {
+impl<R: ReplySink, G: ReplySink, const Q: usize, const L: usize> Default
+    for Requesters<R, G, Q, L>
+{
     fn default() -> Self {
         Self::new()
     }
@@ -459,10 +472,10 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// What a queryable stages goes to `peers.replies` / `peers.finals`, and a
     /// `Request` whose `Final` the table cannot hold never reaches one
     /// ([`crate::reply_stage`]). `requesters` is the session's own.
-    pub fn dispatch_event<R: ReplySink, G: ReplySink>(
+    pub fn dispatch_event<R: ReplySink, G: ReplySink, const Q: usize, const L: usize>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q, L>,
         event: IterationEvent<'_>,
     ) {
         self.subscribers
@@ -575,10 +588,10 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// through its send path: the replies, the answers to its interests, the
     /// terminated-get prunes, and last the `Final`s, so every Reply for a request
     /// precedes the `Final` that ends it.
-    pub fn flush_pending<S, R: ReplySink, G: ReplySink>(
+    pub fn flush_pending<S, R: ReplySink, G: ReplySink, const Q: usize, const L: usize>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q, L>,
         actions: &S,
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
@@ -591,10 +604,10 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
 
     /// Fan and drain in one call: [`Self::dispatch_event`] then
     /// [`Self::flush_pending`], the shape a session's `on_event` takes.
-    pub fn dispatch<S, R: ReplySink, G: ReplySink>(
+    pub fn dispatch<S, R: ReplySink, G: ReplySink, const Q: usize, const L: usize>(
         &mut self,
         peers: &mut PeerTables,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q, L>,
         event: IterationEvent<'_>,
         actions: &S,
     ) where
@@ -770,9 +783,15 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
-    fn drain_get_prunes<S: LivelinessGetPrune, R: ReplySink, G: ReplySink>(
+    fn drain_get_prunes<
+        S: LivelinessGetPrune,
+        R: ReplySink,
+        G: ReplySink,
+        const Q: usize,
+        const L: usize,
+    >(
         &mut self,
-        requesters: &mut Requesters<R, G>,
+        requesters: &mut Requesters<R, G, Q, L>,
         sink: &S,
     ) {
         #[cfg(feature = "liveliness-get")]

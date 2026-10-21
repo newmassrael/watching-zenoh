@@ -266,7 +266,7 @@ fn lent_body<'r>(response: &'r Response<'r>) -> Result<Option<LentBody<'r>>, Fal
     }
 }
 
-impl<C: ReplySink> ReplyRegistry<C> {
+impl<C: ReplySink, const N: usize> ReplyRegistry<C, N> {
     /// Deliver a Response the in-place receive path lent: the pending-get side
     /// of [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
     /// See the module docs for what it delivers and what it hands to the owned

@@ -125,8 +125,14 @@ struct PendingGet<C: ReplySink> {
 /// its [`ReplySink::on_final`] (after which the pending entry is
 /// removed). See module-level docs for why this is a declaration-plane
 /// sibling of [`crate::reply::ReplyRegistry`] rather than a reuse of it.
-pub struct LivelinessGetRegistry<C: ReplySink> {
-    pending: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }>,
+///
+/// `N` is how many gets it holds at once, [`caps::MAX_PENDING_LIVELINESS_GETS`] unless the owner
+/// states another: a node that issues no liveliness get states 0.
+pub struct LivelinessGetRegistry<
+    C: ReplySink,
+    const N: usize = { caps::MAX_PENDING_LIVELINESS_GETS },
+> {
+    pending: BoundedVec<PendingGet<C>, N>,
     /// F3 — interest ids whose get terminated since the last
     /// [`take_finalized`](Self::take_finalized) drain (inbound
     /// `DeclFinal` or local timeout sweep). The observer's
@@ -145,7 +151,7 @@ pub struct LivelinessGetRegistry<C: ReplySink> {
     /// one staged batch is bounded by the pending table and the shared
     /// capacity cannot overflow (a dropped marker would be a PERMANENT
     /// replay-leak: this drain is the entry's only prune).
-    finalized: BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }>,
+    finalized: BoundedVec<u64, N>,
     /// How many token replies were NOT delivered because their keyexpr is longer
     /// than the bounded buffer the slot profile's receive path resolves into
     /// ([`Self::oversize`]). Stays zero on every build that reads the owned
@@ -153,13 +159,13 @@ pub struct LivelinessGetRegistry<C: ReplySink> {
     oversize: u32,
 }
 
-impl<C: ReplySink> Default for LivelinessGetRegistry<C> {
+impl<C: ReplySink, const N: usize> Default for LivelinessGetRegistry<C, N> {
     fn default() -> Self {
         Self::with_sink_backing()
     }
 }
 
-impl<C: ReplySink> LivelinessGetRegistry<C> {
+impl<C: ReplySink, const N: usize> LivelinessGetRegistry<C, N> {
     /// New empty registry over an explicit sink backing `C` (the
     /// no-`alloc` / MCU entry point, paired with
     /// [`register`](Self::register)). AP callers use the inferring
@@ -188,7 +194,7 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// session-reconnect declaration cache drops the finished one-shot
     /// Interest (see the `finalized` field docs). Returns the staged ids
     /// by value, leaving the staging empty.
-    pub fn take_finalized(&mut self) -> BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }> {
+    pub fn take_finalized(&mut self) -> BoundedVec<u64, N> {
         core::mem::take(&mut self.finalized)
     }
 
