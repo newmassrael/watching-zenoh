@@ -290,7 +290,6 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
     let configure = std::fs::read_to_string(include.join("zenoh_configure.h"))
         .expect("the oracle ships zenoh_configure.h");
     let unstable = configure.contains("#define Z_FEATURE_UNSTABLE_API");
-    let shm = unstable && configure.contains("#define Z_FEATURE_SHARED_MEMORY");
 
     // (name, C expression). ONE list, so the name and the thing measured cannot
     // drift apart — the previous shape kept them in two.
@@ -414,8 +413,8 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
             "sizeof(z_owned_ring_handler_reply_t)",
         ),
         // R311y568 — the seven types the DROP-IN CENSUS forced into existence.
-        // Order matches `WZ_CAPI_C_LAYOUT_NAMES`'s tail exactly; the two tables
-        // are compared index for index.
+        // The probe list is selected by the cdylib's own names, so the order
+        // here does not matter.
         ("z_owned_reply_err_t", "sizeof(z_owned_reply_err_t)"),
         ("z_owned_task_t", "sizeof(z_owned_task_t)"),
         ("z_task_attr_t", "sizeof(z_task_attr_t)"),
@@ -435,10 +434,8 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         ),
     ];
     // R311y543 — the `ze_advanced_*` plane, measured ONLY where upstream
-    // declares it. The order must match `abi.rs`'s
-    // `WZ_CAPI_C_LAYOUT_NAMES_UNSTABLE` exactly: the two tables are compared
-    // index for index, so a reordering here compares an advanced publisher
-    // against a miss closure and passes or fails for the wrong reason.
+    // declares it. Selected by name from what the cdylib reports, so the order
+    // is not part of the contract with `abi.rs`.
     let unstable_probes: &[(&str, &str)] = &[
         ("z_entity_global_id_t", "sizeof(z_entity_global_id_t)"),
         (
@@ -494,8 +491,7 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
     ];
     // R311y543 — the SHM provider / buffer plane. Upstream gates every one of
     // these on `Z_FEATURE_SHARED_MEMORY` AND `Z_FEATURE_UNSTABLE_API` together,
-    // so this is a third half rather than the unstable half widened. Same
-    // ordering obligation as above, against `WZ_CAPI_C_LAYOUT_NAMES_SHM`.
+    // so this is a third half rather than the unstable half widened.
     let shm_probes: &[(&str, &str)] = &[
         ("z_owned_shm_t", "sizeof(z_owned_shm_t)"),
         ("z_owned_shm_mut_t", "sizeof(z_owned_shm_mut_t)"),
@@ -532,12 +528,86 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
             "sizeof(z_owned_chunk_alloc_result_t)",
         ),
     ];
-    let probes: Vec<(&str, &str)> = base
+    let pool: Vec<(&str, &str)> = base
         .iter()
-        .chain(if unstable { unstable_probes } else { &[] }.iter())
-        .chain(if shm { shm_probes } else { &[] }.iter())
+        .chain(unstable_probes.iter())
+        .chain(shm_probes.iter())
         .copied()
         .collect();
+
+    // What the SHIPPED cdylib says about itself, read through its own exports:
+    // the values, and the NAMES of the same entries. The probe list is then
+    // taken from the cdylib's names, in the cdylib's order. The previous shape
+    // kept a second ordered table here and compared the two index for index,
+    // so a capability build that left types out (or a table that grew a new
+    // half) shifted every later entry and reported dozens of false footprint
+    // disagreements. Selecting by name makes the order, and which capabilities
+    // this build carries, the cdylib's business alone.
+    let lib = wz_capi_c_cdylib();
+    // SAFETY: loading wz's own freshly built cdylib and calling its documented
+    // layout-report exports. `wz_capi_c_layout` writes at most `cap` `usize`s
+    // through the out-param and returns the true count; `wz_capi_c_layout_name`
+    // returns a `'static` NUL-terminated string, or NULL past the end.
+    let (mine, names) = unsafe {
+        let handle = libloading::Library::new(&lib).expect("dlopen wz's cdylib");
+        let f = handle
+            .get::<unsafe extern "C" fn(*mut usize, usize) -> usize>(b"wz_capi_c_layout\0")
+            .expect("the cdylib exports wz_capi_c_layout");
+        let name_of = handle
+            .get::<unsafe extern "C" fn(usize) -> *const std::ffi::c_char>(
+                b"wz_capi_c_layout_name\0",
+            )
+            .expect("the cdylib exports wz_capi_c_layout_name");
+        let total = f(std::ptr::null_mut(), 0);
+        let mut out = vec![0usize; total];
+        assert_eq!(f(out.as_mut_ptr(), out.len()), total);
+        let mut names: Vec<String> = Vec::new();
+        loop {
+            let ptr = name_of(names.len());
+            if ptr.is_null() {
+                break;
+            }
+            names.push(
+                std::ffi::CStr::from_ptr(ptr)
+                    .to_str()
+                    .expect("a layout name is ASCII")
+                    .to_string(),
+            );
+        }
+        (out, names)
+    };
+    // Asserted BEFORE the values are read: the two exports describe the same
+    // entries, and an entry this probe has no C expression for means someone
+    // widened `abi.rs` without widening the pool above, which would otherwise
+    // leave the new type unchecked.
+    assert_eq!(
+        names.len(),
+        mine.len(),
+        "the cdylib reports {} footprint values and {} footprint names",
+        mine.len(),
+        names.len()
+    );
+    let unknown: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !pool.iter().any(|(name, _)| name == n))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "the cdylib reports footprint(s) {unknown:?} that this probe has no C \
+         expression for. Widen the probe tables above in the same commit as `abi.rs`."
+    );
+    let probes: Vec<(&str, &str)> = names
+        .iter()
+        .map(|n| {
+            *pool
+                .iter()
+                .find(|(name, _)| name == n)
+                .expect("checked above")
+        })
+        .collect();
+    // A cdylib built for the other arm names types this header does not
+    // declare: that fails to COMPILE below, which is the correct signal.
 
     let dir = tempfile::tempdir().expect("tempdir for the layout probe");
     let src = dir.path().join("layout.c");
@@ -575,32 +645,6 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         .map(|t| t.parse().expect("the probe prints one integer per field"))
         .collect();
     assert_eq!(upstream.len(), probes.len(), "probe output: {text:?}");
-
-    // What the SHIPPED cdylib says about itself, read through its own export.
-    let lib = wz_capi_c_cdylib();
-    // SAFETY: loading wz's own freshly built cdylib and calling its documented
-    // layout-report export, which writes at most `cap` `usize`s through the
-    // out-param and returns the true count.
-    let (mine, total) = unsafe {
-        let handle = libloading::Library::new(&lib).expect("dlopen wz's cdylib");
-        let f = handle
-            .get::<unsafe extern "C" fn(*mut usize, usize) -> usize>(b"wz_capi_c_layout\0")
-            .expect("the cdylib exports wz_capi_c_layout");
-        let mut out = vec![0usize; probes.len()];
-        let total = f(out.as_mut_ptr(), out.len());
-        (out, total)
-    };
-    // Asserted BEFORE the values are read: a cdylib that reports more entries
-    // than this probe measures means someone widened `abi.rs` without widening
-    // the C side, and comparing the truncated prefix would pass while leaving
-    // the new types unchecked.
-    assert_eq!(
-        total,
-        probes.len(),
-        "the cdylib reports {total} footprint entries and this probe measures {}. \
-         Widen the `probes` table above in the same commit as `abi.rs`.",
-        probes.len()
-    );
 
     // WHICH zenoh-c build this is. `Z_FEATURE_UNSTABLE_API` changes type SIZES,
     // not just option fields — `z_owned_bytes_t` is 40 with it and 32 without —
