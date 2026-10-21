@@ -100,6 +100,7 @@ use alloc::vec::Vec;
 // no-alloc control plane (queryable table + per-row keyexpr pattern).
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
+#[cfg(feature = "storage-profile")]
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 use crate::query_mode::QueryTarget;
 use crate::registry_error::RegisterError;
@@ -462,11 +463,12 @@ impl<C: QuerySink> Queryable<C> {
     /// path ([`QueryableRegistry::fire_matching_queryables`]) and the
     /// no-heap borrowed fire ([`QueryableRegistry::dispatch_borrowed`]):
     /// does this queryable's pattern match `keyexpr` under the
-    /// `is_remote` locality predicate AND the query `target`? Splits the
-    /// bounded pattern into a stack chunk view (no heap); a pattern whose
-    /// canonical form exceeds [`MAX_KEYEXPR_CHUNKS`] chunks (cannot happen for
-    /// a pattern admitted at register time) is treated as a non-match rather
-    /// than a truncated match.
+    /// `is_remote` locality predicate AND the query `target`? A pattern and a
+    /// keyexpr with no wildcard are compared as text; otherwise the bounded
+    /// pattern is split into a stack chunk view (no heap), and a pattern whose
+    /// canonical form exceeds [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS)
+    /// chunks (cannot happen for a pattern admitted at register time) is
+    /// treated as a non-match rather than a truncated match.
     ///
     /// The three conjuncts mirror zenoh's local `handle_query` filter
     /// (`zenoh/src/api/session.rs:2427-2431`): locality
