@@ -277034,6 +277034,74 @@
         "R29 statechart carry items unchanged. Layer 2 byte-golden 'filename-mismatch / body-match' classification refinement still pending verify-codegen.sh enhancement."
       ]
     },
+    "Round 3403": {
+      "decision_summary": "Record the storage-policy line mcu-pico-r3 (64 commits, pushed as 5faf6df4e): one session host over a storage policy, so that heap or no heap is a setting of the image and not a second code base. Built and run on the T2G kit: SessionHost generic over the stack's driver; an allocator-free Zephyr socket driver and link; the fixed client node; caps.rs limits as WZ_LIMIT_* Kconfig symbols; WZ_FIXED_MEMORY choosing the cargo features; the heap profile's reply written by parts into a lent slot (0 allocations per answered query, was 6). Measured against zenoh-pico built the same way on one board; no superiority is claimed, and none against zenoh or zenoh-c, which this round did not measure. Steps 6 and 7 of the design note are open.",
+      "changes_bullets": [
+        "wz-session-mcu: generic SessionHost, SlotStack, Bind, DriverPump, SlotClientNode and SlotDialer; the lwIP crate keeps its names by delegation. session-slot implies tx-lend-only, so a driver that lends no slot sends nothing.",
+        "wz-session-core: ByteCells and ByteBuf claim static buffers; every capacity in caps.rs is limit(option_env!(\"WZ_LIMIT_<NAME>\"), default); deploy/Kconfig.limits is derived from those rows by scripts/lib/limit_config.py and the Zephyr build turns each CONFIG_WZ_LIMIT_* into the cargo environment.",
+        "wz-runtime-zephyr: UdpDriver carries a TxStore (ByteBuf with one slot, HeapTx with several); runtime-coop-core is the runtime tier without lwIP's link crate.",
+        "Reply path: observer drains the arena stage by parts into ResponseWriter on bounded-heapless plus alloc; a gated or counted egress (transport-stats, reply gate, namespace) keeps the owned path.",
+        "deploy/zephyr-admin-node: client-node selects bounded-heapless and transport-tx-lend itself (wz/transport-tx-lend only forwards to lwIP); the role limits live in overlays/t2g_client.conf for both profiles; t2g_client_fixed.conf adds WZ_FIXED_MEMORY, a 16 KB main stack and the task and timer limits.",
+        "Cold paths out of line (dial, reconcile, dispatch_copied); stack_frame_gate row zephyr-client-fixed; SCE pin 9bc5db4ee9 with additive runtime features.",
+        "keyexpr_intersects_target: the same-text shortcut now refuses a target deeper than MAX_KEYEXPR_CHUNKS on the fixed backing, as the walk does."
+      ],
+      "verification_bullets": [
+        "Kit, wire turnaround, alternating order, 12 boots per image in one session: fixed client 0.203 ms, heap client 0.210 (0.215 before the reply-path step), zenoh-pico 0.213 in its smallest working configuration; the heap client and pico ranges overlap, so no order between them is claimed.",
+        "Kit, size: fixed client text 155,120 B and data plus bss about 118 KB against pico 162,280 B and about 114 KB; heap client text 221,248 B and bss 253,442 B. Fixed client main stack peak 9.8 KB of 16 KB; no allocator symbol in the ELF; kernel heap pool 0, allocated 0, peak 0.",
+        "Kit, heap client: 0 mallocs per answered query (was 6, 2,816 B), 4000 GETs answered, 0 bad.",
+        "Host: cargo test -p wz-session-core --features bounded-heapless --lib passes (549 tests) after the keyexpr fix, which a failing run had shown; clippy -D warnings clean for wz-session-core and wz-runtime-zephyr; cargo fmt --check clean; limit_config.py --check and --selftest, no_allocator_link_gate and stack_frame_gate rows pass.",
+        "Measured now: audit-catalog-status REMAINING WORK 0; depth_axis_census 0 PARTIAL atoms; validate-workspace T1 orphan 14, unchanged. The push of 5faf6df4e went through the pre-push hook without --no-verify and its mandatory gates passed.",
+        "Not run: the full local CI sweep (the hook deferred it to hosted CI), the hosted run for 5faf6df4e (in progress when this was written), host tests of wz-runtime-zephyr, and any measurement of zenoh or zenoh-c."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI and Platform runs for 5faf6df4e per job at the start of the next round; a red is its own round.",
+        "Step 6 of docs/storage-policy-and-link-layer.md is open: the registries and the reply staging are not yet generic over the storage policy; the session shell's own tables are. Step 7 is open: a role is not yet generated from one deploy declaration, and WZ_FIXED_MEMORY still depends on one backend and one role.",
+        "The heap client is not smaller than pico: text is 1.36 times pico's and bss 253 KB against 114 KB. The fixed client is smaller in text and about 4 KB larger in RAM than pico; about 80 KB of RAM (DMA rings, net buffers) is shared with pico and not reducible here.",
+        "No stack turnaround gate yet beyond the frame-size rows; the 9.8 KB fixed-client stack peak is attributed to the first dial tick and the handshake decode (dispatch_copied frame of 4.8 KB), and splitting other frames did not lower it.",
+        "The nostd_workspace_members.py derived set is empty and its run-ci lanes are obsolete; retire them in a round of their own.",
+        "Round numbers 3400 to 3402 belong to the unmerged zlayer line; this entry is 3403, so the ledger has a gap until that line lands.",
+        "Not compared and not claimed: zenoh (Rust) and zenoh-c on the same kit or workload. Compare against an upstream built the same way before saying anything about either."
+      ],
+      "publishable_decision_summary": "Record the storage-policy line mcu-pico-r3 (64 commits, pushed as 5faf6df4e): one session host over a storage policy, so that heap or no heap is a setting of the image and not a second code base. Built and run on the T2G kit: SessionHost generic over the stack's driver; an allocator-free Zephyr socket driver and link; the fixed client node; caps.rs limits as WZ_LIMIT_* Kconfig symbols; WZ_FIXED_MEMORY choosing the cargo features; the heap profile's reply written by parts into a lent slot (0 allocations per answered query, was 6). Measured against zenoh-pico built the same way on one board; no superiority is claimed, and none against zenoh or zenoh-c, which this round did not measure. Steps 6 and 7 of the design note are open.",
+      "publishable_changes_bullets": [
+        "wz-session-mcu: generic SessionHost, SlotStack, Bind, DriverPump, SlotClientNode and SlotDialer; the lwIP crate keeps its names by delegation. session-slot implies tx-lend-only, so a driver that lends no slot sends nothing.",
+        "wz-session-core: ByteCells and ByteBuf claim static buffers; every capacity in caps.rs is limit(option_env!(\"WZ_LIMIT_<NAME>\"), default); deploy/Kconfig.limits is derived from those rows by scripts/lib/limit_config.py and the Zephyr build turns each CONFIG_WZ_LIMIT_* into the cargo environment.",
+        "wz-runtime-zephyr: UdpDriver carries a TxStore (ByteBuf with one slot, HeapTx with several); runtime-coop-core is the runtime tier without lwIP's link crate.",
+        "Reply path: observer drains the arena stage by parts into ResponseWriter on bounded-heapless plus alloc; a gated or counted egress (transport-stats, reply gate, namespace) keeps the owned path.",
+        "deploy/zephyr-admin-node: client-node selects bounded-heapless and transport-tx-lend itself (wz/transport-tx-lend only forwards to lwIP); the role limits live in overlays/t2g_client.conf for both profiles; t2g_client_fixed.conf adds WZ_FIXED_MEMORY, a 16 KB main stack and the task and timer limits.",
+        "Cold paths out of line (dial, reconcile, dispatch_copied); stack_frame_gate row zephyr-client-fixed; SCE pin 9bc5db4ee9 with additive runtime features.",
+        "keyexpr_intersects_target: the same-text shortcut now refuses a target deeper than MAX_KEYEXPR_CHUNKS on the fixed backing, as the walk does."
+      ],
+      "publishable_verification_bullets": [
+        "Kit, wire turnaround, alternating order, 12 boots per image in one session: fixed client 0.203 ms, heap client 0.210 (0.215 before the reply-path step), zenoh-pico 0.213 in its smallest working configuration; the heap client and pico ranges overlap, so no order between them is claimed.",
+        "Kit, size: fixed client text 155,120 B and data plus bss about 118 KB against pico 162,280 B and about 114 KB; heap client text 221,248 B and bss 253,442 B. Fixed client main stack peak 9.8 KB of 16 KB; no allocator symbol in the ELF; kernel heap pool 0, allocated 0, peak 0.",
+        "Kit, heap client: 0 mallocs per answered query (was 6, 2,816 B), 4000 GETs answered, 0 bad.",
+        "Host: cargo test -p wz-session-core --features bounded-heapless --lib passes (549 tests) after the keyexpr fix, which a failing run had shown; clippy -D warnings clean for wz-session-core and wz-runtime-zephyr; cargo fmt --check clean; limit_config.py --check and --selftest, no_allocator_link_gate and stack_frame_gate rows pass.",
+        "Measured now: audit-catalog-status REMAINING WORK 0; depth_axis_census 0 PARTIAL atoms; validate-workspace T1 orphan 14, unchanged. The push of 5faf6df4e went through the pre-push hook without --no-verify and its mandatory gates passed.",
+        "Not run: the full local CI sweep (the hook deferred it to hosted CI), the hosted run for 5faf6df4e (in progress when this was written), host tests of wz-runtime-zephyr, and any measurement of zenoh or zenoh-c."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI and Platform runs for 5faf6df4e per job at the start of the next round; a red is its own round.",
+        "Step 6 of docs/storage-policy-and-link-layer.md is open: the registries and the reply staging are not yet generic over the storage policy; the session shell's own tables are. Step 7 is open: a role is not yet generated from one deploy declaration, and WZ_FIXED_MEMORY still depends on one backend and one role.",
+        "The heap client is not smaller than pico: text is 1.36 times pico's and bss 253 KB against 114 KB. The fixed client is smaller in text and about 4 KB larger in RAM than pico; about 80 KB of RAM (DMA rings, net buffers) is shared with pico and not reducible here.",
+        "No stack turnaround gate yet beyond the frame-size rows; the 9.8 KB fixed-client stack peak is attributed to the first dial tick and the handshake decode (dispatch_copied frame of 4.8 KB), and splitting other frames did not lower it.",
+        "The nostd_workspace_members.py derived set is empty and its run-ci lanes are obsolete; retire them in a round of their own.",
+        "Round numbers 3400 to 3402 belong to the unmerged zlayer line; this entry is 3403, so the ledger has a gap until that line lands.",
+        "Not compared and not claimed: zenoh (Rust) and zenoh-c on the same kit or workload. Compare against an upstream built the same way before saying anything about either."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
