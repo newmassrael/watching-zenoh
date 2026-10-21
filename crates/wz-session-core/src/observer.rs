@@ -881,7 +881,13 @@ impl ApplicationLayerObserver {
     /// replies under the lock and defers the finals past the deferred-fire
     /// drain, so the two halves are separate primitives.
     fn drain_query_replies<S: ResponseSink>(&mut self, sink: &S) {
-        #[cfg(feature = "query-queryable")]
+        // A fixed stage (`bounded-heapless`) holds its replies as rows of an arena and hands them
+        // out as borrowed parts, which the sink writes where it can without building an owned
+        // record. The growable stage holds owned records already.
+        #[cfg(all(feature = "query-queryable", feature = "bounded-heapless"))]
+        self.pending_replies
+            .drain_parts(|parts| sink.send_reply_parts(parts));
+        #[cfg(all(feature = "query-queryable", not(feature = "bounded-heapless")))]
         for reply in self.pending_replies.drain_staged() {
             // W3: a reply whose bounded field overflows cannot be wire-encoded
             // (the codec would reject it too); skip it and continue the drain.

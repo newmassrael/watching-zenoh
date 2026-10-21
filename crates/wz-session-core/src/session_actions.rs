@@ -2686,19 +2686,33 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     fn send_response(&self, response: ResponseOwned) {
         self.send_response(response);
     }
-    // With no allocator a staged reply is written as the codec's borrowed `Response`
-    // from the stage's own row and encoded into the lent slot: no `QueryReply`, no
-    // `ResponseOwned`. Routed as `dispatch_response` routes a response: on the band
-    // and with the express bit of the reply's own `ext_qos`, reliable, and an express
-    // reply drains the open batch. A reply the wire cannot carry is skipped (the heap
-    // drain skips one whose bounded field overflows), and this surface has no error
-    // channel, so a transport-down reject drops the emit as the dead link would.
-    #[cfg(all(
-        feature = "codec-response",
-        feature = "storage-profile",
-        not(feature = "alloc")
-    ))]
+    // A staged reply is written as the codec's borrowed `Response` from the stage's own
+    // row and encoded into the lent slot: no `QueryReply`, no `ResponseOwned`. Routed as
+    // `dispatch_response` routes a response: on the band and with the express bit of the
+    // reply's own `ext_qos`, reliable, and an express reply drains the open batch. This
+    // surface has no error channel, so a transport-down reject drops the emit as the dead
+    // link would.
+    //
+    // The same writer serves both storage policies. With no allocator a reply the wire
+    // cannot carry is skipped (the heap drain skips one whose bounded field overflows).
+    // With one, the reply is written from its parts unless something needs the OWNED
+    // record: the session's egress policy asks a verdict of it, a routing namespace
+    // decorates its key, the transport's statistics classify its content, or the writer
+    // cannot describe it. Those go the way every owned reply goes, through
+    // [`Self::send_response`].
+    #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
+        #[cfg(feature = "alloc")]
+        let writer = match crate::lent_response::ResponseWriter::new(parts) {
+            Ok(writer) if self.reply_can_be_written_from_parts() => writer,
+            _ => {
+                if let Ok(response) = crate::query::QueryReply::from_parts(&parts).into_response() {
+                    self.send_response(response);
+                }
+                return;
+            }
+        };
+        #[cfg(not(feature = "alloc"))]
         let Ok(writer) = crate::lent_response::ResponseWriter::new(parts) else {
             return;
         };
@@ -12722,6 +12736,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::network_message::NetworkMessage::Response(response) => Some(*response),
             _ => None,
         }
+    }
+
+    /// Whether a staged reply may leave as it is written from its parts, with no owned
+    /// record built: nothing between the handler and the wire needs one. The egress policy
+    /// asks its verdict of the owned reply, a routing namespace decorates the owned reply's
+    /// key, and the statistics classify the owned reply's content, so a session that holds
+    /// either, or is built to count, sends the owned reply.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    fn reply_can_be_written_from_parts(&self) -> bool {
+        if cfg!(feature = "transport-stats") {
+            return false;
+        }
+        if self
+            .egress_reply_gate_set
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        #[cfg(feature = "routing-namespace")]
+        if R::with_mutex_mut(&self.namespace_egress, |slot| slot.is_some()) {
+            return false;
+        }
+        true
     }
 
     /// Install (or, with `None`, remove) the egress admission of this bundle's replies. Called by
