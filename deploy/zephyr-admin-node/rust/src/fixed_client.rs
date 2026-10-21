@@ -9,8 +9,8 @@
 //! | what | where | bound |
 //! | --- | --- | --- |
 //! | sessions, dialled | `NODE.sessions`, `pumps`, the runtime's task table | [`SESSIONS`] |
-//! | the link's receive buffer | inside each session's slot, the driver's array | [`RX`] |
-//! | the frame being sent | inside each session's slot, the driver's lent array | [`TX`] |
+//! | the link's receive buffer | `NODE.rx`, claimed by the session's driver | [`RX`] bytes |
+//! | the frame being sent | `NODE.tx`, claimed by the session's driver | [`TX`] bytes |
 //! | the observer, with the two queryables | `NODE.app` | the registry's own capacity |
 //! | the endpoint it dials | [`crate::ENDPOINTS`], a `static` list | the connect manager's rows |
 //! | the declarations it sends | [`DECLARATIONS`], a `static` slice | its length |
@@ -37,6 +37,7 @@ use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_runtime_coop::session_drive::{DriverPump, PumpSlots};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
+use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
@@ -85,8 +86,8 @@ type Clock = ZephyrClock<TICK_HZ>;
 /// The requests a session of this node holds: none. It answers queries and asks none, so it keeps
 /// no table of pending gets, and the application layer its task holds is a few pointers.
 type Requests = Requesters<NoReplies, NoReplies, 0, 0>;
-type Driver = FixedUdpDriver<RX, TX>;
-type Stack = ZephyrStack<RX, TX>;
+type Driver = FixedUdpDriver;
+type Stack = ZephyrStack;
 
 /// The table of session slots this image places: one type for the assertion below and the
 /// probe.
@@ -137,6 +138,10 @@ struct Statics {
     sessions: Slots,
     pumps: PumpSlots<Clock, DriverPump<Driver>, SESSIONS>,
     app: SlotApp<DocumentSinks>,
+    /// The receive buffers the links claim, one batch long each.
+    rx: ByteCells<RX, SESSIONS>,
+    /// The buffers the links' frames are encoded into, one batch long each.
+    tx: ByteCells<TX, SESSIONS>,
 }
 
 // SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative loop on
@@ -151,6 +156,8 @@ impl Statics {
             sessions: SessionSlots::new(),
             pumps: PumpSlots::new(),
             app: SlotApp::new(),
+            rx: ByteCells::new(),
+            tx: ByteCells::new(),
         }
     }
 }
@@ -271,7 +278,7 @@ pub fn run() -> i32 {
         }
     };
 
-    let stack = Stack::new(address);
+    let stack = Stack::new(address, &NODE.rx, &NODE.tx);
     let host: Host = SessionHost::new(
         CoopLocalSet::new(&runtime),
         &NODE.sessions,

@@ -130,6 +130,11 @@ pub mod namespace;
 /// the seam the 25 currently alloc-gated modules migrate onto.
 pub mod bounded;
 
+/// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
+/// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
+/// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.
+pub mod byte_cells;
+
 /// R311gb (Track 2 no-alloc gating) — deploy-declared capacity
 /// constants: the SSOT for the bounded backing sizes (`N`) the
 /// registries pin onto [`bounded::BoundedVec`] / [`bounded::BoundedString`].
