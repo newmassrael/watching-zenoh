@@ -7,14 +7,14 @@
 //!
 //! The growable profile's node is `wz_session_mcu::admin_node::AdminNode`, generic
 //! over a network stack through `SessionLinks` and built from `Rc` handles, `String`
-//! keys and a `Vec` of declared sessions. None of that has a slot form that is
-//! stack-neutral yet, because a session on this profile is opened by the SESSION HOST
-//! ([`SessionHost`]), which owns the tables of one
-//! stack. So the node of the slot profile is written over that host, here, beside it,
-//! and is lwIP's; a stack of another kind brings its own host and its own copy of this
-//! module's twenty lines of wiring. What is shared is everything that decides: the
-//! connect manager (`wz_session_mcu::connect_manager`), the admin queryable and its
-//! fixed rows (`wz_session_mcu::admin_fixed`), the config write host
+//! keys and a `Vec` of declared sessions. The node of the slot profile is written over
+//! the session host ([`SessionHost`]), which opens a session out of the tables the image
+//! declared. The host and the dialler are written once for every stack
+//! (`wz_session_mcu::slot_host`, `wz_session_mcu::slot_dial`); what is lwIP's is this
+//! node's listener and the socket pool it binds from, which is why the node that listens
+//! is here. What is shared is everything that decides: the connect manager
+//! (`wz_session_mcu::connect_manager`), the admin queryable and its fixed rows
+//! (`wz_session_mcu::admin_fixed`), the config write host
 //! (`wz_session_mcu::admin_host`) and the application layer (`wz_session_mcu::app_layer`).
 //!
 //! # What the node holds, and where
@@ -38,215 +38,54 @@
 //! counts those (`ListenerCounts`). And it reports the endpoints and sessions it holds
 //! as the heap node does, one row each, with the same words.
 
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 
-use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
+use wz_runtime_coop::session_drive::{LinkOpenError, SessionDriveConfig, SessionRole, UdpPeer};
 use wz_runtime_coop::session_runtime::SessionHandle;
-use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle};
+use wz_runtime_coop::ClockSource;
 use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef};
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
-use wz_session_core::close_reason::CloseReason;
-use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
-use wz_session_core::entropy::EntropySource;
-use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::FixedText;
 use wz_session_mcu::admin_fixed::{FixedAdminSession, FixedNodeStatus, RowRefused};
 use wz_session_mcu::admin_status::DialStatus;
-use wz_session_mcu::app_layer::SessionEvents;
-use wz_session_mcu::connect_manager::{ConnectManager, DialFailed, Dialer, Ended, SlotState};
-use wz_session_mcu::dial::parse_udp_endpoint;
+use wz_session_mcu::connect_manager::{ConnectManager, SlotState};
+use wz_session_mcu::slot_dial::{events_of, Bind};
 
 use wz_link_lwip::LwipLink;
 
 use core::ops::Deref;
 
+use crate::driver::LwipUdpDriver;
 use crate::links::LwipLinks;
 use crate::listener::{Admission, SessionListener};
-use crate::session_host::{DialRefused, OpenRefused, OpenedSession, SessionHost};
+use crate::session_host::{LwipStack, OpenRefused, SessionHost};
 
-/// What the node needs from the image to make a session: the entropy source the
-/// session's cookies are drawn from, its handshake parameters, and the application
-/// layer it reports to. One value for the three, because the node makes sessions two
-/// ways (it dials and it accepts) and the three must not differ between them.
-pub trait SessionFactory<C: ClockSource + 'static> {
-    /// The entropy source a session owns, in its slot.
-    type Entropy: EntropySource + Send + 'static;
-    /// The application layer a session reports its iterations to, kept in its task.
-    type Events: SessionEvents + 'static;
+pub use wz_session_mcu::slot_dial::{SessionFactory, SlotSession};
 
-    /// A fresh entropy source for one session.
-    fn entropy(&mut self) -> Self::Entropy;
-
-    /// The handshake parameters of one session: its zid, resolutions, signing key.
-    fn params(&mut self) -> SessionInitParams;
-
-    /// The application layer of the session whose handle this is, made after the
-    /// session's slot is claimed and before its pump is
-    /// ([`SessionHost::open`](crate::session_host::SessionHost::open)). The admin node's
-    /// is `wz_session_mcu::app_layer::SlotDispatch` over the process-wide observer.
-    fn events(&mut self, handle: &SessionHandle<C>) -> Self::Events;
-}
-
-/// The `on_event` closure a session driver takes, over the factory's application layer
-/// for the session `handle` names.
-fn events_of<C, F>(
-    factory: &RefCell<F>,
-    handle: &SessionHandle<C>,
-) -> impl FnMut(IterationEvent<'_>) + 'static
+/// How a dial opens its socket on lwIP: out of the pool the image declared, on a port the stack
+/// picks.
+pub struct LwipBinder<'a, L>
 where
-    C: ClockSource + 'static,
-    F: SessionFactory<C>,
-{
-    let mut events = factory.borrow_mut().events(handle);
-    move |event| events.on_event(event)
-}
-
-/// A session this node holds, with what the node remembers about it.
-pub struct SlotSession<C: ClockSource + 'static> {
-    opened: OpenedSession<C>,
-    /// Whether the session was ever seen established, sampled each time the manager
-    /// asks (a session that establishes and drops between two ticks reads as never
-    /// established, so its re-dial continues the old outage's period: it errs towards
-    /// waiting longer, never towards dialling harder).
-    established: bool,
-    /// Whether the admin declarations have gone out on it.
-    declared: Cell<bool>,
-}
-
-impl<C: ClockSource + 'static> SlotSession<C> {
-    fn new(opened: OpenedSession<C>) -> Self {
-        Self {
-            opened,
-            established: false,
-            declared: Cell::new(false),
-        }
-    }
-
-    /// The handle to the session, to publish or declare through.
-    pub fn actions(&self) -> &SessionHandle<C> {
-        &self.opened.actions
-    }
-
-    /// Whether the session's task has ended.
-    pub fn is_finished(&self) -> bool {
-        self.opened.task.is_finished()
-    }
-
-    /// End the session's task now, without a Close on the wire.
-    pub fn abort(&self) {
-        self.opened.task.abort();
-    }
-
-    /// The task that runs the session, for a caller that waits on it.
-    pub fn task(&self) -> &CoopLocalJoinHandle<DriverOutcome> {
-        &self.opened.task
-    }
-}
-
-/// The [`Dialer`] of the slot profile: a written `udp/<ipv4>:<port>` becomes an
-/// initiator session opened by the session host, or a typed refusal. The twin of
-/// `wz_session_mcu::dial::UdpDialer`, with a socket out of the host's pool, a slot, a
-/// pump cell and a task cell where that one has `Rc` handles and a boxed sink.
-///
-/// An endpoint this build cannot dial at all (a scheme it has no link for, an
-/// address it cannot parse) is refused by name and not retried; a node that cannot
-/// afford a session RIGHT NOW (the pool has no socket, a table has no cell) answers
-/// `Exhausted`, which the manager counts as a failed attempt of the same outage.
-pub struct SlotDialer<'a, C, L, F, const S: usize, const P: usize>
-where
-    C: ClockSource + 'static,
     L: Deref<Target = LwipLink> + Clone + 'static,
-    F: SessionFactory<C>,
 {
-    host: &'a SessionHost<C, L, F::Entropy, S, P>,
     links: &'a LwipLinks<L>,
-    factory: &'a RefCell<F>,
-    timeouts: SessionTimeouts,
 }
 
-impl<'a, C, L, F, const S: usize, const P: usize> SlotDialer<'a, C, L, F, S, P>
+impl<L> Bind<LwipUdpDriver> for LwipBinder<'_, L>
 where
-    C: ClockSource + 'static,
     L: Deref<Target = LwipLink> + Clone + 'static,
-    F: SessionFactory<C>,
 {
-    /// A dialler over `host`, whose sockets `links` binds, making its sessions
-    /// through `factory` with the handshake deadlines `timeouts`.
-    pub fn new(
-        host: &'a SessionHost<C, L, F::Entropy, S, P>,
-        links: &'a LwipLinks<L>,
-        factory: &'a RefCell<F>,
-        timeouts: SessionTimeouts,
-    ) -> Self {
-        Self {
-            host,
-            links,
-            factory,
-            timeouts,
-        }
+    fn bind(&mut self, peer: UdpPeer) -> Result<LwipUdpDriver, LinkOpenError> {
+        self.links.bind_driver(0, peer)
     }
 }
 
-impl<C, L, F, const S: usize, const P: usize> Dialer for SlotDialer<'_, C, L, F, S, P>
-where
-    C: ClockSource + 'static,
-    L: Deref<Target = LwipLink> + Clone + 'static,
-    F: SessionFactory<C>,
-{
-    type Session = SlotSession<C>;
-
-    fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
-        let peer = parse_udp_endpoint(endpoint).map_err(DialFailed::Refused)?;
-        let entropy = self.factory.borrow_mut().entropy();
-        let params = self.factory.borrow_mut().params();
-        let factory = self.factory;
-        let opened = self
-            .host
-            .dial(
-                self.links,
-                peer,
-                entropy,
-                params,
-                SessionDriveConfig {
-                    timeouts: self.timeouts,
-                    role: SessionRole::Initiator,
-                    max_iters: None,
-                },
-                |handle| events_of(factory, handle),
-            )
-            // Whichever table is full, the node cannot afford a session right now:
-            // each table counted its own refusal, and the endpoint waits its period.
-            .map_err(|refused| match refused {
-                DialRefused::Link(_) | DialRefused::Open(_) => DialFailed::Exhausted,
-            })?;
-        Ok(SlotSession::new(opened))
-    }
-
-    fn ended(&mut self, session: &mut Self::Session) -> Option<Ended> {
-        session.established |= session.opened.actions.is_established();
-        if !session.is_finished() {
-            return None;
-        }
-        Some(if session.established {
-            Ended::AfterEstablished
-        } else {
-            Ended::BeforeEstablished
-        })
-    }
-
-    fn hang_up(&mut self, session: Self::Session) {
-        // An established peer is told; a half-open one has nothing to close.
-        if session.opened.actions.is_established() {
-            session
-                .opened
-                .actions
-                .send_close_with_reason(CloseReason::Generic);
-        }
-        session.abort();
-    }
-}
+/// The [`Dialer`](wz_session_mcu::connect_manager::Dialer) of the slot profile over lwIP: the
+/// stack-neutral one, given lwIP's host and its socket pool.
+pub type SlotDialer<'a, C, L, F, const S: usize, const P: usize> =
+    wz_session_mcu::slot_dial::SlotDialer<'a, C, LwipStack<L>, LwipBinder<'a, L>, F, S, P>;
 
 /// The declaration ids the node uses on each session; ids are per session.
 const ADMIN_QUERYABLE_ID: u64 = 1;
@@ -339,7 +178,10 @@ where
             listening: false,
             timeouts,
             status,
-            manager: ConnectManager::new(control, SlotDialer::new(host, links, factory, timeouts)),
+            manager: ConnectManager::new(
+                control,
+                SlotDialer::new(&**host, LwipBinder { links }, factory, timeouts),
+            ),
             accepted: BoundedVec::new(),
             admin_key,
             config_key,
@@ -438,11 +280,11 @@ where
             .iter()
             .chain(self.manager.sessions().map(|(_, session)| session));
         for session in live {
-            if session.opened.actions.is_established()
-                && !session.declared.get()
-                && declare_admin(&session.opened.actions, admin_key, config_key)
+            if session.actions().is_established()
+                && !session.declared()
+                && declare_admin(session.actions(), admin_key, config_key)
             {
-                session.declared.set(true);
+                session.mark_declared();
             }
         }
     }
@@ -457,8 +299,7 @@ where
             .chain(self.manager.sessions().map(|(_, session)| session));
         for session in sessions {
             if let Some(row) = session
-                .opened
-                .actions
+                .actions()
                 .with_admin_session(|view: AdminSessionRef<'_>| FixedAdminSession::from_view(&view))
             {
                 // More established sessions than the pool has slots cannot be; one
@@ -474,7 +315,7 @@ where
                 SlotState::Live => DialStatus::Live {
                     established: live
                         .next()
-                        .is_some_and(|(_, session)| session.opened.actions.is_established()),
+                        .is_some_and(|(_, session)| session.actions().is_established()),
                 },
                 SlotState::Waiting { at_ms } => DialStatus::Waiting {
                     retry_in_ms: at_ms.saturating_sub(now_ms),

@@ -74,6 +74,13 @@ pub mod admin_host;
 // and named lwIP's driver, pump link and socket pool for what it needs of a stack.
 #[cfg(feature = "session-slot")]
 pub mod slot_host;
+// The dialler of the slot profile, over that host: a written endpoint becomes an initiator session.
+#[cfg(all(feature = "session-slot", feature = "dial"))]
+pub mod slot_dial;
+// A client of a router that answers queries, on the slot profile: the dialler over a fixed list of
+// endpoints, and the declarations sent on every session as it establishes.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod slot_client;
 // R2830 — the node keeps a session with every endpoint the control names and
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
 #[cfg(feature = "dial")]

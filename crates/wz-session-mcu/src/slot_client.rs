@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! A client of a router that answers queries, on the slot profile: the node of
+//! [`crate::client_node`] with every session, table and text in storage the image declared and no
+//! allocator.
+//!
+//! It dials the endpoints of an [`EndpointSource`] the image knows at build time
+//! ([`StaticEndpoints`](crate::connect_manager::StaticEndpoints)), keeps a session with each and
+//! re-dials the ones that drop (the connect manager), and sends the declarations of the queryables
+//! and subscribers it answers on every session as it establishes. What answers a query or takes a
+//! sample is the observer the sessions dispatch to, built and registered by the image beforehand
+//! as the admin node's is (`SlotApp`): a registration that was refused stops the image, rather
+//! than starting a node that declares what nothing answers.
+//!
+//! | what | where | bound |
+//! | --- | --- | --- |
+//! | sessions it dials | `SessionSlots` / `PumpSlots` / the task table of the host | the pool's `max_sessions`, `process.max_tasks` |
+//! | endpoints it manages | the connect manager's rows | `caps::MAX_STATIC_CONNECT` |
+//! | the declarations | a `&'static` slice the image states | its length |
+//!
+//! Nothing is grown and nothing falls back to the heap; this module does not link `alloc` on the
+//! profile at all.
+
+use core::cell::RefCell;
+
+use wz_runtime_coop::session_drive::SlotStack;
+use wz_runtime_coop::session_runtime::SessionHandle;
+use wz_runtime_coop::ClockSource;
+use wz_session_core::session_timeouts::SessionTimeouts;
+
+use crate::connect_manager::{ConnectManager, EndpointSource};
+use crate::slot_dial::{Bind, SessionFactory, SlotDialer, SlotSession};
+use crate::slot_host::SessionHost;
+
+/// What a declaration announces to the router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationKind {
+    /// A queryable: the router forwards a GET on the key to this node.
+    Queryable,
+    /// A subscriber: the router forwards a PUT on the key to this node.
+    Subscriber,
+}
+
+/// One declaration the node sends on every session as it establishes. Its id on the wire is its
+/// place in the node's list plus one, per session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Declaration {
+    /// What it announces.
+    pub kind: DeclarationKind,
+    /// The key it announces, as the registration on the observer names it.
+    pub key: &'static str,
+}
+
+/// A client node on the slot profile over the stack `T`, binding its sockets with `B`.
+pub struct SlotClientNode<'a, C, T, B, F, const S: usize, const P: usize>
+where
+    C: ClockSource + 'static,
+    T: SlotStack,
+    B: Bind<T::Driver>,
+    F: SessionFactory<C>,
+{
+    manager: ConnectManager<SlotDialer<'a, C, T, B, F, S, P>>,
+    declarations: &'static [Declaration],
+}
+
+impl<'a, C, T, B, F, const S: usize, const P: usize> SlotClientNode<'a, C, T, B, F, S, P>
+where
+    C: ClockSource + 'static,
+    T: SlotStack,
+    B: Bind<T::Driver>,
+    F: SessionFactory<C>,
+{
+    /// A node that dials `endpoints` through `host` (sockets from `bind`, sessions made by
+    /// `factory` with the handshake deadlines `timeouts`) and declares `declarations` on each
+    /// session as it establishes.
+    pub fn new(
+        host: &'a SessionHost<C, T, F::Entropy, S, P>,
+        bind: B,
+        factory: &'a RefCell<F>,
+        endpoints: &'static dyn EndpointSource,
+        timeouts: SessionTimeouts,
+        declarations: &'static [Declaration],
+    ) -> Self {
+        Self {
+            manager: ConnectManager::new(endpoints, SlotDialer::new(host, bind, factory, timeouts)),
+            declarations,
+        }
+    }
+
+    /// Whether some session is established.
+    pub fn is_established(&self) -> bool {
+        self.manager
+            .sessions()
+            .any(|(_, session)| session.actions().is_established())
+    }
+
+    /// Whether the node holds a session, established or still opening. A node that holds none has
+    /// no socket either, so its loop sleeps rather than spin above the network stack's threads.
+    pub fn holds_session(&self) -> bool {
+        self.manager.sessions().next().is_some()
+    }
+
+    /// Advance the node to `now_ms`: keep the sessions in step with the endpoints, and send the
+    /// declarations on every established session that has not had them.
+    pub fn tick(&mut self, now_ms: u64) {
+        self.manager.tick(now_ms);
+        for (_, session) in self.manager.sessions() {
+            if session.actions().is_established()
+                && !session.declared()
+                && declare_all(session, self.declarations)
+            {
+                session.mark_declared();
+            }
+        }
+    }
+}
+
+/// Send the declarations on `session`: `true` once every one went out. A declaration that did not
+/// (the session's stage was busy) leaves the rest for the next tick, which repeats the whole list;
+/// a router that sees a declaration twice under one id takes the second as the first.
+fn declare_all<C: ClockSource + 'static>(
+    session: &SlotSession<C>,
+    declarations: &[Declaration],
+) -> bool {
+    declarations
+        .iter()
+        .enumerate()
+        .all(|(index, declaration)| declare(session.actions(), index as u64 + 1, declaration))
+}
+
+/// Send one declaration under `id`: `true` once it went out.
+fn declare<C: ClockSource + 'static>(
+    actions: &SessionHandle<C>,
+    id: u64,
+    declaration: &Declaration,
+) -> bool {
+    // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
+    match declaration.kind {
+        DeclarationKind::Queryable => actions
+            .send_declare_queryable(id, 0, Some(declaration.key), false)
+            .is_ok(),
+        DeclarationKind::Subscriber => actions
+            .send_declare_subscriber(id, 0, Some(declaration.key))
+            .is_ok(),
+    }
+}
