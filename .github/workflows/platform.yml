@@ -54,6 +54,11 @@ on:
       - "crates/wz/**"
       - "crates/wz-access-control/**"
       - "crates/wz-capi-dissect/**"
+      - "crates/wz-capi-replay/**"
+      - "crates/wz-replay/**"
+      - "crates/wz-analyze/**"
+      - "crates/wz-packet-socket/**"
+      - "crates/wz-tls-record/**"
       - "crates/wz-capture/**"
       - "crates/wz-cdylib-build/**"
       - "crates/wz-codecs/**"
@@ -574,7 +579,12 @@ jobs:
           # its path was a trigger, its crate was not in this list. It reads packets the
           # caller hands it and opens no socket, so what is asked here is that it builds
           # and its unit tests pass.
-          for crate in wz-capi-core wz-capi-pico wz-capi-c wz-capi-dissect; do
+          #
+          # `wz-capi-replay` is the plan half of the replay tool behind a C ABI: scalars in,
+          # scalars out, no socket, no thread, no callback. It has no cfg(unix) arm, and no
+          # hosted runner of either kind had built it before this list named it, so the claim
+          # that it builds on Windows was a reading of its source. It owes what dissect owes.
+          for crate in wz-capi-core wz-capi-pico wz-capi-c wz-capi-dissect wz-capi-replay; do
             built=FAIL
             (cd crates && cargo build -p "$crate") && built=PASS
             verdict "$crate builds:" "$built"
