@@ -276936,6 +276936,54 @@
         "The hosted capability-cost job has not run; read it per job first."
       ]
     },
+    "Round 3399": {
+      "decision_summary": "Put the zenoh-c oracle pin in a data file and let the hosted Windows C ABI loop build wz-capi-replay. A downstream Windows host asked whether the C ABI crates build on x86_64-pc-windows-msvc and where the zenoh-c version is written. Measured on Platform run 39520158066: wz-capi-core, pico, c and dissect pass on windows-latest, wz-ap-demo builds there and reaches Established over six links, and wz-capi-replay was built by no hosted job. The version was a bash default that two readers parsed by regex; scripts/zenoh-c-oracle.pin now holds version, archive name and release URL once, and the installer and the archive-arm gate read it.",
+      "changes_bullets": [
+        "platform.yml: wz-capi-replay joins the C ABI loop (build and unit tests); trigger paths gain the crate and wz-replay, wz-analyze, wz-packet-socket, wz-tls-record, the four dependencies platform_trigger_paths_gate.py found uncovered.",
+        "scripts/zenoh-c-oracle.pin (new): ZENOH_C_VERSION, ZENOH_C_ARCHIVE and ZENOH_C_RELEASE_URL as KEY=VALUE lines with @VERSION@, @TARGET@ and @ARCHIVE@ placeholders; a missing or empty key fails the reader.",
+        "install-zenoh-c.sh reads the file and builds the same URL as before; zenoh_c_archive_arm.py reads it through pin_value, with four selftest cases; ci.yml's two zenoh-c cache keys hash the file so a bump is a cache miss.",
+        "Three messages that named the installer as the pin's home (two clone hints, the archive-arm failure) now name the pin file."
+      ],
+      "verification_bullets": [
+        "platform_trigger_paths_gate --check ok (30 lane crates, 34 packages covered) and its selftest OK; platform_surface_matrix --check exit 0.",
+        "zenoh_c_archive_arm --check and --selftest, bump_sweep --check, zenoh_c_oracle_arms --check and claude_md_upstream_pin_gate --check exit 0; install-zenoh-c.sh passes bash -n and shellcheck.",
+        "install-zenoh-c.sh run end to end into empty prefixes fetched the same release URL as before and installed 1.10.1.",
+        "nda-scan clean over the pushed range (12 terms). The push of the first two commits went with --no-verify at the owner's explicit request, rebased onto origin/main first; the pre-push hook gates (schema pin, validate-workspace, changed-crate tests) did not run on it.",
+        "Not run: wz-capi-replay on Windows or macOS, and the hosted Platform run for that push, which has not been read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the Platform C ABI job for the push that added wz-capi-replay per job at the start of the next round; until then wz-capi-replay is not shown to build on Windows or macOS, only read from its source (no cfg arm, same dependency chain as dissect).",
+        "Nothing installs the zenoh-c oracle on Windows: the pin is data now, but install-zenoh-c.sh is bash and maps linux-gnu targets only. Whether wz ships a Windows installer or the downstream host installs from the pin file is undecided.",
+        "wz-capi-c's zenoh-c-shared-memory feature uses libc mmap and std::os::unix and does not build on Windows; the hosted Windows builds use the default feature set only."
+      ],
+      "publishable_decision_summary": "Put the zenoh-c oracle pin in a data file and let the hosted Windows C ABI loop build wz-capi-replay. A downstream Windows host asked whether the C ABI crates build on x86_64-pc-windows-msvc and where the zenoh-c version is written. Measured on Platform run 39520158066: wz-capi-core, pico, c and dissect pass on windows-latest, wz-ap-demo builds there and reaches Established over six links, and wz-capi-replay was built by no hosted job. The version was a bash default that two readers parsed by regex; scripts/zenoh-c-oracle.pin now holds version, archive name and release URL once, and the installer and the archive-arm gate read it.",
+      "publishable_changes_bullets": [
+        "platform.yml: wz-capi-replay joins the C ABI loop (build and unit tests); trigger paths gain the crate and wz-replay, wz-analyze, wz-packet-socket, wz-tls-record, the four dependencies platform_trigger_paths_gate.py found uncovered.",
+        "scripts/zenoh-c-oracle.pin (new): ZENOH_C_VERSION, ZENOH_C_ARCHIVE and ZENOH_C_RELEASE_URL as KEY=VALUE lines with @VERSION@, @TARGET@ and @ARCHIVE@ placeholders; a missing or empty key fails the reader.",
+        "install-zenoh-c.sh reads the file and builds the same URL as before; zenoh_c_archive_arm.py reads it through pin_value, with four selftest cases; ci.yml's two zenoh-c cache keys hash the file so a bump is a cache miss.",
+        "Three messages that named the installer as the pin's home (two clone hints, the archive-arm failure) now name the pin file."
+      ],
+      "publishable_verification_bullets": [
+        "platform_trigger_paths_gate --check ok (30 lane crates, 34 packages covered) and its selftest OK; platform_surface_matrix --check exit 0.",
+        "zenoh_c_archive_arm --check and --selftest, bump_sweep --check, zenoh_c_oracle_arms --check and claude_md_upstream_pin_gate --check exit 0; install-zenoh-c.sh passes bash -n and shellcheck.",
+        "install-zenoh-c.sh run end to end into empty prefixes fetched the same release URL as before and installed 1.10.1.",
+        "nda-scan clean over the pushed range (12 terms). The push of the first two commits went with --no-verify at the owner's explicit request, rebased onto origin/main first; the pre-push hook gates (schema pin, validate-workspace, changed-crate tests) did not run on it.",
+        "Not run: wz-capi-replay on Windows or macOS, and the hosted Platform run for that push, which has not been read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the Platform C ABI job for the push that added wz-capi-replay per job at the start of the next round; until then wz-capi-replay is not shown to build on Windows or macOS, only read from its source (no cfg arm, same dependency chain as dissect).",
+        "Nothing installs the zenoh-c oracle on Windows: the pin is data now, but install-zenoh-c.sh is bash and maps linux-gnu targets only. Whether wz ships a Windows installer or the downstream host installs from the pin file is undecided.",
+        "wz-capi-c's zenoh-c-shared-memory feature uses libc mmap and std::os::unix and does not build on Windows; the hosted Windows builds use the default feature set only."
+      ]
+    },
     "Round 34": {
       "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
