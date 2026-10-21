@@ -126,14 +126,43 @@ image, so a change that moves one is a visible, recorded change.
    steps of the fixed-memory work already use.
 7. **Deploy to configuration** (D4) and **the stack and turnaround gates** (D5).
 
-## 5. Open
+## 5. Status
+
+Steps 1 to 4 are done and run on the T2G kit (the Zephyr-sockets client,
+`CONFIG_WZ_FIXED_MEMORY` with `overlays/t2g_client_fixed.conf`). What each step
+turned out to need beyond its plan:
+
+- **Step 2** needed the driver to lend a transmit slot. A session on the
+  lend-only profile (`session-slot` implies `tx-lend-only`) builds no frame
+  unless its link lends one, and a link with only `send_blocking` sends nothing,
+  without an error. `UdpDriver` now carries a `TxStore`.
+- **The link's buffers are claimed, not owned.** A driver that holds its receive
+  and frame buffers by value is a 3 KB value that a dial moves three times; the
+  stack of the node grew with the buffers. `ByteCells` (a static table) and
+  `ByteBuf` (a claim) make the driver a few words.
+- **Sizes are limits an image states.** Every capacity of `caps.rs` is
+  `limit(option_env!("WZ_LIMIT_<NAME>"), default)`; `deploy/Kconfig.limits` is
+  derived from those rows (`scripts/lib/limit_config.py --check`) and the Zephyr
+  build turns each `CONFIG_WZ_LIMIT_*` into the environment of the cargo build.
+  The client states sixteen; its session tables went from 34 KB to 2 KB.
+- **Cold paths are out of line.** `SlotDialer::dial`, the connection manager's
+  `reconcile` and `dispatch_copied` (a handshake's decode) are kept out of the
+  frames of the loop and of the receive path.
+- **Step 4**: `runtime-coop-core` in the facade is the runtime tier without
+  lwIP's link crate, so a sockets image has none in its graph.
+
+Measured on the kit with the same method for each image (wire turnaround,
+alternating order, 12 boots each): fixed client 0.204 ms, heap client 0.214 ms,
+zenoh-pico 0.214 ms. Against a zenoh-pico built in its smallest working
+configuration: text 155 KB against 162 KB, data and bss 118 KB against 114 KB.
+Main stack peak 9.8 KB of 16 KB; splitting the observer's planes into frames of
+their own did not move it, so what sets it is not the part that was split.
+
+## 6. Open
 
 - The Zephyr kernel keeps a heap of its own (network buffers, POSIX objects).
-  A Rust image that links no allocator has not removed it; D4 of
-  `no-heap-multi-session.md` is the same point for FreeRTOS. What the kernel
-  allocates after start-up in this image is to be measured in step 3, with the
-  kernel pool at its smallest working size, before the image is called
-  heap-free.
+  For this image it is measured: nothing is allocated from it after start-up
+  (`heap allocated 0, peak 0`), and the image runs with the pool at 0.
 - Whether `Static<N>` reaches the cooperative runtime's task cells by the type
   or by a const generic table (`RuntimeCell`) is decided when step 6 reaches it;
   the existing table is the working form until then.
