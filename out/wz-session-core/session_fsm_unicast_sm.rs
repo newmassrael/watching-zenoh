@@ -14,8 +14,8 @@
 // (SCE Linking Exception, section 3; see LICENSE-GENERATED.md).
 // Full license: https://github.com/newmassrael/scxml-core-engine/blob/main/LICENSE
 // SCE Protocol-Synthesis RFC §synth-5-J-2: no_std variant of the statechart
-// emitter. `sce-rust-runtime` ships a `no_std` feature gate, and
-// the generated crate omits `std::*` paths — Duration comes from
+// emitter. It compiles against `sce-rust-runtime` with or without that
+// crate's `std` feature, and the generated crate omits `std::*` paths — Duration comes from
 // `core::time`, the configuration and history records are the runtime's
 // capacity-bounded `StateChain`, and the parent-event queue field is elided
 // (SCXML `<invoke>` is rejected at codegen time under `--no-std` per the

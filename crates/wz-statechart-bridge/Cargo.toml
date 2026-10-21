@@ -32,21 +32,15 @@ description = "R311gh gc-2b — EngineInjector: SCE Engine -> wz EventInjector p
 
 [features]
 default = []
-# MCU bare-metal selection: forwards to sce-rust-runtime's no_std profile
-# (heapless, no http-send / scripting — those are std-coupled and mutually
-# exclusive with no_std, enforced by a compile_error! in sce-rust-runtime).
-# The bridge crate body is identical on both profiles; this only picks the
-# engine dependency's build.
-no_std = ["sce-rust-runtime/no_std"]
 
 [dependencies]
 # Only the EventInjector port is used (unconditional, alloc-free), so the
 # alloc default is dropped on this edge; AP builds re-enable it via other
 # workspace edges through feature unification.
 wz-session-core = { path = "../wz-session-core", default-features = false }
-# default-features = false drops http-send so the no_std preset can select
-# the bare-metal engine; the AP wz-runtime-tokio edge keeps the std default
-# and unification turns it back on for AP builds.
+# default-features = false is the bare-metal engine, which is what this crate's body is written
+# against (the runtime's features only add, SCE ADR 0053); the AP wz-runtime-tokio edge keeps the
+# defaults and unification turns std back on for AP builds.
 sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", default-features = false }
 
 [lints]

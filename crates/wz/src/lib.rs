@@ -29,25 +29,14 @@
 
 #![cfg_attr(not(any(test, feature = "runtime-tokio")), no_std)]
 
-// R311ax — runtime-tokio and runtime-coop are mutually exclusive
-// per-deploy. Cargo features are monotone-additive (unification
-// across the dep graph cannot encode XOR), so the catalog policy
-// is enforced at compile time here: a build that turns both
-// features on fails with a clear directive rather than silently
-// linking two incompatible runtime profiles.
-//
-// The check pattern is `#[cfg(all(feature = "A", feature = "B"))]`
-// + `compile_error!`. Per-deploy this is the right gate: a real
-// binary picks AP (tokio) or MCU (lwip), never both. A test build
-// that wants to exercise both code paths must split into two
-// build invocations.
-#[cfg(all(feature = "runtime-tokio", feature = "runtime-coop-core"))]
-compile_error!(
-    "wz: `runtime-tokio` and `runtime-coop` are mutually exclusive — \
-     enable exactly one per deploy. The AP profile uses runtime-tokio \
-     (std + tokio); the MCU profile uses runtime-coop (no_std + alloc \
-     + critical_section + cooperative task pool)."
-);
+// runtime-tokio and runtime-coop are two runtimes a build may hold together. They used to be
+// refused together by a `compile_error!` ("pick one per deploy"), on the ground that Cargo
+// features are additive and cannot say "exactly one". That is the same thing a feature of the
+// SCE runtime did, and it is the thing that stopped `cargo check --workspace`, where one build
+// holds an application crate and a bare-metal crate side by side: the facade is built once, with
+// both features on. Each runtime is a namespace of its own (`wz::runtime_tokio`,
+// `wz::runtime_coop`), so holding both adds names and removes none; which one a binary RUNS is
+// what its `main` constructs, not what the facade refuses.
 
 // R311y30 — `platform-freertos` brings the FreeRTOS cooperative runtime profile
 // (FreertosRuntime = CoopRuntime<FreertosClock>), an MCU profile just as

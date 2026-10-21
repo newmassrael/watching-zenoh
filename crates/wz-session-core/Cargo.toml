@@ -377,20 +377,15 @@ transport-shm = ["alloc"]
 # capability AND-merge, NOT zenoh's ZBuf/z64 challenge-response (deferred).
 session-extshm = ["transport-shm", "session-unicast"]
 
-# MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
-# build (heapless, no http-send / scripting — those are std-coupled and
-# mutually exclusive with no_std, enforced by a compile_error! in
-# sce-rust-runtime). Weak (`?`) so it only takes effect when an
-# sce-rust-runtime-pulling capability feature (`reassembly` /
-# `scouting-active` / `session-unicast`) is also enabled — `no_std` alone
-# never pulls the optional dep. The MCU reassembly lane builds
-# `--features reassembly,no_std`; the AP profile omits `no_std` and
-# unifies on the std runtime that wz-runtime-tokio brings. Mirrors
-# wz-statechart-bridge's `no_std` (there sce-rust-runtime is non-optional,
-# so it uses the non-weak `sce-rust-runtime/no_std`). The crate body is
-# always `#![no_std]`; this only picks the engine dependency's build.
+# MCU bare-metal profile selector. It no longer forwards anything to
+# sce-rust-runtime: the runtime's features only ADD (SCE ADR 0053), its
+# `no_std` feature is gone, and the bare-metal profile is the runtime
+# with no feature at all, which is what this crate's dependency on it asks
+# for (`default-features = false`). The AP profile gets the std runtime from
+# wz-runtime-tokio's edge, which takes the defaults, and Cargo unifies the
+# two. The crate body is always `#![no_std]`.
 #
-# Also pulls `portable-atomic` (with `critical-section`): the no_std
+# What this feature still does is `portable-atomic` (with `critical-section`): the bare-metal
 # sce-rust-runtime Engine host uses `AtomicU64`, which `portable-atomic`
 # cannot provide on a CAS-less target (Cortex-M0+ `thumbv6m`) from
 # `fallback` alone — it needs the `critical-section` software-atomic path.
@@ -402,34 +397,15 @@ session-extshm = ["transport-shm", "session-unicast"]
 # host on bare metal, so it enables the backend here. The rlib compiles
 # with the feature alone; the `critical_section` impl is a link-time
 # concern the MCU deploy supplies (cf. Layer G.8).
-no_std = ["sce-rust-runtime?/no_std", "dep:portable-atomic"]
+no_std = ["dep:portable-atomic"]
 
-# ROM profile selector: forwards to sce-rust-runtime's
-# `no_macrostep_diagnostics`, which compiles out the truncated-macrostep
-# counter, the `Option<P::State>` snapshot, their two public accessors and
-# the error log. It does NOT touch the BOUND — the engine still refuses to
-# walk a macrostep that will not end, which is the property SCXML 3.13
-# makes necessary and which no flag should be able to switch off.
-#
-# Weak (`?`) for the same reason `no_std` above is: this feature alone must
-# never pull the optional dep. A profile decision, not a per-capability one
-# — the same distinction the `reassembly` comment draws when it explains
-# why capability features do not force runtime features.
-#
-# WHAT SETTING IT ASSERTS, because upstream made it opt-out on purpose: that
-# nothing in the built image reads those counters. It is true here — no
-# crate in this tree names `last_truncated_macrostep` or its sibling — and
-# upstream `#[cfg]`s the accessors away rather than returning a zero, so a
-# consumer that made the assertion falsely gets a compile error instead of a
-# count that reads as "did not happen".
-#
-# MEASURED (Round 1955) on deploy/mcu-multicast-e2e, thumbv7m-none-eabi,
-# `opt-level = "s"`, three Engine instantiations: -144 B of `.text`, of
-# which -70 B is the `Engine<..>` symbols themselves and the rest is helper
-# and accessor code that had no symbols of its own in the shipped build.
-# Upstream measures 44 B per instantiation on thumbv7em-hf at `"z"`; the
-# ratio transfers and the absolutes do not, exactly as it predicted.
-no_macrostep_diagnostics = ["sce-rust-runtime?/no_macrostep_diagnostics"]
+# There is no ROM-profile feature for the runtime's macrostep report here any more. It was
+# `no_macrostep_diagnostics`, a feature that took the truncated-macrostep counters out of the
+# runtime; the runtime's feature is now the additive `macrostep-diagnostics`, off for a build that
+# asks for no features, which is every bare-metal build of this crate. The saving it measured
+# (Round 1955: -144 B of `.text` on deploy/mcu-multicast-e2e) is therefore the default, and a
+# crate that reads the counters says `sce-rust-runtime/macrostep-diagnostics` itself. None in
+# this tree does. The BOUND on a macrostep (SCXML 3.13) is in every build either way.
 
 # R311di-11 — body-codec feature forwarders for the NetworkMessage
 # dispatch cluster. Each forwards to wz-codecs/codec-* so the 3-stage

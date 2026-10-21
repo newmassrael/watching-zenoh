@@ -237,7 +237,6 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # derives, which are not gates (see `is_cfg_attr` there).
             "dissect-serde",
             "liveliness-subscriber",
-            "no_macrostep_diagnostics",
             "no_std",
             "pubsub-attachment",
             "pubsub-congestion-control",

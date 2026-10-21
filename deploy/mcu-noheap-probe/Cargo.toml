@@ -100,12 +100,12 @@ wz-codecs = { path = "../../crates/wz-codecs", default-features = false, feature
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime", default-features = false }
 
 # ⓓ — the generated thermostat machine's `Engine<ThermostatPolicy>` + the
-# `ThermostatInject::raise_temp_reading` typed-inject seam. `no_std` selects the
-# heapless-backed runtime variant (zero alloc dependency); `default-features =
-# false` drops the std-coupled `http-send` default so the no_std variant links.
-# The switchboard dispatch the build.rs emits drives this engine with a wire-
-# decoded payload, all with no global allocator.
-sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", default-features = false, features = ["no_std"] }
+# `ThermostatInject::raise_temp_reading` typed-inject seam. A bare-metal crate asks the
+# runtime for no feature at all (`default-features = false`): that is the heapless-backed
+# variant, with zero alloc dependency (the runtime's features only add, SCE ADR 0053). The
+# switchboard dispatch the build.rs emits drives this engine with a wire-decoded payload,
+# all with no global allocator.
+sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime", default-features = false }
 
 # R311y22c — no codegen [build-dependencies]: the switchboard 2-stage codegen
 # moved to the committed out/mcu-noheap-probe/*.rs via the `xtask` codegen SSOT.

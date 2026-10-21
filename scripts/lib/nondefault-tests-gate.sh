@@ -401,7 +401,6 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         liveliness-token,\
         multicast-declarations,\
         multicast-ingress-gate,\
-        no_macrostep_diagnostics,\
         no_std,\
         pubsub-attachment,\
         pubsub-congestion-control,\
