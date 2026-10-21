@@ -803,7 +803,7 @@ impl QueryReply {
             } => {
                 let mut builder = match body {
                     ReplyBody::Put(payload) => {
-                        ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &payload)
+                        ResponseReplyBuilder::from_owned(rid, 0, Some(keyexpr_literal), payload)
                     }
                     // R3062 -- as the descriptor when one was reserved, so the bytes are not
                     // copied into a builder that will not send them; as the buffer's bytes

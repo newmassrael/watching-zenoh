@@ -784,11 +784,28 @@ impl ResponseReplyBuilder {
         keyexpr_suffix: Option<&str>,
         payload: &[u8],
     ) -> Self {
+        Self::from_owned(
+            request_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix.map(str::to_string),
+            payload.to_vec(),
+        )
+    }
+
+    /// [`Self::new`] for a caller that already owns the suffix and the payload: they are moved
+    /// into the builder, where `new` copies them. A reply the queryable staged owns both, and
+    /// copying them again was two allocations per reply for bytes that were about to be dropped.
+    pub fn from_owned(
+        request_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<String>,
+        payload: Vec<u8>,
+    ) -> Self {
         Self {
             request_id,
             keyexpr_mapping_id,
-            keyexpr_suffix: keyexpr_suffix.map(str::to_string),
-            payload: payload.to_vec(),
+            keyexpr_suffix,
+            payload,
             body_kind_del: false,
             consolidation: None,
             encoding: None,
