@@ -52,6 +52,11 @@ pub(crate) const fn packed_no_schema(id: EncodingId) -> u32 {
     (id as u32) << 1
 }
 
+/// The wire `packed_id` of zenoh's `Encoding::APPLICATION_JSON`, for a replier that has no
+/// [`EncodingHint`] to lend because the build has no heap
+/// ([`crate::query_sink::ReplyOut::reply_keyed_encoded_parts`] takes the id as a number).
+pub const PACKED_APPLICATION_JSON: u32 = packed_no_schema(ID_APPLICATION_JSON);
+
 #[cfg(feature = "alloc")]
 impl EncodingHint {
     /// zenoh `Encoding::ZENOH_BYTES` (id 0) — the default/empty encoding (raw
@@ -75,7 +80,7 @@ impl EncodingHint {
     /// zenoh `Encoding::APPLICATION_JSON` (id 5). The wz mirror of
     /// `encoding-json`.
     pub const APPLICATION_JSON: EncodingHint = EncodingHint {
-        packed_id: packed_no_schema(ID_APPLICATION_JSON),
+        packed_id: PACKED_APPLICATION_JSON,
         schema: None,
     };
     /// zenoh `Encoding::APPLICATION_CBOR` (id 8). The wz mirror of

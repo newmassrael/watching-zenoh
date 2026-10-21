@@ -27,7 +27,13 @@ use core::cell::RefCell;
 use wz_runtime_coop::session_drive::SlotStack;
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
+use wz_session_core::encoding::PACKED_APPLICATION_JSON;
+use wz_session_core::locality::Locality;
+use wz_session_core::query::QueryableRegistry;
+use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
+use wz_session_core::registry_error::RegisterError;
 use wz_session_core::session_timeouts::SessionTimeouts;
+use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 
 use crate::connect_manager::{ConnectManager, EndpointSource};
 use crate::slot_dial::{Bind, SessionFactory, SlotDialer, SlotSession};
@@ -144,4 +150,48 @@ fn declare<C: ClockSource + 'static>(
             .send_declare_subscriber(id, 0, Some(declaration.key))
             .is_ok(),
     }
+}
+
+/// A queryable that answers every query with one JSON document, under the key the query asked
+/// (`z_query_keyexpr`, as zenoh-pico's comparison image replies): a function and the document it
+/// answers with, stored inline, so the registry that holds it is typed by it and the registration
+/// allocates nothing.
+pub type DocumentSink = FnQuerySink<&'static str>;
+
+/// The observer's registrations of a client that answers documents: queryables of [`DocumentSink`]
+/// and none of the other kinds.
+pub struct DocumentSinks;
+
+impl ObserverSinks for DocumentSinks {
+    type Subscriber = NoSink;
+    type Queryable = DocumentSink;
+    type Declared = NoSink;
+    type Undeclared = NoSink;
+}
+
+fn answer_document(body: &mut &'static str, query: &dyn QueryView, out: &mut dyn ReplyOut) {
+    let _ = out.reply_keyed_encoded_parts(
+        query.keyexpr(),
+        body.as_bytes(),
+        PACKED_APPLICATION_JSON,
+        None,
+    );
+}
+
+/// Register on `queryables` a queryable under `key` that answers every query with `body`. `Err`
+/// when the registry is full or `key` does not fit, which stops an image rather than starting it
+/// declaring what nothing answers.
+pub fn register_document(
+    queryables: &mut QueryableRegistry<DocumentSink>,
+    key: &str,
+    body: &'static str,
+) -> Result<(), RegisterError> {
+    queryables
+        .register_sink(
+            key,
+            Locality::Any,
+            false,
+            FnQuerySink::new(body, answer_document),
+        )
+        .map(|_id| ())
 }
