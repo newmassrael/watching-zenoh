@@ -219,7 +219,7 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// installs none on a group, so the default stays upstream's.
     ///
     /// Always `Some` for a group once the feature is on, even before the session was told its link:
-    /// an unknown link is [`LinkSubject::UNKNOWN`], which the matchers treat as matching every
+    /// an unknown link is `LinkSubject::UNKNOWN`, which the matchers treat as matching every
     /// scoped rule, so a group whose link was never described is governed MORE strictly, not less.
     #[cfg(feature = "access-acl-multicast")]
     fn acl_group_link(_payload: &Self::Payload) -> Option<&wz_session_core::link::LinkSubject> {
