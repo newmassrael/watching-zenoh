@@ -40,10 +40,12 @@ with the same code, the same tests and the same proofs on both sides.
   copied three times, and a 2,480 B frame buffer is taken per reply. The
   heap's peak is 11,220 B against 9,416 B for pico, and the minimum kernel-heap
   pool the image runs in is 11,776 B against 9,728 B. After the copy and
-  allocation work of that day the wire turnaround of the wz image was within 10
-  percent of pico's; the heap and the stack (13.6 KB of the main thread against
-  2.9 KB) are what remains on the RAM side. These are measurements of one board
-  and one configuration, not a general claim.
+  allocation work of that day the wire turnaround of the wz image was 0.215 ms
+  against 0.214 ms for pico (12 boots of each in one session, ranges
+  overlapping: the same, not faster); the heap and the stack (13.6 KB of the
+  main thread against 2.9 KB) are what remains on the RAM side, and the code is
+  1.36 times pico's. These are measurements of one board and one
+  configuration, not a general claim.
 
 ## 3. Decisions
 

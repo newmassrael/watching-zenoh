@@ -898,6 +898,55 @@ impl<C: ClockSource, L: SessionDatagramLink> PumpCell<C, L> {
     }
 }
 
+/// What a network stack gives the slot profile's session host
+/// (`wz_session_mcu::slot_host::SessionHost`): the types of its link, and how the pump of a
+/// session is built from them. The host is written once for every stack and a stack states
+/// these three types and one function; the trait sits here, beside [`SessionDatagramLink`],
+/// so that a stack's own crate names it without taking the host with it.
+#[cfg(feature = "session-slot")]
+pub trait SlotStack: 'static {
+    /// The link driver a session holds in its slot: the outbound half the session's actions
+    /// send through, and (usually) the datagram queue the pump reads.
+    type Driver: wz_session_core::link::BoxedLinkDriver + 'static;
+    /// What the drive loop pumps for a session: it services the stack and takes the next
+    /// datagram, reaching the driver through a handle to the slot that holds it.
+    type Pump: SessionDatagramLink + 'static;
+    /// What an accepted session carries beyond a dialled one, held for as long as it runs and
+    /// given back when it ends: the listener's lane. A stack with no listener names `()`.
+    type Lane;
+
+    /// The pump for the session whose driver `driver` is the handle to; `lane` is the
+    /// listener's lane for an accepted session and `None` for a dialled one.
+    fn pump(
+        &self,
+        driver: wz_session_core::session_slot::SlotDriver<Self::Driver>,
+        lane: Option<Self::Lane>,
+    ) -> Self::Pump;
+}
+
+/// The pump of a stack whose driver is itself the datagram link: the drive loop's calls go to
+/// the driver in the slot, through the handle that keeps the slot for as long as the loop
+/// reads. What a stack with no input path of its own to advance (Zephyr's sockets: the kernel's
+/// threads run it) uses as [`SlotStack::Pump`]; one that does (lwIP) writes its own.
+#[cfg(feature = "session-slot")]
+pub struct DriverPump<D: 'static>(pub wz_session_core::session_slot::SlotDriver<D>);
+
+#[cfg(feature = "session-slot")]
+impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
+    fn service(&self) {
+        self.0.service();
+    }
+
+    #[cfg(feature = "alloc")]
+    fn try_recv(&self) -> Option<RxFrame> {
+        self.0.try_recv()
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        self.0.recv_with(f)
+    }
+}
+
 /// The pump table an image declares: `N` cells, each holding the pump of one
 /// session, in a `static`. The pump's counterpart of `wz_session_core`'s
 /// `SessionSlots`, and declared the same way:

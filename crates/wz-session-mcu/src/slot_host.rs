@@ -33,34 +33,16 @@
 //! (`docs/storage-policy-and-link-layer.md`, D2).
 
 use wz_runtime_coop::executor::SpawnRefusal;
+pub use wz_runtime_coop::session_drive::SlotStack;
 use wz_runtime_coop::session_drive::{
-    spawn_pump, LinkOpenError, PumpSlots, SessionDatagramLink, SessionDriveConfig,
-    SessionSpawnRefused,
+    spawn_pump, LinkOpenError, PumpSlots, SessionDriveConfig, SessionSpawnRefused,
 };
 use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::entropy::EntropySource;
-use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_init_params::SessionInitParams;
-use wz_session_core::session_slot::{SessionSlots, SlotDriver};
-
-/// What a network stack gives the session host: the types of its link, and how the pump is built.
-pub trait SlotStack: 'static {
-    /// The link driver a session holds in its slot: the outbound half the session's actions
-    /// send through, and (usually) the datagram queue the pump reads.
-    type Driver: BoxedLinkDriver + 'static;
-    /// What the drive loop pumps for a session: it services the stack and takes the next
-    /// datagram from the driver, which it reaches through a handle to the slot that holds it.
-    type Pump: SessionDatagramLink + 'static;
-    /// What an accepted session carries beyond a dialled one, held for as long as it runs and
-    /// given back when it ends: the listener's lane. A stack with no listener names `()`.
-    type Lane;
-
-    /// The pump for the session whose driver `driver` is the handle to; `lane` is the listener's
-    /// lane for an accepted session and `None` for a dialled one.
-    fn pump(&self, driver: SlotDriver<Self::Driver>, lane: Option<Self::Lane>) -> Self::Pump;
-}
+use wz_session_core::session_slot::SessionSlots;
 
 /// Why a session could not be opened for want of room in a table. Each table keeps its own
 /// count of the refusals it made (`SessionSlots::refused`, `PumpSlots::refused`,
