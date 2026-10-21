@@ -553,6 +553,10 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `submodule_probes` reads, so the feature became probed and this
                 # row false. The merge of that branch did not run this gate.
                 "codec-fragment",
+                # `pub mod connect_endpoints` is gated `any(connect-endpoints, adminspace-write)`: the
+                # list a node dials, which the config write also fills, so the feature alone is not
+                # what gates it.
+                "connect-endpoints",
                 "codec-hello",
                 "codec-linkstate",
                 "codec-scout",

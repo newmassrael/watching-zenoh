@@ -504,6 +504,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 # the lwip crate's forwards.
                 "codec-response",
                 "codec-response-final",
+                # The client node: `dial` gates the dialler and the connection manager,
+                # `client-core` adds the wire halves of a queryable and a subscriber on
+                # either memory profile, and `client-node` the heap node. (`client-slot`
+                # is a forward of `session-slot` and `client-core` and gates nothing.)
+                "client-core",
+                "client-node",
+                "dial",
                 "liveliness-token",
                 "session-slot",
                 "test-support",
@@ -940,8 +947,11 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "adminspace-core",
             "adminspace-fixed",
             "adminspace-write",
+            "client-core",
+            "client-node",
             "codec-response",
             "codec-response-final",
+            "dial",
             "liveliness-token",
             "session-slot",
             "test-support",
