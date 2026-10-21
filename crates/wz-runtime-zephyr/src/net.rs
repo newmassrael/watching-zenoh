@@ -60,6 +60,15 @@ extern "C" {
     /// serves it from the link-layer address of the interface its sessions run
     /// on, which is unique per NIC and the same on every boot.
     fn wzApplicationGetZid(out: *mut u8, cap: usize) -> usize;
+
+    /// Bound every blocking read of the socket `fd` by `ms` milliseconds (`SO_RCVTIMEO`). 0 on
+    /// success, -1 when the image has no receive timeout or the stack refuses one. A board
+    /// serves it from C because the option's struct is the C library's.
+    fn wz_net_set_rcvtimeo_ms(fd: c_int, ms: c_int) -> c_int;
+
+    /// Whether the `recvfrom` that just returned -1 did so because its timeout ran out (a quiet
+    /// link), not because it failed. `errno` is out of the FFI's reach.
+    fn wz_net_recv_timed_out() -> c_int;
 }
 
 /// The longest zenoh id: 16 bytes.
@@ -159,6 +168,10 @@ pub struct ZephyrUdpSocket {
     /// thread that drives the link touches the socket, so nothing else takes the datagram
     /// between the wait and the read.
     readable: Cell<bool>,
+    /// A blocking read of this socket gives up after [`SERVICE_WAIT_MS`] (`SO_RCVTIMEO` took), so
+    /// [`Self::recv_waiting`] waits for a datagram and takes it in one call, as zenoh-pico's
+    /// reads do. False on an image without the option: the wait is then `poll`'s.
+    times_out: bool,
 }
 
 fn sockaddr(addr: [u8; 4], port: u16) -> SockaddrIn {
@@ -179,10 +192,13 @@ impl ZephyrUdpSocket {
             return Err(ZephyrNetError::Socket(fd));
         }
         // Owned from here, so an early return closes it.
+        // SAFETY: plain FFI with value arguments, on the descriptor just opened.
+        let times_out = unsafe { wz_net_set_rcvtimeo_ms(fd, SERVICE_WAIT_MS) } == 0;
         let mut this = Self {
             fd,
             local: (addr, port),
             readable: Cell::new(false),
+            times_out,
         };
         let local = sockaddr(addr, port);
         // SAFETY: `local` is a live `sockaddr_in` of the length passed.
@@ -301,6 +317,53 @@ impl ZephyrUdpSocket {
         self.readable.set(ready > 0 && pfd.revents & POLLIN != 0);
     }
 
+    /// Whether [`Self::recv_waiting`] can wait: a blocking read of this socket gives up after
+    /// [`SERVICE_WAIT_MS`].
+    pub fn times_out(&self) -> bool {
+        self.times_out
+    }
+
+    /// Wait up to the socket's receive timeout for a datagram and take it into `buf` in the same
+    /// call: `Ok(None)` when the timeout ran out, else its length and source. One pass through the
+    /// stack where [`Self::wait_readable`] and [`Self::try_recv`] make two, which is what
+    /// zenoh-pico's read does. Only for a socket whose [`Self::times_out`] is true: without the
+    /// timeout the read would block for ever.
+    pub fn recv_waiting(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+        debug_assert!(
+            self.times_out,
+            "a read without a timeout would block for ever"
+        );
+        let mut src = SockaddrIn::default();
+        let mut src_len = size_of::<SockaddrIn>() as SockLen;
+        // SAFETY: `buf` and `src` are live and writable for the lengths given.
+        let got = unsafe {
+            recvfrom(
+                self.fd,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len(),
+                0,
+                &mut src,
+                &mut src_len,
+            )
+        };
+        if got < 0 {
+            // SAFETY: reads the calling thread's `errno`, set by the `recvfrom` above.
+            return if unsafe { wz_net_recv_timed_out() } != 0 {
+                Ok(None)
+            } else {
+                Err(ZephyrNetError::Recv(got))
+            };
+        }
+        Ok(Some((
+            got as usize,
+            src.sin_addr.to_ne_bytes(),
+            u16::from_be(src.sin_port),
+        )))
+    }
+
     /// Take one queued datagram into `buf` without blocking: `Ok(None)` when
     /// nothing is queued, else its length and source.
     ///
@@ -382,6 +445,9 @@ pub struct ZephyrUdpDriver {
     /// peer is first known.
     endpoints: OnceCell<LinkEndpoints>,
     rx_buf: RefCell<Vec<u8>>,
+    /// A datagram [`SessionDatagramLink::service`] already read into `rx_buf` while it waited
+    /// (length and source), for the next receive to hand out without another call into the stack.
+    stash: Cell<Option<(usize, [u8; 4], u16)>>,
     /// The last receive failure, kept for the deploy to report: the loop's
     /// seam returns a frame or nothing, and a socket that fails must not
     /// read as a quiet one.
@@ -427,12 +493,25 @@ impl ZephyrUdpDriver {
             peer: Cell::new(None),
             endpoints: OnceCell::new(),
             rx_buf: RefCell::new(vec![0u8; rx_capacity]),
+            stash: Cell::new(None),
             rx_error: Cell::new(None),
         };
         if let Some(peer) = peer {
             driver.set_peer(peer);
         }
         driver
+    }
+
+    /// The next datagram: the one `service` already read into `rx_buf`, if it did, else one the
+    /// stack has queued. `Ok(None)` when there is none.
+    fn next_datagram(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+        match self.stash.take() {
+            Some(held) => Ok(Some(held)),
+            None => self.socket.try_recv(buf),
+        }
     }
 
     fn set_peer(&self, peer: ([u8; 4], u16)) {
@@ -485,12 +564,33 @@ impl SessionDatagramLink for ZephyrUdpDriver {
         // Zephyr's net stack runs its own threads: all this thread owes it is the CPU. It gives
         // it by waiting for the socket, so a datagram is taken the moment it is queued, and a
         // quiet socket costs one millisecond, which is what bounds the loop's timers.
-        self.socket.wait_readable(SERVICE_WAIT_MS);
+        //
+        // On a socket whose reads time out, the wait is the read: the datagram is taken into
+        // `rx_buf` in the same call that waited for it and held for the receive that follows, so
+        // a datagram crosses the stack once, as it does for zenoh-pico. Otherwise `poll` waits and
+        // the receive reads.
+        if !self.socket.times_out() {
+            self.socket.wait_readable(SERVICE_WAIT_MS);
+            return;
+        }
+        if self.stash.get().is_some() {
+            return;
+        }
+        // The buffer is lent out while a receive callback runs; a wait asked for from inside one
+        // (the loop does not) falls back to `poll`, which needs no buffer.
+        let Ok(mut buf) = self.rx_buf.try_borrow_mut() else {
+            self.socket.wait_readable(SERVICE_WAIT_MS);
+            return;
+        };
+        match self.socket.recv_waiting(&mut buf) {
+            Ok(held) => self.stash.set(held),
+            Err(e) => self.rx_error.set(Some(e)),
+        }
     }
 
     fn try_recv(&self) -> Option<RxFrame> {
         let mut buf = self.rx_buf.borrow_mut();
-        match self.socket.try_recv(&mut buf) {
+        match self.next_datagram(&mut buf) {
             Ok(Some((len, addr, port))) => {
                 self.set_peer((addr, port));
                 Some(RxFrame::new(buf[..len].to_vec()))
@@ -509,7 +609,7 @@ impl SessionDatagramLink for ZephyrUdpDriver {
     // it, and a receive from inside `f` would be refused by the `RefCell`.
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         let mut buf = self.rx_buf.borrow_mut();
-        match self.socket.try_recv(&mut buf) {
+        match self.next_datagram(&mut buf) {
             Ok(Some((len, addr, port))) => {
                 self.set_peer((addr, port));
                 f(&buf[..len]);

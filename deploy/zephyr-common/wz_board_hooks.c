@@ -32,8 +32,12 @@
 #include <zephyr/sys/printk.h>
 
 #if defined(CONFIG_NETWORKING)
+#include <errno.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_ip.h>
+#if defined(CONFIG_NET_SOCKETS)
+#include <zephyr/net/socket.h>
+#endif
 #endif
 
 #if defined(CONFIG_WZ_ENABLE_CORE_CACHES)
@@ -432,5 +436,36 @@ size_t wzApplicationGetZid(uint8_t *out, size_t cap)
 	memcpy(out, link->addr, len);
 	return len;
 }
+
+#if defined(CONFIG_NET_SOCKETS)
+
+/* ---- a receive timeout on a socket, for `wz_runtime_zephyr::net` ---- */
+
+/* Bound every blocking read of the socket `fd` by `ms` milliseconds (SO_RCVTIMEO), the way
+ * zenoh-pico's UDP link bounds its own, so that one `recvfrom` both waits for a datagram and
+ * takes it. 0 on success; -1 when the image has no receive timeout (CONFIG_NET_CONTEXT_RCVTIMEO
+ * off) or the stack refuses it, and the caller then waits with `poll` and reads after. The
+ * struct is the C library's, which is why this is not a call from Rust. */
+int wz_net_set_rcvtimeo_ms(int fd, int ms)
+{
+#if defined(CONFIG_NET_CONTEXT_RCVTIMEO)
+	struct timeval timeout = {.tv_sec = ms / 1000, .tv_usec = (ms % 1000) * 1000};
+
+	return zsock_setsockopt(fd, ZSOCK_SOL_SOCKET, ZSOCK_SO_RCVTIMEO, &timeout, sizeof(timeout));
+#else
+	ARG_UNUSED(fd);
+	ARG_UNUSED(ms);
+	return -1;
+#endif
+}
+
+/* Whether the `recvfrom` that just returned -1 did so because its timeout ran out, which is a
+ * quiet link and not a failure. `errno` is a macro Rust cannot read. */
+int wz_net_recv_timed_out(void)
+{
+	return errno == EAGAIN || errno == EWOULDBLOCK;
+}
+
+#endif /* CONFIG_NET_SOCKETS */
 
 #endif /* CONFIG_NETWORKING && CONFIG_NET_IPV4 */
