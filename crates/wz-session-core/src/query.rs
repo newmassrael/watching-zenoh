@@ -503,9 +503,10 @@ impl<C: QuerySink> Queryable<C> {
         // query into target chunks and intersect against this queryable's
         // pattern, the same seam `declare::declared_intersects` already uses. For
         // a concrete query this is identical to the prior pattern match.
-        let Some(target) = crate::keyexpr_match::KeyChunks::split(keyexpr) else {
+        let mut target = crate::keyexpr_match::KeyChunks::empty();
+        if !target.split_into(keyexpr) {
             return false;
-        };
+        }
         keyexpr_intersects_target(&self.pattern, &target)
     }
 }

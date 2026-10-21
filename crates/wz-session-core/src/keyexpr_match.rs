@@ -98,9 +98,41 @@ pub struct KeyChunks<'a> {
 impl<'a> KeyChunks<'a> {
     /// Split `text` on `/`. `None` when it has more chunks than the backing can represent.
     pub fn split(text: &'a str) -> Option<Self> {
-        let mut inline = [""; STACK_KEY_CHUNKS];
-        let mut len = 0usize;
-        let mut fits = true;
+        let mut chunks = Self::empty();
+        if chunks.split_into(text) {
+            Some(chunks)
+        } else {
+            None
+        }
+    }
+
+    /// No chunks, to be filled by [`Self::split_into`].
+    ///
+    /// The buffer is over a hundred bytes, and a value RETURNED from a function is moved into
+    /// the caller's slot, once for the buffer and once for the `Option` around it, whatever the
+    /// function does inside: a query splits six keys, so a hot caller builds the buffer where it
+    /// will use it with this and fills it with `split_into`, and `split` is for the rest.
+    pub fn empty() -> Self {
+        Self {
+            // Not `[""; N]`: that array of fat pointers is built by copying a constant template
+            // of the same size, a call to the copy function for every split.
+            inline: core::array::from_fn(|_| ""),
+            len: 0,
+            spilled: None,
+        }
+    }
+
+    /// Split `text` on `/` into `self`, which is overwritten. `false` when it has more chunks
+    /// than the backing can represent, and `self` is then not to be read.
+    pub fn split_into(&mut self, text: &'a str) -> bool {
+        self.len = 0;
+        self.spilled = None;
+        self.fill_inline(text) || self.spill(text)
+    }
+
+    /// Write `text`'s chunks into the inline array. `false` when there are more than it holds,
+    /// with the array full (`len == STACK_KEY_CHUNKS`) for [`Self::spill`] to start over.
+    fn fill_inline(&mut self, text: &'a str) -> bool {
         // By a scan of the bytes, not `str::split('/')`: the searcher behind that has a fixed
         // cost per chunk that a key of a few short chunks never earns back (4 of these splits
         // were 12% of the instructions of an answered admin GET), and `/` is ASCII, so a byte
@@ -111,37 +143,31 @@ impl<'a> KeyChunks<'a> {
         loop {
             let end_of_chunk = at == bytes.len();
             if end_of_chunk || bytes[at] == b'/' {
-                if len == STACK_KEY_CHUNKS {
-                    fits = false;
-                    break;
+                if self.len == STACK_KEY_CHUNKS {
+                    return false;
                 }
-                inline[len] = &text[start..at];
-                len += 1;
+                self.inline[self.len] = &text[start..at];
+                self.len += 1;
                 if end_of_chunk {
-                    break;
+                    return true;
                 }
                 start = at + 1;
             }
             at += 1;
         }
-        if fits {
-            return Some(Self {
-                inline,
-                len,
-                spilled: None,
-            });
-        }
+    }
+
+    /// The key deeper than the inline array: every chunk into the bounded vector. `false` when
+    /// even that cannot hold them, which every caller reads as no-match.
+    fn spill(&mut self, text: &'a str) -> bool {
         let mut spilled: BoundedVec<&'a str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
         for chunk in text.split('/') {
             if spilled.push(chunk).is_err() {
-                return None;
+                return false;
             }
         }
-        Some(Self {
-            inline,
-            len,
-            spilled: Some(spilled),
-        })
+        self.spilled = Some(spilled);
+        true
     }
 }
 
@@ -217,9 +243,10 @@ pub fn keyexpr_pattern_matches(pattern_chunks: &[&str], target: &str) -> bool {
     // No-alloc backing: a target deeper than the declared bound cannot be
     // represented, so it is conservatively no-match. The alloc backing
     // never takes this arm.
-    let Some(target_chunks) = KeyChunks::split(target) else {
+    let mut target_chunks = KeyChunks::empty();
+    if !target_chunks.split_into(target) {
         return false;
-    };
+    }
     // A malformed target (an empty chunk) matches nothing — see
     // `target_chunks_well_formed`.
     if !target_chunks_well_formed(&target_chunks) {
@@ -533,9 +560,10 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
     // No-alloc backing: a candidate deeper than the declared bound cannot be
     // represented, so it is conservatively no-match (the alloc backing never
     // takes this arm). Same shape as keyexpr_pattern_matches' target split.
-    let Some(candidate_chunks) = KeyChunks::split(candidate) else {
+    let mut candidate_chunks = KeyChunks::empty();
+    if !candidate_chunks.split_into(candidate) {
         return false;
-    };
+    }
     keyexpr_intersect_patterns(&candidate_chunks, target_chunks)
 }
 
@@ -583,9 +611,10 @@ pub fn keyexpr_includes_target(superset: &str, target_chunks: &[&str]) -> bool {
     // No-alloc backing: a rule deeper than the declared bound cannot be
     // represented, so it is conservatively no-match (the alloc backing never
     // takes this arm). Same shape as `keyexpr_intersects_target`.
-    let Some(superset_chunks) = KeyChunks::split(superset) else {
+    let mut superset_chunks = KeyChunks::empty();
+    if !superset_chunks.split_into(superset) {
         return false;
-    };
+    }
     keyexpr_includes_patterns(&superset_chunks, target_chunks)
 }
 

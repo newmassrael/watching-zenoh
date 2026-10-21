@@ -194,9 +194,11 @@ impl ReplyAcceptanceStored {
 /// conservatively a non-match on that backing, the same rule every other scan
 /// in [`keyexpr_match`] takes; the alloc backing grows past the bound.
 pub fn reply_keyexpr_intersects(query_keyexpr: &str, reply: &str) -> bool {
-    let Some(query_chunks) = keyexpr_match::KeyChunks::split(query_keyexpr) else {
+    // Built where it is used: a split RETURNED from a function is a copy of the whole buffer.
+    let mut query_chunks = keyexpr_match::KeyChunks::empty();
+    if !query_chunks.split_into(query_keyexpr) {
         return false;
-    };
+    }
     keyexpr_match::keyexpr_intersects_target(reply, &query_chunks)
 }
 
