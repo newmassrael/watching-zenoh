@@ -169,6 +169,12 @@ where
 {
     type Session = SlotSession<C>;
 
+    // Not inlined into the loop that ticks the manager: a dial holds the socket's driver (the two
+    // buffers of a link, some 3 KB) and the session's parameters, by value, several times over on
+    // the way into the slot. Inlined, that frame is under the loop for the node's whole life and
+    // adds to every receive's; kept apart, it exists for the length of a dial, which the receive
+    // path's frames are not beneath.
+    #[inline(never)]
     fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
         let peer = parse_udp_endpoint(endpoint).map_err(DialFailed::Refused)?;
         let entropy = self.factory.borrow_mut().entropy();
