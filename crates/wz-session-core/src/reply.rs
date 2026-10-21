@@ -892,11 +892,8 @@ struct Pending<C: ReplySink> {
 /// `fire_final_for` / `sweep_timed_out`) form the no-alloc control plane.
 /// The owned-retention `deliver_local_reply` + the wire-dispatch methods
 /// carry `alloc` / `codec-*` gates per-method below.
-///
-/// `N` is how many gets it holds at once, [`caps::MAX_PENDING_QUERIES`] unless the owner states
-/// another: a node that issues no get states 0, and its registry is the size of nothing.
-pub struct ReplyRegistry<C: ReplySink, const N: usize = { caps::MAX_PENDING_QUERIES }> {
-    pending: BoundedVec<Pending<C>, N>,
+pub struct ReplyRegistry<C: ReplySink> {
+    pending: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }>,
     /// transport-shm -- the receive side of shared memory for a reply: the same
     /// state a push has (the negotiated capability, the resolver, the means of
     /// acknowledging the peer's slices, the drop counters, the un-swap). Upstream
@@ -910,7 +907,7 @@ pub struct ReplyRegistry<C: ReplySink, const N: usize = { caps::MAX_PENDING_QUER
     shm: crate::extshm::ShmReceiveState,
 }
 
-impl<C: ReplySink, const N: usize> Default for ReplyRegistry<C, N> {
+impl<C: ReplySink> Default for ReplyRegistry<C> {
     fn default() -> Self {
         Self::with_sink_backing()
     }
@@ -921,7 +918,7 @@ impl<C: ReplySink, const N: usize> Default for ReplyRegistry<C, N> {
 #[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 mod in_place;
 
-impl<C: ReplySink, const N: usize> ReplyRegistry<C, N> {
+impl<C: ReplySink> ReplyRegistry<C> {
     /// New empty registry over an explicit sink backing `C`. Pending
     /// entries are stored in a `Vec` so duplicate-rid registrations (an
     /// application registering two independent z_gets that happen to

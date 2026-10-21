@@ -192,14 +192,8 @@ pub trait SessionEvents {
 /// the task that holds it) and the session's requesters; its size is what the
 /// runtime's task cell has to hold beside the pump's handle.
 #[cfg(feature = "session-slot")]
-pub struct SlotDispatch<
-    C,
-    R,
-    G,
-    K = DefaultSinks,
-    const Q: usize = { wz_session_core::caps::MAX_PENDING_QUERIES },
-    const L: usize = { wz_session_core::caps::MAX_PENDING_LIVELINESS_GETS },
-> where
+pub struct SlotDispatch<C, R, G, K = DefaultSinks>
+where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
@@ -207,11 +201,11 @@ pub struct SlotDispatch<
 {
     observer: &'static ObserverCell<K>,
     handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
-    requesters: Requesters<R, G, Q, L>,
+    requesters: Requesters<R, G>,
 }
 
 #[cfg(feature = "session-slot")]
-impl<C, R, G, K, const Q: usize, const L: usize> SlotDispatch<C, R, G, K, Q, L>
+impl<C, R, G, K> SlotDispatch<C, R, G, K>
 where
     C: ClockSource + 'static,
     R: ReplySink,
@@ -222,7 +216,7 @@ where
     pub fn new(
         observer: &'static ObserverCell<K>,
         handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
-        requesters: Requesters<R, G, Q, L>,
+        requesters: Requesters<R, G>,
     ) -> Self {
         Self {
             observer,
@@ -233,7 +227,7 @@ where
 }
 
 #[cfg(feature = "session-slot")]
-impl<C, R, G, K, const Q: usize, const L: usize> SessionEvents for SlotDispatch<C, R, G, K, Q, L>
+impl<C, R, G, K> SessionEvents for SlotDispatch<C, R, G, K>
 where
     C: ClockSource + 'static,
     R: ReplySink,
@@ -250,10 +244,10 @@ where
 
 /// [`SlotDispatch`] as the `on_event` closure a session driver takes.
 #[cfg(feature = "session-slot")]
-pub fn dispatch_slot<C, R, G, K, const Q: usize, const L: usize>(
+pub fn dispatch_slot<C, R, G, K>(
     observer: &'static ObserverCell<K>,
     handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
-    requesters: Requesters<R, G, Q, L>,
+    requesters: Requesters<R, G>,
 ) -> impl FnMut(IterationEvent<'_>) + 'static
 where
     C: ClockSource + 'static,
