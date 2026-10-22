@@ -278170,6 +278170,62 @@
         "wz writes a pcapng only in tests and fixtures, so there is no rewriting path that would copy a local option to a new file; if one is added, the format gives no rule for a local code and that rule is to be chosen then, not assumed."
       ]
     },
+    "Round 3426": {
+      "decision_summary": "Let the kit's fixed client sleep when idle and batch a send window, and flash it (3 code commits). ZephyrUdpSocket re-arms SO_RCVTIMEO (set_receive_timeout); CONFIG_WZ_IDLE_WAIT_MS (0 keeps the tick) and CONFIG_WZ_TX_BATCHING are Kconfig options; the application layer can state a deadline the loop wakes for (SessionCore::set_app_wake_deadline_ms, folded into the pump's wait budget, published by SlotDispatch for its pending queries). Four images from one tree were flashed to the T2G kit and asked 48,000 times, none wrong: the loop went from 909 rounds a second idle to about 4 with the session held 60 s at a 10 s lease; batching costs 8.2 KB of flash and 300 B of stack (its own stack-gate row and a 10 KB main stack) and the host's GET median was 0.351 ms against 0.399 ms, ranges overlapping. Current draw is not measured; no claim about power.",
+      "changes_bullets": [
+        "wz-runtime-zephyr: ZephyrUdpSocket implements DatagramSocket::set_receive_timeout and CAN_SET_RECEIVE_TIMEOUT through the board hook that armed the timeout; the idle wait is therefore available to the Zephyr stack.",
+        "wz-session-core: SessionCore holds app_wake_deadline_ms (set_app_wake_deadline_ms, app_wake_deadline_ms); wz-runtime-coop: the pump folds it into wake_budget_ms, with a pump-level test (a recording link, an acceptor pump) that fails under a mutation which ignores it; wz-session-mcu: SlotDispatch publishes the earliest pending query's deadline wherever its table changes.",
+        "deploy/zephyr-admin-node: Kconfig WZ_IDLE_WAIT_MS and WZ_TX_BATCHING, CMake passes WZ_IDLE_WAIT_MS and the batching feature on the fixed-memory client, the crate's batching feature, fixed_client.rs reads WZ_IDLE_WAIT_MS at compile time and says how many times its loop went round every 5 s; overlays/t2g_client_batching.conf (batching and a 10 KB main stack).",
+        "scripts/lib/stack_frame_gate.py: row zephyr-client-fixed-batching at 7,140 B; scripts/lib/no_allocator_link_gate.py: the fixed client is also built with batching and WZ_IDLE_WAIT_MS=1000 (gated, clean).",
+        "docs/storage-policy-and-link-layer.md: section 5.3 with the kit table and what it does not show."
+      ],
+      "verification_bullets": [
+        "T2G kit (CYT4BF, Zephyr sockets), four images from one tree flashed and verified (524,288 bytes read back), the router a zenohd on the host listening on udp/192.168.100.1:7447; each asked 2,000 times for each of the node's two documents, three repetitions, order shuffled: 48,000 GETs, bad=0 in every run. Image text 158,924 B (base), 158,952 (idle wait), 167,128 (batching), 167,156 (both). Worst stack chain 6,840, 6,848, 7,140 and 7,148 B against the committed 6,808 (tolerance 128) and 7,140; all four pass the stack gate.",
+        "Loop rounds a second with the session held idle for 60 s at a 10 s lease: 909 (base, 4,545 a 5 s); about 4 (idle wait, 15 to 22 a 5 s) and the same with batching; no session lost. Peak main stack in a run of 4,000 GETs: 5,936 of 9,216 B (base).",
+        "GET median in the host's view, 6 medians each: base 0.399 ms (0.310 to 0.478), idle 0.387 (0.316 to 0.483), batching 0.351 (0.275 to 0.363), both 0.351 (0.283 to 0.380); p99 0.501, 0.537, 0.439, 0.471. The runs of one image differ by more than the images do.",
+        "Tests: wz-runtime-coop lib 34 passed (heap) and 29 (slot), including the pump's wake-budget test and its mutation; wz-session-mcu lib 3; clippy -D warnings of wz-session-core, wz-session-mcu (client-slot with query-get), wz-runtime-coop, -zephyr and -posix with all features; the no-allocator gate reads the fixed client (plain, and with batching and the idle wait) and host-slot-node (plain, and with get and batching) clean, as gated; census and population checks pass; stack gate self-test passes.",
+        "Not run here: the board's current draw (no power measurement), a second session on the idle-wait image, the lwIP images, the full local CI sweep, and the heap client on the kit."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; the CI run of the previous push was cancelled by a newer push and gave no verdict.",
+        "The idle wait is for an image that waits on one socket: with more sessions it would leave the others unread. A runtime axis in deploy/capabilities.toml and Kconfig (one shared fixed-client application for the kit and the host node, which are near copies) is the next candidate.",
+        "Left from the asking node: a mailbox for an application that asks from outside the session's event, several queries in flight, other payload sizes and a real network.",
+        "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
+      ],
+      "publishable_decision_summary": "Let the kit's fixed client sleep when idle and batch a send window, and flash it (3 code commits). ZephyrUdpSocket re-arms SO_RCVTIMEO (set_receive_timeout); CONFIG_WZ_IDLE_WAIT_MS (0 keeps the tick) and CONFIG_WZ_TX_BATCHING are Kconfig options; the application layer can state a deadline the loop wakes for (SessionCore::set_app_wake_deadline_ms, folded into the pump's wait budget, published by SlotDispatch for its pending queries). Four images from one tree were flashed to the T2G kit and asked 48,000 times, none wrong: the loop went from 909 rounds a second idle to about 4 with the session held 60 s at a 10 s lease; batching costs 8.2 KB of flash and 300 B of stack (its own stack-gate row and a 10 KB main stack) and the host's GET median was 0.351 ms against 0.399 ms, ranges overlapping. Current draw is not measured; no claim about power.",
+      "publishable_changes_bullets": [
+        "wz-runtime-zephyr: ZephyrUdpSocket implements DatagramSocket::set_receive_timeout and CAN_SET_RECEIVE_TIMEOUT through the board hook that armed the timeout; the idle wait is therefore available to the Zephyr stack.",
+        "wz-session-core: SessionCore holds app_wake_deadline_ms (set_app_wake_deadline_ms, app_wake_deadline_ms); wz-runtime-coop: the pump folds it into wake_budget_ms, with a pump-level test (a recording link, an acceptor pump) that fails under a mutation which ignores it; wz-session-mcu: SlotDispatch publishes the earliest pending query's deadline wherever its table changes.",
+        "deploy/zephyr-admin-node: Kconfig WZ_IDLE_WAIT_MS and WZ_TX_BATCHING, CMake passes WZ_IDLE_WAIT_MS and the batching feature on the fixed-memory client, the crate's batching feature, fixed_client.rs reads WZ_IDLE_WAIT_MS at compile time and says how many times its loop went round every 5 s; overlays/t2g_client_batching.conf (batching and a 10 KB main stack).",
+        "scripts/lib/stack_frame_gate.py: row zephyr-client-fixed-batching at 7,140 B; scripts/lib/no_allocator_link_gate.py: the fixed client is also built with batching and WZ_IDLE_WAIT_MS=1000 (gated, clean).",
+        "docs/storage-policy-and-link-layer.md: section 5.3 with the kit table and what it does not show."
+      ],
+      "publishable_verification_bullets": [
+        "T2G kit (CYT4BF, Zephyr sockets), four images from one tree flashed and verified (524,288 bytes read back), the router a zenohd on the host listening on udp/192.168.100.1:7447; each asked 2,000 times for each of the node's two documents, three repetitions, order shuffled: 48,000 GETs, bad=0 in every run. Image text 158,924 B (base), 158,952 (idle wait), 167,128 (batching), 167,156 (both). Worst stack chain 6,840, 6,848, 7,140 and 7,148 B against the committed 6,808 (tolerance 128) and 7,140; all four pass the stack gate.",
+        "Loop rounds a second with the session held idle for 60 s at a 10 s lease: 909 (base, 4,545 a 5 s); about 4 (idle wait, 15 to 22 a 5 s) and the same with batching; no session lost. Peak main stack in a run of 4,000 GETs: 5,936 of 9,216 B (base).",
+        "GET median in the host's view, 6 medians each: base 0.399 ms (0.310 to 0.478), idle 0.387 (0.316 to 0.483), batching 0.351 (0.275 to 0.363), both 0.351 (0.283 to 0.380); p99 0.501, 0.537, 0.439, 0.471. The runs of one image differ by more than the images do.",
+        "Tests: wz-runtime-coop lib 34 passed (heap) and 29 (slot), including the pump's wake-budget test and its mutation; wz-session-mcu lib 3; clippy -D warnings of wz-session-core, wz-session-mcu (client-slot with query-get), wz-runtime-coop, -zephyr and -posix with all features; the no-allocator gate reads the fixed client (plain, and with batching and the idle wait) and host-slot-node (plain, and with get and batching) clean, as gated; census and population checks pass; stack gate self-test passes.",
+        "Not run here: the board's current draw (no power measurement), a second session on the idle-wait image, the lwIP images, the full local CI sweep, and the heap client on the kit."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; the CI run of the previous push was cancelled by a newer push and gave no verdict.",
+        "The idle wait is for an image that waits on one socket: with more sessions it would leave the others unread. A runtime axis in deploy/capabilities.toml and Kconfig (one shared fixed-client application for the kit and the host node, which are near copies) is the next candidate.",
+        "Left from the asking node: a mailbox for an application that asks from outside the session's event, several queries in flight, other payload sizes and a real network.",
+        "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
