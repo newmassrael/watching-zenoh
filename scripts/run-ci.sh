@@ -17711,10 +17711,11 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # declarations z_sub, z_queryable and z_liveliness put on the group's wire on each), and,
     # with pico's multicast declarations switched on, the declarations and Interests those and
     # z_pub put on the group against the real library built the same way, the puts z_pub makes
-    # there alone and beside a subscriber, and a real filtered z_pub opening on wz's subscriber.
-    # The drop-in is built a second time in that arm, its features read off the switched-on
-    # pico's own config.h, into the target the test links.
-    # Count-guarded at 9: the legs are `#[ignore]`, so a rename would select nothing and pass.
+    # there alone and beside a subscriber, z_pub going on putting to a member when another
+    # that declared under the same id leaves, and a real filtered z_pub opening on wz's
+    # subscriber. The drop-in is built a second time in that arm, its features read off the
+    # switched-on pico's own config.h, into the target the test links.
+    # Count-guarded at 10: the legs are `#[ignore]`, so a rename would select nothing and pass.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
     local mcdecl_features
     mcdecl_features=$(python3 scripts/lib/capability_config.py --features pico \
@@ -17723,7 +17724,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     read -ra mcdecl_args <<< "$mcdecl_features"
     (cd crates && cargo build -p wz-capi-pico --quiet "${mcdecl_args[@]}" \
         --target-dir target/wz-capi-pico-mcdecl) || return 1
-    _runci_guarded_test "M pico multicast peer test on wz" 9 \
+    _runci_guarded_test "M pico multicast peer test on wz" 10 \
         cargo test -p wz-integration-tests \
         --test pico_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
     # Open-debt item 913 — the zenoh-c ABI's group: a stock zenohd joins

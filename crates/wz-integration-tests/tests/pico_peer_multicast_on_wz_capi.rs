@@ -424,6 +424,107 @@ fn upstream_zpub_with_multicast_declarations_puts_on_a_group_as_the_real_library
     );
 }
 
+/// With pico's `Z_FEATURE_MULTICAST_DECLARATIONS=1`, a publisher's write filter counts each
+/// member's subscriber apart: two pico sessions declare their subscribers under the same entity
+/// id, and when one leaves, upstream's `z_pub` keeps putting to the one that stays, its filter
+/// keying a target by the declaration's id AND its peer (`vendor/zenoh-pico/src/net/filtering.c`
+/// @ `_z_filter_target_t target = {.decl_id = msg->id, .peer = (uintptr_t)peer};`). So must
+/// `z_pub.c` on wz.
+///
+/// # Control
+///
+/// The real `z_pub` first: the subscriber that stays hears it after the other left, so the
+/// leg's timing lets a filter that counts members apart stay open.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn a_filtered_zpub_on_wz_keeps_putting_to_the_member_that_stays() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled example");
+    let wz_pub = compile_pico_example_against_wz_capi_in(
+        "z_pub",
+        dir.path(),
+        PicoHeaderArm::McastDeclarations,
+    )
+    .unwrap_or_else(|diag| panic!("z_pub.c does not build against wz's mcdecl arm\n{diag}"));
+    let real_pub = zenoh_pico_mcdecl_cli_binary("z_pub");
+    let real_sub = zenoh_pico_mcdecl_cli_binary("z_sub");
+    let mut differ = Vec::new();
+    for (label, publisher) in [
+        (
+            "real zenoh-pico z_pub (multicast declarations)",
+            real_pub.as_path(),
+        ),
+        (
+            "z_pub.c on wz-capi-pico (multicast declarations)",
+            wz_pub.as_path(),
+        ),
+    ] {
+        if let Err(why) = the_member_that_stays_keeps_hearing(label, publisher, &real_sub) {
+            differ.push(format!("{label}: {why}"));
+        }
+    }
+    assert!(
+        differ
+            .first()
+            .is_none_or(|first| !first.starts_with("real")),
+        "the control did not hold: {differ:#?}"
+    );
+    assert!(differ.is_empty(), "{differ:#?}");
+}
+
+/// Two real subscribers on the group, then `publisher`; once the second hears it, the first
+/// leaves, and the second must go on hearing. `Err` says what was not heard.
+///
+/// The first leaves on its own, after three samples (`-n 3`), so it undeclares its subscriber
+/// and closes its session as upstream's `z_sub.c` does at the end of its loop; a signal would
+/// kill it with neither, the example installing no handler.
+fn the_member_that_stays_keeps_hearing(
+    label: &str,
+    publisher: &Path,
+    subscriber: &Path,
+) -> Result<(), String> {
+    const RECEIVED: &str = ">> [Subscriber] Received";
+    let sub_args: &[&str] = &["-k", "demo/mc/**"];
+    let (mut leaving, mut leaving_out) = spawn_on_group(
+        "leaving z_sub",
+        subscriber,
+        &["-k", "demo/mc/**", "-n", "3"],
+    );
+    let (mut staying, mut heard) = spawn_on_group("staying z_sub", subscriber, sub_args);
+    for out in [&mut leaving_out, &mut heard] {
+        wait_for_substring(out, "Press CTRL-C", HEARD_WITHIN)
+            .map_err(|printed| format!("a subscriber never declared\n{printed}"))?;
+    }
+    let (mut publishing, _said) = spawn_on_group(label, publisher, &["-k", "demo/mc/zp"]);
+    let outcome = (|| {
+        wait_for_substring(&mut heard, RECEIVED, HEARD_WITHIN)
+            .map_err(|printed| format!("never heard while both were on the group\n{printed}"))?;
+        let left = std::time::Instant::now() + HEARD_WITHIN;
+        while leaving.child_mut().try_wait().ok().flatten().is_none() {
+            if std::time::Instant::now() >= left {
+                return Err(format!(
+                    "the leaving subscriber never took its three samples\n{}",
+                    read_captured(&mut leaving_out)
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let before = read_captured(&mut heard).matches(RECEIVED).count();
+        std::thread::sleep(Duration::from_secs(4));
+        let after = read_captured(&mut heard).matches(RECEIVED).count();
+        if after > before {
+            Ok(())
+        } else {
+            Err(format!(
+                "the staying subscriber heard nothing in 4 s after the other left ({before} before)"
+            ))
+        }
+    })();
+    graceful_terminate(publishing.child_mut(), Duration::from_secs(5));
+    graceful_terminate(staying.child_mut(), Duration::from_secs(5));
+    outcome
+}
+
 /// A process of `exe` on the cross group, its output captured to a file it shares with the
 /// returned reader.
 fn spawn_on_group(label: &str, exe: &Path, args: &[&str]) -> (ChildGuard, File) {
