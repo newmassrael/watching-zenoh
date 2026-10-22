@@ -368,6 +368,10 @@ fn a_client_presents_the_pubkey_identity_its_own_config_states() {
 
     let (public, private, client_key) = pubkey_identity();
     let client_public = RsaPublicKey::from(&client_key);
+    // Made before the client dials: a key's prime search takes a random time, and the client's
+    // `connect/timeout_ms` bounds the whole open, so a key made after the accept could spend that
+    // bound before the responder answered (a debug build on Windows did, at 3.37 s).
+    let responder_key = generate_keypair(512).expect("a 512-bit responder key");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
     let port = listener.local_addr().expect("the bound address").port();
     listener
@@ -382,7 +386,7 @@ fn a_client_presents_the_pubkey_identity_its_own_config_states() {
             let mut params = fixture_session_init_params();
             params.zid = vec![0x09; 4];
             let auth = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
-                generate_keypair(512).expect("a 512-bit responder key"),
+                responder_key,
                 Some(vec![client_public]),
             )) as _]);
             accept_and_open_session_with_auth(
