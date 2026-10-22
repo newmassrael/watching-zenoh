@@ -3609,6 +3609,9 @@ async fn serve_group<D, B, Fut>(
             tick_ms: GROUP_TICK_MS,
             node_stats: None,
             membership: Some(&membership),
+            // The group's events feed this one session's observer, which must tell two members'
+            // declarations apart.
+            scope_members: true,
         },
         bind,
         GroupFaceSeams {

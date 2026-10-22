@@ -1191,6 +1191,12 @@ where
                     // closes the link that was lost.
                     let lost = dispatcher.notify_link_lost();
                     let _ = perform_link_duties(dispatcher, link, lost).await;
+                    // Open-debt item 913 — the members went with the link, and what they
+                    // declared with them.
+                    #[cfg(feature = "codec-declare")]
+                    if let Some(retracted) = dispatcher.take_member_retractions() {
+                        on_event(IterationEvent::Poll(&retracted));
+                    }
                     return MulticastOutcome::LinkLost(cause);
                 }
                 LinkEvent::Ready => {}
@@ -1288,6 +1294,12 @@ where
             () = tx.join_requested() => {
                 next_join_ms = clock.now_monotonic_ms();
             }
+        }
+        // Open-debt item 913 — what the members that left in this turn (an announced Close, an
+        // expired lease) declared goes with them, on a dispatcher that keeps members apart.
+        #[cfg(feature = "codec-declare")]
+        if let Some(retracted) = dispatcher.take_member_retractions() {
+            on_event(IterationEvent::Poll(&retracted));
         }
         // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member
         // set to the forwarder when it changes (a JOIN admit in the RX arm or a
@@ -1570,6 +1582,8 @@ where
                 tick_ms: 50,
                 node_stats: node_stats.as_ref(),
                 membership: membership.as_ref(),
+                // A node's group face hands what its members declare on to its router.
+                scope_members: false,
             },
             || bind(&opts),
             GroupFaceSeams {
@@ -1605,6 +1619,10 @@ pub struct GroupFaceSpec<'a> {
     /// bound link, and the loop keeps the view current. A query on the group counts
     /// its remote finals from it (open-debt item 913).
     pub membership: Option<&'a McastGroupMembership>,
+    /// Open-debt item 913 — whether the events keep each member's declarations apart
+    /// (`MulticastDispatcher::scope_member_declarations`): what a face whose events feed one
+    /// session's observer wants, and a face that hands the ids on must not.
+    pub scope_members: bool,
 }
 
 /// The seams a group face's loop calls, carried across re-joins: each received
@@ -1667,6 +1685,7 @@ where
         tick_ms,
         node_stats,
         membership,
+        scope_members,
     } = spec;
     let GroupFaceSeams {
         mut on_event,
@@ -1674,8 +1693,18 @@ where
         mut on_group_subs,
     } = seams;
     let clock = TokioTime::new();
-    let new_dispatcher =
-        || MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+    let new_dispatcher = || {
+        #[cfg_attr(not(feature = "codec-declare"), allow(unused_mut))]
+        let mut dispatcher =
+            MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+        #[cfg(feature = "codec-declare")]
+        if scope_members {
+            dispatcher.scope_member_declarations();
+        }
+        dispatcher
+    };
+    #[cfg(not(feature = "codec-declare"))]
+    let _ = scope_members;
     let mut rejoin = GroupRejoin::new();
     let mut link = MulticastLink::new(bind);
     let mut dispatcher = new_dispatcher();
