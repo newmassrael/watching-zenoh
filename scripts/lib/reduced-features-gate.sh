@@ -62,7 +62,9 @@ excluded="wz-ap-demo"
 # already reach it.
 # `wz-mcu-multicast-e2e` joined at S9e: its `heap` default is what named `alloc`, and
 # without it the facade's cooperative runtime has no task pool to be built over.
-profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory"
+# `wz-runtime-posix` joined with its slot profile: its coop dependency names the session tier,
+# and its `alloc` default is what chose the pool, exactly as `wz-runtime-zephyr`'s does.
+profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory wz-runtime-posix:session-slot"
 
 # The minimal profile feature of $1, or nothing when the crate is not in tier 4.
 profile_of() {

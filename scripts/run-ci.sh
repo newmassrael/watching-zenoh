@@ -6090,7 +6090,8 @@ layer_c1ax_cargo_test_routing_namespace() {
     # Session duties made causal: 36 -> 38, the two ungated link-open cases (see
     # C1q), over the version JOIN that took it 35 -> 36. Each half was printed
     # by its own run; the sum is derived. The label moves with the value.
-    _runci_guarded_test "C1AX multicast_glue 38" 38 \
+    # 38 -> 39, open-debt item 913's ungated group face case (see C1q), printed.
+    _runci_guarded_test "C1AX multicast_glue 39" 39 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     # Item 900 follow-up — the `--sessions` group session's RE-JOIN loop, which
     # shares the router face's schedule and wait above. The demo compiles it
@@ -11110,11 +11111,13 @@ layer_c1q_multicast_glue() {
     # 36 -> 38: two ungated cases, a link that cannot open sends no JOIN and
     # ends lost, and a Running session handed an unopened link ends lost.
     # Each half was printed by its own run; the sum is derived.
-    _runci_guarded_test C1q 35 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    # 35/39/41 -> 36/40/42, open-debt item 913's ungated group face case, printed by
+    # each run on a build host.
+    _runci_guarded_test C1q 36 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 39 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 40 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 41 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 42 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
     # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
     # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg
