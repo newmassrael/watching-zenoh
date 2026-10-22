@@ -130,6 +130,8 @@ env_logger = "0.11"
 [dev-dependencies]
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
     "tls-fixtures",
+    # The in-memory group the group-session tests run over.
+    "multicast",
 ] }
 # The `--sessions` group-session re-join tests (`sessions_run.rs`) run in
 # paused time: the re-join waits are the router face's 1000 / 2000 / 4000 ms,

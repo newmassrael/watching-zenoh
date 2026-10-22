@@ -20,6 +20,9 @@
 //! the fixtures + link drivers + `TestHal` that the integration tests
 //! consume.
 
+#[cfg(feature = "multicast")]
+pub mod multicast_bus;
+
 use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};

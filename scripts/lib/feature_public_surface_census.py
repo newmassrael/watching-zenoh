@@ -415,7 +415,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "library a Rust consumer could name reaches its gated paths. NOT "
         "\"same reason as the other one\", which is what this row used to say "
         "and which the graph refuted. Held to `TEST_ONLY_REACH` below",
-        frozenset({"tls-fixtures"}),
+        frozenset({"tls-fixtures", "multicast"}),
     ),
     # `wz-session-core` used to sit here with all 65 of its public-gating
     # features -- 65 of the 90 pairs no axis had taken, the longest row this

@@ -914,126 +914,17 @@ mod group_rejoin_tests {
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::rc::Rc;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::sync::{mpsc, watch, Notify};
+    use tokio::sync::{watch, Notify};
 
-    use wz::runtime_tokio::multicast_glue::{MulticastDatagramSender, MulticastLinkDriver};
     use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
-    use wz::runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+    use wz_runtime_tokio_test_support::multicast_bus::{GroupBus, GroupBusLink};
 
     use super::{group_params, serve_group, SessionEnd};
 
     const ENDPOINT: &str = "udp/224.0.0.224:7446";
-
-    type Datagram = (Vec<u8>, SocketAddr);
-
-    /// One attached link: its address and where datagrams for it go.
-    type Member = (SocketAddr, mpsc::UnboundedSender<Datagram>);
-
-    /// The group: every attached link receives what any OTHER attached link
-    /// sends, with the sender's address, as a multicast group delivers.
-    #[derive(Clone, Default)]
-    struct Bus {
-        members: Arc<Mutex<Vec<Member>>>,
-    }
-
-    impl Bus {
-        fn attach(&self, addr: SocketAddr, carrier: Arc<Notify>) -> BusLink {
-            let (tx, inbound) = mpsc::unbounded_channel();
-            self.members.lock().unwrap().push((addr, tx));
-            BusLink {
-                addr,
-                bus: self.clone(),
-                inbound,
-                carrier,
-            }
-        }
-
-        /// A link that is no longer attached sends nothing: its socket is gone.
-        fn deliver(&self, from: SocketAddr, datagram: &[u8]) {
-            let members = self.members.lock().unwrap();
-            if !members.iter().any(|(addr, _)| *addr == from) {
-                return;
-            }
-            for (addr, tx) in members.iter() {
-                if *addr != from {
-                    let _ = tx.send((datagram.to_vec(), from));
-                }
-            }
-        }
-
-        fn detach(&self, addr: SocketAddr) {
-            self.members.lock().unwrap().retain(|(a, _)| *a != addr);
-        }
-    }
-
-    /// One join's link. Notifying its `carrier` drops it, as a lost
-    /// interface does; it is then detached from the group.
-    struct BusLink {
-        addr: SocketAddr,
-        bus: Bus,
-        inbound: mpsc::UnboundedReceiver<Datagram>,
-        carrier: Arc<Notify>,
-    }
-
-    impl Drop for BusLink {
-        fn drop(&mut self) {
-            self.bus.detach(self.addr);
-        }
-    }
-
-    struct BusSender {
-        addr: SocketAddr,
-        bus: Bus,
-    }
-
-    impl MulticastDatagramSender for BusSender {
-        fn send(
-            &self,
-            datagram: &[u8],
-        ) -> impl std::future::Future<Output = io::Result<()>> + Send {
-            self.bus.deliver(self.addr, datagram);
-            std::future::ready(Ok(()))
-        }
-    }
-
-    impl MulticastLinkDriver for BusLink {
-        type Sender = BusSender;
-
-        fn datagram_sender(&self) -> io::Result<BusSender> {
-            Ok(BusSender {
-                addr: self.addr,
-                bus: self.bus.clone(),
-            })
-        }
-    }
-
-    impl LinkDriver for BusLink {
-        async fn open(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-        async fn send(&mut self, frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
-            self.bus.deliver(self.addr, frame.bytes);
-            Ok(())
-        }
-        async fn close(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-        async fn poll_event(&mut self) -> LinkEvent {
-            tokio::select! {
-                datagram = self.inbound.recv() => match datagram {
-                    Some((bytes, src)) => LinkEvent::Rx(RxFrame::with_src(bytes, src)),
-                    None => LinkEvent::Lost { cause: LostCause::OsError },
-                },
-                () = self.carrier.notified() => {
-                    self.bus.detach(self.addr);
-                    LinkEvent::Lost { cause: LostCause::OsError }
-                }
-            }
-        }
-    }
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
@@ -1070,7 +961,7 @@ mod group_rejoin_tests {
     /// line, and `until` fails naming what the session did say.
     #[tokio::test(start_paused = true)]
     async fn a_lost_group_link_is_rejoined_and_admits_a_member_again() {
-        let bus = Bus::default();
+        let bus = GroupBus::new(ENDPOINT);
         let (stop_tx, stop_rx) = watch::channel(false);
         let carrier = Arc::new(Notify::new());
         let (a_lines, b_lines) = (Lines::default(), Lines::default());
@@ -1170,7 +1061,7 @@ mod group_rejoin_tests {
     /// failed re-bind was reported with its wait.
     #[tokio::test(start_paused = true)]
     async fn a_stop_while_the_group_is_down_closes_at_the_signal() {
-        let bus = Bus::default();
+        let bus = GroupBus::new(ENDPOINT);
         let (stop_tx, stop_rx) = watch::channel(false);
         let carrier = Arc::new(Notify::new());
         let lines = Lines::default();
@@ -1238,7 +1129,9 @@ mod group_rejoin_tests {
             &group_params(vec![0xD4], 100, 1_000),
             || {
                 binds.set(binds.get() + 1);
-                std::future::ready(Err::<BusLink, _>(io::Error::other("no such interface")))
+                std::future::ready(Err::<GroupBusLink, _>(io::Error::other(
+                    "no such interface",
+                )))
             },
             None,
             &mut stop,

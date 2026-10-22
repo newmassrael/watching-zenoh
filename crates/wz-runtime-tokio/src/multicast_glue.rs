@@ -254,22 +254,6 @@ pub use wz_session_core::multicast_params::MulticastOutcome;
 // resolve.
 pub use wz_session_core::multicast_params::MulticastDriveConfig;
 
-/// R2859 — a group face's link as upstream labels a multicast link, `(src,
-/// group)`: the address this node's datagrams leave from, and the group they go
-/// to (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `fn get_src(&self) -> &Locator {`
-/// and `fn get_dst`). The one labelling both the stats registry and the admin
-/// member view use, so the two name a group the same way.
-///
-/// Refuses a driver with no group to send to: it is not a multicast link.
-#[cfg(feature = "transport-link-udp")]
-fn group_link_locators(link: &crate::UdpDriver) -> std::io::Result<(String, String)> {
-    let group = link.peer_addr().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotConnected, "no group to send to")
-    })?;
-    let src = link.source_addr()?;
-    Ok((format!("udp/{src}"), format!("udp/{group}")))
-}
-
 /// R2848 (`transport-stats`) — the counts of ONE multicast transport, as a
 /// handle the drive loop records into and the node's registry reads from.
 ///
@@ -319,12 +303,11 @@ impl MulticastTransportStats {
     /// transport by the link's destination, the group
     /// (`io/zenoh-transport/src/multicast/transport.rs` @ `.multicast_transport_stats(config.link.link.get_dst().to_string());`),
     /// and the link by its source, the address its datagrams leave from
-    /// ([`UdpDriver::source_addr`](crate::UdpDriver::source_addr)).
+    /// ([`MulticastLinkDriver::group_locators`]).
     ///
     /// Refuses a driver with no group to send to: it is not a multicast link.
-    #[cfg(feature = "transport-link-udp")]
-    pub fn for_link(link: &crate::UdpDriver) -> std::io::Result<Self> {
-        let (src, group) = group_link_locators(link)?;
+    pub fn for_link<D: MulticastLinkDriver>(link: &D) -> std::io::Result<Self> {
+        let (src, group) = link.group_locators()?;
         Ok(Self::new(&src, &group))
     }
 
@@ -455,6 +438,20 @@ pub trait MulticastLinkDriver: LinkDriver {
     /// group they go to. An error means the link cannot send, and every
     /// datagram queued on it is lost, as a failed send always was.
     fn datagram_sender(&self) -> std::io::Result<Self::Sender>;
+
+    /// R2859 — this link as upstream labels a multicast link, `(src, group)`:
+    /// the address this node's datagrams leave from, and the group they go to
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `fn get_src(&self) -> &Locator {`
+    /// and `fn get_dst`). The one labelling both the stats registry and the
+    /// member view use, so the two name a group the same way.
+    ///
+    /// Required rather than defaulted (open-debt item 913): a group face opens
+    /// its member view only for a link that names itself, and a query on the
+    /// group counts its remote finals from that view, so a link that could
+    /// answer with an error by default would end every one of its queries at
+    /// once. An error is a link with no group to send to, which is not a
+    /// multicast link.
+    fn group_locators(&self) -> std::io::Result<(String, String)>;
 }
 
 /// R2929 — the send half of a [`MulticastLinkDriver`], owned by the transmit
@@ -473,6 +470,14 @@ impl MulticastLinkDriver for crate::UdpDriver {
 
     fn datagram_sender(&self) -> std::io::Result<crate::UdpGroupSender> {
         self.group_sender()
+    }
+
+    fn group_locators(&self) -> std::io::Result<(String, String)> {
+        let group = self.peer_addr().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "no group to send to")
+        })?;
+        let src = self.source_addr()?;
+        Ok((format!("udp/{src}"), format!("udp/{group}")))
     }
 }
 
@@ -1508,9 +1513,10 @@ type GroupBind<'a> = core::pin::Pin<
 /// (`MulticastTransportStats::for_link`), the loop records into it, and the
 /// transport is closed when that join's loop ends. A re-join is a new
 /// transport, because upstream deletes a multicast transport whose link fails
-/// and a reconnect creates another. Every group face is spawned here, so this
-/// is the one place a face's traffic can reach the registry — and the one
-/// place it can fail to.
+/// and a reconnect creates another. Every group face runs [`serve_group_face`],
+/// so that is the one place a face's traffic can reach the registry — and the
+/// one place it can fail to. This spawns it on `pool`; a host that must run the
+/// loop on an executor of its own calls it directly (open-debt item 913).
 ///
 /// The bind runs when a join's session asks for its link
 /// ([`open_multicast_session`]), before the join's loop, because the counters
@@ -1534,10 +1540,10 @@ fn spawn_group_face<B, F, G, H>(
     node_stats: Option<crate::node_stats::NodeStats>,
     membership: Option<McastGroupMembership>,
     bind: B,
-    mut on_event: F,
+    on_event: F,
     producer: MulticastTxProducer,
-    mut on_members: G,
-    mut on_group_subs: H,
+    on_members: G,
+    on_group_subs: H,
 ) -> McastFaceStop
 where
     B: for<'a> Fn(&'a crate::McastGroupOptions) -> GroupBind<'a> + Send + Sync + 'static,
@@ -1545,105 +1551,206 @@ where
     G: FnMut(&[Vec<u8>]) + Send + 'static,
     H: FnMut(&[String]) + Send + 'static,
 {
-    use wz_session_core::multicast_dispatch::MulticastConfig;
-
-    use crate::runtime_impl::TokioTime;
-
-    // A router group serves many members; the bound is the multicast
-    // dispatcher's fixed peer-table capacity.
-    const MCAST_MAX_PEERS: usize = 32;
     // R2333 — the stop channel. `false` is the resting value; the loop watches for
     // a CHANGE, so the initial value is never mistaken for a stop.
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
     let task = pool.spawn(async move {
-        let clock = TokioTime::new();
-        let new_dispatcher =
-            || MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
-        let mut rejoin = GroupRejoin::new();
-        let mut link = MulticastLink::new(|| bind(&opts));
-        let mut dispatcher = new_dispatcher();
-        loop {
-            // R2376 — the FIRST open is the host's own bring-up and its failure
-            // is reported as it always was; every LATER one is a re-join, which
-            // `rejoin_group_session` has already opened, and this finds it open.
-            // A face that never came up is a deploy error the operator must see,
-            // while a face that came up and lost its link is the transient this
-            // loop rides out.
-            let driver = match open_multicast_session(&mut dispatcher, &mut link).await {
-                Ok(driver) => driver,
-                Err(e) => {
-                    log::error!("{label}: group bind failed ({e}); face absent");
-                    return None;
-                }
-            };
-            let recorder = GroupFaceRecorder::open(node_stats.as_ref(), driver, label);
-            // R2859 — this join's member view, labelled by the bound link as
-            // upstream labels a multicast transport's link. A link whose
-            // addresses cannot be read keeps no view, and says so, rather than
-            // listing members under a group it cannot name.
-            let membership_join =
-                membership
-                    .as_ref()
-                    .and_then(|membership| match group_link_locators(driver) {
-                        Ok((src, group)) => Some(membership.open(src, group)),
-                        Err(e) => {
-                            log::warn!(
-                            "{label}: group link has no locators ({e}); its members are not listed"
-                        );
-                            None
-                        }
-                    });
-            let outcome = drive_multicast_session_with_membership(
-                &mut dispatcher,
-                MulticastDriveConfig {
-                    params: &params,
-                    tick_ms: 50,
-                    // production: no iteration budget — the loop runs until the
-                    // host stops it (R2333) or the link is lost.
-                    max_iters: None,
-                },
-                &mut link,
-                &clock,
-                &mut on_event,
-                &producer,
-                &mut on_members,
-                &mut on_group_subs,
-                Some(&mut shutdown),
-                recorder.recorder(),
-                membership_join.as_ref().map(|join| &join.membership),
-            )
-            .await;
-            // This join's transport ends with its loop, before any re-join opens
-            // the next one — and its members with it.
-            recorder.close();
-            drop(membership_join);
-            let Some(delay) = rejoin.wait_for(&outcome) else {
-                return Some(outcome);
-            };
-            log::warn!("{label}: group face lost ({outcome:?}); re-joining in {delay}ms");
-            let rejoined = rejoin_group_session(
-                &mut dispatcher,
-                &new_dispatcher,
-                &mut link,
-                &clock,
-                &mut rejoin,
-                &mut shutdown,
-                delay,
-                |err, retry| {
-                    log::warn!("{label}: group re-join failed ({err}); retrying in {retry}ms")
-                },
-            )
-            .await;
-            if !rejoined {
-                // The host stopped the face while it was down. Report the loss
-                // that took it down, not a synthetic stop: nothing re-joined, so
-                // no departure was announced on the wire.
-                return Some(outcome);
-            }
-            log::info!("{label}: group face re-joined");
-        }
+        serve_group_face(
+            GroupFaceSpec {
+                label,
+                params: &params,
+                tick_ms: 50,
+                node_stats: node_stats.as_ref(),
+                membership: membership.as_ref(),
+            },
+            || bind(&opts),
+            GroupFaceSeams {
+                on_event,
+                on_members,
+                on_group_subs,
+            },
+            &producer,
+            &mut shutdown,
+            |_| {},
+        )
+        .await
     });
     McastFaceStop { signal, task }
+}
+
+/// What a group face is, apart from its link and the seams its loop calls: how it
+/// names itself, the profile its beacon advertises, the cadence of its loop, and
+/// where its counts and its members go.
+#[derive(Clone, Copy)]
+pub struct GroupFaceSpec<'a> {
+    /// The face's name in the lines it logs.
+    pub label: &'static str,
+    /// The profile the face's beacon advertises: its identity and role, its
+    /// intervals and its batch.
+    pub params: &'a MulticastParams,
+    /// The loop's scheduler tick (see [`MulticastDriveConfig::tick_ms`]).
+    pub tick_ms: u64,
+    /// The node's stats registry, when it keeps one (R2852): each join is one
+    /// multicast transport in it, labelled by the bound link.
+    pub node_stats: Option<&'a crate::node_stats::NodeStats>,
+    /// Who is on the group (R2859): each join opens a view in it, labelled by the
+    /// bound link, and the loop keeps the view current. A query on the group counts
+    /// its remote finals from it (open-debt item 913).
+    pub membership: Option<&'a McastGroupMembership>,
+}
+
+/// The seams a group face's loop calls, carried across re-joins: each received
+/// event, the on-group router set on change, and the group-subscriber keys on
+/// change (see [`drive_multicast_session_with_membership`]).
+pub struct GroupFaceSeams<F, G, H> {
+    /// Each event the loop hears.
+    pub on_event: F,
+    /// The on-group ROUTER member set, on change.
+    pub on_members: G,
+    /// The deduped group-subscriber key expressions, on change.
+    pub on_group_subs: H,
+}
+
+/// R2850 / open-debt item 913 — run ONE group face on the caller's executor until
+/// it is stopped or its link is lost for good: bind and open, drive, re-join on
+/// a lost link (see [`spawn_group_face`] for why a face is one loop, and
+/// [`GroupRejoin`] for when it re-joins).
+///
+/// The loop every group face runs, whoever spawns it. A router spawns it on a
+/// subsystem pool; a C session runs it on the thread that runs its callbacks,
+/// because what the loop hears is dispatched into the session's subscribers and
+/// queryables from `on_event`, and a C callback runs on that thread alone.
+///
+/// `bind` makes each join's link and runs when that join's session asks for it.
+/// Generic over the link, so a host whose group runs over something other than
+/// the UDP group link (a test's in-memory link) runs the same loop.
+///
+/// `on_open` hears the FIRST bring-up once, before anything else: `Ok` when the
+/// face came up and its loop is about to run, the bind's or the open's error when
+/// it did not. A host that must report the open of the session that holds the
+/// face (a C `z_open`) waits on it. A face that never came up returns `None`, no
+/// loop having run, so no departure was announced and a host must not report one;
+/// otherwise it returns the outcome of the loop that ended it.
+pub async fn serve_group_face<D, B, Fut, F, G, H, O>(
+    spec: GroupFaceSpec<'_>,
+    bind: B,
+    seams: GroupFaceSeams<F, G, H>,
+    producer: &MulticastTxProducer,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    on_open: O,
+) -> Option<MulticastOutcome>
+where
+    D: MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut(&[Vec<u8>]),
+    H: FnMut(&[String]),
+    O: FnOnce(Result<(), &std::io::Error>),
+{
+    use crate::runtime_impl::TokioTime;
+
+    // A group serves many members; the bound is the multicast dispatcher's fixed
+    // peer-table capacity.
+    const MCAST_MAX_PEERS: usize = 32;
+    let GroupFaceSpec {
+        label,
+        params,
+        tick_ms,
+        node_stats,
+        membership,
+    } = spec;
+    let GroupFaceSeams {
+        mut on_event,
+        mut on_members,
+        mut on_group_subs,
+    } = seams;
+    let clock = TokioTime::new();
+    let new_dispatcher =
+        || MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+    let mut rejoin = GroupRejoin::new();
+    let mut link = MulticastLink::new(bind);
+    let mut dispatcher = new_dispatcher();
+    let mut on_open = Some(on_open);
+    loop {
+        // R2376 — the FIRST open is the host's own bring-up and its failure is
+        // reported as it always was; every LATER one is a re-join, which
+        // `rejoin_group_session` has already opened, and this finds it open. A
+        // face that never came up is a deploy error the operator must see, while
+        // a face that came up and lost its link is the transient this loop rides
+        // out.
+        let driver = match open_multicast_session(&mut dispatcher, &mut link).await {
+            Ok(driver) => driver,
+            Err(e) => {
+                log::error!("{label}: group bind failed ({e}); face absent");
+                if let Some(on_open) = on_open.take() {
+                    on_open(Err(&e));
+                }
+                return None;
+            }
+        };
+        let recorder = GroupFaceRecorder::open(node_stats, driver, label);
+        // R2859 — this join's member view, labelled by the bound link as upstream
+        // labels a multicast transport's link. A link whose addresses cannot be
+        // read keeps no view, and says so, rather than listing members under a
+        // group it cannot name.
+        let membership_join = membership.and_then(|membership| match driver.group_locators() {
+            Ok((src, group)) => Some(membership.open(src, group)),
+            Err(e) => {
+                log::warn!("{label}: group link has no locators ({e}); its members are not listed");
+                None
+            }
+        });
+        if let Some(on_open) = on_open.take() {
+            on_open(Ok(()));
+        }
+        let outcome = drive_multicast_session_with_membership(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params,
+                tick_ms,
+                // production: no iteration budget — the loop runs until the host
+                // stops it (R2333) or the link is lost.
+                max_iters: None,
+            },
+            &mut link,
+            &clock,
+            &mut on_event,
+            producer,
+            &mut on_members,
+            &mut on_group_subs,
+            Some(&mut *shutdown),
+            recorder.recorder(),
+            membership_join.as_ref().map(|join| &join.membership),
+        )
+        .await;
+        // This join's transport ends with its loop, before any re-join opens the
+        // next one — and its members with it.
+        recorder.close();
+        drop(membership_join);
+        let Some(delay) = rejoin.wait_for(&outcome) else {
+            return Some(outcome);
+        };
+        log::warn!("{label}: group face lost ({outcome:?}); re-joining in {delay}ms");
+        let rejoined = rejoin_group_session(
+            &mut dispatcher,
+            &new_dispatcher,
+            &mut link,
+            &clock,
+            &mut rejoin,
+            shutdown,
+            delay,
+            |err, retry| log::warn!("{label}: group re-join failed ({err}); retrying in {retry}ms"),
+        )
+        .await;
+        if !rejoined {
+            // The host stopped the face while it was down. Report the loss that
+            // took it down, not a synthetic stop: nothing re-joined, so no
+            // departure was announced on the wire.
+            return Some(outcome);
+        }
+        log::info!("{label}: group face re-joined");
+    }
 }
 
 /// R2852 — one join's multicast transport in the node registry: opened when the
@@ -1653,21 +1760,13 @@ where
 /// cancelled mid-loop (its stop handle aborting it, or the runtime shutting
 /// down) still marks its transport disconnected. Otherwise the registry would
 /// report a group this node has left as open for the rest of its life.
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "transport-link-udp",
-    feature = "transport-stats"
-))]
+#[cfg(feature = "transport-stats")]
 struct GroupFaceRecorder {
     stats: Option<MulticastTransportStats>,
     registration: Option<(crate::node_stats::NodeStats, u64)>,
 }
 
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "transport-link-udp",
-    feature = "transport-stats"
-))]
+#[cfg(feature = "transport-stats")]
 impl GroupFaceRecorder {
     /// Open this join's transport in `node_stats`, labelled by `link`. A node
     /// without a registry records nothing; a link whose addresses cannot be
@@ -1675,7 +1774,7 @@ impl GroupFaceRecorder {
     /// label that names no link.
     fn open(
         node_stats: Option<&crate::node_stats::NodeStats>,
-        link: &crate::UdpDriver,
+        link: &impl MulticastLinkDriver,
         label: &'static str,
     ) -> Self {
         let Some(node_stats) = node_stats else {
@@ -1711,11 +1810,7 @@ impl GroupFaceRecorder {
     fn close(self) {}
 }
 
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "transport-link-udp",
-    feature = "transport-stats"
-))]
+#[cfg(feature = "transport-stats")]
 impl Drop for GroupFaceRecorder {
     fn drop(&mut self) {
         if let Some((node_stats, key)) = self.registration.take() {
@@ -1725,22 +1820,14 @@ impl Drop for GroupFaceRecorder {
 }
 
 /// R2852 — without `transport-stats` a face has no counters to register.
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "transport-link-udp",
-    not(feature = "transport-stats")
-))]
+#[cfg(not(feature = "transport-stats"))]
 struct GroupFaceRecorder;
 
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "transport-link-udp",
-    not(feature = "transport-stats")
-))]
+#[cfg(not(feature = "transport-stats"))]
 impl GroupFaceRecorder {
     fn open(
         _node_stats: Option<&crate::node_stats::NodeStats>,
-        _link: &crate::UdpDriver,
+        _link: &impl MulticastLinkDriver,
         _label: &'static str,
     ) -> Self {
         GroupFaceRecorder
@@ -2458,6 +2545,15 @@ mod tests {
 
         fn datagram_sender(&self) -> std::io::Result<SentLog> {
             Ok(self.log.clone())
+        }
+
+        /// A fake has no socket, so it names the loopback member and group the
+        /// Layer M witnesses use.
+        fn group_locators(&self) -> std::io::Result<(String, String)> {
+            Ok((
+                "udp/127.0.0.1:7449".to_string(),
+                "udp/224.0.0.224:7449".to_string(),
+            ))
         }
     }
 
