@@ -228,6 +228,35 @@ codec's `Response` is 1,104 B and is probably encoded inside it, which the
 disassembly has not been read for), `lend_declare` and `lend_push`, the other
 records still read as their eager forms, and the application layer's closure.
 
+That last list was a guess, and the call graph of the image of 2026-10-22 does
+not support it. The deepest chain of direct calls under the thread (the polled
+pump task included) is 6,808 B and goes through the handshake: `wz_app_main`
+1,456, the polled task 112, `dispatch_datagram_unit` 168, `dispatch_copied`
+2,408, the observer's `drain_query_replies` 408, `dispatch_network_message_at`
+2,104, and 150 B of leaves. `lend_declare` (2,064 B) is not on it, nor is any
+other lent record: a chain that runs through them is 5,336 B, so reading a
+Declare as its view would not move the peak, and was not done. The kit's own
+reading of the same image is 5,928 B, so the chain counts a path that no run
+takes in that order (a drain after a handshake that the receive path does not
+make) and is a figure to hold, not the peak. What would lower it is the size of
+the handshake's frame: `InboundFrame` is 720 B because its extension chains are
+held as arrays of entries, the form the request's view replaced; a handshake
+reads each chain once, so a view would take about 600 B out of `dispatch_copied`.
+That is a moderate change to the readers of `Init`, `Open` and `Close` for about
+a tenth of the stack, and is left until something needs the bytes.
+
+D5 is built for the stack. `scripts/lib/stack_frame_gate.py` reads the worst
+chain of direct calls from the image's disassembly, with the polled tasks as
+roots below the thread's entry and a panic's tail not counted, and holds it: it
+fails when the chain is over the declared stack, and when it is further than 128
+B from the committed figure (6,808 B for the fixed client), so a change that
+moves the stack is a recorded change. It is not a bound, and says so: a call
+through a register (twelve on this path) is not followed, and the closure a walk
+hands each record to is one. The image is now built by Layer Qzb (the board
+table's `zeth-sockets-client-fixed` row, with the devicetree overlay the table
+learned to carry), where before the row of the gate was read only by hand. The
+wire turnaround is not gated: it needs the board, and no hosted lane has one.
+
 Against zenoh-pico on the same board, bench and network buffers (2026-10-22, the
 two documents answered 2000 times each with no wrong answer by both). Stack is
 the sum of the application threads, because pico runs a read task of its own
