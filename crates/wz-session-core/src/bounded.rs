@@ -107,9 +107,11 @@ pub trait Storage {
 /// holds. Each policy spells them with its own container; the container above
 /// them is written once.
 pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
-    /// The empty sequence, as an associated constant so the container's `new`
-    /// can be a `const fn` on every policy.
-    const EMPTY: Self;
+    /// The empty sequence. A function and not an associated constant: a constant
+    /// of a type with an inline buffer is materialised, so every use of it
+    /// writes the whole buffer (measured: a 260-byte clear in the keyexpr
+    /// canonizer), where a call is inlined to a length of zero and nothing else.
+    fn empty() -> Self;
 
     /// The elements, in order.
     fn as_slice(&self) -> &[T];
@@ -151,8 +153,8 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
 /// The operations a [`BoundedString`] needs of the text a [`Storage`] policy
 /// holds.
 pub trait TextBacking: Sized + Clone {
-    /// The empty text, as an associated constant (see [`SeqBacking::EMPTY`]).
-    const EMPTY: Self;
+    /// The empty text. A function for the reason [`SeqBacking::empty`] is.
+    fn empty() -> Self;
 
     /// The contents.
     fn as_str(&self) -> &str;
@@ -200,7 +202,10 @@ pub type Profile = Static;
 
 #[cfg(feature = "alloc")]
 impl<T> SeqBacking<T> for Vec<T> {
-    const EMPTY: Self = Vec::new();
+    #[inline(always)]
+    fn empty() -> Self {
+        Vec::new()
+    }
 
     fn as_slice(&self) -> &[T] {
         Vec::as_slice(self)
@@ -253,7 +258,10 @@ impl<T> SeqBacking<T> for Vec<T> {
 }
 
 impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
-    const EMPTY: Self = heapless::Vec::new();
+    #[inline(always)]
+    fn empty() -> Self {
+        heapless::Vec::new()
+    }
 
     fn as_slice(&self) -> &[T] {
         heapless::Vec::as_slice(self)
@@ -310,7 +318,10 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
 
 #[cfg(feature = "alloc")]
 impl TextBacking for String {
-    const EMPTY: Self = String::new();
+    #[inline(always)]
+    fn empty() -> Self {
+        String::new()
+    }
 
     fn as_str(&self) -> &str {
         String::as_str(self)
@@ -332,7 +343,10 @@ impl TextBacking for String {
 }
 
 impl<const N: usize> TextBacking for heapless::String<N> {
-    const EMPTY: Self = heapless::String::new();
+    #[inline(always)]
+    fn empty() -> Self {
+        heapless::String::new()
+    }
 
     fn as_str(&self) -> &str {
         heapless::String::as_str(self)
@@ -357,15 +371,44 @@ pub struct BoundedVec<T, const N: usize, P: Storage = Profile> {
     inner: P::Seq<T, N>,
 }
 
-impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
-    /// Construct an empty backing store. `const` on both policies so a
-    /// registry may hold a `BoundedVec` in a `const`/`static` slot.
-    pub const fn new() -> Self {
+// The `const` constructors are written per concrete policy, because a `const fn`
+// cannot call a trait function and a trait constant would be materialised at every
+// use (see [`SeqBacking::empty`]). Generic code constructs through `Default`.
+impl<T, const N: usize> BoundedVec<T, N, Static> {
+    /// An empty table of the static policy. `const`, so a registry may hold it in
+    /// a `const`/`static` slot.
+    pub const fn new_static() -> Self {
         Self {
-            inner: <P::Seq<T, N> as SeqBacking<T>>::EMPTY,
+            inner: heapless::Vec::new(),
         }
     }
+}
 
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> BoundedVec<T, N, Heap> {
+    /// An empty table of the heap policy. `const`, as [`Self::new_static`] is.
+    pub const fn new_heap() -> Self {
+        Self { inner: Vec::new() }
+    }
+}
+
+impl<T, const N: usize> BoundedVec<T, N, Profile> {
+    /// An empty table of this build's profile. `const` on both policies so a
+    /// registry may hold a `BoundedVec` in a `const`/`static` slot. Defined for
+    /// the profile alone, so `BoundedVec::new()` names its policy by itself.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub const fn new() -> Self {
+        Self::new_heap()
+    }
+
+    /// An empty table of this build's profile. See the heap form.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub const fn new() -> Self {
+        Self::new_static()
+    }
+}
+
+impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
     /// The declared logical capacity `N`. Advisory on [`Heap`] (AP may exceed
     /// it); the hard limit `push` enforces on [`Static`].
     pub const fn capacity(&self) -> usize {
@@ -433,8 +476,8 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
     where
         F: FnMut(&mut T) -> bool,
     {
-        let mut extracted: Self = Self::new();
-        let mut keep: Self = Self::new();
+        let mut extracted: Self = Self::default();
+        let mut keep: Self = Self::default();
         for mut entry in core::mem::take(self) {
             if extract(&mut entry) {
                 extracted
@@ -517,8 +560,11 @@ impl<const N: usize> BoundedVec<u8, N, Heap> {
 }
 
 impl<T, const N: usize, P: Storage> Default for BoundedVec<T, N, P> {
+    #[inline(always)]
     fn default() -> Self {
-        Self::new()
+        Self {
+            inner: <P::Seq<T, N> as SeqBacking<T>>::empty(),
+        }
     }
 }
 
@@ -573,14 +619,40 @@ pub struct BoundedString<const N: usize, P: Storage = Profile> {
     inner: P::Text<N>,
 }
 
-impl<const N: usize, P: Storage> BoundedString<N, P> {
-    /// Construct an empty string. `const` on both policies.
-    pub const fn new() -> Self {
+impl<const N: usize> BoundedString<N, Static> {
+    /// An empty string of the static policy. `const`; see [`BoundedVec::new_static`].
+    pub const fn new_static() -> Self {
         Self {
-            inner: <P::Text<N> as TextBacking>::EMPTY,
+            inner: heapless::String::new(),
         }
     }
+}
 
+#[cfg(feature = "alloc")]
+impl<const N: usize> BoundedString<N, Heap> {
+    /// An empty string of the heap policy. `const`, as [`Self::new_static`] is.
+    pub const fn new_heap() -> Self {
+        Self {
+            inner: String::new(),
+        }
+    }
+}
+
+impl<const N: usize> BoundedString<N, Profile> {
+    /// An empty string of this build's profile. `const` on both policies.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub const fn new() -> Self {
+        Self::new_heap()
+    }
+
+    /// An empty string of this build's profile. See the heap form.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub const fn new() -> Self {
+        Self::new_static()
+    }
+}
+
+impl<const N: usize, P: Storage> BoundedString<N, P> {
     /// The declared logical byte capacity `N`. Advisory on [`Heap`]; the hard
     /// byte limit `push_str` / `push` enforce on [`Static`].
     pub const fn capacity(&self) -> usize {
@@ -613,8 +685,11 @@ impl<const N: usize, P: Storage> BoundedString<N, P> {
 }
 
 impl<const N: usize, P: Storage> Default for BoundedString<N, P> {
+    #[inline(always)]
     fn default() -> Self {
-        Self::new()
+        Self {
+            inner: <P::Text<N> as TextBacking>::empty(),
+        }
     }
 }
 
@@ -786,7 +861,7 @@ mod tests {
     /// Fill to `N`, then one more: refused with the value handed back on a policy
     /// that enforces `N`, accepted on one that does not.
     fn fill_to_n_then_one_more<P: Storage>() {
-        let mut v: BoundedVec<u32, 3, P> = BoundedVec::new();
+        let mut v: BoundedVec<u32, 3, P> = BoundedVec::default();
         for i in 0..3 {
             assert!(v.push(i).is_ok(), "entry {i} is within the capacity");
         }
@@ -806,7 +881,7 @@ mod tests {
     /// `free_slots` is what a whole-group stager reserves against, so it has to
     /// agree with `push` on each policy: exactly the pushes that succeed.
     fn free_slots_counts_the_pushes_that_still_succeed<P: Storage>() {
-        let mut v: BoundedVec<u32, 2, P> = BoundedVec::new();
+        let mut v: BoundedVec<u32, 2, P> = BoundedVec::default();
         v.push(1).unwrap();
         if P::ENFORCES_CAPACITY {
             assert_eq!(v.free_slots(), 1);
@@ -825,7 +900,7 @@ mod tests {
     /// every policy: only the refusal differs, and the partition never reaches it
     /// (retained + extracted == taken <= N).
     fn removal_and_partition_keep_order<P: Storage>() {
-        let mut v: BoundedVec<u32, 6, P> = BoundedVec::new();
+        let mut v: BoundedVec<u32, 6, P> = BoundedVec::default();
         for i in 0..6 {
             v.push(i).unwrap();
         }
@@ -845,7 +920,7 @@ mod tests {
     /// The byte filler: grow, fill in place, give back what was not used. The
     /// refusal at `N` is the policy's, and a refusal leaves the bytes as they were.
     fn byte_filler_grows_fills_and_truncates<P: Storage>() {
-        let mut v: BoundedVec<u8, 8, P> = BoundedVec::new();
+        let mut v: BoundedVec<u8, 8, P> = BoundedVec::default();
         let window = v.grow_for_fill(5).unwrap();
         window.copy_from_slice(b"abcde");
         v.truncate(3);
@@ -873,7 +948,7 @@ mod tests {
     /// and `Display`/equality read the same on every policy.
     fn text_append_is_atomic_where_the_capacity_is_hard<P: Storage>() {
         use core::fmt::Write;
-        let mut s: BoundedString<4, P> = BoundedString::new();
+        let mut s: BoundedString<4, P> = BoundedString::default();
         assert!(s.push_str("abcd").is_ok());
 
         let more = s.push_str("e");
@@ -890,12 +965,28 @@ mod tests {
         assert_eq!(s.clone().as_str(), s.as_str());
     }
 
-    /// A table built in a `const` is usable as a `static` on every policy: the
-    /// reason `EMPTY` is an associated constant.
-    fn new_is_const_on_every_policy<P: Storage>() {
-        let v: BoundedVec<u32, 2, P> = const { BoundedVec::new() };
-        let s: BoundedString<2, P> = const { BoundedString::new() };
+    /// A table of a policy builds from `Default` and is empty, on every policy.
+    fn default_is_empty<P: Storage>() {
+        let v: BoundedVec<u32, 2, P> = BoundedVec::default();
+        let s: BoundedString<2, P> = BoundedString::default();
         assert!(v.is_empty() && s.is_empty());
+    }
+
+    /// The `const` constructors are usable in a `static` initialiser: a registry
+    /// held in a session slot is a `static`. Each policy has its own, because a
+    /// `const fn` cannot call a trait function.
+    #[test]
+    fn the_const_constructors_make_statics() {
+        static FIXED: BoundedVec<u32, 2, Static> = BoundedVec::new_static();
+        static FIXED_TEXT: BoundedString<2, Static> = BoundedString::new_static();
+        const PROFILE: BoundedVec<u32, 2> = BoundedVec::new();
+        assert!(FIXED.is_empty() && FIXED_TEXT.is_empty() && PROFILE.is_empty());
+        #[cfg(feature = "alloc")]
+        {
+            static GROWN: BoundedVec<u32, 2, Heap> = BoundedVec::new_heap();
+            static GROWN_TEXT: BoundedString<2, Heap> = BoundedString::new_heap();
+            assert!(GROWN.is_empty() && GROWN_TEXT.is_empty());
+        }
     }
 
     macro_rules! on_every_policy {
@@ -918,7 +1009,7 @@ mod tests {
         removal_and_partition_keep_order,
         byte_filler_grows_fills_and_truncates,
         text_append_is_atomic_where_the_capacity_is_hard,
-        new_is_const_on_every_policy,
+        default_is_empty,
     );
 
     /// Both policies in ONE build, side by side: what the feature selector could
@@ -926,8 +1017,8 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn both_policies_coexist_in_one_build() {
-        let mut fixed: BoundedVec<u32, 1, Static> = BoundedVec::new();
-        let mut grown: BoundedVec<u32, 1, Heap> = BoundedVec::new();
+        let mut fixed: BoundedVec<u32, 1, Static> = BoundedVec::new_static();
+        let mut grown: BoundedVec<u32, 1, Heap> = BoundedVec::new_heap();
         for i in 0..2 {
             let _ = fixed.push(i);
             let _ = grown.push(i);
@@ -936,8 +1027,8 @@ mod tests {
         assert_eq!(grown.as_ref(), &[0, 1]);
 
         // Content equality does not depend on the policy.
-        let mut a: BoundedString<8, Static> = BoundedString::new();
-        let mut b: BoundedString<8, Heap> = BoundedString::new();
+        let mut a: BoundedString<8, Static> = BoundedString::new_static();
+        let mut b: BoundedString<8, Heap> = BoundedString::new_heap();
         a.push_str("k/v").unwrap();
         b.push_str("k/v").unwrap();
         assert!(a == b);
