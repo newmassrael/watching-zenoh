@@ -180,6 +180,20 @@ pub enum MulticastTxItem {
         /// Boxed (R311mb) to bound the enum size.
         declare: Box<wz_codecs::declare::DeclareOwned>,
     },
+    /// Open-debt item 913 — a declaration the session ANNOUNCES on the group, answering no
+    /// interest: zenoh announces a session's subscriber on each group it holds
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
+    /// Framed, sent and counted as a
+    /// `MulticastTxItem::DeclareReply` is (`declare_frame_meta`); the two
+    /// differ in what produced them, an interest or the session.
+    // A group session sends through its producer only under `codec-push`, so the variant is
+    // built where both are.
+    #[cfg(all(feature = "alloc", feature = "codec-declare", feature = "codec-push"))]
+    Declare {
+        /// The built `Declare`, boxed to bound the enum size.
+        declare: Box<wz_codecs::declare::DeclareOwned>,
+    },
 }
 
 /// The wire datagrams one [`MulticastTxItem`] becomes, plus the channel
@@ -409,6 +423,8 @@ fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
         MulticastTxItem::ResponseFinal { .. } => true,
         #[cfg(feature = "liveliness-token")]
         MulticastTxItem::DeclareReply { .. } => true,
+        #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
+        MulticastTxItem::Declare { .. } => true,
     }
 }
 
@@ -534,6 +550,16 @@ where
             conf,
             queue,
         ),
+        #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
+        MulticastTxItem::Declare { declare } => push_frame(
+            meta,
+            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            crate::frame_encode::declare_body(&declare),
+            tx_sn,
+            params,
+            conf,
+            queue,
+        ),
     }
 }
 
@@ -644,15 +670,28 @@ fn frame_meta(
         // The declare reply is DEFAULT-band: no frame ext_qos, no per-priority
         // conduit.
         #[cfg(feature = "liveliness-token")]
-        MulticastTxItem::DeclareReply { declare } => FrameMeta {
-            priority: Priority::DEFAULT,
-            ext_qos: None,
-            reliable: true,
-            droppable: is_droppable(
-                true,
-                crate::declare_ext_qos::read_declare_qos(declare).congestion(),
-            ),
-        },
+        MulticastTxItem::DeclareReply { declare } => declare_frame_meta(declare),
+        #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
+        MulticastTxItem::Declare { declare } => declare_frame_meta(declare),
+    }
+}
+
+/// How a `Declare` the group carries is framed: DEFAULT-band, no frame `ext_qos`, reliable, and
+/// droppable as its own `ext_qos` says.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-declare",
+    any(feature = "codec-push", feature = "liveliness-token")
+))]
+fn declare_frame_meta(declare: &wz_codecs::declare::DeclareOwned) -> FrameMeta {
+    FrameMeta {
+        priority: Priority::DEFAULT,
+        ext_qos: None,
+        reliable: true,
+        droppable: is_droppable(
+            true,
+            crate::declare_ext_qos::read_declare_qos(declare).congestion(),
+        ),
     }
 }
 
@@ -955,6 +994,12 @@ pub fn multicast_tx_stats_class(
         ),
         #[cfg(feature = "liveliness-token")]
         MulticastTxItem::DeclareReply { declare } => (
+            crate::declare_ext_qos::read_declare_qos(declare).priority(),
+            NetworkStatsClass::control(MessageLabel::Declare),
+        ),
+        // Counted as the interest's reply above is: at its own band, as a control message.
+        #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
+        MulticastTxItem::Declare { declare } => (
             crate::declare_ext_qos::read_declare_qos(declare).priority(),
             NetworkStatsClass::control(MessageLabel::Declare),
         ),

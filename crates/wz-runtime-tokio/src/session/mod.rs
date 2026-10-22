@@ -2692,6 +2692,27 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         self.transport.link.set(subject).is_ok()
     }
 
+    /// Open-debt item 913 — announce a subscription on `keyexpr` to the group, as zenoh announces
+    /// a session's subscriber on each group it holds: a `DeclSubscriber` with id 0 and the
+    /// literal key, answering no interest (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`;
+    /// MEASURED off the group's wire: `decl_subscriber(0, demo/mc/**)` for a libzenohc `z_sub`
+    /// on `demo/mc/**`). It routes nothing here: the group's data reaches every member whatever
+    /// it declared. `Err` for a key past the codec's bound.
+    #[cfg(all(feature = "codec-push", feature = "declare-subscriber"))]
+    pub fn announce_subscriber(
+        &self,
+        keyexpr: &str,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        let declare = wz_session_core::declare_build::build_declare_subscriber(0, 0, Some(keyexpr))
+            .map_err(wz_session_core::send_wire_error::SendWireError::Codec)?;
+        self.send_network_message(
+            wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+            true,
+            false,
+        )
+    }
+
     /// Tell this session the membership the drive loop keeps for its group, the one handed to
     /// [`drive_multicast_session_with_membership`](crate::multicast_glue::drive_multicast_session_with_membership):
     /// a [`Self::query`] that may go remote waits for one final per member it holds when the query

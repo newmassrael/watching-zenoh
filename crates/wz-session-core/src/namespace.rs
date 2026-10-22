@@ -380,6 +380,10 @@ pub fn apply_egress_multicast_item(
         Item::ResponseFinal { .. } => {}
         #[cfg(feature = "liveliness-token")]
         Item::DeclareReply { declare } => apply_egress_declare(ns, declare)?,
+        // A declaration the session announces on the group (open-debt item 913): local-origin,
+        // prefixed as the reply above is.
+        #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
+        Item::Declare { declare } => apply_egress_declare(ns, declare)?,
     }
     Ok(())
 }

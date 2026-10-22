@@ -595,8 +595,9 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
         {
             use wz_session_core::network_message::NetworkMessage;
             match msg {
-                // A multicast Session originates Push and (under `codec-request`)
-                // Request; any other variant is an honest transport-variant mismatch (the reply-plane
+                // A multicast Session originates Push, (under `codec-request`) Request and
+                // (under `codec-declare`) the Declare it announces; any other variant is an
+                // honest transport-variant mismatch (the reply-plane
                 // variants Response / ResponseFinal / Oam are emitted by the
                 // drive-loop MulticastReplySink, never routed here).
                 NetworkMessage::Push(push) => {
@@ -628,6 +629,13 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                 #[cfg(feature = "codec-request")]
                 NetworkMessage::Request(request) => {
                     let _ = payload.tx.push(MulticastTxItem::Request { request });
+                    Ok(())
+                }
+                // Open-debt item 913 — a declaration the session announces on the group (a
+                // subscriber, as zenoh announces one on each group it holds).
+                #[cfg(feature = "codec-declare")]
+                NetworkMessage::Declare(declare) => {
+                    let _ = payload.tx.push(MulticastTxItem::Declare { declare });
                     Ok(())
                 }
                 _ => {
