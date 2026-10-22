@@ -279,6 +279,82 @@ that answers queries; the kernel configurations differ beyond the network
 buffers. So the table is a measurement of two builds, not of the two libraries'
 cost for one feature set. No ordering is claimed from it.
 
+## 5.1 The same node as a Linux process (2026-10-23)
+
+The question the host asks of D1 and D2 is whether the node of the kit runs
+unchanged where there is no Zephyr, with no allocator and one thread. It does,
+and what that took is small, which is the evidence that the seams are in the
+right place.
+
+- **The UDP link is written once** (`wz_runtime_coop::udp_link`): the driver, its
+  outbound storage and the slot profile's stack, over a `DatagramSocket` that a
+  platform supplies (bind, send, wait, take a datagram). `wz-runtime-zephyr`
+  keeps `ZephyrUdpSocket` and every name it had as an alias; it was 420 lines of
+  the link, witnessed only on the target, and now has host tests (eight on the
+  heap forms, nine on the slot forms, fifteen with the idle wait).
+- **`wz-runtime-posix`** supplies the host's seams over libc: a monotonic clock,
+  `getrandom`, the date, a UDP socket, the console and the image glue (a
+  `critical_section` that takes no lock, because one thread runs the program).
+  Linux only. It is the Zephyr profile's shape.
+- **`deploy/host-slot-node`** is the node of `fixed_client.rs` with those seams
+  under it: `#![no_std]`, `#![no_main]`, no `#[global_allocator]`. The link is the
+  proof, as for the kit's image: a program that allocates anywhere does not
+  link. It imports 24 symbols from libc and none is an allocator.
+
+Measured on a build host (pc3), loopback, a zenoh-c client asking a router
+for a 1 KiB document that the responder under test answers; the responder is the
+only thing that changes, the order is shuffled every repetition and each
+responder gets a fresh router. The node and zenoh-pico are both UDP clients of
+the router with one thread; wz is built `-Os` and pico with its own Release build.
+
+| | wz node | wz node, `batching` | pico, one thread | pico, two threads |
+|---|---|---|---|---|
+| GET median, 21 runs | 74.9 to 77.0 us | 72.7 to 73.0 us | 74.8 to 76.3 us | 74.8 to 76.4 us |
+| CPU time a query, lowest of 15 runs | 7.8 us | 5.8 us | 7.2 us | 7.4 us |
+| system calls a query | 3 | 2 | 3 | |
+| idle context switches a second | 2 | 2 | 10 | 11 |
+| resident memory | 1,344 kB | 1,356 kB | 1,988 kB | 2,208 kB |
+
+The CPU time is the responder's own, read from `/proc` over 50,000 answered
+queries, and the lowest of the runs is the figure because the host is shared and
+disturbance only adds (medians: 8.0, 6.0, 7.4 and 7.6 us). The `batching` node
+spends 19 percent less than pico on a query and 25 percent less than the plain
+node; pico's queryable does not open a batching window, and pico has the
+feature, so this compares what each sends by default, not what each could.
+
+The latency ranges are the lowest and highest medians of three separate comparisons of
+21 runs each, which differ by a few microseconds with the host's load (it is a
+shared build host). In the two comparisons that had both wz columns, the
+`batching` node was below the plain one and 2 to 3 microseconds below pico; the
+runs overlap in their extremes, so this is a small effect and not a margin.
+
+Three things this shows and one it does not:
+
+- **A query is answered with two messages, and a datagram each.** The reply and
+  the `Final` that ends it were two `sendto` calls in wz and in pico alike.
+  `ResponseSink::begin_burst` and `end_burst`, called round the drains in
+  `flush_pending`, open a batching window when nobody has one open, so the two
+  leave as one frame (one `sendto`, one wake of the router). It is the
+  `transport-batching` feature and off unless the image selects it
+  (`host-slot-node --features batching`); a window the application opened is
+  never closed by it.
+- **An idle node woke 499 times a second**, because the loop waited at most one
+  tick on the socket to look at its timers. `SessionDatagramLink::service_within`
+  gives the link the time until anything is due (the handshake, lease and
+  keep-alive deadlines and the runtime's next timer); a link whose image says it
+  is the loop's only wait (`UdpStack::with_idle_wait_ms`) sleeps until then,
+  arming its receive timeout at the largest power of two not above the deadline,
+  so no deadline is late and a deadline an hour away costs one wake a second.
+  The node held a session for 40 s with nothing to send at a 10 s lease. An image
+  that does not ask runs the code it ran, and compiles the deadline arithmetic out.
+- **A node and a stack that is not Zephyr's changed no kit image materially**:
+  the fixed client's image is 173,436 B (173,468 B before this change) and its
+  worst stack chain 6,816 B (6,808 B), inside the gate's tolerance.
+- It does not show the cost of a GET the node *sends*. The kit's client answers
+  queries and asks none; a heap-free requester on the slot profile does not
+  exist, so nothing here says how the host profile compares with `z_get` of the
+  tokio C ABI (86 against pico's 78 microseconds in the earlier comparison).
+
 ## 6. Open
 
 - The Zephyr kernel keeps a heap of its own (network buffers, POSIX objects).
