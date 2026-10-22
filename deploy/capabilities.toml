@@ -253,3 +253,17 @@ kconfig = "WZ_CAP_E2E_SENDER"
 abis = ["core", "c"]
 implies = []
 help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it."
+
+[[capability]]
+id = "transport_compression"
+kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
+abis = ["core", "c"]
+implies = []
+help = "The batch compression extension: a session offers it and accepts a compressed batch."
+
+[[capability]]
+id = "auth_usrpwd"
+kconfig = "WZ_CAP_AUTH_USRPWD"
+abis = ["core", "c"]
+implies = []
+help = "The user/password handshake method, and the credential check of a listener that names a dictionary file."

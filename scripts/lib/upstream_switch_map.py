@@ -200,9 +200,10 @@ ZENOH_C_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
     ("unstable", "maps", "wz-capi-c/zenoh-c-no-unstable-api",
      "in the inverse sense: the unstable surface is built unless this feature removes it, "
      "where upstream's default is without it"),
-    ("auth_usrpwd", "always", "crates/wz-capi-c/Cargo.toml",
-     "the user/password handshake extension"),
-    ("transport_compression", "always", "crates/wz-capi-c/Cargo.toml",
+    ("auth_usrpwd", "maps", "wz-capi-c/auth_usrpwd",
+     "the user/password handshake extension, and the credential check of a listener that "
+     "names a dictionary file"),
+    ("transport_compression", "maps", "wz-capi-c/transport_compression",
      "the batch compression codec, through session-extcompression"),
     ("transport_tcp", "always", "crates/wz-capi-core/Cargo.toml", "the tcp/ link"),
     ("transport_udp", "maps", "wz-capi-c/link-udp", "the udp/ link"),

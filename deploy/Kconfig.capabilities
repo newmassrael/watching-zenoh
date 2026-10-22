@@ -208,4 +208,18 @@ config WZ_CAP_E2E_SENDER
 	  The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it.
 	  Exported by: c.
 
+config WZ_CAP_TRANSPORT_COMPRESSION
+	bool "transport_compression"
+	default y
+	help
+	  The batch compression extension: a session offers it and accepts a compressed batch.
+	  Exported by: c.
+
+config WZ_CAP_AUTH_USRPWD
+	bool "auth_usrpwd"
+	default y
+	help
+	  The user/password handshake method, and the credential check of a listener that names a dictionary file.
+	  Exported by: c.
+
 endmenu

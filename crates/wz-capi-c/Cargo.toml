@@ -211,6 +211,8 @@ default = [
     "transport_multilink",
     "auth_pubkey",
     "e2e-sender",
+    "transport_compression",
+    "auth_usrpwd",
 ]
 # The roles beyond the client: a listener, a router or a peer, and the gossip that introduces
 # the nodes of a mesh. A build without them opens a client session to the endpoints it dials.
@@ -355,6 +357,12 @@ zenoh-c-shared-memory = ["wz-runtime-tokio/session-extshm", "wz-capi-core/sessio
 # that only queries leaves it out, and with it the frame writer of `wz-capture` (212 KB of that
 # build's 1.9 MB of symbols).
 e2e-sender = ["dep:wz-capture", "wz-capi-core/e2e-sender"]
+# The batch compression session extension. Off, a session neither offers nor accepts it, as a
+# zenoh-c built without `transport_compression` does.
+transport_compression = ["wz-capi-core/transport_compression"]
+# The user/password handshake method and the credential check of a listener that names a
+# dictionary file. Off, neither is built, as in a zenoh-c built without `auth_usrpwd`.
+auth_usrpwd = ["wz-capi-core/auth_usrpwd"]
 
 [dependencies]
 # The ABI-neutral session model, shared with wz-capi-pico.
@@ -366,7 +374,7 @@ e2e-sender = ["dep:wz-capture", "wz-capi-core/e2e-sender"]
 # `access-extauth-usrpwd` and `interceptors`: the credentials and the traffic policy (`access_control`,
 # `low_pass_filter`, `downsampling`) a zenoh-c node's config states are enforced, not accepted and
 # dropped.
-wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "access-extauth-usrpwd", "interceptors"] }
+wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "interceptors"] }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and
@@ -418,11 +426,9 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     # opener reads off every endpoint it dials.
     "session-extqos",
     "transport-lowlatency",
-    "session-extcompression",
-    # A node that states `transport/auth/usrpwd/dictionary_file` demands credentials of the
-    # peers it accepts; upstream compiles the method into every build, and a config key that
-    # names a security mechanism is not one a build may leave out and ignore.
-    "access-extauth-usrpwd",
+    # Compression and the user/password method are not named here: each is a capability of this
+    # crate (`transport_compression`, `auth_usrpwd`), on by default as upstream compiles them
+    # into its default build, and reaches the runtime through the core's feature of that name.
 ] }
 # The frame writer behind `e2e_sender`, the sending side of an end-to-end
 # protected message. `default-features = false` and nothing named, for the rule

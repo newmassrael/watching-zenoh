@@ -272,7 +272,9 @@ pub unsafe extern "C" fn z_open(
 ///   * `transport/auth/usrpwd/dictionary_file` makes the node a responder over that dictionary;
 ///     a file that cannot be read, or that holds no user, fails the open.
 ///   * `transport/auth/usrpwd/user` and `password` make the node an initiator that presents
-///     them when it dials; one stated without the other fails the open.
+///     them when it dials; one stated without the other fails the open. A build without
+///     `auth_usrpwd` cannot hold either, so there a config that states any of the three keys
+///     fails the open.
 ///   * `transport/auth/pubkey/*` names the node's RSA identity, presented to the peers it dials
 ///     and asked of the peers it accepts (`NodeAuth::with_pubkey_config`); an identity that
 ///     cannot be loaded fails the open. A build without `auth_pubkey` cannot hold one, so there
@@ -290,12 +292,22 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
     {
         return Err(());
     }
+    #[cfg(not(feature = "auth_usrpwd"))]
+    if node.usrpwd_dictionary_file.is_some()
+        || node.usrpwd_user.is_some()
+        || node.usrpwd_password.is_some()
+    {
+        return Err(());
+    }
+    #[cfg(feature = "auth_usrpwd")]
     let auth = NodeAuth::from_usrpwd_config(
         node.usrpwd_dictionary_file.as_deref(),
         node.usrpwd_user.as_deref(),
         node.usrpwd_password.as_ref(),
     )
     .map_err(|_| ())?;
+    #[cfg(not(feature = "auth_usrpwd"))]
+    let auth: Option<NodeAuth> = None;
     #[cfg(feature = "auth_pubkey")]
     let auth = NodeAuth::with_pubkey_config(auth, node.pubkey_pem_config()).map_err(|_| ())?;
     let policy = NodePolicy::from_node_config(node).map_err(|_| ())?;

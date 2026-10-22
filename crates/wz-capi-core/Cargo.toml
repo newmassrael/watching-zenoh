@@ -76,6 +76,8 @@ default = [
     "transport_multilink",
     "auth_pubkey",
     "e2e-sender",
+    "transport_compression",
+    "auth_usrpwd",
 ]
 # The roles beyond the CLIENT: a session that listens, that accepts the sessions of others, that
 # is a peer or a router, and what those roles bring with them: the accept loop, the listener's
@@ -177,6 +179,12 @@ auth_pubkey = ["access-extauth-pubkey"]
 # and the frame writer they use are the zenoh-c ABI's own (`wz-capi-c/e2e-sender`), so this
 # feature only carries the capability's name, as the declaration requires of every capability.
 e2e-sender = []
+# The batch compression a session offers and accepts, and the capability that names it in the
+# declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
+transport_compression = ["wz-runtime-tokio/session-extcompression"]
+# The user/password authentication, under zenoh-c's own feature name. `access-extauth-usrpwd`
+# below is the mechanism; this is the capability that names it in the declaration.
+auth_usrpwd = ["access-extauth-usrpwd"]
 # The usrpwd authentication a node's config asks for: a listener that names a
 # `transport/auth/usrpwd/dictionary_file` admits only the peers that hold a user of it
 # (`NodeAuth`). Off by default for the reason the TLS feature is: the pico ABI has no such
