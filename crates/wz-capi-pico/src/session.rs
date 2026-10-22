@@ -408,7 +408,9 @@ pub unsafe extern "C" fn z_open(
                     endpoint,
                     profile: PICO_GROUP,
                     is_shm: false,
-                    declarations: wz_capi_core::drive::GroupDeclarations::None,
+                    // pico declares its entities over whatever transport it holds, a group too
+                    // (MEASURED off the group's wire: `decl_subscriber(1, ..)`).
+                    declarations: wz_capi_core::drive::GroupDeclarations::Entities,
                 }],
             ),
             listen => (listen, connect, Vec::new()),

@@ -3795,14 +3795,19 @@ pub struct GroupJoin {
 /// calling ABI's upstream does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupDeclarations {
-    /// Nothing: zenoh-pico declares nothing on a multicast transport unless its
-    /// `Z_FEATURE_MULTICAST_DECLARATIONS` is on, which it is not by default
-    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
+    /// Nothing: zenoh's session on Windows, where its announcement is compiled out, and what a
+    /// face replays to a group of the entities the session held before the group came up,
+    /// which neither upstream announces there.
     None,
-    /// Each subscriber, announced when it is declared and when the group comes up, as zenoh
+    /// Each subscriber declared while the group is up, with id 0, and never retracted, as zenoh
     /// announces a session's subscriber on each group it holds (its queryables and tokens it
     /// does not announce there).
     Subscribers,
+    /// Each subscriber, queryable and liveliness token declared while the group is up, with its
+    /// own entity id and literal key, and retracted with both when it is undeclared, as
+    /// zenoh-pico declares a session's entities over whatever transport it holds at its
+    /// default (`vendor/zenoh-pico/src/net/primitives.c` @ `z_result_t _z_send_declare(`).
+    Entities,
 }
 
 /// What a session's JOIN beacon advertises on a group, beside its identity and its role:

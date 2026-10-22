@@ -63,12 +63,14 @@ use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
 use wz_runtime_tokio::session_glue::LinkKind;
 
+use super::TokenId;
 #[cfg(feature = "queryable")]
 use super::{queryable_options, QblEntry, QblId};
 use super::{
     FaceEventKind, FaceSnapshot, GroupLink, Inner, LinkSnapshot, SharedSession, SubEntry, SubId,
 };
 use crate::drive::GroupDeclarations;
+use wz_runtime_tokio::session::GroupDeclaration;
 
 /// One member of a group as the transport both upstreams report it as: its zid and role,
 /// shared memory as the calling ABI says (`is_shm`), and one link from this node's locator on
@@ -184,9 +186,62 @@ impl Inner {
     }
 }
 
-/// Declare the C subscription `entry` on a group's session, and announce it on the group when
-/// the ABI's upstream does ([`GroupDeclarations::Subscribers`]). A subscription that takes its
-/// own session's samples alone is not announced: it is not declared to the network at all.
+/// The id a group is told an entity by under `declarations`, or `None` when the group is told
+/// nothing of `what`: zenoh announces its subscribers alone, each as id 0, and zenoh-pico every
+/// subscriber, queryable and token by its entity id. An entity that takes its own session's
+/// traffic alone is told to no group: neither upstream declares it to the network.
+fn announced_id(
+    declarations: GroupDeclarations,
+    what: GroupDeclaration,
+    id: u64,
+    allowed_origin: wz_runtime_tokio::locality::Locality,
+) -> Option<u64> {
+    if allowed_origin == wz_runtime_tokio::locality::Locality::SessionLocal {
+        return None;
+    }
+    match (declarations, what) {
+        (GroupDeclarations::Subscribers, GroupDeclaration::Subscriber) => Some(0),
+        (GroupDeclarations::Entities, _) => Some(id),
+        _ => None,
+    }
+}
+
+/// Tell the group `session` reaches of the entity `what` (`id`, `keyexpr`) as `declarations`
+/// says. Best effort, as the group's put is: a key past the codec's bound is announced nowhere,
+/// and the entity still serves the group.
+fn announce_on(
+    session: &TokioMulticastSession,
+    declarations: GroupDeclarations,
+    what: GroupDeclaration,
+    id: u64,
+    keyexpr: &str,
+    allowed_origin: wz_runtime_tokio::locality::Locality,
+) {
+    if let Some(announced) = announced_id(declarations, what, id, allowed_origin) {
+        let _ = session.announce(what, announced, keyexpr);
+    }
+}
+
+/// Retract from the group the entity [`announce_on`] told it of. zenoh retracts nothing on a
+/// group: its announcement is a subscriber the group keeps.
+fn retract_on(
+    session: &TokioMulticastSession,
+    declarations: GroupDeclarations,
+    what: GroupDeclaration,
+    id: u64,
+    keyexpr: &str,
+    allowed_origin: wz_runtime_tokio::locality::Locality,
+) {
+    if declarations != GroupDeclarations::Entities {
+        return;
+    }
+    if let Some(announced) = announced_id(declarations, what, id, allowed_origin) {
+        let _ = session.retract(what, announced, keyexpr);
+    }
+}
+
+/// Declare the C subscription `entry` on a group's session, and tell the group of it as
+/// `declarations` says.
 fn subscribe_on(
     session: &TokioMulticastSession,
     entry: &SubEntry,
@@ -197,21 +252,36 @@ fn subscribe_on(
         SubscribeOptions::default().with_allowed_origin(entry.allowed_origin),
         (entry.sink)(),
     );
-    if declarations == GroupDeclarations::Subscribers
-        && entry.allowed_origin != wz_runtime_tokio::locality::Locality::SessionLocal
-    {
-        // Best effort, as the group's put is: a key past the codec's bound is announced
-        // nowhere, and the subscription still hears the group.
-        let _ = session.announce_subscriber(&entry.keyexpr);
-    }
+    announce_on(
+        session,
+        declarations,
+        GroupDeclaration::Subscriber,
+        entry.id,
+        &entry.keyexpr,
+        entry.allowed_origin,
+    );
     subscriber
 }
 
-/// Declare the C queryable `entry` on a group's session. Its handler is minted
-/// with the GROUP as the holder of an escaped query, so a query that came over
-/// the group is answered on the group.
+/// Declare the C queryable `entry` on a group's session, and tell the group of it as
+/// `declarations` says. Its handler is minted with the GROUP as the holder of an escaped query,
+/// so a query that came over the group is answered on the group.
 #[cfg(feature = "queryable")]
-fn answer_on(session: &TokioMulticastSession, entry: &QblEntry) -> Queryable {
+fn answer_on(
+    session: &TokioMulticastSession,
+    entry: &QblEntry,
+    declarations: GroupDeclarations,
+) -> Queryable {
+    announce_on(
+        session,
+        declarations,
+        GroupDeclaration::Queryable {
+            complete: entry.complete,
+        },
+        entry.id,
+        &entry.keyexpr,
+        entry.allowed_origin,
+    );
     session.declare_queryable(
         entry.keyexpr.clone(),
         queryable_options(entry.complete, entry.allowed_origin),
@@ -277,7 +347,7 @@ impl SharedSession {
         let qbls = guard
             .qbls
             .iter()
-            .map(|entry| (entry.id, answer_on(session, entry)))
+            .map(|entry| (entry.id, answer_on(session, entry, GroupDeclarations::None)))
             .collect();
         let replaced = guard.mcast_faces.insert(
             id,
@@ -422,30 +492,88 @@ impl SharedSession {
     #[cfg(feature = "queryable")]
     pub(super) fn answer_on_groups(guard: &mut Inner, entry: &QblEntry) {
         for face in guard.mcast_faces.values_mut() {
-            let qbl = answer_on(&face.session, entry);
+            let qbl = answer_on(&face.session, entry, face.declarations);
             face.qbls.insert(entry.id, qbl);
         }
     }
 
     /// Take subscription `id` off every group face, for the caller to drop
-    /// outside the lock.
+    /// outside the lock, retracting it from each group told of it. Called before the
+    /// registry entry is removed, which is where its key is read.
     pub(super) fn unsubscribe_on_groups(guard: &mut Inner, id: SubId) -> Vec<Subscriber> {
+        let told = guard
+            .subs
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| (entry.keyexpr.clone(), entry.allowed_origin));
         guard
             .mcast_faces
             .values_mut()
-            .filter_map(|face| face.subs.remove(&id))
+            .filter_map(|face| {
+                let sub = face.subs.remove(&id)?;
+                if let Some((keyexpr, origin)) = &told {
+                    let what = GroupDeclaration::Subscriber;
+                    retract_on(&face.session, face.declarations, what, id, keyexpr, *origin);
+                }
+                Some(sub)
+            })
             .collect()
     }
 
     /// Take queryable `id` off every group face, for the caller to drop outside the
-    /// lock.
+    /// lock, retracting it from each group told of it. Called before the registry
+    /// entry is removed, which is where its key is read.
     #[cfg(feature = "queryable")]
     pub(super) fn unanswer_on_groups(guard: &mut Inner, id: QblId) -> Vec<Queryable> {
+        let told = guard
+            .qbls
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| (entry.keyexpr.clone(), entry.complete, entry.allowed_origin));
         guard
             .mcast_faces
             .values_mut()
-            .filter_map(|face| face.qbls.remove(&id))
+            .filter_map(|face| {
+                let qbl = face.qbls.remove(&id)?;
+                if let Some((keyexpr, complete, origin)) = &told {
+                    let what = GroupDeclaration::Queryable {
+                        complete: *complete,
+                    };
+                    retract_on(&face.session, face.declarations, what, id, keyexpr, *origin);
+                }
+                Some(qbl)
+            })
             .collect()
+    }
+
+    /// Tell every group of liveliness token `id` on `keyexpr`, as each group's declarations
+    /// say. A group carries no copy of a token: the token is the declaration, which the group's
+    /// members read, and the session's own plane holds the local one.
+    pub(super) fn announce_token_on_groups(guard: &Inner, id: TokenId, keyexpr: &str) {
+        for face in guard.mcast_faces.values() {
+            announce_on(
+                &face.session,
+                face.declarations,
+                GroupDeclaration::Token,
+                id,
+                keyexpr,
+                wz_runtime_tokio::locality::Locality::Any,
+            );
+        }
+    }
+
+    /// Retract liveliness token `id` on `keyexpr` from every group told of it.
+    pub(super) fn retract_token_on_groups(guard: &Inner, id: TokenId, keyexpr: &str) {
+        for face in guard.mcast_faces.values() {
+            retract_on(
+                &face.session,
+                face.declarations,
+                GroupDeclaration::Token,
+                id,
+                keyexpr,
+                wz_runtime_tokio::locality::Locality::Any,
+            );
+        }
     }
 }
 

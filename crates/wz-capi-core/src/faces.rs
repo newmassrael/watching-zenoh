@@ -1576,25 +1576,24 @@ struct Inner {
     #[cfg(feature = "multicast-transport")]
     mcast_set: Arc<Vec<multicast::McastLeg>>,
     subs: Vec<SubEntry>,
-    next_sub_id: SubId,
-    /// R311y559 — the session-scope ENTITY id counter the C ABIs' `z_*_id`
-    /// accessors report, for the handles that are NOT registered in a
-    /// per-kind map.
+    /// R311y559 — the session-scope ENTITY id counter: the `eid` of every entity the session
+    /// declares, the one the C ABIs' `z_*_id` accessors report.
     ///
-    /// Subscribers and queryables already have ids (`SubId` / `QblId`) because
-    /// the registry keys their per-face replicas on them. Publishers and
-    /// queriers have no such map — they are local handles that fan out through
-    /// the session — yet zenoh assigns every declared entity a global
-    /// `(zid, eid)` and `z_publisher_id` / `z_querier_id` hand it back. This is
-    /// that allocator. A SEPARATE space from `next_sub_id` on purpose: the two
-    /// number different things, and sharing one counter would make an entity's
-    /// id depend on how many subscribers happened to be declared first, which
-    /// is exactly the sort of coupling that reads as stable until it is not.
+    /// Open-debt item 913 — ONE counter for every kind, from 1, and the registry's own keys
+    /// (`SubId`, `QblId`, `TokenId`) are drawn from it. Both upstreams number every entity of a
+    /// session from one counter: zenoh-pico's `_z_get_entity_id` serves publishers,
+    /// subscribers, queryables, queriers and tokens alike
+    /// (`vendor/zenoh-pico/src/session/utils.c` @ `zn->_entity_id = 1;`), and zenoh's runtime from
+    /// `next_id: AtomicU32::new(1)` (`zenoh/src/net/runtime/mod.rs` @
+    /// `next_id: AtomicU32::new(1), // 0 is reserved for routing core`). It used to be a
+    /// separate space from per-kind counters that started at 0, on the reasoning that an id
+    /// depending on how many entities of another kind came first was a coupling to avoid; it is
+    /// the upstreams' rule, and a pico peer reads it off the wire: the id pico declares a
+    /// subscriber with on a group is this one (MEASURED: `decl_subscriber(1, ..)` for the
+    /// first entity of a session).
     next_entity_id: u64,
     qbls: Vec<QblEntry>,
-    next_qbl_id: QblId,
     tokens: Vec<TokenEntry>,
-    next_token_id: TokenId,
     live_subs: Vec<LiveSubEntry>,
     matches: Vec<MatchEntry>,
     next_match_id: MatchId,
@@ -1621,6 +1620,21 @@ struct Inner {
 }
 
 impl Inner {
+    /// The next session-scope entity id ([`Inner::next_entity_id`]).
+    fn take_entity_id(&mut self) -> u64 {
+        let id = self.next_entity_id;
+        self.next_entity_id = id.wrapping_add(1);
+        id
+    }
+
+    /// [`Self::take_entity_id`], or `None` once the space is spent, for a declaration whose
+    /// retraction names it by id alone and must not wrap onto a live one.
+    fn try_take_entity_id(&mut self) -> Option<u64> {
+        let id = self.next_entity_id;
+        self.next_entity_id = id.checked_add(1)?;
+        Some(id)
+    }
+
     /// Rebuild [`Self::face_set`] from `faces`. Call it right after `faces` changes, with the
     /// lock still held.
     fn refresh_face_set(&mut self) {
@@ -2134,6 +2148,8 @@ impl SharedSession {
                 // The plane is no link to anyone.
                 peer_zid: None,
             }),
+            // Both upstreams number a session's first entity 1.
+            next_entity_id: 1,
             ..Default::default()
         };
         Ok(Self {
@@ -3475,8 +3491,7 @@ impl SharedSession {
         options: LivelinessOptions,
     ) -> Option<TokenId> {
         let mut guard = self.lock();
-        let id = guard.next_token_id.checked_add(1)?;
-        guard.next_token_id = id;
+        let id = guard.try_take_entity_id()?;
 
         // R2580 — the local plane is in this walk. MEASURED against
         // `libzenohc.so` before the repair: a token declared here and a
@@ -3489,6 +3504,10 @@ impl SharedSession {
                 face.tokens.insert(id, tok);
             }
         }
+        // Open-debt item 913 — and every group the session joined is told of it, as its ABI
+        // says.
+        #[cfg(feature = "multicast-transport")]
+        Self::announce_token_on_groups(&guard, id, &keyexpr);
         guard.tokens.push(TokenEntry {
             id,
             keyexpr,
@@ -3510,6 +3529,10 @@ impl SharedSession {
             // may keep a keyexpr declaration alive, and releasing the last one
             // retracts it through this registry.
             if let Some(pos) = guard.tokens.iter().position(|e| e.id == id) {
+                // Open-debt item 913 — retracted from every group told of it, by the key the
+                // entry holds.
+                #[cfg(feature = "multicast-transport")]
+                Self::retract_token_on_groups(&guard, id, &guard.tokens[pos].keyexpr);
                 dropped_entry = Some(guard.tokens.remove(pos));
             }
             // R2580 — including the plane's, or a C `z_drop` on the token would
@@ -3555,8 +3578,7 @@ impl SharedSession {
         sink: LivelinessSink,
     ) -> SubId {
         let mut guard = self.lock();
-        let id = guard.next_sub_id;
-        guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
+        let id = guard.take_entity_id();
 
         // R2580 — the plane included, which is the receiving half of the same
         // measurement: without it this subscriber cannot hear a token its own
@@ -4051,10 +4073,7 @@ impl SharedSession {
     /// stable for a handle's whole life, and a counter read per accessor would
     /// hand back a different answer each time it was asked.
     pub fn next_entity_id(&self) -> u64 {
-        let mut guard = self.lock();
-        let id = guard.next_entity_id;
-        guard.next_entity_id = guard.next_entity_id.wrapping_add(1);
-        id
+        self.lock().take_entity_id()
     }
 
     pub fn declare_subscriber(
@@ -4078,8 +4097,7 @@ impl SharedSession {
         sink: SubscriberSink,
     ) -> SubId {
         let mut guard = self.lock();
-        let id = guard.next_sub_id;
-        guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
+        let id = guard.take_entity_id();
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what makes an
         // in-process put reach this subscriber whether or not a peer exists.
@@ -5187,8 +5205,7 @@ impl SharedSession {
         sink: QueryableSink,
     ) -> QblId {
         let mut guard = self.lock();
-        let id = guard.next_qbl_id;
-        guard.next_qbl_id = guard.next_qbl_id.wrapping_add(1);
+        let id = guard.take_entity_id();
 
         // R311y557 — the LOCAL PLANE is in this walk, which is what an
         // in-process `z_get` reaches. The sink factory receives each target's
