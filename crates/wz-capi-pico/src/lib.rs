@@ -68,6 +68,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod abi;
+#[cfg(feature = "admin-space")]
+pub mod admin_space;
 #[cfg(feature = "advanced")]
 pub mod advanced;
 #[cfg(feature = "advanced")]

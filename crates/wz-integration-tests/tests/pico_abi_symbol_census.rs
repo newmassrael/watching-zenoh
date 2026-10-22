@@ -346,6 +346,18 @@ const BUILD_GATED_EXTRAS: &[(&str, &str)] = &[
         "declared in upstream's `primitives.h`; the oracle build omits the body \
          with its scouting configuration. wz defines it on every arm.",
     ),
+    (
+        "zp_start_admin_space",
+        "upstream declares it under `#if Z_FEATURE_ADMIN_SPACE == 1` in \
+         `admin_space.h`; the oracle build keeps that switch at its default 0. \
+         wz defines it only with its own off-by-default `admin-space` feature.",
+    ),
+    (
+        "zp_stop_admin_space",
+        "upstream declares it under `#if Z_FEATURE_ADMIN_SPACE == 1` in \
+         `admin_space.h`; the oracle build keeps that switch at its default 0. \
+         wz defines it only with its own off-by-default `admin-space` feature.",
+    ),
 ];
 
 /// THE OTHER DIRECTION: wz exports nothing upstream does not itself own.

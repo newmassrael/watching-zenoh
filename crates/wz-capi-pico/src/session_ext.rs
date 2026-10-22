@@ -13,7 +13,9 @@
 //! - the session's CONNECTIVITY listeners, which pico keeps in the session
 //!   itself (`vendor/zenoh-pico/src/api/connectivity.c` @
 //!   `_z_connectivity_transport_listener_intmap_insert(&session->_connectivity_transport_event_listeners, id,`)
-//!   and which therefore live exactly as long as it does.
+//!   and which therefore live exactly as long as it does;
+//! - with `admin-space`, the session's ADMIN SPACE, which pico also keeps in the
+//!   session (`_admin_space_queryable_id`) and clears with it.
 
 use std::sync::Arc;
 
@@ -36,6 +38,9 @@ pub(crate) struct PicoSessionExt {
     /// The face registry this session's connectivity hub watches, and the id it
     /// watches under, so the watch can be dropped with the session.
     watch: (Arc<SharedSession>, u64),
+    /// Whether the admin space runs, and what it reports as the transport's link.
+    #[cfg(feature = "admin-space")]
+    pub(crate) admin_space: crate::admin_space::AdminSpaceSlot,
 }
 
 impl PicoSessionExt {
@@ -68,7 +73,17 @@ impl PicoSessionExt {
             hlc: NodeHlc::for_node(zid, mode, TimestampingEnabled::all(true)),
             connectivity,
             watch: (Arc::clone(shared), watch_id),
+            #[cfg(feature = "admin-space")]
+            admin_space: crate::admin_space::AdminSpaceSlot::new(None),
         }
+    }
+
+    /// The same session, whose admin space reports `transport_endpoint` (the
+    /// locator the session was opened on) as its transport's link.
+    #[cfg(feature = "admin-space")]
+    pub(crate) fn with_transport_endpoint(mut self, transport_endpoint: Option<String>) -> Self {
+        self.admin_space = crate::admin_space::AdminSpaceSlot::new(transport_endpoint);
+        self
     }
 }
 

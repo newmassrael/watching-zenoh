@@ -234,9 +234,12 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 /// `options->auto_start_read_task` decides whether the session's read task runs
 /// from the open, as pico starts its executor only if it is set (default true);
 /// without it the session is connected or bound and reads nothing until
-/// `zp_start_read_task`. The rest of the options have no effect here: the lease
-/// flag is never read by pico either, and the admin-space flag and the thread
-/// attributes have nothing to apply to.
+/// `zp_start_read_task`. With `admin-space`, `options->auto_start_admin_space`
+/// starts the admin space once the session is open, and a start that fails
+/// drops the session and returns its error, as pico's `z_open` does
+/// (`vendor/zenoh-pico/src/api/api.c` @ `if (opts.auto_start_admin_space) {`).
+/// The rest of the options have no effect here: the lease flag is never read by
+/// pico either, and the thread attributes have nothing to apply to.
 #[no_mangle]
 pub unsafe extern "C" fn z_open(
     zs: *mut z_owned_session_t,
@@ -250,6 +253,9 @@ pub unsafe extern "C" fn z_open(
         // pico reads the options only when they are given and otherwise takes
         // `z_open_options_default`, whose read task starts.
         let start_read_task = options.is_null() || (*options).auto_start_read_task;
+        // And its admin space does not start unless asked to.
+        #[cfg(feature = "admin-space")]
+        let start_admin_space = !options.is_null() && (*options).auto_start_admin_space;
         // Always-initialize the out-param (pico contract) before any fallible
         // work, so a caller reading `*zs` on an error path sees a null session.
         *zs = z_owned_session_t::null_value();
@@ -321,6 +327,12 @@ pub unsafe extern "C" fn z_open(
         } else {
             dial_whatami
         };
+        // The locator pico's one transport is opened on, which its admin space
+        // reports as the transport's link: the listen locator when there is one,
+        // the connect locator otherwise (`vendor/zenoh-pico/src/net/session.c` @
+        // `// First, try to open the optional listen locator.`).
+        #[cfg(feature = "admin-space")]
+        let transport_endpoint = listen.clone().or_else(|| connect.clone());
         match open_blocking(
             connect.into_iter().collect(),
             // pico's config carries ONE listen locator, so the set is that one or none.
@@ -394,15 +406,26 @@ pub unsafe extern "C" fn z_open(
                 // memory state is. It carries the session's connectivity
                 // listeners too (`crate::connectivity`), and watches the face
                 // registry for them from here on.
-                let _ = state.set_abi_extension(crate::session_ext::PicoSessionExt::new(
+                let ext = crate::session_ext::PicoSessionExt::new(
                     session_mode,
                     &state.zid(),
                     &state.shared,
-                ));
+                );
+                #[cfg(feature = "admin-space")]
+                let ext = ext.with_transport_endpoint(transport_endpoint);
+                let _ = state.set_abi_extension(ext);
                 *zs = z_owned_session_t {
                     _val: Box::into_raw(Box::new(state)) as *mut c_void,
                     _cnt: std::ptr::null_mut(),
                 };
+                #[cfg(feature = "admin-space")]
+                if start_admin_space {
+                    let code = crate::admin_space::zp_start_admin_space(z_session_loan_mut(zs));
+                    if code != Z_OK {
+                        z_session_drop(z_session_move(zs));
+                        return code;
+                    }
+                }
                 Z_OK
             }
             // R311y498 — the core reports a NEUTRAL failure; this shim maps it
@@ -1067,11 +1090,18 @@ pub struct z_subscriber_options_t {
 /// observable part is the DEFAULT `z_open_options_default` writes, which the
 /// options-default leg compares. `executor_task_attributes` are the attributes of
 /// pico's executor thread, which this session has no such thread to apply to.
+///
+/// With `admin-space` the struct gains pico's trailing `bool
+/// auto_start_admin_space` (`vendor/zenoh-pico/include/zenoh-pico/api/types.h` @
+/// `bool auto_start_admin_space;`), at offset 16 for 24 B, which is the layout a
+/// program compiled with `Z_FEATURE_ADMIN_SPACE=1` writes.
 #[repr(C)]
 pub struct z_open_options_t {
     pub auto_start_read_task: bool,
     pub auto_start_lease_task: bool,
     pub executor_task_attributes: *mut crate::sync::z_task_attr_t,
+    #[cfg(feature = "admin-space")]
+    pub auto_start_admin_space: bool,
 }
 
 /// pico `z_close_options_t` — a one-byte dummy, 1 B measured.
@@ -1094,11 +1124,21 @@ pub struct zp_task_lease_options_t {
 
 const _: () = {
     assert!(std::mem::size_of::<z_subscriber_options_t>() == 1);
-    assert!(std::mem::size_of::<z_open_options_t>() == 16);
+    assert!(
+        std::mem::size_of::<z_open_options_t>()
+            == if cfg!(feature = "admin-space") {
+                24
+            } else {
+                16
+            }
+    );
     assert!(std::mem::size_of::<z_close_options_t>() == 1);
     assert!(std::mem::size_of::<zp_task_read_options_t>() == 8);
     assert!(std::mem::size_of::<zp_task_lease_options_t>() == 8);
 };
+
+#[cfg(feature = "admin-space")]
+const _: () = assert!(std::mem::offset_of!(z_open_options_t, auto_start_admin_space) == 16);
 
 /// Fill default subscriber options (pico `z_subscriber_options_default`).
 ///
@@ -1126,6 +1166,9 @@ pub unsafe extern "C" fn z_open_options_default(options: *mut z_open_options_t) 
             auto_start_read_task: true,
             auto_start_lease_task: false,
             executor_task_attributes: std::ptr::null_mut(),
+            // `options->auto_start_admin_space = false;` in pico's default.
+            #[cfg(feature = "admin-space")]
+            auto_start_admin_space: false,
         };
     }
 }

@@ -328,18 +328,24 @@ pub unsafe extern "C" fn z_id_to_string(id: *const z_id_t, out: *mut z_owned_str
         if id.is_null() || out.is_null() {
             return Z_ERR_NULL;
         }
-        let mut buf = [0u8; Z_ID_SIZE * 2];
-        let bytes = &(*id).id;
-        let mut pos = buf.len();
-        for byte in bytes.iter() {
-            pos -= 1;
-            buf[pos] = HEX[(byte & 0x0F) as usize];
-            pos -= 1;
-            buf[pos] = HEX[((byte & 0xF0) >> 4) as usize];
-        }
-        store_owned_string(out, &buf);
+        store_owned_string(out, &zid_hex(&(*id).id));
         Z_OK
     })
+}
+
+/// The 32 characters [`z_id_to_string`] renders `id` as. Shared with the admin
+/// space, whose key expressions and documents spell every zid this way
+/// (`vendor/zenoh-pico/src/api/admin_space.c` @ `_Z_RETURN_IF_ERR(z_id_to_string(zid, &zid_str));`).
+pub(crate) fn zid_hex(id: &[u8; Z_ID_SIZE]) -> [u8; Z_ID_SIZE * 2] {
+    let mut buf = [0u8; Z_ID_SIZE * 2];
+    let mut pos = buf.len();
+    for byte in id.iter() {
+        pos -= 1;
+        buf[pos] = HEX[(byte & 0x0F) as usize];
+        pos -= 1;
+        buf[pos] = HEX[((byte & 0xF0) >> 4) as usize];
+    }
+    buf
 }
 
 const HEX: &[u8; 16] = b"0123456789abcdef";

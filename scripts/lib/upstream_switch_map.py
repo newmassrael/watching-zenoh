@@ -180,9 +180,10 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
     ("Z_FEATURE_LOCAL_QUERYABLE", "never", None,
      "queries never reach a queryable of the same session, upstream's default; the on arm "
      "is open-debt item 914"),
-    ("Z_FEATURE_ADMIN_SPACE", "never", None,
-     "pico's zp_start_admin_space / zp_stop_admin_space doors are absent, though the wz "
-     "runtime has an admin space; open-debt item 915"),
+    ("Z_FEATURE_ADMIN_SPACE", "maps", "wz-capi-pico/admin-space",
+     "zp_start_admin_space / zp_stop_admin_space and the open flag, serving pico's "
+     "@/<zid>/pico/** documents; the session-local connectivity half has no observer "
+     "while the local switches are off"),
 )
 
 # One row per zenoh-c capability feature: (feature, class, anchor, note). Judged against

@@ -1167,8 +1167,8 @@ pub(crate) fn declare_queryable_on(
 
 /// A pico queryable with no C handle around it, retracted when dropped: the
 /// declaration and its key, for a composite that answers with something other
-/// than a C closure.
-#[cfg(feature = "advanced")]
+/// than a C closure (an advanced publisher's cache, the admin space).
+#[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
     shared: Arc<SharedSession>,
     id: QblId,
@@ -1176,7 +1176,7 @@ pub(crate) struct PlainQueryable {
     _key: DeclaredKeyexpr,
 }
 
-#[cfg(feature = "advanced")]
+#[cfg(any(feature = "advanced", feature = "admin-space"))]
 impl PlainQueryable {
     /// Declare a queryable on `keyexpr` answered by `sink`.
     pub(crate) fn declare(
@@ -1196,7 +1196,7 @@ impl PlainQueryable {
     }
 }
 
-#[cfg(feature = "advanced")]
+#[cfg(any(feature = "advanced", feature = "admin-space"))]
 impl Drop for PlainQueryable {
     fn drop(&mut self) {
         self.shared.undeclare_queryable(self.id);

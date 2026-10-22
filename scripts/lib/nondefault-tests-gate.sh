@@ -271,7 +271,10 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # (`serial_link_roundtrip`, `ws_link_roundtrip`): a sample across a loopback
     # ws listener, and across two pty pairs this process pumps into each other.
     # Neither leaves the host, which is what `hook` asks of a leg.
-    "wz-capi-pico|hook|transport-link-quic,transport-link-serial,transport-link-tls,\
+    #
+    # `admin-space` joins with the pico admin space: its unit tests and the
+    # `admin_space_roundtrip` target are reached only by that feature.
+    "wz-capi-pico|hook|admin-space,transport-link-quic,transport-link-serial,transport-link-tls,\
 transport-link-unixpipe,transport-link-ws|"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
