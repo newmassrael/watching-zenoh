@@ -602,11 +602,21 @@ jobs:
             # which measures the host (`refusal-probe:`) prints its number on a pass.
             # A `tests/` directory is not a test target: `wz-capi-dissect`'s holds one C
             # file, which `cargo test --test '*'` matches to nothing and refuses.
+            #
+            # `--tests` and not `--test '*'`. cargo takes a target named by `--test`, a glob
+            # included, as asked for, and refuses it when the features it requires are off:
+            # `admin_space_roundtrip` of `wz-capi-pico` requires `admin-space`, which the
+            # default build does not carry, and `--test '*'` stopped there with `requires the
+            # features`, so the macOS probe printed its FAIL before one test of the crate ran.
+            # `--tests` skips such a target, which is the question this probe asks: the
+            # default build's integration tests. A target behind a feature has its own lane
+            # (`scripts/lib/nondefault-tests-gate.sh` lists them). The cost is that the
+            # library's unit tests run again beside the integration ones.
             if compgen -G "crates/$crate/tests/*.rs" > /dev/null; then
               integrated=SKIPPED
               if [ "$built" = PASS ]; then
                 integrated=FAIL
-                (cd crates && cargo test -p "$crate" --test '*' -- --nocapture) && integrated=PASS
+                (cd crates && cargo test -p "$crate" --tests -- --nocapture) && integrated=PASS
               fi
               verdict "$crate integration tests:" "$integrated"
               [ "$integrated" = PASS ] || overall=FAIL
