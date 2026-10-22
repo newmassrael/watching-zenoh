@@ -506,4 +506,96 @@ mod tests {
             "what was held and what was taken make the whole capture"
         );
     }
+
+    /// One TCP direction: Init, Open, then two Frames. Packet 2 carries TWO
+    /// messages in one Frame, `demo/a` with a 1-byte value and `demo/b` with a
+    /// 50-byte one; packet 3 carries one message, `demo/a` with a 50-byte value.
+    fn two_messages_in_one_frame_capture() -> Dissection {
+        let prefixed = |unit: Vec<u8>| {
+            let mut out = (unit.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(&unit);
+            out
+        };
+        let mut both = push(sender_space(0, Some("demo/a")), &[0x01]);
+        both.extend_from_slice(&push(sender_space(0, Some("demo/b")), &[0x55; 50]));
+        let payloads: Vec<Vec<u8>> = alloc::vec![
+            prefixed(init_datagram(false, &[])),
+            prefixed(open_datagram(false)),
+            prefixed(frame_carrying(&both)),
+            prefixed(frame_carrying(&push(
+                sender_space(0, Some("demo/a")),
+                &[0x55; 50],
+            ))),
+        ];
+        let mut seq = 1000u32;
+        let wires: Vec<Vec<u8>> = payloads
+            .iter()
+            .map(|payload| {
+                let wire = tcp_packet(seq, payload);
+                seq += payload.len() as u32;
+                wire
+            })
+            .collect();
+        let rows: Vec<(u32, u32, &[u8])> = wires
+            .iter()
+            .enumerate()
+            .map(|(i, wire)| (1, i as u32 * 10_000, wire.as_slice()))
+            .collect();
+        Dissection::from_capture(&crate::pcap::write(LINKTYPE_ETHERNET, &rows))
+            .expect("the capture reads")
+    }
+
+    /// Two selectors joined by `and` judge each MESSAGE against both, where two
+    /// calls whose lists are intersected judge each against one and intersect
+    /// FRAMES.
+    ///
+    /// Packet 2 carries a message that passes the first selector and another that
+    /// passes the second, and none that passes both. Each selector alone names
+    /// the packet, so the intersection of the two lists keeps it; the joined
+    /// selector does not, because its verdict is made on each message and a row
+    /// is picked when one of its messages is. Packet 3 carries a message that
+    /// passes both, and every route names it. A pipeline that passes a message
+    /// only when it passed the stage before is the joined selector, in any
+    /// number of stages.
+    #[test]
+    fn selectors_joined_by_and_are_judged_message_by_message() {
+        let d = two_messages_in_one_frame_capture();
+        let first = "key == demo/a";
+        let second = "bytes > 10";
+
+        let by_first = picked(&d, first, false).packets;
+        let by_second = picked(&d, second, false).packets;
+        assert_eq!(by_first, alloc::vec![2, 3]);
+        assert_eq!(by_second, alloc::vec![2, 3]);
+        let intersection: Vec<u64> = by_first
+            .iter()
+            .copied()
+            .filter(|packet| by_second.contains(packet))
+            .collect();
+        assert_eq!(
+            intersection,
+            alloc::vec![2, 3],
+            "two calls intersected judge frames, and keep the frame no message of which passes both"
+        );
+
+        let joined = picked(&d, &alloc::format!("({first}) and ({second})"), false);
+        assert_eq!(
+            joined.packets,
+            alloc::vec![3],
+            "joined, a message must pass both: {:?}",
+            joined.summary
+        );
+        assert_eq!(joined.summary.rows_yes, 1);
+
+        let three = picked(
+            &d,
+            &alloc::format!("({first}) and ({second}) and (key == demo/b)"),
+            false,
+        );
+        assert!(
+            three.packets.is_empty(),
+            "a third stage that nothing in packet 3 passes leaves nothing: {:?}",
+            three.summary
+        );
+    }
 }
