@@ -95,13 +95,12 @@ fn a_failed_open_names_its_cause_as_the_real_library_does() {
     )
     .unwrap_or_else(|diag| panic!("the probe does not build against wz's drop-in\n{diag}"));
 
-    // A port this test holds, so a listen on it cannot bind, and one nobody listens on.
+    // A port this test holds, so a listen on it cannot bind, and one held and refusing, so a
+    // connect to it fails while no other test can take the number.
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
     let busy = held.local_addr().expect("its address").port();
-    let closed = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("find a free port");
-        probe.local_addr().expect("its address").port()
-    };
+    let refusing = wz_runtime_tokio_test_support::refusing_port();
+    let closed = refusing.addr().port();
     let cases = [
         ("peer", "listen", format!("tcp/127.0.0.1:{busy}")),
         ("client", "connect", format!("tcp/127.0.0.1:{closed}")),
@@ -123,6 +122,7 @@ fn a_failed_open_names_its_cause_as_the_real_library_does() {
         }
     }
     drop(held);
+    drop(refusing);
     assert!(
         differ.is_empty(),
         "z_open names a failure otherwise on wz than on the real library:\n{}",

@@ -641,7 +641,7 @@ pub(crate) unsafe fn open_session(
             // zenoh announces each subscriber on the groups it holds, on every target but
             // Windows, where the announcement is compiled out (`#[cfg(not(windows))]` above
             // `zenoh/src/net/routing/hat/peer/pubsub.rs` @
-            // `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
+            // `if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
             let declarations = if cfg!(windows) {
                 GroupDeclarations::None
             } else {

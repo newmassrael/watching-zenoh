@@ -186,7 +186,7 @@ pub enum MulticastTxItem {
     /// Open-debt item 913 — a declaration the session ANNOUNCES on the group, answering no
     /// interest: zenoh announces a session's subscriber on each group it holds
     /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
-    /// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
+    /// `if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
     /// Framed, sent and counted as a
     /// `MulticastTxItem::DeclareReply` is (`declare_frame_meta`); the two
     /// differ in what produced them, an interest or the session.

@@ -2950,7 +2950,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// id `id` on `key`, answering no interest. What a session announces, and
     /// with which id, is its ABI's: zenoh announces each subscriber with id 0
     /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
-    /// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`;
+    /// `if we have a multicast group, we use it to propagate subscribers to upstream gateways.`;
     /// MEASURED off the group's wire: `decl_subscriber(0, demo/mc/**)`), and zenoh-pico each
     /// subscriber, queryable and token with its own entity id, over whatever transport it holds
     /// (MEASURED: `decl_subscriber(1, demo/mc/**)`, `decl_queryable(1, demo/mc/q)`,

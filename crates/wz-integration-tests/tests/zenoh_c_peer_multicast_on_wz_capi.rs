@@ -38,7 +38,8 @@ use std::time::{Duration, Instant};
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, graceful_terminate, group_declarations,
-    read_captured, wait_for_substring, wz_capi_c_cdylib, zenoh_c_oracle, zenohd_binary, ChildGuard,
+    read_captured, wait_for_substring, wz_capi_c_cdylib, zenoh_c_oracle, zenoh_c_shared_library,
+    zenohd_binary, ChildGuard,
 };
 
 /// The group: a port of its own, so a leg never hears another file's, on the loopback
@@ -91,8 +92,9 @@ int main(int argc, char** argv) {
 }
 "#;
 
-/// The oracle's include, examples and library directories, or `None` with a loud note.
-fn oracle_or_note() -> Option<(PathBuf, PathBuf, PathBuf)> {
+/// The oracle's include and examples directories, or `None` with a loud note. The library is
+/// resolved where the reference arm is built, by [`zenoh_c_shared_library`].
+fn oracle_or_note() -> Option<(PathBuf, PathBuf)> {
     let oracle = zenoh_c_oracle();
     if oracle.is_none() {
         eprintln!(
@@ -100,7 +102,7 @@ fn oracle_or_note() -> Option<(PathBuf, PathBuf, PathBuf)> {
              libzenohc.so (default prefix ~/.local, override WZ_ZENOH_C_PREFIX)."
         );
     }
-    oracle.map(|(include, libdir, examples)| (include, examples, libdir))
+    oracle.map(|(include, _libdir, examples)| (include, examples))
 }
 
 /// Every `Transport` and `Link` block a program printed, each as one line, the port of a link's
@@ -195,11 +197,13 @@ struct Arms {
 }
 
 /// Compile `name` from `src_dir` against each library, into a directory per arm under `dir`.
-fn both_arms(name: &str, src_dir: &Path, dir: &Path, include: &Path, libdir: &Path) -> Arms {
+fn both_arms(name: &str, src_dir: &Path, dir: &Path, include: &Path) -> Arms {
     let real_dir = dir.join(format!("{name}-real"));
     let wz_dir = dir.join(format!("{name}-wz"));
     std::fs::create_dir_all(&real_dir).expect("a directory per arm");
     std::fs::create_dir_all(&wz_dir).expect("a directory per arm");
+    let reference = zenoh_c_shared_library().expect("the oracle resolved before the arms");
+    let libdir = reference.parent().expect("libzenohc.so has a directory");
     let real = compile_zenoh_c_example(name, &real_dir, include, src_dir, libdir, "zenohc")
         .unwrap_or_else(|diag| panic!("{name}.c does not build against libzenohc\n{diag}"));
     let cdylib = wz_capi_c_cdylib();
@@ -228,6 +232,7 @@ fn zenohd_member() -> (ChildGuard, File) {
         .spawn()
         .expect("spawn zenohd on the group");
     let member = ChildGuard::wrap("zenohd (the member)", member);
+    // barrier-origin: zenohd "Zenoh can be reached at" -- `zenoh/src/net/runtime/orchestrator.rs` @ `Zenoh can be reached at: {}`
     if let Err(printed) = wait_for_substring(&mut log, "Zenoh can be reached at", REPORTED_WITHIN) {
         panic!("zenohd never came up on {GROUP}\n{printed}");
     }
@@ -246,12 +251,12 @@ fn zenohd_member() -> (ChildGuard, File) {
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
 fn upstream_zinfo_on_wz_announces_a_zenohd_group_member_as_libzenohc_does() {
-    let Some((include, examples, libdir)) = oracle_or_note() else {
+    let Some((include, examples)) = oracle_or_note() else {
         return;
     };
     assert_zenoh_c_arm_pairing(&include);
     let dir = tempfile::tempdir().expect("tempdir for the compiled programs");
-    let arms = both_arms("z_info", &examples, dir.path(), &include, &libdir);
+    let arms = both_arms("z_info", &examples, dir.path(), &include);
     let (mut member, _member_log) = zenohd_member();
     let by_real = announced("z_info.c on libzenohc", &arms.real);
     let by_wz = announced("z_info.c on wz-capi-c", &arms.wz);
@@ -274,7 +279,7 @@ fn upstream_zinfo_on_wz_announces_a_zenohd_group_member_as_libzenohc_does() {
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
 fn upstream_zinfo_printers_on_wz_list_a_zenohd_group_member_as_libzenohc_does() {
-    let Some((include, examples, libdir)) = oracle_or_note() else {
+    let Some((include, examples)) = oracle_or_note() else {
         return;
     };
     assert_zenoh_c_arm_pairing(&include);
@@ -287,7 +292,7 @@ fn upstream_zinfo_printers_on_wz_list_a_zenohd_group_member_as_libzenohc_does() 
         LISTING_PROBE.replace("{upstream}", &upstream.display().to_string()),
     )
     .expect("write the listing program");
-    let arms = both_arms("zc_group_listing", &src_dir, dir.path(), &include, &libdir);
+    let arms = both_arms("zc_group_listing", &src_dir, dir.path(), &include);
     let (mut member, _member_log) = zenohd_member();
     let by_real = listed("the listing on libzenohc", &arms.real);
     let by_wz = listed("the listing on wz-capi-c", &arms.wz);
@@ -356,14 +361,14 @@ const SUB_KEY: &str = "demo/mc/**";
 // wz-proves: api-compat-c wz->zenoh-c partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn upstream_zpub_and_zsub_cross_between_libzenohc_and_wz_on_a_group() {
-    let Some((include, examples, libdir)) = oracle_or_note() else {
+fn upstream_zpub_and_zsub_cross_between_libzenohc_and_wz_on_a_multicast_group() {
+    let Some((include, examples)) = oracle_or_note() else {
         return;
     };
     assert_zenoh_c_arm_pairing(&include);
     let dir = tempfile::tempdir().expect("tempdir for the compiled programs");
-    let zpub = both_arms("z_pub", &examples, dir.path(), &include, &libdir);
-    let zsub = both_arms("z_sub", &examples, dir.path(), &include, &libdir);
+    let zpub = both_arms("z_pub", &examples, dir.path(), &include);
+    let zsub = both_arms("z_sub", &examples, dir.path(), &include);
     let pub_args: &[&str] = &["-k", PUT_KEY, "-p", "FROM-THE-OTHER-LIBRARY"];
     let sub_args: &[&str] = &["-k", SUB_KEY];
     let heard = format!("('{PUT_KEY}': '[");
@@ -433,7 +438,7 @@ fn declared_on_group(label: &str, exe: &Path, args: &[&str]) -> BTreeSet<String>
 /// A subscriber on a group is announced on it as zenoh announces one: upstream's `z_sub.c` puts
 /// the same declarations on the group on wz as on libzenohc (zenoh announces a session's
 /// subscriber on each group it holds, `zenoh/src/net/routing/hat/peer/pubsub.rs` @
-/// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
+/// `if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
 ///
 /// MEASURED before this leg: a libzenohc publisher with a matching listener does NOT report a
 /// libzenohc subscriber on the same group as matching, so the announcement is visible on the
@@ -446,13 +451,13 @@ fn declared_on_group(label: &str, exe: &Path, args: &[&str]) -> BTreeSet<String>
 // wz-proves: api-compat-c wz->zenoh-c partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn upstream_zsub_on_wz_announces_its_subscriber_on_a_group_as_libzenohc_does() {
-    let Some((include, examples, libdir)) = oracle_or_note() else {
+fn upstream_zsub_on_wz_announces_its_subscriber_on_a_multicast_group_as_libzenohc_does() {
+    let Some((include, examples)) = oracle_or_note() else {
         return;
     };
     assert_zenoh_c_arm_pairing(&include);
     let dir = tempfile::tempdir().expect("tempdir for the compiled programs");
-    let zsub = both_arms("z_sub", &examples, dir.path(), &include, &libdir);
+    let zsub = both_arms("z_sub", &examples, dir.path(), &include);
     let sub_args: &[&str] = &["-k", SUB_KEY];
     let by_real = declared_on_group("z_sub.c on libzenohc", &zsub.real, sub_args);
     let by_wz = declared_on_group("z_sub.c on wz-capi-c", &zsub.wz, sub_args);

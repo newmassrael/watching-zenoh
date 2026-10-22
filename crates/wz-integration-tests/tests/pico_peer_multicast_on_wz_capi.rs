@@ -335,7 +335,7 @@ fn recorded_while_running(programs: &[OnGroup<'_>]) -> Vec<Vec<u8>> {
 // wz-proves: api-compat-pico wz->pico partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn upstream_examples_on_wz_declare_on_a_group_as_the_real_library_does() {
+fn upstream_examples_on_wz_declare_on_a_multicast_group_as_the_real_library_does() {
     let dir = tempfile::tempdir().expect("tempdir for the compiled examples");
     let mut differ = Vec::new();
     for (example, key, args) in [
@@ -492,7 +492,7 @@ fn upstream_zpub_with_multicast_declarations_puts_on_a_group_as_the_real_library
 // wz-proves: api-compat-pico wz->pico partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn a_filtered_zpub_on_wz_keeps_putting_to_the_member_that_stays() {
+fn a_filtered_zpub_on_wz_keeps_putting_to_the_multicast_member_that_stays() {
     let dir = tempfile::tempdir().expect("tempdir for the compiled example");
     let wz_pub = compile_pico_example_against_wz_capi_in(
         "z_pub",
@@ -650,7 +650,7 @@ fn subscriber_hears_publisher(sub: (&str, &Path), publisher: (&str, &Path)) {
 // wz-proves: api-compat-pico pico->wz partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn a_subscriber_on_wz_answers_the_interest_of_a_filtered_real_pico_zpub() {
+fn a_subscriber_on_wz_answers_the_multicast_interest_of_a_filtered_real_pico_zpub() {
     let dir = tempfile::tempdir().expect("tempdir for the compiled example");
     let filtered = zenoh_pico_mcdecl_cli_binary("z_pub");
     let wz_sub = on_wz("z_sub", dir.path());
@@ -668,7 +668,7 @@ fn a_subscriber_on_wz_answers_the_interest_of_a_filtered_real_pico_zpub() {
 // wz-proves: api-compat-pico pico->wz partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn upstream_zsub_on_wz_hears_the_real_pico_zpub_on_a_group() {
+fn upstream_zsub_on_wz_hears_the_real_pico_zpub_on_a_multicast_group() {
     let dir = tempfile::tempdir().expect("tempdir for the compiled example");
     subscriber_hears_publisher(
         ("z_sub.c on wz-capi-pico", &on_wz("z_sub", dir.path())),
@@ -680,7 +680,7 @@ fn upstream_zsub_on_wz_hears_the_real_pico_zpub_on_a_group() {
 // wz-proves: api-compat-pico wz->pico partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn the_real_pico_zsub_hears_upstream_zpub_on_wz_on_a_group() {
+fn the_real_pico_zsub_hears_upstream_zpub_on_wz_on_a_multicast_group() {
     let dir = tempfile::tempdir().expect("tempdir for the compiled example");
     subscriber_hears_publisher(
         ("real zenoh-pico z_sub", &zenoh_pico_cli_binary("z_sub")),
@@ -739,7 +739,7 @@ fn zinfo_reports(label: &str, exe: &Path) -> std::collections::BTreeSet<String> 
 // wz-proves: api-compat-pico pico->wz partial
 #[test]
 #[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
-fn upstream_zinfo_on_wz_reports_a_group_member_as_the_real_library_does() {
+fn upstream_zinfo_on_wz_reports_a_multicast_group_member_as_the_real_library_does() {
     let dir = tempfile::tempdir().expect("tempdir for the compiled example");
     let (mut member, _member_out) = spawn_on_group(
         "real zenoh-pico z_pub (the member)",
