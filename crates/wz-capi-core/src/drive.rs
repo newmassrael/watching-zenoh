@@ -166,13 +166,13 @@ impl Dialer {
     /// `open_transport_unicast`, which both connects and opens the session and
     /// is what `peers_connector_retry` re-attempts. A peer that is up but not
     /// yet serving therefore retries like one that is down.
-    async fn open(&self, endpoint: &str) -> Result<OpenedSession, ()> {
+    async fn open(&self, endpoint: &str) -> Result<OpenedSession, OpenError> {
         let dial_cfg = self
             .dial_cfgs
             .iter()
             .find(|(e, _)| e == endpoint)
             .map(|(_, cfg)| cfg)
-            .ok_or(())?;
+            .ok_or(OpenError::DriveFailed)?;
         self.open_with(endpoint, dial_cfg).await
     }
 
@@ -180,22 +180,35 @@ impl Dialer {
     /// that answered from it. Upstream's `open_transport_unicast_with_zid`: a link that opens to
     /// another node than the Hello named is not the connection that was wanted, and is closed.
     #[cfg(feature = "scout")]
-    async fn open_scouted(&self, locator: &str, expected: &[u8]) -> Result<OpenedSession, ()> {
-        let dial_cfg = dial_config(&self.tls, locator).map_err(|_| ())?;
+    async fn open_scouted(
+        &self,
+        locator: &str,
+        expected: &[u8],
+    ) -> Result<OpenedSession, OpenError> {
+        let dial_cfg = dial_config(&self.tls, locator).map_err(|_| OpenError::LinkFailed)?;
         let session = self.open_with(locator, &dial_cfg).await?;
         if is_expected_peer(session.peer_zid().as_deref(), expected) {
             Ok(session)
         } else {
             session.drain_to_close().await;
-            Err(())
+            Err(OpenError::LinkFailed)
         }
     }
 
-    async fn open_with(&self, endpoint: &str, dial_cfg: &DialConfig) -> Result<OpenedSession, ()> {
+    /// Dial `endpoint` and open a session over the link: a link that cannot be dialled is
+    /// named as [`OpenError::of_endpoint`] names it, and a handshake that does not complete is
+    /// [`OpenError::DriveFailed`].
+    async fn open_with(
+        &self,
+        endpoint: &str,
+        dial_cfg: &DialConfig,
+    ) -> Result<OpenedSession, OpenError> {
         // The endpoint's own QoS band rides the node's offer, as upstream's
         // opener reads it off the endpoint it dials.
-        let offer = offer_for_connect(self.offer, endpoint).map_err(|_| ())?;
-        let dialed = dial_endpoint(endpoint, dial_cfg).await.map_err(|_| ())?;
+        let offer = offer_for_connect(self.offer, endpoint).map_err(|_| OpenError::LinkFailed)?;
+        let dialed = dial_endpoint(endpoint, dial_cfg)
+            .await
+            .map_err(|e| OpenError::of_endpoint(endpoint, &e))?;
         // What the node presents is installed before any wire byte, so the InitSyn carries the
         // authentication offer. A node that states no credential installs nothing and dials as
         // it always did.
@@ -219,7 +232,7 @@ impl Dialer {
             DEFAULT_OPEN_TICK_MS,
         )
         .await
-        .map_err(|_| ())
+        .map_err(|_| OpenError::DriveFailed)
     }
 }
 
@@ -233,7 +246,34 @@ pub enum OpenError {
     /// The drive thread could not be spawned, its runtime could not be built,
     /// or the session did not reach Established.
     DriveFailed,
+    /// Open-debt item 911 (found on the way) — a link the session was told to listen on, connect
+    /// to or join could not be opened: zenoh-pico's `_Z_ERR_TRANSPORT_OPEN_FAILED`
+    /// (`vendor/zenoh-pico/src/link/link.c` @ `ret = _Z_ERR_TRANSPORT_OPEN_FAILED;`).
+    LinkFailed,
+    /// An endpoint names a scheme no link of this build serves: zenoh-pico's
+    /// `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` (`ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`).
+    SchemeUnknown,
 }
+
+impl OpenError {
+    /// Why `endpoint` could not be opened, `error` being what opening it answered: a scheme no
+    /// parse or no link of this build knows, or else a link that did not open.
+    fn of_endpoint(endpoint: &str, error: &std::io::Error) -> Self {
+        use wz_runtime_tokio::locator::{parse_any_locator, AnyLocatorError, LocatorParseError};
+        let unknown_scheme = matches!(
+            parse_any_locator(endpoint),
+            Err(AnyLocatorError::Ip(LocatorParseError::UnknownProto(_)))
+        );
+        if unknown_scheme || error.kind() == std::io::ErrorKind::Unsupported {
+            Self::SchemeUnknown
+        } else {
+            Self::LinkFailed
+        }
+    }
+}
+
+/// Where the drive role reports whether the session opened, and why not.
+type OpenReport = mpsc::Sender<Result<(), OpenError>>;
 
 // --- the read task ---------------------------------------------------------
 
@@ -579,9 +619,9 @@ impl ReadGate {
     /// Announce the open to the caller: arm the gate, then report success. The
     /// order is the point (see [`Self::mark_opened`]). `true` when the caller is
     /// gone.
-    fn announce_open(&self, tx: &mpsc::Sender<bool>) -> bool {
+    fn announce_open(&self, tx: &OpenReport) -> bool {
         self.mark_opened();
-        tx.send(true).is_err()
+        tx.send(Ok(())).is_err()
     }
 }
 
@@ -1210,7 +1250,7 @@ struct DriveContext {
     /// Unblocks `z_open`: `true` once the role has reached its ready point
     /// (handshake settled for dial, bind complete for listen), `false` on any
     /// failure before it.
-    tx: mpsc::Sender<bool>,
+    tx: OpenReport,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     clock: TokioTime,
@@ -1328,7 +1368,7 @@ async fn drive_dial(
     let Some(DialSetup { scheduled, dialer }) =
         prepare_dial(&ctx, &endpoints, &tls, &phase, whatami)
     else {
-        let _ = ctx.tx.send(false);
+        let _ = ctx.tx.send(Err(OpenError::DriveFailed));
         return;
     };
     #[cfg(feature = "scout")]
@@ -1378,7 +1418,7 @@ async fn drive_dial(
     let Some(DialSetup { scheduled, dialer }) =
         prepare_dial(&ctx, &endpoints, &tls, &phase, whatami)
     else {
-        let _ = ctx.tx.send(false);
+        let _ = ctx.tx.send(Err(OpenError::DriveFailed));
         return;
     };
     let DriveContext {
@@ -1412,9 +1452,9 @@ async fn drive_dial(
     // R3089 -- and under the budget and the retry of `listen/timeout_ms` and `listen/retry`.
     let BoundListeners { legs: listen, late } =
         match bind_listeners(&listen, listen_phase, &tls, &zid, link_tx, offer, clock).await {
-            Some(bound) => bound,
-            None => {
-                let _ = tx.send(false);
+            Ok(bound) => bound,
+            Err(cause) => {
+                let _ = tx.send(Err(cause));
                 return;
             }
         };
@@ -1447,7 +1487,7 @@ async fn drive_dial(
     {
         Ok(responder) => responder,
         Err(()) => {
-            let _ = tx.send(false);
+            let _ = tx.send(Err(OpenError::DriveFailed));
             return;
         }
     };
@@ -1607,7 +1647,7 @@ async fn drive_client(
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
-    tx: mpsc::Sender<bool>,
+    tx: OpenReport,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     gate: Arc<ReadGate>,
@@ -1648,16 +1688,22 @@ async fn drive_client(
     };
     #[cfg(not(feature = "scout"))]
     let scouted: Option<Result<OpenedSession, ()>> = None;
+    // A scouted connect that finds nobody is no link this session was told of; the connect
+    // phase names why its last attempt failed, a phase cut off before any answered being a link
+    // that did not open.
     let first = match scouted {
-        Some(first) => first,
+        Some(first) => first.map_err(|()| OpenError::DriveFailed),
         None => drive_connect_phase(phase.policy.budget, &scheduled, &attempt)
             .await
-            .map_err(|e| log_open_failure(&format!("connect to {endpoints:?}"), &e)),
+            .map_err(|e| {
+                log_open_failure(&format!("connect to {endpoints:?}"), &e);
+                e.last.unwrap_or(OpenError::LinkFailed)
+            }),
     };
     let mut session = match first {
         Ok(opened) => opened,
-        Err(()) => {
-            let _ = tx.send(false);
+        Err(cause) => {
+            let _ = tx.send(Err(cause));
             return;
         }
     };
@@ -1960,7 +2006,7 @@ async fn drive_peer(
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
-    tx: mpsc::Sender<bool>,
+    tx: OpenReport,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     gate: Arc<ReadGate>,
@@ -1983,6 +2029,9 @@ async fn drive_peer(
                 .deadline()
                 .map(|d| tokio::time::Instant::now() + d);
             let mut failed = false;
+            // Why the walk failed, for the open's report: a link that did not open unless an
+            // attempt named its own cause.
+            let mut cause = OpenError::LinkFailed;
             let mut registered_faces: Vec<tokio::sync::oneshot::Receiver<()>> = Vec::new();
             for (i, endpoint) in endpoints.iter().enumerate() {
                 let policy = endpoint_policy(phase.policy, endpoint);
@@ -2012,11 +2061,12 @@ async fn drive_peer(
                                 registered_faces.push(registered);
                                 faces.push(spawn_leg(&gate, leg.run(Some(session), None, owed)))
                             }
-                            Some(Err(())) if arm.ends_startup() => {
+                            Some(Err(why)) if arm.ends_startup() => {
+                                cause = why;
                                 failed = true;
                                 break;
                             }
-                            Some(Err(())) => {}
+                            Some(Err(_)) => {}
                         }
                     }
                     PhaseArm::RetryThenFail => {
@@ -2074,7 +2124,10 @@ async fn drive_peer(
                 if let Some(plan) = scouting {
                     match ScoutLink::bind(&plan).await {
                         Ok(link) => scout = Some((plan, link)),
-                        Err(_) => failed = true,
+                        Err(_) => {
+                            cause = OpenError::DriveFailed;
+                            failed = true;
+                        }
                     }
                 }
                 if let (false, Some((intents_tx, intents))) = (failed, dials) {
@@ -2118,7 +2171,7 @@ async fn drive_peer(
                 for face in faces {
                     let _ = face.await;
                 }
-                let _ = tx.send(false);
+                let _ = tx.send(Err(cause));
                 return;
             }
             match router_hold {
@@ -3002,8 +3055,8 @@ async fn bind_one(
     tls: &CapiTlsConfig,
     zid: &[u8],
     link_tx: LinkTx,
-) -> Result<Listening, ()> {
-    bind_listener(endpoint, tls, zid, link_tx).await.ok_or(())
+) -> Result<Listening, OpenError> {
+    bind_listener(endpoint, tls, zid, link_tx).await
 }
 
 /// Bind the endpoints a session's `listen` states, in the order the config states them, under the
@@ -3037,13 +3090,17 @@ async fn bind_listeners(
     link_tx: LinkTx,
     offer: SessionOffer,
     clock: TokioTime,
-) -> Option<BoundListeners> {
+) -> Result<BoundListeners, OpenError> {
+    // A phase that fails names why its last attempt did; one cut off before any answered is a
+    // link that did not open.
     let outcome = drive_bind_phase(phase.policy, phase.schedule, endpoints, |position, _| {
         bind_one(&endpoints[position], tls, zid, link_tx)
     })
     .await
-    .map_err(|e| log_open_failure("bind phase", &e))
-    .ok()?;
+    .map_err(|e| {
+        log_open_failure("bind phase", &e);
+        e.last.unwrap_or(OpenError::LinkFailed)
+    })?;
     let legs = outcome
         .bound
         .into_iter()
@@ -3063,7 +3120,7 @@ async fn bind_listeners(
             schedule,
         })
         .collect();
-    Some(BoundListeners {
+    Ok(BoundListeners {
         legs,
         late: LateBinds {
             pending,
@@ -3091,7 +3148,7 @@ async fn bind_listener(
     tls: &CapiTlsConfig,
     zid: &[u8],
     link_tx: LinkTx,
-) -> Option<Listening> {
+) -> Result<Listening, OpenError> {
     // Everything that can fail the open runs BEFORE the success signal the
     // caller sends, so a failure is reported to the C caller rather than
     // silently killing a listener it was told had opened.
@@ -3102,17 +3159,20 @@ async fn bind_listener(
     // cert-absence reject). Each backend's slot is filled only when its feature
     // is compiled in; without it that scheme surfaces `Unsupported` at bind
     // regardless -- see `listen_accept_config`.
-    let accept_cfg = listen_accept_config(tls)
-        .map_err(|e| log_open_failure("listen configuration", &e))
-        .ok()?;
+    let accept_cfg = listen_accept_config(tls).map_err(|e| {
+        log_open_failure("listen configuration", &e);
+        OpenError::DriveFailed
+    })?;
     let listener = bind_endpoint_with_config(endpoint, &accept_cfg)
         .await
-        .map_err(|e| log_open_failure(&format!("bind {endpoint}"), &e))
-        .ok()?;
+        .map_err(|e| {
+            log_open_failure(&format!("bind {endpoint}"), &e);
+            OpenError::of_endpoint(endpoint, &e)
+        })?;
     // CALLER fail-fast (mesh accept loop): pico's z_open(listen) holds N
     // concurrent inbound peers off ONE listener, so a NON-mesh-capable acceptor
     // (one that could not feed a multi-accept loop) is rejected here -- z_open
-    // reports the open failure to the C caller (tx.send(false) -> Z_ERR_GENERIC),
+    // reports the open failure to the C caller (an `OpenError` the ABI maps to its code),
     // the pico twin of run_router's bind-time guard and the BIND-time twin of the
     // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop.
     //
@@ -3133,10 +3193,11 @@ async fn bind_listener(
     // the open succeeded, so an entropy failure could only be reported as "no
     // peer ever connects". Built before the bind is announced, it is an ordinary
     // open failure like the two above.
-    let params = init_params(WhatAmI::Peer, zid.to_vec(), link_tx)
-        .map_err(|e| log_open_failure(&format!("session parameters for {endpoint}"), &e))
-        .ok()?;
-    Some(Listening { listener, params })
+    let params = init_params(WhatAmI::Peer, zid.to_vec(), link_tx).map_err(|e| {
+        log_open_failure(&format!("session parameters for {endpoint}"), &e);
+        OpenError::DriveFailed
+    })?;
+    Ok(Listening { listener, params })
 }
 
 /// The [`FaceExecutor`] of a [`FaceDrive::PerFace`] node: every face's drive runs on a thread of
@@ -3268,12 +3329,14 @@ async fn drive_listen(
         gossiping: _,
         listen_phase,
     } = ctx;
-    let Some(BoundListeners { legs, late }) =
-        bind_listeners(&endpoints, listen_phase, &tls, &zid, link_tx, offer, clock).await
-    else {
-        let _ = tx.send(false);
-        return;
-    };
+    let BoundListeners { legs, late } =
+        match bind_listeners(&endpoints, listen_phase, &tls, &zid, link_tx, offer, clock).await {
+            Ok(bound) => bound,
+            Err(cause) => {
+                let _ = tx.send(Err(cause));
+                return;
+            }
+        };
     let listeners: Vec<&BoundListener> = legs.iter().map(|leg| &leg.listening.listener).collect();
     let _findable = match bound_responder(
         scouting.as_ref(),
@@ -3286,7 +3349,7 @@ async fn drive_listen(
     {
         Ok(responder) => responder.map(Responder::start),
         Err(()) => {
-            let _ = tx.send(false);
+            let _ = tx.send(Err(OpenError::DriveFailed));
             return;
         }
     };
@@ -3358,7 +3421,7 @@ async fn drive_idle(whatami: WhatAmI, ctx: DriveContext) {
     {
         Ok(responder) => responder.map(Responder::start),
         Err(()) => {
-            let _ = tx.send(false);
+            let _ = tx.send(Err(OpenError::DriveFailed));
             return;
         }
     };
@@ -3384,7 +3447,7 @@ struct GroupSetup {
     tx_queue: TxQueueConf,
     /// Where a group that cannot be joined reports the open as failed, before the role
     /// reports anything.
-    opened: mpsc::Sender<bool>,
+    opened: OpenReport,
 }
 
 /// One group, resolved from its [`GroupJoin`]: where it is and what this session
@@ -3396,35 +3459,37 @@ struct ResolvedGroup {
     is_shm: bool,
     /// [`GroupJoin::declarations`].
     declarations: GroupDeclarations,
-    group: std::net::IpAddr,
-    port: u16,
-    opts: wz_runtime_tokio::McastGroupOptions,
+    link: GroupLinkSpec,
     params: wz_runtime_tokio::multicast_glue::MulticastParams,
+}
+
+/// The link a group runs over, as its endpoint names it.
+#[cfg(feature = "multicast-transport")]
+enum GroupLinkSpec {
+    /// A UDP multicast group: its address, its port and the socket keys of its metadata.
+    Udp {
+        group: std::net::IpAddr,
+        port: u16,
+        opts: wz_runtime_tokio::McastGroupOptions,
+    },
+    /// Open-debt item 911 — raw Ethernet, as the `reth/` endpoint configures it.
+    #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+    RawEth(wz_runtime_tokio::raweth_link::RethLocator),
 }
 
 #[cfg(feature = "multicast-transport")]
 impl ResolvedGroup {
     /// Read `join`'s endpoint as a router reads its group locator: a `udp/` locator, either
-    /// family, with the socket keys of its metadata. `None` is an endpoint that names no
-    /// group, which fails the open.
+    /// family, with the socket keys of its metadata, or, in a build with the raweth transport,
+    /// a `reth/` endpoint as zenoh-pico reads one. `None` is an endpoint that names no group,
+    /// which fails the open.
     fn resolve(
         join: &GroupJoin,
         zid: &[u8],
         whatami: WhatAmI,
         tx_queue: TxQueueConf,
     ) -> Option<Self> {
-        use wz_runtime_tokio::locator::{parse_locator, Proto};
-
-        let parsed = parse_locator(&join.endpoint)
-            .map_err(|e| log_open_failure(&format!("group {}", join.endpoint), &e))
-            .ok()?;
-        if parsed.proto != Proto::Udp || !parsed.addr.ip().is_multicast() {
-            log_open_failure(
-                &format!("group {}", join.endpoint),
-                &"not a udp multicast group",
-            );
-            return None;
-        }
+        let link = Self::link_of(&join.endpoint)?;
         let GroupProfile {
             lease_ms,
             join_interval_ms,
@@ -3437,15 +3502,7 @@ impl ResolvedGroup {
             endpoint: join.endpoint.clone(),
             is_shm: join.is_shm,
             declarations: join.declarations,
-            group: parsed.addr.ip(),
-            port: parsed.addr.port(),
-            opts: wz_runtime_tokio::McastGroupOptions {
-                iface: parsed.socket.as_ref().and_then(|s| s.iface.clone()),
-                ttl: parsed.mcast_ttl,
-                joins: parsed.mcast_join,
-                bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
-                dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
-            },
+            link,
             params: wz_runtime_tokio::multicast_glue::MulticastParams {
                 whatami,
                 zid: zid.to_vec(),
@@ -3456,6 +3513,37 @@ impl ResolvedGroup {
                 batch_size,
                 is_qos,
                 tx_queue,
+            },
+        })
+    }
+
+    /// The link `endpoint` names, or `None` (logged) for one that names no group.
+    fn link_of(endpoint: &str) -> Option<GroupLinkSpec> {
+        use wz_runtime_tokio::locator::{parse_locator, Proto};
+
+        #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+        if endpoint.starts_with("reth/") {
+            return wz_runtime_tokio::raweth_link::parse_reth_locator(endpoint)
+                .map(GroupLinkSpec::RawEth)
+                .map_err(|e| log_open_failure(&format!("group {endpoint}"), &e))
+                .ok();
+        }
+        let parsed = parse_locator(endpoint)
+            .map_err(|e| log_open_failure(&format!("group {endpoint}"), &e))
+            .ok()?;
+        if parsed.proto != Proto::Udp || !parsed.addr.ip().is_multicast() {
+            log_open_failure(&format!("group {endpoint}"), &"not a udp multicast group");
+            return None;
+        }
+        Some(GroupLinkSpec::Udp {
+            group: parsed.addr.ip(),
+            port: parsed.addr.port(),
+            opts: wz_runtime_tokio::McastGroupOptions {
+                iface: parsed.socket.as_ref().and_then(|s| s.iface.clone()),
+                ttl: parsed.mcast_ttl,
+                joins: parsed.mcast_join,
+                bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
+                dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
             },
         })
     }
@@ -3488,7 +3576,9 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         .map(|join| ResolvedGroup::resolve(join, &zid, whatami, tx_queue))
         .collect::<Option<Vec<_>>>()
     else {
-        let _ = opened.send(false);
+        // An endpoint that names no group this build can join: pico's listen of it finds no
+        // link for its scheme.
+        let _ = opened.send(Err(OpenError::SchemeUnknown));
         return;
     };
     let local = tokio::task::LocalSet::new();
@@ -3506,31 +3596,53 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                             endpoint,
                             is_shm,
                             declarations,
-                            group,
-                            port,
-                            opts,
+                            link,
                             params,
                         } = group;
-                        serve_group(
-                            shared,
-                            index as u64,
-                            GroupLabel {
-                                endpoint: &endpoint,
-                                is_shm,
-                                declarations,
-                            },
-                            &params,
-                            || {
-                                wz_runtime_tokio::UdpDriver::bind_multicast_link(
-                                    group,
-                                    port,
-                                    opts.as_socket_config(),
+                        let label = GroupLabel {
+                            endpoint: &endpoint,
+                            is_shm,
+                            declarations,
+                        };
+                        match link {
+                            GroupLinkSpec::Udp { group, port, opts } => {
+                                serve_group(
+                                    shared,
+                                    index as u64,
+                                    label,
+                                    &params,
+                                    || {
+                                        wz_runtime_tokio::UdpDriver::bind_multicast_link(
+                                            group,
+                                            port,
+                                            opts.as_socket_config(),
+                                        )
+                                    },
+                                    stop,
+                                    up,
                                 )
-                            },
-                            stop,
-                            up,
-                        )
-                        .await
+                                .await
+                            }
+                            // Open-debt item 911 — the same group face over raw Ethernet.
+                            #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+                            GroupLinkSpec::RawEth(reth) => {
+                                serve_group(
+                                    shared,
+                                    index as u64,
+                                    label,
+                                    &params,
+                                    || {
+                                        let reth = reth.clone();
+                                        async move {
+                                            wz_runtime_tokio::raweth_group::RawEthGroupDriver::open_endpoint(reth)
+                                        }
+                                    },
+                                    stop,
+                                    up,
+                                )
+                                .await
+                            }
+                        }
                     })
                 })
                 .collect();
@@ -3545,7 +3657,8 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
             if joined == faces.len() {
                 role.await;
             } else {
-                let _ = opened.send(false);
+                // A group that could not be joined is a listen link that did not open.
+                let _ = opened.send(Err(OpenError::LinkFailed));
             }
             let _ = stop_tx.send(true);
             for face in faces {
@@ -4053,7 +4166,7 @@ pub fn open_blocking(
     let shutdown = Arc::new(Notify::new());
     // The node's own closed latch, not a new one: every entity holding `shared` reads it.
     let stop = shared.closed_latch();
-    let (tx, rx) = mpsc::channel::<bool>();
+    let (tx, rx) = mpsc::channel::<Result<(), OpenError>>();
 
     let drive_shared = shared.clone();
     let drive_shutdown = shutdown.clone();
@@ -4107,7 +4220,7 @@ pub fn open_blocking(
             let rt = match built {
                 Ok(rt) => rt,
                 Err(_) => {
-                    let _ = tx.send(false);
+                    let _ = tx.send(Err(OpenError::DriveFailed));
                     return;
                 }
             };
@@ -4180,7 +4293,7 @@ pub fn open_blocking(
         .map_err(|_| OpenError::DriveFailed)?;
 
     match rx.recv() {
-        Ok(true) => Ok(SessionState {
+        Ok(Ok(())) => Ok(SessionState {
             shared,
             zid,
             shutdown,
@@ -4189,9 +4302,14 @@ pub fn open_blocking(
             abi_extension: std::sync::OnceLock::new(),
             read_gate,
         }),
-        _ => {
-            // Open failed (bind / link / handshake error, or the drive thread
-            // returned without opening). Join the finished thread and report.
+        // Open failed (bind / link / handshake error), and the drive role said why. Join the
+        // finished thread and report.
+        Ok(Err(cause)) => {
+            let _ = handle.join();
+            Err(cause)
+        }
+        // The drive thread returned without saying.
+        Err(_) => {
             let _ = handle.join();
             Err(OpenError::DriveFailed)
         }
@@ -4447,9 +4565,9 @@ mod tests {
             "the open was held by a stopped gate"
         );
 
-        let (tx, rx) = mpsc::channel::<bool>();
+        let (tx, rx) = mpsc::channel::<Result<(), OpenError>>();
         assert!(!gate.announce_open(&tx), "the receiver is alive");
-        assert_eq!(rx.recv(), Ok(true));
+        assert_eq!(rx.recv(), Ok(Ok(())));
         assert!(
             !gate.drive_may_run(),
             "after the announcement a stopped gate holds the drive"
@@ -5054,10 +5172,34 @@ mod multicast_face_tests {
     use wz_runtime_tokio::sink::SampleView;
     use wz_runtime_tokio_test_support::multicast_bus::GroupBus;
 
-    use super::{serve_group, GroupLabel, WhatAmI};
+    use super::{serve_group, GroupLabel, GroupLinkSpec, ResolvedGroup, WhatAmI};
     use crate::faces::{QueryableSink, SharedSession, SubscriberSink};
 
     const ENDPOINT: &str = "udp/224.0.0.224:7447";
+
+    /// Open-debt item 911 — an endpoint names its group's link: a `udp/` multicast address the
+    /// UDP group, a unicast one no group at all, and, with the raweth transport, a `reth/`
+    /// endpoint the raw Ethernet group pico reads it as (its own MAC, its interface).
+    #[test]
+    fn an_endpoint_names_the_link_of_its_group() {
+        assert!(matches!(
+            ResolvedGroup::link_of(ENDPOINT),
+            Some(GroupLinkSpec::Udp { port: 7447, .. })
+        ));
+        assert!(ResolvedGroup::link_of("udp/127.0.0.1:7447").is_none());
+        #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+        {
+            let Some(GroupLinkSpec::RawEth(reth)) =
+                ResolvedGroup::link_of("reth/02:00:00:00:00:01#iface=eth9")
+            else {
+                panic!("a reth/ endpoint is a raw Ethernet group");
+            };
+            assert_eq!(reth.smac, [0x02, 0, 0, 0, 0, 0x01]);
+            assert_eq!(reth.interface, "eth9");
+        }
+        #[cfg(not(all(feature = "raweth-transport", target_os = "linux")))]
+        assert!(ResolvedGroup::link_of("reth/02:00:00:00:00:01").is_none());
+    }
 
     /// A peer's beacon, every 100 ms.
     fn params(zid: &[u8]) -> MulticastParams {

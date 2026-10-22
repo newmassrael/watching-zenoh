@@ -92,9 +92,16 @@ pub const Z_ERR_SCOUT_NO_RESULTS: ZResult = -87;
 /// pico `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` (`utils/result.h`), which its listen link
 /// answers when no link it carries takes the endpoint (`vendor/zenoh-pico/src/link/link.c` @
 /// `ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`): a multicast group in a build without the
-/// multicast transport.
-#[cfg(not(feature = "multicast-transport"))]
+/// multicast transport, a scheme no link serves (MEASURED on the real library: `nope/...` and,
+/// in a build without its raweth transport, `reth/...`).
 pub const Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN: ZResult = -92;
+
+/// Open-debt item 911 (found on the way) — a `z_open` whose listen or connect link could not be
+/// opened. Matches pico `_Z_ERR_TRANSPORT_OPEN_FAILED` (`utils/result.h`), which its link
+/// answers when the link it took does not open (`vendor/zenoh-pico/src/link/link.c` @
+/// `ret = _Z_ERR_TRANSPORT_OPEN_FAILED;`; MEASURED on the real library: a listen on a port held
+/// elsewhere, a client connect to a port nobody listens on).
+pub const Z_ERR_TRANSPORT_OPEN_FAILED: ZResult = -102;
 
 /// An allocation failed. Matches pico `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 /// (`utils/result.h`).

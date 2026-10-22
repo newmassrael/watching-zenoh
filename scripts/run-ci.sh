@@ -17728,6 +17728,13 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M pico multicast peer test on wz" 12 \
         cargo test -p wz-integration-tests \
         --test pico_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
+    # Open-debt item 911 (found on the way) — what `z_open` returns when it cannot open, case by
+    # case (a listen on a held port, a connect to a closed one, a scheme no link serves), on
+    # both libraries; past the same pico guard, since it compiles a probe against the library.
+    # Count-guarded at 1.
+    _runci_guarded_test "M pico open failure codes on wz" 1 \
+        cargo test -p wz-integration-tests \
+        --test pico_open_failure_on_wz_capi -- --ignored || return 1
     # Open-debt item 913 — the zenoh-c ABI's group: a stock zenohd joins
     # `udp/224.0.0.226:7451#iface=lo`, and upstream's `z_info.c` (events) and its printers
     # (listing) report it, once on libzenohc and once on wz's drop-in, which must agree block

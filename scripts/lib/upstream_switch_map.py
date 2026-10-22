@@ -144,19 +144,19 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
     ("Z_FEATURE_LINK_TLS", "maps", "wz-capi-pico/transport-link-tls",
      "the tls/ link, dial and accept"),
     ("Z_FEATURE_SCOUTING", "maps", "wz-capi-pico/scout", "z_scout and the hello family"),
-    ("Z_FEATURE_LINK_UDP_MULTICAST", "never", None,
-     "the C surface establishes unicast transports only; open-debt item 913"),
+    ("Z_FEATURE_LINK_UDP_MULTICAST", "maps", "wz-capi-pico/multicast-transport",
+     "the udp/ group link a listen endpoint with an interface joins; one capability with the "
+     "multicast transport, as both switches are needed for it in pico"),
     ("Z_FEATURE_LINK_UDP_UNICAST", "maps", "wz-capi-pico/link-udp",
      "a udp/ endpoint to dial"),
-    ("Z_FEATURE_MULTICAST_TRANSPORT", "never", None,
-     "the C surface establishes unicast transports only, though the wz runtime has the "
-     "multicast transport; open-debt item 913"),
+    ("Z_FEATURE_MULTICAST_TRANSPORT", "maps", "wz-capi-pico/multicast-transport",
+     "z_open joins a group as the session's one transport, held as a group face beside "
+     "the unicast ones"),
     ("Z_FEATURE_UNICAST_TRANSPORT", "always", "crates/wz-capi-core/Cargo.toml",
      "the unicast transport"),
-    ("Z_FEATURE_RAWETH_TRANSPORT", "never", None,
-     "pico opens raw ethernet as a multicast-kind transport, which the C surface does not "
-     "establish; the wz runtime has its framing and socket but no reth/ locator or "
-     "session-open seam; open-debt item 911"),
+    ("Z_FEATURE_RAWETH_TRANSPORT", "maps", "wz-capi-pico/raweth-transport",
+     "a reth/ listen endpoint joins a group over raw ethernet, one frame per message, "
+     "its destination from the endpoint's mapping; linux only, as pico's"),
     ("Z_FEATURE_TCP_NODELAY", "always", "crates/wz-runtime-tokio/src/lib.rs",
      "set on every TCP-backed link, as zenoh does; turning it off would be a policy"),
     ("Z_FEATURE_LOCAL_SUBSCRIBER", "maps", "wz-capi-pico/local-subscriber",
@@ -180,9 +180,9 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
      "the roles beyond the client; a stronger cut than pico's, which keeps a lone listener"),
     ("Z_FEATURE_AUTO_RECONNECT", "always", "crates/wz-capi-pico/src/session.rs",
      "the redial of a lost link"),
-    ("Z_FEATURE_MULTICAST_DECLARATIONS", "never", None,
-     "meaningful only over a multicast transport, which the C surface does not establish; "
-     "open-debt item 913"),
+    ("Z_FEATURE_MULTICAST_DECLARATIONS", "maps", "wz-capi-pico/multicast-declarations",
+     "on a group: keyexpr declarations, the open-time and write-filter interests, and a "
+     "write filter that holds a write back"),
     ("Z_FEATURE_LOCAL_QUERYABLE", "maps", "wz-capi-pico/local-queryable",
      "a session's own get reaches its own queryables, and their replies it, inside the "
      "calls; allowed_origin and allowed_destination in the option structs"),

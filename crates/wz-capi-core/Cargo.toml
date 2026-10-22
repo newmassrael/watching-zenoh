@@ -150,6 +150,10 @@ multicast-transport = ["peer", "link-udp", "wz-runtime-tokio/transport-multicast
 # (the open-time pull of the members' keyexprs, a write filter's), the keyexpr declarations,
 # and a write filter that holds a write back. Off by default, as pico's switch is.
 multicast-declarations = ["multicast-transport", "wz-runtime-tokio/multicast-declarations"]
+# Open-debt item 911 — a group over raw Ethernet: a `reth/` endpoint joins one as the UDP group
+# is joined, through the runtime's raweth group link (`transport-link-raweth`). Linux only, as
+# pico's raweth transport is; elsewhere the endpoint names no group.
+raweth-transport = ["multicast-transport", "wz-runtime-tokio/transport-link-raweth"]
 # The link kinds the zenoh-c ABI forwards beside the ones above. No arm of this
 # crate is cfg'd on them: a session dials through `dial_endpoint` and binds through
 # `bind_endpoint_with_config`, and both decide by scheme in the runtime, so a scheme

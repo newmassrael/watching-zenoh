@@ -729,8 +729,10 @@ pub(crate) unsafe fn open_session(
                 Z_OK
             }
             // The core reports a NEUTRAL failure; zenoh-c's vocabulary for "the
-            // session could not be established" is Z_ENETWORK.
-            Err(OpenError::DriveFailed) => Z_ENETWORK,
+            // session could not be established" is Z_ENETWORK, whichever the cause.
+            Err(OpenError::DriveFailed | OpenError::LinkFailed | OpenError::SchemeUnknown) => {
+                Z_ENETWORK
+            }
         }
     }
 }

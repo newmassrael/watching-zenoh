@@ -85,6 +85,17 @@ default = "off"
 implies = ["multicast-transport"]
 help = "pico's multicast declarations: interests, keyexpr declarations and the write filter on a group."
 
+# Open-debt item 911 — zenoh-pico's raw Ethernet transport (vendor default 0): a multicast session
+# over L2 frames, one message per frame, its destination MAC from the endpoint's mapping.
+[[capability]]
+id = "raweth-transport"
+kconfig = "WZ_CAP_RAWETH_TRANSPORT"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_RAWETH_TRANSPORT"
+default = "off"
+implies = ["multicast-transport"]
+help = "pico's raw Ethernet transport: a group over L2 frames on one interface (Linux, CAP_NET_RAW)."
+
 [[capability]]
 id = "query"
 kconfig = "WZ_CAP_QUERY"

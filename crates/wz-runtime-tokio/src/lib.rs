@@ -1132,6 +1132,11 @@ pub mod zenoh_config_finding;
 #[cfg(all(feature = "transport-link-raweth", target_os = "linux"))]
 pub use wz_packet_socket::raweth_socket;
 
+/// The raweth framing and the `reth/` endpoint it is configured by, for a host that opens a
+/// raweth group (open-debt item 911).
+#[cfg(feature = "transport-link-raweth")]
+pub use wz_session_core::raweth_link;
+
 /// R311y594 (B1) — the LIVE capture source: an `AF_PACKET` tap feeding the
 /// same [`wz_capture::Dissection`] a pcap file does, with the KERNEL's
 /// timestamp as the observer's clock. Linux-only, and privileged — see the

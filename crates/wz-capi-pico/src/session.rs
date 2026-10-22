@@ -77,8 +77,17 @@ use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 /// for it is the multicast one (`vendor/zenoh-pico/src/link/multicast/udp.c` @
 /// `z_result_t _z_endpoint_udp_multicast_valid(`); pico's listen has no unicast UDP link
 /// (`vendor/zenoh-pico/src/link/link.c` @ `z_result_t _z_listen_link(`).
+///
+/// Open-debt item 911 — and, with `raweth-transport`, any `reth/` endpoint: pico's listen of one
+/// opens its raweth transport, a multicast session over raw Ethernet
+/// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
+/// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
 fn is_group_endpoint(endpoint: &str) -> bool {
     let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
+    #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
+    if locator.starts_with("reth/") {
+        return true;
+    }
     locator.starts_with("udp/") && metadata.split(';').any(|pair| pair.starts_with("iface="))
 }
 
@@ -533,6 +542,8 @@ pub unsafe extern "C" fn z_open(
             // onto zenoh-pico's code. The mapping exists precisely because the
             // other ABI's `int8_t` uses different values for the same idea.
             Err(OpenError::DriveFailed) => Z_ERR_GENERIC,
+            Err(OpenError::LinkFailed) => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+            Err(OpenError::SchemeUnknown) => crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
         }
     })
 }

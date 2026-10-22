@@ -94,6 +94,10 @@ multicast-transport = ["link-udp", "peer", "wz-capi-core/multicast-transport"]
 # Open-debt item 913 — pico's `Z_FEATURE_MULTICAST_DECLARATIONS` (vendor default 0), off here
 # as there.
 multicast-declarations = ["multicast-transport", "wz-capi-core/multicast-declarations"]
+# Open-debt item 911 — pico's `Z_FEATURE_RAWETH_TRANSPORT` (vendor default 0): `z_open` with a
+# `listen` endpoint `reth/<mac>#...` joins a group over raw Ethernet as the session's one
+# transport, as pico opens its raweth transport. Off here as there.
+raweth-transport = ["multicast-transport", "wz-capi-core/raweth-transport"]
 # `link-udp` (`Z_FEATURE_LINK_UDP_UNICAST`): a `udp/` endpoint to dial. `scout` implies it, the
 # scouting group being a UDP one.
 link-udp = ["wz-capi-core/link-udp"]

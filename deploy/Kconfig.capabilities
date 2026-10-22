@@ -58,6 +58,15 @@ config WZ_CAP_MULTICAST_DECLARATIONS
 	  zenoh-pico's switch for it: Z_FEATURE_MULTICAST_DECLARATIONS.
 	  Exported by: pico.
 
+config WZ_CAP_RAWETH_TRANSPORT
+	bool "raweth-transport"
+	default n
+	select WZ_CAP_MULTICAST_TRANSPORT
+	help
+	  pico's raw Ethernet transport: a group over L2 frames on one interface (Linux, CAP_NET_RAW).
+	  zenoh-pico's switch for it: Z_FEATURE_RAWETH_TRANSPORT.
+	  Exported by: pico.
+
 config WZ_CAP_QUERY
 	bool "query"
 	default y
