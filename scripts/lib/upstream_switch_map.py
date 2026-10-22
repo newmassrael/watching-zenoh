@@ -119,10 +119,11 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
      "transport-fragmentation is enabled unconditionally"),
     ("Z_FEATURE_ENCODING_VALUES", "always", "crates/wz-capi-pico/src/encoding.rs",
      "the predefined encoding table, held to the oracle"),
-    ("Z_FEATURE_MULTI_THREAD", "always", "crates/wz-capi-pico/src/sync.rs",
+    ("Z_FEATURE_MULTI_THREAD", "always", "crates/wz-capi-pico/src/session.rs",
      "a host threading model rather than a wire feature: the session drives itself on its "
-     "own runtime, so one cdylib serves both header arms; the single-thread arm's entry "
-     "points and object sizes are open-debt item 918"),
+     "own runtime, so one cdylib serves both header arms, the single-threaded entry points "
+     "(zp_read, zp_send_keep_alive, zp_send_join) included; only the mutex and condvar "
+     "sizes differ between the arms, which is open-debt item 917's layout question"),
     ("Z_FEATURE_LINK_TCP", "always", "crates/wz-capi-core/Cargo.toml",
      "the tcp/ link is part of every capi-core build"),
     ("Z_FEATURE_LINK_BLUETOOTH", "never", None,
@@ -155,9 +156,9 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
     ("Z_FEATURE_LOCAL_SUBSCRIBER", "never", None,
      "every put is remote-only and the options struct keeps the off layout, which is "
      "upstream's default; the on arm is open-debt item 914"),
-    ("Z_FEATURE_SESSION_CHECK", "never", None,
-     "an operation on an entity of a closed session is expected to return success rather "
-     "than upstream's session-closed error, not yet measured; open-debt item 916"),
+    ("Z_FEATURE_SESSION_CHECK", "always", "crates/wz-capi-pico/tests/session_check.rs",
+     "a put, delete or get on an entity whose session was closed, and a reply on a query "
+     "held past it, answer the session-closed error, as upstream's default does"),
     ("Z_FEATURE_BATCHING", "always", "crates/wz-capi-pico/src/session.rs",
      "zp_batch_start / flush / stop"),
     ("Z_FEATURE_BATCH_TX_MUTEX", "n/a", None,

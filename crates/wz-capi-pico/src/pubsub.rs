@@ -44,7 +44,9 @@ use crate::abi::{
 use crate::bytes::ByteBuf;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::result::{
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+};
 use crate::session::{session_state, z_loaned_session_t};
 use crate::write_filter::{PicoSession, WriteFilter};
 use wz_capi_core::faces::{FilterPlane, FilteredPut, MatchId, SharedSession, SubId, WireKey};
@@ -870,6 +872,11 @@ impl PlainPublisher {
     /// put or a face stamps what it sends (`put_plain_declared` answers `None`
     /// then, with nothing sent).
     pub(crate) fn publish_plain(&self, payload: &[u8]) -> ZResult {
+        // pico's session check comes first, before the write filter
+        // (`_z_publisher_put_impl`, `Z_FEATURE_SESSION_CHECK`).
+        if self.shared.is_closed() {
+            return Z_ERR_SESSION_CLOSED;
+        }
         let Some((params, mapping)) = &self.plain else {
             return self.publish(payload, &put_options());
         };
@@ -891,6 +898,12 @@ impl PlainPublisher {
     /// (`vendor/zenoh-pico/src/api/api.c` @
     /// `!_z_write_filter_active(&pub->_filter)`).
     pub(crate) fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+        // A put or a delete on a publisher whose session was closed answers
+        // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
+        // default), and before the write filter is consulted.
+        if self.shared.is_closed() {
+            return Z_ERR_SESSION_CLOSED;
+        }
         if self.filter.active() {
             return Z_OK;
         }

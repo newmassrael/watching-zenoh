@@ -62,7 +62,7 @@ use crate::config::{
     Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY, Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY,
 };
 use crate::ffi::{guard_val, guarded};
-use crate::result::{ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
     DEFAULT_BATCH_SIZE,
@@ -618,6 +618,106 @@ pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) -> bool {
     guard_val(false, || session_state(zs).is_some())
 }
 
+// --- the single-threaded entry points (pico `Z_FEATURE_MULTI_THREAD == 0`) --
+//
+// A program compiled against pico's single-threaded headers advances its session
+// by hand with these three, which upstream declares (and defines) only when
+// `Z_FEATURE_MULTI_THREAD == 0` (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h`,
+// `vendor/zenoh-pico/src/api/api.c` `zp_read` .. `zp_send_join`). They are exported here on
+// every build for the reason `zp_spin_once` is: one cdylib serves both header arms, and
+// only `z_owned_mutex_t` / `z_owned_condvar_t` differ in size between them.
+//
+// The wz session drives itself, so each is the same one-directional divergence
+// `zp_spin_once` documents: the work a call would trigger (a read, a keep-alive, a
+// join) is done by the session on its own schedule whether or not the call is made,
+// and the call answers what upstream answers for a live session.
+
+/// pico `zp_read_options_t` (`api/types.h`, `Z_FEATURE_MULTI_THREAD == 0`): one `bool`.
+#[repr(C)]
+pub struct zp_read_options_t {
+    pub single_read: bool,
+}
+
+/// pico `zp_send_keep_alive_options_t`: one byte so the struct is not empty.
+#[repr(C)]
+pub struct zp_send_keep_alive_options_t {
+    pub __dummy: u8,
+}
+
+/// pico `zp_send_join_options_t`: one byte so the struct is not empty.
+#[repr(C)]
+pub struct zp_send_join_options_t {
+    pub __dummy: u8,
+}
+
+/// pico `zp_read_options_default`: `single_read = false`.
+#[no_mangle]
+pub unsafe extern "C" fn zp_read_options_default(options: *mut zp_read_options_t) {
+    if !options.is_null() {
+        (*options).single_read = false;
+    }
+}
+
+/// pico `zp_read`: read and process what the session's link holds. The wz session
+/// reads continuously on its own runtime, so a live session answers `Z_OK`; a null
+/// one answers `_Z_ERR_SESSION_CLOSED`, the code pico's session check uses.
+#[no_mangle]
+pub unsafe extern "C" fn zp_read(
+    zs: *const z_loaned_session_t,
+    _options: *const zp_read_options_t,
+) -> ZResult {
+    guarded(|| live_session_result(zs))
+}
+
+/// pico `zp_send_keep_alive_options_default`.
+#[no_mangle]
+pub unsafe extern "C" fn zp_send_keep_alive_options_default(
+    options: *mut zp_send_keep_alive_options_t,
+) {
+    if !options.is_null() {
+        (*options).__dummy = 0;
+    }
+}
+
+/// pico `zp_send_keep_alive`: send a KeepAlive now. The wz session keeps its lease
+/// with keep-alives on its own schedule, so a live session answers `Z_OK`.
+#[no_mangle]
+pub unsafe extern "C" fn zp_send_keep_alive(
+    zs: *const z_loaned_session_t,
+    _options: *const zp_send_keep_alive_options_t,
+) -> ZResult {
+    guarded(|| live_session_result(zs))
+}
+
+/// pico `zp_send_join_options_default`.
+#[no_mangle]
+pub unsafe extern "C" fn zp_send_join_options_default(options: *mut zp_send_join_options_t) {
+    if !options.is_null() {
+        (*options).__dummy = 0;
+    }
+}
+
+/// pico `zp_send_join`: send a Join now. Upstream sends one only on a multicast or
+/// raw-ethernet transport and answers `_Z_RES_OK` on a unicast one without sending
+/// (`vendor/zenoh-pico/src/transport/common/lease.c` `_z_send_join`); this ABI
+/// establishes unicast transports only, so a live session answers `Z_OK`.
+#[no_mangle]
+pub unsafe extern "C" fn zp_send_join(
+    zs: *const z_loaned_session_t,
+    _options: *const zp_send_join_options_t,
+) -> ZResult {
+    guarded(|| live_session_result(zs))
+}
+
+/// What the three single-threaded entry points answer for `zs`: `Z_OK` for an open
+/// session, `_Z_ERR_SESSION_CLOSED` for a null or closed one.
+unsafe fn live_session_result(zs: *const z_loaned_session_t) -> ZResult {
+    match session_state(zs) {
+        Some(state) if !state.is_closed() => Z_OK,
+        _ => Z_ERR_SESSION_CLOSED,
+    }
+}
+
 // --- TX batching (pico `zp_batch_*`) ---------------------------------------
 
 /// Open a TX batching window (pico `zp_batch_start`).
@@ -635,7 +735,9 @@ pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResul
             state.shared.batch_start_all();
             Z_OK
         }
-        None => Z_ERR_NULL,
+        // pico: `if (_Z_RC_IS_NULL(zs)) _Z_ERROR_RETURN(_Z_ERR_SESSION_CLOSED);` -- a null
+        // session is answered as a closed one, for all three batch calls.
+        None => Z_ERR_SESSION_CLOSED,
     })
 }
 
@@ -652,7 +754,7 @@ pub unsafe extern "C" fn zp_batch_flush(zs: *const z_loaned_session_t) -> ZResul
             state.shared.batch_flush_all();
             Z_OK
         }
-        None => Z_ERR_NULL,
+        None => Z_ERR_SESSION_CLOSED,
     })
 }
 
@@ -664,7 +766,7 @@ pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult
             state.shared.batch_stop_all();
             Z_OK
         }
-        None => Z_ERR_NULL,
+        None => Z_ERR_SESSION_CLOSED,
     })
 }
 

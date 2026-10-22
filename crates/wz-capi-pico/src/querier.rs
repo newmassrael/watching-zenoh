@@ -58,7 +58,7 @@ use crate::matching::{
 };
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
 use crate::write_filter::{PicoSession, WriteFilter};
 
@@ -502,6 +502,12 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // (`vendor/zenoh-pico/src/api/api.c` @
         // `} else if (closure.drop != NULL) { closure.drop(closure.context); }`).
         // The bytes and the token were consumed above, as upstream's cleanup does.
+        // pico checks the session first, then the write filter, and on either refusal runs
+        // the closure's `drop` (`z_querier_get_with_parameters_substr`, `should_proceed`).
+        if state.shared.is_closed() {
+            drop(closure);
+            return Z_ERR_SESSION_CLOSED;
+        }
         if state.filter.active() {
             drop(closure);
             return Z_OK;

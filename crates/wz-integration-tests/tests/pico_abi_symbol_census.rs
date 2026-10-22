@@ -317,6 +317,31 @@ const BUILD_GATED_EXTRAS: &[(&str, &str)] = &[
          single-threaded drop-in defines it unconditionally.",
     ),
     (
+        "zp_read",
+        "upstream declares and defines it only under `#if Z_FEATURE_MULTI_THREAD == 0`; \
+         the oracle build has threads ON. wz exports it on every arm, as zp_spin_once.",
+    ),
+    (
+        "zp_read_options_default",
+        "the options default of zp_read, under the same single-threaded condition.",
+    ),
+    (
+        "zp_send_keep_alive",
+        "single-threaded only upstream (`Z_FEATURE_MULTI_THREAD == 0`); exported on every arm.",
+    ),
+    (
+        "zp_send_keep_alive_options_default",
+        "the options default of zp_send_keep_alive, same condition.",
+    ),
+    (
+        "zp_send_join",
+        "single-threaded only upstream (`Z_FEATURE_MULTI_THREAD == 0`); exported on every arm.",
+    ),
+    (
+        "zp_send_join_options_default",
+        "the options default of zp_send_join, same condition.",
+    ),
+    (
         "z_scout_options_default",
         "declared in upstream's `primitives.h`; the oracle build omits the body \
          with its scouting configuration. wz defines it on every arm.",

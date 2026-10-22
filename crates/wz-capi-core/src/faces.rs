@@ -1565,6 +1565,14 @@ pub struct SharedSession {
     /// not inert the send and receive lanes that step around a per-message verdict are off for
     /// this node's sessions. See [`SessionResources::policy`].
     policy: crate::node_policy::NodePolicy,
+    /// The session's closed latch: set once by `SessionState::close` and never cleared. It lives
+    /// HERE, and the drive loop races against this same `Arc`, so that an entity that outlives
+    /// the session handle (a publisher, a querier, a query being answered) asks the one fact the
+    /// drive thread and the C thread already agree on instead of a second flag kept beside it.
+    /// It is what pico's `Z_FEATURE_SESSION_CHECK` reads through `_z_session_weak_upgrade_if_open`
+    /// (`vendor/zenoh-pico/src/api/api.c`, the publisher put and delete, the querier get, the
+    /// query replies and the batch calls).
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
@@ -1847,7 +1855,19 @@ impl SharedSession {
             gossip,
             auth,
             policy,
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// The closed latch the drive loop stops on (see the `closed` field): the drive takes this
+    /// `Arc` rather than making its own, so the two can never disagree.
+    pub fn closed_latch(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.closed.clone()
+    }
+
+    /// Whether the session this node belongs to has been closed (pico's session check).
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The authentication the node holds, for the sessions it dials and accepts.

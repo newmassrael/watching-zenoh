@@ -88,7 +88,7 @@ CASES: tuple[Case, ...] = (
          forbid=(GOSSIP, CLOCK, ADVANCED), require=(ACCEPT, RESPONDER, SCOUTING, UDP),
          note="peer implies scout and with it the UDP group"),
     Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_030_000,
-         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED), exports=803,
+         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED), exports=809,
          note="every capability on: the symbol count is the drop-in's"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED)),

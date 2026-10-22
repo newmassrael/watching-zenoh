@@ -76,7 +76,9 @@ use crate::abi::{
 };
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_OK};
+use crate::result::{
+    ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+};
 use crate::session::{session_state, z_loaned_session_t};
 use wz_capi_core::faces::{QblId, SharedSession};
 
@@ -314,6 +316,13 @@ struct QueryMarshal {
     /// flushed by the dispatch. Each escape is its own hold (pushing the same
     /// query into two channels is legal), released on its own drop.
     deferred: Option<HeldQuery>,
+    /// The node's closed latch ([`SharedSession::closed_latch`]), on a marshal the dispatch
+    /// built and on every copy escaped from it. A reply on a query whose session has been
+    /// closed answers `_Z_ERR_SESSION_CLOSED`, as pico's `z_query_reply*` do before anything else
+    /// (`vendor/zenoh-pico/src/api/api.c`, `_z_session_weak_upgrade_if_open`). Only an ESCAPED
+    /// query can meet a closed session: a callback's own query cannot outlive the drive thread
+    /// `z_close` joins. `None` on a fixture built outside a dispatch.
+    closed: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Reply accumulator.
     ///
     /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
@@ -383,6 +392,7 @@ impl QueryMarshal {
             session: None,
             is_local: view.is_local(),
             deferred: None,
+            closed: None,
             replies: UnsafeCell::new(Vec::new()),
         }
     }
@@ -392,6 +402,19 @@ impl QueryMarshal {
     fn with_session(mut self, session: TokioSession) -> Self {
         self.session = Some(session);
         self
+    }
+
+    /// Bind the node's closed latch (see the `closed` field).
+    fn with_closed(mut self, closed: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.closed = Some(closed);
+        self
+    }
+
+    /// Whether the session this query arrived on has been closed.
+    fn session_closed(&self) -> bool {
+        self.closed
+            .as_ref()
+            .is_some_and(|latch| latch.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     /// An INDEPENDENT copy bound to a DEFERRED responder — what
@@ -434,6 +457,7 @@ impl QueryMarshal {
             session: None,
             is_local: self.is_local,
             deferred: Some(held),
+            closed: self.closed.clone(),
             replies: UnsafeCell::new(Vec::new()),
         }
     }
@@ -619,13 +643,16 @@ unsafe impl Sync for CQueryClosure {}
 pub(crate) fn make_queryable_callback(
     closure: Arc<CQueryClosure>,
     session: TokioSession,
+    closed: Arc<std::sync::atomic::AtomicBool>,
 ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
     move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
         let call = match closure.call {
             Some(f) => f,
             None => return,
         };
-        let mut marshal = QueryMarshal::new(view).with_session(session.clone());
+        let mut marshal = QueryMarshal::new(view)
+            .with_session(session.clone())
+            .with_closed(closed.clone());
         // Bind AFTER the move out of `new` — the marshal is at its final
         // address only here. See `QueryMarshal::bind`.
         marshal.bind();
@@ -1086,8 +1113,13 @@ unsafe fn declare_queryable_inner(
             // R311y498 — see the pubsub/liveliness twins: the shim mints, the
             // registry calls the factory per face, the C drop(context) is unmoved.
             let closure = Arc::new(cclosure);
+            let closed = state.shared.closed_latch();
             Arc::new(move |session: &TokioSession| {
-                Box::new(make_queryable_callback(closure.clone(), session.clone())) as Box<_>
+                Box::new(make_queryable_callback(
+                    closure.clone(),
+                    session.clone(),
+                    closed.clone(),
+                )) as Box<_>
             })
         },
     )?;
@@ -1421,6 +1453,11 @@ pub unsafe extern "C" fn z_query_reply(
             Some(m) => m,
             None => return Z_ERR_INVALID,
         };
+        // pico refuses a reply on a closed session before reading anything else; the moved
+        // arguments above are consumed first all the same, so none of them leaks.
+        if marshal.session_closed() {
+            return Z_ERR_SESSION_CLOSED;
+        }
         // pico dereferences `keyexpr` unconditionally (`_z_send_reply` passes it
         // straight into `_z_declared_keyexpr_intersects`), so a null there is a
         // caller bug that SEGFAULTS pico. Report it instead of inventing a
@@ -1495,6 +1532,11 @@ pub unsafe extern "C" fn z_query_reply_del(
             Some(m) => m,
             None => return Z_ERR_INVALID,
         };
+        // pico refuses a reply on a closed session before reading anything else; the moved
+        // arguments above are consumed first all the same, so none of them leaks.
+        if marshal.session_closed() {
+            return Z_ERR_SESSION_CLOSED;
+        }
         // Null is a caller bug that segfaults pico — reported, not substituted
         // (see `z_query_reply`).
         let ke = match keyexpr_str(keyexpr) {
@@ -1533,6 +1575,11 @@ pub unsafe extern "C" fn z_query_reply_err(
             Some(m) => m,
             None => return Z_ERR_INVALID,
         };
+        // pico refuses a reply on a closed session before reading anything else; the moved
+        // arguments above are consumed first all the same, so none of them leaks.
+        if marshal.session_closed() {
+            return Z_ERR_SESSION_CLOSED;
+        }
         marshal.push_reply(PendingReply::Err {
             payload: buf,
             encoding,

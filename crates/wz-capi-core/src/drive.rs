@@ -3645,7 +3645,8 @@ pub fn open_blocking(
         .map_err(|_| OpenError::DriveFailed)?,
     );
     let shutdown = Arc::new(Notify::new());
-    let stop = Arc::new(AtomicBool::new(false));
+    // The node's own closed latch, not a new one: every entity holding `shared` reads it.
+    let stop = shared.closed_latch();
     let (tx, rx) = mpsc::channel::<bool>();
 
     let drive_shared = shared.clone();
