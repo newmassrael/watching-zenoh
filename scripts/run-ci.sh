@@ -10748,10 +10748,10 @@ layer_c1k_cargo_test_scouting_static() {
 # catching exactly the "implemented-but-not-excludable" drift this
 # round closed. The no_std MCU strip is Layer G's cross-compile job.
 layer_c1o_keyexpr_gating_behavior() {
-    _runci_guarded_test "C1o keyexpr alloc" 7 \
+    _runci_guarded_test "C1o keyexpr alloc" 9 \
         cargo test -p wz-session-core --no-default-features --features alloc \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr alloc+wildcards" 18 \
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 20 \
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
