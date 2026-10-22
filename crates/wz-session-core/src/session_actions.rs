@@ -8640,6 +8640,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "liveliness-token",
     ))]
     #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn dispatch_network_message_at<P>(
         &self,
         stage: DispatchStage,
