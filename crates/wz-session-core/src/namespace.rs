@@ -141,11 +141,7 @@ pub fn apply_egress(ns: &OwnedNonWildKeyExpr, msg: &mut NetworkMessage) -> Resul
         #[cfg(feature = "codec-push")]
         NetworkMessage::Push(p) => apply_egress_push(ns, p)?,
         #[cfg(feature = "codec-request")]
-        NetworkMessage::Request(r) => {
-            if let Some(new) = literal_prefix(ns, &r.keyexpr) {
-                crate::request_build::set_request_keyexpr_literal(r, &new)?;
-            }
-        }
+        NetworkMessage::Request(r) => apply_egress_request(ns, r)?,
         #[cfg(feature = "codec-response")]
         NetworkMessage::Response(r) => apply_egress_response(ns, r)?,
         NetworkMessage::Interest(i) => apply_egress_interest(ns, i)?,
@@ -181,6 +177,23 @@ pub fn apply_egress_push(
 ) -> Result<(), CodecError> {
     if let Some(new) = literal_prefix(ns, &p.keyexpr) {
         crate::push_build::set_push_keyexpr_literal(p, &new)?;
+    }
+    Ok(())
+}
+
+/// The Request (query) egress rule — the SSOT for the `NetworkMessage::Request`
+/// arm of [`apply_egress`] AND the multicast TX-item dispatcher
+/// ([`apply_egress_multicast_item`]), which carries a group's query since a
+/// multicast session issues them (open-debt item 913). Prefixes a LITERAL
+/// selector; an aliased one passes through. zenoh decorates the query
+/// (`zenoh/src/net/routing/namespace.rs` @ `fn send_request(&self, msg: &mut Request) {`).
+#[cfg(feature = "codec-request")]
+pub fn apply_egress_request(
+    ns: &OwnedNonWildKeyExpr,
+    r: &mut crate::wire::RequestOwned,
+) -> Result<(), CodecError> {
+    if let Some(new) = literal_prefix(ns, &r.keyexpr) {
+        crate::request_build::set_request_keyexpr_literal(r, &new)?;
     }
     Ok(())
 }
@@ -355,6 +368,10 @@ pub fn apply_egress_multicast_item(
     match item {
         #[cfg(feature = "codec-push")]
         Item::Push { push, .. } => apply_egress_push(ns, push)?,
+        // A query this session sends to the group: local-origin like the Push,
+        // prefixed by the same rule as a unicast query.
+        #[cfg(all(feature = "codec-push", feature = "codec-request"))]
+        Item::Request { request } => apply_egress_request(ns, request)?,
         #[cfg(feature = "codec-response")]
         Item::Response { response } => apply_egress_response(ns, response)?,
         // ResponseFinal is a bare request-id with no keyexpr — nothing to

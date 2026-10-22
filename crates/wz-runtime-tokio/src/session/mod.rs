@@ -4763,6 +4763,15 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         }
         Ok(())
     }
+
+    /// Make `value` the query's value: its bytes go in `opts.payload`, which serves every
+    /// leg that cannot carry the buffer. The buffer itself rides beside the options into
+    /// [`Self::query_via`], which decides per leg: the remote one sends the descriptor on a
+    /// session that negotiated SHM, and the local one hands a queryable the chunk (R3061).
+    #[cfg(all(feature = "transport-shm", feature = "query-value"))]
+    fn adopt_shm_value(opts: &mut QueryOptions, value: &crate::shm_provider::ShmBackedPayload) {
+        opts.payload = Some(value.bytes().to_vec());
+    }
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -4896,15 +4905,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             on_reply,
             on_final,
         )
-    }
-
-    /// Make `value` the query's value: its bytes go in `opts.payload`, which serves every
-    /// leg that cannot carry the buffer. The buffer itself rides beside the options into
-    /// [`Self::query_via`], which decides per leg: the remote one sends the descriptor on a
-    /// session that negotiated SHM, and the local one hands a queryable the chunk (R3061).
-    #[cfg(all(feature = "transport-shm", feature = "query-value"))]
-    fn adopt_shm_value(opts: &mut QueryOptions, value: &crate::shm_provider::ShmBackedPayload) {
-        opts.payload = Some(value.bytes().to_vec());
     }
 
     /// The body of [`Self::query_aliased_auto`] and its shared-memory sibling: the
