@@ -278226,6 +278226,58 @@
         "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
       ]
     },
+    "Round 3427": {
+      "decision_summary": "Item 913 is paid through its last step and item 911's raw-ethernet residue with it, with no residue left. The zenoh-c drop-in joins a multicast group beside its unicast face and reports the members as libzenohc does; pico's multicast-declarations switch is a capability that declares keyexprs, asks open-time and write-filter interests and answers them on a group; and a reth/ listen opens pico's raweth transport, witnessed against the real pico library under sudo on a host that allows it. That witness found the pinned pico raweth unable to run its own scenario (a bufferless receive address, and a write-filter bypass that names the UDP transport only); its reference arm is built with both fixed. Found and fixed in wz: z_open codes, a group's queryable interest answer, the raweth member listing, fragment routing, and an interest on an undeclared alias. This push repays this item's hosted reds C1bz, C1cf and C1cs.",
+      "changes_bullets": [
+        "Item 913 D: wz-capi-c joins a multicast group in listen/endpoints beside its unicast face, reads transport/multicast/join_interval, reports members through z_transport_is_multicast, z_link_group and the transport events as libzenohc does, and announces a session's subscribers on each group it holds.",
+        "Item 913 E: GroupDeclarations::Mapped is pico's Z_FEATURE_MULTICAST_DECLARATIONS as the capability multicast-declarations: a group session declares keyexprs, asks a K interest at open and S or Q interests for its write filters, answers members' interests, and puts by a key it declared; Layer M builds a switched-on drop-in and pico oracle.",
+        "Item 913 F and 911: the reth/ endpoint is parsed in pico's grammar (source MAC, mapping, whitelist), a raweth group link frames one message per frame with its dmac and VLAN chosen by the mapping, and pico's z_open with a reth/ listen opens it under the capability raweth-transport.",
+        "Found: z_open names the cause of a failure as pico does (-102 link, -92 unknown scheme); a group answers members' queryable interests; each member's declarations and aliased keys are kept apart and retracted when it leaves.",
+        "Repaid: rustdoc links in multicast_glue and raweth_group; the C ABI default builds' size budgets move with the multicast plane, which the cost gate now requires and forbids per case; A4 foreign adjudicator links 1058 to 1074; preflight fixes to test names, the zenoh-c arms' class, a barrier origin, a held port, an upstream citation and two gate tables.",
+        "Residues paid: the pico raweth reference arm and its two library patches (THIRD_PARTY.md), the raweth witness in Layer M under sudo with a guard that ends a root child however a leg ends, the raweth member link as pico lists it, fragments routed by their message's key, and no keyexpr answer for an interest on an undeclared alias."
+      ],
+      "verification_bullets": [
+        "Layer M pico file on a build host: 12 of 12 pass, including upstream's z_test_peer_multicast at switch 0 and 1 against the real pico and wz; the open-failure probe passes against both libraries.",
+        "The raweth witness under sudo on this host: upstream's scenario passes on the patched real library 10 of 10, then real z_pub to wz z_sub, wz z_pub to real z_sub and z_info's member line pass 3 of 3; with wz's receive dead and its source MAC wrong all three red at the wz arm.",
+        "Unit witnesses with damage controls: fragments of one message share its mapping entry; an interest on an undeclared alias gets no keyexpr answer; the raweth member link reads as the real library's.",
+        "capability_cost_gate, Layer C1bz over every crate, wz-capi-core clippy with default features off, and the changed crates' tests and clippy on a build host: pass. Layers A4 and C0 pass, C0 save for another session's prose name.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The pinned pico's per-key raweth mapping reads a message's wire expression as a session keyexpr (a type confusion its compiler warns of); wz follows the mapping's stated intent, and the real library's choice is not an adjudicator for it.",
+        "The two raweth library defects are upstream's; reporting them upstream is outward-facing and waits on the owner.",
+        "Layer C0 is red on bf880aadd for another session's prose name (CONFIG_WZ_IDLE_WAIT_MS), which that session repays.",
+        "Item 910: the Rust API compatibility crate. Item 912: bt and a board's USB CDC serial need hardware to witness."
+      ],
+      "publishable_decision_summary": "Item 913 is paid through its last step and item 911's raw-ethernet residue with it, with no residue left. The zenoh-c drop-in joins a multicast group beside its unicast face and reports the members as libzenohc does; pico's multicast-declarations switch is a capability that declares keyexprs, asks open-time and write-filter interests and answers them on a group; and a reth/ listen opens pico's raweth transport, witnessed against the real pico library under sudo on a host that allows it. That witness found the pinned pico raweth unable to run its own scenario (a bufferless receive address, and a write-filter bypass that names the UDP transport only); its reference arm is built with both fixed. Found and fixed in wz: z_open codes, a group's queryable interest answer, the raweth member listing, fragment routing, and an interest on an undeclared alias. This push repays this item's hosted reds C1bz, C1cf and C1cs.",
+      "publishable_changes_bullets": [
+        "Item 913 D: wz-capi-c joins a multicast group in listen/endpoints beside its unicast face, reads transport/multicast/join_interval, reports members through z_transport_is_multicast, z_link_group and the transport events as libzenohc does, and announces a session's subscribers on each group it holds.",
+        "Item 913 E: GroupDeclarations::Mapped is pico's Z_FEATURE_MULTICAST_DECLARATIONS as the capability multicast-declarations: a group session declares keyexprs, asks a K interest at open and S or Q interests for its write filters, answers members' interests, and puts by a key it declared; Layer M builds a switched-on drop-in and pico oracle.",
+        "Item 913 F and 911: the reth/ endpoint is parsed in pico's grammar (source MAC, mapping, whitelist), a raweth group link frames one message per frame with its dmac and VLAN chosen by the mapping, and pico's z_open with a reth/ listen opens it under the capability raweth-transport.",
+        "Found: z_open names the cause of a failure as pico does (-102 link, -92 unknown scheme); a group answers members' queryable interests; each member's declarations and aliased keys are kept apart and retracted when it leaves.",
+        "Repaid: rustdoc links in multicast_glue and raweth_group; the C ABI default builds' size budgets move with the multicast plane, which the cost gate now requires and forbids per case; A4 foreign adjudicator links 1058 to 1074; preflight fixes to test names, the zenoh-c arms' class, a barrier origin, a held port, an upstream citation and two gate tables.",
+        "Residues paid: the pico raweth reference arm and its two library patches (THIRD_PARTY.md), the raweth witness in Layer M under sudo with a guard that ends a root child however a leg ends, the raweth member link as pico lists it, fragments routed by their message's key, and no keyexpr answer for an interest on an undeclared alias."
+      ],
+      "publishable_verification_bullets": [
+        "Layer M pico file on a build host: 12 of 12 pass, including upstream's z_test_peer_multicast at switch 0 and 1 against the real pico and wz; the open-failure probe passes against both libraries.",
+        "The raweth witness under sudo on this host: upstream's scenario passes on the patched real library 10 of 10, then real z_pub to wz z_sub, wz z_pub to real z_sub and z_info's member line pass 3 of 3; with wz's receive dead and its source MAC wrong all three red at the wz arm.",
+        "Unit witnesses with damage controls: fragments of one message share its mapping entry; an interest on an undeclared alias gets no keyexpr answer; the raweth member link reads as the real library's.",
+        "capability_cost_gate, Layer C1bz over every crate, wz-capi-core clippy with default features off, and the changed crates' tests and clippy on a build host: pass. Layers A4 and C0 pass, C0 save for another session's prose name.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pinned pico's per-key raweth mapping reads a message's wire expression as a session keyexpr (a type confusion its compiler warns of); wz follows the mapping's stated intent, and the real library's choice is not an adjudicator for it.",
+        "The two raweth library defects are upstream's; reporting them upstream is outward-facing and waits on the owner.",
+        "Layer C0 is red on bf880aadd for another session's prose name (CONFIG_WZ_IDLE_WAIT_MS), which that session repays.",
+        "Item 910: the Rust API compatibility crate. Item 912: bt and a board's USB CDC serial need hardware to witness."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
