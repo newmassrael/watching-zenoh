@@ -645,9 +645,9 @@ struct GroupKeyexprState {
 ))]
 struct OwedKeyexprs {
     interest_id: u64,
-    /// The key the interest names, `None` for every key. A key the member names by a declaration
-    /// of its own reads as every key: the session does not hold its members' declarations, so it
-    /// answers with more than zenoh-pico would rather than with less.
+    /// The key the interest names, `None` for every key. A key the member named by a declaration
+    /// of its own arrives here as the literal it declared, the group's dispatch having resolved
+    /// it per member (`MulticastDispatcher::apply_declared_aliases`).
     restriction: Option<String>,
     /// Whether this answer ends the interest: it asks for no other kind, so nothing else stages
     /// its final.
@@ -695,12 +695,21 @@ impl GroupKeyexprs {
             if !interest.c() || !body.ke() {
                 continue;
             }
-            let restriction = body.keyexpr.as_ref().and_then(|wire| match &wire.body {
-                WireexprOwnedVariant::WireexprLocal(local) if local.id == 0 => {
-                    local.suffix.as_ref().map(|suffix| suffix.to_string())
+            // A key the dispatch could not make literal names a declaration the member never
+            // made: zenoh-pico answers such an interest with nothing, not even its final
+            // (`vendor/zenoh-pico/src/session/interest.c` @
+            // `_Z_RETURN_IF_ERR(_z_get_keyexpr_from_wireexpr(zn, &restr_key, wireexpr, peer, true));`),
+            // and the session's other answers to it drop it alike.
+            let restriction = match body.keyexpr.as_ref().map(|wire| &wire.body) {
+                None => None,
+                Some(WireexprOwnedVariant::WireexprLocal(local)) if local.id == 0 => {
+                    match local.suffix.as_ref() {
+                        Some(suffix) => Some(suffix.to_string()),
+                        None => continue,
+                    }
                 }
-                _ => None,
-            });
+                Some(_) => continue,
+            };
             state.owed.push(OwedKeyexprs {
                 interest_id: interest.interest_id,
                 restriction,

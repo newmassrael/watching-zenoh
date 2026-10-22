@@ -11993,7 +11993,13 @@ fn tapped_qos_group_session() -> (
 /// JOIN it asks for: each keyexpr the session declared to the group that meets the interest's
 /// key, stamped with the interest's id, and then a final, the interest asking for no other kind.
 /// zenoh-pico's answer (`vendor/zenoh-pico/src/session/interest.c` @
-/// `ret = _z_interest_send_decl_resource(zn, id, NULL, restr_key_opt);`).
+/// `ret = _z_interest_send_decl_resource(zn, id, NULL, restr_key_opt);`). An interest whose key
+/// names a declaration the member never made is answered with nothing.
+///
+/// # Control
+///
+/// Reading such a key as every key answers interest 8 with both keyexprs and a final, which
+/// reds the assert.
 #[cfg(all(
     feature = "transport-multicast",
     feature = "codec-push",
@@ -12024,11 +12030,24 @@ fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group
         Some((0, Some("demo/**"))),
     )
     .expect("the interest builds");
+    // A key named by a declaration the member never made reaches the session unresolved, and
+    // zenoh-pico answers such an interest with nothing at all.
+    let unresolved = wz_session_core::interest_build::build_interest_exact(
+        8,
+        InterestKinds::KEYEXPRS,
+        /*current=*/ true,
+        /*future=*/ false,
+        Some((5, None)),
+    )
+    .expect("the interest builds");
     let outcome = DriverLoopOutcome::FramePayload {
         priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,
         sn: 0,
-        messages: vec![NetworkMessage::Interest(interest)],
+        messages: vec![
+            NetworkMessage::Interest(interest),
+            NetworkMessage::Interest(unresolved),
+        ],
         has_ext: false,
         extensions: Vec::new(),
     };
@@ -12059,7 +12078,8 @@ fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group
             (Some(7), "kexpr 1".to_owned()),
             (Some(7), "final".to_owned())
         ],
-        "the keyexpr meeting `demo/**`, then the final, both answering interest 7"
+        "the keyexpr meeting `demo/**`, then the final, both answering interest 7, and \
+         nothing answering interest 8, whose key names no declaration"
     );
 }
 
