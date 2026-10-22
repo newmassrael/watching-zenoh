@@ -3739,7 +3739,19 @@ mod custom_option_tests {
             0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x00, 0x00,
             0x00, 0x00, 0x88, 0x00, 0x00, 0x00,
         ];
-        assert_eq!(WRITTEN_BY_EDITCAP.len(), 272);
+        // The transcription is whole: each block states its own total length (little-endian,
+        // the byte order the program wrote), and the blocks fill the bytes exactly, so a byte
+        // lost or added in copying shows here and not as an odd parse below.
+        let mut at = 0;
+        while at + 8 <= WRITTEN_BY_EDITCAP.len() {
+            let stated = &WRITTEN_BY_EDITCAP[at + 4..at + 8];
+            at += u32::from_le_bytes(stated.try_into().expect("four bytes")) as usize;
+        }
+        assert_eq!(
+            at,
+            WRITTEN_BY_EDITCAP.len(),
+            "the blocks' lengths fill the file"
+        );
 
         let mut seen = Vec::new();
         let mut flags = None;
