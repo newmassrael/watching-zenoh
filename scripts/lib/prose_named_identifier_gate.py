@@ -315,7 +315,6 @@ UPSTREAM_UNCARRIED = frozenset(
         # counterpart of. Described, not spelled, for the reason above.
         "Z_PROTO_VERSION",
         "Z_QUERY_TARGET_DEFAULT",
-        "Z_REPLY_KEYEXPR_DEFAULT",
         "Z_SAMPLE_KIND_DEFAULT",
         "Z_SELECTOR_QUERY_MATCH",
         "Z_SELECTOR_TIME",

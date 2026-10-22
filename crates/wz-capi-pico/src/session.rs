@@ -844,6 +844,7 @@ pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult
 /// The `zid` half always comes from the SESSION, never from the handle: an
 /// entity's identity is `(this session's zid, this entity's eid)`, and reading
 /// the zid per-handle would be a second source for a fact that has one.
+#[cfg(feature = "unstable-api")]
 pub(crate) unsafe fn entity_global_id(
     zs: &SessionState,
     eid: u64,
@@ -863,6 +864,7 @@ pub(crate) unsafe fn entity_global_id(
 ///
 /// # Safety
 /// `zs` must be null or a live loaned session.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub unsafe extern "C" fn z_session_id(
     zs: *const z_loaned_session_t,
@@ -923,6 +925,7 @@ pub unsafe extern "C" fn z_publisher_keyexpr(
 ///
 /// # Safety
 /// `publisher` must be null or a live loaned publisher.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_id(
     publisher: *const crate::pubsub::z_loaned_publisher_t,
@@ -961,7 +964,7 @@ pub unsafe extern "C" fn z_querier_keyexpr(
 ///
 /// # Safety
 /// `querier` must be null or a live loaned querier.
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "unstable-api"))]
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_id(
     querier: *const crate::querier::z_loaned_querier_t,
@@ -1002,6 +1005,7 @@ pub unsafe extern "C" fn z_subscriber_keyexpr(
 ///
 /// # Safety
 /// `subscriber` must be null or a live loaned subscriber.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub unsafe extern "C" fn z_subscriber_id(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
@@ -1019,7 +1023,7 @@ pub unsafe extern "C" fn z_subscriber_id(
 ///
 /// # Safety
 /// `queryable` must be null or a live loaned queryable.
-#[cfg(feature = "queryable")]
+#[cfg(all(feature = "queryable", feature = "unstable-api"))]
 #[no_mangle]
 pub unsafe extern "C" fn z_queryable_id(
     queryable: *const crate::query::z_loaned_queryable_t,
@@ -1084,6 +1088,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_keyexpr(
 /// One projection for all seven accessors above so the "what does a dead handle
 /// report" answer cannot differ between them — the class of asymmetry this
 /// crate has already paid for.
+#[cfg(feature = "unstable-api")]
 fn entity_id_of(identity: Option<([u8; 16], u64)>) -> crate::entity::z_entity_global_id_t {
     match identity {
         Some((zid, eid)) => crate::entity::z_entity_global_id_t {
@@ -1314,6 +1319,7 @@ pub extern "C" fn z_priority_default() -> std::ffi::c_int {
 
 /// pico's default reliability (pico `z_reliability_default`) —
 /// `Z_RELIABILITY_RELIABLE`, which is 0 on this ABI and 1 in wz's own enum.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub extern "C" fn z_reliability_default() -> std::ffi::c_int {
     crate::pubsub::Z_RELIABILITY_RELIABLE

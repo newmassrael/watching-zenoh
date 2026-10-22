@@ -70,6 +70,7 @@ config WZ_CAP_LIVELINESS_GET
 	select WZ_CAP_QUERY
 	help
 	  The snapshot get of the liveliness plane; it is a query.
+	  zenoh-pico has it when all of these are on: Z_FEATURE_LIVELINESS, Z_FEATURE_QUERY.
 	  Exported by: pico, c.
 
 config WZ_CAP_ADVANCED
@@ -78,6 +79,7 @@ config WZ_CAP_ADVANCED
 	select WZ_CAP_LIVELINESS
 	select WZ_CAP_QUERYABLE
 	select WZ_CAP_TIMESTAMPING
+	select WZ_CAP_UNSTABLE_API
 	help
 	  The advanced publisher and subscriber (cache, history, miss detection).
 	  zenoh-pico's switch for it: Z_FEATURE_ADVANCED_PUBLICATION.
@@ -97,6 +99,23 @@ config WZ_CAP_GOSSIP
 	help
 	  A session told of a node by one it holds a link to dials it.
 	  Exported by: pico, c.
+
+config WZ_CAP_UNSTABLE_API
+	bool "unstable-api"
+	default y
+	help
+	  pico's unstable API: entity ids, reliability, source info, the cancellation token, and their option fields.
+	  zenoh-pico's switch for it: Z_FEATURE_UNSTABLE_API.
+	  Exported by: pico.
+
+config WZ_CAP_CONNECTIVITY
+	bool "connectivity"
+	default y
+	select WZ_CAP_UNSTABLE_API
+	help
+	  pico's connectivity plane: transport and link snapshots, and their event listeners.
+	  zenoh-pico's switch for it: Z_FEATURE_CONNECTIVITY.
+	  Exported by: pico.
 
 config WZ_CAP_MULTI_THREAD
 	bool "multi-thread"

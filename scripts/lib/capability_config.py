@@ -132,6 +132,11 @@ def validate_decl(data: dict, caps: dict) -> list[str]:
             out.append(f"{c['id']} is not in core, and every capability is")
         if not c["kconfig"].startswith("WZ_CAP_"):
             out.append(f"{c['id']}: Kconfig symbol `{c['kconfig']}` is not WZ_CAP_*")
+        if "pico_flag" in c and "pico_flags_all" in c:
+            out.append(f"{c['id']} names both a pico_flag and pico_flags_all; it is one or the other")
+        for flag in [c.get("pico_flag", "Z_FEATURE_")] + c.get("pico_flags_all", []):
+            if not flag.startswith("Z_FEATURE_"):
+                out.append(f"{c['id']}: pico switch `{flag}` is not Z_FEATURE_*")
     # A dependency cycle would make the closure below loop.
     for start in caps:
         seen: set[str] = set()
@@ -185,6 +190,9 @@ def emit_kconfig(decl: dict) -> str:
         flag = cap.get("pico_flag")
         if flag:
             lines.append(f"\t  zenoh-pico's switch for it: {flag}.")
+        flags = cap.get("pico_flags_all")
+        if flags:
+            lines.append(f"\t  zenoh-pico has it when all of these are on: {', '.join(flags)}.")
         lines.append(f"\t  Exported by: {', '.join(a for a in cap['abis'] if a != 'core')}.")
         lines.append("")
     lines.append("endmenu")
@@ -193,21 +201,38 @@ def emit_kconfig(decl: dict) -> str:
 
 CONFIG_RE = re.compile(r"^\s*CONFIG_(WZ_CAP_[A-Z0-9_]+)\s*=\s*y\s*$")
 DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s+([01])\b")
+# pico writes one switch, `Z_FEATURE_UNSTABLE_API`, through `#cmakedefine`: a bare `#define`
+# when it is on and `/* #undef ... */` when it is off, and its headers test it with `#ifdef`.
+BARE_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s*(?://.*|/\*.*)?$")
 
 
 def read_config(decl: dict, text: str) -> set[str]:
-    """The capabilities a `.config` or pico header turns ON. Unmentioned means off."""
+    """The capabilities a `.config` or pico header turns ON. Unmentioned means off.
+
+    A capability with a `pico_flag` is on when that switch is; one with `pico_flags_all`
+    has no switch of its own in pico and is on when every switch it names is (the
+    liveliness get exists where pico has both the liveliness and the query plane).
+    """
     by_kconfig = {c["kconfig"]: cid for cid, c in decl["caps"].items()}
-    by_flag = {c["pico_flag"]: cid for cid, c in decl["caps"].items() if "pico_flag" in c}
     on: set[str] = set()
+    flags_on: set[str] = set()
     for line in text.splitlines():
         m = CONFIG_RE.match(line)
         if m and m.group(1) in by_kconfig:
             on.add(by_kconfig[m.group(1)])
             continue
         d = DEFINE_RE.match(line)
-        if d and d.group(1) in by_flag and d.group(2) == "1":
-            on.add(by_flag[d.group(1)])
+        if d and d.group(2) == "1":
+            flags_on.add(d.group(1))
+            continue
+        b = BARE_DEFINE_RE.match(line)
+        if b:
+            flags_on.add(b.group(1))
+    for cid, cap in decl["caps"].items():
+        if cap.get("pico_flag") in flags_on:
+            on.add(cid)
+        elif cap.get("pico_flags_all") and set(cap["pico_flags_all"]) <= flags_on:
+            on.add(cid)
     return on
 
 
@@ -337,6 +362,17 @@ def cmd_selftest() -> int:
                              "CONFIG_WZ_CAP_GROUP=n\nCONFIG_OTHER=y\n") == {"query"})
     expect("a pico header reads 1 and not 0",
            read_config(decl, "#define Z_FEATURE_QUERY 1\n#define Z_FEATURE_QUERYABLE 0\n") == {"query"})
+    expect("a capability of several pico switches is on only when all of them are",
+           "liveliness-get" in read_config(
+               decl, "#define Z_FEATURE_LIVELINESS 1\n#define Z_FEATURE_QUERY 1\n")
+           and "liveliness-get" not in read_config(
+               decl, "#define Z_FEATURE_LIVELINESS 1\n#define Z_FEATURE_QUERY 0\n"))
+    expect("a bare #define is on and a #cmakedefine's #undef is off",
+           read_config(decl, "#define Z_FEATURE_UNSTABLE_API\n") == {"unstable-api"}
+           and read_config(decl, "/* #undef Z_FEATURE_UNSTABLE_API */\n") == set())
+    expect("advanced and connectivity pull the unstable API in pico",
+           "unstable-api" in features_for(decl, "pico", {"advanced"})
+           and "unstable-api" in features_for(decl, "pico", {"connectivity"}))
     expect("cargo args of nothing", cargo_args(decl, "c", set()) == "--no-default-features")
     expect("cargo args name the base then the closure",
            cargo_args(decl, "pico", {"peer"}).endswith("rx-busy-poll,link-udp,scout,peer"))

@@ -19,7 +19,9 @@
 # exported (core is the model under both ABIs and always has it). `default` is whether a build
 # that names nothing has it (every capability is on by default: the drop-in exports what the
 # reference build does). `pico_flag` is zenoh-pico's own switch for it, where it has one, so a
-# deployer who already writes a pico `config.h` can state the same intent.
+# deployer who already writes a pico `config.h` can state the same intent. `pico_flags_all` is
+# for a capability pico has no switch of its own for but has whenever several switches are all
+# on (the liveliness get, which pico declares inside both the liveliness and the query switch).
 #
 # `base` is what an ABI build needs that is not a capability.
 
@@ -87,6 +89,7 @@ help = "The liveliness token and subscriber."
 id = "liveliness-get"
 kconfig = "WZ_CAP_LIVELINESS_GET"
 abis = ["core", "pico", "c"]
+pico_flags_all = ["Z_FEATURE_LIVELINESS", "Z_FEATURE_QUERY"]
 implies = ["liveliness", "query"]
 help = "The snapshot get of the liveliness plane; it is a query."
 
@@ -95,7 +98,7 @@ id = "advanced"
 kconfig = "WZ_CAP_ADVANCED"
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_ADVANCED_PUBLICATION"
-implies = ["liveliness", "queryable", "timestamping"]
+implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
 help = "The advanced publisher and subscriber (cache, history, miss detection)."
 
 [[capability]]
@@ -111,6 +114,30 @@ kconfig = "WZ_CAP_GOSSIP"
 abis = ["core", "pico", "c"]
 implies = ["peer"]
 help = "A session told of a node by one it holds a link to dials it."
+
+# pico's unstable API (`Z_FEATURE_UNSTABLE_API`, a bare `#define`): the entity ids, the sample's
+# reliability and source info, the cancellation token, and the option fields that carry them
+# (`reliability`, `source_info`, `cancellation_token`). Off, those fields are not in the option
+# structs a program allocates, so the structs are smaller; pico's CMake forces the connectivity
+# plane, the advanced publisher and the admin space off with it, which `implies` states from
+# their side.
+[[capability]]
+id = "unstable-api"
+kconfig = "WZ_CAP_UNSTABLE_API"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_UNSTABLE_API"
+implies = []
+help = "pico's unstable API: entity ids, reliability, source info, the cancellation token, and their option fields."
+
+# pico's connectivity plane (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and
+# event listeners. Upstream declares it only with the unstable API.
+[[capability]]
+id = "connectivity"
+kconfig = "WZ_CAP_CONNECTIVITY"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_CONNECTIVITY"
+implies = ["unstable-api"]
+help = "pico's connectivity plane: transport and link snapshots, and their event listeners."
 
 # pico's header arm for its tasks. On, the C ABI is the one pico's multi-threaded headers declare:
 # the read and lease task doors, the host mutex, condvar and task, and the channel collections

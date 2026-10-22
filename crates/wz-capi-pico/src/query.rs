@@ -881,14 +881,19 @@ pub struct z_query_reply_options_t {
     pub is_express: bool,
     pub attachment: *mut z_moved_bytes_t,
     /// `z_source_info_t*` — the `(zid, eid, sn)` the reply is stamped with.
-    /// Unstable-gated upstream (`#ifdef Z_FEATURE_UNSTABLE_API`), and this ABI
-    /// mirrors the unstable layout throughout (so does `z_put_options_t`).
+    /// Unstable-gated upstream (`#ifdef Z_FEATURE_UNSTABLE_API`), and here with
+    /// `unstable-api` (so is `z_put_options_t`'s).
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut crate::pubsub::z_source_info_t,
 }
 
+crate::option_fields::unstable_option_fields!(z_query_reply_options_t {
+    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+});
+
 /// The upstream layout this struct must match, measured against the vendored
 /// header with `Z_FEATURE_UNSTABLE_API` on: 48 B, `source_info` last at
-/// offset 40.
+/// offset 40; without it, 40 B and 32 B for the two reply structs.
 ///
 /// R311y562 — the FIRST ABI layout guard on this crate's reply options. Adding
 /// `source_info` moves this struct from 40 B to 48 B, and nothing else in the
@@ -896,8 +901,6 @@ pub struct z_query_reply_options_t {
 /// struct into a wz build with a short one writes past the end of wz's view and
 /// reads garbage for every field after the mismatch, silently.
 const _: () = {
-    assert!(std::mem::size_of::<z_query_reply_options_t>() == 48);
-    assert!(std::mem::size_of::<z_query_reply_del_options_t>() == 40);
     assert!(std::mem::size_of::<z_query_reply_err_options_t>() == 8);
     // By OFFSET, not only by size — see `crate::get::z_get_options_t`, where the
     // same feature-conditional tail displaced a field and a size check would
@@ -907,10 +910,22 @@ const _: () = {
     // what was wrong next door.
     assert!(std::mem::offset_of!(z_query_reply_options_t, timestamp) == 16);
     assert!(std::mem::offset_of!(z_query_reply_options_t, attachment) == 32);
-    assert!(std::mem::offset_of!(z_query_reply_options_t, source_info) == 40);
     assert!(std::mem::offset_of!(z_query_reply_del_options_t, timestamp) == 8);
     assert!(std::mem::offset_of!(z_query_reply_del_options_t, attachment) == 24);
+};
+
+#[cfg(feature = "unstable-api")]
+const _: () = {
+    assert!(std::mem::size_of::<z_query_reply_options_t>() == 48);
+    assert!(std::mem::size_of::<z_query_reply_del_options_t>() == 40);
+    assert!(std::mem::offset_of!(z_query_reply_options_t, source_info) == 40);
     assert!(std::mem::offset_of!(z_query_reply_del_options_t, source_info) == 32);
+};
+
+#[cfg(not(feature = "unstable-api"))]
+const _: () = {
+    assert!(std::mem::size_of::<z_query_reply_options_t>() == 40);
+    assert!(std::mem::size_of::<z_query_reply_del_options_t>() == 32);
 };
 
 /// Fill default reply options (pico `z_query_reply_options_default`).
@@ -925,7 +940,10 @@ pub unsafe extern "C" fn z_query_reply_options_default(options: *mut z_query_rep
     (*options).timestamp = std::ptr::null_mut();
     (*options).is_express = false;
     (*options).attachment = std::ptr::null_mut();
-    (*options).source_info = std::ptr::null_mut();
+    #[cfg(feature = "unstable-api")]
+    {
+        (*options).source_info = std::ptr::null_mut();
+    }
 }
 
 /// Del-reply options (pico `z_query_reply_del_options_t`,
@@ -952,8 +970,13 @@ pub struct z_query_reply_del_options_t {
     /// `z_source_info_t*` — READ (R311y562). `has_source_info` is computed off
     /// the shared push-body `_commons`, BEFORE the `_is_put` split
     /// (`message.c:259-261`), so a Del reply carries its source identity.
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut crate::pubsub::z_source_info_t,
 }
+
+crate::option_fields::unstable_option_fields!(z_query_reply_del_options_t {
+    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+});
 
 /// Fill default del-reply options (pico `z_query_reply_del_options_default`).
 #[no_mangle]
@@ -968,7 +991,10 @@ pub unsafe extern "C" fn z_query_reply_del_options_default(
     (*options).timestamp = std::ptr::null_mut();
     (*options).is_express = false;
     (*options).attachment = std::ptr::null_mut();
-    (*options).source_info = std::ptr::null_mut();
+    #[cfg(feature = "unstable-api")]
+    {
+        (*options).source_info = std::ptr::null_mut();
+    }
 }
 
 /// Err-reply options (pico `z_query_reply_err_options_t`) — `{ encoding }`.
@@ -1444,7 +1470,7 @@ pub unsafe extern "C" fn z_query_reply(
             let meta = ReplyMetaOwned {
                 encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
                 timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
-                source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+                source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
                 express: (*options).is_express,
             };
             (attachment, meta)
@@ -1522,7 +1548,7 @@ pub unsafe extern "C" fn z_query_reply_del(
             let meta = ReplyMetaOwned {
                 encoding: None,
                 timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
-                source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+                source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
                 express: (*options).is_express,
             };
             (attachment, meta)
@@ -1617,6 +1643,7 @@ pub unsafe extern "C" fn z_query_encoding(
 ///
 /// # Safety
 /// `queryable` must be null or a live loaned queryable.
+#[cfg(feature = "unstable-api")]
 pub(crate) unsafe fn queryable_identity(
     queryable: *const z_loaned_queryable_t,
 ) -> Option<([u8; 16], u64)> {

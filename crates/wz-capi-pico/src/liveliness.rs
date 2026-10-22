@@ -416,8 +416,31 @@ pub struct z_liveliness_get_options_t {
     /// `z_moved_cancellation_token_t*` — HONOURED as of R311y575. Cancelling the
     /// token drops this snapshot get's pending registration; an ALREADY-cancelled
     /// token fails the call with `Z_ERR_CANCELLED` and sends no Interest, which
-    /// is upstream's own ordering (`src/net/liveliness.c:284-310, 341`).
+    /// is upstream's own ordering (`src/net/liveliness.c:284-310, 341`). Only with
+    /// `unstable-api`, as only with `Z_FEATURE_UNSTABLE_API` upstream.
+    #[cfg(feature = "unstable-api")]
     pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
+}
+
+#[cfg(feature = "liveliness-get")]
+impl z_liveliness_get_options_t {
+    /// The token the caller handed over, taken, as [`crate::get::z_get_options_t`]'s.
+    ///
+    /// # Safety
+    /// The field must be null or a moved token this crate produced.
+    #[cfg(feature = "unstable-api")]
+    unsafe fn take_cancellation_token(
+        &self,
+    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+        crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
+    }
+
+    #[cfg(not(feature = "unstable-api"))]
+    unsafe fn take_cancellation_token(
+        &self,
+    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+        None
+    }
 }
 
 /// The upstream layout this struct must match, measured against the reference
@@ -426,13 +449,16 @@ pub struct z_liveliness_get_options_t {
 /// offset tells those apart. The mechanical gate
 /// (`crates/wz-integration-tests/tests/pico_abi_option_layout.rs`) is what
 /// notices upstream MOVING the field; this const is the compile-time floor under
-/// it.
-#[cfg(feature = "liveliness-get")]
+/// it. Without the unstable API the struct is the 8 B timeout alone.
+#[cfg(all(feature = "liveliness-get", feature = "unstable-api"))]
 const _: () = {
     assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 16);
     assert!(std::mem::align_of::<z_liveliness_get_options_t>() == 8);
     assert!(std::mem::offset_of!(z_liveliness_get_options_t, cancellation_token) == 8);
 };
+
+#[cfg(all(feature = "liveliness-get", not(feature = "unstable-api")))]
+const _: () = assert!(std::mem::size_of::<z_liveliness_get_options_t>() == 8);
 
 /// Fill default liveliness-get options (pico `z_liveliness_get_options_default`,
 /// `src/api/liveliness.c:111`).
@@ -451,7 +477,10 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
         // caller's 16-byte struct kept whatever its stack held in the tail, so
         // the very next thing a drop-in program does with these options differs
         // from upstream on uninitialised memory.
-        (*options).cancellation_token = std::ptr::null_mut();
+        #[cfg(feature = "unstable-api")]
+        {
+            (*options).cancellation_token = std::ptr::null_mut();
+        }
         Z_OK
     })
 }
@@ -494,7 +523,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         let token = if options.is_null() {
             None
         } else {
-            crate::cancellation::take_moved_cancellation_token((*options).cancellation_token)
+            (*options).take_cancellation_token()
         };
         if callback.is_null() {
             return Z_ERR_NULL;

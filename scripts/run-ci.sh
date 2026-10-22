@@ -15653,19 +15653,23 @@ layer_e_ap_demo_round_trip() {
     # feature-arm builds in Layer C1bm), while the ONE artifact this lane's legs
     # link carries every scheme they exercise.
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
-    # Open-debt item 918 -- and the SINGLE-THREADED build, which the `_st` drop-in legs
-    # and `pico_header_arm_layout` link. pico's two header arms differ in the size of
-    # structs a C program allocates (`_z_fifo_mt_t`, `z_open_options_t`), so a program
-    # compiled against the `-st` headers links the build of that arm: wz-capi-pico
-    # without `multi-thread`. Its features are read off the arm's own generated
-    # config.h, so the build is what that header states, into its own target
-    # directory because both builds are `libwz_capi_pico.so`.
-    local st_features
-    st_features="$(python3 scripts/lib/capability_config.py --features pico \
-        target/zenoh-pico-build-st/zenohpico/include/zenoh-pico/config.h)" || return 1
-    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo build -p wz-capi-pico $st_features \
-        --target-dir target/wz-capi-pico-st --quiet) || return 1
+    # Open-debt items 918 and 917 -- and wz's build of every other pico header arm,
+    # which the `_st` drop-in legs and `pico_header_arm_layout` link. pico's arms differ
+    # in the size of structs a C program allocates (`_z_fifo_mt_t` and `z_open_options_t`
+    # with `Z_FEATURE_MULTI_THREAD`, every option struct with an unstable field with
+    # `Z_FEATURE_UNSTABLE_API`), so a program compiled against an arm's headers links
+    # the build of that arm. Its features are read off the arm's own generated config.h,
+    # so the build is what that header states, each into its own target directory
+    # because every build is `libwz_capi_pico.so`. The pairs are the ones
+    # `PicoHeaderArm` in wz-integration-tests names.
+    local arm arm_features
+    for arm in st default; do
+        arm_features="$(python3 scripts/lib/capability_config.py --features pico \
+            "target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
+        # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+        (cd crates && cargo build -p wz-capi-pico $arm_features \
+            --target-dir "target/wz-capi-pico-$arm" --quiet) || return 1
+    done
     # R121e + R121f + R121f1 + R121g: bundle the integration tests
     # into a single cargo invocation so the compilation/link step
     # runs once and the lane timing stays predictable. `--test`

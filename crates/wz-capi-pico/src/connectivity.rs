@@ -75,11 +75,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use wz_capi_core::faces::{FaceEventKind, FaceSnapshot, LinkSnapshot, SharedSession};
 use wz_capi_core::listeners::ListenerSet;
-use wz_runtime_tokio::session_glue::LinkKind;
 
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
 use crate::ffi::{guarded, CClosure};
+use crate::link_properties::pico_link_properties;
 use crate::pubsub::{
     z_closure_drop_callback_t, z_sample_kind_t, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
@@ -406,39 +406,6 @@ fn transport_of(snapshot: &FaceSnapshot) -> z_loaned_transport_t {
         is_qos: false,
         is_multicast: snapshot.is_multicast,
         is_shm: false,
-    }
-}
-
-/// `(mtu, is_streamed, is_reliable)` of a link, as pico's link of that kind
-/// answers.
-///
-/// pico's five links fix all three per TYPE (`_z_get_link_mtu_tcp` and its
-/// siblings, and `zl->_cap._flow` / `zl->_cap._is_reliable` beside them). A kind
-/// pico has no link for keeps what the registry reports. A link whose kind the
-/// driver cannot name reports pico's own zeros, which is what pico answers for a
-/// transport with no link object at all
-/// (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h` @
-/// `static inline void _z_transport_link_properties_from_transport(`).
-pub(crate) fn pico_link_properties(kind: Option<LinkKind>, reported_mtu: u16) -> (u16, bool, bool) {
-    match kind {
-        None => (0, false, false),
-        // pico: stream, reliable, `return 65535;`.
-        Some(LinkKind::Tcp) | Some(LinkKind::Tls) => (65535, true, true),
-        // pico: datagram, unreliable, `return 1450;`.
-        Some(LinkKind::Udp) => (1450, false, false),
-        // pico: datagram, RELIABLE, `return 65535;` — the one link where the two
-        // flags differ.
-        Some(LinkKind::Ws) => (65535, false, true),
-        // pico: datagram, unreliable, `_Z_SERIAL_MTU_SIZE`.
-        Some(LinkKind::Serial) => (1500, false, false),
-        Some(
-            other @ (LinkKind::UdpReliable
-            | LinkKind::Quic
-            | LinkKind::QuicDatagram
-            | LinkKind::Unixpipe
-            | LinkKind::UnixsockStream
-            | LinkKind::Vsock),
-        ) => (reported_mtu, other.is_streamed(), other.is_reliable()),
     }
 }
 
@@ -1765,7 +1732,9 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
+
     use std::sync::OnceLock;
+    use wz_runtime_tokio::session_glue::LinkKind;
 
     use wz_runtime_tokio::runtime_impl::TokioTime;
 
@@ -2060,39 +2029,6 @@ mod tests {
             2,
             "shutdown is idempotent"
         );
-    }
-
-    /// The link a face reports follows pico's table for the kinds pico has and
-    /// the registry's answer for the rest.
-    ///
-    /// # Control
-    ///
-    /// Reporting the negotiated MTU for TCP (2048 from a pico peer) where pico's
-    /// link says 65535 reds the first row.
-    #[test]
-    fn a_link_reports_what_pico_reports_for_its_kind() {
-        let reported = 777;
-        let table = [
-            (Some(LinkKind::Tcp), (65535, true, true)),
-            (Some(LinkKind::Tls), (65535, true, true)),
-            (Some(LinkKind::Udp), (1450, false, false)),
-            (Some(LinkKind::Ws), (65535, false, true)),
-            (Some(LinkKind::Serial), (1500, false, false)),
-            (None, (0, false, false)),
-            // pico has no such link: the registry's answers stand.
-            (Some(LinkKind::Quic), (reported, true, true)),
-            (Some(LinkKind::QuicDatagram), (reported, false, false)),
-            (Some(LinkKind::UdpReliable), (reported, true, true)),
-            (Some(LinkKind::Unixpipe), (reported, true, true)),
-        ];
-        for (kind, want) in table {
-            assert_eq!(pico_link_properties(kind, reported), want, "{kind:?}");
-        }
-        // Every kind the registry can report has a row above or an arm there;
-        // this is the population, derived from the enum.
-        for kind in LinkKind::ALL {
-            let _ = pico_link_properties(Some(*kind), reported);
-        }
     }
 
     /// The wire role becomes pico's bitmask, and an unknown role becomes

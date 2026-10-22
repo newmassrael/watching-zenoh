@@ -89,29 +89,60 @@ pub struct z_querier_options_t {
 
 /// pico `z_querier_get_options_t` (`api/types.h:290-297`), 40 B measured.
 ///
-/// The `cancellation_token` / `source_info` tail exists because
-/// `Z_FEATURE_UNSTABLE_API` is defined in the generated config. Both are
-/// HONOURED — `source_info` since R311y562, `cancellation_token` since
-/// R311y575, which is also when it stopped being a `c_void` that leaked one
-/// token per get. The two entry points describe the same query and share
-/// [`crate::get::issue_get`], so the cancellation semantics here are the same
-/// ones `z_get` has by construction rather than by a second implementation.
+/// The `cancellation_token` / `source_info` tail exists when the build has
+/// `unstable-api` (`Z_FEATURE_UNSTABLE_API` defined, as in the reference build;
+/// without it the struct is the 24 B head). Both are HONOURED — `source_info`
+/// since R311y562, `cancellation_token` since R311y575, which is also when it
+/// stopped being a `c_void` that leaked one token per get. The two entry points
+/// describe the same query and share [`crate::get::issue_get`], so the
+/// cancellation semantics here are the same ones `z_get` has by construction
+/// rather than by a second implementation.
 #[repr(C)]
 pub struct z_querier_get_options_t {
     pub payload: *mut z_moved_bytes_t,
     pub encoding: *mut c_void,
     pub attachment: *mut z_moved_bytes_t,
+    #[cfg(feature = "unstable-api")]
     pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
     /// `z_source_info_t*` — the `(zid, eid, sn)` stamped on the outbound Query
     /// body (ext 0x01). READ as of R311y562; it was carried opaque alongside
     /// `cancellation_token` and the two were named ignored TOGETHER, which
     /// bundled a field wz has no plane for with one it does.
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut crate::pubsub::z_source_info_t,
 }
+
+crate::option_fields::unstable_option_fields!(z_querier_get_options_t {
+    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+});
+
+impl z_querier_get_options_t {
+    /// The token the caller handed over, taken, as [`crate::get::z_get_options_t`]'s.
+    ///
+    /// # Safety
+    /// The field must be null or a moved token this crate produced.
+    #[cfg(feature = "unstable-api")]
+    unsafe fn take_cancellation_token(
+        &self,
+    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+        crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
+    }
+
+    #[cfg(not(feature = "unstable-api"))]
+    unsafe fn take_cancellation_token(
+        &self,
+    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+        None
+    }
+}
+
+#[cfg(not(feature = "unstable-api"))]
+const _: () = assert!(std::mem::size_of::<z_querier_get_options_t>() == 24);
 
 /// The reference build declares this at 40 B
 /// (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`); pinned so the unstable tail
 /// cannot silently fall off, as it had on `z_get_options_t`.
+#[cfg(feature = "unstable-api")]
 const _: () = {
     assert!(std::mem::size_of::<z_querier_get_options_t>() == 40);
     // By OFFSET too: this struct's unstable tail is a PAIR, and a pair is where
@@ -160,7 +191,9 @@ pub unsafe extern "C" fn z_querier_get_options_default(options: *mut z_querier_g
         payload: std::ptr::null_mut(),
         encoding: std::ptr::null_mut(),
         attachment: std::ptr::null_mut(),
+        #[cfg(feature = "unstable-api")]
         cancellation_token: std::ptr::null_mut(),
+        #[cfg(feature = "unstable-api")]
         source_info: std::ptr::null_mut(),
     };
 }
@@ -183,7 +216,9 @@ pub(crate) struct QuerierState {
     /// for it; retracted after the querier, as the publisher's is.
     key: DeclaredKeyexpr,
     /// R311y559 — the `eid` half of the global id `z_querier_id` reports,
-    /// allocated once at declare. See `PublisherState::eid`.
+    /// allocated once at declare. See `PublisherState::eid`. Only with
+    /// `unstable-api`, which is what reports it.
+    #[cfg(feature = "unstable-api")]
     eid: u64,
     /// R311y559 — cached loan of `key` for `z_querier_keyexpr`; bound after
     /// boxing, as everywhere else here.
@@ -214,11 +249,13 @@ impl QuerierState {
     }
 
     /// The `eid` half of the global id `z_querier_id` reports.
+    #[cfg(feature = "unstable-api")]
     pub(crate) fn entity_id(&self) -> u64 {
         self.eid
     }
 
     /// The SESSION's zid — the other half of that global id.
+    #[cfg(feature = "unstable-api")]
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
         self.shared.zid()
     }
@@ -395,6 +432,7 @@ pub unsafe extern "C" fn z_declare_querier(
             &key,
         );
         let mut boxed = Box::new(QuerierState {
+            #[cfg(feature = "unstable-api")]
             eid: state.shared.next_entity_id(),
             shared: state.shared.clone(),
             filter,
@@ -478,12 +516,12 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
                 crate::pubsub::take_moved_bytes((*options).attachment),
                 crate::get::PicoQueryValueMeta {
                     encoding: crate::encoding::take_moved_encoding((*options).encoding),
-                    source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+                    source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
                 },
                 // R311y575 — consumed on the same every-path line as the byte
                 // buffers, for the same reason: upstream's `z_querier_get` drops
                 // it unconditionally once the call is made.
-                crate::cancellation::take_moved_cancellation_token((*options).cancellation_token),
+                (*options).take_cancellation_token(),
             )
         };
         if callback.is_null() {
@@ -648,7 +686,15 @@ mod tests {
         assert_eq!(std::mem::size_of::<z_loaned_querier_t>(), 184);
         assert_eq!(std::mem::size_of::<z_moved_querier_t>(), 184);
         assert_eq!(std::mem::size_of::<z_querier_options_t>(), 48);
-        assert_eq!(std::mem::size_of::<z_querier_get_options_t>(), 40);
+        // The token and source-info tail is the unstable API's.
+        assert_eq!(
+            std::mem::size_of::<z_querier_get_options_t>(),
+            if cfg!(feature = "unstable-api") {
+                40
+            } else {
+                24
+            }
+        );
     }
 
     /// Every offset in `z_querier_options_t`, because a C caller fills this

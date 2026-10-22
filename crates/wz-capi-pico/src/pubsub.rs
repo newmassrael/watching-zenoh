@@ -44,6 +44,7 @@ use crate::abi::{
 use crate::bytes::ByteBuf;
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
+use crate::option_fields::unstable_option_fields;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
@@ -690,8 +691,13 @@ pub struct z_publisher_put_options_t {
     pub encoding: *mut c_void,
     pub timestamp: *mut z_timestamp_t,
     pub attachment: *mut z_moved_bytes_t,
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
+
+unstable_option_fields!(z_publisher_put_options_t {
+    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+});
 
 /// Fill default publisher-put options (pico `z_publisher_put_options_default`).
 #[no_mangle]
@@ -703,6 +709,7 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
         encoding: std::ptr::null_mut(),
         timestamp: std::ptr::null_mut(),
         attachment: std::ptr::null_mut(),
+        #[cfg(feature = "unstable-api")]
         source_info: std::ptr::null_mut(),
     };
 }
@@ -739,7 +746,8 @@ pub(crate) struct PlainPublisher {
     /// R311y559 — the `eid` half of the global id `z_publisher_id` reports,
     /// allocated ONCE at declare from the session's entity counter. See
     /// `SharedSession::next_entity_id` for why it is allocated rather than
-    /// derived.
+    /// derived. Only the unstable API reports it, so only `unstable-api` keeps it.
+    #[cfg(feature = "unstable-api")]
     eid: u64,
     /// What it was declared with, applied to every put and delete it makes
     /// ([`PublisherQos`]).
@@ -812,7 +820,7 @@ impl PublisherQos {
             congestion_control: push_congestion_from_pico(options.congestion_control),
             priority: crate::qos::priority_from_pico(options.priority),
             is_express: options.is_express,
-            reliability: reliability_from_pico(options.reliability),
+            reliability: reliability_from_pico(options.reliability()),
         }
     }
 
@@ -857,6 +865,7 @@ impl PlainPublisher {
             .plain_put_params()
             .zip(key.whole_key_mapping(&session.shared));
         Ok(Self {
+            #[cfg(feature = "unstable-api")]
             eid: session.shared.next_entity_id(),
             shared: session.shared.clone(),
             filter,
@@ -970,11 +979,13 @@ impl PublisherState {
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
+    #[cfg(feature = "unstable-api")]
     pub(crate) fn entity_id(&self) -> u64 {
         self.core.eid
     }
 
     /// The SESSION's zid — the other half of that global id.
+    #[cfg(feature = "unstable-api")]
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
         self.core.shared.zid()
     }
@@ -1259,7 +1270,7 @@ unsafe fn publisher_put_options(
         opts = opts.with_timestamp(ts);
         carried = true;
     }
-    if let Some(si) = source_info_hint_of((*options).source_info) {
+    if let Some(si) = source_info_hint_of((*options).source_info()) {
         opts = opts.with_source_info(si);
         carried = true;
     }
@@ -1302,10 +1313,11 @@ fn put_options() -> PublishOptions {
 ///
 /// The tail is FEATURE-CONDITIONAL in pico's header and these arms follow the
 /// GENERATED `config.h` the drop-in's programs compile against:
-/// `allowed_destination` is ABSENT (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0) and the
-/// `reliability` / `source_info` pair is PRESENT (`Z_FEATURE_UNSTABLE_API` is
-/// defined). Reading that off the cmake command line instead of the generated
-/// header is the R311y466 trap.
+/// `allowed_destination` is ABSENT (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0), and the
+/// `reliability` / `source_info` pair is present exactly when the build has
+/// `unstable-api` (`Z_FEATURE_UNSTABLE_API` defined, as in the reference build;
+/// undefined in upstream's default). Reading that off the cmake command line
+/// instead of the generated header is the R311y466 trap.
 #[repr(C)]
 pub struct z_put_options_t {
     pub encoding: *mut c_void,
@@ -1314,9 +1326,16 @@ pub struct z_put_options_t {
     pub timestamp: *mut z_timestamp_t,
     pub is_express: bool,
     pub attachment: *mut z_moved_bytes_t,
+    #[cfg(feature = "unstable-api")]
     pub reliability: c_int,
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
+
+unstable_option_fields!(z_put_options_t {
+    reliability: c_int = Z_RELIABILITY_RELIABLE,
+    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+});
 
 /// pico `z_delete_options_t` (`api/types.h:413-425`).
 ///
@@ -1328,16 +1347,28 @@ pub struct z_delete_options_t {
     pub priority: c_int,
     pub is_express: bool,
     pub timestamp: *mut z_timestamp_t,
+    #[cfg(feature = "unstable-api")]
     pub reliability: c_int,
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
+
+unstable_option_fields!(z_delete_options_t {
+    reliability: c_int = Z_RELIABILITY_RELIABLE,
+    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+});
 
 /// pico `z_publisher_delete_options_t` (`api/types.h:454-459`).
 #[repr(C)]
 pub struct z_publisher_delete_options_t {
     pub timestamp: *mut z_timestamp_t,
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
+
+unstable_option_fields!(z_publisher_delete_options_t {
+    source_info: *mut z_source_info_t = std::ptr::null_mut(),
+});
 
 /// Fill default put options (pico `z_put_options_default`).
 ///
@@ -1355,7 +1386,9 @@ pub unsafe extern "C" fn z_put_options_default(options: *mut z_put_options_t) {
         timestamp: std::ptr::null_mut(),
         is_express: false,
         attachment: std::ptr::null_mut(),
+        #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
+        #[cfg(feature = "unstable-api")]
         source_info: std::ptr::null_mut(),
     };
 }
@@ -1374,7 +1407,9 @@ pub unsafe extern "C" fn z_delete_options_default(options: *mut z_delete_options
         priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
         timestamp: std::ptr::null_mut(),
+        #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
+        #[cfg(feature = "unstable-api")]
         source_info: std::ptr::null_mut(),
     };
 }
@@ -1393,6 +1428,7 @@ pub unsafe extern "C" fn z_publisher_delete_options_default(
     }
     *options = z_publisher_delete_options_t {
         timestamp: std::ptr::null_mut(),
+        #[cfg(feature = "unstable-api")]
         source_info: std::ptr::null_mut(),
     };
 }
@@ -1516,7 +1552,7 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
         .with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
-        .with_reliability(reliability_from_pico((*options).reliability));
+        .with_reliability(reliability_from_pico((*options).reliability()));
     if let Some(attachment) = attachment {
         opts = opts.with_attachment(attachment.to_vec());
     }
@@ -1526,7 +1562,7 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
     }
-    if let Some(si) = source_info_hint_of((*options).source_info) {
+    if let Some(si) = source_info_hint_of((*options).source_info()) {
         opts = opts.with_source_info(si);
     }
     opts
@@ -1547,11 +1583,11 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
         .with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
-        .with_reliability(reliability_from_pico((*options).reliability));
+        .with_reliability(reliability_from_pico((*options).reliability()));
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
     }
-    if let Some(si) = source_info_hint_of((*options).source_info) {
+    if let Some(si) = source_info_hint_of((*options).source_info()) {
         opts = opts.with_source_info(si);
     }
     opts
@@ -1671,7 +1707,7 @@ pub unsafe extern "C" fn z_publisher_delete(
             if let Some(ts) = timestamp_hint_of((*options).timestamp) {
                 opts = opts.with_timestamp(ts);
             }
-            if let Some(si) = source_info_hint_of((*options).source_info) {
+            if let Some(si) = source_info_hint_of((*options).source_info()) {
                 opts = opts.with_source_info(si);
             }
         }
@@ -1686,8 +1722,9 @@ pub unsafe extern "C" fn z_publisher_delete(
 ///
 /// The tail of this struct is FEATURE-CONDITIONAL in pico's header, so the
 /// layout is a property of the generated `config.h`, not of the source tree:
-/// `reliability` exists because `Z_FEATURE_UNSTABLE_API` is defined, and
-/// `allowed_destination` is ABSENT because `Z_FEATURE_LOCAL_SUBSCRIBER` is 0.
+/// `reliability` exists when the build has `unstable-api` (`Z_FEATURE_UNSTABLE_API`
+/// defined, as in the reference build), and `allowed_destination` is ABSENT
+/// because `Z_FEATURE_LOCAL_SUBSCRIBER` is 0.
 /// Reading that off the cmake command line instead of the generated header is
 /// the R311y466 trap; both were read off `config.h`, and the offsets are pinned
 /// in this module's tests.
@@ -1707,8 +1744,13 @@ pub struct z_publisher_options_t {
     pub congestion_control: c_int,
     pub priority: c_int,
     pub is_express: bool,
+    #[cfg(feature = "unstable-api")]
     pub reliability: c_int,
 }
+
+unstable_option_fields!(z_publisher_options_t {
+    reliability: c_int = Z_RELIABILITY_RELIABLE,
+});
 
 /// Default publisher options (pico `z_publisher_options_default`,
 /// `vendor/zenoh-pico/src/api/api.c` @
@@ -1728,6 +1770,7 @@ pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_o
         congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
         priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
+        #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
     };
 }
@@ -2324,6 +2367,7 @@ pub unsafe extern "C" fn z_source_info_sn(info: *const z_source_info_t) -> u32 {
 ///
 /// # Safety
 /// `sample` must be null or a live loaned sample.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub unsafe extern "C" fn z_sample_source_info(
     sample: *const z_loaned_sample_t,
@@ -2348,6 +2392,7 @@ pub unsafe extern "C" fn z_sample_source_info(
 ///
 /// # Safety
 /// `sample` must be null or a live loaned sample.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub unsafe extern "C" fn z_sample_reliability(sample: *const z_loaned_sample_t) -> c_int {
     /// pico `Z_RELIABILITY_RELIABLE`, and its `Z_RELIABILITY_DEFAULT`.

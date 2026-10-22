@@ -66,6 +66,9 @@ ADVANCED = r"advanced_publisher|AdvancedPublisher"
 # without the capability is the single-threaded arm, so the two are each other's absence.
 THREADED = r"^(z_mutex_init|zp_start_read_task)$"
 SINGLE_THREADED = r"^(zp_spin_once|zp_read)$"
+# pico's connectivity plane (`connectivity`), which the default build has and a build of
+# upstream's default header does not.
+CONNECTIVITY = r"^(z_info_transports|z_declare_transport_events_listener)$"
 
 
 @dataclass(frozen=True)
@@ -83,21 +86,24 @@ class Case:
 
 # Budgets are the measured text plus about two percent. See the module doc.
 CASES: tuple[Case, ...] = (
-    Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_915_000,
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED),
+    Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_830_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
+                 CONNECTIVITY),
          require=(SINGLE_THREADED,),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
-              "no UDP, no clock"),
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_975_000,
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED),
+              "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
+              "with the unstable API and the connectivity plane"),
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_892_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY),
          require=(UDP, SINGLE_THREADED)),
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_100_000,
-         forbid=(GOSSIP, CLOCK, ADVANCED, THREADED),
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
+         forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
     Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_030_000,
          forbid=(SINGLE_THREADED,),
-         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED),
+         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
+                  CONNECTIVITY),
          exports=802,
          note="every capability on: the symbol count is the drop-in's. 809 -> 802 when the "
               "seven single-threaded entry points left the multi-threaded arm"),

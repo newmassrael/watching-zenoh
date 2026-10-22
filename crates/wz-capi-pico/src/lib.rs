@@ -77,9 +77,14 @@ mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
 pub mod bytes;
+// pico implements the token only with both the unstable API and the query plane: its
+// `vendor/zenoh-pico/src/api/api.c` @ `_Z_OWNED_FUNCTIONS_RC_IMPL(cancellation_token)` sits
+// inside `#ifdef Z_FEATURE_UNSTABLE_API` and `#if Z_FEATURE_QUERY == 1`.
+#[cfg(all(feature = "unstable-api", feature = "query"))]
 pub mod cancellation;
 pub mod codec;
 pub mod config;
+#[cfg(feature = "connectivity")]
 pub mod connectivity;
 pub mod encoding;
 pub mod entity;
@@ -88,9 +93,12 @@ mod ffi;
 pub mod get;
 pub mod handlers;
 pub mod keyexpr;
+#[cfg(any(feature = "connectivity", feature = "admin-space"))]
+mod link_properties;
 #[cfg(feature = "liveliness")]
 pub mod liveliness;
 pub mod matching;
+mod option_fields;
 mod os;
 pub mod platform;
 pub mod pubsub;
@@ -188,9 +196,16 @@ const _: () = {
     //
     // Measured against that header (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`):
     // reply 48, reply_del 40 — each 8 B larger than the old pin, the trailing
-    // `z_source_info_t*`.
-    assert!(size_of::<query::z_query_reply_options_t>() == 48);
-    assert!(size_of::<query::z_query_reply_del_options_t>() == 40);
+    // `z_source_info_t*`. Both builds exist now: with `unstable-api` the
+    // reference layout, without it upstream's default one (40 / 32), each the
+    // layout of the header a program of that arm compiles against.
+    if cfg!(feature = "unstable-api") {
+        assert!(size_of::<query::z_query_reply_options_t>() == 48);
+        assert!(size_of::<query::z_query_reply_del_options_t>() == 40);
+    } else {
+        assert!(size_of::<query::z_query_reply_options_t>() == 40);
+        assert!(size_of::<query::z_query_reply_del_options_t>() == 32);
+    }
 };
 
 // The requesting end of a query.
@@ -218,7 +233,15 @@ const _: () = {
     // a size check alone cannot express: the two unstable fields sit BEFORE
     // `accept_replies`, so omitting them displaced that field from offset 72 to
     // 56 and wz read a caller's reply-keyexpr policy out of the low half of the
-    // `source_info` pointer. See `get::z_get_options_t`.
-    assert!(size_of::<get::z_get_options_t>() == 80);
+    // `source_info` pointer. See `get::z_get_options_t`. Without `unstable-api`
+    // the pair is absent, as in upstream's default header: 64.
+    assert!(
+        size_of::<get::z_get_options_t>()
+            == if cfg!(feature = "unstable-api") {
+                80
+            } else {
+                64
+            }
+    );
     assert!(core::mem::align_of::<get::z_get_options_t>() == 8);
 };

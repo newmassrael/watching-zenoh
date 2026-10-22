@@ -24,9 +24,11 @@ original reproduced by naming it. Three things follow from it:
 
 ## 2. What exists
 
-- **Capabilities of the C ABI builds** (`deploy/capabilities.toml`): nineteen, all on
-  by default (one of them, `multi-thread`, chooses pico's header arm: off is pico's
-  single-threaded C ABI, a separate library from the default one), generated into `deploy/Kconfig.capabilities` and cargo arguments by
+- **Capabilities of the C ABI builds** (`deploy/capabilities.toml`): twenty-one, all
+  on by default. Two of them change the layout of structs a pico program allocates, so
+  a program links the build of the header arm it compiled against: `multi-thread` (off
+  is pico's single-threaded C ABI) and `unstable-api` (off is the option layout of
+  upstream's default header). They are generated into `deploy/Kconfig.capabilities` and cargo arguments by
   `scripts/lib/capability_config.py`, which also holds the three capi manifests to
   the declared graph. No Kconfig `rsource`s the generated file; the MCU images do
   not see it.
@@ -219,7 +221,7 @@ fragment. A preset file starts with `# wz-preset: 1`, `# catalog: <version>` and
 
 Each step lands with its own done-when; sizes are not estimated here.
 
-1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the nineteen
+1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the twenty-one
    capabilities, the limits and the axis-like symbols of the MCU images into
    `deploy/wz-config.toml`; the generator absorbs `capability_config.py` and
    `limit_config.py`; the images use the generated Kconfig and CMake bridge; place

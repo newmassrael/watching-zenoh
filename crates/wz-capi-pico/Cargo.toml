@@ -67,6 +67,8 @@ default = [
     "advanced",
     "gossip",
     "multi-thread",
+    "unstable-api",
+    "connectivity",
 ]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
@@ -101,14 +103,26 @@ liveliness-get = ["liveliness", "query", "wz-capi-core/liveliness-get"]
 # `advanced`: the advanced publisher and subscriber and the plane they replay through.
 # It implies `liveliness`, because an advanced subscriber's publisher detection is a liveliness
 # subscription declared through the liveliness plane, and `queryable`, because the publisher's
-# cache is a queryable.
-advanced = ["liveliness", "queryable", "wz-capi-core/advanced"]
+# cache is a queryable. And `unstable-api`, because pico declares the whole advanced API inside
+# `#ifdef Z_FEATURE_UNSTABLE_API` and its CMake forces the switch off without it.
+advanced = ["liveliness", "queryable", "unstable-api", "wz-capi-core/advanced"]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /
 # `zp_stop_admin_space`, the queryable that answers pico's `@/<zid>/pico/**` documents, and the
 # `auto_start_admin_space` flag of the open options. Upstream refuses the switch without
 # `Z_FEATURE_QUERYABLE` (`vendor/zenoh-pico/CMakeLists.txt` @
-# `if(Z_FEATURE_ADMIN_SPACE AND NOT Z_FEATURE_QUERYABLE)`), so it implies `queryable`.
-admin-space = ["queryable"]
+# `if(Z_FEATURE_ADMIN_SPACE AND NOT Z_FEATURE_QUERYABLE)`), so it implies `queryable`, and
+# forces it off without the unstable API, so it implies `unstable-api`.
+admin-space = ["queryable", "unstable-api"]
+# `unstable-api` (`Z_FEATURE_UNSTABLE_API`, on in the reference build and off in upstream's
+# default): the entity ids (`z_session_id`, `z_publisher_id`, ...), the sample's reliability and
+# source info, `z_reliability_default`, `z_bytes_get_contiguous_view`, `z_reply_replier_id`, the
+# cancellation token, and the option fields that carry them (`reliability`, `source_info`,
+# `cancellation_token`). Off, those fields are not in the option structs a program allocates,
+# which are then the smaller structs pico's default header declares.
+unstable-api = ["wz-capi-core/unstable-api"]
+# `connectivity` (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and the event
+# listeners of pico's connectivity plane. Upstream declares it only with the unstable API.
+connectivity = ["unstable-api", "wz-capi-core/connectivity"]
 # `gossip`: a session that is told of a node by one it holds a link to dials it (see the
 # runtime's feature of the same name). Pico itself has no such plane.
 gossip = ["peer", "wz-capi-core/gossip"]
@@ -202,7 +216,7 @@ required-features = ["peer", "query", "queryable"]
 
 [[test]]
 name = "reply_options_roundtrip"
-required-features = ["peer", "query", "queryable"]
+required-features = ["peer", "query", "queryable", "unstable-api"]
 
 [[test]]
 name = "remote_only_queryable"
@@ -225,9 +239,14 @@ required-features = ["peer", "query", "admin-space"]
 name = "blocking_callback_keeps_session"
 required-features = ["peer"]
 
+# A closed session's publisher and querier, over a listening session.
+[[test]]
+name = "session_check"
+required-features = ["peer", "query"]
+
 [[test]]
 name = "connectivity_events"
-required-features = ["peer"]
+required-features = ["peer", "connectivity"]
 
 [[test]]
 name = "fragmentation_roundtrip"
@@ -247,11 +266,11 @@ required-features = ["peer"]
 
 [[test]]
 name = "publisher_declared_options_roundtrip"
-required-features = ["peer"]
+required-features = ["peer", "unstable-api"]
 
 [[test]]
 name = "put_source_info_roundtrip"
-required-features = ["peer"]
+required-features = ["peer", "unstable-api"]
 
 [[test]]
 name = "quic_listen_cert"

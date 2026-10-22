@@ -686,7 +686,9 @@ pub struct z_get_options_t {
     /// `z_moved_bytes_t*` — an optional attachment on the query. Honoured.
     pub attachment: *mut z_moved_bytes_t,
     /// `z_source_info_t*` — the `(zid, eid, sn)` stamped on the outbound Query
-    /// body (ext 0x01). Honoured (R311y562).
+    /// body (ext 0x01). Honoured (R311y562). This and `cancellation_token` exist
+    /// only with `unstable-api`, as only with `Z_FEATURE_UNSTABLE_API` upstream.
+    #[cfg(feature = "unstable-api")]
     pub source_info: *mut crate::pubsub::z_source_info_t,
     /// `z_moved_cancellation_token_t*` — HONOURED as of R311y575, and typed
     /// rather than `c_void` because the type is the contract: this is a MOVED
@@ -700,13 +702,40 @@ pub struct z_get_options_t {
     /// face; an ALREADY-cancelled token fails the call with `Z_ERR_CANCELLED`
     /// and sends no Query, both mirroring upstream (see
     /// [`crate::get::fan_get`]).
+    #[cfg(feature = "unstable-api")]
     pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
     pub accept_replies: z_reply_keyexpr_t,
 }
 
-/// The upstream layout this struct must match, measured against the reference
-/// build's header (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`): 80 B with
-/// `accept_replies` at 72.
+crate::option_fields::unstable_option_fields!(z_get_options_t {
+    source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
+});
+
+impl z_get_options_t {
+    /// The token the caller handed over, taken: pico drops it whatever the call
+    /// does. A build without the unstable API has no such field and no token.
+    ///
+    /// # Safety
+    /// The field must be null or a moved token this crate produced.
+    #[cfg(feature = "unstable-api")]
+    unsafe fn take_cancellation_token(
+        &self,
+    ) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+        crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
+    }
+
+    #[cfg(not(feature = "unstable-api"))]
+    unsafe fn take_cancellation_token(
+        &self,
+    ) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+        None
+    }
+}
+
+/// The upstream layout this struct must match, in each arm of
+/// `Z_FEATURE_UNSTABLE_API`: measured against the reference build's header
+/// (`-DZENOH_LINUX -DZ_FEATURE_UNSTABLE_API`), 80 B with `accept_replies` at 72;
+/// against upstream's default header, 64 B with `accept_replies` at 56.
 ///
 /// R311y562 — the SIZE alone would not have caught the defect this replaces.
 /// A struct can be the wrong size for a harmless reason (a missing tail field
@@ -714,7 +743,6 @@ pub struct z_get_options_t {
 /// and only an OFFSET assertion tells those apart. So the field that moved is
 /// pinned by offset, not merely counted.
 const _: () = {
-    assert!(std::mem::size_of::<z_get_options_t>() == 80);
     assert!(std::mem::align_of::<z_get_options_t>() == 8);
     // Every field AFTER the feature-conditional region, by offset. These are
     // the assertions that would have caught the defect: the struct was 64 B
@@ -722,9 +750,20 @@ const _: () = {
     // when in fact the missing pair sits BEFORE `accept_replies` and displaced
     // it by 16 B. A size check cannot tell those two stories apart.
     assert!(std::mem::offset_of!(z_get_options_t, attachment) == 48);
+};
+
+#[cfg(feature = "unstable-api")]
+const _: () = {
+    assert!(std::mem::size_of::<z_get_options_t>() == 80);
     assert!(std::mem::offset_of!(z_get_options_t, source_info) == 56);
     assert!(std::mem::offset_of!(z_get_options_t, cancellation_token) == 64);
     assert!(std::mem::offset_of!(z_get_options_t, accept_replies) == 72);
+};
+
+#[cfg(not(feature = "unstable-api"))]
+const _: () = {
+    assert!(std::mem::size_of::<z_get_options_t>() == 64);
+    assert!(std::mem::offset_of!(z_get_options_t, accept_replies) == 56);
 };
 
 /// How to re-measure the numbers above, so the next round checks rather than
@@ -778,8 +817,11 @@ pub unsafe extern "C" fn z_get_options_default(options: *mut z_get_options_t) {
     (*options).target = Z_QUERY_TARGET_BEST_MATCHING;
     (*options).timeout_ms = 0;
     (*options).attachment = std::ptr::null_mut();
-    (*options).source_info = std::ptr::null_mut();
-    (*options).cancellation_token = std::ptr::null_mut();
+    #[cfg(feature = "unstable-api")]
+    {
+        (*options).source_info = std::ptr::null_mut();
+        (*options).cancellation_token = std::ptr::null_mut();
+    }
     (*options).accept_replies = crate::reply_keyexpr::Z_REPLY_KEYEXPR_MATCHING_QUERY;
 }
 
@@ -1079,13 +1121,13 @@ unsafe fn get_inner(
             // every-path line, for the same reason the two byte buffers are.
             PicoQueryValueMeta {
                 encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
-                source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+                source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
             },
             // R311y575 — the cancellation token joins the same consume-first
             // line. It is a MOVED handle upstream drops unconditionally
             // (`api.c:1783`), so taking it anywhere later would leak it on the
             // null-callback return below, exactly as the two byte buffers would.
-            crate::cancellation::take_moved_cancellation_token((*options).cancellation_token),
+            (*options).take_cancellation_token(),
         )
     };
 
@@ -1266,7 +1308,7 @@ pub(crate) fn issue_get(
     qos: PicoQueryQos,
     value_meta: PicoQueryValueMeta,
     closure: Arc<CReplyClosure>,
-    token: Option<Arc<crate::cancellation::CancellationToken>>,
+    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
 ) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
 
@@ -1320,7 +1362,7 @@ fn fan_get(
     opts: &QueryOptions,
     closure: Arc<CReplyClosure>,
     gate: Arc<ReplyGate>,
-    token: Option<Arc<crate::cancellation::CancellationToken>>,
+    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
 ) -> ZResult {
     let guard = closure.clone();
     // R311y575 — the cancellation is registered BEFORE the first face is
@@ -1825,6 +1867,7 @@ pub unsafe extern "C" fn z_reply_clone(
 /// # Safety
 /// `reply` must be null or a live loaned reply; `out_id` must be null or valid
 /// and writable.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub unsafe extern "C" fn z_reply_replier_id(
     reply: *const z_loaned_reply_t,

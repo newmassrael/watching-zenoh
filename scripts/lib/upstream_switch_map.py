@@ -93,12 +93,12 @@ DEBT_CITATION = "open-debt item "
 # `crates/wz-capi-pico`, the pico C ABI drop-in, at the pin. A `maps` anchor is a feature of
 # that crate; an `always` anchor is the file that shows the capability is unconditional.
 PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
-    ("Z_FEATURE_UNSTABLE_API", "always", "crates/wz-capi-pico/src/lib.rs",
-     "the drop-in exports the unstable surface and lays every options struct out at the "
-     "flag-ON size; a program compiled with the upstream default (0) reads other offsets, "
-     "which is open-debt item 917"),
-    ("Z_FEATURE_CONNECTIVITY", "always", "crates/wz-capi-pico/src/connectivity.rs",
-     "the connectivity status and event doors, in every build"),
+    ("Z_FEATURE_UNSTABLE_API", "maps", "wz-capi-pico/unstable-api",
+     "the entity ids, reliability, source info and the cancellation token, and the option "
+     "fields that carry them; off, every option struct has upstream's default layout"),
+    ("Z_FEATURE_CONNECTIVITY", "maps", "wz-capi-pico/connectivity",
+     "the connectivity status and event doors; implies unstable-api, as upstream's CMake "
+     "forces it off without the unstable API"),
     ("Z_FEATURE_PUBLICATION", "always", "crates/wz-capi-pico/src/pubsub.rs",
      "the publisher and z_put"),
     ("Z_FEATURE_ADVANCED_PUBLICATION", "maps", "wz-capi-pico/advanced",

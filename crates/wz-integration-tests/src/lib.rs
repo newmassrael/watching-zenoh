@@ -933,73 +933,103 @@ pub mod common {
         );
     }
 
-    /// The target directory the SINGLE-THREADED drop-in is built into, under
-    /// `crates/`. Its own directory, because the two arms are two builds of one
-    /// crate with one library name: in the shared target directory either build
-    /// would overwrite the other's `libwz_capi_pico.so`.
-    pub const WZ_CAPI_PICO_SINGLE_THREADED_TARGET_DIR: &str = "target/wz-capi-pico-st";
-
-    /// Locate the `wz-capi-pico` cdylib built for pico's SINGLE-THREADED header
-    /// arm (`Z_FEATURE_MULTI_THREAD 0`): the crate without its `multi-thread`
-    /// capability, built from the arm's own generated `config.h` by
-    /// `scripts/lib/capability_config.py --features pico`, so the feature set is
-    /// what that header states.
+    /// One of the zenoh-pico header arms `scripts/build-zenoh-pico-cli.sh`
+    /// configures, and the wz build a program compiled against it links. The pair
+    /// is one value so a leg cannot take the headers of one arm and the library of
+    /// another, which is the mismatch that smashed a single-threaded program's
+    /// stack (open-debt item 918).
     ///
-    /// A program compiled against one header arm must link the build of the same
-    /// arm. The two disagree on the size of structs the C program allocates in
-    /// its own frame (`z_open_options_t` 16 B against 1 B, `_z_fifo_mt_t` 184 B
-    /// against 48 B), so the multi-threaded cdylib zeroed 184 bytes into a
-    /// single-threaded program's 48-byte channel slot.
-    pub fn wz_capi_pico_cdylib_single_threaded() -> PathBuf {
-        let crates_dir = project_root().join("crates");
-        let target = crates_dir.join(WZ_CAPI_PICO_SINGLE_THREADED_TARGET_DIR);
-        let candidates = [
-            target.join("debug/libwz_capi_pico.so"),
-            target.join("release/libwz_capi_pico.so"),
-        ];
-        for c in &candidates {
-            if c.is_file() {
-                assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-pico");
-                return c.clone();
-            }
-        }
-        panic!(
-            "the single-threaded libwz_capi_pico.so is not in {candidates:?}; from \
-             crates/, run `cargo build -p wz-capi-pico $(python3 \
-             ../scripts/lib/capability_config.py --features pico \
-             ../target/zenoh-pico-build-st/zenohpico/include/zenoh-pico/config.h) \
-             --target-dir {WZ_CAPI_PICO_SINGLE_THREADED_TARGET_DIR}`"
-        );
-    }
-
-    /// One of zenoh-pico's two header arms, and the wz build a program compiled
-    /// against it links. The pair is one value so a leg cannot take the headers of
-    /// one arm and the library of the other, which is the mismatch that smashed a
-    /// single-threaded program's stack.
+    /// Every arm but the reference one is a wz build of its own: the crate built
+    /// from the arm's generated `config.h` by `scripts/lib/capability_config.py
+    /// --features pico`, so its feature set is what that header states, into a
+    /// target directory of its own, because each build is `libwz_capi_pico.so`
+    /// and a shared directory would hold whichever ran last.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum PicoHeaderArm {
-        /// `Z_FEATURE_MULTI_THREAD 1`, the primary CMake arm and wz's default build.
+        /// The reference CMake arm (unstable API, advanced, TLS, serial and
+        /// connectivity on, `Z_FEATURE_MULTI_THREAD 1`) and wz's default build.
         MultiThreaded,
-        /// `Z_FEATURE_MULTI_THREAD 0`, the `-st` CMake arm and wz without
-        /// `multi-thread`.
+        /// The reference arm with `Z_FEATURE_MULTI_THREAD 0` (`-st`): wz without
+        /// `multi-thread`. `z_open_options_t` is 1 B against 16, `_z_fifo_mt_t`
+        /// 48 B against 184.
         SingleThreaded,
+        /// pico configured with no switch passed (`-default`): upstream's own
+        /// default, whose missing unstable API takes three fields out of the
+        /// option structs (`z_get_options_t` 64 B against 80; open-debt item 917).
+        UpstreamDefault,
     }
 
     impl PicoHeaderArm {
+        /// The suffix `build-zenoh-pico-cli.sh` gives this arm's CMake directory.
+        fn cmake_suffix(self) -> &'static str {
+            match self {
+                Self::MultiThreaded => "",
+                Self::SingleThreaded => "-st",
+                Self::UpstreamDefault => "-default",
+            }
+        }
+
+        /// The target directory, under `crates/`, wz's build of this arm lands in.
+        pub fn wz_target_dir(self) -> &'static str {
+            match self {
+                Self::MultiThreaded => "target",
+                Self::SingleThreaded => "target/wz-capi-pico-st",
+                Self::UpstreamDefault => "target/wz-capi-pico-default",
+            }
+        }
+
         /// The include set a program of this arm compiles against.
         pub fn include_dirs(self) -> [PathBuf; 3] {
             match self {
                 Self::MultiThreaded => zenoh_pico_include_dirs(),
                 Self::SingleThreaded => zenoh_pico_include_dirs_single_threaded(),
+                Self::UpstreamDefault => {
+                    let root = project_root();
+                    let generated = root.join(format!(
+                        "target/zenoh-pico-build{}/zenohpico/include",
+                        self.cmake_suffix()
+                    ));
+                    assert!(
+                        generated.is_dir(),
+                        "the {self:?} zenoh-pico config.h dir is missing at {}; run \
+                         scripts/build-zenoh-pico-cli.sh first",
+                        generated.display()
+                    );
+                    // No Mbed TLS: TLS is off in upstream's default, and the third
+                    // slot repeats the vendored headers rather than naming a
+                    // directory this arm does not use.
+                    let vendored = root.join("vendor/zenoh-pico/include");
+                    [generated, vendored.clone(), vendored]
+                }
             }
         }
 
         /// The wz cdylib a program of this arm links.
         pub fn wz_cdylib(self) -> PathBuf {
-            match self {
-                Self::MultiThreaded => wz_capi_pico_cdylib(),
-                Self::SingleThreaded => wz_capi_pico_cdylib_single_threaded(),
+            if self == Self::MultiThreaded {
+                return wz_capi_pico_cdylib();
             }
+            let crates_dir = project_root().join("crates");
+            let target = crates_dir.join(self.wz_target_dir());
+            let candidates = [
+                target.join("debug/libwz_capi_pico.so"),
+                target.join("release/libwz_capi_pico.so"),
+            ];
+            for c in &candidates {
+                if c.is_file() {
+                    assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-pico");
+                    return c.clone();
+                }
+            }
+            panic!(
+                "wz's {self:?} libwz_capi_pico.so is not in {candidates:?}; from \
+                 crates/, run `cargo build -p wz-capi-pico $(python3 \
+                 ../scripts/lib/capability_config.py --features pico \
+                 ../target/zenoh-pico-build{}/zenohpico/include/zenoh-pico/config.h) \
+                 --target-dir {}`",
+                self.cmake_suffix(),
+                self.wz_target_dir()
+            );
         }
     }
 
@@ -1512,7 +1542,7 @@ pub mod common {
     ///
     /// Only the config header differs; the API headers are the same vendored
     /// tree. The LIBRARY is not the same: a program of this arm links
-    /// [`wz_capi_pico_cdylib_single_threaded`] (take both through
+    /// wz's single-threaded build (take both through
     /// [`PicoHeaderArm::SingleThreaded`]). This file once recorded that one cdylib
     /// served both arms, measured over the public owned types an example names;
     /// the structs the C program allocates WITHOUT naming them (`_z_fifo_mt_t`

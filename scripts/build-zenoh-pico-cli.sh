@@ -604,6 +604,36 @@ if ! grep -qx "#define Z_FEATURE_MULTI_THREAD 0" "$GENERATED_CONFIG_ST"; then
     exit 1
 fi
 
+# --- upstream's DEFAULT header arm -------------------------------------------
+#
+# A third CONFIGURE (no build) with no switch passed at all: the header a program
+# compiled against an unconfigured pico sees. It differs from the reference arm
+# above where the reference turns switches on, most visibly in
+# `Z_FEATURE_UNSTABLE_API`, whose absence removes the `reliability`,
+# `source_info` and `cancellation_token` fields from the option structs
+# (`z_get_options_t` 80 -> 64 B) along with the connectivity plane and the
+# advanced API (open-debt item 917). wz builds the drop-in for this arm from the
+# arm's own config.h (`capability_config.py --features pico`), and the layout
+# legs link that build against these headers. TLS is off here, as it is by
+# default, so the arm needs no Mbed TLS.
+cmake -B "${BUILD_DIR}-default" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release >&2
+
+# Read back the switch this arm exists for: an arm whose config.h still defined
+# the unstable API would be a second copy of the reference arm, and every leg
+# built from it would pass without measuring the default layout.
+GENERATED_CONFIG_DEFAULT="${BUILD_DIR}-default/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG_DEFAULT" ]]; then
+    echo "build-zenoh-pico-cli: default-arm config.h missing: $GENERATED_CONFIG_DEFAULT" >&2
+    exit 1
+fi
+if grep -qE "^#define Z_FEATURE_UNSTABLE_API" "$GENERATED_CONFIG_DEFAULT"; then
+    echo "build-zenoh-pico-cli: the default arm defines Z_FEATURE_UNSTABLE_API;" \
+        "it is not upstream's default" >&2
+    exit 1
+fi
+
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).
 cmake --build "$BUILD_DIR" --target "${TARGETS[@]}" -j"$(nproc)" >&2

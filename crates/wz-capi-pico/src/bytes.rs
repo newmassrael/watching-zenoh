@@ -218,7 +218,9 @@ impl ByteBuf {
     /// there is more than one. The question the export asks is about the
     /// payload's SEGMENT structure, not about wz's allocator, so it is answered
     /// from `bounds` — the same field the slice iterator walks, and the same
-    /// field the R311y532 foreign oracle showed wz had been discarding.
+    /// field the R311y532 foreign oracle showed wz had been discarding. The export
+    /// is the unstable API's, and so is this.
+    #[cfg(feature = "unstable-api")]
     pub(crate) fn is_contiguous(&self) -> bool {
         self.bounds.len() <= 1
     }
@@ -1355,6 +1357,7 @@ pub unsafe extern "C" fn z_bytes_from_str(
 /// # Safety
 /// `bytes` must be null or a live loaned payload; `view` must be valid and
 /// writable, and must not outlive `bytes`.
+#[cfg(feature = "unstable-api")]
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_get_contiguous_view(
     bytes: *const z_loaned_bytes_t,

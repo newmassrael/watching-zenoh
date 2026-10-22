@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! zenoh-pico's two header arms, each against the wz build of the same arm: what a C
-//! program allocates, wz writes inside of.
+//! zenoh-pico's header arms, each against the wz build of the same arm: what a C
+//! program allocates, wz writes inside of, and where the program reads it.
 //!
-//! `Z_FEATURE_MULTI_THREAD` changes the size of structs a program allocates in its own
-//! frame without naming them in its source: `_z_fifo_mt_t` and `_z_ring_mt_t` (184 and
-//! 136 bytes multi-threaded, 48 and 48 single-threaded), which pico's channel macros
-//! allocate and hand to `_z_fifo_mt_init` / `_z_ring_mt_init`, and `z_open_options_t`
-//! (16 bytes against 1), which `z_open_options_default` fills. A single-threaded program
-//! once linked wz's one multi-threaded build: the init zeroed 184 bytes into a 48-byte
-//! slot and the default wrote 16 bytes into a 1-byte struct (open-debt item 918).
+//! The switches change the size of structs a program allocates in its own frame.
+//! `Z_FEATURE_MULTI_THREAD` does it without the program naming them: `_z_fifo_mt_t` and
+//! `_z_ring_mt_t` (184 and 136 bytes multi-threaded, 48 and 48 single-threaded), which
+//! pico's channel macros allocate and hand to `_z_fifo_mt_init` / `_z_ring_mt_init`, and
+//! `z_open_options_t` (16 bytes against 1). `Z_FEATURE_UNSTABLE_API` does it to every
+//! option struct with a `reliability`, `source_info` or `cancellation_token` field, and
+//! in `z_get_options_t` the missing pair sits before `accept_replies`, which moves. A
+//! single-threaded program once linked wz's one multi-threaded build: the init zeroed
+//! 184 bytes into a 48-byte slot and the default wrote 16 bytes into a 1-byte struct
+//! (open-debt item 918); a program compiled against upstream's default header had no wz
+//! build of its layout at all (open-debt item 917).
 //!
 //! The probe puts a guard block right after each struct, calls wz's writer, and reports
-//! whether the guard survived. It runs in each arm against that arm's wz build, and once
-//! against the mismatched pair, which must fail: that run is the control showing the
-//! probe can see an overrun.
+//! whether the guard survived; for `z_get_options_t` it also reads `accept_replies`
+//! where the program's header puts it. It runs in each arm against that arm's wz build,
+//! and against two mismatched pairs, which must fail: those runs are the controls
+//! showing the probe can see an overrun.
 
 use std::path::Path;
 use std::process::Command;
@@ -32,6 +37,8 @@ const PROBE: &str = r#"
 
 #define GUARD 64
 
+static int bad = 0;
+
 static int intact(const unsigned char *guard) {
     for (int i = 0; i < GUARD; i++) {
         if (guard[i] != 0xA5) {
@@ -41,9 +48,20 @@ static int intact(const unsigned char *guard) {
     return 1;
 }
 
-int main(void) {
-    int bad = 0;
+/* Fill a `T` with wz's default writer `f` and check nothing past it was written. */
+#define CHECK_DEFAULT(T, f)                                                     \
+    do {                                                                        \
+        struct { T value; unsigned char guard[GUARD]; } s;                      \
+        memset(s.guard, 0xA5, GUARD);                                           \
+        f(&s.value);                                                            \
+        if (!intact(s.guard)) {                                                 \
+            printf("layout-probe: " #f " wrote past sizeof(" #T ") = %zu\n",    \
+                   sizeof(T));                                                  \
+            bad = 1;                                                            \
+        }                                                                       \
+    } while (0)
 
+int main(void) {
     struct { _z_fifo_mt_t value; unsigned char guard[GUARD]; } fifo;
     memset(fifo.guard, 0xA5, GUARD);
     if (_z_fifo_mt_init(&fifo.value, 4) != _Z_RES_OK) {
@@ -68,16 +86,31 @@ int main(void) {
     }
     _z_ring_mt_clear(&ring.value, NULL);
 
-    struct { z_open_options_t value; unsigned char guard[GUARD]; } open;
-    memset(open.guard, 0xA5, GUARD);
-    z_open_options_default(&open.value);
-    if (!intact(open.guard)) {
-        printf("layout-probe: z_open_options_default wrote past sizeof(z_open_options_t)\n");
+    CHECK_DEFAULT(z_open_options_t, z_open_options_default);
+    CHECK_DEFAULT(z_put_options_t, z_put_options_default);
+    CHECK_DEFAULT(z_delete_options_t, z_delete_options_default);
+    CHECK_DEFAULT(z_publisher_options_t, z_publisher_options_default);
+    CHECK_DEFAULT(z_publisher_put_options_t, z_publisher_put_options_default);
+    CHECK_DEFAULT(z_publisher_delete_options_t, z_publisher_delete_options_default);
+    CHECK_DEFAULT(z_get_options_t, z_get_options_default);
+    CHECK_DEFAULT(z_querier_get_options_t, z_querier_get_options_default);
+    CHECK_DEFAULT(z_query_reply_options_t, z_query_reply_options_default);
+    CHECK_DEFAULT(z_query_reply_del_options_t, z_query_reply_del_options_default);
+    CHECK_DEFAULT(z_liveliness_get_options_t, z_liveliness_get_options_default);
+
+    /* The field after the unstable pair, read where this program's header puts it. */
+    z_get_options_t get;
+    memset(&get, 0xEE, sizeof(get));
+    z_get_options_default(&get);
+    if (get.accept_replies != Z_REPLY_KEYEXPR_DEFAULT) {
+        printf("layout-probe: z_get_options_default left accept_replies at %d\n",
+               (int)get.accept_replies);
         bad = 1;
     }
 
-    printf("layout-probe: fifo=%zu ring=%zu open_options=%zu\n", sizeof(_z_fifo_mt_t),
-           sizeof(_z_ring_mt_t), sizeof(z_open_options_t));
+    printf("layout-probe: fifo=%zu ring=%zu open_options=%zu get_options=%zu\n",
+           sizeof(_z_fifo_mt_t), sizeof(_z_ring_mt_t), sizeof(z_open_options_t),
+           sizeof(z_get_options_t));
     if (!bad) {
         printf("layout-probe: ok\n");
     }
@@ -117,27 +150,34 @@ fn run_probe(headers: PicoHeaderArm, library: PicoHeaderArm, dir: &Path) -> (boo
 
 // wz-proves: none -- the header arm and the wz build a C program links, paired
 #[test]
-#[ignore = "compiles against the CMake-configured pico headers of both arms and links \
-            both wz builds; run by run-ci Layer E"]
+#[ignore = "compiles against the CMake-configured pico headers of every arm and links \
+            every wz build; run by run-ci Layer E"]
 fn each_header_arm_is_written_inside_of_by_its_own_build() {
     let dir = tempfile::tempdir().expect("tempdir for the probes");
-    for arm in [PicoHeaderArm::MultiThreaded, PicoHeaderArm::SingleThreaded] {
+    for arm in [
+        PicoHeaderArm::MultiThreaded,
+        PicoHeaderArm::SingleThreaded,
+        PicoHeaderArm::UpstreamDefault,
+    ] {
         let (clean, text) = run_probe(arm, arm, dir.path());
         assert!(
             clean && text.contains("layout-probe: ok"),
-            "{arm:?}: wz's build of this arm wrote past a struct the program allocated:\n{text}"
+            "{arm:?}: wz's build of this arm wrote past or beside a struct the program \
+             allocated:\n{text}"
         );
     }
 
-    // The control: the single-threaded headers against the multi-threaded build, the
-    // pairing that overran. A probe that passes this cannot see what it checks for.
-    let (clean, text) = run_probe(
+    // The controls: each pairing of a smaller arm's headers with the reference build,
+    // the pairing that overran. A probe that passes these cannot see what it checks for.
+    for headers in [
         PicoHeaderArm::SingleThreaded,
-        PicoHeaderArm::MultiThreaded,
-        dir.path(),
-    );
-    assert!(
-        !clean,
-        "the mismatched pair ran clean, so the probe cannot see an overrun:\n{text}"
-    );
+        PicoHeaderArm::UpstreamDefault,
+    ] {
+        let (clean, text) = run_probe(headers, PicoHeaderArm::MultiThreaded, dir.path());
+        assert!(
+            !clean,
+            "{headers:?} headers against the reference build ran clean, so the probe \
+             cannot see an overrun:\n{text}"
+        );
+    }
 }

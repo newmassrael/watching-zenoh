@@ -70,8 +70,8 @@ use wz_runtime_tokio::sample::EncodingHint;
 use wz_runtime_tokio::session::TokioSession;
 use wz_runtime_tokio::session_glue::{LinkKind, WhatAmI};
 
-use crate::connectivity::pico_link_properties;
 use crate::ffi::guarded;
+use crate::link_properties::pico_link_properties;
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
