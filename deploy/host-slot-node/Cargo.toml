@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# host-slot-node -- the kit's fixed-memory client, as a Linux process.
+#
+# The node of `deploy/zephyr-admin-node/rust/src/fixed_client.rs` (a client of a router that
+# answers queries, on the per-session slot profile) with the host's seams under it
+# (`wz-runtime-posix`) where the kit has Zephyr's. The session code is the same code; what differs
+# is the clock, the entropy, the date, the socket and the entry point.
+#
+# It is `#![no_std]` and `#![no_main]` and declares NO `#[global_allocator]`, so a reference to the
+# `alloc` crate anywhere in its graph is a link error ("no global memory allocator found"). A clean
+# link is the whole-program proof that the node allocates nothing, the same proof the kit's image
+# and `mcu-noheap-probe` rest on, at a process on the build host.
+#
+# Standalone `[workspace]` (the rationale of `mcu-noheap-probe`): the slot profile is a SELECTOR
+# for a final binary, and cargo would otherwise unify it into the host `crates/` build.
+
+[workspace]
+
+[package]
+name = "host-slot-node"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+description = "The fixed-memory client node run as a Linux process: shared MCU session code over the host's sockets, no allocator."
+
+[[bin]]
+name = "host-slot-node"
+path = "src/main.rs"
+
+[features]
+default = []
+# The session coalesces the messages of one send window into one datagram (zenoh-pico's
+# `Z_FEATURE_BATCHING`): off, every message is a datagram of its own.
+batching = ["wz-runtime-coop/transport-batching", "wz-session-core/transport-batching"]
+
+[dependencies]
+# The implementation of the `critical_section` the image glue names (`posix_image_no_heap!`). It
+# takes no lock: one thread runs the program.
+critical-section = "1"
+
+# The composable-framework route every deploy takes: the facade's features unify onto the one
+# wz-session-core the session shell is built against. `runtime-coop-core` is the runtime tier
+# alone, with no link crate (the host has no lwIP to bundle).
+wz = { path = "../../crates/wz", default-features = false, features = [
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-close",
+    "transport-keepalive",
+    "runtime-coop-core",
+] }
+# The session shell: application layer, connection manager, dialler, generic over the stack. The
+# client on the slot profile (`slot_client`), with no allocator.
+wz-session-mcu = { path = "../../crates/wz-session-mcu", default-features = false, features = [
+    "transport-keepalive",
+    "client-slot",
+] }
+# The slot profile of the cooperative runtime, named to turn its selector on (the facade links the
+# same instance).
+wz-runtime-coop = { path = "../../crates/wz-runtime-coop", default-features = false, features = ["session-slot"] }
+# The host's seams: clock, entropy, date, UDP socket, image glue. Defaults off, so no heap form of
+# the cooperative runtime is named.
+wz-runtime-posix = { path = "../../crates/wz-runtime-posix", default-features = false, features = ["session-slot"] }
+# The types the facade does not re-export (SessionInitParams, SigningKey, SessionTimeouts, the
+# entropy trait).
+wz-session-core = { path = "../../crates/wz-session-core", default-features = false, features = [
+    "session-unicast",
+    "no_std",
+    "session-slot",
+] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

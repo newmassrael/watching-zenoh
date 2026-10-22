@@ -1,0 +1,25 @@
+# The limits this image states, as the kit's client states them (`deploy/zephyr-admin-node/overlays/
+# t2g_client.conf`, which `CONFIG_WZ_LIMIT_<NAME>` turns into `WZ_LIMIT_<NAME>` in the Zephyr build).
+# `wz-session-core`'s `caps` reads each with `option_env!` while it compiles, so every table the
+# node holds is the size this file says and a limit it does not state keeps the crate's default.
+#
+# One difference from the kit's client, stated: the reply payload is 1 KiB here, not 256 B, because
+# the comparison this image is built for (`docs/storage-policy-and-link-layer.md`, the host
+# section) answers a 1 KiB document, as the other implementations in it do.
+[env]
+WZ_LIMIT_MAX_KEYEXPR_BYTES = "64"
+WZ_LIMIT_MAX_LOCATOR_LEN = "32"
+WZ_LIMIT_MAX_STATIC_CONNECT = "1"
+WZ_LIMIT_MAX_QUERYABLES = "2"
+WZ_LIMIT_MAX_SUBSCRIPTIONS = "0"
+WZ_LIMIT_MAX_PENDING_QUERIES = "0"
+WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS = "0"
+WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS = "0"
+WZ_LIMIT_MAX_REMOTE_DECLS = "0"
+WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES = "4"
+WZ_LIMIT_MAX_PENDING_REPLIES = "2"
+WZ_LIMIT_MAX_PENDING_FINALS = "2"
+WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES = "1024"
+WZ_LIMIT_MAX_ADMIN_REPLY_BYTES = "256"
+WZ_LIMIT_MAX_TASKS = "2"
+WZ_LIMIT_MAX_TIMERS = "4"
