@@ -173,7 +173,7 @@ fn scenario(sub: (&str, &Path), publisher: (&str, &Path)) {
         graceful_terminate(sub_child.child_mut(), Duration::from_secs(5));
         panic!("{} never declared its subscriber\n{printed}", sub.0);
     }
-    let (mut pub_child, mut said) = spawn_privileged(
+    let (pub_child, mut said) = spawn_privileged(
         publisher.0,
         publisher.1,
         &["-n", &n, "-m", "peer", "-l", PUB_ENDPOINT],
