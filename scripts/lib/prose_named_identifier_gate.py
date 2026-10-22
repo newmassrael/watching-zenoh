@@ -274,13 +274,11 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT",
         "Z_CONFIG_SCOUTING_WHAT_DEFAULT",
         "Z_CONGESTION_CONTROL_DEFAULT",
-        "Z_FEATURE_BATCHING",
-        "Z_FEATURE_ENCODING_VALUES",
-        "Z_FEATURE_FRAGMENTATION",
-        "Z_FEATURE_MATCHING",
-        "Z_FEATURE_MULTICAST_DECLARATIONS",
-        "Z_FEATURE_PUBLICATION",
-        "Z_FEATURE_SUBSCRIPTION",
+        # R3406 — seven `Z_FEATURE_*` switches left this set: BATCHING, ENCODING_VALUES,
+        # FRAGMENTATION, MATCHING, MULTICAST_DECLARATIONS, PUBLICATION, SUBSCRIPTION.
+        # `scripts/lib/upstream_switch_map.py` now carries every pico switch as a judged
+        # row, so the tree names each one in code; what wz does with it is that row's
+        # class (maps, always, never, n/a), which is the record this set used to stand in for.
         "Z_FRAG_MAX_SIZE",
         "Z_JOIN_INTERVAL",
         "Z_KEYEXPR_CANON_CONTAINS_SHARP_OR_QMARK",
