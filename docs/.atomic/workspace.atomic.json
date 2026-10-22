@@ -278412,6 +278412,58 @@
         "The images' Kconfig and CMake files are another session's; they are told before a change to them lands."
       ]
     },
+    "Round 3431": {
+      "decision_summary": "Step 1 of docs/build-configuration.md continues with two parts. The help of the twenty-three limits in the Kconfig menu is now written for a deployer, and the declaration refuses help that names a Rust item. A registered preset is now resolved by one pinned Kconfig interpreter, kconfiglib 14.1.0, provisioned by hash into a virtual environment of the checkout, with the settings and the two checks Zephyr applies: an undefined symbol, a promptless assignment, or an assignment the tree overrides is an error. The resolution gives the cargo arguments of the preset's base ABI. Layer C0 runs it on every profile, and the job that provisions the interpreter arms it, so its absence there is a failure rather than a skip. The tool now reads the profiles under configs/profiles, so the pre-push hook runs it, and its selftest declines only behind the same flag.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: every limit's help says what the limit bounds, what a deployment that exceeds it sees, and when to raise it.",
+        "scripts/lib/wz_config.py: the generated Kconfig root deploy/Kconfig; preset headers (format, catalogue, base) checked; presets resolved strictly on kconfiglib into features and limit environment; --check-presets; eight selftest arms for the preset rules; help naming a Rust item is refused.",
+        "scripts/requirements-kconfig.txt and scripts/provision-kconfiglib.sh: kconfiglib 14.1.0 pinned by its two PyPI hashes and installed into target/kconfig-venv.",
+        "scripts/run-ci.sh Layer C0 runs --check-presets; the validate job of the CI workflow provisions kconfiglib and arms WZ_KCONFIG_REQUIRE.",
+        ".githooks/pre-push runs wz_config.py --check and --check-presets in the round-fed array.",
+        "docs/build-configuration.md names the interpreter and where it comes from."
+      ],
+      "verification_bullets": [
+        "wz_config selftest 57 of 57 with kconfiglib present: a preset assigning an undefined symbol, a promptless symbol, a value the tree overrides, a wrong catalogue or an unknown base is refused, and the comparison preset resolves to the query feature alone.",
+        "The check and --check-presets pass; the registered profile resolves to its expected cargo arguments.",
+        "round_fed_gate_reach and armed_skip_guard, which refused the first cut, pass after the hook entry and the guarded selftest decline; the hook structure gates pass.",
+        "Layer C0 passes on a build host; the derived preflight passes.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 1 continues: a Zephyr CMake bridge that the images use from the generated Kconfig root, with their cargo command lines compared before and after; the axis-like symbols of the MCU images into the declaration; the extension header and its subset gate; an equivalence gate between the pinned kconfiglib and the copy Zephyr bundles.",
+        "The images' Kconfig and CMake files are another session's; they are told before a change to them lands.",
+        "The hosted run that carries item 913 is still to be read job by job."
+      ],
+      "publishable_decision_summary": "Step 1 of docs/build-configuration.md continues with two parts. The help of the twenty-three limits in the Kconfig menu is now written for a deployer, and the declaration refuses help that names a Rust item. A registered preset is now resolved by one pinned Kconfig interpreter, kconfiglib 14.1.0, provisioned by hash into a virtual environment of the checkout, with the settings and the two checks Zephyr applies: an undefined symbol, a promptless assignment, or an assignment the tree overrides is an error. The resolution gives the cargo arguments of the preset's base ABI. Layer C0 runs it on every profile, and the job that provisions the interpreter arms it, so its absence there is a failure rather than a skip. The tool now reads the profiles under configs/profiles, so the pre-push hook runs it, and its selftest declines only behind the same flag.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: every limit's help says what the limit bounds, what a deployment that exceeds it sees, and when to raise it.",
+        "scripts/lib/wz_config.py: the generated Kconfig root deploy/Kconfig; preset headers (format, catalogue, base) checked; presets resolved strictly on kconfiglib into features and limit environment; --check-presets; eight selftest arms for the preset rules; help naming a Rust item is refused.",
+        "scripts/requirements-kconfig.txt and scripts/provision-kconfiglib.sh: kconfiglib 14.1.0 pinned by its two PyPI hashes and installed into target/kconfig-venv.",
+        "scripts/run-ci.sh Layer C0 runs --check-presets; the validate job of the CI workflow provisions kconfiglib and arms WZ_KCONFIG_REQUIRE.",
+        ".githooks/pre-push runs wz_config.py --check and --check-presets in the round-fed array.",
+        "docs/build-configuration.md names the interpreter and where it comes from."
+      ],
+      "publishable_verification_bullets": [
+        "wz_config selftest 57 of 57 with kconfiglib present: a preset assigning an undefined symbol, a promptless symbol, a value the tree overrides, a wrong catalogue or an unknown base is refused, and the comparison preset resolves to the query feature alone.",
+        "The check and --check-presets pass; the registered profile resolves to its expected cargo arguments.",
+        "round_fed_gate_reach and armed_skip_guard, which refused the first cut, pass after the hook entry and the guarded selftest decline; the hook structure gates pass.",
+        "Layer C0 passes on a build host; the derived preflight passes.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1 continues: a Zephyr CMake bridge that the images use from the generated Kconfig root, with their cargo command lines compared before and after; the axis-like symbols of the MCU images into the declaration; the extension header and its subset gate; an equivalence gate between the pinned kconfiglib and the copy Zephyr bundles.",
+        "The images' Kconfig and CMake files are another session's; they are told before a change to them lands.",
+        "The hosted run that carries item 913 is still to be read job by job."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
