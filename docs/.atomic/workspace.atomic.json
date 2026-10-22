@@ -278278,6 +278278,44 @@
         "Item 910: the Rust API compatibility crate. Item 912: bt and a board's USB CDC serial need hardware to witness."
       ]
     },
+    "Round 3428": {
+      "decision_summary": "Repay the Layer C0 red that Round 3426 left. prose_named_identifier_gate.py failed on bf880aadd: the no-allocator gate's comment and fixed_client.rs name CONFIG_WZ_IDLE_WAIT_MS as code while the tree held no file that sets it (the Kconfig symbol is WZ_IDLE_WAIT_MS, and Kconfig adds the prefix; the build was given the value on a command line). The name is made real the way CONFIG_WZ_TX_BATCHING is: overlays/t2g_client_idle.conf sets CONFIG_WZ_IDLE_WAIT_MS=1000, with the measurement the Round 3426 entry records (909 loop rounds a second idle against about 4). Nothing else changes. Layer C0 was run whole on a build host after the fix and passes; the gate alone passes in a clean worktree.",
+      "changes_bullets": [
+        "deploy/zephyr-admin-node/overlays/t2g_client_idle.conf: new overlay, CONFIG_WZ_IDLE_WAIT_MS=1000, with its use, its measured effect and the one-socket condition for an image that takes it."
+      ],
+      "verification_bullets": [
+        "scripts/lib/prose_named_identifier_gate.py --check failed before the overlay (prose spells CONFIG_WZ_IDLE_WAIT_MS as code and nothing in this tree carries that name) and passes after it, in the worktree of the push and in the one that holds the unfinished work.",
+        "bash scripts/run-ci.sh --layer C0 on a build host, with the overlay: exit 0 (337 s). Its FAIL lines are the self-tests' intended red arms.",
+        "validate-workspace: T1 orphan 14, unchanged.",
+        "Not run here: the hosted run of this push; Layers other than C0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; the C0 red of bf880aadd and of d2b4ba92c is this entry's, and a run that no longer shows it is the repayment.",
+        "A pre-push list of the prose-name gate next to the census would have caught this before the push: a name spelled as code in a comment needs a file that carries it, and a Kconfig symbol is carried by a .conf, not by its definition."
+      ],
+      "publishable_decision_summary": "Repay the Layer C0 red that Round 3426 left. prose_named_identifier_gate.py failed on bf880aadd: the no-allocator gate's comment and fixed_client.rs name CONFIG_WZ_IDLE_WAIT_MS as code while the tree held no file that sets it (the Kconfig symbol is WZ_IDLE_WAIT_MS, and Kconfig adds the prefix; the build was given the value on a command line). The name is made real the way CONFIG_WZ_TX_BATCHING is: overlays/t2g_client_idle.conf sets CONFIG_WZ_IDLE_WAIT_MS=1000, with the measurement the Round 3426 entry records (909 loop rounds a second idle against about 4). Nothing else changes. Layer C0 was run whole on a build host after the fix and passes; the gate alone passes in a clean worktree.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-admin-node/overlays/t2g_client_idle.conf: new overlay, CONFIG_WZ_IDLE_WAIT_MS=1000, with its use, its measured effect and the one-socket condition for an image that takes it."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/lib/prose_named_identifier_gate.py --check failed before the overlay (prose spells CONFIG_WZ_IDLE_WAIT_MS as code and nothing in this tree carries that name) and passes after it, in the worktree of the push and in the one that holds the unfinished work.",
+        "bash scripts/run-ci.sh --layer C0 on a build host, with the overlay: exit 0 (337 s). Its FAIL lines are the self-tests' intended red arms.",
+        "validate-workspace: T1 orphan 14, unchanged.",
+        "Not run here: the hosted run of this push; Layers other than C0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; the C0 red of bf880aadd and of d2b4ba92c is this entry's, and a run that no longer shows it is the repayment.",
+        "A pre-push list of the prose-name gate next to the census would have caught this before the push: a name spelled as code in a comment needs a file that carries it, and a Kconfig symbol is carried by a .conf, not by its definition."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
