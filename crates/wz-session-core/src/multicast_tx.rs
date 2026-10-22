@@ -33,7 +33,7 @@
     any(
         feature = "codec-push",
         feature = "codec-response",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 use alloc::boxed::Box;
@@ -52,7 +52,7 @@ use crate::link::{RoomAnswer, RoomWait};
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 use crate::{
@@ -173,7 +173,10 @@ pub enum MulticastTxItem {
     /// because the borrowed-arg sink seam resolves the keyexpr at drain (mirror
     /// of the unicast `SessionLinkActions: DeclareReplySink`, which routes the
     /// same owned form through its inherent `send_declare`).
-    #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
     DeclareReply {
         /// The built `Declare` reply (a `DeclToken` for a held token, or the
         /// terminating `DeclFinal`), already owned via `Declare::try_into_owned`.
@@ -346,7 +349,7 @@ pub struct MulticastTxDatagram {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 struct UnboundedCollect(Vec<Vec<u8>>);
@@ -357,7 +360,7 @@ struct UnboundedCollect(Vec<Vec<u8>>);
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 impl MulticastTxQueue for UnboundedCollect {
@@ -393,7 +396,7 @@ impl MulticastTxQueue for UnboundedCollect {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 pub fn multicast_tx_emit(
@@ -420,7 +423,7 @@ pub fn multicast_tx_emit(
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
@@ -433,7 +436,7 @@ fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
         MulticastTxItem::Response { .. } => true,
         #[cfg(feature = "codec-response-final")]
         MulticastTxItem::ResponseFinal { .. } => true,
-        #[cfg(feature = "liveliness-token")]
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         MulticastTxItem::DeclareReply { .. } => true,
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { .. } => true,
@@ -464,7 +467,7 @@ fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 pub fn multicast_tx_push<M, Q>(
@@ -552,7 +555,7 @@ where
         // zenoh-pico's `_z_send_declare` rides `_z_send_n_msg` with
         // `Z_RELIABILITY_RELIABLE` (src/net/primitives.c:52); a large held-token
         // keyexpr re-frames as a fragment chain exactly like an oversize Push.
-        #[cfg(feature = "liveliness-token")]
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         // `meta` pins a declare reply reliable and DEFAULT-band (no ext_qos),
         // the frame `encode_frame_with_declare` writes.
         MulticastTxItem::DeclareReply { declare } => push_frame(
@@ -596,7 +599,7 @@ where
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bool {
@@ -613,7 +616,7 @@ fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bo
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 fn frame_meta(
@@ -693,7 +696,7 @@ fn frame_meta(
         }
         // The declare reply is DEFAULT-band: no frame ext_qos, no per-priority
         // conduit.
-        #[cfg(feature = "liveliness-token")]
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         MulticastTxItem::DeclareReply { declare } => declare_frame_meta(declare),
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => declare_frame_meta(declare),
@@ -715,7 +718,10 @@ fn frame_meta(
 #[cfg(all(
     feature = "alloc",
     feature = "codec-declare",
-    any(feature = "codec-push", feature = "liveliness-token")
+    any(
+        feature = "codec-push",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
 ))]
 fn declare_frame_meta(declare: &wz_codecs::declare::DeclareOwned) -> FrameMeta {
     FrameMeta {
@@ -741,7 +747,7 @@ fn declare_frame_meta(declare: &wz_codecs::declare::DeclareOwned) -> FrameMeta {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 pub fn multicast_tx_conduit(
@@ -808,7 +814,7 @@ impl MulticastTxMint for MulticastTxConduit<'_> {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 #[derive(Clone, Copy)]
@@ -845,7 +851,7 @@ struct FrameMeta {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 fn push_frame<M, Q, P>(
@@ -998,7 +1004,7 @@ pub fn multicast_put_literal(
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 pub fn multicast_tx_stats_class(
@@ -1026,7 +1032,7 @@ pub fn multicast_tx_stats_class(
             qos.priority(),
             NetworkStatsClass::control(MessageLabel::ResponseFinal),
         ),
-        #[cfg(feature = "liveliness-token")]
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         MulticastTxItem::DeclareReply { declare } => (
             crate::declare_ext_qos::read_declare_qos(declare).priority(),
             NetworkStatsClass::control(MessageLabel::Declare),
@@ -1056,7 +1062,7 @@ pub fn multicast_tx_stats_class(
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 pub struct MulticastTxTally {
@@ -1072,7 +1078,7 @@ pub struct MulticastTxTally {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 impl MulticastTxTally {
@@ -1314,7 +1320,7 @@ pub fn multicast_tx_emit_offer(
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         )
     ))]
     {
@@ -1340,7 +1346,7 @@ pub fn multicast_tx_emit_offer(
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             )
         ),
         all(

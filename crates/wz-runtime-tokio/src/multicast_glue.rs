@@ -357,7 +357,7 @@ impl MulticastStatsRecorder for MulticastTransportStats {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     fn network_message_sent(&self, tally: &wz_session_core::multicast_tx::MulticastTxTally) {
         self.with(|inner| {
@@ -371,7 +371,7 @@ impl MulticastStatsRecorder for MulticastTransportStats {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     fn network_message_dropped(&self, tally: &wz_session_core::multicast_tx::MulticastTxTally) {
         self.with(|inner| {

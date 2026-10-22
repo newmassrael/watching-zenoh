@@ -25,7 +25,9 @@ use crate::multicast_tx::MulticastTxItem;
 // Only the boxed reply variants (Response / DeclareReply) name Box; the unboxed
 // ResponseFinal does not, so a codec-response-final-only build imports nothing.
 // R311y530 — `declare-subscriber` joins the list: the session-local subscriber
-// interest-response also enqueues boxed `DeclareReply` items.
+// interest-response also enqueues boxed `DeclareReply` items, which exist under either feature
+// (`MulticastTxItem::DeclareReply`; open-debt item 913 found the variant still gated on
+// `liveliness-token` alone, which left a `declare-subscriber` build without it uncompilable).
 #[cfg(any(
     feature = "codec-response",
     feature = "liveliness-token",

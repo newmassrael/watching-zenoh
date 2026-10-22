@@ -56,7 +56,7 @@ struct Stage {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     sn: wz_session_core::sn::TxSn,
     queued: Queued,
@@ -68,7 +68,7 @@ impl Stage {
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         )))]
         let _ = mask;
         Mutex::new(Self {
@@ -76,7 +76,7 @@ impl Stage {
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             sn: wz_session_core::sn::TxSn::new(mask),
             queued: VecDeque::new(),
@@ -124,7 +124,7 @@ struct Link {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     params: MulticastParams,
     lanes: crate::writer_queue::OutboundTx,
@@ -132,7 +132,7 @@ struct Link {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     stages: Arc<Stages>,
     /// What each push did, for the plane to count: the stats recorder is the
@@ -142,7 +142,7 @@ struct Link {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     pushed: Option<
         tokio::sync::mpsc::UnboundedSender<(
@@ -296,7 +296,7 @@ impl MulticastTxProducer {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     pub fn push(
         &self,
@@ -326,7 +326,7 @@ impl MulticastTxProducer {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )))]
     pub fn push(
         &self,
@@ -370,7 +370,7 @@ impl MulticastTxProducer {
     feature = "codec-push",
     feature = "codec-response",
     feature = "codec-response-final",
-    feature = "liveliness-token"
+    any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
 impl Link {
     fn push(
@@ -422,7 +422,7 @@ impl Link {
     feature = "codec-push",
     feature = "codec-response",
     feature = "codec-response-final",
-    feature = "liveliness-token"
+    any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
 struct StageQueue<'a> {
     lanes: &'a crate::writer_queue::OutboundTx,
@@ -433,7 +433,7 @@ struct StageQueue<'a> {
     feature = "codec-push",
     feature = "codec-response",
     feature = "codec-response-final",
-    feature = "liveliness-token"
+    any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
 impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
     fn wait_for_room(
@@ -527,7 +527,7 @@ pub(crate) struct MulticastTxPlane {
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
     pushed: tokio::sync::mpsc::UnboundedReceiver<(
         wz_session_core::multicast_tx::MulticastTxTally,
@@ -595,7 +595,7 @@ impl MulticastTxPlane {
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         ))]
         let (pushed_tx, pushed) = tokio::sync::mpsc::unbounded_channel();
         let link = Arc::new(Link {
@@ -603,7 +603,7 @@ impl MulticastTxPlane {
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             params: params.clone(),
             lanes,
@@ -611,14 +611,14 @@ impl MulticastTxPlane {
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             stages: stages.clone(),
             #[cfg(any(
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             pushed: Some(pushed_tx),
             #[cfg(feature = "routing-namespace")]
@@ -634,7 +634,7 @@ impl MulticastTxPlane {
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             pushed,
             writer: Some(writer),
@@ -687,7 +687,7 @@ impl MulticastTxPlane {
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         ))]
         while let Ok((tally, outcome)) = self.pushed.try_recv() {
             // A network message is counted as sent only once pushed, and as a
@@ -797,7 +797,7 @@ impl MulticastTxTap {
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             params: params.clone(),
             lanes,
@@ -805,14 +805,14 @@ impl MulticastTxTap {
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             stages: stages.clone(),
             #[cfg(any(
                 feature = "codec-push",
                 feature = "codec-response",
                 feature = "codec-response-final",
-                feature = "liveliness-token"
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             ))]
             pushed: None,
             #[cfg(feature = "routing-namespace")]

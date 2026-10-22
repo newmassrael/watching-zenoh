@@ -347,8 +347,8 @@ pub fn apply_egress_declare(
 /// Dispatches each variant to the EXISTING per-message egress rule SSOT (zero
 /// rule duplication): Push -> [`apply_egress_push`], Response ->
 /// [`apply_egress_response`], DeclareReply -> [`apply_egress_declare`]
-/// (`liveliness-token` implies `codec-declare`, so the declare egress is always
-/// available here). `ResponseFinal` carries no keyexpr — left untouched, exactly
+/// (`liveliness-token` and `declare-subscriber`, either of which carries the reply, imply
+/// `codec-declare`, so the declare egress is always available here). `ResponseFinal` carries no keyexpr — left untouched, exactly
 /// as zenoh leaves `send_response_final` undecorated (`namespace.rs:111-113`).
 #[cfg(all(
     feature = "session-multicast",
@@ -357,7 +357,7 @@ pub fn apply_egress_declare(
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
-        feature = "liveliness-token"
+        any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
 pub fn apply_egress_multicast_item(
@@ -378,7 +378,7 @@ pub fn apply_egress_multicast_item(
         // namespace (zenoh leaves send_response_final undecorated).
         #[cfg(feature = "codec-response-final")]
         Item::ResponseFinal { .. } => {}
-        #[cfg(feature = "liveliness-token")]
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         Item::DeclareReply { declare } => apply_egress_declare(ns, declare)?,
         // A declaration the session announces on the group (open-debt item 913): local-origin,
         // prefixed as the reply above is.

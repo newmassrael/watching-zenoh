@@ -73,7 +73,7 @@ pub trait MulticastStatsRecorder {
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         )
     ))]
     fn network_message_sent(&self, _tally: &crate::multicast_tx::MulticastTxTally) {}
@@ -86,7 +86,7 @@ pub trait MulticastStatsRecorder {
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         )
     ))]
     fn network_message_dropped(&self, _tally: &crate::multicast_tx::MulticastTxTally) {}
@@ -135,7 +135,7 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         )
     ))]
     fn network_message_sent(&self, tally: &crate::multicast_tx::MulticastTxTally) {
@@ -150,7 +150,7 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
             feature = "codec-push",
             feature = "codec-response",
             feature = "codec-response-final",
-            feature = "liveliness-token"
+            any(feature = "liveliness-token", feature = "declare-subscriber")
         )
     ))]
     fn network_message_dropped(&self, tally: &crate::multicast_tx::MulticastTxTally) {
