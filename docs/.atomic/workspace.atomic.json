@@ -277828,6 +277828,54 @@
         "Not compared and not claimed: pico against wz in speed or size on the host, and any heap-free host build."
       ]
     },
+    "Round 3418": {
+      "decision_summary": "Item 913 steps B and C land. Step B: capi-core holds one multicast group face per joined group beside its unicast faces, driven by the runtime's executor-neutral group loop; it replays subscribers and queryables, publishes on the literal key, and ends a get when every member's final has come. Step C: wz's pico z_open joins a group when listen is a udp locator with an iface, as pico's does, with pico's join profile; writes skip the write filter while a group is held and z_info_peers_zid lists the members, both as pico does. The capability is multicast-transport, registered for core and pico. The witness is upstream's own z_test_peer_multicast, unmodified, run first on the real library as a calibration and then on wz's drop-in.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio: serve_group_face, generic over MulticastLinkDriver, which gains group_locators; the test-support crate adds an in-memory group bus.",
+        "crates/wz-capi-core: group faces in the face table, QueryLeg for every get leg, write_filter_holds_back and group_member_zids; feature multicast-transport.",
+        "crates/wz-capi-pico: z_open's group door with pico's join profile, the write filter steps aside while a group is held, z_info_peers_zid lists members; crates/wz-capi-c issues its get legs through QueryLeg.",
+        "deploy/capabilities.toml and Kconfig.capabilities: multicast-transport for core and pico.",
+        "crates/wz-integration-tests: upstream's multicast peer test on the real library and on wz; scripts/run-ci.sh Layer M runs both.",
+        "Two reds of other rounds repaid: the pcapng editcap fixture's length is derived from its blocks, and the census row drops the features Round 3417 made default."
+      ],
+      "verification_bullets": [
+        "On a build host: upstream's test passes on the real library (fifteen subscriber and queryable receipts and five replies per session) and on wz's drop-in, inside the bound that tells gets ending on finals from gets waiting out their timeout.",
+        "With the group door disabled the wz leg fails, so the witness discriminates; the damage was reverted.",
+        "capi-core's group face unit tests pass; clippy is clean for capi-core with and without the feature, capi-pico with defaults and without multicast, capi-c, the runtime's multicast features, wz-ap-demo and the integration test.",
+        "Layer C0 and Layer A4 pass locally."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read this push's hosted run, Layer M's new leg in particular.",
+        "Item 913 next: step D, zenoh-c's group door; step E, declarations, interests and tokens over a group; step F, raweth.",
+        "Items 910 and 912 remain open."
+      ],
+      "publishable_decision_summary": "Item 913 steps B and C land. Step B: capi-core holds one multicast group face per joined group beside its unicast faces, driven by the runtime's executor-neutral group loop; it replays subscribers and queryables, publishes on the literal key, and ends a get when every member's final has come. Step C: wz's pico z_open joins a group when listen is a udp locator with an iface, as pico's does, with pico's join profile; writes skip the write filter while a group is held and z_info_peers_zid lists the members, both as pico does. The capability is multicast-transport, registered for core and pico. The witness is upstream's own z_test_peer_multicast, unmodified, run first on the real library as a calibration and then on wz's drop-in.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio: serve_group_face, generic over MulticastLinkDriver, which gains group_locators; the test-support crate adds an in-memory group bus.",
+        "crates/wz-capi-core: group faces in the face table, QueryLeg for every get leg, write_filter_holds_back and group_member_zids; feature multicast-transport.",
+        "crates/wz-capi-pico: z_open's group door with pico's join profile, the write filter steps aside while a group is held, z_info_peers_zid lists members; crates/wz-capi-c issues its get legs through QueryLeg.",
+        "deploy/capabilities.toml and Kconfig.capabilities: multicast-transport for core and pico.",
+        "crates/wz-integration-tests: upstream's multicast peer test on the real library and on wz; scripts/run-ci.sh Layer M runs both.",
+        "Two reds of other rounds repaid: the pcapng editcap fixture's length is derived from its blocks, and the census row drops the features Round 3417 made default."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: upstream's test passes on the real library (fifteen subscriber and queryable receipts and five replies per session) and on wz's drop-in, inside the bound that tells gets ending on finals from gets waiting out their timeout.",
+        "With the group door disabled the wz leg fails, so the witness discriminates; the damage was reverted.",
+        "capi-core's group face unit tests pass; clippy is clean for capi-core with and without the feature, capi-pico with defaults and without multicast, capi-c, the runtime's multicast features, wz-ap-demo and the integration test.",
+        "Layer C0 and Layer A4 pass locally."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read this push's hosted run, Layer M's new leg in particular.",
+        "Item 913 next: step D, zenoh-c's group door; step E, declarations, interests and tokens over a group; step F, raweth.",
+        "Items 910 and 912 remain open."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
