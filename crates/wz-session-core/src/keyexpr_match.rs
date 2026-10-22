@@ -1038,13 +1038,28 @@ mod tests {
                         .is_some_and(|split| keyexpr_intersect_patterns(&split, &chunks))
             })
         };
-        let deep = "a/".repeat(MAX_KEYEXPR_CHUNKS) + "a";
-        let deep_other = "a/".repeat(MAX_KEYEXPR_CHUNKS) + "b";
-        let mut keys: alloc::vec::Vec<&str> = corpus.to_vec();
-        keys.push(&deep);
-        keys.push(&deep_other);
-        for &candidate in &keys {
-            for &target in &keys {
+        // Fixed buffers, not `String` and `Vec`: the test has to run where there is no allocator
+        // as well, because that is where the shortcut it guards was added.
+        const DEEP_BYTES: usize = 2 * MAX_KEYEXPR_CHUNKS + 1;
+        let deep_with = |last: &str| {
+            let mut key: crate::bounded::BoundedString<DEEP_BYTES> =
+                crate::bounded::BoundedString::new();
+            for _ in 0..MAX_KEYEXPR_CHUNKS {
+                key.push_str("a/").expect("the buffer holds every chunk");
+            }
+            key.push_str(last).expect("the buffer holds the last chunk");
+            key
+        };
+        let deep = deep_with("a");
+        let deep_other = deep_with("b");
+        let mut keys: crate::bounded::BoundedVec<&str, 64> = crate::bounded::BoundedVec::new();
+        for &key in &corpus {
+            keys.push(key).expect("the corpus fits");
+        }
+        keys.push(deep.as_str()).expect("two deep keys fit");
+        keys.push(deep_other.as_str()).expect("two deep keys fit");
+        for &candidate in keys.iter() {
+            for &target in keys.iter() {
                 let want = walk(candidate, target);
                 assert_eq!(
                     keyexpr_intersects_text(candidate, target),
