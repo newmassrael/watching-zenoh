@@ -755,6 +755,13 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         }
 
         let now_ms = self.clock.now_monotonic_ms();
+        // The application layer's own deadline (a pending query's, a query left for it), if it
+        // has come due: the layer's work is not a datagram or the lease, so no other event says
+        // so. Raised before the inbound datagram is read and without ending the step, so a stream
+        // of datagrams cannot hold it off and it does not cost one.
+        if self.actions.take_app_wake_due(now_ms) {
+            on_event(IterationEvent::AppWake);
+        }
         // Sweep expired reassembly chains and surface the eviction count as
         // an `IterationEvent::ReassemblyTimeout` (the shared SSOT — the AP
         // loop calls the same primitive). A stalled chain whose continuation
@@ -1396,6 +1403,42 @@ mod wake_budget_tests {
         let _ = pump.step(&mut |_event| {});
         let waited = *link.budgets.borrow().last().expect("the link was serviced");
         waited
+    }
+
+    /// The events a pump raises over one step, after the application layer stated a deadline
+    /// `in_ms` from now, and the deadline left afterwards.
+    fn raised(in_ms: Option<u64>) -> (usize, Option<u64>) {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let now_ms = clock.now_monotonic_ms();
+        actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
+        let link = Rc::new(Recording::default());
+        let config = SessionDriveConfig {
+            timeouts: SessionTimeouts::spec_defaults(),
+            role: SessionRole::Acceptor,
+            max_iters: None,
+        };
+        let mut pump = SessionPump::new(runtime, link, actions.clone(), clock, config);
+        let mut wakes = 0;
+        let _ = pump.step(&mut |event| {
+            if matches!(event, IterationEvent::AppWake) {
+                wakes += 1;
+            }
+        });
+        (wakes, actions.app_wake_deadline_ms())
+    }
+
+    #[test]
+    fn a_deadline_that_has_come_due_raises_one_event_and_is_spent() {
+        // The session's steady state raises no event of its own, so without this one the layer
+        // that stated a deadline would run only when a datagram or the lease happened to.
+        assert_eq!(raised(Some(0)), (1, None), "due: one event, and none left");
+        let (wakes, left) = raised(Some(5));
+        assert_eq!(wakes, 0, "not yet due: no event");
+        assert!(left.is_some(), "and the deadline is kept for when it is");
+        assert_eq!(raised(None), (0, None), "none stated: no event");
     }
 
     #[test]

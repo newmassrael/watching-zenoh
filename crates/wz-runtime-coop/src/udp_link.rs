@@ -557,6 +557,12 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     }
 
     fn service_within(&self, max_wait_ms: u64) {
+        // Something is due now (a deadline, a query left for the application's layer): a wait
+        // of the tick would be the whole of what the thing costs. The receive that follows reads
+        // what is queued without waiting.
+        if max_wait_ms == 0 {
+            return;
+        }
         // The most this link may wait: what its session has due, and what its image allows. At
         // or below the tick it is the tick, which is every link that has not been given more.
         let want = max_wait_ms.min(u64::from(self.idle_wait_ms));
@@ -1035,6 +1041,23 @@ mod tests {
         assert!(default.socket.arms.borrow().is_empty(), "no re-arming");
         assert_eq!(default.armed_wait_ms.get(), SERVICE_WAIT_MS);
         assert_eq!(default.socket.waiting_reads.get(), 1, "one tick's read");
+    }
+
+    #[test]
+    fn a_budget_of_nothing_waits_for_nothing_and_the_receive_reads_what_is_queued() {
+        let link = driver(arming_socket()).with_idle_wait_ms(1000);
+        queued(&link.socket, b"queued");
+        link.service_within(0);
+        assert_eq!(link.socket.waiting_reads.get(), 0, "no read to wait on");
+        assert_eq!(link.socket.waits.get(), 0, "no poll either");
+        assert!(link.socket.arms.borrow().is_empty(), "and nothing armed");
+
+        let mut got = Vec::new();
+        assert!(link.recv_with(&mut |bytes| got.extend_from_slice(bytes)));
+        assert_eq!(got, b"queued", "what was queued is still read");
+        // The control: a budget of one tick or more does wait.
+        link.service_within(5);
+        assert_eq!(link.socket.waiting_reads.get(), 1);
     }
 
     #[test]

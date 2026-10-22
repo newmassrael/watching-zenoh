@@ -10795,6 +10795,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             .store(deadline_ms.unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
+    /// Spend the application layer's deadline if it is due at `now_ms`: `true` once, after which
+    /// the layer has none until it states one again. The pump calls this before it raises
+    /// [`IterationEvent::AppWake`](crate::driver_loop::IterationEvent::AppWake).
+    pub fn take_app_wake_due(&self, now_ms: u64) -> bool {
+        let deadline_ms = self.app_wake_deadline_ms.load(Ordering::Relaxed);
+        deadline_ms != u64::MAX
+            && deadline_ms <= now_ms
+            && self
+                .app_wake_deadline_ms
+                .compare_exchange(deadline_ms, u64::MAX, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+    }
+
     /// The deadline the application layer asked the loop to wake for, if it did.
     pub fn app_wake_deadline_ms(&self) -> Option<u64> {
         match self.app_wake_deadline_ms.load(Ordering::Relaxed) {

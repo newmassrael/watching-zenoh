@@ -464,6 +464,18 @@ pub enum IterationEvent<'a> {
     /// not care ignores this event, as it ignores the other multicast ones.
     /// Carries the same ungated [`MulticastPeerId`] the departure does. `Copy`.
     MulticastSource(MulticastPeerId),
+    /// The application layer's own deadline has come due: the moment it stated through
+    /// [`SessionCore::set_app_wake_deadline_ms`](crate::session_actions::SessionCore::set_app_wake_deadline_ms)
+    /// is now or past.
+    ///
+    /// A session's steady state is event-free: the loop raises an event for a datagram, for the
+    /// lease or keep-alive coming due, and for little else, so a layer whose work is not one of
+    /// those (a pending query's deadline, a query left for it by the application) would run only
+    /// when one of them happened to fall near. This is the event that says "your time". It
+    /// carries nothing and the layer has no obligation: the deadline is spent when the event is
+    /// raised, so the layer that wants another states it again, and one that does not is not
+    /// woken again for it. An observer that has no deadlines ignores it. Ungated, as the others.
+    AppWake,
     /// ARCHITECTURE section 9.2 ("Codec::decode parses in place from slot",
     /// "Event emitted with `&slot` borrow") — ONE record of an inbound `Frame`,
     /// decoded where the frame lies and handed over borrowed: the receive path
