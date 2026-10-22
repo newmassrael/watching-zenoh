@@ -2018,21 +2018,20 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // is DENIED, so an egress policy refused every put on a declared key, whether the
         // policy named that key or not.
         let keyexpr = R::with_mutex_mut(&self.observer, |obs| {
-            let peer = obs.subscribers.mapping_spaces().peer();
+            let spaces = obs.subscribers.mapping_spaces();
+            let peer = spaces.peer();
             match flow {
                 crate::interceptor::InterceptorFlow::Ingress => {
                     crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
                         msg,
-                        wz_session_core::wireexpr_resolve::MappingSpaces::with_own(
-                            peer, &**actions,
-                        ),
+                        spaces.with_own_space(&**actions),
                     )
                 }
                 crate::interceptor::InterceptorFlow::Egress => {
                     R::with_mutex_mut(&actions.outbound_mappings, |ours| {
                         crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
                             msg,
-                            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, peer),
+                            wz_session_core::wireexpr_resolve::MappingSpaces::with_own(ours, &peer),
                         )
                     })
                 }

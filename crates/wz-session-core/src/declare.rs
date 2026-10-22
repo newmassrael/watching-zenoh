@@ -107,7 +107,6 @@ pub mod liveliness_get;
 #[cfg(all(
     feature = "storage-profile",
     feature = "alloc",
-    not(feature = "bounded-heapless"),
     target_has_atomic = "64"
 ))]
 pub type DeclEpoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
@@ -129,9 +128,12 @@ pub type DeclEpoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
 /// [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS) matches
 /// nothing, the conservative answer every sibling scan gives an over-deep key.
 #[cfg(feature = "storage-profile")]
-pub(crate) fn declared_intersects(declared: &crate::id_map::DeclaredKeys, keyexpr: &str) -> bool {
+pub(crate) fn declared_intersects<M, K>(declared: &M, keyexpr: &str) -> bool
+where
+    M: crate::id_map::IdMap<K>,
+    K: AsRef<str>,
+{
     use crate::bounded::BoundedVec;
-    use crate::id_map::IdMap;
     let mut target_chunks: BoundedVec<&str, { crate::keyexpr_match::MAX_KEYEXPR_CHUNKS }> =
         BoundedVec::new();
     for chunk in keyexpr.split('/') {
@@ -140,7 +142,7 @@ pub(crate) fn declared_intersects(declared: &crate::id_map::DeclaredKeys, keyexp
         }
     }
     declared.entries().any(|(_, candidate)| {
-        crate::keyexpr_match::keyexpr_intersects_target(candidate.as_str(), &target_chunks)
+        crate::keyexpr_match::keyexpr_intersects_target(candidate.as_ref(), &target_chunks)
     })
 }
 

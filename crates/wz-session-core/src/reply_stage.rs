@@ -46,7 +46,7 @@
 //! the stage's. The allocation has moved from the moment the handler replies to the
 //! moment the session sends, which is where the codec mirrors are replaced.
 
-use crate::bounded::{BoundedVec, Profile, SpanOffset, Storage};
+use crate::bounded::{BoundedVec, Profile, SpanOffset, Static, Storage};
 use crate::caps;
 #[cfg(feature = "alloc")]
 use crate::query::QueryReply;
@@ -295,6 +295,21 @@ pub struct ReplyStage<P: Storage = Profile> {
     rows: BoundedVec<Row<P>, { caps::MAX_PENDING_REPLIES }, P>,
     arena: BoundedVec<u8, { caps::REPLY_STAGE_BYTES }, P>,
     refusals: ReplyRefusals,
+}
+
+impl ReplyStage<Static> {
+    /// An empty stage of the static policy. `const`, so a session slot that holds
+    /// one can be a `static` whatever the build's profile is.
+    pub const fn new_static() -> Self {
+        Self {
+            rows: BoundedVec::new_static(),
+            arena: BoundedVec::new_static(),
+            refusals: ReplyRefusals {
+                staging_full: 0,
+                payload_too_large: 0,
+            },
+        }
+    }
 }
 
 impl ReplyStage<Profile> {
@@ -680,6 +695,17 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
 pub struct FinalStage<P: Storage = Profile> {
     rows: BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     refused_requests: u32,
+}
+
+impl FinalStage<Static> {
+    /// An empty table of the static policy. `const`, so a session slot that holds
+    /// one can be a `static` whatever the build's profile is.
+    pub const fn new_static() -> Self {
+        Self {
+            rows: BoundedVec::new_static(),
+            refused_requests: 0,
+        }
+    }
 }
 
 impl FinalStage<Profile> {

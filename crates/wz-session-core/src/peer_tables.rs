@@ -44,6 +44,7 @@
 //! does (the registry is generic over the application's reply sink); it is
 //! bounded already ([`crate::caps::MAX_PENDING_QUERIES`]).
 
+use crate::bounded::{Profile, Static, Storage};
 use crate::declare::liveliness_subscriber::PeerTokens;
 use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
@@ -58,72 +59,94 @@ use crate::caps;
 use crate::declare::local_token::DeclResponseItem;
 
 /// The tables of one session's peer. See the module documentation.
-pub struct PeerTables {
+///
+/// The storage policy `P` is one choice for every table of the peer: the build's
+/// [`Profile`] unless a caller names another, so `PeerTables` alone is the build's
+/// tables and `PeerTables<Static>` / `PeerTables<Heap>` are the two policies side by
+/// side in one build.
+pub struct PeerTables<P: Storage = Profile> {
     /// The peer's keyexpr aliases, its subscriber interests and what is staged
     /// back to it.
-    pub subscribers: SubscriberPeer,
+    pub subscribers: SubscriberPeer<P>,
     /// The subscribers the peer declared to us.
-    pub remote_subscribers: RemoteSubscriberPeer,
+    pub remote_subscribers: RemoteSubscriberPeer<P>,
     /// The queryables the peer declared to us.
-    pub remote_queryables: RemoteQueryablePeer,
+    pub remote_queryables: RemoteQueryablePeer<P>,
     /// The liveliness tokens the peer declared to us.
-    pub tokens: PeerTokens,
+    pub tokens: PeerTokens<P>,
     /// The replies a queryable staged for the peer's queries.
-    pub replies: ReplyStage,
+    pub replies: ReplyStage<P>,
     /// The `Final`s owed to the peer's queries.
-    pub finals: FinalStage,
+    pub finals: FinalStage<P>,
     /// The answers to the peer's liveliness interests, staged until the next
     /// drain: [`caps::MAX_PENDING_DECLARES`] items, whole chains or none.
     #[cfg(feature = "liveliness-token")]
-    pub pending_declares: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+    pub pending_declares: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     /// The liveliness interests whose answer chain `pending_declares` could not
     /// take whole, and which were therefore staged not at all.
     #[cfg(feature = "liveliness-token")]
     pub token_interest_chains_refused: u32,
 }
 
-impl Default for PeerTables {
+impl<P: Storage> Default for PeerTables<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            subscribers: SubscriberPeer::default(),
+            remote_subscribers: RemoteSubscriberPeer::default(),
+            remote_queryables: RemoteQueryablePeer::default(),
+            tokens: PeerTokens::default(),
+            replies: ReplyStage::default(),
+            finals: FinalStage::default(),
+            #[cfg(feature = "liveliness-token")]
+            pending_declares: BoundedVec::default(),
+            #[cfg(feature = "liveliness-token")]
+            token_interest_chains_refused: 0,
+        }
     }
 }
 
-impl PeerTables {
+impl PeerTables<Static> {
+    /// Empty tables of the static policy, for a peer that has said nothing yet.
+    /// `const`, so a session slot that holds them can be a `static`.
+    pub const fn new_static() -> Self {
+        Self {
+            subscribers: SubscriberPeer::new_static(),
+            remote_subscribers: RemoteSubscriberPeer::new_static(),
+            remote_queryables: RemoteQueryablePeer::new_static(),
+            tokens: PeerTokens::new_static(),
+            replies: ReplyStage::new_static(),
+            finals: FinalStage::new_static(),
+            #[cfg(feature = "liveliness-token")]
+            pending_declares: BoundedVec::new_static(),
+            #[cfg(feature = "liveliness-token")]
+            token_interest_chains_refused: 0,
+        }
+    }
+}
+
+impl PeerTables<Profile> {
     /// Empty tables, for a peer that has said nothing yet. `const` on the fixed
     /// backing, so a session slot that holds them can be a `static`.
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
-        Self {
-            subscribers: SubscriberPeer::new(),
-            remote_subscribers: RemoteSubscriberPeer::new(),
-            remote_queryables: RemoteQueryablePeer::new(),
-            tokens: PeerTokens::new(),
-            replies: ReplyStage::new(),
-            finals: FinalStage::new(),
-            #[cfg(feature = "liveliness-token")]
-            pending_declares: BoundedVec::new(),
-            #[cfg(feature = "liveliness-token")]
-            token_interest_chains_refused: 0,
-        }
+        Self::new_static()
     }
 
     /// Empty tables, for a peer that has said nothing yet.
     #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
-        Self {
-            subscribers: SubscriberPeer::new(),
-            remote_subscribers: RemoteSubscriberPeer::new(),
-            remote_queryables: RemoteQueryablePeer::new(),
-            tokens: PeerTokens::new(),
-            replies: ReplyStage::new(),
-            finals: FinalStage::new(),
-            #[cfg(feature = "liveliness-token")]
-            pending_declares: BoundedVec::new(),
-            #[cfg(feature = "liveliness-token")]
-            token_interest_chains_refused: 0,
-        }
+        Self::default()
     }
 
+    /// The bytes one session's peer tables take where the table is placed, for
+    /// the build's limits: what the deploy file's `limits` keys add up to, read off
+    /// the types and not estimated.
+    pub const fn bytes() -> usize {
+        core::mem::size_of::<Self>()
+    }
+}
+
+impl<P: Storage> PeerTables<P> {
     /// Forget everything the peer said and everything owed to it, in place: the
     /// session ended, or its slot is being handed to the next one. What the session
     /// itself installed (its own id space and zid) goes too, because the next
@@ -144,13 +167,6 @@ impl PeerTables {
         self.finals.clear();
         #[cfg(feature = "liveliness-token")]
         self.pending_declares.clear();
-    }
-
-    /// The bytes one session's peer tables take where the table is placed, for
-    /// the build's limits: what the deploy file's `limits` keys add up to, read off
-    /// the types and not estimated.
-    pub const fn bytes() -> usize {
-        core::mem::size_of::<Self>()
     }
 }
 

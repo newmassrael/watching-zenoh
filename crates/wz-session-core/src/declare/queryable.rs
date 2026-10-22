@@ -17,10 +17,13 @@
 // the map it always was on the growable backing and a bounded table on the fixed
 // one. The no-alloc control plane stores observers in a `BoundedVec` and fires
 // through the borrowed `DeclView` seam.
-#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::id_map::{key_text, DeclaredQueryable};
 #[cfg(feature = "storage-profile")]
-use crate::id_map::{DeclaredQueryables, IdMap};
+use crate::bounded::EpochCounter;
+use crate::bounded::{Profile, Static, Storage};
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::id_map::key_text_as;
+#[cfg(feature = "storage-profile")]
+use crate::id_map::{DeclaredQueryable, DeclaredQueryables, FixedIdMap, IdMap};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 
@@ -175,7 +178,11 @@ impl QuerierCriterion {
 /// aggregate member (see the `declare-interest` atom) — so the waiver
 /// could only ever fire on a flag wz cannot emit.
 #[cfg(feature = "alloc")]
-fn declared_answers(declared: &DeclaredQueryables, criterion: &QuerierCriterion) -> bool {
+fn declared_answers<M, V>(declared: &M, criterion: &QuerierCriterion) -> bool
+where
+    M: IdMap<V>,
+    V: DeclaredRow,
+{
     declared_answers_for(
         declared,
         &criterion.keyexpr,
@@ -188,12 +195,16 @@ fn declared_answers(declared: &DeclaredQueryables, criterion: &QuerierCriterion)
 /// owned [`QuerierCriterion`] (the slot profile) asks the same question with
 /// a borrowed keyexpr and no allocation.
 #[cfg(feature = "storage-profile")]
-fn declared_answers_for(
-    declared: &DeclaredQueryables,
+fn declared_answers_for<M, V>(
+    declared: &M,
     keyexpr: &str,
     locality: Locality,
     complete_required: bool,
-) -> bool {
+) -> bool
+where
+    M: IdMap<V>,
+    V: DeclaredRow,
+{
     use crate::bounded::BoundedVec;
     // R311y797 — the querier's own locality gates this half BEFORE the
     // membership is consulted at all: a `Locality::SessionLocal` querier
@@ -216,9 +227,9 @@ fn declared_answers_for(
         #[cfg(feature = "keyexpr-includes")]
         {
             declared.entries().any(|(_, candidate)| {
-                candidate.complete
+                candidate.complete()
                     && crate::keyexpr_match::keyexpr_includes_target(
-                        candidate.keyexpr.as_str(),
+                        candidate.keyexpr(),
                         &target_chunks,
                     )
             })
@@ -234,11 +245,30 @@ fn declared_answers_for(
         }
     } else {
         declared.entries().any(|(_, candidate)| {
-            crate::keyexpr_match::keyexpr_intersects_target(
-                candidate.keyexpr.as_str(),
-                &target_chunks,
-            )
+            crate::keyexpr_match::keyexpr_intersects_target(candidate.keyexpr(), &target_chunks)
         })
+    }
+}
+
+/// What the membership consult reads of a declared queryable, whichever storage policy
+/// holds it: the keyexpr it answers on and whether it answers for it completely.
+#[cfg(feature = "storage-profile")]
+trait DeclaredRow {
+    fn keyexpr(&self) -> &str;
+    /// Read only by the inclusion test, which `keyexpr-includes` builds.
+    #[cfg(feature = "keyexpr-includes")]
+    fn complete(&self) -> bool;
+}
+
+#[cfg(feature = "storage-profile")]
+impl<P: Storage> DeclaredRow for DeclaredQueryable<P> {
+    fn keyexpr(&self) -> &str {
+        crate::bounded::TextBacking::as_str(&self.keyexpr)
+    }
+
+    #[cfg(feature = "keyexpr-includes")]
+    fn complete(&self) -> bool {
+        self.complete
     }
 }
 
@@ -263,19 +293,19 @@ fn declared_answers_for(
 /// [`RemoteQueryableTable`] and one peer's [`RemoteQueryablePeer`] together, the
 /// shape every AP session has always had, and a process serving several sessions
 /// holds the table once and a peer side per session.
-pub struct RemoteQueryableRegistry<D: DeclSink, U: UndeclSink> {
-    table: RemoteQueryableTable<D, U>,
-    peer: RemoteQueryablePeer,
+pub struct RemoteQueryableRegistry<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
+    table: RemoteQueryableTable<D, U, P>,
+    peer: RemoteQueryablePeer<P>,
 }
 
 /// The application's half of [`RemoteQueryableRegistry`]: the observer lists and
 /// the matching watches. Nothing a peer writes is here.
-pub struct RemoteQueryableTable<D: DeclSink, U: UndeclSink> {
+pub struct RemoteQueryableTable<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
     /// R311gb (Track 2) — shared 2-list observer machinery composed from
     /// [`crate::decl_sink::DeclObserverPair`] (SSOT across the three
     /// `DeclSink` registries). `D = BoxedDeclSink` / `U = BoxedUndeclSink`
     /// on AP, consumer-supplied closed `enum`s on MCU.
-    observers: DeclObserverPair<D, U>,
+    observers: DeclObserverPair<D, U, P>,
     /// R311kh — matching-listener watches (pico `Z_FEATURE_MATCHING`),
     /// the Q-side mirror of the subscriber registry's list: re-evaluated
     /// against the peer's `declared` table on every membership mutation, firing
@@ -293,7 +323,7 @@ pub struct RemoteQueryableTable<D: DeclSink, U: UndeclSink> {
 
 /// What ONE peer has declared as queryables to this session: the table a peer
 /// writes. See [`RemoteQueryableRegistry`].
-pub struct RemoteQueryablePeer {
+pub struct RemoteQueryablePeer<P: Storage = Profile> {
     /// R288 — peer-declared queryables tracked by `{id -> resolved
     /// keyexpr}`. Populated on every inbound `DeclQueryable` whose
     /// keyexpr resolves through the peer's alias table, and entries
@@ -317,75 +347,85 @@ pub struct RemoteQueryablePeer {
     /// on the fixed one, a table of [`crate::caps::MAX_REMOTE_DECLS`] rows whose
     /// full state refuses a NEW id, counts it, and announces nothing for it.
     #[cfg(feature = "storage-profile")]
-    declared: DeclaredQueryables,
+    declared: DeclaredQueryables<P>,
     /// `DeclQueryable`s refused because their keyexpr is longer than a row's
     /// text. Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
     oversize: u32,
-    /// Moves after every change to `declared` ([`crate::declare::DeclEpoch`]).
-    #[cfg(all(
-        feature = "storage-profile",
-        feature = "alloc",
-        not(feature = "bounded-heapless"),
-        target_has_atomic = "64"
-    ))]
-    epoch: crate::declare::DeclEpoch,
+    /// Moves after every change to `declared`: a shared counter on a policy that can
+    /// share one ([`crate::declare::DeclEpoch`]), nothing on one that cannot.
+    #[cfg(feature = "storage-profile")]
+    epoch: P::Epoch,
+    /// Names the policy where no field above does (a build without the session
+    /// machinery). Zero-sized.
+    _policy: core::marker::PhantomData<P>,
 }
 
-impl Default for RemoteQueryablePeer {
+impl<P: Storage> Default for RemoteQueryablePeer<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            #[cfg(feature = "storage-profile")]
+            declared: DeclaredQueryables::<P>::default(),
+            #[cfg(feature = "storage-profile")]
+            oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            epoch: <P::Epoch as Default>::default(),
+            _policy: core::marker::PhantomData,
+        }
     }
 }
 
-impl RemoteQueryablePeer {
-    /// A peer that has declared nothing. `const` on the fixed backing, so a
-    /// session slot that holds one can be a `static`.
+impl RemoteQueryablePeer<Static> {
+    /// A peer of the static policy that has declared nothing. `const`, so a session
+    /// slot that holds one can be a `static`.
+    pub const fn new_static() -> Self {
+        Self {
+            #[cfg(feature = "storage-profile")]
+            declared: FixedIdMap::new(),
+            #[cfg(feature = "storage-profile")]
+            oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            epoch: (),
+            _policy: core::marker::PhantomData,
+        }
+    }
+}
+
+impl RemoteQueryablePeer<Profile> {
+    /// A peer of this build's storage profile that has declared nothing. `const` where
+    /// the profile is the static policy, so a session slot that holds one can be a
+    /// `static`.
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
-        Self {
-            #[cfg(feature = "storage-profile")]
-            declared: DeclaredQueryables::new(),
-            #[cfg(feature = "storage-profile")]
-            oversize: 0,
-        }
+        Self::new_static()
     }
 
-    /// A peer that has declared nothing.
-    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
+    /// A peer of this build's storage profile that has declared nothing.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
-        Self {
-            declared: DeclaredQueryables::new(),
-            oversize: 0,
-            #[cfg(all(feature = "alloc", target_has_atomic = "64"))]
-            epoch: crate::declare::DeclEpoch::default(),
-        }
+        Self::default()
     }
+}
 
+#[cfg(all(
+    feature = "storage-profile",
+    feature = "alloc",
+    target_has_atomic = "64"
+))]
+impl RemoteQueryablePeer<crate::bounded::Heap> {
     /// The counter that moves after every change to what this peer has declared, to be
     /// read without this table's lock; see [`crate::declare::DeclEpoch`].
-    #[cfg(all(
-        feature = "storage-profile",
-        feature = "alloc",
-        not(feature = "bounded-heapless"),
-        target_has_atomic = "64"
-    ))]
     pub fn epoch(&self) -> crate::declare::DeclEpoch {
         self.epoch.clone()
     }
+}
 
+impl<P: Storage> RemoteQueryablePeer<P> {
     /// Move the counter: what a change to `declared` ends with.
     #[cfg(feature = "storage-profile")]
     #[inline]
     fn changed(&self) {
-        #[cfg(all(
-            feature = "storage-profile",
-            feature = "alloc",
-            not(feature = "bounded-heapless"),
-            target_has_atomic = "64"
-        ))]
-        self.epoch
-            .fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.epoch.moved();
     }
 
     /// R288 — count of currently-declared peer queryables (those whose
@@ -407,7 +447,7 @@ impl RemoteQueryablePeer {
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.declared
             .entries()
-            .map(|(id, q)| (id, q.keyexpr.as_str()))
+            .map(|(id, q)| (id, q.keyexpr.as_ref()))
     }
 
     /// R311y797 — [`Self::iter_declared`] carrying the third fact the
@@ -419,7 +459,7 @@ impl RemoteQueryablePeer {
     pub fn iter_declared_info(&self) -> impl Iterator<Item = (u64, &str, bool)> + '_ {
         self.declared
             .entries()
-            .map(|(id, q)| (id, q.keyexpr.as_str(), q.complete))
+            .map(|(id, q)| (id, q.keyexpr.as_ref(), q.complete))
     }
 
     /// How many `DeclQueryable` this peer's table refused: for a NEW id because
@@ -490,51 +530,60 @@ impl RemoteQueryablePeer {
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> Default for RemoteQueryableRegistry<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> Default for RemoteQueryableRegistry<D, U, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            table: RemoteQueryableTable::default(),
+            peer: RemoteQueryablePeer::default(),
+        }
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> Default for RemoteQueryableTable<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> Default for RemoteQueryableTable<D, U, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            observers: DeclObserverPair::default(),
+            #[cfg(all(feature = "session-matching", feature = "alloc"))]
+            matching_watches: MatchingWatchList::new(),
+        }
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> core::ops::Deref for RemoteQueryableRegistry<D, U> {
-    type Target = RemoteQueryableTable<D, U>;
+impl<D: DeclSink, U: UndeclSink, P: Storage> core::ops::Deref for RemoteQueryableRegistry<D, U, P> {
+    type Target = RemoteQueryableTable<D, U, P>;
 
-    fn deref(&self) -> &RemoteQueryableTable<D, U> {
+    fn deref(&self) -> &RemoteQueryableTable<D, U, P> {
         &self.table
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> core::ops::DerefMut for RemoteQueryableRegistry<D, U> {
-    fn deref_mut(&mut self) -> &mut RemoteQueryableTable<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> core::ops::DerefMut
+    for RemoteQueryableRegistry<D, U, P>
+{
+    fn deref_mut(&mut self) -> &mut RemoteQueryableTable<D, U, P> {
         &mut self.table
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
-    /// New empty registry over explicit sink backings `D` / `U`. Both
-    /// observer lists start empty; an empty registry processes inbound
-    /// `Declare(Decl*Queryable)` records as no-ops.
+impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U, Profile> {
+    /// New empty registry over explicit sink backings `D` / `U`, of this build's
+    /// storage profile. Both observer lists start empty; an empty registry processes
+    /// inbound `Declare(Decl*Queryable)` records as no-ops.
     ///
     /// R311gb-3d — the generic constructor (no-`alloc` / MCU entry point,
     /// paired with the `*_sink` installers). AP callers use the inferring
     /// [`new`](RemoteQueryableRegistry::new) shorthand, which fixes
-    /// `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
+    /// `D = BoxedDeclSink` / `U = BoxedUndeclSink`. Defined for the profile alone, so
+    /// it names its storage policy by itself.
     pub fn with_sink_backing() -> Self {
-        Self {
-            table: RemoteQueryableTable::with_sink_backing(),
-            peer: RemoteQueryablePeer::new(),
-        }
+        Self::default()
     }
+}
 
+impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableRegistry<D, U, P> {
     /// The peer's side of this registry, for a caller that wants its table or its
     /// counters by name.
-    pub fn peer(&self) -> &RemoteQueryablePeer {
+    pub fn peer(&self) -> &RemoteQueryablePeer<P> {
         &self.peer
     }
 
@@ -699,17 +748,15 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
-    /// New empty table over explicit sink backings `D` / `U`. Both observer lists
-    /// start empty.
+impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U, Profile> {
+    /// New empty table over explicit sink backings `D` / `U`, of this build's storage
+    /// profile. Both observer lists start empty.
     pub fn with_sink_backing() -> Self {
-        Self {
-            observers: DeclObserverPair::new(),
-            #[cfg(all(feature = "session-matching", feature = "alloc"))]
-            matching_watches: MatchingWatchList::new(),
-        }
+        Self::default()
     }
+}
 
+impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
     /// seam-native entry point; works on every profile). The `alloc`-only
     /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
@@ -767,7 +814,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener(
         &mut self,
-        peer: &RemoteQueryablePeer,
+        peer: &RemoteQueryablePeer<P>,
         keyexpr: &str,
         sink: BoxedMatchingSink,
     ) -> u64 {
@@ -794,7 +841,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener_seeded(
         &mut self,
-        peer: &RemoteQueryablePeer,
+        peer: &RemoteQueryablePeer<P>,
         criterion: QuerierCriterion,
         local_matching: bool,
         sink: BoxedMatchingSink,
@@ -812,7 +859,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn reevaluate_matching(
         &mut self,
-        peer: &RemoteQueryablePeer,
+        peer: &RemoteQueryablePeer<P>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) -> usize {
         self.matching_watches
@@ -829,7 +876,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) -> usize {
         let _ = &local_matching;
@@ -883,7 +930,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare<'a>(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -911,7 +958,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare_with_local<'a>(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -966,7 +1013,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     ))]
     pub fn dispatch_declare_view_with_local<'a>(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         body: &DeclareVariant<'a>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -1007,7 +1054,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_declared(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         id: u64,
         resolved: &str,
         complete: bool,
@@ -1021,7 +1068,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
         // subsequent declare with the same id overwrites
         // the prior entry (peer renamed the keyexpr), which
         // matches zenoh-pico's same-id-replaces behaviour.
-        let Ok(text) = key_text(resolved) else {
+        let Ok(text) = key_text_as::<P>(resolved) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
@@ -1059,7 +1106,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_undeclared(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         id: u64,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
     ) {
@@ -1078,7 +1125,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages<'a>(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1090,7 +1137,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages_with_local<'a>(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,
@@ -1112,7 +1159,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1125,7 +1172,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
-        peer: &mut RemoteQueryablePeer,
+        peer: &mut RemoteQueryablePeer<P>,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&QuerierCriterion) -> bool,

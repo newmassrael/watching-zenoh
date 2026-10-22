@@ -107,6 +107,51 @@ pub trait Storage {
     /// many bits as the capacity, and its rows are that much smaller; one that
     /// grows with the allocator needs the width of an allocation.
     type Offset: SpanOffset;
+
+    /// A table of values by the `u64` id a peer gave them, of at most `N` ids where
+    /// the policy enforces a capacity. A policy chooses the representation, not only
+    /// the room: the growable policy keeps the hash map the registries always had
+    /// (a lookup stays constant time however many ids a router's peers declare), and
+    /// the static policy keeps `N` rows in an inline array whose lookup is a short
+    /// scan, which is what a few dozen rows cost least in RAM and in code.
+    type Ids<V, const N: usize>: crate::id_map::IdMap<V> + Default;
+
+    /// What a table of this policy moves after every change to it, for a reader that
+    /// must not take the table's lock to ask "has anything changed since I looked": a
+    /// shared counter where the policy can share one (the allocator, 64-bit atomics),
+    /// and nothing where it cannot, so a table of the static policy carries no field
+    /// for it.
+    type Epoch: EpochCounter;
+
+    /// A peer's keyexpr-alias table of this policy as the id space a
+    /// [`MappingSpaces`](crate::wireexpr_resolve::MappingSpaces) reads. The policy knows
+    /// which table it keeps, so a reader that holds one through a generic table never
+    /// has to.
+    #[cfg(feature = "storage-profile")]
+    fn peer_space(
+        aliases: &crate::id_map::PeerAliases<Self>,
+    ) -> crate::wireexpr_resolve::PeerSpace<'_>
+    where
+        Self: Sized;
+}
+
+/// The counter of a table's changes; see [`Storage::Epoch`].
+pub trait EpochCounter: Default {
+    /// A change to the table has been made: move the counter after it.
+    fn moved(&self);
+}
+
+impl EpochCounter for () {
+    #[inline(always)]
+    fn moved(&self) {}
+}
+
+#[cfg(all(feature = "alloc", target_has_atomic = "64"))]
+impl EpochCounter for alloc::sync::Arc<core::sync::atomic::AtomicU64> {
+    #[inline]
+    fn moved(&self) {
+        self.fetch_add(1, core::sync::atomic::Ordering::Release);
+    }
 }
 
 /// An unsigned integer that addresses bytes of a table: the width a [`Storage`]
@@ -199,7 +244,7 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
 
 /// The operations a [`BoundedString`] needs of the text a [`Storage`] policy
 /// holds.
-pub trait TextBacking: Sized + Clone {
+pub trait TextBacking: Sized + Clone + core::ops::Deref<Target = str> + AsRef<str> {
     /// The empty text. A function for the reason [`SeqBacking::empty`] is.
     fn empty() -> Self;
 
@@ -226,6 +271,18 @@ impl Storage for Heap {
     type Seq<T, const N: usize> = Vec<T>;
     type Text<const N: usize> = String;
     type Offset = u32;
+    type Ids<V, const N: usize> = hashbrown::HashMap<u64, V>;
+    #[cfg(target_has_atomic = "64")]
+    type Epoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
+    #[cfg(not(target_has_atomic = "64"))]
+    type Epoch = ();
+
+    #[cfg(feature = "storage-profile")]
+    fn peer_space(
+        aliases: &crate::id_map::PeerAliases<Self>,
+    ) -> crate::wireexpr_resolve::PeerSpace<'_> {
+        crate::wireexpr_resolve::PeerSpace::of_map(aliases)
+    }
 }
 
 /// The static policy: a capacity fixed in the type and no allocator. A push past
@@ -237,6 +294,15 @@ impl Storage for Static {
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
     type Text<const N: usize> = heapless::String<N>;
     type Offset = u16;
+    type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
+    type Epoch = ();
+
+    #[cfg(feature = "storage-profile")]
+    fn peer_space(
+        aliases: &crate::id_map::PeerAliases<Self>,
+    ) -> crate::wireexpr_resolve::PeerSpace<'_> {
+        crate::wireexpr_resolve::PeerSpace::of_table(aliases)
+    }
 }
 
 /// The policy this build's features choose, and the default of every container's

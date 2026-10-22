@@ -55,9 +55,9 @@ use alloc::string::{String, ToString};
 #[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
-#[cfg(feature = "bounded-heapless")]
-use crate::id_map::IdMap;
-use crate::id_map::PeerAliases;
+use crate::bounded::{Static, Storage};
+use crate::caps;
+use crate::id_map::{FixedIdMap, IdMap, KeyText, PeerAliases};
 use sce_forge_runtime::codec::{CodecStorage, SceStr};
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
@@ -309,41 +309,53 @@ pub struct MappingSpaces<'a> {
 }
 
 /// The peer's id space as a [`MappingSpaces`] reads it: a plain map (a router
-/// face, a multicast peer, a test) or, on the fixed backing, the table a session
-/// keeps ([`PeerAliases`]).
+/// face, a multicast peer, a test) or the table a session of the static storage
+/// policy keeps ([`PeerAliases`] of [`Static`](crate::bounded::Static)).
 ///
-/// Closed, and not a trait object, because the AP's `peer()` accessor lends the
-/// plain map to callers that need a `&HashMap`, and a closed pair keeps that.
+/// Closed, and not a trait object: the two tables are the two representations a
+/// storage policy has, and which of them a given [`PeerAliases`] is the policy
+/// says ([`Storage::peer_space`]), so a reader never needs to know the policy.
 #[derive(Clone, Copy)]
-enum PeerSpace<'a> {
-    /// The heap profile's plain map; a build with no allocator has none.
+pub struct PeerSpace<'a>(PeerSpaceRepr<'a>);
+
+#[derive(Clone, Copy)]
+enum PeerSpaceRepr<'a> {
+    /// The growable policy's plain map; a build with no allocator has none.
     #[cfg(feature = "alloc")]
     Map(&'a HashMap<u64, String>),
-    /// Only a build whose [`PeerAliases`] is not the plain map has this arm.
-    #[cfg(feature = "bounded-heapless")]
-    Table(&'a PeerAliases),
+    /// The static policy's bounded table.
+    Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
 }
 
 impl<'a> PeerSpace<'a> {
+    /// The growable policy's table, as a peer space.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn of_map(map: &'a HashMap<u64, String>) -> Self {
+        Self(PeerSpaceRepr::Map(map))
+    }
+
+    /// The static policy's table, as a peer space.
+    pub(crate) fn of_table(
+        table: &'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>,
+    ) -> Self {
+        Self(PeerSpaceRepr::Table(table))
+    }
+
     /// The literal keyexpr the peer declared for `id`.
     fn literal(&self, id: u64) -> Option<&'a str> {
-        match *self {
+        match self.0 {
             #[cfg(feature = "alloc")]
-            PeerSpace::Map(map) => map.get(&id).map(String::as_str),
-            #[cfg(feature = "bounded-heapless")]
-            PeerSpace::Table(table) => table.find(id).map(|text| text.as_str()),
+            PeerSpaceRepr::Map(map) => map.get(&id).map(String::as_str),
+            PeerSpaceRepr::Table(table) => table.find(id).map(|text| text.as_str()),
         }
     }
 }
 
 /// The peer's half of a [`MappingSpaces`] as a table to inspect: what
-/// [`MappingSpaces::peer`] answers on the fixed backing, where the table is not a
-/// `HashMap` to lend.
-#[cfg(feature = "bounded-heapless")]
+/// [`MappingSpaces::peer`] answers, on every storage policy.
 #[derive(Clone, Copy)]
 pub struct PeerSpaceView<'a>(PeerSpace<'a>);
 
-#[cfg(feature = "bounded-heapless")]
 impl<'a> PeerSpaceView<'a> {
     /// The literal the peer declared for `id`.
     pub fn get(&self, id: &u64) -> Option<&'a str> {
@@ -352,10 +364,10 @@ impl<'a> PeerSpaceView<'a> {
 
     /// How many ids the peer has declared.
     pub fn len(&self) -> usize {
-        match self.0 {
+        match self.0 .0 {
             #[cfg(feature = "alloc")]
-            PeerSpace::Map(map) => map.len(),
-            PeerSpace::Table(table) => table.count(),
+            PeerSpaceRepr::Map(map) => map.len(),
+            PeerSpaceRepr::Table(table) => table.count(),
         }
     }
 
@@ -365,12 +377,41 @@ impl<'a> PeerSpaceView<'a> {
     }
 }
 
+/// The peer's table is an own space too, from the other end of the link: a check
+/// that reads a message WE send resolves its `M=1` through the ids this node declared
+/// and its `M=0` through the ones the peer did, so the peer's table is the "own" half
+/// of that pair. Whatever table the storage policy keeps it in.
+impl OwnMappingSpace for PeerSpaceView<'_> {
+    #[cfg(feature = "alloc")]
+    fn resolve_own_mapping(&self, id: u64) -> Option<String> {
+        self.get(&id).map(String::from)
+    }
+
+    fn append_own_mapping(
+        &self,
+        id: u64,
+        out: &mut KeyexprBuf,
+    ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
+        self.get(&id).map(|literal| out.push_str(literal))
+    }
+}
+
 impl<'a> MappingSpaces<'a> {
+    /// This pair without its own space: the peer's half alone, for a reader whose wire
+    /// form names its key in the sender's space only (the `ext_keyexpr` of an
+    /// undeclaration) and must not be handed an `M=0` half it would silently read.
+    pub fn without_own(self) -> Self {
+        Self {
+            peer: self.peer,
+            own: None,
+        }
+    }
+
     /// Only the peer's space is known. `M=0` aliases refuse.
     #[cfg(feature = "alloc")]
     pub fn peer_only(peer: &'a HashMap<u64, String>) -> Self {
         Self {
-            peer: PeerSpace::Map(peer),
+            peer: PeerSpace::of_map(peer),
             own: None,
         }
     }
@@ -379,23 +420,36 @@ impl<'a> MappingSpaces<'a> {
     #[cfg(feature = "alloc")]
     pub fn with_own(peer: &'a HashMap<u64, String>, own: &'a dyn OwnMappingSpace) -> Self {
         Self {
-            peer: PeerSpace::Map(peer),
+            peer: PeerSpace::of_map(peer),
             own: Some(own),
         }
     }
 
-    /// The pair a session holds: the peer's aliases in whatever table the build
-    /// keeps them in ([`PeerAliases`]) and our own space when one is installed.
+    /// The pair a session holds: the peer's aliases in whatever table its storage
+    /// policy keeps them in ([`PeerAliases`]) and our own space when one is
+    /// installed.
     ///
-    /// On the growable backing that table IS the plain map, so this is
-    /// [`Self::peer_only`] / [`Self::with_own`] by another name; on the fixed one
+    /// On the growable policy that table IS the plain map, so this is
+    /// [`Self::peer_only`] / [`Self::with_own`] by another name; on the static one
     /// it is the bounded table, which no `HashMap` constructor can take.
-    pub fn for_aliases(peer: &'a PeerAliases, own: Option<&'a dyn OwnMappingSpace>) -> Self {
-        #[cfg(not(feature = "bounded-heapless"))]
-        let peer = PeerSpace::Map(peer);
-        #[cfg(feature = "bounded-heapless")]
-        let peer = PeerSpace::Table(peer);
-        Self { peer, own }
+    pub fn for_aliases<P: Storage>(
+        peer: &'a PeerAliases<P>,
+        own: Option<&'a dyn OwnMappingSpace>,
+    ) -> Self {
+        Self {
+            peer: P::peer_space(peer),
+            own,
+        }
+    }
+
+    /// This pair with `own` as its own space, the peer's half unchanged: what a
+    /// caller that holds the peer's table through a pair and has an own space of
+    /// its own to put beside it needs, without a table type to name.
+    pub fn with_own_space(self, own: &'a dyn OwnMappingSpace) -> Self {
+        Self {
+            peer: self.peer,
+            own: Some(own),
+        }
     }
 
     /// The peer's half as a raw table, for a caller that must INSPECT it rather
@@ -415,18 +469,10 @@ impl<'a> MappingSpaces<'a> {
     /// reachable only THROUGH the pair — a consumer holding it has already been
     /// handed the `M=0` half it would otherwise silently refuse.
     ///
-    /// The growable backing lends the plain map. The fixed backing has none to
-    /// lend and answers a [`PeerSpaceView`] with the same three questions.
-    #[cfg(not(feature = "bounded-heapless"))]
-    pub fn peer(&self) -> &'a HashMap<u64, String> {
-        match self.peer {
-            PeerSpace::Map(map) => map,
-        }
-    }
-
-    /// The peer's half as a table to inspect. See the growable form for what it
-    /// is for and why it is the narrow half.
-    #[cfg(feature = "bounded-heapless")]
+    /// A [`PeerSpaceView`] answers the three questions an inspector has (the literal
+    /// of an id, how many ids, none at all) whatever table the policy keeps: the
+    /// growable policy's map is not lent as a `HashMap`, because a pair of the static
+    /// policy has none to lend and the answer must not depend on which it holds.
     pub fn peer(&self) -> PeerSpaceView<'a> {
         PeerSpaceView(self.peer)
     }
@@ -472,12 +518,11 @@ impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a> {
     }
 }
 
-/// The fixed backing's table is a valid pair for the same reason, and on the
+/// The static policy's table is a valid pair for the same reason, and on the
 /// same terms: no own space in it.
-#[cfg(feature = "bounded-heapless")]
-impl<'a> From<&'a PeerAliases> for MappingSpaces<'a> {
-    fn from(peer: &'a PeerAliases) -> Self {
-        Self::for_aliases(peer, None)
+impl<'a> From<&'a PeerAliases<Static>> for MappingSpaces<'a> {
+    fn from(peer: &'a PeerAliases<Static>) -> Self {
+        Self::for_aliases::<Static>(peer, None)
     }
 }
 

@@ -118,7 +118,7 @@ fn declare_governed_keyexpr(declare: &DeclareOwned, spaces: MappingSpaces<'_>) -
         _ => return None,
     };
     // The extension names its key in the SENDER's space (`M=1`), which is the `peer` slot.
-    resolve_ext_keyexpr(exts, spaces.peer())
+    resolve_ext_keyexpr(exts, spaces.without_own())
 }
 
 /// The keyexpr `Wireexpr` a `DeclareSubscriber` declares interest in — `None` for

@@ -35,15 +35,10 @@
 //! one comparison per row on a table that lives in cache, and an indexed
 //! no-alloc map would spend more RAM than the rows it indexes.
 
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
-use alloc::string::String;
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
-#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-use crate::bounded::BoundedString;
-use crate::bounded::CapacityFull;
-#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+use crate::bounded::{CapacityFull, Profile, Storage, TextBacking};
 use crate::caps;
 
 /// A table of values by the id the peer gave them.
@@ -164,7 +159,7 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
     }
 }
 
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+#[cfg(feature = "alloc")]
 impl<V> IdMap<V> for HashMap<u64, V> {
     fn find(&self, id: u64) -> Option<&V> {
         self.get(&id)
@@ -202,77 +197,52 @@ impl<V> IdMap<V> for HashMap<u64, V> {
     }
 }
 
-/// The text of a keyexpr as a peer's table holds it: a `String` on the growable
-/// backing, and a bounded buffer of [`caps::MAX_KEYEXPR_BYTES`] on the fixed one.
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
-pub type KeyText = String;
-
-/// The text of a keyexpr as a peer's table holds it: a `String` on the growable
-/// backing, and a bounded buffer of [`caps::MAX_KEYEXPR_BYTES`] on the fixed one.
-#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-pub type KeyText = BoundedString<{ caps::MAX_KEYEXPR_BYTES }>;
+/// The text of a keyexpr as a peer's table holds it, in the storage policy `P`: a
+/// `String` on the growable policy, and a buffer of [`caps::MAX_KEYEXPR_BYTES`]
+/// bytes on the static one.
+pub type KeyText<P = Profile> = <P as Storage>::Text<{ caps::MAX_KEYEXPR_BYTES }>;
 
 /// A keyexpr the peer named is longer than [`caps::MAX_KEYEXPR_BYTES`], which a
-/// fixed table cannot hold. Never answered on the growable backing.
+/// table of the static policy cannot hold. Never answered on the growable policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyexprTooLong;
 
-/// `literal` as the text a table holds, or [`KeyexprTooLong`] when the fixed
-/// backing cannot hold it. The caller drops the declaration, as it drops one the
+/// `literal` as the text a table of policy `P` holds, or [`KeyexprTooLong`] when
+/// the policy cannot hold it. The caller drops the declaration, as it drops one the
 /// table has no room for.
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
-pub fn key_text(literal: &str) -> Result<KeyText, KeyexprTooLong> {
-    Ok(String::from(literal))
-}
-
-/// `literal` as the text a table holds, or [`KeyexprTooLong`] when the fixed
-/// backing cannot hold it. The caller drops the declaration, as it drops one the
-/// table has no room for.
-#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-pub fn key_text(literal: &str) -> Result<KeyText, KeyexprTooLong> {
-    let mut text = KeyText::new();
+pub fn key_text_as<P: Storage>(literal: &str) -> Result<KeyText<P>, KeyexprTooLong> {
+    let mut text = <KeyText<P> as TextBacking>::empty();
     text.push_str(literal).map_err(|_| KeyexprTooLong)?;
     Ok(text)
 }
 
-/// The peer's keyexpr aliases: `DeclKexpr.id -> keyexpr`, at most
-/// [`caps::MAX_PEER_KEYEXPR_ALIASES`] on the fixed backing.
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
-pub type PeerAliases = HashMap<u64, String>;
+/// [`key_text_as`] in this build's storage profile.
+pub fn key_text(literal: &str) -> Result<KeyText, KeyexprTooLong> {
+    key_text_as::<Profile>(literal)
+}
 
 /// The peer's keyexpr aliases: `DeclKexpr.id -> keyexpr`, at most
-/// [`caps::MAX_PEER_KEYEXPR_ALIASES`] on the fixed backing.
-#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-pub type PeerAliases = FixedIdMap<KeyText, { caps::MAX_PEER_KEYEXPR_ALIASES }>;
+/// [`caps::MAX_PEER_KEYEXPR_ALIASES`] where the policy enforces a capacity.
+pub type PeerAliases<P = Profile> =
+    <P as Storage>::Ids<KeyText<P>, { caps::MAX_PEER_KEYEXPR_ALIASES }>;
 
 /// The keyexprs the peer declared a subscriber, or a token, on: `id -> keyexpr`,
-/// at most [`caps::MAX_REMOTE_DECLS`] on the fixed backing.
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
-pub type DeclaredKeys = HashMap<u64, String>;
-
-/// The keyexprs the peer declared a subscriber, or a token, on: `id -> keyexpr`,
-/// at most [`caps::MAX_REMOTE_DECLS`] on the fixed backing.
-#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-pub type DeclaredKeys = FixedIdMap<KeyText, { caps::MAX_REMOTE_DECLS }>;
+/// at most [`caps::MAX_REMOTE_DECLS`] where the policy enforces a capacity.
+pub type DeclaredKeys<P = Profile> = <P as Storage>::Ids<KeyText<P>, { caps::MAX_REMOTE_DECLS }>;
 
 /// What a peer's `DeclQueryable` is remembered as, in a table that holds one per
 /// id: the keyexpr it answers on and whether it answers for it completely.
-pub struct DeclaredQueryable {
+pub struct DeclaredQueryable<P: Storage = Profile> {
     /// The keyexpr the peer declared the queryable on, resolved.
-    pub keyexpr: KeyText,
+    pub keyexpr: KeyText<P>,
     /// Whether the peer declared it `complete`.
     pub complete: bool,
 }
 
 /// The queryables the peer declared: `id -> (keyexpr, complete)`, at most
-/// [`caps::MAX_REMOTE_DECLS`] on the fixed backing.
-#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
-pub type DeclaredQueryables = HashMap<u64, DeclaredQueryable>;
-
-/// The queryables the peer declared: `id -> (keyexpr, complete)`, at most
-/// [`caps::MAX_REMOTE_DECLS`] on the fixed backing.
-#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-pub type DeclaredQueryables = FixedIdMap<DeclaredQueryable, { caps::MAX_REMOTE_DECLS }>;
+/// [`caps::MAX_REMOTE_DECLS`] where the policy enforces a capacity.
+pub type DeclaredQueryables<P = Profile> =
+    <P as Storage>::Ids<DeclaredQueryable<P>, { caps::MAX_REMOTE_DECLS }>;
 
 #[cfg(test)]
 mod tests {
@@ -345,7 +315,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_growable_backing_refuses_nothing() {
         let mut table: HashMap<u64, u32> = HashMap::new();

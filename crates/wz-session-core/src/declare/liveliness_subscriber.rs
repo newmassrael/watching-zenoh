@@ -87,16 +87,16 @@ use wz_codecs::declare::DeclareOwnedVariant;
 ))]
 use wz_codecs::declare::DeclareVariant;
 
-use crate::bounded::{BoundedString, BoundedVec};
+use crate::bounded::{BoundedString, BoundedVec, Profile, Static, Storage};
 use crate::caps;
 #[cfg(feature = "alloc")]
 use crate::driver_loop::DriverLoopOutcome;
 #[cfg(feature = "storage-profile")]
 use crate::driver_loop::IterationEvent;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::id_map::key_text;
+use crate::id_map::key_text_as;
 #[cfg(feature = "storage-profile")]
-use crate::id_map::{DeclaredKeys, IdMap};
+use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
 // R2662 — `keyexpr_pattern_matches` is gone from this module: both fan paths
 // were its last callers, so a token keyexpr cannot be read as a literal here
 // again without the import being restored deliberately. `MAX_KEYEXPR_CHUNKS`
@@ -134,7 +134,7 @@ pub use crate::declare::liveliness_sample::{
 /// through [`LivelinessSubscriberRegistry::register`] /
 /// [`LivelinessSubscriberRegistry::unregister`] and the RAII handle
 /// at the [`crate::session::LivelinessSubscriber`] layer.
-struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
+struct LivelinessSubscriberSlot<C: LivelinessSampleSink, P: Storage = Profile> {
     /// R311gb (Track 2) — the slot's interest id (was the `HashMap` key;
     /// now carried in-row since the slot table is a linear `BoundedVec`).
     interest_id: u64,
@@ -145,7 +145,7 @@ struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
     /// single buffer). Empty literal chunks are preserved so `a//b` is
     /// distinguishable from `a/b`; the registry's `keyexpr` accessor
     /// returns this verbatim.
-    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
+    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
     /// R311gb-3d — the delivery sink (DIP seam). Fired in registration
     /// order if multiple subscribers are declared on overlapping
     /// patterns. `C = BoxedLivelinessSampleSink` on AP, a consumer-
@@ -177,25 +177,25 @@ struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
 /// together, the shape every AP session has always had. A process serving several
 /// sessions holds the table once and a [`PeerTokens`] per session, since a token
 /// id is scoped to the session it came in on.
-pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink> {
-    table: LivelinessSubscriberTable<C>,
-    peer: PeerTokens,
+pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink, P: Storage = Profile> {
+    table: LivelinessSubscriberTable<C, P>,
+    peer: PeerTokens<P>,
 }
 
 /// The application's half of [`LivelinessSubscriberRegistry`]: the subscriber
 /// slots and nothing a peer writes.
-pub struct LivelinessSubscriberTable<C: LivelinessSampleSink> {
+pub struct LivelinessSubscriberTable<C: LivelinessSampleSink, P: Storage = Profile> {
     /// R311gb (Track 2) — bounded slot table (was a `HashMap` keyed by
     /// `interest_id`; now a linear `BoundedVec` with the id carried
     /// in-row, scanned on register / unregister / accessor lookup —
     /// `caps::MAX_LIVELINESS_SUBSCRIPTIONS` is small so the linear scan is
     /// cheaper than a no-alloc map).
-    slots: BoundedVec<LivelinessSubscriberSlot<C>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
+    slots: BoundedVec<LivelinessSubscriberSlot<C, P>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }, P>,
 }
 
 /// The tokens ONE peer has declared to this session: the table a peer writes.
 /// See [`LivelinessSubscriberRegistry`].
-pub struct PeerTokens {
+pub struct PeerTokens<P: Storage = Profile> {
     /// Peer-side token table: maps a `DeclToken.id` to the keyexpr it
     /// resolved to at `DeclToken` arrival time. Populated by
     /// [`Self::dispatch_declare`] on `DeclToken` reception and
@@ -219,41 +219,59 @@ pub struct PeerTokens {
     /// session's peer holds, so a replay run against another session's table
     /// would hand one peer's tokens to a subscriber of the other.
     #[cfg(feature = "storage-profile")]
-    table: DeclaredKeys,
+    table: DeclaredKeys<P>,
     /// `DeclToken`s refused because their keyexpr is longer than a row's text.
     /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// Names the policy where no field above does (a build without the session
+    /// machinery). Zero-sized.
+    _policy: core::marker::PhantomData<P>,
 }
 
-impl Default for PeerTokens {
+impl<P: Storage> Default for PeerTokens<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            #[cfg(feature = "storage-profile")]
+            table: DeclaredKeys::<P>::default(),
+            #[cfg(feature = "storage-profile")]
+            oversize: 0,
+            _policy: core::marker::PhantomData,
+        }
     }
 }
 
-impl PeerTokens {
-    /// A peer that has declared no token. `const` on the fixed backing, so a
-    /// session slot that holds one can be a `static`.
+impl PeerTokens<Static> {
+    /// A peer of the static policy that has declared no token. `const`, so a session
+    /// slot that holds one can be a `static`.
+    pub const fn new_static() -> Self {
+        Self {
+            #[cfg(feature = "storage-profile")]
+            table: FixedIdMap::new(),
+            #[cfg(feature = "storage-profile")]
+            oversize: 0,
+            _policy: core::marker::PhantomData,
+        }
+    }
+}
+
+impl PeerTokens<Profile> {
+    /// A peer of this build's storage profile that has declared no token. `const`
+    /// where the profile is the static policy, so a session slot that holds one can be
+    /// a `static`.
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
-        Self {
-            #[cfg(feature = "storage-profile")]
-            table: DeclaredKeys::new(),
-            #[cfg(feature = "storage-profile")]
-            oversize: 0,
-        }
+        Self::new_static()
     }
 
-    /// A peer that has declared no token.
-    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
+    /// A peer of this build's storage profile that has declared no token.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
-        Self {
-            table: DeclaredKeys::new(),
-            oversize: 0,
-        }
+        Self::default()
     }
+}
 
+impl<P: Storage> PeerTokens<P> {
     /// Snapshot of how many peer-side `DeclToken` records are
     /// currently tracked. Equal to the number of `DeclToken` arrivals
     /// minus matching `UndeclToken` arrivals; bounded by the peer's
@@ -292,7 +310,7 @@ impl PeerTokens {
     pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.table
             .entries()
-            .map(|(id, keyexpr)| (id, keyexpr.as_str()))
+            .map(|(id, keyexpr)| (id, keyexpr.as_ref()))
     }
 
     /// Drop every token the peer declared, in place; the refusal counts are kept.
@@ -302,50 +320,57 @@ impl PeerTokens {
     }
 }
 
-impl<C: LivelinessSampleSink> Default for LivelinessSubscriberRegistry<C> {
+impl<C: LivelinessSampleSink, P: Storage> Default for LivelinessSubscriberRegistry<C, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            table: LivelinessSubscriberTable::default(),
+            peer: PeerTokens::default(),
+        }
     }
 }
 
-impl<C: LivelinessSampleSink> Default for LivelinessSubscriberTable<C> {
+impl<C: LivelinessSampleSink, P: Storage> Default for LivelinessSubscriberTable<C, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            slots: BoundedVec::default(),
+        }
     }
 }
 
-impl<C: LivelinessSampleSink> core::ops::Deref for LivelinessSubscriberRegistry<C> {
-    type Target = LivelinessSubscriberTable<C>;
+impl<C: LivelinessSampleSink, P: Storage> core::ops::Deref for LivelinessSubscriberRegistry<C, P> {
+    type Target = LivelinessSubscriberTable<C, P>;
 
-    fn deref(&self) -> &LivelinessSubscriberTable<C> {
+    fn deref(&self) -> &LivelinessSubscriberTable<C, P> {
         &self.table
     }
 }
 
-impl<C: LivelinessSampleSink> core::ops::DerefMut for LivelinessSubscriberRegistry<C> {
-    fn deref_mut(&mut self) -> &mut LivelinessSubscriberTable<C> {
+impl<C: LivelinessSampleSink, P: Storage> core::ops::DerefMut
+    for LivelinessSubscriberRegistry<C, P>
+{
+    fn deref_mut(&mut self) -> &mut LivelinessSubscriberTable<C, P> {
         &mut self.table
     }
 }
 
-impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
-    /// New empty registry over an explicit sink backing `C`. No slots,
-    /// empty peer-token table.
+impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C, Profile> {
+    /// New empty registry over an explicit sink backing `C`, of this build's storage
+    /// profile. No slots, empty peer-token table.
     ///
     /// R311gb-3d — the generic constructor (no-`alloc` / MCU entry point,
     /// paired with [`register`](Self::register) taking an explicit sink).
     /// AP callers use the inferring [`new`](LivelinessSubscriberRegistry::new)
-    /// shorthand, which fixes `C = BoxedLivelinessSampleSink`.
+    /// shorthand, which fixes `C = BoxedLivelinessSampleSink`. Defined for the
+    /// profile alone, so it names its storage policy by itself.
     pub fn with_sink_backing() -> Self {
-        Self {
-            table: LivelinessSubscriberTable::with_sink_backing(),
-            peer: PeerTokens::new(),
-        }
+        Self::default()
     }
+}
 
+impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// The peer's side of this registry, for a caller that wants its table or its
     /// counters by name.
-    pub fn peer(&self) -> &PeerTokens {
+    pub fn peer(&self) -> &PeerTokens<P> {
         &self.peer
     }
 
@@ -477,14 +502,15 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     }
 }
 
-impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
-    /// New empty table over an explicit sink backing `C`. No slots.
+impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C, Profile> {
+    /// New empty table over an explicit sink backing `C`, of this build's storage
+    /// profile. No slots.
     pub fn with_sink_backing() -> Self {
-        Self {
-            slots: BoundedVec::new(),
-        }
+        Self::default()
     }
+}
 
+impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// Register a subscriber slot keyed by `interest_id`. Returns
     /// `false` if `interest_id` is already registered — callers
     /// allocate fresh ids through
@@ -517,7 +543,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// is replayed the tokens THAT peer holds.
     pub fn register(
         &mut self,
-        peer: &PeerTokens,
+        peer: &PeerTokens<P>,
         interest_id: u64,
         keyexpr: &str,
         history: bool,
@@ -529,7 +555,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
         if self.slots.iter().any(|s| s.interest_id == interest_id) {
             return Ok(false);
         }
-        let mut pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> = BoundedString::new();
+        let mut pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
         pattern
             .push_str(keyexpr)
             .map_err(|_| RegisterError::KeyexprTooLong)?;
@@ -659,7 +685,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare<'a>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -696,7 +722,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare_historical<'a>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
@@ -750,7 +776,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     ))]
     pub fn dispatch_declare_view_historical<'a>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         body: &DeclareVariant<'a>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         historical: bool,
@@ -792,7 +818,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_token_declared(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         id: u64,
         resolved: &str,
         historical: bool,
@@ -819,7 +845,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
         // longer than a row's text) is REFUSED and counted, and is not
         // announced to the subscribers: what they are told is what the
         // table holds, so a later `UndeclToken` can name it.
-        let Ok(text) = key_text(resolved) else {
+        let Ok(text) = key_text_as::<P>(resolved) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
@@ -837,7 +863,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_token_undeclared<'k, E: crate::ext_view::ExtEntryView>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         id: u64,
         exts: Option<&'k [E]>,
         peer_keyexpr_table: MappingSpaces<'k>,
@@ -851,7 +877,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
         let mut composed = KeyexprBuf::new();
         let removed = peer.table.unbind(id);
         let resolved: &str = match removed.as_ref() {
-            Some(s) => s.as_str(),
+            Some(s) => s.as_ref(),
             // R311y769 — the id is unknown, so FALL BACK to the keyexpr
             // the retraction carries itself. zenoh reaches its
             // `else if m.ext_wire_expr.wire_expr != WireExpr::empty()`
@@ -940,7 +966,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// iterated while a sink runs" property are the ones a drain-then-sort gave,
     /// and nothing is collected, so a link loss allocates nothing on the fixed
     /// backing. `peer` is the session whose link was lost.
-    pub fn flush_peer_tokens_on_link_loss(&mut self, peer: &mut PeerTokens) -> usize {
+    pub fn flush_peer_tokens_on_link_loss(&mut self, peer: &mut PeerTokens<P>) -> usize {
         #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
@@ -953,7 +979,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
                 // its history flag, exactly as the live `UndeclToken` fan does.
                 self.fan_to_matching_slots(
                     LivelinessSampleKind::Delete,
-                    keyexpr.as_str(),
+                    keyexpr.as_ref(),
                     id,
                     false,
                 );
@@ -1010,7 +1036,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     /// same shape as the sibling flush): `peer_token_table` is the wire-side
     /// resolution state and does not exist on the no-alloc control plane, so
     /// `0` is the honest answer there — nothing is known to replay.
-    pub fn replay_known_tokens(&mut self, peer: &PeerTokens, interest_id: u64) -> usize {
+    pub fn replay_known_tokens(&mut self, peer: &PeerTokens<P>, interest_id: u64) -> usize {
         #[cfg(feature = "storage-profile")]
         {
             let slots = &mut self.slots;
@@ -1064,7 +1090,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
                         continue;
                     }
                     if keyexpr_intersects_target(&slot.pattern, &target) {
-                        next = Some((token_id, keyexpr.as_str()));
+                        next = Some((token_id, keyexpr.as_ref()));
                     }
                 }
                 let Some((token_id, keyexpr)) = next else {
@@ -1159,7 +1185,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(feature = "alloc")]
     pub fn dispatch_messages<'a>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1188,7 +1214,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(feature = "alloc")]
     pub fn dispatch_messages_unclaimed<'a>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,
@@ -1290,7 +1316,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1302,7 +1328,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event_unclaimed<'a>(
         &mut self,
-        peer: &mut PeerTokens,
+        peer: &mut PeerTokens<P>,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         claimed: &dyn Fn(u64) -> bool,

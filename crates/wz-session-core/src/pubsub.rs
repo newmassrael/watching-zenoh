@@ -98,10 +98,10 @@ use alloc::string::String;
 // a subset no lane built until Layer C1bj. Fully qualifying removes the
 // coupling rather than restating it in a longer cfg.
 
-use crate::bounded::{BoundedString, BoundedVec};
+use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
 use crate::caps;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
-use crate::id_map::key_text;
+use crate::id_map::key_text_as;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{IdMap, PeerAliases};
 use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
@@ -229,7 +229,7 @@ impl SubscriptionId {
     }
 }
 
-struct Subscriber<C: SampleSink> {
+struct Subscriber<C: SampleSink, P: Storage = Profile> {
     id: SubscriptionId,
     /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
     /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it
@@ -239,7 +239,7 @@ struct Subscriber<C: SampleSink> {
     /// preserved (a pattern like `a//b` keeps its empty chunk); `*` /
     /// `**` are single-char chunks; matching is performed by
     /// [`keyexpr_pattern_matches`].
-    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
+    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
     /// R223 — locality filter applied before the sink fires.
     /// See [`crate::locality`] for the semantics and the wz
     /// dispatch invariant (every inbound Push is treated as remote
@@ -275,8 +275,8 @@ pub use crate::keyexpr_match::{keyexpr_intersect_patterns, keyexpr_pattern_match
 /// See module-level docs for scope (Push + DECLARE resolver, R121d).
 /// `!Sync` by construction (no shared mutable state); callers that
 /// need cross-task sharing wrap in `Arc<Mutex<…>>`.
-pub struct SubscriberTable<C: SampleSink> {
-    subscribers: BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
+pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
+    subscribers: BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
     next_id: u64,
     /// How many times a subscription was registered or retired since this was
     /// built. A session that stages announcements from the subscription table
@@ -332,17 +332,20 @@ pub struct SubscriberTable<C: SampleSink> {
 /// (read by every plane that resolves a keyexpr), and `InterestSide`, what it
 /// asked to be told and what is staged back (written by the interest plane while
 /// it holds a keyexpr resolved out of the first).
-pub struct SubscriberPeer {
+pub struct SubscriberPeer<P: Storage = Profile> {
     #[cfg(feature = "storage-profile")]
-    naming: PeerNaming,
+    naming: PeerNaming<P>,
     #[cfg(feature = "declare-subscriber")]
-    interests: InterestSide,
+    interests: InterestSide<P>,
+    /// Names the policy where no field above does (a build without the session
+    /// machinery). Zero-sized.
+    _policy: core::marker::PhantomData<P>,
 }
 
 /// What a session's peer has named, and what names OUR side: its keyexpr aliases,
 /// the id space of our own bundle, and our zid. See [`SubscriberPeer`].
 #[cfg(feature = "storage-profile")]
-struct PeerNaming {
+struct PeerNaming<P: Storage = Profile> {
     /// R121d — peer-side keyexpr alias table. Populated from
     /// inbound `Declare(DeclKexpr)` records; cleared per-id by
     /// `Declare(UndeclKexpr)`. Each entry maps a peer-declared
@@ -368,7 +371,7 @@ struct PeerNaming {
     /// [`caps::MAX_PEER_KEYEXPR_ALIASES`] rows whose full state refuses a NEW id
     /// and counts it.
     #[cfg(feature = "storage-profile")]
-    aliases: PeerAliases,
+    aliases: PeerAliases<P>,
     /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
     /// the table itself lives on `SessionActions::outbound_mappings`, written by
@@ -422,13 +425,13 @@ struct PeerNaming {
     ///
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
-    own_zid: Option<BoundedVec<u8, 16>>,
+    own_zid: Option<BoundedVec<u8, 16, P>>,
 }
 
 /// What a session's peer asked to be told about our subscriptions, and what is
 /// staged back to it. See [`SubscriberPeer`].
 #[cfg(feature = "declare-subscriber")]
-struct InterestSide {
+struct InterestSide<P: Storage = Profile> {
     /// R311y530 — inbound SUBSCRIBER `Interest`s this session has been told
     /// about, zenoh's per-face `remote-interests` table restricted to the
     /// session-local half. Retired on that interest's `Interest(Final)`.
@@ -441,12 +444,12 @@ struct InterestSide {
     /// the liveliness twin tried it). So the keyexpr lives here, once, and the
     /// staged item is two `u64`s that resolve through it.
     #[cfg(feature = "declare-subscriber")]
-    rows: BoundedVec<InboundSubInterest, { caps::MAX_INBOUND_SUB_INTERESTS }>,
+    rows: BoundedVec<InboundSubInterest<P>, { caps::MAX_INBOUND_SUB_INTERESTS }, P>,
     /// R311y530 — the staged interest-response chain, drained by
     /// [`Self::take_staged_sub_interest_replies`] through a
     /// [`crate::response_sink::DeclareReplySink`].
     #[cfg(feature = "declare-subscriber")]
-    staged: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }>,
+    staged: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P>,
     /// What the two tables above could not take, counted rather than dropped
     /// in silence. Every field stays zero on the growable backing, where no
     /// push fails; see [`SubInterestRefusals`].
@@ -560,13 +563,13 @@ fn subscription_matches_interest(pattern: &str, interest: Option<&str>) -> bool 
 
 /// R311y530 — one remembered inbound SUBSCRIBER `Interest`.
 #[cfg(feature = "declare-subscriber")]
-struct InboundSubInterest {
+struct InboundSubInterest<P: Storage = Profile> {
     /// The peer's interest id, echoed on every reply and on the terminating
     /// `DeclFinal` so the peer routes them to this interest.
     interest_id: u64,
     /// The interest's RESOLVED keyexpr — the reply keyexpr when
     /// [`aggregate`](Self::aggregate) is set.
-    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
+    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
     /// The `AGGREGATE` flag off the interest body. Load-bearing, not
     /// informational: an aggregate interest's replies are associated by
     /// `_z_keyexpr_equals` against THIS keyexpr (`session/interest.c:274-276`),
@@ -670,50 +673,49 @@ pub enum SubInterestReply {
 /// `session-slot`'s ([`SubscriberTable`] once per process, a [`SubscriberPeer`] in
 /// each session slot); it uses this type for nothing but the single-session case
 /// and for tests.
-pub struct SubscriberRegistry<C: SampleSink> {
-    table: SubscriberTable<C>,
-    peer: SubscriberPeer,
+pub struct SubscriberRegistry<C: SampleSink, P: Storage = Profile> {
+    table: SubscriberTable<C, P>,
+    peer: SubscriberPeer<P>,
 }
 
-impl<C: SampleSink> core::ops::Deref for SubscriberRegistry<C> {
-    type Target = SubscriberTable<C>;
+impl<C: SampleSink, P: Storage> core::ops::Deref for SubscriberRegistry<C, P> {
+    type Target = SubscriberTable<C, P>;
 
-    fn deref(&self) -> &SubscriberTable<C> {
+    fn deref(&self) -> &SubscriberTable<C, P> {
         &self.table
     }
 }
 
-impl<C: SampleSink> core::ops::DerefMut for SubscriberRegistry<C> {
-    fn deref_mut(&mut self) -> &mut SubscriberTable<C> {
+impl<C: SampleSink, P: Storage> core::ops::DerefMut for SubscriberRegistry<C, P> {
+    fn deref_mut(&mut self) -> &mut SubscriberTable<C, P> {
         &mut self.table
     }
 }
 
-impl<C: SampleSink> Default for SubscriberRegistry<C> {
+impl<C: SampleSink, P: Storage> Default for SubscriberRegistry<C, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
-    }
-}
-
-impl<C: SampleSink> Default for SubscriberTable<C> {
-    fn default() -> Self {
-        Self::with_sink_backing()
-    }
-}
-
-impl Default for SubscriberPeer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<C: SampleSink> SubscriberTable<C> {
-    /// New empty table over an explicit sink backing `C`. Subscriber ids start
-    /// at 1 so 0 stays available as a sentinel "no subscription" value for any
-    /// caller-side wrapper that needs one.
-    pub fn with_sink_backing() -> Self {
         Self {
-            subscribers: BoundedVec::new(),
+            table: SubscriberTable::default(),
+            peer: SubscriberPeer::default(),
+        }
+    }
+}
+
+impl<C: SampleSink> SubscriberTable<C, Profile> {
+    /// New empty table over an explicit sink backing `C`, of this build's storage
+    /// profile. Subscriber ids start at 1 so 0 stays available as a sentinel "no
+    /// subscription" value for any caller-side wrapper that needs one. Defined for
+    /// the profile alone, so it names its storage policy by itself; code generic
+    /// over a policy builds a table with `Default`.
+    pub fn with_sink_backing() -> Self {
+        Self::default()
+    }
+}
+
+impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
+    fn default() -> Self {
+        Self {
+            subscribers: BoundedVec::default(),
             next_id: 1,
             epoch: 0,
             #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -729,7 +731,9 @@ impl<C: SampleSink> SubscriberTable<C> {
             in_place_fallbacks: InPlaceFallbacks::default(),
         }
     }
+}
 
+impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// What the in-place receive path's Puts cost in owned fallbacks since this
     /// registry was built; see [`InPlaceFallbacks`].
     #[cfg(all(
@@ -873,8 +877,11 @@ impl<C: SampleSink> SubscriberTable<C> {
         // canonical form is a hard no-alloc failure (fail-fast, no
         // silent truncation). On the `alloc` backing neither capacity
         // branch is ever taken.
-        let pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> =
-            match crate::keyexpr_canon::canonize_keyexpr(keyexpr_pattern) {
+        let pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> =
+            match crate::keyexpr_canon::canonize_keyexpr_as::<P>(
+                keyexpr_pattern,
+                crate::keyexpr_canon::KeyexprDialect::Pico,
+            ) {
                 Ok(canon) => canon,
                 Err(crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity) => {
                     return Err(RegisterError::KeyexprTooLong);
@@ -885,7 +892,7 @@ impl<C: SampleSink> SubscriberTable<C> {
                          canonical ({err}); storing raw form. The matcher still operates but \
                          the stored chunks may drift from the canonical form a peer emits."
                     );
-                    let mut raw = BoundedString::new();
+                    let mut raw = BoundedString::default();
                     raw.push_str(keyexpr_pattern)
                         .map_err(|_| RegisterError::KeyexprTooLong)?;
                     raw
@@ -989,7 +996,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event(
         &mut self,
-        peer: &mut SubscriberPeer,
+        peer: &mut SubscriberPeer<P>,
         event: IterationEvent<'_>,
     ) {
         match event {
@@ -1041,7 +1048,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "session-slot")]
     fn dispatch_in_place_control(
         &mut self,
-        peer: &mut SubscriberPeer,
+        peer: &mut SubscriberPeer<P>,
         record: &crate::driver_loop::InPlaceRecord<'_>,
     ) {
         #[cfg(feature = "codec-declare")]
@@ -1079,7 +1086,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "alloc")]
     pub fn dispatch(
         &mut self,
-        peer: &mut SubscriberPeer,
+        peer: &mut SubscriberPeer<P>,
         message: &NetworkMessage,
         _reliability: Reliability,
     ) {
@@ -1140,10 +1147,12 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
     fn respond_to_subscriber_interest(
         &mut self,
-        peer: &mut SubscriberPeer,
+        peer: &mut SubscriberPeer<P>,
         interest: &InterestOwned,
     ) {
-        let SubscriberPeer { naming, interests } = peer;
+        let SubscriberPeer {
+            naming, interests, ..
+        } = peer;
         let interest_id = interest.interest_id;
         let (current, future) = (interest.c(), interest.f());
         let Some(body) = interest.body.as_ref() else {
@@ -1190,10 +1199,12 @@ impl<C: SampleSink> SubscriberTable<C> {
     ))]
     fn respond_to_subscriber_interest_view(
         &mut self,
-        peer: &mut SubscriberPeer,
+        peer: &mut SubscriberPeer<P>,
         interest: &wz_codecs::interest::Interest<'_>,
     ) {
-        let SubscriberPeer { naming, interests } = peer;
+        let SubscriberPeer {
+            naming, interests, ..
+        } = peer;
         let interest_id = interest.interest_id;
         let (current, future) = (interest.c(), interest.f());
         let Some(body) = interest.body.as_ref() else {
@@ -1255,7 +1266,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "declare-subscriber")]
     pub fn respond_to_subscriber_interest_borrowed(
         &mut self,
-        peer: &mut SubscriberPeer,
+        peer: &mut SubscriberPeer<P>,
         interest_id: u64,
         pattern: Option<&str>,
         aggregate: bool,
@@ -1278,7 +1289,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "declare-subscriber")]
     fn respond_to_interest(
         &mut self,
-        interests: &mut InterestSide,
+        interests: &mut InterestSide<P>,
         interest_id: u64,
         pattern: Option<&str>,
         aggregate: bool,
@@ -1301,7 +1312,7 @@ impl<C: SampleSink> SubscriberTable<C> {
         {
             true
         } else {
-            let mut keyexpr = BoundedString::new();
+            let mut keyexpr = BoundedString::<{ caps::MAX_KEYEXPR_BYTES }, P>::default();
             if keyexpr.push_str(pattern.unwrap_or("**")).is_err() {
                 // A keyexpr past the bounded field cannot be replied with
                 // anyway; terminate the chain honestly instead of half-
@@ -1436,7 +1447,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// [`SubscriberPeer::reconcile`], which finds the same subscriptions by their
     /// ids instead of by being told.
     #[cfg(feature = "declare-subscriber")]
-    fn stage_future_subscriber_pushes(&self, interests: &mut InterestSide, new_id: u64) {
+    fn stage_future_subscriber_pushes(&self, interests: &mut InterestSide<P>, new_id: u64) {
         let mut hits: BoundedVec<(u64, bool), { caps::MAX_INBOUND_SUB_INTERESTS }> =
             BoundedVec::new();
         {
@@ -1498,7 +1509,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// them away. `an_unrelated_unregister_stages_no_aggregate_retraction` is
     /// the red that keeps this line honest; the wire tests are not.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
-    fn stage_emptied_aggregate_retracts(&self, interests: &mut InterestSide) {
+    fn stage_emptied_aggregate_retracts(&self, interests: &mut InterestSide<P>) {
         let mut hits: BoundedVec<u64, { caps::MAX_INBOUND_SUB_INTERESTS }> = BoundedVec::new();
         for row in interests.rows.iter() {
             if row.aggregate
@@ -1535,7 +1546,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     pub fn take_aggregate_retract(
         &self,
-        peer: &mut SubscriberPeer,
+        peer: &mut SubscriberPeer<P>,
         interest_id: u64,
     ) -> Option<u64> {
         let rows = &mut peer.interests.rows;
@@ -1594,7 +1605,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "declare-subscriber")]
     pub fn sub_interest_reply<'a>(
         &'a self,
-        peer: &'a SubscriberPeer,
+        peer: &'a SubscriberPeer<P>,
         item: &SubInterestReply,
     ) -> Option<(u64, &'a str)> {
         match item {
@@ -1642,7 +1653,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "alloc")]
     fn dispatch_push(
         &mut self,
-        peer: &SubscriberPeer,
+        peer: &SubscriberPeer<P>,
         push: &PushOwned,
         reliability: Reliability,
         is_remote: bool,
@@ -2098,8 +2109,8 @@ impl MatchMemo {
 /// from the same slot without hashing the key or comparing it again; anything else is looked up
 /// as usual.
 #[cfg(feature = "alloc")]
-fn fire_into_memoized<C: SampleSink>(
-    subscribers: &mut BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
+fn fire_into_memoized<C: SampleSink, P: Storage>(
+    subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
     memo: &mut MatchMemo,
     epoch: u64,
     key: &str,
@@ -2181,8 +2192,8 @@ fn fire_into_memoized<C: SampleSink>(
 /// remembers what a key matched; the in-place receive and every build without an allocator
 /// reach it directly, and a build that has neither caller leaves it unused.
 #[cfg_attr(feature = "alloc", allow(dead_code))]
-fn fire_into<C: SampleSink>(
-    subscribers: &mut BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
+fn fire_into<C: SampleSink, P: Storage>(
+    subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
     view: &dyn SampleView,
     is_remote: bool,
 ) -> usize {
@@ -2241,7 +2252,7 @@ fn fire_into<C: SampleSink>(
     fired
 }
 
-impl<C: SampleSink> SubscriberTable<C> {
+impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// R311y788 — the SESSION-LOCAL half of a publisher's matching
     /// status: `true` iff at least one subscriber registered on THIS
     /// session would receive a local publish on `publish_keyexpr`.
@@ -2343,39 +2354,60 @@ impl<C: SampleSink> SubscriberTable<C> {
 /// The peer's side of the registry: the operations that read and write only what
 /// ONE peer owns, which is all of them that do not also need the subscription
 /// table.
-impl SubscriberPeer {
-    /// An empty side, for a session that has heard nothing yet. `const` on the
-    /// fixed backing, so a session slot that holds one can be a `static`.
-    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-    pub const fn new() -> Self {
+impl<P: Storage> Default for SubscriberPeer<P> {
+    fn default() -> Self {
         Self {
             #[cfg(feature = "storage-profile")]
             naming: PeerNaming {
-                aliases: PeerAliases::new(),
+                aliases: PeerAliases::<P>::default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 own_zid: None,
             },
             #[cfg(feature = "declare-subscriber")]
-            interests: InterestSide::new(),
+            interests: InterestSide::default(),
+            _policy: core::marker::PhantomData,
         }
     }
+}
 
-    /// An empty side, for a session that has heard nothing yet.
-    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
-    pub fn new() -> Self {
+impl SubscriberPeer<crate::bounded::Static> {
+    /// An empty side of the static policy, for a session that has heard nothing yet.
+    /// `const`, so a session slot that holds one can be a `static`.
+    pub const fn new_static() -> Self {
         Self {
+            #[cfg(feature = "storage-profile")]
             naming: PeerNaming {
-                aliases: PeerAliases::new(),
+                aliases: crate::id_map::FixedIdMap::new(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 own_zid: None,
             },
             #[cfg(feature = "declare-subscriber")]
-            interests: InterestSide::new(),
+            interests: InterestSide::new_static(),
+            _policy: core::marker::PhantomData,
         }
     }
+}
 
+impl SubscriberPeer<Profile> {
+    /// An empty side of this build's storage profile, for a session that has heard
+    /// nothing yet. `const` where the profile is the static policy, so a session slot
+    /// that holds one can be a `static`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub const fn new() -> Self {
+        Self::new_static()
+    }
+
+    /// An empty side of this build's storage profile, for a session that has heard
+    /// nothing yet.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<P: Storage> SubscriberPeer<P> {
     /// Forget everything the peer said: the aliases it declared, the interests it
     /// registered and what was staged to it. What the session itself installed
     /// (its own id space and zid) stays, because it is the session's and not the
@@ -2508,7 +2540,7 @@ impl SubscriberPeer {
         if !(1..=16).contains(&zid.len()) {
             return false;
         }
-        let mut own: BoundedVec<u8, 16> = BoundedVec::new();
+        let mut own: BoundedVec<u8, 16, P> = BoundedVec::default();
         for byte in zid {
             // At most 16 were admitted above, so the fixed backing has room.
             if own.push(*byte).is_err() {
@@ -2597,7 +2629,7 @@ impl SubscriberPeer {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text(literal) else {
+                let Ok(text) = key_text_as::<P>(literal) else {
                     return;
                 };
                 // A refusal is counted by the table itself; the declaration that
@@ -2666,7 +2698,7 @@ impl SubscriberPeer {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text(literal) else {
+                let Ok(text) = key_text_as::<P>(literal) else {
                     return;
                 };
                 // A refusal is counted by the table itself, as for the owned form.
@@ -2689,7 +2721,7 @@ impl SubscriberPeer {
 }
 
 #[cfg(feature = "storage-profile")]
-impl PeerNaming {
+impl<P: Storage> PeerNaming<P> {
     /// The two id spaces this session resolves a keyexpr against: the peer's
     /// aliases and, when installed, our own.
     fn spaces(&self) -> MappingSpaces<'_> {
@@ -2702,18 +2734,30 @@ impl PeerNaming {
         // relay face does, which refuses it.
         #[cfg(not(feature = "alloc"))]
         let own = None;
-        MappingSpaces::for_aliases(&self.aliases, own)
+        MappingSpaces::for_aliases::<P>(&self.aliases, own)
     }
 }
 
 #[cfg(feature = "declare-subscriber")]
-impl InterestSide {
-    /// No interest registered, nothing staged. `const` on the fixed backing.
-    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
-    const fn new() -> Self {
+impl<P: Storage> Default for InterestSide<P> {
+    /// No interest registered, nothing staged.
+    fn default() -> Self {
         Self {
-            rows: BoundedVec::new(),
-            staged: BoundedVec::new(),
+            rows: BoundedVec::default(),
+            staged: BoundedVec::default(),
+            refusals: SubInterestRefusals::default(),
+            reconciled_epoch: 0,
+        }
+    }
+}
+
+#[cfg(feature = "declare-subscriber")]
+impl InterestSide<crate::bounded::Static> {
+    /// No interest registered, nothing staged, of the static policy. `const`.
+    const fn new_static() -> Self {
+        Self {
+            rows: BoundedVec::new_static(),
+            staged: BoundedVec::new_static(),
             refusals: SubInterestRefusals {
                 chains: 0,
                 future_interests: 0,
@@ -2722,18 +2766,10 @@ impl InterestSide {
             reconciled_epoch: 0,
         }
     }
+}
 
-    /// No interest registered, nothing staged.
-    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
-    fn new() -> Self {
-        Self {
-            rows: BoundedVec::new(),
-            staged: BoundedVec::new(),
-            refusals: SubInterestRefusals::default(),
-            reconciled_epoch: 0,
-        }
-    }
-
+#[cfg(feature = "declare-subscriber")]
+impl<P: Storage> InterestSide<P> {
     /// Retire the row of `interest_id`: the peer cancelled it, or a recycled id
     /// must not inherit a dead publisher's keyexpr.
     fn retire(&mut self, interest_id: u64) {
@@ -2774,7 +2810,7 @@ impl InterestSide {
 /// The interest plane of one peer's side: what it registered, what is staged back
 /// to it, and what could not be.
 #[cfg(feature = "declare-subscriber")]
-impl SubscriberPeer {
+impl<P: Storage> SubscriberPeer<P> {
     /// The counted refusals of this peer's interest staging. All zero on the
     /// growable backing; see [`SubInterestRefusals`].
     pub fn interest_staging_refusals(&self) -> SubInterestRefusals {
@@ -2792,7 +2828,7 @@ impl SubscriberPeer {
     /// own them.
     pub fn take_staged_sub_interest_replies(
         &mut self,
-    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }> {
+    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P> {
         core::mem::take(&mut self.interests.staged)
     }
 
@@ -2834,7 +2870,7 @@ impl SubscriberPeer {
     ///
     /// A no-op when the table did not move. Staging that does not fit is counted
     /// and refused, as everywhere else.
-    pub fn reconcile<C: SampleSink>(&mut self, table: &SubscriberTable<C>) {
+    pub fn reconcile<C: SampleSink>(&mut self, table: &SubscriberTable<C, P>) {
         let interests = &mut self.interests;
         if interests.reconciled_epoch == table.epoch {
             return;
@@ -2893,9 +2929,9 @@ impl SubscriberPeer {
 /// The application-facing registry of ONE session: the table and that session's
 /// peer side. Everything that does not need the peer is the table's, reached
 /// through `Deref`; what does is here, with the signature it has always had.
-impl<C: SampleSink> SubscriberRegistry<C> {
-    /// New empty registry over an explicit sink backing `C`. Subscriber
-    /// ids start at 1 so 0 stays available as a sentinel "no
+impl<C: SampleSink> SubscriberRegistry<C, Profile> {
+    /// New empty registry over an explicit sink backing `C`, of this build's storage
+    /// profile. Subscriber ids start at 1 so 0 stays available as a sentinel "no
     /// subscription" value for any caller-side wrapper that needs one.
     ///
     /// R311gb-2b — the generic constructor (the no-`alloc` / MCU entry
@@ -2904,17 +2940,17 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// shorthand, which fixes `C = BoxedSink`; this mirrors the std
     /// `HashMap::new` (default hasher) vs `with_hasher` split, so a bare
     /// `SubscriberRegistry::new()` resolves its type parameter without a
-    /// turbofish.
+    /// turbofish. Defined for the profile alone, so it names its storage policy by
+    /// itself; code generic over a policy builds a registry with `Default`.
     pub fn with_sink_backing() -> Self {
-        Self {
-            table: SubscriberTable::with_sink_backing(),
-            peer: SubscriberPeer::new(),
-        }
+        Self::default()
     }
+}
 
+impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
     /// The peer's side of this registry, for a caller that wants its counters or
     /// its tables by name.
-    pub fn peer(&self) -> &SubscriberPeer {
+    pub fn peer(&self) -> &SubscriberPeer<P> {
         &self.peer
     }
 
@@ -3047,7 +3083,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     #[cfg(feature = "declare-subscriber")]
     pub fn take_staged_sub_interest_replies(
         &mut self,
-    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }> {
+    ) -> BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P> {
         self.peer.take_staged_sub_interest_replies()
     }
 

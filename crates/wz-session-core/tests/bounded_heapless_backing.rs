@@ -274,6 +274,7 @@ fn local_token_table_refuses_the_token_past_max_local_tokens_without_allocating(
 mod peer_tables {
     use super::*;
     use wz_codecs::declare::DeclareOwned;
+    use wz_session_core::bounded::Profile;
     use wz_session_core::id_map::PeerAliases;
     use wz_session_core::wireexpr_resolve::MappingSpaces;
     use wz_session_core_test_support as fx;
@@ -301,13 +302,13 @@ mod peer_tables {
                 RemoteSubscriberTable::with_sink_backing();
             let mut peer = RemoteSubscriberPeer::new();
             let msgs = declares(caps::MAX_REMOTE_DECLS + 1, sub);
-            let aliases = PeerAliases::new();
+            let aliases = PeerAliases::<Profile>::new();
             let (_, allocations) = allocations_during(|| {
                 for m in &msgs {
                     table.dispatch_declare(
                         &mut peer,
                         &m.body,
-                        MappingSpaces::for_aliases(&aliases, None),
+                        MappingSpaces::for_aliases::<Profile>(&aliases, None),
                     );
                 }
             });
@@ -327,12 +328,12 @@ mod peer_tables {
                 RemoteSubscriberTable::with_sink_backing();
             let (mut flooded, mut quiet) =
                 (RemoteSubscriberPeer::new(), RemoteSubscriberPeer::new());
-            let aliases = PeerAliases::new();
+            let aliases = PeerAliases::<Profile>::new();
             for m in &declares(caps::MAX_REMOTE_DECLS + 4, sub) {
                 table.dispatch_declare(
                     &mut flooded,
                     &m.body,
-                    MappingSpaces::for_aliases(&aliases, None),
+                    MappingSpaces::for_aliases::<Profile>(&aliases, None),
                 );
             }
             // The same id from the other session means something else there, and fits.
@@ -340,7 +341,7 @@ mod peer_tables {
             table.dispatch_declare(
                 &mut quiet,
                 &one.body,
-                MappingSpaces::for_aliases(&aliases, None),
+                MappingSpaces::for_aliases::<Profile>(&aliases, None),
             );
             assert_eq!(
                 (
@@ -371,13 +372,13 @@ mod peer_tables {
                 RemoteQueryableTable::with_sink_backing();
             let mut peer = RemoteQueryablePeer::new();
             let msgs = declares(caps::MAX_REMOTE_DECLS + 1, qbl);
-            let aliases = PeerAliases::new();
+            let aliases = PeerAliases::<Profile>::new();
             let (_, allocations) = allocations_during(|| {
                 for m in &msgs {
                     table.dispatch_declare(
                         &mut peer,
                         &m.body,
-                        MappingSpaces::for_aliases(&aliases, None),
+                        MappingSpaces::for_aliases::<Profile>(&aliases, None),
                     );
                 }
             });
@@ -393,19 +394,19 @@ mod peer_tables {
             let mut table: RemoteQueryableTable<NoopDeclSink, NoopUndeclSink> =
                 RemoteQueryableTable::with_sink_backing();
             let (mut flooded, mut quiet) = (RemoteQueryablePeer::new(), RemoteQueryablePeer::new());
-            let aliases = PeerAliases::new();
+            let aliases = PeerAliases::<Profile>::new();
             for m in &declares(caps::MAX_REMOTE_DECLS + 4, qbl) {
                 table.dispatch_declare(
                     &mut flooded,
                     &m.body,
-                    MappingSpaces::for_aliases(&aliases, None),
+                    MappingSpaces::for_aliases::<Profile>(&aliases, None),
                 );
             }
             let one = qbl(3, "quiet/three");
             table.dispatch_declare(
                 &mut quiet,
                 &one.body,
-                MappingSpaces::for_aliases(&aliases, None),
+                MappingSpaces::for_aliases::<Profile>(&aliases, None),
             );
             assert_eq!(
                 (
@@ -439,10 +440,13 @@ mod peer_tables {
             let mut reg: LivelinessSubscriberRegistry<NoopTokenSink> =
                 LivelinessSubscriberRegistry::with_sink_backing();
             let msgs = declares(caps::MAX_REMOTE_DECLS + 1, tok);
-            let aliases = PeerAliases::new();
+            let aliases = PeerAliases::<Profile>::new();
             let (_, allocations) = allocations_during(|| {
                 for m in &msgs {
-                    reg.dispatch_declare(&m.body, MappingSpaces::for_aliases(&aliases, None));
+                    reg.dispatch_declare(
+                        &m.body,
+                        MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                    );
                 }
             });
             assert_eq!(
@@ -458,16 +462,22 @@ mod peer_tables {
 
         #[test]
         fn one_session_filling_its_token_table_leaves_the_other_session_untouched() {
-            let aliases = PeerAliases::new();
+            let aliases = PeerAliases::<Profile>::new();
             let mut flooded: LivelinessSubscriberRegistry<NoopTokenSink> =
                 LivelinessSubscriberRegistry::with_sink_backing();
             let mut quiet: LivelinessSubscriberRegistry<NoopTokenSink> =
                 LivelinessSubscriberRegistry::with_sink_backing();
             for m in &declares(caps::MAX_REMOTE_DECLS + 4, tok) {
-                flooded.dispatch_declare(&m.body, MappingSpaces::for_aliases(&aliases, None));
+                flooded.dispatch_declare(
+                    &m.body,
+                    MappingSpaces::for_aliases::<Profile>(&aliases, None),
+                );
             }
             let one = tok(3, "quiet/three");
-            quiet.dispatch_declare(&one.body, MappingSpaces::for_aliases(&aliases, None));
+            quiet.dispatch_declare(
+                &one.body,
+                MappingSpaces::for_aliases::<Profile>(&aliases, None),
+            );
             assert_eq!(
                 (
                     flooded.peer_token_count(),

@@ -70,7 +70,7 @@
 //! emits them through the sink. Wire ordering is preserved — every
 //! `DeclToken` precedes the terminating `DeclFinal`.
 
-use crate::bounded::{BoundedString, BoundedVec, CapacityFull};
+use crate::bounded::{BoundedString, BoundedVec, CapacityFull, Profile, Storage};
 use crate::caps;
 use crate::keyexpr_match::{keyexpr_intersect_patterns, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
@@ -146,13 +146,13 @@ pub enum DeclResponseItem {
 /// One held-token row. Private to this module; the `BoundedVec` of these
 /// is the no-alloc backing for the token table (was a `HashMap` key/value
 /// pair before R311hn).
-struct LocalToken {
+struct LocalToken<P: Storage = Profile> {
     /// The token's unique id (was the `HashMap` key; carried in-row now
     /// the table is a linear `BoundedVec`).
     token_id: u64,
     /// The token's resolved literal keyexpr, stored as one
     /// [`BoundedString`] (no-alloc backing on MCU).
-    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
+    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
 }
 
 /// DECLARER-side registry of wz's own held `LivelinessToken`s.
@@ -162,32 +162,37 @@ struct LocalToken {
 /// token handle's `Drop`. The membership is consulted only when an
 /// inbound non-final liveliness Interest arrives, to decide which held
 /// tokens to reply with.
-pub struct LocalTokenRegistry {
+///
+/// The storage policy `P` is the one the build's profile picks unless a caller
+/// names another: the algorithm is written once over [`Storage`].
+pub struct LocalTokenRegistry<P: Storage = Profile> {
     /// R311hn (Track 2) — bounded token table (was an unbounded
     /// `HashMap<u64, String>`; now a linear `BoundedVec` with the id
     /// carried in-row, scanned on register / unregister / response —
     /// `caps::MAX_LOCAL_TOKENS` is small so the linear scan is cheaper
     /// than a no-alloc map).
-    tokens: BoundedVec<LocalToken, { caps::MAX_LOCAL_TOKENS }>,
+    tokens: BoundedVec<LocalToken<P>, { caps::MAX_LOCAL_TOKENS }, P>,
 }
 
-impl Default for LocalTokenRegistry {
+impl<P: Storage> Default for LocalTokenRegistry<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            tokens: BoundedVec::default(),
+        }
     }
 }
 
-impl LocalTokenRegistry {
+impl LocalTokenRegistry<Profile> {
     /// New empty registry. An empty registry still replies to an inbound
     /// Interest — with zero `DeclToken`s and a single terminating
     /// `DeclFinal` — so the peer's CURRENT query resolves cleanly even
     /// when wz holds no matching token.
     pub fn new() -> Self {
-        Self {
-            tokens: BoundedVec::new(),
-        }
+        Self::default()
     }
+}
 
+impl<P: Storage> LocalTokenRegistry<P> {
     /// Record a locally-declared token. Called by
     /// `Session::declare_token` after the proactive `Declare(DeclToken)`
     /// emit.
@@ -203,7 +208,7 @@ impl LocalTokenRegistry {
         if self.tokens.iter().any(|t| t.token_id == token_id) {
             return Ok(false);
         }
-        let mut ke: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> = BoundedString::new();
+        let mut ke: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
         ke.push_str(keyexpr)
             .map_err(|_| RegisterError::KeyexprTooLong)?;
         self.tokens
@@ -266,7 +271,7 @@ impl LocalTokenRegistry {
         &self,
         pattern: Option<&str>,
         interest_id: u64,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> Result<usize, CapacityFull<()>> {
         let matching = self
             .tokens
@@ -325,7 +330,7 @@ impl LocalTokenRegistry {
         &self,
         interest: &InterestOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> Result<(), CapacityFull<()>> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if !interest.c() {
@@ -374,7 +379,7 @@ impl LocalTokenRegistry {
         &self,
         interest: &wz_codecs::interest::Interest<'a>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> Result<(), CapacityFull<()>> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if !interest.c() {
@@ -427,7 +432,7 @@ impl LocalTokenRegistry {
         &self,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         let mut refused = 0usize;
@@ -453,7 +458,7 @@ impl LocalTokenRegistry {
         &self,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+        pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
     ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {

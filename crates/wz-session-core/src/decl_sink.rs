@@ -49,7 +49,7 @@
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
-use crate::bounded::BoundedVec;
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 
@@ -162,24 +162,28 @@ struct KeyedSink<S> {
 /// No-alloc: both lists are [`BoundedVec`] capped at
 /// [`caps::MAX_DECL_OBSERVERS`]; `fire_*` split nothing and allocate
 /// nothing, so the whole component is the MCU no-heap control plane.
-pub struct DeclObserverPair<D: DeclSink, U: UndeclSink> {
-    on_decl: BoundedVec<KeyedSink<D>, { caps::MAX_DECL_OBSERVERS }>,
-    on_undecl: BoundedVec<KeyedSink<U>, { caps::MAX_DECL_OBSERVERS }>,
+pub struct DeclObserverPair<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
+    on_decl: BoundedVec<KeyedSink<D>, { caps::MAX_DECL_OBSERVERS }, P>,
+    on_undecl: BoundedVec<KeyedSink<U>, { caps::MAX_DECL_OBSERVERS }, P>,
     /// Monotonic id source shared by both lists (ids are unique within
     /// the pair, so a caller cannot cross-cancel a decl observer with
     /// an undecl id that happens to collide).
     next_id: u64,
 }
 
-impl<D: DeclSink, U: UndeclSink> Default for DeclObserverPair<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> Default for DeclObserverPair<D, U, P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            on_decl: BoundedVec::default(),
+            on_undecl: BoundedVec::default(),
+            next_id: 0,
+        }
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U> {
-    /// Empty observer pair. `const` so a registry may hold it in a
-    /// `const` / `static` slot.
+impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Profile> {
+    /// Empty observer pair of this build's storage profile. `const` so a registry
+    /// may hold it in a `const` / `static` slot.
     pub const fn new() -> Self {
         Self {
             on_decl: BoundedVec::new(),
@@ -187,7 +191,9 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U> {
             next_id: 0,
         }
     }
+}
 
+impl<D: DeclSink, U: UndeclSink, P: Storage> DeclObserverPair<D, U, P> {
     /// Install a declaration observer. Fallible on the no-alloc backing
     /// ([`RegisterError::TableFull`] past [`caps::MAX_DECL_OBSERVERS`]);
     /// infallible on `alloc`. Duplicate sinks are allowed; fired in

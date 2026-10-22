@@ -6851,7 +6851,12 @@ mod shm_reply_tests {
 /// The queryable table, written once and run on every storage policy: the same bodies
 /// on `Static` and on `Heap`, in one build, with the policy's own contract read from
 /// `P::ENFORCES_CAPACITY` and never from a feature gate.
-#[cfg(all(test, feature = "storage-profile", feature = "alloc"))]
+#[cfg(all(
+    test,
+    feature = "storage-profile",
+    feature = "alloc",
+    feature = "codec-request"
+))]
 mod storage_policy_tests {
     use super::*;
     use crate::bounded::{Heap, Static};

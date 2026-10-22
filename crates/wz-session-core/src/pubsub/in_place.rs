@@ -42,6 +42,7 @@ use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::timestamp::Timestamp;
 
 use super::{fire_into, SubscriberPeer, SubscriberTable};
+use crate::bounded::Storage;
 use crate::driver_loop::InPlaceRecord;
 use crate::reliability::Reliability;
 #[cfg(feature = "alloc")]
@@ -216,7 +217,7 @@ fn lent_body<'s>(push: &'s Push<'s>) -> Result<Option<LentBody<'s>>, Fallback> {
     }
 }
 
-impl<C: SampleSink> SubscriberTable<C> {
+impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// Deliver a Push the in-place receive path lent: the subscriber side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
     /// See the module docs for what it delivers and what it hands to the owned
@@ -224,7 +225,11 @@ impl<C: SampleSink> SubscriberTable<C> {
     ///
     /// `peer` is the sending peer's side: whose aliases the keyexpr resolves
     /// through and whose zid names a self-echo.
-    pub(super) fn dispatch_in_place(&mut self, peer: &SubscriberPeer, record: &InPlaceRecord<'_>) {
+    pub(super) fn dispatch_in_place(
+        &mut self,
+        peer: &SubscriberPeer<P>,
+        record: &InPlaceRecord<'_>,
+    ) {
         // A lent Request or Response is the queryables' or the pending gets'.
         let Some(push) = record.push() else {
             return;
@@ -251,7 +256,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// fits, short of a timestamp or encoding hint a subscriber asks for.
     fn deliver_lent(
         &mut self,
-        peer: &SubscriberPeer,
+        peer: &SubscriberPeer<P>,
         push: &Push<'_>,
         reliability: Reliability,
     ) -> Result<(), Fallback> {
@@ -315,7 +320,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     #[cfg(feature = "alloc")]
     fn dispatch_owned_projection(
         &mut self,
-        peer: &SubscriberPeer,
+        peer: &SubscriberPeer<P>,
         push: &Push<'_>,
         reliability: Reliability,
     ) {
@@ -329,7 +334,7 @@ impl<C: SampleSink> SubscriberTable<C> {
 }
 
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
-impl<C: SampleSink> SubscriberTable<C> {
+impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// Deliver the plain `Put`s of one frame
     /// ([`DriverLoopOutcome::FramePlainPuts`](crate::driver_loop::DriverLoopOutcome::FramePlainPuts)),
     /// in the order they lie in it: what [`Self::dispatch_push`] delivers for the owned
@@ -341,7 +346,7 @@ impl<C: SampleSink> SubscriberTable<C> {
     /// drops it, and one record's key never affects another's.
     pub(super) fn dispatch_plain_puts(
         &mut self,
-        peer: &SubscriberPeer,
+        peer: &SubscriberPeer<P>,
         reliable: bool,
         frame: &crate::link::RxBytes,
         puts: &[crate::plain_push::PlainPut],

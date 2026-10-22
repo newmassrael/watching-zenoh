@@ -19,10 +19,13 @@
 // `DeclaredKeys` (S9a): the map it always was on the growable backing and a
 // bounded table on the fixed one. The no-alloc control plane stores observers in a
 // `BoundedVec` and fires through the borrowed `DeclView` seam.
-#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
-use crate::id_map::key_text;
 #[cfg(feature = "storage-profile")]
-use crate::id_map::{DeclaredKeys, IdMap};
+use crate::bounded::EpochCounter;
+use crate::bounded::{Profile, Static, Storage};
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::id_map::key_text_as;
+#[cfg(feature = "storage-profile")]
+use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 
@@ -125,7 +128,11 @@ impl PublisherCriterion {
 /// consults the membership table while the watch list itself is mutably
 /// borrowed.
 #[cfg(feature = "alloc")]
-fn declared_reaches(declared: &DeclaredKeys, criterion: &PublisherCriterion) -> bool {
+fn declared_reaches<M, K>(declared: &M, criterion: &PublisherCriterion) -> bool
+where
+    M: IdMap<K>,
+    K: AsRef<str>,
+{
     criterion.locality.allows_remote() && declared_intersects(declared, &criterion.keyexpr)
 }
 
@@ -145,21 +152,21 @@ fn declared_reaches(declared: &DeclaredKeys, criterion: &PublisherCriterion) -> 
 /// peer has declared) together, the shape every AP session has always had. A
 /// process that serves several sessions holds the table once and one peer side
 /// per session, since the ids a peer declares are scoped to its own session.
-pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink> {
-    table: RemoteSubscriberTable<D, U>,
-    peer: RemoteSubscriberPeer,
+pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
+    table: RemoteSubscriberTable<D, U, P>,
+    peer: RemoteSubscriberPeer<P>,
 }
 
 /// The application's half of [`RemoteSubscriberRegistry`]: the observer lists and
 /// the matching watches. Nothing a peer writes is here.
-pub struct RemoteSubscriberTable<D: DeclSink, U: UndeclSink> {
+pub struct RemoteSubscriberTable<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
     /// R311gb (Track 2) — the shared 2-list observer machinery
     /// (`on_decl` + `on_undecl`, install + fire), composed from
     /// [`crate::decl_sink::DeclObserverPair`] so the fan-out logic lives
     /// once across the three `DeclSink` registries. `D = BoxedDeclSink` /
     /// `U = BoxedUndeclSink` on AP (heap closures), consumer-supplied
     /// closed `enum`s on MCU.
-    observers: DeclObserverPair<D, U>,
+    observers: DeclObserverPair<D, U, P>,
     /// R311kh — matching-listener watches (pico `Z_FEATURE_MATCHING`):
     /// re-evaluated against the peer's `declared` table on every membership
     /// mutation, firing each watch's sink on a verdict flip. The
@@ -175,7 +182,7 @@ pub struct RemoteSubscriberTable<D: DeclSink, U: UndeclSink> {
 
 /// What ONE peer has declared as subscribers to this session: the table a peer
 /// writes. See [`RemoteSubscriberRegistry`].
-pub struct RemoteSubscriberPeer {
+pub struct RemoteSubscriberPeer<P: Storage = Profile> {
     /// R290 — peer-declared subscribers tracked by `{id -> resolved
     /// keyexpr}`. Pub-side analogue of the `declared` map landed on
     /// [`crate::declare::queryable::RemoteQueryableRegistry`] in R288.
@@ -200,7 +207,7 @@ pub struct RemoteSubscriberPeer {
     /// fixed one, a table of [`crate::caps::MAX_REMOTE_DECLS`] rows whose full
     /// state refuses a NEW id, counts it, and announces nothing for it.
     #[cfg(feature = "storage-profile")]
-    declared: DeclaredKeys,
+    declared: DeclaredKeys<P>,
     /// `DeclSubscriber`s refused because their keyexpr is longer than the table's
     /// text (a [`DeclaredKeys`] row holds [`crate::caps::MAX_KEYEXPR_BYTES`] bytes
     /// on the fixed backing). Counted with the table's own refusals.
@@ -212,61 +219,79 @@ pub struct RemoteSubscriberPeer {
     /// subscriber as no subscriber. Cleared with the table when the link is lost.
     #[cfg(feature = "storage-profile")]
     initial_final: bool,
-    /// Moves after every change to `declared` ([`crate::declare::DeclEpoch`]).
-    #[cfg(all(
-        feature = "storage-profile",
-        feature = "alloc",
-        not(feature = "bounded-heapless"),
-        target_has_atomic = "64"
-    ))]
-    epoch: crate::declare::DeclEpoch,
+    /// Moves after every change to `declared`: a shared counter on a policy that can
+    /// share one ([`crate::declare::DeclEpoch`]), nothing on one that cannot.
+    #[cfg(feature = "storage-profile")]
+    epoch: P::Epoch,
+    /// Names the policy where no field above does (a build without the session
+    /// machinery). Zero-sized.
+    _policy: core::marker::PhantomData<P>,
 }
 
-impl Default for RemoteSubscriberPeer {
+impl<P: Storage> Default for RemoteSubscriberPeer<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            #[cfg(feature = "storage-profile")]
+            declared: DeclaredKeys::<P>::default(),
+            #[cfg(feature = "storage-profile")]
+            oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            initial_final: false,
+            #[cfg(feature = "storage-profile")]
+            epoch: <P::Epoch as Default>::default(),
+            _policy: core::marker::PhantomData,
+        }
     }
 }
 
-impl RemoteSubscriberPeer {
-    /// A peer that has declared nothing. `const` on the fixed backing, so a
-    /// session slot that holds one can be a `static`.
+impl RemoteSubscriberPeer<Static> {
+    /// A peer of the static policy that has declared nothing. `const`, so a session
+    /// slot that holds one can be a `static`.
+    pub const fn new_static() -> Self {
+        Self {
+            #[cfg(feature = "storage-profile")]
+            declared: FixedIdMap::new(),
+            #[cfg(feature = "storage-profile")]
+            oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            initial_final: false,
+            #[cfg(feature = "storage-profile")]
+            epoch: (),
+            _policy: core::marker::PhantomData,
+        }
+    }
+}
+
+impl RemoteSubscriberPeer<Profile> {
+    /// A peer of this build's storage profile that has declared nothing. `const` where
+    /// the profile is the static policy, so a session slot that holds one can be a
+    /// `static`.
     #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
-        Self {
-            #[cfg(feature = "storage-profile")]
-            declared: DeclaredKeys::new(),
-            #[cfg(feature = "storage-profile")]
-            oversize: 0,
-            #[cfg(feature = "storage-profile")]
-            initial_final: false,
-        }
+        Self::new_static()
     }
 
-    /// A peer that has declared nothing.
-    #[cfg(all(feature = "storage-profile", not(feature = "bounded-heapless")))]
+    /// A peer of this build's storage profile that has declared nothing.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
-        Self {
-            declared: DeclaredKeys::new(),
-            oversize: 0,
-            initial_final: false,
-            #[cfg(all(feature = "alloc", target_has_atomic = "64"))]
-            epoch: crate::declare::DeclEpoch::default(),
-        }
+        Self::default()
     }
+}
 
+#[cfg(all(
+    feature = "storage-profile",
+    feature = "alloc",
+    target_has_atomic = "64"
+))]
+impl RemoteSubscriberPeer<crate::bounded::Heap> {
     /// The counter that moves after every change to what this peer has declared, to be
     /// read without this table's lock; see [`crate::declare::DeclEpoch`].
-    #[cfg(all(
-        feature = "storage-profile",
-        feature = "alloc",
-        not(feature = "bounded-heapless"),
-        target_has_atomic = "64"
-    ))]
     pub fn epoch(&self) -> crate::declare::DeclEpoch {
         self.epoch.clone()
     }
+}
 
+impl<P: Storage> RemoteSubscriberPeer<P> {
     /// Whether the peer has ended its initial declarations, which is what makes an absent
     /// subscriber mean no subscriber: before it, a declaration may simply not have arrived.
     #[cfg(feature = "storage-profile")]
@@ -288,14 +313,7 @@ impl RemoteSubscriberPeer {
     #[cfg(feature = "storage-profile")]
     #[inline]
     fn changed(&self) {
-        #[cfg(all(
-            feature = "storage-profile",
-            feature = "alloc",
-            not(feature = "bounded-heapless"),
-            target_has_atomic = "64"
-        ))]
-        self.epoch
-            .fetch_add(1, core::sync::atomic::Ordering::Release);
+        self.epoch.moved();
     }
 
     /// R290 — count of currently-declared peer subscribers (those
@@ -312,7 +330,7 @@ impl RemoteSubscriberPeer {
     /// `iter_declared`. Ordering is unspecified.
     #[cfg(feature = "storage-profile")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
-        self.declared.entries().map(|(id, ke)| (id, ke.as_str()))
+        self.declared.entries().map(|(id, ke)| (id, ke.as_ref()))
     }
 
     /// How many `DeclSubscriber` this peer's table refused: for a NEW id because
@@ -364,52 +382,64 @@ impl RemoteSubscriberPeer {
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> Default for RemoteSubscriberRegistry<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> Default for RemoteSubscriberRegistry<D, U, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            table: RemoteSubscriberTable::default(),
+            peer: RemoteSubscriberPeer::default(),
+        }
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> Default for RemoteSubscriberTable<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> Default for RemoteSubscriberTable<D, U, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            observers: DeclObserverPair::default(),
+            #[cfg(all(feature = "session-matching", feature = "alloc"))]
+            matching_watches: MatchingWatchList::new(),
+        }
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> core::ops::Deref for RemoteSubscriberRegistry<D, U> {
-    type Target = RemoteSubscriberTable<D, U>;
+impl<D: DeclSink, U: UndeclSink, P: Storage> core::ops::Deref
+    for RemoteSubscriberRegistry<D, U, P>
+{
+    type Target = RemoteSubscriberTable<D, U, P>;
 
-    fn deref(&self) -> &RemoteSubscriberTable<D, U> {
+    fn deref(&self) -> &RemoteSubscriberTable<D, U, P> {
         &self.table
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> core::ops::DerefMut for RemoteSubscriberRegistry<D, U> {
-    fn deref_mut(&mut self) -> &mut RemoteSubscriberTable<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> core::ops::DerefMut
+    for RemoteSubscriberRegistry<D, U, P>
+{
+    fn deref_mut(&mut self) -> &mut RemoteSubscriberTable<D, U, P> {
         &mut self.table
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
-    /// New empty registry over explicit sink backings `D` / `U`. Both
-    /// observer lists start empty; an empty registry processes inbound
-    /// `Declare(Decl*)` records as no-ops.
+impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U, Profile> {
+    /// New empty registry over explicit sink backings `D` / `U`, of this build's
+    /// storage profile. Both observer lists start empty; an empty registry processes
+    /// inbound `Declare(Decl*)` records as no-ops.
     ///
     /// R311gb-3d — the generic constructor (the no-`alloc` / MCU entry
     /// point, paired with [`on_subscriber_declared_sink`](RemoteSubscriberTable::on_subscriber_declared_sink)
     /// / [`on_subscriber_undeclared_sink`](RemoteSubscriberTable::on_subscriber_undeclared_sink)).
     /// AP callers use the inferring [`new`](RemoteSubscriberRegistry::new)
-    /// shorthand, which fixes `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
+    /// shorthand, which fixes `D = BoxedDeclSink` / `U = BoxedUndeclSink`. Defined for
+    /// the profile alone, so it names its storage policy by itself; code generic over a
+    /// policy builds a registry with `Default`.
     pub fn with_sink_backing() -> Self {
-        Self {
-            table: RemoteSubscriberTable::with_sink_backing(),
-            peer: RemoteSubscriberPeer::new(),
-        }
+        Self::default()
     }
+}
 
+impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
     /// The peer's side of this registry, for a caller that wants its table or its
     /// counters by name.
-    pub fn peer(&self) -> &RemoteSubscriberPeer {
+    pub fn peer(&self) -> &RemoteSubscriberPeer<P> {
         &self.peer
     }
 
@@ -571,17 +601,15 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
-    /// New empty table over explicit sink backings `D` / `U`. Both observer lists
-    /// start empty.
+impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Profile> {
+    /// New empty table over explicit sink backings `D` / `U`, of this build's
+    /// storage profile. Both observer lists start empty.
     pub fn with_sink_backing() -> Self {
-        Self {
-            observers: DeclObserverPair::new(),
-            #[cfg(all(feature = "session-matching", feature = "alloc"))]
-            matching_watches: MatchingWatchList::new(),
-        }
+        Self::default()
     }
+}
 
+impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
     /// seam-native entry point; works on every profile). The `alloc`-only
     /// [`on_subscriber_declared`](RemoteSubscriberRegistry::on_subscriber_declared)
@@ -642,7 +670,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener(
         &mut self,
-        peer: &RemoteSubscriberPeer,
+        peer: &RemoteSubscriberPeer<P>,
         keyexpr: &str,
         sink: BoxedMatchingSink,
     ) -> u64 {
@@ -672,7 +700,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn declare_matching_listener_seeded(
         &mut self,
-        peer: &RemoteSubscriberPeer,
+        peer: &RemoteSubscriberPeer<P>,
         criterion: PublisherCriterion,
         local_matching: bool,
         sink: BoxedMatchingSink,
@@ -693,7 +721,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "session-matching", feature = "alloc"))]
     pub fn reevaluate_matching(
         &mut self,
-        peer: &RemoteSubscriberPeer,
+        peer: &RemoteSubscriberPeer<P>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) -> usize {
         self.matching_watches
@@ -732,7 +760,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn flush_declarations_on_link_loss(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) -> usize {
         let _ = &local_matching;
@@ -798,7 +826,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare<'a>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -831,7 +859,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare_with_local<'a>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         body: &DeclareOwnedVariant,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -876,7 +904,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     ))]
     pub fn dispatch_declare_view_with_local<'a>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         body: &DeclareVariant<'a>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -914,7 +942,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_declared(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         id: u64,
         resolved: &str,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -924,7 +952,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
         // R290 — same membership-tracking pattern as the
         // Q-side registry: same-id-replaces semantic, no
         // explicit conflict surfacing.
-        let Ok(text) = key_text(resolved) else {
+        let Ok(text) = key_text_as::<P>(resolved) else {
             peer.oversize = peer.oversize.saturating_add(1);
             return;
         };
@@ -956,7 +984,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_undeclared(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         id: u64,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
     ) {
@@ -982,7 +1010,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages<'a>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -995,7 +1023,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages_with_local<'a>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
@@ -1028,7 +1056,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event<'a>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
     ) {
@@ -1043,7 +1071,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U> {
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a>(
         &mut self,
-        peer: &mut RemoteSubscriberPeer,
+        peer: &mut RemoteSubscriberPeer<P>,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         local_matching: &dyn Fn(&PublisherCriterion) -> bool,
