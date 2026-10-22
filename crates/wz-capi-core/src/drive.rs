@@ -5152,8 +5152,9 @@ mod tests {
 
 /// Open-debt item 913 — two C sessions on one group, each through its multicast face: the
 /// drive's own face loop (`serve_group`) over the in-memory group, and the registry's replay
-/// and fan-outs above it. Time is paused, so the beacons run on the profile's schedule and
-/// cost nothing.
+/// and fan-outs above it. Time is real: each face writes through the process-wide transmit
+/// runtime, which a paused clock would race (see
+/// `two_sessions_put_and_get_through_their_group_faces`).
 #[cfg(all(test, feature = "multicast-transport"))]
 mod multicast_face_tests {
     use std::io;
@@ -5303,7 +5304,14 @@ mod multicast_face_tests {
     /// A's get is answered by B's queryable, declared after (the live declaration), and
     /// ends on B's final rather than its own timeout: the get counted the one member it
     /// held. Once B undeclares its subscriber, A's put reaches nothing on B.
-    #[tokio::test(start_paused = true)]
+    ///
+    /// On the real clock, as every test of this module: each face's datagrams are written
+    /// by a task on the process-wide transmit runtime
+    /// ([`wz_runtime_tokio::runtime_pool::WzRuntime::Tx`]),
+    /// which a paused clock does not wait for. While this runtime waits on that one, a
+    /// paused clock advances to its next timer, so a bound here would elapse before the
+    /// datagram it waits for was written.
+    #[tokio::test]
     async fn two_sessions_put_and_get_through_their_group_faces() {
         let local = tokio::task::LocalSet::new();
         local
@@ -5399,8 +5407,11 @@ mod multicast_face_tests {
     /// # Control
     ///
     /// With the drive's `observe` registration removed, no event is announced and the
-    /// listing stays empty: the first wait times out.
-    #[tokio::test(start_paused = true)]
+    /// listing stays empty: the first wait times out. Without B's Close, A drops B only when
+    /// its 10 s lease expires, well after the 2.5 s the second wait allows; on a paused clock
+    /// that wait could reach the lease, so the test runs on the real one (see
+    /// [`two_sessions_put_and_get_through_their_group_faces`]).
+    #[tokio::test]
     async fn a_member_is_announced_and_listed_as_a_multicast_transport() {
         use crate::faces::{FaceEventKind, FaceSnapshot};
 
