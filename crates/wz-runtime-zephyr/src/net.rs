@@ -336,7 +336,7 @@ impl ZephyrUdpSocket {
     }
 
     /// Whether [`Self::recv_waiting`] can wait: a blocking read of this socket gives up after
-    /// [`SERVICE_WAIT_MS`].
+    /// `SERVICE_WAIT_MS`.
     pub fn times_out(&self) -> bool {
         self.times_out
     }

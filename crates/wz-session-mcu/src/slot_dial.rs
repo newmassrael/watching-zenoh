@@ -4,7 +4,7 @@
 //! The dialler of the slot profile, written ONCE for every network stack: a written
 //! `udp/<ipv4>:<port>` becomes an initiator session opened by the session host
 //! ([`crate::slot_host::SessionHost`]), or a typed refusal. The twin of
-//! [`crate::dial::UdpDialer`], with a socket the stack binds, a slot, a pump cell and a task
+//! `crate::dial::UdpDialer`, with a socket the stack binds, a slot, a pump cell and a task
 //! cell where that one has `Rc` handles and a boxed sink.
 //!
 //! An endpoint this build cannot dial at all (a scheme it has no link for, an address it cannot

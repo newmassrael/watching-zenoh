@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A client of a router that answers queries, on the slot profile: the node of
-//! [`crate::client_node`] with every session, table and text in storage the image declared and no
+//! `crate::client_node` with every session, table and text in storage the image declared and no
 //! allocator.
 //!
 //! It dials the endpoints of an [`EndpointSource`] the image knows at build time

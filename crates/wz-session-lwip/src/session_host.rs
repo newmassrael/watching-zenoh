@@ -58,7 +58,7 @@ where
 
 /// The tables a node opens sessions in, and the means to run what it opens, over lwIP. All are
 /// `static`s the image declared, or handles to them, so the host is a few references and costs
-/// the heap nothing; it is built once. [`Self::open`] and the rest of the stack-neutral host are
+/// the heap nothing; it is built once. `open` and the rest of the stack-neutral host are
 /// reached through `Deref`.
 pub struct SessionHost<C, L, E, const S: usize, const P: usize>
 where
