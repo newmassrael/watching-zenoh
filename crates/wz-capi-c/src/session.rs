@@ -11,8 +11,9 @@
 use std::ffi::c_void;
 
 use wz_capi_core::drive::{
-    names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive, GroupJoin,
-    GroupProfile, ListenPhase, OpenError, OpenStance, SessionState, DEFAULT_BATCH_SIZE,
+    names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive,
+    GroupDeclarations, GroupJoin, GroupProfile, ListenPhase, OpenError, OpenStance, SessionState,
+    DEFAULT_BATCH_SIZE,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::gossip::GossipPolicy;
@@ -637,12 +638,22 @@ pub(crate) unsafe fn open_session(
             let is_shm = node.shared_memory;
             #[cfg(not(feature = "zenoh-c-shared-memory"))]
             let is_shm = false;
+            // zenoh announces each subscriber on the groups it holds, on every target but
+            // Windows, where the announcement is compiled out (`#[cfg(not(windows))]` above
+            // `zenoh/src/net/routing/hat/peer/pubsub.rs` @
+            // `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
+            let declarations = if cfg!(windows) {
+                GroupDeclarations::None
+            } else {
+                GroupDeclarations::Subscribers
+            };
             group_endpoints
                 .into_iter()
                 .map(|endpoint| GroupJoin {
                     endpoint,
                     profile,
                     is_shm,
+                    declarations,
                 })
                 .collect()
         });

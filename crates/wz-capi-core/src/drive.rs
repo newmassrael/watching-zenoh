@@ -3394,6 +3394,8 @@ struct ResolvedGroup {
     endpoint: String,
     /// [`GroupJoin::is_shm`].
     is_shm: bool,
+    /// [`GroupJoin::declarations`].
+    declarations: GroupDeclarations,
     group: std::net::IpAddr,
     port: u16,
     opts: wz_runtime_tokio::McastGroupOptions,
@@ -3434,6 +3436,7 @@ impl ResolvedGroup {
         Some(Self {
             endpoint: join.endpoint.clone(),
             is_shm: join.is_shm,
+            declarations: join.declarations,
             group: parsed.addr.ip(),
             port: parsed.addr.port(),
             opts: wz_runtime_tokio::McastGroupOptions {
@@ -3502,6 +3505,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                         let ResolvedGroup {
                             endpoint,
                             is_shm,
+                            declarations,
                             group,
                             port,
                             opts,
@@ -3513,6 +3517,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                             GroupLabel {
                                 endpoint: &endpoint,
                                 is_shm,
+                                declarations,
                             },
                             &params,
                             || {
@@ -3550,13 +3555,15 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         .await;
 }
 
-/// What a group face reports about itself beside what it carries: the endpoint the session
-/// joined it by, and whether its transports are shared-memory ones ([`GroupJoin::is_shm`]).
+/// What a group face is beside what it carries: the endpoint the session joined it by, whether
+/// its transports are shared-memory ones ([`GroupJoin::is_shm`]), and what the session tells it
+/// of its declarations ([`GroupJoin::declarations`]).
 #[cfg(feature = "multicast-transport")]
 #[derive(Clone, Copy)]
 struct GroupLabel<'a> {
     endpoint: &'a str,
     is_shm: bool,
+    declarations: GroupDeclarations,
 }
 
 /// One group face for its whole life: bind and join, register as face `id` of the
@@ -3624,6 +3631,7 @@ async fn serve_group<D, B, Fut>(
                         producer: &producer,
                         endpoint: label.endpoint,
                         is_shm: label.is_shm,
+                        declarations: label.declarations,
                     },
                 ),
                 Err(e) => log_open_failure(&format!("join {}", label.endpoint), e),
@@ -3779,6 +3787,22 @@ pub struct GroupJoin {
     /// (`io/zenoh-transport/src/multicast/transport.rs` @ `self.shm_context.is_some()`), and
     /// zenoh-pico has no shared memory.
     pub is_shm: bool,
+    /// What the session tells the group of its own declarations.
+    pub declarations: GroupDeclarations,
+}
+
+/// Open-debt item 913 — what a session tells a group it joined of its own declarations, as the
+/// calling ABI's upstream does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupDeclarations {
+    /// Nothing: zenoh-pico declares nothing on a multicast transport unless its
+    /// `Z_FEATURE_MULTICAST_DECLARATIONS` is on, which it is not by default
+    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
+    None,
+    /// Each subscriber, announced when it is declared and when the group comes up, as zenoh
+    /// announces a session's subscriber on each group it holds (its queryables and tokens it
+    /// does not announce there).
+    Subscribers,
 }
 
 /// What a session's JOIN beacon advertises on a group, beside its identity and its role:
@@ -5044,6 +5068,7 @@ mod multicast_face_tests {
                 GroupLabel {
                     endpoint: ENDPOINT,
                     is_shm: false,
+                    declarations: super::GroupDeclarations::None,
                 },
                 &params(&zid),
                 move || {

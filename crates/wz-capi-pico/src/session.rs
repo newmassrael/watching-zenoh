@@ -408,6 +408,7 @@ pub unsafe extern "C" fn z_open(
                     endpoint,
                     profile: PICO_GROUP,
                     is_shm: false,
+                    declarations: wz_capi_core::drive::GroupDeclarations::None,
                 }],
             ),
             listen => (listen, connect, Vec::new()),

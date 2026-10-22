@@ -25,8 +25,12 @@
 //! (`vendor/zenoh-pico/src/session/keyexpr.c` @
 //! `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
 //!
-//! Not sent: the Declare of each subscriber, queryable and liveliness token,
-//! which zenoh-pico sends over whatever transport its session holds
+//! What the face tells the group of the session's declarations is the ABI's
+//! ([`GroupDeclarations`]): nothing for zenoh-pico at its default, and for zenoh
+//! each subscriber declared while the group is up, which zenoh announces on
+//! every group it holds. Not sent on either: the Declare of each queryable and
+//! liveliness token, and with zenoh-pico the Declare of each subscriber, which
+//! zenoh-pico sends over whatever transport its session holds
 //! (`_z_send_declare`, `vendor/zenoh-pico/src/net/primitives.c`). A member
 //! that reads them (a write filter, a matching listener, a liveliness
 //! subscriber) hears none from this face; a member's put and query reach it
@@ -64,6 +68,7 @@ use super::{queryable_options, QblEntry, QblId};
 use super::{
     FaceEventKind, FaceSnapshot, GroupLink, Inner, LinkSnapshot, SharedSession, SubEntry, SubId,
 };
+use crate::drive::GroupDeclarations;
 
 /// One member of a group as the transport both upstreams report it as: its zid and role,
 /// shared memory as the calling ABI says (`is_shm`), and one link from this node's locator on
@@ -128,6 +133,8 @@ pub(super) struct McastFaceEntry {
     pub(super) endpoint: String,
     /// Whether the group's transports are reported as shared-memory ones.
     pub(super) is_shm: bool,
+    /// What the session tells the group of the declarations made while it is up.
+    pub(super) declarations: GroupDeclarations,
     /// The members announced as connected so far, each as it was announced, so a
     /// departure is announced as the arrival was even when the join that held it is gone.
     pub(super) announced: Vec<(MulticastMember, FaceSnapshot)>,
@@ -148,6 +155,8 @@ pub struct McastFaceParts<'a> {
     /// Whether the calling ABI reports the group's transports as shared-memory ones
     /// (`GroupJoin::is_shm`).
     pub is_shm: bool,
+    /// What the session tells the group of its declarations (`GroupJoin::declarations`).
+    pub declarations: GroupDeclarations,
 }
 
 /// A group face as a sender takes it: the session and its re-arm signal, read
@@ -175,14 +184,27 @@ impl Inner {
     }
 }
 
-/// Declare the C subscription `entry` on a group's session. A group is told of
-/// no declaration, so this registers the callback and sends nothing.
-fn subscribe_on(session: &TokioMulticastSession, entry: &SubEntry) -> Subscriber {
-    session.declare_subscriber(
+/// Declare the C subscription `entry` on a group's session, and announce it on the group when
+/// the ABI's upstream does ([`GroupDeclarations::Subscribers`]). A subscription that takes its
+/// own session's samples alone is not announced: it is not declared to the network at all.
+fn subscribe_on(
+    session: &TokioMulticastSession,
+    entry: &SubEntry,
+    declarations: GroupDeclarations,
+) -> Subscriber {
+    let subscriber = session.declare_subscriber(
         entry.keyexpr.clone(),
         SubscribeOptions::default().with_allowed_origin(entry.allowed_origin),
         (entry.sink)(),
-    )
+    );
+    if declarations == GroupDeclarations::Subscribers
+        && entry.allowed_origin != wz_runtime_tokio::locality::Locality::SessionLocal
+    {
+        // Best effort, as the group's put is: a key past the codec's bound is announced
+        // nowhere, and the subscription still hears the group.
+        let _ = session.announce_subscriber(&entry.keyexpr);
+    }
+    subscriber
 }
 
 /// Declare the C queryable `entry` on a group's session. Its handler is minted
@@ -235,12 +257,21 @@ impl SharedSession {
             producer,
             endpoint,
             is_shm,
+            declarations,
         } = parts;
         let mut guard = self.lock();
+        // The replay announces nothing: zenoh tells a group that comes up of no subscriber the
+        // session already holds (`zenoh/src/net/routing/gateway.rs` @
+        // `tables.data.hats[region].mcast_groups.push(face);`, and no declaration beside it).
         let subs = guard
             .subs
             .iter()
-            .map(|entry| (entry.id, subscribe_on(session, entry)))
+            .map(|entry| {
+                (
+                    entry.id,
+                    subscribe_on(session, entry, GroupDeclarations::None),
+                )
+            })
             .collect();
         #[cfg(feature = "queryable")]
         let qbls = guard
@@ -260,6 +291,7 @@ impl SharedSession {
                 producer: producer.clone(),
                 endpoint: endpoint.to_owned(),
                 is_shm,
+                declarations,
                 announced: Vec::new(),
             },
         );
@@ -381,7 +413,7 @@ impl SharedSession {
     /// Declare the C subscription `entry` on every group face.
     pub(super) fn subscribe_on_groups(guard: &mut Inner, entry: &SubEntry) {
         for face in guard.mcast_faces.values_mut() {
-            let sub = subscribe_on(&face.session, entry);
+            let sub = subscribe_on(&face.session, entry, face.declarations);
             face.subs.insert(entry.id, sub);
         }
     }
