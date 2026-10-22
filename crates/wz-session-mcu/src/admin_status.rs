@@ -651,7 +651,6 @@ mod tests {
             SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                 sink,
                 SessionInitParams {
-                    version: 0x05,
                     whatami: WhatAmI::Peer,
                     zid: vec![0xa1, 0xb2],
                     seq_num_res: 2,
