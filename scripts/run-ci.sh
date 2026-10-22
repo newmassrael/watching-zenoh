@@ -17706,11 +17706,34 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # test at all) and then against wz's pico drop-in, which this lane builds here as Layer E
     # does. Past the pico-CLI guard above, because the same build script makes the library and
     # the headers the test compiles against. One at a time, since both runs join one group port.
-    # Count-guarded at 2: the legs are `#[ignore]`, so a rename would select nothing and pass.
+    # The same file holds the three legs across the two libraries (the real z_pub to wz's
+    # z_sub, wz's z_pub to the real z_sub, and z_info on each reporting one real member).
+    # Count-guarded at 5: the legs are `#[ignore]`, so a rename would select nothing and pass.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
-    _runci_guarded_test "M pico multicast peer test on wz" 2 \
+    _runci_guarded_test "M pico multicast peer test on wz" 5 \
         cargo test -p wz-integration-tests \
         --test pico_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
+    # Open-debt item 913 — the zenoh-c ABI's group: a stock zenohd joins
+    # `udp/224.0.0.226:7451#iface=lo`, and upstream's `z_info.c` (events) and its printers
+    # (listing) report it, once on libzenohc and once on wz's drop-in, which must agree block
+    # for block. Needs the zenoh-c oracle, which the hosted interop job installs, and zenohd;
+    # SKIP on a box without either, FATAL under WZ_M_REQUIRE. The drop-in is built in the
+    # oracle's arm (`_runci_build_capi_c_for_oracle`), since the oracle's headers decide the
+    # struct sizes the program is compiled against.
+    local m_zenoh_c="${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh.h"
+    if [[ ! -f "$m_zenoh_c" || ! -x "$m_zenohd" ]]; then
+        if (( m_required )); then
+            echo "  Layer M FAIL: the zenoh-c oracle ($m_zenoh_c) or zenohd ($m_zenohd) is" >&2
+            echo "    absent but WZ_M_REQUIRE=1 — the hosted interop job provisions both." >&2
+            return 1
+        fi
+        echo "Layer M SKIP zenoh-c multicast group on wz (zenoh-c oracle or zenohd absent)"
+    else
+        _runci_build_capi_c_for_oracle M || return 1
+        _runci_guarded_test "M zenoh-c multicast group on wz" 2 \
+            env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
+            --test zenoh_c_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
+    fi
     # R2586 — the `#join=` key with a FOREIGN sender: pico `z_pub` in its own
     # network namespace publishes to a group wz reaches only through `#join=` on
     # the `#iface=`-pinned veth end. The namespace is what makes the silent arms
