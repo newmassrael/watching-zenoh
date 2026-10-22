@@ -656,9 +656,10 @@ fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
     let frame_part = (2 * one).checked_sub(two).expect("cost(2) <= 2 * cost(1)");
 
     // S3: a Put whose keyexpr fits costs nothing on the fixed backing; on the
-    // growable one, exactly the two chunk lists the subscriber matcher grows.
+    // growable one, exactly the one chunk list the subscriber matcher grows: the
+    // key's. A subscriber's pattern is scanned against it as text, not split.
     #[cfg(feature = "rx-in-place")]
-    let matcher_scratch = if fixed { 0 } else { 2 };
+    let matcher_scratch = if fixed { 0 } else { 1 };
     #[cfg(feature = "rx-in-place")]
     assert_eq!(
         (frame_part, per_record, eight),
@@ -699,8 +700,9 @@ fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
 ///   resolved keyexpr `String` and the reply the registry builds).
 /// - A Request read in place reaches its queryable as a view too, through a
 ///   responder that borrows the query's keyexpr until a reply is staged (a
-///   staged reply is an owned record, on both loops): it costs the heap only
-///   the queryable matcher's growable scratch, and nothing on the fixed backing.
+///   staged reply is an owned record, on both loops): it costs the heap
+///   nothing on either backing, since the queryable matcher scans a pattern
+///   as text and the staging tables keep the capacity they grew to.
 ///   The copying loop pays its frame and record copies besides.
 ///
 /// Either way each Response's payload and keyexpr reach the get, and each
@@ -920,24 +922,18 @@ mod query_and_reply {
             costs[1],
             costs[2]
         );
-        // In place a query costs what the queryable matcher's growable scratch
-        // costs (its two chunk lists, as the subscriber matcher's), and on the
-        // fixed backing nothing: not its decode, not its keyexpr, and not the
-        // responder the matched queryable is handed. Its Final is staged into
-        // capacity already there and sent through the session's own path.
+        // In place a query costs nothing on either backing: not its decode, not
+        // its keyexpr, not the matcher (a pattern is scanned as text, no chunk
+        // list is grown) and not the responder the matched queryable is handed.
+        // Its Final is staged into capacity already there and sent through the
+        // session's own path; the staging table keeps that capacity when it is
+        // drained, which is what the zeros below depend on.
         #[cfg(feature = "rx-in-place")]
-        {
-            let scratch = if wz_session_core::bounded::ENFORCES_CAPACITY {
-                0
-            } else {
-                2
-            };
-            assert_eq!(
-                costs,
-                [scratch, 2 * scratch, 8 * scratch],
-                "a Request read in place costs the heap only the matcher's growable scratch"
-            );
-        }
+        assert_eq!(
+            costs,
+            [0, 0, 0],
+            "a Request read in place costs the heap nothing"
+        );
         #[cfg(not(feature = "rx-in-place"))]
         assert!(
             costs[2] > costs[1] && costs[1] > costs[0] && costs[0] > 0,
@@ -1128,7 +1124,7 @@ mod fragments {
         let link = Rc::new(link);
         let mut pair = Pair::establish(&link, 7497);
         let fixed = wz_session_core::bounded::ENFORCES_CAPACITY;
-        let matcher_scratch = if fixed { 0 } else { 2 };
+        let matcher_scratch = if fixed { 0 } else { 1 };
         for puts in [1usize, 2, 8] {
             let (_, body) = frame_of(0, puts);
             let expected = decoded_puts(&body);
