@@ -286,6 +286,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # on unconditionally and the pico ABI crate neither, so what a program reaches is that
     # crate's symbols, and the items are exercised through `z_open` by its `listener_auth` and
     # `interceptors*` legs, with a control beside every refusal.
+    # R3418 -- the two node-config features left the row when Round 3417 made them
+    # capabilities, on in this crate's default build: a default feature is not on this
+    # census's axis, and a row that keeps naming one waits for nothing.
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
         "consumers are the two C ABI crates, and the one of them that turns the "
@@ -293,9 +296,8 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "(`wz-capi-c`'s `zenoh-c-shared-memory`). What a C program can reach is "
         "that crate's symbol set, graded against upstream's own library, and the "
         "gated methods are exercised by that arm's legs against upstream's own "
-        "subscriber; the node-config features are turned on by `wz-capi-c` alone "
-        "and driven through `z_open` by its own legs",
-        frozenset({"transport-shm", "access-extauth-usrpwd", "interceptors"}),
+        "subscriber",
+        frozenset({"transport-shm"}),
     ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
