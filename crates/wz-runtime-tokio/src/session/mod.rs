@@ -592,6 +592,21 @@ pub enum LocalDeliveryDrain {
     DriveTask,
 }
 
+/// Open-debt item 913 — the kind of entity a group session announces or retracts
+/// ([`Session::announce`], [`Session::retract`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupDeclaration {
+    /// A subscriber.
+    Subscriber,
+    /// A queryable, with whether it answers a query completely.
+    Queryable {
+        /// The queryable's completeness, which its declaration carries.
+        complete: bool,
+    },
+    /// A liveliness token.
+    Token,
+}
+
 /// R3069 -- how a chunk publish holds the payload it hands to its LOCAL leg: borrowed from a
 /// caller that goes on holding it, or handed over by one that gave it up. See
 /// [`Session::deliver_shm_local_owned`] for why the second exists.
@@ -2692,20 +2707,82 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         self.transport.link.set(subject).is_ok()
     }
 
-    /// Open-debt item 913 — announce a subscription on `keyexpr` to the group, as zenoh announces
-    /// a session's subscriber on each group it holds: a `DeclSubscriber` with id 0 and the
-    /// literal key, answering no interest (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// Open-debt item 913 — announce the entity `what` to the group: a `Declare` of its kind with
+    /// id `id` and the literal `keyexpr`, answering no interest. What a session announces, and
+    /// with which id, is its ABI's: zenoh announces each subscriber with id 0
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
     /// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`;
-    /// MEASURED off the group's wire: `decl_subscriber(0, demo/mc/**)` for a libzenohc `z_sub`
-    /// on `demo/mc/**`). It routes nothing here: the group's data reaches every member whatever
-    /// it declared. `Err` for a key past the codec's bound.
-    #[cfg(all(feature = "codec-push", feature = "declare-subscriber"))]
-    pub fn announce_subscriber(
+    /// MEASURED off the group's wire: `decl_subscriber(0, demo/mc/**)`), and zenoh-pico each
+    /// subscriber, queryable and token with its own entity id, over whatever transport it holds
+    /// (MEASURED: `decl_subscriber(1, demo/mc/**)`, `decl_queryable(1, demo/mc/q)`,
+    /// `decl_token(1, demo/mc/token)`). It routes nothing here: the group's data reaches every
+    /// member whatever it declared. `Err` for a key past the codec's bound, or a kind this build
+    /// cannot declare.
+    #[cfg(feature = "codec-push")]
+    pub fn announce(
         &self,
+        what: GroupDeclaration,
+        id: u64,
         keyexpr: &str,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
-        let declare = wz_session_core::declare_build::build_declare_subscriber(0, 0, Some(keyexpr))
-            .map_err(wz_session_core::send_wire_error::SendWireError::Codec)?;
+        use wz_session_core::send_wire_error::SendWireError;
+        let declare = match what {
+            #[cfg(feature = "declare-subscriber")]
+            GroupDeclaration::Subscriber => {
+                wz_session_core::declare_build::build_declare_subscriber(id, 0, Some(keyexpr))
+            }
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { complete } => {
+                wz_session_core::declare_build::build_declare_queryable_with_id_info(
+                    id,
+                    keyexpr,
+                    wz_session_core::queryable_info::QueryableInfo::local(complete),
+                )
+            }
+            #[cfg(feature = "liveliness-token")]
+            GroupDeclaration::Token => {
+                wz_session_core::declare_build::build_declare_token(id, 0, Some(keyexpr))
+            }
+            #[allow(unreachable_patterns)]
+            _ => return Err(SendWireError::FeatureDisabled),
+        }
+        .map_err(SendWireError::Codec)?;
+        self.send_network_message(
+            wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+            true,
+            false,
+        )
+    }
+
+    /// Open-debt item 913 — retract the entity `what` the session announced: an `Undeclare` of
+    /// its kind with id `id` and the literal `keyexpr`, as a zenoh-pico peer retracts one
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `declaration = _z_make_undecl_subscriber(sub->_entity_id, &expr);`).
+    #[cfg(feature = "codec-push")]
+    pub fn retract(
+        &self,
+        what: GroupDeclaration,
+        id: u64,
+        keyexpr: &str,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        use wz_session_core::send_wire_error::SendWireError;
+        let declare = match what {
+            #[cfg(feature = "declare-subscriber")]
+            GroupDeclaration::Subscriber => {
+                wz_session_core::declare_build::build_undeclare_subscriber_on_wire(id, 0, keyexpr)
+            }
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { .. } => {
+                wz_session_core::declare_build::build_undeclare_queryable_on_wire(id, 0, keyexpr)
+            }
+            #[cfg(feature = "liveliness-token")]
+            GroupDeclaration::Token => {
+                wz_session_core::declare_build::build_undeclare_token_on_wire(id, 0, keyexpr)
+            }
+            #[allow(unreachable_patterns)]
+            _ => return Err(SendWireError::FeatureDisabled),
+        }
+        .map_err(SendWireError::Codec)?;
         self.send_network_message(
             wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
             true,
