@@ -6,9 +6,11 @@
 //!
 //! Both are written by a PEER, in the sense that matters: the peer's `Request`
 //! makes the session stage them, and a peer that sends requests faster than the
-//! session drains them decides how many there are. On the growable backing (the AP
-//! profile) that is a `Vec` and nothing is refused, as it always was. On the fixed
-//! backing (`bounded-heapless`) each is a table of declared capacity
+//! session drains them decides how many there are. Each is ONE type over a storage
+//! policy ([`crate::bounded::Storage`]), written once. On the growable policy (the AP
+//! profile) the tables grow with the allocator and nothing is refused, as it always
+//! was. On the policy that enforces its capacity (the fixed backing, selected by
+//! `bounded-heapless`) each is a table of declared capacity
 //! ([`caps::MAX_PENDING_REPLIES`], [`caps::MAX_PENDING_FINALS`]) and a table that
 //! cannot take another entry REFUSES it, COUNTS it, and tells whoever asked:
 //!
@@ -27,15 +29,16 @@
 //! # A staged reply is bytes in the stage, not a record on the heap (S9b)
 //!
 //! A queryable describes a reply as [`crate::reply_stage::ReplyParts`], every field BORROWED from the
-//! handler. On the growable backing the stage turns that into the owned
-//! [`crate::query::QueryReply`] it has always held. On the fixed backing it writes
-//! the reply's bytes (keyexpr, payload, attachment, encoding schema) into ONE byte
-//! arena the stage owns ([`caps::REPLY_STAGE_BYTES`], the room for
+//! handler. The stage writes the reply's bytes (keyexpr, payload, attachment,
+//! encoding schema) into ONE byte arena it owns and a small row that points into it.
+//! On the fixed policy the arena is [`caps::REPLY_STAGE_BYTES`], the room for
 //! [`caps::MAX_PENDING_REPLIES`] replies of [`caps::MAX_REPLY_PAYLOAD_BYTES`] and a
-//! keyexpr each) and a small fixed row that points into it, so staging a reply
-//! allocates nothing. A reply that does not fit what is left of the arena is
-//! refused as [`crate::query_sink::ReplyError::StagingFull`], counted, like a reply
-//! the table has no row for.
+//! keyexpr each, so staging a reply allocates nothing; a reply that does not fit what
+//! is left of the arena is refused as
+//! [`crate::query_sink::ReplyError::StagingFull`], counted, like a reply the table has
+//! no row for. On the growable policy the arena and the rows grow with the allocator
+//! and are reused across drains, where the stage used to build an owned
+//! [`crate::query::QueryReply`] at every staging.
 //!
 //! What this does NOT take off the heap is the DRAIN: handing a staged reply to the
 //! wire builds the owned [`crate::query::QueryReply`] from its row, and that owned
@@ -43,10 +46,7 @@
 //! the stage's. The allocation has moved from the moment the handler replies to the
 //! moment the session sends, which is where the codec mirrors are replaced.
 
-#[cfg(not(feature = "bounded-heapless"))]
-use alloc::vec::Vec;
-
-use crate::bounded::{BoundedVec, Profile, Storage};
+use crate::bounded::{BoundedVec, Profile, SpanOffset, Storage};
 use crate::caps;
 #[cfg(feature = "alloc")]
 use crate::query::QueryReply;
@@ -155,10 +155,9 @@ pub struct ReplyParts<'a> {
 }
 
 /// The longest `zid` a timestamp or a responder identity carries on the wire.
-#[cfg(feature = "bounded-heapless")]
 const ZID_BYTES: usize = 16;
 
-/// How a queryable's replies are staged, the same for both backings.
+/// How a queryable's replies are staged, the same for every storage policy.
 pub trait ReplyStaging {
     /// Stage one reply, or refuse it and count it: a stage with no room
     /// ([`ReplyError::StagingFull`]) or a payload past the bound
@@ -170,9 +169,9 @@ pub trait ReplyStaging {
     fn staged(&self) -> usize;
 
     /// The `index`-th staged reply, in the order they were staged, as the owned
-    /// record. The fixed backing builds it from its row (an allocation, which is
-    /// the drain's, see the module documentation); the growable one clones.
-    /// Heap profile only: the owned record is the owned mirror's.
+    /// record. Built from its row (an allocation, which is the drain's, see the
+    /// module documentation). Heap profile only: the owned record is the owned
+    /// mirror's.
     #[cfg(feature = "alloc")]
     fn nth(&self, index: usize) -> Option<QueryReply>;
 
@@ -185,13 +184,12 @@ pub trait ReplyStaging {
     /// Hand every staged reply, in the order they were staged, to `emit` as borrowed
     /// parts, and leave the stage empty: the drain that builds no owned record, so a
     /// node with no allocator can send what it staged. `emit` reads the parts where
-    /// they lie, in the arena, and must not keep them. Fixed backing only: the growable
-    /// one holds owned records, which `drain_staged` hands out.
-    #[cfg(feature = "bounded-heapless")]
+    /// they lie, in the arena, and must not keep them.
     fn drain_parts<F: FnMut(ReplyParts<'_>)>(&mut self, emit: F);
 }
 
-/// How the `ResponseFinal`s owed to a peer are staged, the same for both backings.
+/// How the `ResponseFinal`s owed to a peer are staged, the same for every storage
+/// policy.
 pub trait FinalStaging {
     /// Whether another `Final` can be owed. A `false` is the caller's cue to
     /// refuse the request ([`Self::refuse_request`]) before running anything.
@@ -211,37 +209,9 @@ pub trait FinalStaging {
 }
 
 // ---------------------------------------------------------------------------
-// The growable backing: what the AP has always had.
-// ---------------------------------------------------------------------------
-
-/// The replies a queryable has staged for one peer.
-#[cfg(not(feature = "bounded-heapless"))]
-pub type ReplyStage = Vec<QueryReply>;
-
-#[cfg(not(feature = "bounded-heapless"))]
-impl ReplyStaging for Vec<QueryReply> {
-    fn stage_parts(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
-        self.push(QueryReply::from_parts(&parts));
-        Ok(())
-    }
-
-    fn staged(&self) -> usize {
-        self.len()
-    }
-
-    #[cfg(feature = "alloc")]
-    fn nth(&self, index: usize) -> Option<QueryReply> {
-        self.get(index).cloned()
-    }
-
-    #[cfg(feature = "alloc")]
-    fn drain_staged(&mut self) -> impl Iterator<Item = QueryReply> + '_ {
-        self.drain(..)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The fixed backing: tables of declared capacity, refusing and counting.
+// The stage, once, over a storage policy: tables of declared capacity on a policy
+// that enforces it (refusing and counting), and the same tables growing with the
+// allocator on one that does not.
 // ---------------------------------------------------------------------------
 
 /// What a [`ReplyStage`] refused since it was made, by why.
@@ -254,86 +224,95 @@ pub struct ReplyRefusals {
     pub payload_too_large: u32,
 }
 
+/// The offset a stage of policy `P` addresses its arena with.
+type Off<P> = <P as Storage>::Offset;
+
 /// Where the bytes of one staged reply's text or payload lie in the stage's arena.
-#[cfg(feature = "bounded-heapless")]
-#[derive(Debug, Clone, Copy)]
-struct Span {
-    start: u16,
-    len: u16,
+/// The width of an offset is the policy's: 16 bits where the capacity is fixed in the
+/// type, so a row costs what it always cost, and 32 where the arena grows with the
+/// allocator.
+struct Span<P: Storage> {
+    start: Off<P>,
+    len: Off<P>,
 }
 
-#[cfg(feature = "bounded-heapless")]
-const _: () = assert!(
-    caps::REPLY_STAGE_BYTES <= u16::MAX as usize,
-    "a staged reply's bytes are addressed by 16-bit offsets"
-);
+impl<P: Storage> Clone for Span<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: Storage> Copy for Span<P> {}
 
 /// A staged reply's encoding: the packed id and, if there is one, where its schema is.
-#[cfg(feature = "bounded-heapless")]
-type RowEncoding = Option<(u32, Option<Span>)>;
+type RowEncoding<P> = Option<(u32, Option<Span<P>>)>;
 
-#[cfg(feature = "bounded-heapless")]
-#[derive(Clone)]
-enum RowPayload {
-    Put(Span),
+enum RowPayload<P: Storage> {
+    Put(Span<P>),
     Del,
     #[cfg(feature = "transport-shm")]
     Shared(crate::extshm::ShmSendHandle),
 }
 
-#[cfg(feature = "bounded-heapless")]
-#[derive(Clone)]
-enum RowKind {
+enum RowKind<P: Storage> {
     Reply {
-        payload: RowPayload,
-        encoding: RowEncoding,
-        timestamp: Option<(u64, heapless::Vec<u8, ZID_BYTES>)>,
-        attachment: Option<Span>,
+        payload: RowPayload<P>,
+        encoding: RowEncoding<P>,
+        timestamp: Option<(u64, BoundedVec<u8, ZID_BYTES, P>)>,
+        attachment: Option<Span<P>>,
         source_info: Option<SourceInfo>,
     },
     #[cfg(feature = "query-reply-err")]
     Err {
-        encoding: RowEncoding,
-        payload: Span,
+        encoding: RowEncoding<P>,
+        payload: Span<P>,
     },
 }
 
 /// One staged reply: fixed fields, and spans into the stage's arena for its bytes.
-#[cfg(feature = "bounded-heapless")]
-#[derive(Clone)]
-struct Row {
+struct Row<P: Storage> {
     rid: u64,
     qos: QosLevel,
-    keyexpr: Span,
-    responder: Option<(heapless::Vec<u8, ZID_BYTES>, u32)>,
-    kind: RowKind,
+    keyexpr: Span<P>,
+    responder: Option<(BoundedVec<u8, ZID_BYTES, P>, u32)>,
+    kind: RowKind<P>,
 }
 
-/// The replies a queryable has staged for one peer: [`caps::MAX_PENDING_REPLIES`]
-/// rows and [`caps::REPLY_STAGE_BYTES`] of bytes, no more. A full stage refuses and
-/// counts; it does not grow.
-#[cfg(feature = "bounded-heapless")]
-pub struct ReplyStage {
-    rows: heapless::Vec<Row, { caps::MAX_PENDING_REPLIES }>,
-    arena: heapless::Vec<u8, { caps::REPLY_STAGE_BYTES }>,
+/// The replies a queryable has staged for one peer, over a storage policy.
+///
+/// On a policy that enforces its capacity ([`Static`](crate::bounded::Static)) the
+/// stage holds [`caps::MAX_PENDING_REPLIES`] rows and [`caps::REPLY_STAGE_BYTES`] of
+/// bytes, no more: a full stage refuses and counts, and does not grow. On one that
+/// does not ([`Heap`](crate::bounded::Heap)) the same rows and the same arena grow
+/// with the allocator, nothing is refused and nothing is counted, as the AP always
+/// had it. One algorithm for both: the row table and the arena are
+/// [`BoundedVec`]s of the policy, the room check asks them how many pushes are
+/// still guaranteed, and the heap policy answers `usize::MAX`.
+///
+/// The policy defaults to this build's [`Profile`], so `ReplyStage` alone is the
+/// build's stage.
+pub struct ReplyStage<P: Storage = Profile> {
+    rows: BoundedVec<Row<P>, { caps::MAX_PENDING_REPLIES }, P>,
+    arena: BoundedVec<u8, { caps::REPLY_STAGE_BYTES }, P>,
     refusals: ReplyRefusals,
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl ReplyStage {
-    /// An empty stage. `const`, so a session slot that holds one can be a
-    /// `static`.
+impl ReplyStage<Profile> {
+    /// An empty stage of this build's profile. `const`, so a session slot that holds
+    /// one can be a `static`.
     pub const fn new() -> Self {
         Self {
-            rows: heapless::Vec::new(),
-            arena: heapless::Vec::new(),
+            rows: BoundedVec::new(),
+            arena: BoundedVec::new(),
             refusals: ReplyRefusals {
                 staging_full: 0,
                 payload_too_large: 0,
             },
         }
     }
+}
 
+impl<P: Storage> ReplyStage<P> {
     /// What this stage has refused since it was made.
     pub fn refusals(&self) -> ReplyRefusals {
         self.refusals
@@ -367,7 +346,7 @@ impl ReplyStage {
         // Rows are written front to back, key first, so this row's bytes are the
         // arena's tail from where its key starts.
         if let Some(row) = self.rows.pop() {
-            self.arena.truncate(usize::from(row.keyexpr.start));
+            self.arena.truncate(row.keyexpr.start.to_usize());
         }
         Some(reply)
     }
@@ -380,35 +359,36 @@ impl ReplyStage {
         (0..self.rows.len()).filter_map(|index| self.nth(index))
     }
 
-    fn bytes(&self, span: Span) -> &[u8] {
-        let start = usize::from(span.start);
+    fn bytes(&self, span: Span<P>) -> &[u8] {
+        let start = span.start.to_usize();
         self.arena
-            .get(start..start + usize::from(span.len))
+            .get(start..start + span.len.to_usize())
             .unwrap_or_default()
     }
 
-    fn text(&self, span: Span) -> &str {
+    fn text(&self, span: Span<P>) -> &str {
         core::str::from_utf8(self.bytes(span)).unwrap_or_default()
     }
 
     /// Copy `bytes` onto the end of the arena. Room was checked by the caller
     /// ([`Self::stage_parts`] sizes the whole reply first), so this cannot refuse.
-    fn put(&mut self, bytes: &[u8]) -> Span {
+    fn put(&mut self, bytes: &[u8]) -> Span<P> {
         let start = self.arena.len();
-        // Checked by `stage_parts` before anything is written: the whole reply fits.
+        // Checked by `stage_parts` before anything is written: the whole reply fits,
+        // and every offset of it is within what the policy's width can address.
         let _ = self.arena.extend_from_slice(bytes);
         Span {
-            start: start as u16,
-            len: bytes.len() as u16,
+            start: Off::<P>::from_usize(start),
+            len: Off::<P>::from_usize(bytes.len()),
         }
     }
 
-    fn put_encoding(&mut self, encoding: Option<(u32, Option<&str>)>) -> RowEncoding {
+    fn put_encoding(&mut self, encoding: Option<(u32, Option<&str>)>) -> RowEncoding<P> {
         encoding.map(|(id, schema)| (id, schema.map(|schema| self.put(schema.as_bytes()))))
     }
 
     /// A row's encoding as the id and the schema text read out of the arena.
-    fn encoding_of(&self, encoding: &RowEncoding) -> Option<(u32, Option<&str>)> {
+    fn encoding_of(&self, encoding: &RowEncoding<P>) -> Option<(u32, Option<&str>)> {
         encoding
             .as_ref()
             .map(|(packed_id, schema)| (*packed_id, schema.map(|schema| self.text(schema))))
@@ -417,7 +397,7 @@ impl ReplyStage {
     /// A row as the borrowed description it was staged from. Nothing is copied:
     /// every slice points into the arena or the row, so this is what a writer that
     /// puts the reply on the wire reads, and what the owned record is built from.
-    fn row_parts<'a>(&'a self, row: &'a Row) -> ReplyParts<'a> {
+    fn row_parts<'a>(&'a self, row: &'a Row<P>) -> ReplyParts<'a> {
         let kind = match &row.kind {
             RowKind::Reply {
                 payload,
@@ -450,10 +430,7 @@ impl ReplyStage {
         ReplyParts {
             rid: row.rid,
             keyexpr: self.text(row.keyexpr),
-            responder: row
-                .responder
-                .as_ref()
-                .map(|(zid, eid)| (zid.as_slice(), *eid)),
+            responder: row.responder.as_ref().map(|(zid, eid)| (&zid[..], *eid)),
             qos: row.qos,
             kind,
         }
@@ -468,20 +445,20 @@ impl ReplyStage {
     /// A row as the owned record, built from its parts: the one place a described
     /// reply becomes a [`QueryReply`].
     #[cfg(feature = "alloc")]
-    fn row_to_reply(&self, row: &Row) -> QueryReply {
+    fn row_to_reply(&self, row: &Row<P>) -> QueryReply {
         QueryReply::from_parts(&self.row_parts(row))
     }
 }
 
 /// The staged replies of a stage taken BY VALUE, in order, as owned records.
-#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
-pub struct StagedIntoIter {
-    stage: ReplyStage,
+#[cfg(feature = "alloc")]
+pub struct StagedIntoIter<P: Storage = Profile> {
+    stage: ReplyStage<P>,
     next: usize,
 }
 
-#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
-impl Iterator for StagedIntoIter {
+#[cfg(feature = "alloc")]
+impl<P: Storage> Iterator for StagedIntoIter<P> {
     type Item = QueryReply;
 
     fn next(&mut self) -> Option<QueryReply> {
@@ -491,12 +468,12 @@ impl Iterator for StagedIntoIter {
     }
 }
 
-#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
-impl IntoIterator for ReplyStage {
+#[cfg(feature = "alloc")]
+impl<P: Storage> IntoIterator for ReplyStage<P> {
     type Item = QueryReply;
-    type IntoIter = StagedIntoIter;
+    type IntoIter = StagedIntoIter<P>;
 
-    fn into_iter(self) -> StagedIntoIter {
+    fn into_iter(self) -> StagedIntoIter<P> {
         StagedIntoIter {
             stage: self,
             next: 0,
@@ -506,14 +483,14 @@ impl IntoIterator for ReplyStage {
 
 /// The staged replies of a stage taken IN PLACE: what [`ReplyStaging::drain_staged`]
 /// hands back. The stage is emptied when this is dropped, however much was taken.
-#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
-struct StagedDrain<'a> {
-    stage: &'a mut ReplyStage,
+#[cfg(feature = "alloc")]
+struct StagedDrain<'a, P: Storage> {
+    stage: &'a mut ReplyStage<P>,
     next: usize,
 }
 
-#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
-impl Iterator for StagedDrain<'_> {
+#[cfg(feature = "alloc")]
+impl<P: Storage> Iterator for StagedDrain<'_, P> {
     type Item = QueryReply;
 
     fn next(&mut self) -> Option<QueryReply> {
@@ -523,22 +500,24 @@ impl Iterator for StagedDrain<'_> {
     }
 }
 
-#[cfg(all(feature = "bounded-heapless", feature = "alloc"))]
-impl Drop for StagedDrain<'_> {
+#[cfg(feature = "alloc")]
+impl<P: Storage> Drop for StagedDrain<'_, P> {
     fn drop(&mut self) {
         self.stage.clear();
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl Default for ReplyStage {
+impl<P: Storage> Default for ReplyStage<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            rows: BoundedVec::default(),
+            arena: BoundedVec::default(),
+            refusals: ReplyRefusals::default(),
+        }
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl ReplyStaging for ReplyStage {
+impl<P: Storage> ReplyStaging for ReplyStage<P> {
     fn stage_parts(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
         // The sizes the reply would put in the arena, and the two bounds a peer's
         // query must not be able to move: the payload (and attachment) length, and
@@ -566,10 +545,21 @@ impl ReplyStaging for ReplyStage {
                 encoding.and_then(|(_, schema)| schema).map_or(0, str::len),
             ),
         };
-        if self.rows.is_full() {
+        // A policy that enforces its capacity addresses its arena with 16 bits, which
+        // is only sound while the arena it declares fits them.
+        const {
+            assert!(
+                !P::ENFORCES_CAPACITY || caps::REPLY_STAGE_BYTES <= <Off<P> as SpanOffset>::MAX,
+                "a staged reply's bytes are addressed by offsets of the policy's width"
+            );
+        }
+        if self.rows.free_slots() == 0 {
             self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
             return Err(ReplyError::StagingFull);
         }
+        // The bounds a peer's query must not be able to move are the fixed policy's:
+        // the payload length and the identity lengths the row can hold. The growable
+        // policy has neither a payload cap nor an identity cap, as it never had.
         let identity_too_long = parts
             .responder
             .is_some_and(|(zid, _)| zid.len() > ZID_BYTES)
@@ -577,15 +567,25 @@ impl ReplyStaging for ReplyStage {
                 &parts.kind,
                 PartsKind::Reply { timestamp: Some(ts), .. } if ts.zid.len() > ZID_BYTES
             );
-        if payload_len > caps::MAX_REPLY_PAYLOAD_BYTES
-            || attachment_len > caps::MAX_REPLY_PAYLOAD_BYTES
-            || identity_too_long
+        if P::ENFORCES_CAPACITY
+            && (payload_len > caps::MAX_REPLY_PAYLOAD_BYTES
+                || attachment_len > caps::MAX_REPLY_PAYLOAD_BYTES
+                || identity_too_long)
         {
             self.refusals.payload_too_large = self.refusals.payload_too_large.saturating_add(1);
             return Err(ReplyError::PayloadTooLarge);
         }
         let need = parts.keyexpr.len() + payload_len + attachment_len + schema_len;
-        if self.arena.len() + need > caps::REPLY_STAGE_BYTES {
+        // The arena's room. On the fixed policy it is the declared bytes, and the
+        // assertion above makes them addressable, so that is the whole check; on the
+        // growable one the allocator has room, and what bounds the arena is the
+        // largest offset the policy's width can address.
+        let arena_has_room = if P::ENFORCES_CAPACITY {
+            need <= self.arena.free_slots()
+        } else {
+            self.arena.len().saturating_add(need) <= <Off<P> as SpanOffset>::MAX
+        };
+        if !arena_has_room {
             self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
             return Err(ReplyError::StagingFull);
         }
@@ -594,8 +594,9 @@ impl ReplyStaging for ReplyStage {
         // gives the arena back from where the last row's key starts.
         let keyexpr = self.put(parts.keyexpr.as_bytes());
         let responder = parts.responder.map(|(zid, eid)| {
-            let mut copy = heapless::Vec::new();
-            // The length was checked above.
+            let mut copy = BoundedVec::default();
+            // The length was checked above on a policy that enforces it; the growable
+            // one takes any length.
             let _ = copy.extend_from_slice(zid);
             (copy, eid)
         });
@@ -615,8 +616,8 @@ impl ReplyStaging for ReplyStage {
                 },
                 encoding: self.put_encoding(encoding.map(|e| (e.packed_id, e.schema))),
                 timestamp: timestamp.map(|ts| {
-                    let mut zid = heapless::Vec::new();
-                    // The length was checked above.
+                    let mut zid = BoundedVec::default();
+                    // The length was checked above, as the responder's was.
                     let _ = zid.extend_from_slice(ts.zid);
                     (ts.time, zid)
                 }),
@@ -658,7 +659,7 @@ impl ReplyStaging for ReplyStage {
     }
 
     fn drain_parts<F: FnMut(ReplyParts<'_>)>(&mut self, mut emit: F) {
-        for row in &self.rows {
+        for row in self.rows.iter() {
             emit(self.row_parts(row));
         }
         self.clear();
@@ -762,6 +763,8 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
 mod tests {
     use super::*;
     use crate::bounded::Static;
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
 
     const N: usize = caps::MAX_PENDING_FINALS;
 
@@ -826,6 +829,228 @@ mod tests {
         assert_eq!(finals.refusals(), 1);
     }
 
+    // ---- The reply stage, the same bodies on every policy ----------------------
+
+    /// A plain data reply, described the way a queryable's `send_*` describes it.
+    fn put_reply<'a>(rid: u64, keyexpr: &'a str, payload: &'a [u8]) -> ReplyParts<'a> {
+        ReplyParts {
+            rid,
+            keyexpr,
+            responder: None,
+            qos: QosLevel::DEFAULT,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: None,
+                timestamp: None,
+                attachment: None,
+                source_info: None,
+            },
+        }
+    }
+
+    /// A reply whose bytes come from four places: key, payload, attachment, schema.
+    fn fat_reply<'a>(rid: u64, payload: &'a [u8], attachment: &'a [u8]) -> ReplyParts<'a> {
+        let key = "k";
+        ReplyParts {
+            rid,
+            keyexpr: key,
+            responder: None,
+            qos: QosLevel::DEFAULT,
+            kind: PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: None,
+                timestamp: None,
+                attachment: Some(attachment),
+                source_info: None,
+            },
+        }
+    }
+
+    /// Fill the row table to `MAX_PENDING_REPLIES`, then stage one more: refused and
+    /// counted where the capacity is hard, taken where it is not.
+    fn rows_fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        for rid in 0..caps::MAX_PENDING_REPLIES as u64 {
+            assert!(stage.stage_parts(put_reply(rid, "a/b", b"x")).is_ok());
+        }
+        assert_eq!(stage.staged(), caps::MAX_PENDING_REPLIES);
+        assert_eq!(stage.refusals(), ReplyRefusals::default());
+
+        let beyond = stage.stage_parts(put_reply(99, "a/b", b"x"));
+        if P::ENFORCES_CAPACITY {
+            assert_eq!(beyond, Err(ReplyError::StagingFull));
+            assert_eq!(stage.staged(), caps::MAX_PENDING_REPLIES);
+            assert_eq!(stage.refusals().staging_full, 1);
+            assert_eq!(stage.refusals().payload_too_large, 0);
+        } else {
+            assert_eq!(beyond, Ok(()));
+            assert_eq!(stage.staged(), caps::MAX_PENDING_REPLIES + 1);
+            assert_eq!(stage.refusals(), ReplyRefusals::default());
+        }
+    }
+
+    /// A payload past `MAX_REPLY_PAYLOAD_BYTES` is a refusal on the fixed policy and
+    /// leaves the stage as it was; the growable policy never had that bound.
+    fn payload_past_the_bound<P: Storage>() {
+        let big = [7u8; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        let outcome = stage.stage_parts(put_reply(1, "a", &big));
+        if P::ENFORCES_CAPACITY {
+            assert_eq!(outcome, Err(ReplyError::PayloadTooLarge));
+            assert_eq!(stage.staged(), 0);
+            assert_eq!(stage.bytes_held(), 0, "a refusal writes nothing");
+            assert_eq!(stage.refusals().payload_too_large, 1);
+        } else {
+            assert_eq!(outcome, Ok(()));
+            assert_eq!(stage.staged(), 1);
+            assert_eq!(stage.refusals(), ReplyRefusals::default());
+        }
+    }
+
+    /// The arena has its own room, apart from the rows: replies fat enough to use up
+    /// the declared bytes before the rows are used up are refused as `StagingFull`.
+    fn arena_runs_out_before_the_rows<P: Storage>() {
+        let payload = [1u8; caps::MAX_REPLY_PAYLOAD_BYTES];
+        let attachment = [2u8; caps::MAX_REPLY_PAYLOAD_BYTES];
+        let per_reply = 1 + payload.len() + attachment.len();
+        let fits = caps::REPLY_STAGE_BYTES / per_reply;
+        assert!(
+            fits < caps::MAX_PENDING_REPLIES,
+            "the fixture is fat enough to meet the arena first"
+        );
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        for rid in 0..fits as u64 {
+            assert_eq!(
+                stage.stage_parts(fat_reply(rid, &payload, &attachment)),
+                Ok(())
+            );
+        }
+        let beyond = stage.stage_parts(fat_reply(99, &payload, &attachment));
+        if P::ENFORCES_CAPACITY {
+            assert_eq!(beyond, Err(ReplyError::StagingFull));
+            assert_eq!(stage.staged(), fits);
+            assert_eq!(stage.bytes_held(), fits * per_reply);
+            assert_eq!(stage.refusals().staging_full, 1);
+        } else {
+            assert_eq!(beyond, Ok(()));
+            assert_eq!(stage.staged(), fits + 1);
+        }
+    }
+
+    /// What was staged is handed out as borrowed parts, in order, with every field
+    /// as it went in, and the stage is left empty with its counts kept.
+    fn drain_parts_hands_out_what_was_staged<P: Storage>() {
+        let zid = [9u8; 4];
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        for rid in 0..3u64 {
+            let payload = [rid as u8 + 1; 3];
+            let parts = ReplyParts {
+                rid,
+                keyexpr: "home/temp",
+                responder: Some((&zid, 5)),
+                qos: QosLevel::DEFAULT,
+                kind: PartsKind::Reply {
+                    body: PartsBody::Put(&payload),
+                    encoding: Some(EncodingParts {
+                        packed_id: 7,
+                        schema: Some("s"),
+                    }),
+                    timestamp: Some(TimestampParts {
+                        time: 42,
+                        zid: &zid,
+                    }),
+                    attachment: Some(b"att"),
+                    source_info: None,
+                },
+            };
+            assert_eq!(stage.stage_parts(parts), Ok(()));
+        }
+
+        let mut seen = 0u64;
+        stage.drain_parts(|parts| {
+            assert_eq!(parts.rid, seen, "in the order they were staged");
+            assert_eq!(parts.keyexpr, "home/temp");
+            assert_eq!(parts.responder, Some((&zid[..], 5)));
+            let PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                encoding: Some(encoding),
+                timestamp: Some(timestamp),
+                attachment: Some(attachment),
+                ..
+            } = parts.kind
+            else {
+                panic!("the staged reply is a Put with every optional field");
+            };
+            assert_eq!(payload, &[seen as u8 + 1; 3]);
+            assert_eq!((encoding.packed_id, encoding.schema), (7, Some("s")));
+            assert_eq!((timestamp.time, timestamp.zid), (42, &zid[..]));
+            assert_eq!(attachment, b"att");
+            seen += 1;
+        });
+        assert_eq!(seen, 3);
+        assert_eq!(stage.staged(), 0);
+        assert_eq!(stage.bytes_held(), 0);
+    }
+
+    /// The owned drain builds exactly the record `QueryReply::from_parts` builds from
+    /// the same description, in order, and `pop` takes the last and gives its bytes
+    /// back.
+    fn owned_drain_is_from_parts<P: Storage>() {
+        #[cfg(feature = "alloc")]
+        owned_drain_is_from_parts_body::<P>();
+    }
+
+    #[cfg(feature = "alloc")]
+    fn owned_drain_is_from_parts_body<P: Storage>() {
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        let described = [
+            put_reply(1, "a/b", b"one"),
+            put_reply(2, "a/c", b"second"),
+            put_reply(3, "a/d", b""),
+        ];
+        for parts in described {
+            assert_eq!(stage.stage_parts(parts), Ok(()));
+        }
+        assert_eq!(
+            stage.nth(1),
+            Some(QueryReply::from_parts(&described[1])),
+            "nth builds the record from its row"
+        );
+
+        let held = stage.bytes_held();
+        let last = stage.pop().expect("three are staged");
+        assert_eq!(last, QueryReply::from_parts(&described[2]));
+        assert_eq!(stage.staged(), 2);
+        assert_eq!(
+            stage.bytes_held(),
+            held - "a/d".len(),
+            "pop gives its bytes back"
+        );
+
+        let drained: Vec<QueryReply> = stage.drain_staged().collect();
+        assert_eq!(
+            drained,
+            [
+                QueryReply::from_parts(&described[0]),
+                QueryReply::from_parts(&described[1])
+            ]
+        );
+        assert_eq!(stage.staged(), 0, "a drain leaves the stage empty");
+    }
+
+    /// `clear` drops what is staged and its bytes and keeps what was refused.
+    fn clear_keeps_the_refusals<P: Storage>() {
+        let mut stage: ReplyStage<P> = ReplyStage::default();
+        let big = [0u8; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
+        let _ = stage.stage_parts(put_reply(1, "a", &big));
+        let _ = stage.stage_parts(put_reply(2, "a", b"x"));
+        let refused = stage.refusals();
+        stage.clear();
+        assert_eq!(stage.staged(), 0);
+        assert_eq!(stage.bytes_held(), 0);
+        assert_eq!(stage.refusals(), refused);
+    }
+
     macro_rules! on_every_policy {
         ($($case:ident),* $(,)?) => {
             mod on_static {
@@ -844,7 +1069,51 @@ mod tests {
         fill_to_n_then_refuse_at_n_plus_one,
         drain_takes_in_order_and_keeps_the_count,
         clear_keeps_the_count,
+        rows_fill_to_n_then_refuse_at_n_plus_one,
+        payload_past_the_bound,
+        arena_runs_out_before_the_rows,
+        drain_parts_hands_out_what_was_staged,
+        owned_drain_is_from_parts,
+        clear_keeps_the_refusals,
     );
+
+    /// The growable policy addresses its arena with 32-bit offsets: a stage that holds
+    /// more than 64 KiB keeps every reply's bytes where they were put. (The fixed
+    /// policy's 16-bit offsets are why its arena is declared under 64 KiB.)
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_growable_stage_addresses_past_64_kib() {
+        use crate::bounded::Heap;
+        let first = alloc::vec![1u8; 40_000];
+        let second = alloc::vec![2u8; 40_000];
+        let mut stage: ReplyStage<Heap> = ReplyStage::default();
+        assert_eq!(stage.stage_parts(put_reply(1, "a", &first)), Ok(()));
+        assert_eq!(stage.stage_parts(put_reply(2, "b", &second)), Ok(()));
+        assert!(stage.bytes_held() > usize::from(u16::MAX));
+
+        let mut lens = [0usize; 2];
+        let mut fills = [0u8; 2];
+        let mut at = 0;
+        stage.drain_parts(|parts| {
+            let PartsKind::Reply {
+                body: PartsBody::Put(payload),
+                ..
+            } = parts.kind
+            else {
+                panic!("a Put was staged");
+            };
+            lens[at] = payload.len();
+            assert!(payload.iter().all(|byte| *byte == payload[0]));
+            fills[at] = payload[0];
+            at += 1;
+        });
+        assert_eq!(lens, [40_000, 40_000]);
+        assert_eq!(
+            fills,
+            [1, 2],
+            "the second reply's bytes are not the first's"
+        );
+    }
 
     /// The default `FinalStage` is the build's profile and can sit in a `static`.
     #[test]

@@ -8,6 +8,10 @@
 //! `wz_runtime_tokio::session::Queryable` is unchanged.
 
 use super::*;
+// The deferred handler job stages into a `ReplyStage` as the in-dispatch path does,
+// and takes the owned records out of it for the wire or the local reply plane.
+#[cfg(feature = "query-queryable")]
+use wz_session_core::reply_stage::ReplyStaging;
 
 /// R246 — options bundle for [`Session::declare_queryable`].
 /// Mirrors zenoh-pico's `z_queryable_options_t` — R311up wired the
@@ -325,7 +329,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     Some(shared) => shared,
                     None => &borrowed,
                 };
-                let mut replies: Vec<crate::query::QueryReply> = Vec::new();
+                let mut replies = wz_session_core::reply_stage::ReplyStage::new();
                 {
                     // R311y834 — the DEFERRED job runs the handler outside
                     // the observer lock, so it rebuilds the responder and
@@ -355,7 +359,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // reply plane's own deferred fires staged here
                     // drain in the same outer pass.
                     R::with_mutex_mut(&observer, |obs| {
-                        for reply in replies.drain(..) {
+                        for reply in ReplyStaging::drain_staged(&mut replies) {
                             let inbound: crate::reply::InboundReply = reply.into();
                             obs.replies.deliver_local_reply(&inbound);
                         }
@@ -365,7 +369,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // the dispatch SSOT emits the ResponseFinal
                     // after the drain. Overflow-rejected replies
                     // are skipped, mirroring flush_pending.
-                    for reply in replies.drain(..) {
+                    for reply in ReplyStaging::drain_staged(&mut replies) {
                         send_staged_reply(&actions, reply);
                     }
                 }

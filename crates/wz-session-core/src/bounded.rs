@@ -101,6 +101,53 @@ pub trait Storage {
 
     /// The UTF-8 text of a [`BoundedString<N, Self>`].
     type Text<const N: usize>: TextBacking;
+
+    /// The integer a table of this policy addresses its own bytes with (a span
+    /// into an arena). A policy that fixes its capacity in the type needs only as
+    /// many bits as the capacity, and its rows are that much smaller; one that
+    /// grows with the allocator needs the width of an allocation.
+    type Offset: SpanOffset;
+}
+
+/// An unsigned integer that addresses bytes of a table: the width a [`Storage`]
+/// policy gives its spans.
+pub trait SpanOffset: Copy {
+    /// The largest byte offset this width can hold.
+    const MAX: usize;
+
+    /// The offset `n`, which the caller has checked against [`Self::MAX`].
+    fn from_usize(n: usize) -> Self;
+
+    /// This offset as a `usize`.
+    fn to_usize(self) -> usize;
+}
+
+impl SpanOffset for u16 {
+    const MAX: usize = u16::MAX as usize;
+
+    #[inline(always)]
+    fn from_usize(n: usize) -> Self {
+        n as u16
+    }
+
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        usize::from(self)
+    }
+}
+
+impl SpanOffset for u32 {
+    const MAX: usize = u32::MAX as usize;
+
+    #[inline(always)]
+    fn from_usize(n: usize) -> Self {
+        n as u32
+    }
+
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
 }
 
 /// The operations a [`BoundedVec`] needs of the sequence a [`Storage`] policy
@@ -178,6 +225,7 @@ impl Storage for Heap {
     const ENFORCES_CAPACITY: bool = false;
     type Seq<T, const N: usize> = Vec<T>;
     type Text<const N: usize> = String;
+    type Offset = u32;
 }
 
 /// The static policy: a capacity fixed in the type and no allocator. A push past
@@ -188,6 +236,7 @@ impl Storage for Static {
     const ENFORCES_CAPACITY: bool = true;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
     type Text<const N: usize> = heapless::String<N>;
+    type Offset = u16;
 }
 
 /// The policy this build's features choose, and the default of every container's

@@ -394,7 +394,7 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 use wz_session_core::qos::Priority;
-use wz_session_core::query::{QueryReply, QueryResponder};
+use wz_session_core::query::QueryResponder;
 use wz_session_core::wireexpr_resolve::{
     resolve_wireexpr, wireexpr_is_empty, wireexpr_names_a_declaration,
 };
@@ -7042,7 +7042,7 @@ impl RouterForwarder {
             rid: request.rid,
             qos: wz_session_core::declare_ext_qos::read_request_qos(request),
         };
-        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
         {
             // R311y834 — `MatchingQuery`: the self-hosted admin handler renders
             // net data under concrete keys inside the queried admin namespace,

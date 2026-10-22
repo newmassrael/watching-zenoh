@@ -129,7 +129,7 @@ use wz_session_core::push_routing_context::{
 // (this whole module is `#[cfg(feature = "routing-peer")]`, which force-pulls
 // `codec-push`, so the referenced symbol is always live — never an unused import).
 use wz_session_core::qos::Priority;
-use wz_session_core::query::{QueryReply, QueryResponder};
+use wz_session_core::query::QueryResponder;
 use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::queryable_info::QueryableInfo;
@@ -3984,7 +3984,7 @@ impl LinkstateForwarder {
         if matched.is_empty() {
             return false;
         }
-        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
         let mut deferred: Vec<Rc<RefCell<LocalQueryHandler>>> = Vec::new();
         {
             // R311y834 — `MatchingQuery`, and it is a decision rather than a
@@ -4053,7 +4053,12 @@ impl LinkstateForwarder {
     /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) so the deferred
     /// self-query redelivery ([`drain_query_redelivery`](Self::drain_query_redelivery))
     /// reuses the exact same emission.
-    fn emit_query_responses(&self, inbound: FaceId, reliable: bool, replies: Vec<QueryReply>) {
+    fn emit_query_responses(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        replies: wz_session_core::reply_stage::ReplyStage,
+    ) {
         for reply in replies {
             let Ok(resp) = reply.into_response() else {
                 continue;
@@ -4139,7 +4144,7 @@ impl LinkstateForwarder {
                 rid: dq.rid,
                 qos: dq.qos,
             };
-            let mut replies: Vec<QueryReply> = Vec::new();
+            let mut replies = wz_session_core::reply_stage::ReplyStage::new();
             {
                 // R311y834 — same reasoning as the immediate leg above; the
                 // deferred redelivery answers the same query under the same

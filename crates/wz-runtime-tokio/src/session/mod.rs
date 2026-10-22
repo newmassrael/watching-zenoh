@@ -251,13 +251,6 @@ use crate::pubsub::SubscriptionId;
 // R311gb-2b — the subscriber registry now delivers `&dyn SampleView`
 // (the sink seam accessor contract) rather than the owned `&Sample`.
 use crate::sink::SampleView;
-// R311r — `crate::query` is type-ungated; `QueryableId` follows the
-// same shape (always available). `QueryReply` is only referenced from
-// `Session::query`'s loopback fan; R311fq gated that fan on
-// `query-queryable`, so this import now follows
-// `all(query-get, query-queryable)` to match the sole call site.
-#[cfg(all(feature = "query-get", feature = "query-queryable"))]
-use crate::query::QueryReply;
 // R311mn (B2) — `QueryableId` names a queryable-plane id used only by the
 // `transport-unicast`-gated `queryable` submodule (via `use super::*`) and
 // the gated query loopback; gate it so the multicast-only build does not see
@@ -4513,7 +4506,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         wz_session_core::link::RxBytes,
                     )> = None;
                     R::with_mutex_mut(&self.observer, |observer| {
-                        let mut replies: Vec<QueryReply> = Vec::new();
+                        let mut replies = wz_session_core::reply_stage::ReplyStage::new();
                         // R311y94 (review V2) — carry the GET's selector params
                         // (`_sn` / `_max`) into the loopback Query so a SessionLocal
                         // queryable filters identically to the wire path.
@@ -4548,7 +4541,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                             local_value,
                             &mut replies,
                         );
-                        for reply in replies.drain(..) {
+                        for reply in
+                            wz_session_core::reply_stage::ReplyStaging::drain_staged(&mut replies)
+                        {
                             let inbound: InboundReply = reply.into();
                             observer.replies.deliver_local_reply(&inbound);
                         }

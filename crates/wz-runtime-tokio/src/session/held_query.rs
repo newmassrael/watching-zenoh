@@ -21,9 +21,10 @@
 
 use super::*;
 
-use wz_session_core::query::{QueryReply, QueryResponder};
+use wz_session_core::query::QueryResponder;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
+use wz_session_core::reply_stage::ReplyStage;
 use wz_session_core::sample::QosLevel;
 
 /// A query kept past its handler: it answers on the route the query came in
@@ -74,7 +75,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// came in on it, into this session's own pending GET for a query it asked
     /// of itself. A local reply lands as the in-dispatch local leg's does, and
     /// its fires are drained under this session's [`LocalDeliveryDrain`].
-    fn deliver_held_replies(&self, key: FinalKey, replies: Vec<QueryReply>) {
+    fn deliver_held_replies(&self, key: FinalKey, replies: ReplyStage) {
         if key.local {
             R::with_mutex_mut(&self.observer, |observer| {
                 for reply in replies {
@@ -191,7 +192,7 @@ impl<R: SessionRuntime, T: TimeSource> HeldQuery<R, T> {
     /// the in-dispatch one is (the query's keyexpr, acceptance policy and QoS),
     /// and they go out on the query's own route.
     pub fn reply(&self, answer: impl FnOnce(&mut dyn ReplyOut)) {
-        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut replies = ReplyStage::new();
         {
             let mut responder = QueryResponder::new(
                 self.key.rid,

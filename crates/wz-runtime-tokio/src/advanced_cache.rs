@@ -623,6 +623,7 @@ fn sample_matches_time(sample_time: u64, range: Option<TimeRange<SystemTime>>) -
 mod tests {
     use super::*;
     use wz_session_core::query_sink::ReplyError;
+    use wz_session_core::reply_stage::ReplyStage;
 
     /// Shared `ReplyOut` recorder for the `answer_from_ring` integration
     /// tests: captures each reply's `(keyexpr, payload)` and its source
@@ -1282,7 +1283,7 @@ mod tests {
             qos: asked,
         };
 
-        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut replies = ReplyStage::new();
         {
             let mut responder = QueryResponder::new(
                 7,
@@ -1300,7 +1301,7 @@ mod tests {
 
         let staged: Vec<QosLevel> = replies
             .iter()
-            .map(|r| match r {
+            .map(|r| match &r {
                 QueryReply::Reply { qos, .. } => *qos,
                 #[allow(unreachable_patterns)]
                 _ => panic!("the cache stages only Reply records"),
@@ -1324,7 +1325,7 @@ mod tests {
             congestion_control: CongestionControl::Drop,
             is_express: true,
         };
-        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut replies = ReplyStage::new();
         {
             let mut responder = QueryResponder::new(
                 7,
@@ -1335,8 +1336,8 @@ mod tests {
             );
             answer_from_ring(&ring, &view, &mut responder, 0, custom);
         }
-        for reply in &replies {
-            let QueryReply::Reply { qos, .. } = reply else {
+        for reply in replies.iter() {
+            let QueryReply::Reply { qos, .. } = &reply else {
                 panic!("the cache stages only Reply records");
             };
             assert_eq!(*qos, custom.qos(), "a configured QoS reaches every reply");
