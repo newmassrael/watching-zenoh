@@ -183,7 +183,7 @@ access-extauth-pubkey = [
     "dep:wz-session-core",
     "wz-session-core/session-extauth",
 ]
-# The zenoh-c switches that are capabilities (`deploy/capabilities.toml`), under zenoh-c's own
+# The zenoh-c switches that are capabilities (`deploy/wz-config.toml`), under zenoh-c's own
 # names, each the link kind or the handshake method above.
 transport_tls = ["transport-link-tls"]
 transport_quic = ["transport-link-quic"]
@@ -320,16 +320,16 @@ group = ["wz-runtime-tokio/ext-pubsub-group-membership"]
 # it, which is how two peers that each reached a third come to meet when multicast scouting
 # reaches nobody.
 gossip = ["peer", "wz-runtime-tokio/routing-gossip"]
-# pico's header arm for its tasks (`deploy/capabilities.toml`). The model has no thread choice of
+# pico's header arm for its tasks (`deploy/wz-config.toml`). The model has no thread choice of
 # its own, since a session drives itself on its runtime either way, so nothing here reads it; it
 # is a feature because every capability is one of the core's.
 multi-thread = []
-# pico's unstable API and its connectivity plane (`deploy/capabilities.toml`): ABI surface the
+# pico's unstable API and its connectivity plane (`deploy/wz-config.toml`): ABI surface the
 # pico crate exports or not, over a model that has both either way. Features here because every
 # capability is one of the core's.
 unstable-api = []
 connectivity = ["unstable-api"]
-# pico's admin space and its session-local delivery (`deploy/capabilities.toml`, off by default
+# pico's admin space and its session-local delivery (`deploy/wz-config.toml`, off by default
 # as upstream's are). The model behind them is here either way: the local plane, and a write
 # filter or matching listener told whether to count the session's own entities. Features here
 # because every capability is one of the core's.

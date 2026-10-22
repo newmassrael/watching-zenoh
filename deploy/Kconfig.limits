@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# GENERATED from crates/wz-session-core/src/caps.rs by scripts/lib/limit_config.py --emit-kconfig.
-# Do not edit: `limit_config.py --check` fails when this file is stale.
+# GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit kconfig-limits.
+# Do not edit: `wz_config.py --check` fails when this file is stale.
 
 menu "wz limits"
 

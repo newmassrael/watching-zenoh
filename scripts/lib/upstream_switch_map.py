@@ -53,11 +53,11 @@ wz still owes for an upstream original are found at all.
 
 ## Agreement with the capability declaration
 
-`deploy/capabilities.toml` names zenoh-pico's switch for a capability (`pico_flag`).
-That is the same fact as a `maps` row here, written twice until step 1 merges the
-two, so both directions are checked: a capability's `pico_flag` must have a `maps`
-row to that capability, and a `maps` row to a capability must be that capability's
-`pico_flag`.
+`deploy/wz-config.toml` names zenoh-pico's switch for a capability (`pico_flag`).
+That is the same fact as a `maps` row here, written twice until the upstream map moves
+into the declaration (docs/build-configuration.md, step 2), so both directions are
+checked: a capability's `pico_flag` must have a `maps` row to that capability, and a
+`maps` row to a capability must be that capability's `pico_flag`.
 
 ## What this does NOT claim
 
@@ -83,8 +83,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
-import capability_config  # noqa: E402
 import upstream_release_distance as urd  # noqa: E402
+import wz_config  # noqa: E402
 
 WORKSPACE_MANIFEST = ROOT / "crates" / "Cargo.toml"
 PICO_URL = "https://github.com/eclipse-zenoh/zenoh-pico"
@@ -613,7 +613,7 @@ def main() -> int:
     try:
         features = crate_features()
         pinned = pins()
-        decl = capability_config.load_decl()
+        decl = wz_config.load_decl()
     except InputError as e:
         print(f"  upstream-switch-map: INPUT -- {e}", file=sys.stderr)
         return 2

@@ -46,25 +46,31 @@
 //! # Provenance
 //!
 //! These are **documented defaults**, and each is also a number an image
-//! can state for itself. Every constant below is
-//! `limit(option_env!("WZ_LIMIT_<NAME>"), <default>)`: the default when the
-//! build does not say, the number the build's environment states when it
-//! does. A firmware that only answers two short queries has no use for 16
-//! subscription rows of 256 bytes of key and pays for them in RAM; it states
-//! `WZ_LIMIT_MAX_SUBSCRIPTIONS=1` and every table sized by the constant is
-//! sized by that. The numbers stay build-wide constants (one value per name
-//! per image), because that is the shape of the fact; what is configurable
-//! is where the value comes from: for a Zephyr image from Kconfig
-//! (`deploy/Kconfig.limits`, derived from this file by
-//! `scripts/lib/limit_config.py`, which `--check`s that it is current), for
-//! another front end from whatever sets the environment of the cargo build
-//! (the deploy file's `limits` keys are the next such front end). A value
-//! that is not a decimal number is a compile error, not a default.
+//! can state for itself. Every limit is declared in `deploy/wz-config.toml`
+//! (its name, default and help) and its value is read in the generated
+//! `caps_generated.rs` as `limit(option_env!("WZ_LIMIT_<NAME>"), <default>)`:
+//! the default when the build does not say, the number the build's
+//! environment states when it does; each constant below binds a name the
+//! code uses to that value. A firmware that only answers two short queries
+//! has no use for 16 subscription rows of 256 bytes of key and pays for them
+//! in RAM; it states `WZ_LIMIT_MAX_SUBSCRIPTIONS=1` and every table sized by
+//! the constant is sized by that. The numbers stay build-wide constants (one
+//! value per name per image), because that is the shape of the fact; what is
+//! configurable is where the value comes from: for a Zephyr image from
+//! Kconfig (`deploy/Kconfig.limits`, generated from the declaration by
+//! `scripts/lib/wz_config.py`, which `--check`s that it, the generated module
+//! and the bindings below are current), for another front end from whatever
+//! sets the environment of the cargo build (the deploy file's `limits` keys
+//! are the next such front end). A value that is not a decimal number is a
+//! compile error, not a default.
 //!
 //! Distinct from protocol constants fixed by the zenoh wire spec (e.g. the
 //! 16-byte ZID ceiling) — those are not tunable and land in a sibling
 //! `limits` module when their first consumer (the registry's `own_zid`
 //! field) migrates.
+
+#[path = "caps_generated.rs"]
+mod generated;
 
 /// A limit: `stated` is the text of the build's `WZ_LIMIT_<NAME>`, if it set one.
 const fn limit(stated: Option<&str>, default: usize) -> usize {
@@ -93,19 +99,19 @@ const fn limit(stated: Option<&str>, default: usize) -> usize {
 /// no-alloc backing; a pattern whose canonical form exceeds this is
 /// rejected with [`crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity`]
 /// rather than silently truncated.
-pub const MAX_KEYEXPR_BYTES: usize = limit(option_env!("WZ_LIMIT_MAX_KEYEXPR_BYTES"), 256);
+pub const MAX_KEYEXPR_BYTES: usize = generated::MAX_KEYEXPR_BYTES;
 
 /// Maximum number of concurrently-registered local subscriptions in a
 /// [`crate::pubsub::SubscriberRegistry`]. Bounds the registry's
 /// subscriber table on the no-alloc backing; a `register` past this is
 /// rejected (`RegisterError::TableFull`) rather than growing the table.
-pub const MAX_SUBSCRIPTIONS: usize = limit(option_env!("WZ_LIMIT_MAX_SUBSCRIPTIONS"), 16);
+pub const MAX_SUBSCRIPTIONS: usize = generated::MAX_SUBSCRIPTIONS;
 
 /// Maximum number of concurrently-registered local queryables in a
 /// [`crate::query::QueryableRegistry`]. Bounds the registry's queryable
 /// table on the no-alloc backing; a `register` past this is rejected
 /// (`RegisterError::TableFull`) rather than growing the table.
-pub const MAX_QUERYABLES: usize = limit(option_env!("WZ_LIMIT_MAX_QUERYABLES"), 16);
+pub const MAX_QUERYABLES: usize = generated::MAX_QUERYABLES;
 
 /// Maximum number of concurrently-outstanding pending z_get queries in a
 /// [`crate::reply::ReplyRegistry`]. Bounds the registry's pending table
@@ -113,7 +119,7 @@ pub const MAX_QUERYABLES: usize = limit(option_env!("WZ_LIMIT_MAX_QUERYABLES"), 
 /// (`RegisterError::TableFull`) rather than growing the table. Also
 /// bounds the `keep` / `fired` partitions the no-alloc `fire_final_for` /
 /// `sweep_timed_out` build on the stack.
-pub const MAX_PENDING_QUERIES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_QUERIES"), 16);
+pub const MAX_PENDING_QUERIES: usize = generated::MAX_PENDING_QUERIES;
 
 /// Maximum number of installed declaration observers per list
 /// (`on_decl` / `on_undecl`) in each of the remote-declaration
@@ -124,15 +130,14 @@ pub const MAX_PENDING_QUERIES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_Q
 /// this is rejected (`RegisterError::TableFull`) rather than
 /// growing the list. Observers are installed once at startup, so the
 /// default is small.
-pub const MAX_DECL_OBSERVERS: usize = limit(option_env!("WZ_LIMIT_MAX_DECL_OBSERVERS"), 8);
+pub const MAX_DECL_OBSERVERS: usize = generated::MAX_DECL_OBSERVERS;
 
 /// Maximum number of concurrently-registered liveliness-subscriber
 /// interest slots in a
 /// [`crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry`].
 /// Bounds the registry's slot table on the no-alloc backing; a `register`
 /// past this is rejected rather than growing the table.
-pub const MAX_LIVELINESS_SUBSCRIPTIONS: usize =
-    limit(option_env!("WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS"), 8);
+pub const MAX_LIVELINESS_SUBSCRIPTIONS: usize = generated::MAX_LIVELINESS_SUBSCRIPTIONS;
 
 /// Maximum number of liveliness tokens wz itself can declare and hold
 /// concurrently in a [`crate::declare::local_token::LocalTokenRegistry`]
@@ -141,7 +146,7 @@ pub const MAX_LIVELINESS_SUBSCRIPTIONS: usize =
 /// this is rejected (`RegisterError::TableFull`) rather than growing the
 /// table. R311hn (Track 2, Decision 2 no-heap emit) — was an unbounded
 /// `HashMap` on the prior alloc-only backing.
-pub const MAX_LOCAL_TOKENS: usize = limit(option_env!("WZ_LIMIT_MAX_LOCAL_TOKENS"), 8);
+pub const MAX_LOCAL_TOKENS: usize = generated::MAX_LOCAL_TOKENS;
 
 /// Maximum number of concurrently-outstanding pending liveliness GET
 /// (snapshot) queries in a
@@ -153,8 +158,7 @@ pub const MAX_LOCAL_TOKENS: usize = limit(option_env!("WZ_LIMIT_MAX_LOCAL_TOKENS
 /// snapshot get is short-lived (one CURRENT Interest, drained on the
 /// terminating `Declare(DeclFinal)`), so few are outstanding at once;
 /// the default mirrors [`MAX_LIVELINESS_SUBSCRIPTIONS`].
-pub const MAX_PENDING_LIVELINESS_GETS: usize =
-    limit(option_env!("WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"), 8);
+pub const MAX_PENDING_LIVELINESS_GETS: usize = generated::MAX_PENDING_LIVELINESS_GETS;
 
 /// Maximum number of [`crate::declare::local_token::DeclResponseItem`]
 /// records the application-layer observer stages for one drain cycle
@@ -192,7 +196,7 @@ pub const MAX_PENDING_LIVELINESS_GETS: usize =
 /// `token_interest_chains_refused`); a chain is never truncated and never
 /// loses its `Final`. What this number still decides is how many chains
 /// one frame can be answered with before the next drain.
-pub const MAX_PENDING_DECLARES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_DECLARES"), 32);
+pub const MAX_PENDING_DECLARES: usize = generated::MAX_PENDING_DECLARES;
 
 /// Maximum number of inbound SUBSCRIBER `Interest`s one
 /// [`crate::pubsub::SubscriberRegistry`] remembers — zenoh's per-face
@@ -208,8 +212,7 @@ pub const MAX_PENDING_DECLARES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_
 /// not pushed to them. Sized against [`MAX_SUBSCRIPTIONS`] rather than
 /// generously: the table is a linear scan on every inbound Interest and every
 /// local declare.
-pub const MAX_INBOUND_SUB_INTERESTS: usize =
-    limit(option_env!("WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS"), 16);
+pub const MAX_INBOUND_SUB_INTERESTS: usize = generated::MAX_INBOUND_SUB_INTERESTS;
 
 /// Maximum number of keyexpr aliases ONE peer may have declared to this session
 /// at a time (`DeclKexpr.id -> keyexpr`, the deploy `limits` key
@@ -223,8 +226,7 @@ pub const MAX_INBOUND_SUB_INTERESTS: usize =
 /// SESSION, which is why it is a number the deploy file states and not a hidden
 /// constant: `deploy/mcu_client_and_group.yaml` carries the same 16, and
 /// `tests/session_slot_pool_deploy.rs` holds the two equal.
-pub const MAX_PEER_KEYEXPR_ALIASES: usize =
-    limit(option_env!("WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"), 16);
+pub const MAX_PEER_KEYEXPR_ALIASES: usize = generated::MAX_PEER_KEYEXPR_ALIASES;
 
 /// Maximum number of declarations of ONE kind (subscribers, queryables, liveliness
 /// tokens) a peer may hold open to this session at a time (the deploy `limits`
@@ -232,28 +234,27 @@ pub const MAX_PEER_KEYEXPR_ALIASES: usize =
 /// [`crate::id_map::DeclaredQueryables`] on the fixed backing: a `Decl*` for a NEW
 /// id with its table full is refused and counted and is not announced to the
 /// application, as one whose keyexpr does not resolve never was.
-pub const MAX_REMOTE_DECLS: usize = limit(option_env!("WZ_LIMIT_MAX_REMOTE_DECLS"), 16);
+pub const MAX_REMOTE_DECLS: usize = generated::MAX_REMOTE_DECLS;
 
 /// Maximum number of data replies a queryable's handlers may have staged for ONE
 /// session between two drains (the deploy `limits` key `pending_replies`). On the
 /// fixed backing a reply past it is refused with
 /// [`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
 /// made it is told, and nothing is built on the heap in its place.
-pub const MAX_PENDING_REPLIES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_REPLIES"), 8);
+pub const MAX_PENDING_REPLIES: usize = generated::MAX_PENDING_REPLIES;
 
 /// Maximum number of `ResponseFinal`s ONE session may owe between two drains (the
 /// deploy `limits` key `pending_finals`). A Request that would need a Final the
 /// table cannot hold is refused BEFORE its queryables run, and counted: a query
 /// that cannot be terminated is not answered, because a reply with no `Final`
 /// after it leaves the peer's `get` open until its own timeout.
-pub const MAX_PENDING_FINALS: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_FINALS"), 8);
+pub const MAX_PENDING_FINALS: usize = generated::MAX_PENDING_FINALS;
 
 /// Maximum byte length of the payload of ONE staged reply, and the bytes of an
 /// attachment it carries beside it (the deploy `limits` key
 /// `reply_payload_bytes`). A reply that does not fit is refused with
 /// [`crate::query_sink::ReplyError::PayloadTooLarge`], never truncated.
-pub const MAX_REPLY_PAYLOAD_BYTES: usize =
-    limit(option_env!("WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES"), 1024);
+pub const MAX_REPLY_PAYLOAD_BYTES: usize = generated::MAX_REPLY_PAYLOAD_BYTES;
 
 /// The bytes ONE session's reply stage holds for what its queryables have staged
 /// between two drains: the room for [`MAX_PENDING_REPLIES`] replies of
@@ -277,7 +278,7 @@ pub const REPLY_STAGE_BYTES: usize =
 /// [`MAX_REPLY_PAYLOAD_BYTES`]: a number above that one would be a buffer that
 /// builds replies the stage then refuses. The deploy validator holds the two in
 /// that order, and this crate asserts it at compile time.
-pub const MAX_ADMIN_REPLY_BYTES: usize = limit(option_env!("WZ_LIMIT_MAX_ADMIN_REPLY_BYTES"), 1024);
+pub const MAX_ADMIN_REPLY_BYTES: usize = generated::MAX_ADMIN_REPLY_BYTES;
 
 const _: () = assert!(
     MAX_ADMIN_REPLY_BYTES <= MAX_REPLY_PAYLOAD_BYTES,
@@ -288,14 +289,13 @@ const _: () = assert!(
 /// admin `local_data` (the deploy `session_pool.process.admin_locators` key). The
 /// node's identity holds that many locator rows of [`MAX_LOCATOR_LEN`] bytes; one
 /// more is refused when the identity is built, never dropped.
-pub const MAX_ADMIN_LOCATORS: usize = limit(option_env!("WZ_LIMIT_MAX_ADMIN_LOCATORS"), 4);
+pub const MAX_ADMIN_LOCATORS: usize = generated::MAX_ADMIN_LOCATORS;
 
 /// Maximum number of links one admin `sessions[]` row lists (the deploy
 /// `session_pool.process.admin_session_links` key). A unicast transport has one;
 /// the number covers a session that holds a second. A row with more links than this
 /// is refused and counted, not listed in part.
-pub const MAX_ADMIN_SESSION_LINKS: usize =
-    limit(option_env!("WZ_LIMIT_MAX_ADMIN_SESSION_LINKS"), 2);
+pub const MAX_ADMIN_SESSION_LINKS: usize = generated::MAX_ADMIN_SESSION_LINKS;
 
 /// Maximum number of replies a multicast pump of a node with no allocator holds
 /// between the observer that stages one and the loop that frames and sends it (the
@@ -303,7 +303,7 @@ pub const MAX_ADMIN_SESSION_LINKS: usize =
 /// counted by the queue (`wz_session_lwip::multicast_drive::MulticastReplyQueue`),
 /// never queued without bound: multicast to a group is best effort, and a querier
 /// whose reply was dropped asks again.
-pub const MAX_MULTICAST_REPLIES: usize = limit(option_env!("WZ_LIMIT_MAX_MULTICAST_REPLIES"), 8);
+pub const MAX_MULTICAST_REPLIES: usize = generated::MAX_MULTICAST_REPLIES;
 
 /// The most tasks a fixed-memory machine's runtime may hold (the deploy
 /// `session_pool.process.max_tasks` key): a CEILING on the task table an image
@@ -312,12 +312,12 @@ pub const MAX_MULTICAST_REPLIES: usize = limit(option_env!("WZ_LIMIT_MAX_MULTICA
 /// smaller than this; the images assert `TASKS <= MAX_TASKS` at compile time, and
 /// a host test holds this number equal to the deploy file's, so a deploy file that
 /// raises the ceiling and an image that outgrows it are each a red build.
-pub const MAX_TASKS: usize = limit(option_env!("WZ_LIMIT_MAX_TASKS"), 8);
+pub const MAX_TASKS: usize = generated::MAX_TASKS;
 
 /// The most timers a fixed-memory machine's runtime may hold (the deploy
 /// `session_pool.process.max_timers` key): the ceiling on an image's `RuntimeCell`
 /// `TIMERS`, held the same way as [`MAX_TASKS`].
-pub const MAX_TIMERS: usize = limit(option_env!("WZ_LIMIT_MAX_TIMERS"), 16);
+pub const MAX_TIMERS: usize = generated::MAX_TIMERS;
 
 /// Maximum byte length of the keyexpr one admin reply is stamped with:
 /// `@/<zid>/<whatami>/<leg>` and, for a per-entity leg, the entity's own
@@ -334,7 +334,7 @@ pub const MAX_ADMIN_KEY_BYTES: usize = 2 * MAX_KEYEXPR_BYTES;
 /// length the scouting Hello sizing uses (docs/scouting-fsm.md §2.6,
 /// "per-locator length of 64 bytes") — long enough for an `ipv6` locator
 /// with a `proto/` prefix and port, with margin.
-pub const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
+pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
 
 /// Maximum number of static-scouting peer locators
 /// ([`crate::scout_static::synth_static_locators`] output capacity =
@@ -345,4 +345,4 @@ pub const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN")
 /// Mirrors the MCU `hello_max_peers` discovery capacity (deploy
 /// `mcu_target.yaml:263 = 8`): a static deploy is a small fixed peer set
 /// (e.g. one AP for a fixed AP<->MCU pair), so few configured locators.
-pub const MAX_STATIC_CONNECT: usize = limit(option_env!("WZ_LIMIT_MAX_STATIC_CONNECT"), 8);
+pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;

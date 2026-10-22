@@ -1,0 +1,628 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The build configuration of wz, declared ONCE (docs/build-configuration.md, decision C1).
+#
+# Every switch a build can turn is declared here, and everything else is derived from this file by
+# `scripts/lib/wz_config.py`, which `--check`s each derived file against it:
+#
+#   * `deploy/Kconfig.capabilities`   the capabilities a Zephyr or Linux deployer selects from
+#                                     (generated; `--check` fails when it is stale);
+#   * `deploy/Kconfig.limits`         the limits an image states for itself (generated);
+#   * `crates/wz-session-core/src/caps_generated.rs`
+#                                     the value of each limit as the code reads it (generated);
+#   * the Cargo features               `--features <abi> <.config>` turns a Kconfig result into
+#                                     the `cargo build` arguments of an ABI crate;
+#   * the three manifests              wz-capi-core, wz-capi-pico and wz-capi-c each spell the
+#                                     same capability graph by hand in `[features]`, because Cargo
+#                                     cannot include a fragment; `--check` fails when a manifest
+#                                     drifts from it.
+#
+# The file is read by a reader of one small TOML shape (the hosted Python floor has no `tomllib`):
+# `key = value` on one line, the value a string, an integer or an array of strings, or a `'''`
+# literal string across lines; `[table]` and `[[array of tables]]` headers; `#` comments on lines
+# of their own.
+#
+# ## Capabilities
+#
+# A capability is a plane a build either has or does not: the doors it exports and the runtime
+# behind them. `implies` is a capability that must be on when this one is. `abis` is where the
+# capability is exported (core is the model under both ABIs and always has it). `default` is
+# whether a build that names nothing has it: on unless declared `default = "off"`, so the drop-in
+# exports what the reference build does, and `off` is for a switch the reference library itself
+# leaves off. `pico_flag` is zenoh-pico's own switch for it, where it has one, so a deployer who
+# already writes a pico `config.h` can state the same intent. `pico_flags_all` is for a capability
+# pico has no switch of its own for but has whenever several switches are all on (the liveliness
+# get, which pico declares inside both the liveliness and the query switch).
+#
+# `base` is what an ABI build needs that is not a capability.
+#
+# ## Limits
+#
+# A limit is the capacity of a table every session of an image holds. `default` is the value of a
+# build that states nothing; an image states its own through `CONFIG_<kconfig>`, which the Zephyr
+# build hands to cargo as the environment variable of the same name without `CONFIG_`
+# (deploy/zephyr-common/wz_zephyr_board.cmake). The code reads each limit from the generated
+# module, and `crates/wz-session-core/src/caps.rs` binds the name the code uses to it.
+
+schema_version = 1
+catalog_version = 1
+
+[base]
+core = ["rx-busy-poll"]
+pico = ["serial-drive-own-thread", "rx-busy-poll"]
+c = []
+
+[[capability]]
+id = "link-udp"
+kconfig = "WZ_CAP_LINK_UDP"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_LINK_UDP_UNICAST"
+implies = []
+help = "A udp/ endpoint to dial, and the transport the scouting group rides."
+
+[[capability]]
+id = "timestamping"
+kconfig = "WZ_CAP_TIMESTAMPING"
+abis = ["core", "c"]
+implies = []
+help = "The node clock a role that stamps its messages holds (zenoh's router does by default)."
+
+[[capability]]
+id = "scout"
+kconfig = "WZ_CAP_SCOUT"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_SCOUTING"
+implies = ["link-udp"]
+help = "z_scout, the hello family, and a client finding its router by scouting."
+
+[[capability]]
+id = "peer"
+kconfig = "WZ_CAP_PEER"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_UNICAST_PEER"
+implies = ["scout"]
+help = "A listener, a router or a peer: the roles beyond the client. Off, z_open refuses them."
+
+# Open-debt item 913 — a UDP multicast group a peer joins. pico has it where both its transport
+# switch and its UDP multicast link switch are on, so the capability names the two. zenoh-c has
+# no switch for it: its default build joins a group listed in `listen/endpoints`.
+[[capability]]
+id = "multicast-transport"
+kconfig = "WZ_CAP_MULTICAST_TRANSPORT"
+abis = ["core", "pico", "c"]
+pico_flags_all = ["Z_FEATURE_MULTICAST_TRANSPORT", "Z_FEATURE_LINK_UDP_MULTICAST"]
+implies = ["link-udp", "peer"]
+help = "A UDP multicast group a peer joins: one transport to every member of the group."
+
+# Open-debt item 913 — zenoh-pico's multicast declarations switch (vendor default 0). On a
+# group it sends interests (the open-time pull of the members' keyexprs, a write filter's),
+# declares keyexprs, and lets a publisher's or querier's write filter hold a write back.
+[[capability]]
+id = "multicast-declarations"
+kconfig = "WZ_CAP_MULTICAST_DECLARATIONS"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_MULTICAST_DECLARATIONS"
+default = "off"
+implies = ["multicast-transport"]
+help = "pico's multicast declarations: interests, keyexpr declarations and the write filter on a group."
+
+# Open-debt item 911 — zenoh-pico's raw Ethernet transport (vendor default 0): a multicast session
+# over L2 frames, one message per frame, its destination MAC from the endpoint's mapping.
+[[capability]]
+id = "raweth-transport"
+kconfig = "WZ_CAP_RAWETH_TRANSPORT"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_RAWETH_TRANSPORT"
+default = "off"
+implies = ["multicast-transport"]
+help = "pico's raw Ethernet transport: a group over L2 frames on one interface (Linux, CAP_NET_RAW)."
+
+[[capability]]
+id = "query"
+kconfig = "WZ_CAP_QUERY"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_QUERY"
+implies = []
+help = "z_get and the querier: the requesting end of a query."
+
+[[capability]]
+id = "queryable"
+kconfig = "WZ_CAP_QUERYABLE"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_QUERYABLE"
+implies = []
+help = "z_declare_queryable and the replies: the answering end of a query."
+
+[[capability]]
+id = "liveliness"
+kconfig = "WZ_CAP_LIVELINESS"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_LIVELINESS"
+implies = []
+help = "The liveliness token and subscriber."
+
+[[capability]]
+id = "liveliness-get"
+kconfig = "WZ_CAP_LIVELINESS_GET"
+abis = ["core", "pico", "c"]
+pico_flags_all = ["Z_FEATURE_LIVELINESS", "Z_FEATURE_QUERY"]
+implies = ["liveliness", "query"]
+help = "The snapshot get of the liveliness plane; it is a query."
+
+[[capability]]
+id = "advanced"
+kconfig = "WZ_CAP_ADVANCED"
+abis = ["core", "pico", "c"]
+pico_flag = "Z_FEATURE_ADVANCED_PUBLICATION"
+implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
+help = "The advanced publisher and subscriber (cache, history, miss detection)."
+
+[[capability]]
+id = "group"
+kconfig = "WZ_CAP_GROUP"
+abis = ["core", "c"]
+implies = []
+help = "zenoh-ext group membership."
+
+[[capability]]
+id = "gossip"
+kconfig = "WZ_CAP_GOSSIP"
+abis = ["core", "pico", "c"]
+implies = ["peer"]
+help = "A session told of a node by one it holds a link to dials it."
+
+# pico's unstable API (`Z_FEATURE_UNSTABLE_API`, a bare `#define`): the entity ids, the sample's
+# reliability and source info, the cancellation token, and the option fields that carry them
+# (`reliability`, `source_info`, `cancellation_token`). Off, those fields are not in the option
+# structs a program allocates, so the structs are smaller; pico's CMake forces the connectivity
+# plane, the advanced publisher and the admin space off with it, which `implies` states from
+# their side.
+[[capability]]
+id = "unstable-api"
+kconfig = "WZ_CAP_UNSTABLE_API"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_UNSTABLE_API"
+implies = []
+help = "pico's unstable API: entity ids, reliability, source info, the cancellation token, and their option fields."
+
+# pico's connectivity plane (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and
+# event listeners. Upstream declares it only with the unstable API.
+[[capability]]
+id = "connectivity"
+kconfig = "WZ_CAP_CONNECTIVITY"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_CONNECTIVITY"
+implies = ["unstable-api"]
+help = "pico's connectivity plane: transport and link snapshots, and their event listeners."
+
+# pico's admin space (`Z_FEATURE_ADMIN_SPACE`, off in upstream's default and in the reference
+# build): `zp_start_admin_space` / `zp_stop_admin_space`, a queryable answering pico's
+# `@/<zid>/pico/**` documents, and the open options' `auto_start_admin_space`. pico's CMake
+# turns it off without the queryable and without the unstable API.
+[[capability]]
+id = "admin-space"
+kconfig = "WZ_CAP_ADMIN_SPACE"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_ADMIN_SPACE"
+default = "off"
+implies = ["queryable", "unstable-api"]
+help = "pico's admin space: zp_start_admin_space, zp_stop_admin_space and the @/<zid>/pico/** documents."
+
+# pico's session-local delivery (`Z_FEATURE_LOCAL_SUBSCRIBER`, `Z_FEATURE_LOCAL_QUERYABLE`, both
+# off upstream). On, a session's own put reaches its own subscribers, and its own get its own
+# queryables, inside the call and on the caller's thread as pico delivers them; the option
+# structs gain `allowed_origin` and `allowed_destination`, so the layouts differ from the
+# default arm's; and a publisher's or querier's write filter and matching status count the
+# session's own entities.
+[[capability]]
+id = "local-subscriber"
+kconfig = "WZ_CAP_LOCAL_SUBSCRIBER"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_LOCAL_SUBSCRIBER"
+default = "off"
+implies = []
+help = "pico's session-local subscriptions: a session's own put reaches its own subscribers."
+
+[[capability]]
+id = "local-queryable"
+kconfig = "WZ_CAP_LOCAL_QUERYABLE"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_LOCAL_QUERYABLE"
+default = "off"
+implies = []
+help = "pico's session-local queryables: a session's own get reaches its own queryables."
+
+# pico's header arm for its tasks. On, the C ABI is the one pico's multi-threaded headers declare:
+# the read and lease task doors, the host mutex, condvar and task, and the channel collections
+# that block. Off, it is the single-threaded one: zp_read, zp_send_keep_alive, zp_send_join and
+# zp_spin_once instead, a one-byte z_open_options_t, and channel collections that never block.
+# The struct sizes differ between the arms, so a program compiled against one header arm must be
+# linked to a build of the same arm. The model has no thread choice of its own (a wz session drives
+# itself either way); the core feature exists because every capability is one of the core's.
+[[capability]]
+id = "multi-thread"
+kconfig = "WZ_CAP_MULTI_THREAD"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_MULTI_THREAD"
+implies = []
+help = "pico's multi-threaded C ABI (task doors, host sync, blocking channels); off, the single-threaded one."
+
+# The link kinds and the handshake methods zenoh-c turns on by default. They carry zenoh-c's own
+# feature names, so a build of the zenoh-c drop-in is asked for with the switches a zenoh-c build
+# is; the pico ABI forwards its links under names of its own and has none of these. The switches
+# zenoh-c leaves off (serial, unixpipe, vsock, stats) are features of the two manifests and not
+# capabilities here, because a capability is on in every default build.
+
+[[capability]]
+id = "transport_tls"
+kconfig = "WZ_CAP_TRANSPORT_TLS"
+abis = ["core", "c"]
+implies = []
+help = "The tls/ link, dial and accept, with the certificate material of transport/link/tls."
+
+[[capability]]
+id = "transport_quic"
+kconfig = "WZ_CAP_TRANSPORT_QUIC"
+abis = ["core", "c"]
+implies = []
+help = "The quic/ link, dial and accept, with the certificate material of transport/link/tls."
+
+[[capability]]
+id = "transport_quic_datagram"
+kconfig = "WZ_CAP_TRANSPORT_QUIC_DATAGRAM"
+abis = ["core", "c"]
+implies = ["transport_quic"]
+help = "The quic-datagram/ link, over the quic link's connection and certificate material."
+
+[[capability]]
+id = "transport_ws"
+kconfig = "WZ_CAP_TRANSPORT_WS"
+abis = ["core", "c"]
+implies = []
+help = "The ws/ link, dial and accept."
+
+[[capability]]
+id = "transport_unixsock-stream"
+kconfig = "WZ_CAP_TRANSPORT_UNIXSOCK_STREAM"
+abis = ["core", "c"]
+implies = []
+help = "The unixsock-stream/ link, dial and accept, on a Unix target."
+
+[[capability]]
+id = "transport_multilink"
+kconfig = "WZ_CAP_TRANSPORT_MULTILINK"
+abis = ["core", "c"]
+implies = []
+help = "The multilink establishment extension."
+
+[[capability]]
+id = "auth_pubkey"
+kconfig = "WZ_CAP_AUTH_PUBKEY"
+abis = ["core", "c"]
+implies = []
+help = "The public-key handshake, from the RSA identity of transport/auth/pubkey."
+
+[[capability]]
+id = "e2e-sender"
+kconfig = "WZ_CAP_E2E_SENDER"
+abis = ["core", "c"]
+implies = []
+help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it."
+
+[[capability]]
+id = "transport_compression"
+kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
+abis = ["core", "c"]
+implies = []
+help = "The batch compression extension: a session offers it and accepts a compressed batch."
+
+[[capability]]
+id = "auth_usrpwd"
+kconfig = "WZ_CAP_AUTH_USRPWD"
+abis = ["core", "c"]
+implies = []
+help = "The user/password handshake method, and the credential check of a listener that names a dictionary file."
+
+[[capability]]
+id = "interceptors"
+kconfig = "WZ_CAP_INTERCEPTORS"
+abis = ["core", "c"]
+implies = []
+help = "The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face."
+
+[[limit]]
+id = "MAX_KEYEXPR_BYTES"
+kconfig = "WZ_LIMIT_MAX_KEYEXPR_BYTES"
+default = 256
+help = '''
+Maximum byte length of a canonicalized keyexpr stored by a registry
+(subscription pattern, resolved peer mapping). Bounds
+[`crate::keyexpr_canon::canonize_keyexpr`]'s output buffer on the
+no-alloc backing; a pattern whose canonical form exceeds this is
+rejected with [`crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity`]
+rather than silently truncated.
+'''
+
+[[limit]]
+id = "MAX_SUBSCRIPTIONS"
+kconfig = "WZ_LIMIT_MAX_SUBSCRIPTIONS"
+default = 16
+help = '''
+Maximum number of concurrently-registered local subscriptions in a
+[`crate::pubsub::SubscriberRegistry`]. Bounds the registry's
+subscriber table on the no-alloc backing; a `register` past this is
+rejected (`RegisterError::TableFull`) rather than growing the table.
+'''
+
+[[limit]]
+id = "MAX_QUERYABLES"
+kconfig = "WZ_LIMIT_MAX_QUERYABLES"
+default = 16
+help = '''
+Maximum number of concurrently-registered local queryables in a
+[`crate::query::QueryableRegistry`]. Bounds the registry's queryable
+table on the no-alloc backing; a `register` past this is rejected
+(`RegisterError::TableFull`) rather than growing the table.
+'''
+
+[[limit]]
+id = "MAX_PENDING_QUERIES"
+kconfig = "WZ_LIMIT_MAX_PENDING_QUERIES"
+default = 16
+help = '''
+Maximum number of concurrently-outstanding pending z_get queries in a
+[`crate::reply::ReplyRegistry`]. Bounds the registry's pending table
+on the no-alloc backing; a `register` past this is rejected
+(`RegisterError::TableFull`) rather than growing the table. Also
+bounds the `keep` / `fired` partitions the no-alloc `fire_final_for` /
+`sweep_timed_out` build on the stack.
+'''
+
+[[limit]]
+id = "MAX_DECL_OBSERVERS"
+kconfig = "WZ_LIMIT_MAX_DECL_OBSERVERS"
+default = 8
+help = '''
+Maximum number of installed declaration observers per list
+(`on_decl` / `on_undecl`) in each of the remote-declaration
+registries ([`crate::declare::subscriber::RemoteSubscriberRegistry`],
+[`crate::declare::queryable::RemoteQueryableRegistry`],
+[`crate::declare::liveliness::LivelinessRegistry`]). Bounds each
+observer list on the no-alloc backing; an `on_*_declared_sink` past
+this is rejected (`RegisterError::TableFull`) rather than
+growing the list. Observers are installed once at startup, so the
+default is small.
+'''
+
+[[limit]]
+id = "MAX_LIVELINESS_SUBSCRIPTIONS"
+kconfig = "WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS"
+default = 8
+help = '''
+Maximum number of concurrently-registered liveliness-subscriber
+interest slots in a
+[`crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry`].
+Bounds the registry's slot table on the no-alloc backing; a `register`
+past this is rejected rather than growing the table.
+'''
+
+[[limit]]
+id = "MAX_LOCAL_TOKENS"
+kconfig = "WZ_LIMIT_MAX_LOCAL_TOKENS"
+default = 8
+help = '''
+Maximum number of liveliness tokens wz itself can declare and hold
+concurrently in a [`crate::declare::local_token::LocalTokenRegistry`]
+(the declarer-side mirror of [`MAX_LIVELINESS_SUBSCRIPTIONS`]). Bounds
+the registry's token table on the no-alloc backing; a `register` past
+this is rejected (`RegisterError::TableFull`) rather than growing the
+table. R311hn (Track 2, Decision 2 no-heap emit) — was an unbounded
+`HashMap` on the prior alloc-only backing.
+'''
+
+[[limit]]
+id = "MAX_PENDING_LIVELINESS_GETS"
+kconfig = "WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"
+default = 8
+help = '''
+Maximum number of concurrently-outstanding pending liveliness GET
+(snapshot) queries in a
+[`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the
+registry's pending table on the no-alloc backing; a `register` past
+this is rejected (`RegisterError::TableFull`) rather than growing the
+table. Also bounds the `keep` / `fired` partitions the no-alloc
+`dispatch_final` / `sweep_timed_out` build on the stack. A liveliness
+snapshot get is short-lived (one CURRENT Interest, drained on the
+terminating `Declare(DeclFinal)`), so few are outstanding at once;
+the default mirrors [`MAX_LIVELINESS_SUBSCRIPTIONS`].
+'''
+
+[[limit]]
+id = "MAX_PENDING_DECLARES"
+kconfig = "WZ_LIMIT_MAX_PENDING_DECLARES"
+default = 32
+help = '''
+Maximum number of [`crate::declare::local_token::DeclResponseItem`]
+records the application-layer observer stages for one drain cycle
+(the declarer-side liveliness interest-response buffer). One inbound
+CURRENT Interest stages up to [`MAX_LOCAL_TOKENS`] `DeclToken` items
+plus one `DeclFinal` — 9 items per chain. R311hn (Track 2) — replaces
+the prior unbounded `Vec<DeclareOwned>` staging.
+'''
+
+[[limit]]
+id = "MAX_INBOUND_SUB_INTERESTS"
+kconfig = "WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS"
+default = 16
+help = '''
+Maximum number of inbound SUBSCRIBER `Interest`s one
+[`crate::pubsub::SubscriberRegistry`] remembers — zenoh's per-face
+`remote-interests` table, session-local half.
+'''
+
+[[limit]]
+id = "MAX_PEER_KEYEXPR_ALIASES"
+kconfig = "WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"
+default = 16
+help = '''
+Maximum number of keyexpr aliases ONE peer may have declared to this session
+at a time (`DeclKexpr.id -> keyexpr`, the deploy `limits` key
+`peer_keyexpr_aliases`). Bounds [`crate::id_map::PeerAliases`] on the fixed
+backing: a `DeclKexpr` for a NEW id with the table full is refused and
+counted, the alias is not recorded, and a later reference to it resolves to
+nothing (the message naming it is dropped, as one naming an undeclared id
+always was) rather than growing a table the peer controls.
+'''
+
+[[limit]]
+id = "MAX_REMOTE_DECLS"
+kconfig = "WZ_LIMIT_MAX_REMOTE_DECLS"
+default = 16
+help = '''
+Maximum number of declarations of ONE kind (subscribers, queryables, liveliness
+tokens) a peer may hold open to this session at a time (the deploy `limits`
+key `remote_decls`). Bounds each of [`crate::id_map::DeclaredKeys`] and
+[`crate::id_map::DeclaredQueryables`] on the fixed backing: a `Decl*` for a NEW
+id with its table full is refused and counted and is not announced to the
+application, as one whose keyexpr does not resolve never was.
+'''
+
+[[limit]]
+id = "MAX_PENDING_REPLIES"
+kconfig = "WZ_LIMIT_MAX_PENDING_REPLIES"
+default = 8
+help = '''
+Maximum number of data replies a queryable's handlers may have staged for ONE
+session between two drains (the deploy `limits` key `pending_replies`). On the
+fixed backing a reply past it is refused with
+[`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
+made it is told, and nothing is built on the heap in its place.
+'''
+
+[[limit]]
+id = "MAX_PENDING_FINALS"
+kconfig = "WZ_LIMIT_MAX_PENDING_FINALS"
+default = 8
+help = '''
+Maximum number of `ResponseFinal`s ONE session may owe between two drains (the
+deploy `limits` key `pending_finals`). A Request that would need a Final the
+table cannot hold is refused BEFORE its queryables run, and counted: a query
+that cannot be terminated is not answered, because a reply with no `Final`
+after it leaves the peer's `get` open until its own timeout.
+'''
+
+[[limit]]
+id = "MAX_REPLY_PAYLOAD_BYTES"
+kconfig = "WZ_LIMIT_MAX_REPLY_PAYLOAD_BYTES"
+default = 1024
+help = '''
+Maximum byte length of the payload of ONE staged reply, and the bytes of an
+attachment it carries beside it (the deploy `limits` key
+`reply_payload_bytes`). A reply that does not fit is refused with
+[`crate::query_sink::ReplyError::PayloadTooLarge`], never truncated.
+'''
+
+[[limit]]
+id = "MAX_ADMIN_REPLY_BYTES"
+kconfig = "WZ_LIMIT_MAX_ADMIN_REPLY_BYTES"
+default = 1024
+help = '''
+Maximum byte length of ONE admin reply body (the deploy
+`session_pool.process.admin_reply_bytes` key): the buffer every admin leg is
+written into before it is handed to the session's reply stage
+(`admin_reply::AdminReplyArena`, under `adminspace-core`). A body that does not
+fit is refused, counted, and answered to the querier as a typed error; it is
+never cut short.
+'''
+
+[[limit]]
+id = "MAX_ADMIN_LOCATORS"
+kconfig = "WZ_LIMIT_MAX_ADMIN_LOCATORS"
+default = 4
+help = '''
+Maximum number of listening locators a node with no allocator reports in its
+admin `local_data` (the deploy `session_pool.process.admin_locators` key). The
+node's identity holds that many locator rows of [`MAX_LOCATOR_LEN`] bytes; one
+more is refused when the identity is built, never dropped.
+'''
+
+[[limit]]
+id = "MAX_ADMIN_SESSION_LINKS"
+kconfig = "WZ_LIMIT_MAX_ADMIN_SESSION_LINKS"
+default = 2
+help = '''
+Maximum number of links one admin `sessions[]` row lists (the deploy
+`session_pool.process.admin_session_links` key). A unicast transport has one;
+the number covers a session that holds a second. A row with more links than this
+is refused and counted, not listed in part.
+'''
+
+[[limit]]
+id = "MAX_MULTICAST_REPLIES"
+kconfig = "WZ_LIMIT_MAX_MULTICAST_REPLIES"
+default = 8
+help = '''
+Maximum number of replies a multicast pump of a node with no allocator holds
+between the observer that stages one and the loop that frames and sends it (the
+deploy `session_pool.process.multicast_replies` key). A reply past it is dropped and
+counted by the queue (`wz_session_lwip::multicast_drive::MulticastReplyQueue`),
+never queued without bound: multicast to a group is best effort, and a querier
+whose reply was dropped asks again.
+'''
+
+[[limit]]
+id = "MAX_TASKS"
+kconfig = "WZ_LIMIT_MAX_TASKS"
+default = 8
+help = '''
+The most tasks a fixed-memory machine's runtime may hold (the deploy
+`session_pool.process.max_tasks` key): a CEILING on the task table an image
+declares for itself (`RuntimeCell`'s `TASKS`), not the size of that table. An
+image's table is the pump per session it holds and room beside them, so it is
+smaller than this; the images assert `TASKS <= MAX_TASKS` at compile time, and
+a host test holds this number equal to the deploy file's, so a deploy file that
+raises the ceiling and an image that outgrows it are each a red build.
+'''
+
+[[limit]]
+id = "MAX_TIMERS"
+kconfig = "WZ_LIMIT_MAX_TIMERS"
+default = 16
+help = '''
+The most timers a fixed-memory machine's runtime may hold (the deploy
+`session_pool.process.max_timers` key): the ceiling on an image's `RuntimeCell`
+`TIMERS`, held the same way as [`MAX_TASKS`].
+'''
+
+[[limit]]
+id = "MAX_LOCATOR_LEN"
+kconfig = "WZ_LIMIT_MAX_LOCATOR_LEN"
+default = 64
+help = '''
+Maximum byte length of one static-scouting peer locator string
+(`deploy.connect[]` entry, e.g. `"udp/192.168.1.10:7447"`). Bounds the
+[`crate::bounded::BoundedString`] each
+[`crate::scout_static::synth_static_locators`] entry is built into on
+the no-alloc backing; a configured locator longer than this is rejected
+(skipped) rather than truncated. Matches the conservative per-locator
+length the scouting Hello sizing uses (docs/scouting-fsm.md §2.6,
+"per-locator length of 64 bytes") — long enough for an `ipv6` locator
+with a `proto/` prefix and port, with margin.
+'''
+
+[[limit]]
+id = "MAX_STATIC_CONNECT"
+kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
+default = 8
+help = '''
+Maximum number of static-scouting peer locators
+([`crate::scout_static::synth_static_locators`] output capacity =
+`deploy.connect[]` length). Bounds the no-alloc synthesis on the MCU
+backing; a `connect[]` longer than this stops at the cap (a future
+`deploy.yaml` -> caps codegen step enforces the bound at build time, the
+same hard-error model as docs/scouting-fsm.md §2.6 hello_max_peers).
+Mirrors the MCU `hello_max_peers` discovery capacity (deploy
+`mcu_target.yaml:263 = 8`): a static deploy is a small fixed peer set
+(e.g. one AP for a fixed AP<->MCU pair), so few configured locators.
+'''

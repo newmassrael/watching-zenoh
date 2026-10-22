@@ -142,8 +142,9 @@ beyond its plan:
   stack of the node grew with the buffers. `ByteCells` (a static table) and
   `ByteBuf` (a claim) make the driver a few words.
 - **Sizes are limits an image states.** Every capacity of `caps.rs` is
-  `limit(option_env!("WZ_LIMIT_<NAME>"), default)`; `deploy/Kconfig.limits` is
-  derived from those rows (`scripts/lib/limit_config.py --check`) and the Zephyr
+  `limit(option_env!("WZ_LIMIT_<NAME>"), default)`, declared in
+  `deploy/wz-config.toml`; `deploy/Kconfig.limits` and the value module are
+  generated from it (`scripts/lib/wz_config.py --check`) and the Zephyr
   build turns each `CONFIG_WZ_LIMIT_*` into the environment of the cargo build.
   The client states sixteen; its session tables went from 34 KB to 2 KB.
 - **Cold paths are out of line.** `SlotDialer::dial`, the connection manager's

@@ -622,7 +622,7 @@ fi
 # `source_info` and `cancellation_token` fields from the option structs
 # (`z_get_options_t` 80 -> 64 B) along with the connectivity plane and the
 # advanced API (open-debt item 917). wz builds the drop-in for this arm from the
-# arm's own config.h (`capability_config.py --features pico`), and the layout
+# arm's own config.h (`wz_config.py --features pico`), and the layout
 # legs link that build against these headers. TLS is off here, as it is by
 # default, so the arm needs no Mbed TLS.
 cmake -B "${BUILD_DIR}-default" -S "$EXAMPLES_DIR" \

@@ -940,7 +940,7 @@ pub mod common {
     /// stack (open-debt item 918).
     ///
     /// Every arm but the reference one is a wz build of its own: the crate built
-    /// from the arm's generated `config.h` by `scripts/lib/capability_config.py
+    /// from the arm's generated `config.h` by `scripts/lib/wz_config.py
     /// --features pico`, so its feature set is what that header states, into a
     /// target directory of its own, because each build is `libwz_capi_pico.so`
     /// and a shared directory would hold whichever ran last.
@@ -1050,7 +1050,7 @@ pub mod common {
             panic!(
                 "wz's {self:?} libwz_capi_pico.so is not in {candidates:?}; from \
                  crates/, run `cargo build -p wz-capi-pico $(python3 \
-                 ../scripts/lib/capability_config.py --features pico \
+                 ../scripts/lib/wz_config.py --features pico \
                  ../target/zenoh-pico-build{}/zenohpico/include/zenoh-pico/config.h) \
                  --target-dir {}`",
                 self.cmake_suffix(),

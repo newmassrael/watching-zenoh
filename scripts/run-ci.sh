@@ -3237,15 +3237,13 @@ layer_c0_test_discipline() {
     # synthetic input: its matcher, its budget arithmetic and the control that every plane it
     # forbids somewhere it requires somewhere else.
     python3 scripts/lib/capability_cost_gate.py --selftest || return 1
-    # R3398 -- the capability graph is declared once (deploy/capabilities.toml); the generated
-    # Kconfig and the three C ABI manifests are held to it. The selftest also pins that a
-    # Kconfig selection derives the very features the size gate above grades.
-    python3 scripts/lib/capability_config.py --selftest || return 1
-    python3 scripts/lib/capability_config.py --check || return 1
-    # The limits an image can state for itself are declared once, as the rows of caps.rs; the
-    # Kconfig that offers them is derived from those rows and held to them.
-    python3 scripts/lib/limit_config.py --selftest || return 1
-    python3 scripts/lib/limit_config.py --check || return 1
+    # The build configuration is declared once (deploy/wz-config.toml, docs/build-configuration.md
+    # C1): the capability graph and the limits an image can state for itself. The generated
+    # Kconfig files, the generated limit values, caps.rs's bindings and the three C ABI manifests
+    # are held to it. The selftest also pins that a Kconfig selection derives the very features
+    # the size gate above grades.
+    python3 scripts/lib/wz_config.py --selftest || return 1
+    python3 scripts/lib/wz_config.py --check || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.
@@ -15691,7 +15689,7 @@ layer_e_ap_demo_round_trip() {
     # `PicoHeaderArm` in wz-integration-tests names.
     local arm arm_features
     for arm in st default local; do
-        arm_features="$(python3 scripts/lib/capability_config.py --features pico \
+        arm_features="$(python3 scripts/lib/wz_config.py --features pico \
             "target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         (cd crates && cargo build -p wz-capi-pico $arm_features \
@@ -17719,7 +17717,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # Count-guarded at 12: the legs are `#[ignore]`, so a rename would select nothing and pass.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
     local mcdecl_features
-    mcdecl_features=$(python3 scripts/lib/capability_config.py --features pico \
+    mcdecl_features=$(python3 scripts/lib/wz_config.py --features pico \
         target/zenoh-pico-build-mcdecl/zenohpico/include/zenoh-pico/config.h) || return 1
     local -a mcdecl_args
     read -ra mcdecl_args <<< "$mcdecl_features"
@@ -17744,7 +17742,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # two library patches) by `scripts/build-zenoh-pico-cli.sh`. Count-guarded at 3.
     if sudo -n true 2>/dev/null; then
         local reth_features
-        reth_features=$(python3 scripts/lib/capability_config.py --features pico \
+        reth_features=$(python3 scripts/lib/wz_config.py --features pico \
             target/zenoh-pico-build-reth/zenohpico/include/zenoh-pico/config.h) || return 1
         local -a reth_args
         read -ra reth_args <<< "$reth_features"
@@ -18527,7 +18525,7 @@ layer_z_zenohd_interop() {
     # local-delivery tests link in the leg below; built from that arm's config.h, as
     # Layer E builds the other arms.
     local local_features
-    local_features="$(python3 scripts/lib/capability_config.py --features pico \
+    local_features="$(python3 scripts/lib/wz_config.py --features pico \
         target/zenoh-pico-build-local/zenohpico/include/zenoh-pico/config.h)" || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-pico $local_features \

@@ -24,22 +24,24 @@ original reproduced by naming it. Three things follow from it:
 
 ## 2. What exists
 
-- **Capabilities of the C ABI builds** (`deploy/capabilities.toml`): twenty-four, on by
-  default except the three the reference library also leaves off (`admin-space`,
-  `local-subscriber`, `local-queryable`). Four change the layout of structs a pico program
-  allocates, so a program links the build of the header arm it compiled against:
+- **One declaration** (`deploy/wz-config.toml`, step 1 begun): the capabilities and the
+  limits, with a `catalog_version`; `scripts/lib/wz_config.py` generates
+  `deploy/Kconfig.capabilities`, `deploy/Kconfig.limits` and the value module of the limits,
+  turns a `.config` or a pico `config.h` into cargo arguments, and `--check`s the generated
+  files, the limit bindings of `caps.rs` and the three capi manifests against it.
+- **Capabilities of the C ABI builds**: thirty-one, on by default except those the reference
+  library also leaves off (`admin-space`, `local-subscriber`, `local-queryable`,
+  `multicast-declarations`, `raweth-transport`). Four change the layout of structs a pico
+  program allocates, so a program links the build of the header arm it compiled against:
   `multi-thread` (off is pico's single-threaded C ABI), `unstable-api` (off is the option
   layout of upstream's default header) and the two local switches (on adds a locality
-  field to seven option structs). They are generated into `deploy/Kconfig.capabilities` and cargo arguments by
-  `scripts/lib/capability_config.py`, which also holds the three capi manifests to
-  the declared graph. No Kconfig `rsource`s the generated file; the MCU images do
-  not see it.
-- **Limits** (`crates/wz-session-core/src/caps.rs`): every capacity is
-  `limit(option_env!("WZ_LIMIT_<NAME>"), default)`; `deploy/Kconfig.limits` is
-  derived from those rows by `scripts/lib/limit_config.py`, and the Zephyr build
-  turns each `CONFIG_WZ_LIMIT_*` into the cargo environment
-  (`deploy/zephyr-common/wz_zephyr_board.cmake`). `limit()` reads a decimal `usize`
-  only.
+  field to seven option structs). No Kconfig `rsource`s the generated file yet; the MCU
+  images do not see it.
+- **Limits**: twenty-three, each read in the generated module as
+  `limit(option_env!("WZ_LIMIT_<NAME>"), default)` and bound to the name the code uses in
+  `crates/wz-session-core/src/caps.rs`; the Zephyr build turns each `CONFIG_WZ_LIMIT_*`
+  into the cargo environment (`deploy/zephyr-common/wz_zephyr_board.cmake`). `limit()`
+  reads a decimal `usize` only.
 - **The MCU images' own Kconfig** (`deploy/zephyr-admin-node/Kconfig`): the role
   choice, the network backend choice and `WZ_FIXED_MEMORY`, whose `depends on` is
   written by hand; the mapping from `CONFIG_*` to cargo features is written by hand
@@ -56,8 +58,8 @@ original reproduced by naming it. Three things follow from it:
   `upstream_switch_map.py` for zenoh-pico's 38 `Z_FEATURE_*` switches and zenoh-c's
   17 cargo features. The relation is not one to one: pico's advanced publication
   and subscription switches are one wz plane, and pico's liveliness get needs two of
-  its switches where wz has one capability. The `pico_flag` of
-  `deploy/capabilities.toml` names one switch per capability and is held to the map.
+  its switches where wz has one capability. The `pico_flag` of a capability in
+  `deploy/wz-config.toml` names its switch and is held to the map.
 - **No Rust API compatibility atom.** `api-compat-c` and `api-compat-pico` exist;
   nothing makes wz a drop-in for the `zenoh` crate's public API.
 - **No Kconfig interpreter on the host.** `kconfiglib` exists only inside the
@@ -223,10 +225,11 @@ fragment. A preset file starts with `# wz-preset: 1`, `# catalog: <version>` and
 
 Each step lands with its own done-when; sizes are not estimated here.
 
-1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the twenty-four
+1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the
    capabilities, the limits and the axis-like symbols of the MCU images into
-   `deploy/wz-config.toml`; the generator absorbs `capability_config.py` and
-   `limit_config.py`; the images use the generated Kconfig and CMake bridge; place
+   `deploy/wz-config.toml`; one generator (`wz_config.py`) replaces the capability and the
+   limit generators (done for the capabilities and the limits); the images use the
+   generated Kconfig and CMake bridge; place
    `wz_ext.h` and the subset gate; pin `kconfiglib` and add the equivalence gate.
    Done when the existing images build with the same features and environment as
    before (the cargo command lines compared) and the Layer C0 checks pass on the
