@@ -991,3 +991,85 @@ fn a_session_dropped_mid_window_gives_the_slot_back() {
     assert!(link.doors().is_empty(), "nothing half built was sent");
     link.assert_every_slot_home();
 }
+
+/// THE CLAIM of a burst (`ResponseSink::begin_burst`): what a drain sends, the replies and the
+/// `Final` that ends them, leaves as ONE frame in ONE slot, the frame a window of the same
+/// messages makes, where without it each message is a frame of its own.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_burst_gathers_what_a_drain_sends_into_one_frame() {
+    use wz_session_core::response_sink::ResponseSink;
+
+    // CONTROL: no burst, two messages, two frames, two grants.
+    let alone = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(alone.clone());
+    for payload in [&b"reply"[..], &b"final"[..]] {
+        actions
+            .send_push_literal("home/batch", payload, true)
+            .expect("push");
+    }
+    assert_eq!(alone.lent().len(), 2, "CONTROL: a frame to each message");
+
+    let control = heap_window(&[b"reply", b"final"]);
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    let opened = actions.begin_burst();
+    assert!(opened, "nobody had a window open, so the burst opened one");
+    for payload in [&b"reply"[..], &b"final"[..]] {
+        actions
+            .send_push_literal("home/batch", payload, true)
+            .expect("push");
+    }
+    assert!(
+        link.doors().is_empty(),
+        "nothing leaves while the burst gathers"
+    );
+    actions.end_burst(opened);
+    assert_eq!(link.lent(), control, "the frame a window of both makes");
+    assert!(link.heap().is_empty());
+    assert_eq!(
+        link.grants.load(Ordering::SeqCst),
+        1,
+        "one slot for the burst"
+    );
+    link.assert_every_slot_home();
+
+    // The burst closed its window: the next message is a frame of its own again.
+    actions
+        .send_push_literal("home/batch", b"after", true)
+        .expect("push");
+    assert_eq!(link.lent().len(), 2, "the window is closed, not left open");
+}
+
+/// A window somebody else opened is not the burst's to close: the burst reports that it opened
+/// nothing, and ending it sends nothing and leaves the window as it was.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_burst_inside_a_window_of_the_applications_leaves_that_window_open() {
+    use wz_session_core::response_sink::ResponseSink;
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    actions.batch_start().expect("batch_start");
+    let opened = actions.begin_burst();
+    assert!(!opened, "the application's window is already open");
+    actions
+        .send_push_literal("home/batch", b"inside", true)
+        .expect("push");
+    actions.end_burst(opened);
+    assert!(
+        link.doors().is_empty(),
+        "ending a burst that opened nothing sends nothing"
+    );
+    // The application's window is still its own, and still gathering.
+    actions
+        .send_push_literal("home/batch", b"more", true)
+        .expect("push");
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(
+        link.lent(),
+        heap_window(&[b"inside", b"more"]),
+        "both messages left in the application's one frame"
+    );
+    link.assert_every_slot_home();
+}

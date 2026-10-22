@@ -587,10 +587,14 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
+        // One burst: the replies and the `Final` that ends them leave as one frame, where each
+        // would be a datagram of its own (see `ResponseSink::begin_burst`).
+        let burst = actions.begin_burst();
         self.drain_query_replies(peers, actions);
         self.drain_declare_replies(peers, actions);
         self.drain_get_prunes(requesters, actions);
         self.drain_query_finals(peers, actions);
+        actions.end_burst(burst);
     }
 
     /// Fan and drain in one call: [`Self::dispatch_event`] then

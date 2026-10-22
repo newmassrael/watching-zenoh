@@ -2790,6 +2790,58 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
         self.send_response_final(request_id, qos);
     }
+
+    // The replies of a drain and the `Final` that ends them leave as one frame. The window is
+    // opened only when nobody has one open (the application's own `batch_start`, or the writer's
+    // standing one), and closed only by the call that opened it, so neither is ever cut short.
+    // Closing deactivates before it drains, as `batch_stop` does, so a send racing the close goes
+    // out directly rather than into a window that is closing.
+    //
+    // Gated as the window's reader `TxConduits::is_active` is, which this calls.
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn begin_burst(&self) -> bool {
+        if self.tx_conduits.is_active() {
+            return false;
+        }
+        self.tx_conduits.set_active(true);
+        true
+    }
+
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn end_burst(&self, opened: bool) {
+        if opened {
+            self.tx_conduits.set_active(false);
+            self.flush_open_batch();
+        }
+    }
 }
 
 // R283 / R311hn (Track 2) — drain targets for the declarer-side

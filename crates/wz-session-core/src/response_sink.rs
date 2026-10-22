@@ -89,6 +89,26 @@ pub trait ResponseSink {
     /// DEFAULT would be droppable while the replies it closes are not.
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel);
+
+    /// Open a window in which the messages the next calls send leave together as one frame, and
+    /// say whether this call opened it (to be handed back to [`Self::end_burst`]). The replies a
+    /// drain sends and the `Final` that ends them are one burst: a query answered with one reply
+    /// is two messages, and a datagram each costs a system call, a wake of the router and a
+    /// frame header more than one frame does.
+    ///
+    /// A window that is already open (the application's own, or the link's writer's, which keeps
+    /// one open for good) is not this call's to close, so the answer is `false` and
+    /// [`Self::end_burst`] then leaves it alone. The provided form opens nothing, which is right
+    /// for a sink that cannot coalesce and for a build without `transport-batching`.
+    fn begin_burst(&self) -> bool {
+        false
+    }
+
+    /// Close the window [`Self::begin_burst`] opened, if that call opened one, and send what it
+    /// gathered.
+    fn end_burst(&self, opened: bool) {
+        let _ = opened;
+    }
 }
 
 /// Declarer-side liveliness interest-response emit. Separate from
@@ -254,6 +274,12 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
     fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
         (**self).send_response_final(request_id, qos)
     }
+    fn begin_burst(&self) -> bool {
+        (**self).begin_burst()
+    }
+    fn end_burst(&self, opened: bool) {
+        (**self).end_burst(opened)
+    }
 }
 
 impl<S: DeclareReplySink + ?Sized> DeclareReplySink for &S {
@@ -315,6 +341,12 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64, qos: crate::sample::QosLevel) {
         (**self).send_response_final(request_id, qos)
+    }
+    fn begin_burst(&self) -> bool {
+        (**self).begin_burst()
+    }
+    fn end_burst(&self, opened: bool) {
+        (**self).end_burst(opened)
     }
 }
 
