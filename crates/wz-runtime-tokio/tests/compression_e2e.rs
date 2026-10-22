@@ -48,7 +48,9 @@ use wz_runtime_tokio::session_open::{
 use wz_runtime_tokio_test_support::{
     establish_capability_pair, fixture_params_with_zid, LifecycleRecordingDriver,
 };
-use wz_session_core::compression::{decompress_batch, BATCH_HEADER_COMPRESSION};
+use wz_session_core::compression::{
+    decompress_batch, BATCH_HEADER_BYTES, BATCH_HEADER_COMPRESSION,
+};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -236,6 +238,18 @@ async fn compression_put_rides_a_batch_header_not_a_bare_frame() {
         both.resp_actions.is_compression(),
         "acceptor negotiated compression on"
     );
+    // The BatchHeader rides inside the negotiated batch, as zenoh writes it into
+    // the buffer it sizes at the batch: a frame gets the batch less that byte. Read
+    // twice, so the second answer is the one the session kept once established.
+    assert_eq!(both.init_actions.batch_envelope_bytes(), BATCH_HEADER_BYTES);
+    let batch = both.init_actions.negotiated_batch_mtu();
+    for _ in 0..2 {
+        assert_eq!(
+            both.init_actions.negotiated_tx_limits().0,
+            batch - BATCH_HEADER_BYTES,
+            "a compressing session's frame budget is the batch less its BatchHeader"
+        );
+    }
     let wire = publish_and_capture(&both.init_actions, &both.init_driver, &payload);
     assert_eq!(
         wire[0], BATCH_HEADER_COMPRESSION,
@@ -258,6 +272,11 @@ async fn compression_put_rides_a_batch_header_not_a_bare_frame() {
     assert!(
         !none.resp_actions.is_compression(),
         "acceptor stays uncompressed"
+    );
+    assert_eq!(
+        none.init_actions.batch_envelope_bytes(),
+        0,
+        "no BatchHeader, and the recording link writes no length"
     );
     let raw = publish_and_capture(&none.init_actions, &none.init_driver, &payload);
     assert_eq!(

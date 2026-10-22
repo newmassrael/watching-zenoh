@@ -56,6 +56,11 @@ pub(crate) struct RecordingLinkDriver {
     /// egress selection reads a link's intrinsic reliability class off its
     /// kind. `None` (the default) is a driver that names no kind.
     subject: Option<wz_session_core::link::LinkSubject>,
+    /// What [`BoxedLinkDriver::batch_length_prefixed`] answers: `true` for a
+    /// recorder that stands for a streamed link's driver, so the session spends
+    /// the length's bytes of the batch on it. The recorder keeps the frames
+    /// without the length either way.
+    length_prefixed: bool,
 }
 
 impl RecordingLinkDriver {
@@ -143,6 +148,9 @@ impl BoxedLinkDriver for RecordingLinkDriver {
     fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
         self.subject.as_ref()
     }
+    fn batch_length_prefixed(&self) -> bool {
+        self.length_prefixed
+    }
 }
 
 /// R2943 — [`recording_actions`] over a recorder that stands for a link of
@@ -192,6 +200,7 @@ pub(crate) fn recording_driver_over(
             kind: Some(kind),
             ..wz_session_core::link::LinkSubject::UNKNOWN
         }),
+        length_prefixed: false,
     })
 }
 
@@ -226,7 +235,25 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
         frames: Mutex::new(Vec::new()),
         priorities: Mutex::new(Vec::new()),
         subject: None,
+        length_prefixed: false,
     })
+}
+
+/// [`recording_actions_with_params`] over a recorder that stands for a streamed
+/// link's driver ([`BoxedLinkDriver::batch_length_prefixed`] answers `true`), for
+/// a test of what the session leaves of a batch for its frame on such a link.
+#[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
+pub(crate) fn recording_actions_length_prefixed(
+    params: SessionInitParams,
+) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
+    let driver = Arc::new(RecordingLinkDriver {
+        frames: Mutex::new(Vec::new()),
+        priorities: Mutex::new(Vec::new()),
+        subject: None,
+        length_prefixed: true,
+    });
+    let actions = new_session_actions(driver.clone(), params, TokioTime::new());
+    (actions, driver)
 }
 
 /// R2371 — a link driver that REFUSES every write, reporting the refusal

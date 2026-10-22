@@ -66,7 +66,7 @@ use crate::reassembly_dispatch::{
 use wz_codecs::ext_entry::ExtEntryOwned;
 
 /// The universal stream length-prefix width: 2-byte LE `u16`.
-pub const PREFIX_WIDTH_UNIVERSAL: usize = 2;
+pub const PREFIX_WIDTH_UNIVERSAL: usize = crate::link::STREAM_BATCH_LENGTH_BYTES;
 
 /// The lowlatency stream length-prefix width: 4-byte LE `u32`, in force only
 /// once a session that negotiated `LowLatency` reaches Established.

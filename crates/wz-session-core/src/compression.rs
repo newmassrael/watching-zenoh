@@ -36,6 +36,13 @@ use alloc::vec::Vec;
 /// bit 0 of the 1-byte header set => the payload that follows is lz4-compressed.
 pub const BATCH_HEADER_COMPRESSION: u8 = 0x01;
 
+/// The size of the `BatchHeader` [`compress_batch`] puts in front of a batch's
+/// payload. It is counted inside the batch size, as the streamed length is
+/// ([`crate::link::STREAM_BATCH_LENGTH_BYTES`]): zenoh writes it into the same
+/// mtu-sized buffer, right after the length (`io/zenoh-transport/src/common/batch.rs`
+/// @ `let _ = writer.write_u8(h.as_u8());`).
+pub const BATCH_HEADER_BYTES: usize = 1;
+
 /// Wrap a serialized batch payload for a compression-negotiated session: prepend
 /// the 1-byte `BatchHeader` and lz4-compress the payload, keeping the compressed
 /// form ONLY when it is strictly smaller than the original (zenoh

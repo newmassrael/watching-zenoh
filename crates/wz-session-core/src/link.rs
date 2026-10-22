@@ -359,6 +359,20 @@ impl LinkKind {
 /// `u16`, so they never exceed it).
 pub const DEFAULT_LINK_MTU: usize = 65_535;
 
+/// The width of the length a streamed link writes in front of every batch: the
+/// `StreamEnvelope` `payload_len`, a little-endian `u16` (zenoh's `BatchSize`).
+///
+/// It is counted INSIDE the batch size. zenoh allocates a batch's buffer at
+/// the batch mtu and writes the length into it before the first message
+/// (`io/zenoh-transport/src/common/batch.rs` @ `buffer: BBuf::with_capacity(config.mtu as usize)`
+/// and @ `let _ = writer.write_exact(&BatchSize::MIN.to_be_bytes());`), and its
+/// receiver reads the length and the batch into one buffer of the batch mtu
+/// (`io/zenoh-transport/src/unicast/link.rs` @ `.get_mut(len.len()..len.len() + l)`),
+/// so a batch of `n` negotiated bytes carries at most `n - 2` bytes of
+/// messages. zenoh-pico sizes its write buffer and its read buffer the same way
+/// (`src/transport/unicast/transport.c` @ `size_t wbuf_size = mtu;`).
+pub const STREAM_BATCH_LENGTH_BYTES: usize = 2;
+
 /// What a [`BoxedLinkDriver::send_blocking`] did with the bytes it was handed —
 /// the DRIVER-LEVEL DROP HOOK (R2371).
 ///
@@ -723,6 +737,21 @@ pub trait BoxedLinkDriver {
     /// [`DEFAULT_LINK_MTU`], inert against the `u16` advertisement.
     fn link_rx_capacity(&self) -> usize {
         DEFAULT_LINK_MTU
+    }
+
+    /// Whether this link writes every batch behind the
+    /// [`STREAM_BATCH_LENGTH_BYTES`] length, as a streamed link does: the
+    /// session then spends that many bytes of the negotiated batch on the length
+    /// and sizes its frames to the rest
+    /// ([`crate::session_actions::SessionLinkActions::batch_envelope_bytes`]).
+    ///
+    /// A driver that frames batches this way MUST answer `true`; answering
+    /// `false` lets a frame fill the whole batch, and a zenoh or zenoh-pico
+    /// receiver whose buffer is the batch size cannot take it. The default is
+    /// the datagram links and the test doubles, which hand the session's frame
+    /// to the wire with no length in front of it.
+    fn batch_length_prefixed(&self) -> bool {
+        false
     }
 
     /// R311y453 — the LINK-DERIVED SUBJECT of this driver's transport: what the

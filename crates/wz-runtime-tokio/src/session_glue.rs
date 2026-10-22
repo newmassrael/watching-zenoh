@@ -3383,6 +3383,53 @@ mod negotiated_mtu_tests {
             );
         }
     }
+
+    /// On a streamed link the batch carries the 2-byte length as well as the
+    /// frame, and zenoh and zenoh-pico size the batch, both to write it and to
+    /// read it, at the negotiated batch size with the length inside it. A frame
+    /// that filled the whole batch left a batch two bytes past what the peer
+    /// accepts: a device that advertised 2048 never received the 2047- and
+    /// 2048-byte frames a put sent whole.
+    ///
+    /// Puts sized across the point where one frame would fill the batch: no
+    /// frame leaves less than the length's room, and the largest takes exactly
+    /// the rest, so a budget short of it, which fragments what zenoh sends
+    /// whole, fails too.
+    #[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
+    #[test]
+    fn a_streamed_link_keeps_the_length_inside_the_negotiated_batch() {
+        const BATCH: usize = 128;
+        let length = wz_session_core::link::STREAM_BATCH_LENGTH_BYTES;
+        let (actions, driver) =
+            crate::test_fixtures::recording_actions_length_prefixed(fixture_session_init_params());
+        let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, BATCH as u16);
+        actions.handle_inbound(&wire).expect("parse InitAck");
+        assert_eq!(actions.negotiated_batch_mtu(), BATCH);
+        assert_eq!(actions.batch_envelope_bytes(), length);
+
+        let mut longest = 0;
+        for size in BATCH / 2..=BATCH {
+            let before = driver.frame_count();
+            actions
+                .send_push_literal("home/sensor/bulk", &vec![0x5A; size], true)
+                .expect("send push");
+            for i in before..driver.frame_count() {
+                let frame = driver.frame_bytes(i).len();
+                assert!(
+                    frame + length <= BATCH,
+                    "a {size}-byte value left a {frame}-byte frame: behind its {length}-byte \
+                     length the batch is {} bytes, past the negotiated {BATCH}",
+                    frame + length
+                );
+                longest = longest.max(frame);
+            }
+        }
+        assert_eq!(
+            longest,
+            BATCH - length,
+            "the largest frame must fill the batch up to the length's room"
+        );
+    }
 }
 
 /// R311ke — unicast RX SN gate: handshake seeding + the reassembly
@@ -5720,6 +5767,9 @@ mod reconnect_tx_tests {
             fn link_mtu(&self) -> usize {
                 1234
             }
+            fn batch_length_prefixed(&self) -> bool {
+                true
+            }
             fn open_blocking(&self) {}
             fn close_blocking(&self) {}
         }
@@ -5743,6 +5793,7 @@ mod reconnect_tx_tests {
         );
         assert_eq!(shared.wait_for_room(Priority::RealTime, wait), congested);
         assert_eq!(shared.link_mtu(), 1234);
+        assert!(shared.batch_length_prefixed());
         shared.shape_tx_queue(shape);
         assert_eq!(*live.shapes.lock().expect("shapes"), [shape]);
         assert_eq!(
@@ -5759,6 +5810,7 @@ mod reconnect_tx_tests {
         );
         assert_eq!(local.wait_for_room(Priority::Background, wait), congested);
         assert_eq!(local.link_mtu(), 1234);
+        assert!(local.batch_length_prefixed());
         local.shape_tx_queue(shape);
         assert_eq!(*local_live.shapes.lock().expect("shapes"), [shape]);
         assert_eq!(

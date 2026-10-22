@@ -20,7 +20,15 @@
 //! only because both ends are this very build would pass with the defect in place
 //! if the other end happened to accept an oversize batch. The gate is what a
 //! device sees: the TCP stream the dialer writes, read through a recording relay,
-//! carries NO transport frame longer than the negotiated batch size.
+//! carries NO batch longer than the negotiated batch size.
+//!
+//! A batch there is the frame AND its 2-byte length. zenoh and zenoh-pico size
+//! the buffer they read a batch into at the negotiated batch size and read the
+//! length into it too, which is why genuine zenoh-c's fragments are 1448 bytes
+//! against a 1450 batch. This gate once compared the frame alone with the batch
+//! size, and so passed a frame of the whole 1450 bytes that the device dropped; a
+//! consumer measured that at 2048, on puts just below the fragmenting point. The
+//! sizes now include that point.
 //!
 //! The delivery half (every size arrives whole, byte for byte, at the subscriber)
 //! is checked as well, so a fragmenter that split correctly and a reassembler that
@@ -54,6 +62,13 @@ use wz_runtime_tokio_test_support::free_port;
 const BATCH: u16 = 1450;
 /// The two sizes of the report, and one that needs more than two fragments.
 const SIZES: &[usize] = &[3027, 4123, 20_000];
+/// The values whose single frame comes within its encoding's few dozen bytes of
+/// the batch: the largest frame that leaves whole, and the first values that must
+/// fragment, are in this range whatever the key costs.
+const AT_THE_BATCH: std::ops::RangeInclusive<usize> = BATCH as usize - 64..=BATCH as usize;
+/// The length zenoh writes in front of every batch on a stream link, inside the
+/// batch size.
+const LENGTH: usize = 2;
 const KEYEXPR: &str = "wz/fragmentation/demo";
 
 /// A size-dependent, position-dependent filler: a truncated or reordered delivery
@@ -219,7 +234,7 @@ fn a_put_past_the_negotiated_batch_leaves_as_fragments_and_arrives_whole() {
 
         // Each size is republished until the subscriber reports it, bounded, so the
         // time the subscription takes to propagate retries and a loss fails.
-        for &size in SIZES {
+        for size in SIZES.iter().copied().chain(AT_THE_BATCH) {
             let want = payload_of(size);
             let until = Instant::now() + Duration::from_secs(15);
             loop {
@@ -245,9 +260,11 @@ fn a_put_past_the_negotiated_batch_leaves_as_fragments_and_arrives_whole() {
             SIZES.len()
         );
         assert!(
-            longest <= usize::from(BATCH),
-            "a transport frame of {longest} bytes left a session whose negotiated batch is \
-             {BATCH}: the value was not fragmented (frame lengths {lengths:?})"
+            longest + LENGTH <= usize::from(BATCH),
+            "a transport frame of {longest} bytes, {} with its {LENGTH}-byte length, left a \
+             session whose negotiated batch is {BATCH}: the value was not fragmented to fit \
+             (frame lengths {lengths:?})",
+            longest + LENGTH
         );
 
         z_undeclare_subscriber(

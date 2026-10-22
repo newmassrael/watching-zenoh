@@ -4948,14 +4948,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         ))
     }
 
-    /// The negotiated batch budget and SN ring mask together: both of
-    /// [`Self::negotiated_batch_mtu`] and [`Self::negotiated_sn_mask`], with the peer's caps
+    /// The frame budget and SN ring mask together: [`Self::negotiated_batch_mtu`] less
+    /// [`Self::batch_envelope_bytes`], and [`Self::negotiated_sn_mask`], with the peer's caps
     /// read under one hold of their mutex instead of two. What every send resolves before it
     /// takes its conduit's lock.
     ///
-    /// Answered from the kept value when the capabilities have not been written since it was
-    /// computed, so a send pays no mutex for it; the answer is always what
-    /// [`Self::negotiated_batch_mtu`] and [`Self::negotiated_sn_mask`] give.
+    /// The budget is what one frame may carry, not the batch size: the batch size counts the
+    /// envelope the link and the compression wrap put around the frame, and a frame that
+    /// filled the whole batch would reach the peer as a batch past what it negotiated.
+    ///
+    /// Answered from the kept value when its inputs have not changed since it was computed, so
+    /// a send pays no mutex for it. A value is kept only once the session is established: the
+    /// envelope depends on the lowlatency and compression outcomes, which the Init exchange
+    /// settles AFTER it writes the peer's capabilities, and are final only then. A reconnect
+    /// clears the capabilities, which moves the tag and drops the kept value.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -4980,13 +4986,51 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             (*slot, self.tx_limits_cache.current_tag())
         });
         let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res, peer);
-        let mtu = self.batch_mtu_for(peer);
-        // Before the peer's capabilities arrive the own advertisement applies, and the
-        // next send must see the peer's: that answer is not kept.
-        if peer.is_some() {
-            self.tx_limits_cache.keep(tag, mtu, ring);
+        // Read BEFORE the envelope: a session seen established had settled the outcomes the
+        // envelope reads before it became established, so they are final here.
+        let established = self.is_established();
+        let budget = self
+            .batch_mtu_for(peer)
+            .saturating_sub(self.batch_envelope_bytes());
+        // Before the peer's capabilities arrive the own advertisement applies, and before
+        // establishment the envelope can still change: neither answer is kept.
+        if peer.is_some() && established {
+            self.tx_limits_cache.keep(tag, budget, ring);
         }
-        (mtu, crate::sn::mask_from_res(ring))
+        (budget, crate::sn::mask_from_res(ring))
+    }
+
+    /// The bytes of a batch that are not its frame: the length a streamed link writes in
+    /// front of it ([`crate::link::STREAM_BATCH_LENGTH_BYTES`]) and the `BatchHeader` of a
+    /// compressing session ([`crate::compression::BATCH_HEADER_BYTES`]). zenoh writes both
+    /// into the buffer it allocates at the batch size, so both come out of the negotiated
+    /// batch (`io/zenoh-transport/src/common/batch.rs` @ `fn init(buffer: &mut BBuf, config: &BatchConfig) {`),
+    /// and a frame gets [`Self::negotiated_batch_mtu`] less this.
+    ///
+    /// A lowlatency link once established has neither: its 4-byte length is outside the
+    /// batch, since zenoh reads the length and then a message of up to the batch size
+    /// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `let b = buffer.get_mut(0..n)`),
+    /// and it does not compress ([`Self::compresses_batches`]). Before establishment the
+    /// same link still frames with the batch length, as [`crate::drive`] reads it.
+    pub fn batch_envelope_bytes(&self) -> usize {
+        #[cfg(feature = "transport-lowlatency")]
+        if self.is_lowlatency() && self.is_established() {
+            return 0;
+        }
+        let length = if self.link_driver().batch_length_prefixed() {
+            crate::link::STREAM_BATCH_LENGTH_BYTES
+        } else {
+            0
+        };
+        #[cfg(feature = "transport-compression")]
+        let header = if self.compresses_batches() {
+            crate::compression::BATCH_HEADER_BYTES
+        } else {
+            0
+        };
+        #[cfg(not(feature = "transport-compression"))]
+        let header = 0;
+        length + header
     }
 
     /// Write the peer's capabilities ([`SessionCore::inbound_peer_init_caps`]), and tell the
@@ -8839,7 +8883,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the same budget bounds the batching accumulator (pico shares one
         // `_wbuf` capacity between both concerns). Resolved before the
         // batch lock for the same disjoint-mutex discipline as `sn_mask`
-        // below (the accessor takes `inbound_peer_init_caps`).
+        // below (the accessor takes `inbound_peer_init_caps`). The budget is
+        // the batch less its envelope ([`Self::batch_envelope_bytes`]): a
+        // streamed link's length and a compressing session's header ride in
+        // the same negotiated batch as the frame.
         //
         // R311kb — and the negotiated SN ring every mint below walks
         // ([`Self::negotiated_sn_mask`]). Resolved here, before the batch

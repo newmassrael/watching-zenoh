@@ -835,7 +835,7 @@ impl StreamWriteDriver {
         if self.lowlatency.load(Ordering::Acquire) {
             4
         } else {
-            2
+            wz_session_core::link::STREAM_BATCH_LENGTH_BYTES
         }
     }
 
@@ -861,6 +861,12 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // resolved, for the same six-pipelines reason as the subject above.
     fn link_endpoints(&self) -> Option<&wz_session_core::link::LinkEndpoints> {
         self.endpoints.as_ref()
+    }
+
+    // Every batch this link writes goes behind the `StreamEnvelope` length, and the
+    // session counts it inside the negotiated batch, as zenoh and zenoh-pico do.
+    fn batch_length_prefixed(&self) -> bool {
+        true
     }
 
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
