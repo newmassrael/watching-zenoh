@@ -781,7 +781,38 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
     }
 
     fn drain_owed(&mut self) -> impl Iterator<Item = (u64, QosLevel)> {
-        core::mem::take(&mut self.rows).into_iter()
+        OwedDrain {
+            rows: &mut self.rows,
+            at: 0,
+        }
+    }
+}
+
+/// What [`FinalStaging::drain_owed`] hands out: the owed rows in order, with the table
+/// emptied when the iterator is dropped, consumed or not.
+///
+/// Not `mem::take(rows).into_iter()`: that moves the backing out, and a growable one
+/// then allocates again at the next row. The table keeps the capacity it grew to, which
+/// is what lets a frame of queries cost no allocation once the first one has run. A row
+/// is two words and `Copy`, so it is read in place and the backing never moves.
+struct OwedDrain<'a, P: Storage> {
+    rows: &'a mut BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
+    at: usize,
+}
+
+impl<P: Storage> Iterator for OwedDrain<'_, P> {
+    type Item = (u64, QosLevel);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = *self.rows.get(self.at)?;
+        self.at += 1;
+        Some(row)
+    }
+}
+
+impl<P: Storage> Drop for OwedDrain<'_, P> {
+    fn drop(&mut self) {
+        self.rows.clear();
     }
 }
 
@@ -843,6 +874,32 @@ mod tests {
         assert_eq!(finals.owed(), 0);
         assert!(finals.is_empty());
         assert_eq!(finals.refusals(), 1, "draining does not clear the count");
+    }
+
+    /// Taking what is owed leaves the table the memory it grew to: the rows of the
+    /// next frame lie where the rows of this one did, so a growable table does not
+    /// allocate again for each frame (the in-place receive path's turn is measured to
+    /// cost the heap nothing for a query, and moving the backing out of the table in
+    /// the drain made it cost one allocation per frame).
+    fn drain_keeps_the_backing<P: Storage>() {
+        let mut finals: FinalStage<P> = FinalStage::default();
+        for rid in 0..6u64 {
+            finals.owe(rid, QosLevel::DEFAULT);
+        }
+        let first = finals.as_ptr();
+        assert_eq!(finals.drain_owed().count(), 6);
+        assert!(finals.is_empty());
+        for rid in 0..6u64 {
+            finals.owe(rid, QosLevel::DEFAULT);
+        }
+        assert_eq!(
+            finals.as_ptr(),
+            first,
+            "the second frame's rows lie where the first frame's did"
+        );
+        // An iterator dropped before its end empties the table all the same.
+        let _ = finals.drain_owed().next();
+        assert!(finals.is_empty());
     }
 
     /// `clear` drops what is owed and keeps the count, as `forget_peer` relies on.
@@ -1094,6 +1151,7 @@ mod tests {
     on_every_policy!(
         fill_to_n_then_refuse_at_n_plus_one,
         drain_takes_in_order_and_keeps_the_count,
+        drain_keeps_the_backing,
         clear_keeps_the_count,
         rows_fill_to_n_then_refuse_at_n_plus_one,
         payload_past_the_bound,
