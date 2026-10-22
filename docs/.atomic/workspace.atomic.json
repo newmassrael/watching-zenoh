@@ -277410,6 +277410,54 @@
         "The ws and serial links are still off-default features, not capabilities, so a pico config.h that turns them on does not reach them through capability_config."
       ]
     },
+    "Round 3410": {
+      "decision_summary": "Hosted run 39733003983, graded on 8e4fac0cf, is red in four jobs, and two of them are this session's own R3406 work: the reserved api-compat-rust atom was registered without the cargo feature every catalog atom must be and under a reason tag outside the closed set, and the switch-map gate's --zenoh-c run also graded the zenoh-pico arm in a lane whose shallow checkout has no submodule tags to name its pin. Both are repaid here. The other two are not this session's and stay open, named in the acknowledgement row: broken doc links in crates another session's storage-policy and dissect work moved (C1bz), and the C1bn job's clock at 90 percent.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml declares api-compat-rust as an empty reserved feature in the api-compat block and domain-api lists it; the store reason of api-compat-rust opens with UNBUILT, the closed tag a reserved atom takes.",
+        "upstream_switch_map.py: each run grades the one upstream arm its lane provisions, the default run zenoh-pico against the submodule's tag and --zenoh-c zenoh-c against its checkout, and prints that it deferred the other; the shape and declaration arms run in both.",
+        "wz-capi-pico: two links from public docs to private items (the locality macro and the open-time scout) are code spans, which returns the crate to its C1bz budget of 43.",
+        "docs/hosted-red-acks.md: the row for run 39733003983, written before the push that uses it."
+      ],
+      "verification_bullets": [
+        "run-ci Layer A3 with WZ_A3_REQUIRE=1: pass (catalog status truthfulness OK, domain census 0 new); it read api-compat-rust as the one UNBUILT atom.",
+        "upstream_switch_map.py --selftest, the default run and --zenoh-c: rc=0, each printing the arm it deferred.",
+        "Layer C1bz on wz-capi-pico, wz-capi-core and wz-capi-c on a build host: each spends exactly its budget.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "C1bz is red on crates this session did not touch: wz 4 against 2, wz-runtime-tokio 476 against 475, wz-session-core 512 against 499, wz-runtime-zephyr, wz-session-lwip and wz-session-mcu over a budget of 0; owned by the session whose commits moved them.",
+        "The C1bn job runs at 90 percent of its 1800 s clock with every lane green.",
+        "Item 913: C ABI multicast transport; the raw-ethernet link of item 911 waits on it.",
+        "Item 910: the Rust API compatibility crate; api-compat-rust is its reserved atom.",
+        "Item 912: bt and a board's USB CDC serial need hardware to witness."
+      ],
+      "publishable_decision_summary": "Hosted run 39733003983, graded on 8e4fac0cf, is red in four jobs, and two of them are this session's own R3406 work: the reserved api-compat-rust atom was registered without the cargo feature every catalog atom must be and under a reason tag outside the closed set, and the switch-map gate's --zenoh-c run also graded the zenoh-pico arm in a lane whose shallow checkout has no submodule tags to name its pin. Both are repaid here. The other two are not this session's and stay open, named in the acknowledgement row: broken doc links in crates another session's storage-policy and dissect work moved (C1bz), and the C1bn job's clock at 90 percent.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml declares api-compat-rust as an empty reserved feature in the api-compat block and domain-api lists it; the store reason of api-compat-rust opens with UNBUILT, the closed tag a reserved atom takes.",
+        "upstream_switch_map.py: each run grades the one upstream arm its lane provisions, the default run zenoh-pico against the submodule's tag and --zenoh-c zenoh-c against its checkout, and prints that it deferred the other; the shape and declaration arms run in both.",
+        "wz-capi-pico: two links from public docs to private items (the locality macro and the open-time scout) are code spans, which returns the crate to its C1bz budget of 43.",
+        "docs/hosted-red-acks.md: the row for run 39733003983, written before the push that uses it."
+      ],
+      "publishable_verification_bullets": [
+        "run-ci Layer A3 with WZ_A3_REQUIRE=1: pass (catalog status truthfulness OK, domain census 0 new); it read api-compat-rust as the one UNBUILT atom.",
+        "upstream_switch_map.py --selftest, the default run and --zenoh-c: rc=0, each printing the arm it deferred.",
+        "Layer C1bz on wz-capi-pico, wz-capi-core and wz-capi-c on a build host: each spends exactly its budget.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "C1bz is red on crates this session did not touch: wz 4 against 2, wz-runtime-tokio 476 against 475, wz-session-core 512 against 499, wz-runtime-zephyr, wz-session-lwip and wz-session-mcu over a budget of 0; owned by the session whose commits moved them.",
+        "The C1bn job runs at 90 percent of its 1800 s clock with every lane green.",
+        "Item 913: C ABI multicast transport; the raw-ethernet link of item 911 waits on it.",
+        "Item 910: the Rust API compatibility crate; api-compat-rust is its reserved atom.",
+        "Item 912: bt and a board's USB CDC serial need hardware to witness."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
