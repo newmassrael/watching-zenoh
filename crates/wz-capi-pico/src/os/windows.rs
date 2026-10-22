@@ -550,6 +550,7 @@ mod tests {
     #[cfg(feature = "multi-thread")]
     #[test]
     fn the_trampoline_runs_the_function_and_join_waits() {
+        use crate::result::Z_OK;
         use std::sync::atomic::AtomicBool;
         static RAN: AtomicBool = AtomicBool::new(false);
         extern "C" fn body(arg: *mut c_void) -> *mut c_void {
