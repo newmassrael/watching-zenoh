@@ -169,7 +169,11 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "here, and this row is the CONTROL that keeps the gate from reading "
         "as `every narrow read is a bug`.",
     ),
-    "out/wz-codecs/encoding.rs::decode::": (
+    # The four generated rows below read in `decode_into`: SCE splits a codec's
+    # decode into `decode` (a new value) and `decode_into` (in place), and the
+    # field reads live in the second. The fields, widths and upstream codecs are
+    # the ones the rows named when they sat under `decode`.
+    "out/wz-codecs/encoding.rs::decode_into::": (
         "REFUSE",
         "the generated sibling of `walk_encoding` above, and correct for the "
         "same reason: upstream's `Encoding` codec is `Zenoh080Bounded::<u32>` "
@@ -198,12 +202,12 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "(`zbuf.rs` `let kind: u8 = self.codec.read(..)`): a varint past "
         "u32 is refused there, and only then is the value cut to a byte.",
     ),
-    "out/wz-codecs/msg_put.rs::decode::": (
+    "out/wz-codecs/msg_put.rs::decode_into::": (
         "REFUSE",
         "the generated sibling of `walk_msg_put`'s `slice_count`, correct for "
         "the same reason: the count is `Zenoh080Bounded::<u32>` upstream.",
     ),
-    "out/wz-codecs/zbuf_slice.rs::decode::": (
+    "out/wz-codecs/zbuf_slice.rs::decode_into::": (
         "REFUSE",
         "the generated sibling of `walk_zbuf_slice`'s `kind`, correct for the "
         "same reason: the kind is `Zenoh080Bounded::<u32>` upstream.",
@@ -219,7 +223,7 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "`Zenoh080Bounded::<u32>` upstream as `walk_msg_put`'s is: a varint "
         "past u32 is `DidntRead` there too.",
     ),
-    "out/wz-codecs/query_value_zbuf.rs::decode::": (
+    "out/wz-codecs/query_value_zbuf.rs::decode_into::": (
         "REFUSE",
         "the Query value's slice count, the sibling of `msg_put.rs`'s above: "
         "`ValueType`'s reader hands its payload to `Zenoh080Sliced::<u32>`, "
