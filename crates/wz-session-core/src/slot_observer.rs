@@ -459,6 +459,10 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// What a queryable stages goes to `peers.replies` / `peers.finals`, and a
     /// `Request` whose `Final` the table cannot hold never reaches one
     /// ([`crate::reply_stage`]). `requesters` is the session's own.
+    // Not inlined, for the stack: each plane's fan leaves its temporaries in the frame it runs
+    // in, and inlined into the session's `on_event` they are all there for the length of the
+    // application layer's call.
+    #[inline(never)]
     pub fn dispatch_event<R: ReplySink, G: ReplySink>(
         &mut self,
         peers: &mut PeerTables,
@@ -686,6 +690,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// writes the `Response` from the row and builds no record, and a sink with a heap
     /// builds the owned one it always did. A reply whose bounded field overflows cannot
     /// be wire-encoded and is skipped, as on the AP.
+    #[inline(never)]
     fn drain_query_replies<S: ResponseSink>(&mut self, peers: &mut PeerTables, sink: &S) {
         #[cfg(feature = "query-queryable")]
         peers
@@ -696,6 +701,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 
     /// The `Final`s owed, through `send_response_final`.
+    #[inline(never)]
     fn drain_query_finals<S: ResponseSink>(&mut self, peers: &mut PeerTables, sink: &S) {
         #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
         for (rid, qos) in peers.finals.drain_owed() {
@@ -709,6 +715,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
 
     /// The answers to the peer's interests: the subscriber interest chains first,
     /// then the liveliness ones, each batch's items before its terminating `Final`.
+    #[inline(never)]
     fn drain_declare_replies<S: DeclareReplySink>(&mut self, peers: &mut PeerTables, sink: &S) {
         #[cfg(feature = "declare-subscriber")]
         for item in peers.subscribers.take_staged_sub_interest_replies() {
@@ -770,6 +777,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
+    #[inline(never)]
     fn drain_get_prunes<S: LivelinessGetPrune, R: ReplySink, G: ReplySink>(
         &mut self,
         requesters: &mut Requesters<R, G>,
