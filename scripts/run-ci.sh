@@ -17716,7 +17716,9 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # Open-debt item 913 — the zenoh-c ABI's group: a stock zenohd joins
     # `udp/224.0.0.226:7451#iface=lo`, and upstream's `z_info.c` (events) and its printers
     # (listing) report it, once on libzenohc and once on wz's drop-in, which must agree block
-    # for block. Needs the zenoh-c oracle, which the hosted interop job installs, and zenohd;
+    # for block; upstream's `z_pub.c` and `z_sub.c` cross between the two libraries on the
+    # group; and `z_sub.c` puts the same subscriber announcement on the group's wire on both.
+    # Count-guarded at 4. Needs the zenoh-c oracle, which the hosted interop job installs, and zenohd;
     # SKIP on a box without either, FATAL under WZ_M_REQUIRE. The drop-in is built in the
     # oracle's arm (`_runci_build_capi_c_for_oracle`), since the oracle's headers decide the
     # struct sizes the program is compiled against.
@@ -17730,7 +17732,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         echo "Layer M SKIP zenoh-c multicast group on wz (zenoh-c oracle or zenohd absent)"
     else
         _runci_build_capi_c_for_oracle M || return 1
-        _runci_guarded_test "M zenoh-c multicast group on wz" 2 \
+        _runci_guarded_test "M zenoh-c multicast group on wz" 4 \
             env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
             --test zenoh_c_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
     fi

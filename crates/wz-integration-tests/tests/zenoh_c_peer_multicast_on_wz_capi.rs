@@ -302,3 +302,200 @@ fn upstream_zinfo_printers_on_wz_list_a_zenohd_group_member_as_libzenohc_does() 
         "the listing on wz reports the group's member otherwise than on libzenohc"
     );
 }
+
+/// A process of `exe` on the group with `args`, its output captured to the returned file.
+fn spawn_on_group(label: &str, exe: &Path, args: &[&str]) -> (ChildGuard, File) {
+    let capture: File = tempfile::tempfile().expect("a capture file");
+    let child = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(exe)
+        .args(ON_THE_GROUP)
+        .args(args)
+        .stdout(Stdio::from(capture.try_clone().expect("dup stdout")))
+        .stderr(Stdio::from(capture.try_clone().expect("dup stderr")))
+        .spawn()
+        .unwrap_or_else(|e| panic!("{label}: cannot start {}: {e}", exe.display()));
+    (ChildGuard::wrap(label, child), capture)
+}
+
+/// One program on the group: its label, its build, its arguments.
+type OnGroup<'a> = (&'a str, &'a Path, &'a [&'a str]);
+
+/// Run `watcher` and `speaker` on the group until `watcher` prints `heard`, and return what it
+/// printed; panic with both outputs when it does not within [`REPORTED_WITHIN`].
+fn heard_on_group(watcher: OnGroup<'_>, speaker: OnGroup<'_>, heard: &str) -> String {
+    let (mut watching, mut watched) = spawn_on_group(watcher.0, watcher.1, watcher.2);
+    let (mut speaking, mut said) = spawn_on_group(speaker.0, speaker.1, speaker.2);
+    let outcome = wait_for_substring(&mut watched, heard, REPORTED_WITHIN);
+    graceful_terminate(speaking.child_mut(), Duration::from_secs(5));
+    graceful_terminate(watching.child_mut(), Duration::from_secs(5));
+    outcome.unwrap_or_else(|printed| {
+        panic!(
+            "{} never printed {heard:?} with {} on {GROUP}\n--- {} ---\n{printed}\n--- {} ---\n{}",
+            watcher.0,
+            speaker.0,
+            watcher.0,
+            speaker.0,
+            read_captured(&mut said)
+        )
+    })
+}
+
+/// The key the pub/sub legs use, and the subscription that covers it.
+const PUT_KEY: &str = "demo/mc/zc";
+const SUB_KEY: &str = "demo/mc/**";
+
+/// Upstream's `z_pub.c` and `z_sub.c` on one group, one on each library, both ways: a put of
+/// libzenohc is heard by wz's subscriber, and a put of wz's by libzenohc's.
+///
+/// # Control
+///
+/// The calibration is the same pair on libzenohc alone, which says whether this host carries a
+/// zenoh group at all.
+// wz-proves: api-compat-c zenoh-c->wz partial
+// wz-proves: api-compat-c wz->zenoh-c partial
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn upstream_zpub_and_zsub_cross_between_libzenohc_and_wz_on_a_group() {
+    let Some((include, examples, libdir)) = oracle_or_note() else {
+        return;
+    };
+    assert_zenoh_c_arm_pairing(&include);
+    let dir = tempfile::tempdir().expect("tempdir for the compiled programs");
+    let zpub = both_arms("z_pub", &examples, dir.path(), &include, &libdir);
+    let zsub = both_arms("z_sub", &examples, dir.path(), &include, &libdir);
+    let pub_args: &[&str] = &["-k", PUT_KEY, "-p", "FROM-THE-OTHER-LIBRARY"];
+    let sub_args: &[&str] = &["-k", SUB_KEY];
+    let heard = format!("('{PUT_KEY}': '[");
+    for (watcher, speaker) in [
+        (
+            ("z_sub.c on libzenohc", zsub.real.as_path()),
+            ("z_pub.c on libzenohc", zpub.real.as_path()),
+        ),
+        (
+            ("z_sub.c on wz-capi-c", zsub.wz.as_path()),
+            ("z_pub.c on libzenohc", zpub.real.as_path()),
+        ),
+        (
+            ("z_sub.c on libzenohc", zsub.real.as_path()),
+            ("z_pub.c on wz-capi-c", zpub.wz.as_path()),
+        ),
+    ] {
+        heard_on_group(
+            (watcher.0, watcher.1, sub_args),
+            (speaker.0, speaker.1, pub_args),
+            &heard,
+        );
+    }
+}
+
+/// The group's address, joined by the recorder on the loopback interface.
+const GROUP_ADDR: ([u8; 4], u16) = ([224, 0, 0, 226], 7451);
+
+/// Every datagram sent to the group while `exe` ran with `args`, read by a socket of this
+/// test's own that joins it on loopback. `SO_REUSEADDR` is load-bearing: the program binds the
+/// same port, and without the option the second socket on a multicast port receives nothing.
+fn recorded_on_group(label: &str, exe: &Path, args: &[&str]) -> Vec<Vec<u8>> {
+    let raw = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .expect("open a UDP socket");
+    raw.set_reuse_address(true).expect("SO_REUSEADDR");
+    raw.bind(&std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, GROUP_ADDR.1).into())
+        .expect("bind the group's port");
+    let socket: std::net::UdpSocket = raw.into();
+    socket
+        .join_multicast_v4(&GROUP_ADDR.0.into(), &std::net::Ipv4Addr::LOCALHOST)
+        .expect("join the group on loopback");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("a read timeout, so a silent group cannot hang this test");
+    let (mut child, _out) = spawn_on_group(label, exe, args);
+    let mut datagrams = Vec::new();
+    let mut buf = [0u8; 65_535];
+    let until = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < until {
+        if let Ok((n, _)) = socket.recv_from(&mut buf) {
+            datagrams.push(buf[..n].to_vec());
+        }
+    }
+    graceful_terminate(child.child_mut(), Duration::from_secs(5));
+    datagrams
+}
+
+/// Every declaration body and interest in `field`, each as `name(id, key)`: the body's name (the
+/// dissector's `decl_*` / `undecl_*`, or `Interest`), the id it carries and the key suffix it
+/// carries, if any.
+fn declarations(field: &wz_session_core::dissect::Field, out: &mut BTreeSet<String>) {
+    use wz_session_core::dissect::FieldValue;
+    let FieldValue::Nested(children) = &field.value else {
+        return;
+    };
+    if field.name.starts_with("decl_")
+        || field.name.starts_with("undecl_")
+        || field.name.contains("Interest")
+    {
+        let key = match field.find("suffix").map(|f| &f.value) {
+            Some(FieldValue::Text(text)) => text.as_str(),
+            _ => "",
+        };
+        let id = match field.find("id").map(|f| &f.value) {
+            Some(FieldValue::Uint(id)) => id.to_string(),
+            _ => String::new(),
+        };
+        out.insert(format!("{}({id}, {key})", field.name));
+    }
+    for child in children {
+        declarations(child, out);
+    }
+}
+
+/// The declarations and interests a program put on the group, from its datagrams.
+fn declared_on_group(label: &str, exe: &Path, args: &[&str]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for datagram in recorded_on_group(label, exe, args) {
+        if let Ok(message) = wz_session_core::dissect::dissect_transport_message(&datagram, 0) {
+            declarations(&message, &mut out);
+        }
+    }
+    out
+}
+
+/// A subscriber on a group is announced on it as zenoh announces one: upstream's `z_sub.c` puts
+/// the same declarations on the group on wz as on libzenohc (zenoh announces a session's
+/// subscriber on each group it holds, `zenoh/src/net/routing/hat/peer/pubsub.rs` @
+/// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
+///
+/// MEASURED before this leg: a libzenohc publisher with a matching listener does NOT report a
+/// libzenohc subscriber on the same group as matching, so the announcement is visible on the
+/// wire alone, and that is where this leg reads it.
+///
+/// # Control
+///
+/// The reference must announce something, or there is nothing to compare: its set is required
+/// to name the subscription.
+// wz-proves: api-compat-c wz->zenoh-c partial
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn upstream_zsub_on_wz_announces_its_subscriber_on_a_group_as_libzenohc_does() {
+    let Some((include, examples, libdir)) = oracle_or_note() else {
+        return;
+    };
+    assert_zenoh_c_arm_pairing(&include);
+    let dir = tempfile::tempdir().expect("tempdir for the compiled programs");
+    let zsub = both_arms("z_sub", &examples, dir.path(), &include, &libdir);
+    let sub_args: &[&str] = &["-k", SUB_KEY];
+    let by_real = declared_on_group("z_sub.c on libzenohc", &zsub.real, sub_args);
+    let by_wz = declared_on_group("z_sub.c on wz-capi-c", &zsub.wz, sub_args);
+    eprintln!("libzenohc declared on the group: {by_real:#?}");
+    assert!(
+        by_real.iter().any(|d| d.contains(SUB_KEY)),
+        "libzenohc's z_sub.c announced no subscription on the group: {by_real:#?}"
+    );
+    assert_eq!(
+        by_wz, by_real,
+        "z_sub.c on wz announces its subscriber on the group otherwise than on libzenohc"
+    );
+}
