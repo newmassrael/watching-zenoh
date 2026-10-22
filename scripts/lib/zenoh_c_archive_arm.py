@@ -257,6 +257,7 @@ CAPABILITY_FEATURES = frozenset({
     "auth_pubkey", "transport_multilink", "transport_quic", "transport_quic_datagram",
     "transport_tls", "transport_unixsock-stream", "transport_ws",
     "transport_serial", "transport_unixpipe", "transport_vsock", "stats",
+    "e2e-sender",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

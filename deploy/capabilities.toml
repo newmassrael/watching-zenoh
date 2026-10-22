@@ -246,3 +246,10 @@ kconfig = "WZ_CAP_AUTH_PUBKEY"
 abis = ["core", "c"]
 implies = []
 help = "The public-key handshake, from the RSA identity of transport/auth/pubkey."
+
+[[capability]]
+id = "e2e-sender"
+kconfig = "WZ_CAP_E2E_SENDER"
+abis = ["core", "c"]
+implies = []
+help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it."

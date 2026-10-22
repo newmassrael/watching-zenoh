@@ -103,8 +103,10 @@ pub mod encoding;
 pub mod entity;
 // The SENDING side of an end-to-end protected message: an owned sender that
 // keeps the message's counter and writes it into every frame it builds. A wz-own
-// surface like `config_verdict`, so ungated for the same reason: upstream has
-// nothing of the kind to be a drop-in for.
+// surface like `config_verdict`, so not gated by the upstream axes for the same reason: upstream
+// has nothing of the kind to be a drop-in for. It has a switch of its own, on by default, because
+// it is the one door set that links the frame writer of `wz-capture`.
+#[cfg(feature = "e2e-sender")]
 pub mod e2e_sender;
 // R2259 (open-debt item 593) — the LINK and TRANSPORT event planes. Gated for
 // the reason `cancellation` above is, and measured the same way: upstream's

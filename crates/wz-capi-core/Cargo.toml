@@ -75,6 +75,7 @@ default = [
     "transport_unixsock-stream",
     "transport_multilink",
     "auth_pubkey",
+    "e2e-sender",
 ]
 # The roles beyond the CLIENT: a session that listens, that accepts the sessions of others, that
 # is a peer or a router, and what those roles bring with them: the accept loop, the listener's
@@ -172,6 +173,10 @@ transport_ws = ["transport-link-ws"]
 transport_unixsock-stream = ["transport-link-unixsock"]
 transport_multilink = ["transport-multilink"]
 auth_pubkey = ["access-extauth-pubkey"]
+# The sending side of an end-to-end protected message. The model has nothing behind it: the doors
+# and the frame writer they use are the zenoh-c ABI's own (`wz-capi-c/e2e-sender`), so this
+# feature only carries the capability's name, as the declaration requires of every capability.
+e2e-sender = []
 # The usrpwd authentication a node's config asks for: a listener that names a
 # `transport/auth/usrpwd/dictionary_file` admits only the peers that hold a user of it
 # (`NodeAuth`). Off by default for the reason the TLS feature is: the pico ABI has no such

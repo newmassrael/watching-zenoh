@@ -201,4 +201,11 @@ config WZ_CAP_AUTH_PUBKEY
 	  The public-key handshake, from the RSA identity of transport/auth/pubkey.
 	  Exported by: c.
 
+config WZ_CAP_E2E_SENDER
+	bool "e2e-sender"
+	default y
+	help
+	  The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it.
+	  Exported by: c.
+
 endmenu

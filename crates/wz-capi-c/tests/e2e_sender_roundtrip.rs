@@ -13,6 +13,7 @@
 //! same writer, `wz_capture::e2e_json::wrap_document`, asked for the same
 //! counter: a sender whose frame differed by a byte would be a second opinion
 //! about the header.
+#![cfg(feature = "e2e-sender")]
 
 use std::ffi::CString;
 
