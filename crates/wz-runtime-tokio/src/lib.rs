@@ -1424,6 +1424,15 @@ pub mod multicast_glue;
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_pipeline;
 
+/// Open-debt item 911 — a multicast group over raw Ethernet, the link zenoh-pico's raweth
+/// transport runs on, as a group face drives it. Linux-only, as pico's raweth is.
+#[cfg(all(
+    feature = "transport-link-raweth",
+    feature = "transport-multicast",
+    target_os = "linux"
+))]
+pub mod raweth_group;
+
 // R311di-4 — Reliability moved to wz-session-core::reliability; the
 // re-export keeps every `wz_runtime_tokio::Reliability` external
 // callsite (9 caller files across tests / wz-integration-tests /

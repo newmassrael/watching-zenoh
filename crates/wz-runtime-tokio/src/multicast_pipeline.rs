@@ -550,6 +550,19 @@ impl MulticastTxPlane {
             &wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr,
         >,
     ) -> Self {
+        // Open-debt item 911 — what the link can carry bounds what is framed for it; the
+        // group's batch, which the JOIN advertises, is left to the drive loop's own params.
+        let framed;
+        let params = match driver.frame_budget() {
+            Some(budget) if budget < params.batch_size => {
+                framed = MulticastParams {
+                    batch_size: budget,
+                    ..params.clone()
+                };
+                &framed
+            }
+            _ => params,
+        };
         let (lanes, mut queued) = pipeline_lanes();
         lanes.reshape(
             params

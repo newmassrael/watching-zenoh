@@ -138,6 +138,24 @@ impl AfPacketSocket {
     }
 }
 
+impl AfPacketSocket {
+    /// Put the descriptor in non-blocking mode, for a reactor that waits on its readiness
+    /// (open-debt item 911: the async raweth group link) instead of a thread parked in
+    /// `recvfrom`.
+    pub fn set_nonblocking(&self) -> io::Result<()> {
+        // SAFETY: `F_GETFL` / `F_SETFL` on a descriptor this value owns.
+        let flags = unsafe { libc::fcntl(self.fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: as above; only `O_NONBLOCK` is added to the flags just read.
+        if unsafe { libc::fcntl(self.fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 impl AsRawFd for AfPacketSocket {
     fn as_raw_fd(&self) -> RawFd {
         self.fd

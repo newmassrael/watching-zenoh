@@ -452,6 +452,17 @@ pub trait MulticastLinkDriver: LinkDriver {
     /// once. An error is a link with no group to send to, which is not a
     /// multicast link.
     fn group_locators(&self) -> std::io::Result<(String, String)>;
+
+    /// Open-debt item 911 — the most a datagram this link sends may hold, or `None` for a link
+    /// with no bound below the group's batch. The transmit side frames to the lesser of the two,
+    /// and fragments past it, while the JOIN goes on advertising the group's batch, as
+    /// zenoh-pico sizes its multicast write buffer by `min(link MTU, Z_BATCH_MULTICAST_SIZE)`
+    /// (`vendor/zenoh-pico/src/transport/multicast/transport.c` @
+    /// `uint16_t mtu = (zl->_mtu < Z_BATCH_MULTICAST_SIZE) ? zl->_mtu : Z_BATCH_MULTICAST_SIZE;`)
+    /// and advertises the batch alone. A UDP datagram holds any batch, so UDP says `None`.
+    fn frame_budget(&self) -> Option<u16> {
+        None
+    }
 }
 
 /// R2929 — the send half of a [`MulticastLinkDriver`], owned by the transmit
