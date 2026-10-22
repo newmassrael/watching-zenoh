@@ -26,7 +26,13 @@ declaration of step 1 together.
   arm runs with `--zenoh-c` and the default run PRINTS that it was deferred.
 
 Both pins are read from the shared deriver (`upstream_release_distance`); this file
-spells no version.
+spells no version. The zenoh-pico pin is the submodule's tag (`git describe --tags`),
+which a checkout without tags cannot name; the zenoh-c lane is one (a shallow
+checkout), and when `--zenoh-c` also graded the zenoh-pico arm there it failed with
+"the pin deriver could not name this original". So each run grades ONE upstream arm,
+the one its lane provisions: the default run zenoh-pico's, `--zenoh-c` zenoh-c's, and
+each prints that it deferred the other. The shape and declaration arms read only this
+tree and run in both.
 
 ## The four classes
 
@@ -60,7 +66,7 @@ That a `maps` or `always` capability is as DEEP as upstream's: that is the depth
 
 Usage:
     python3 scripts/lib/upstream_switch_map.py              # shape + pico arm
-    python3 scripts/lib/upstream_switch_map.py --zenoh-c    # + zenoh-c arm
+    python3 scripts/lib/upstream_switch_map.py --zenoh-c    # shape + zenoh-c arm
     python3 scripts/lib/upstream_switch_map.py --selftest
 """
 
@@ -593,7 +599,11 @@ def selftest() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="zenoh-pico and zenoh-c build switches against wz")
-    ap.add_argument("--zenoh-c", action="store_true", help="also grade the zenoh-c table against its checkout")
+    ap.add_argument(
+        "--zenoh-c",
+        action="store_true",
+        help="grade the zenoh-c table against its checkout instead of the zenoh-pico table against its pin",
+    )
     ap.add_argument("--selftest", action="store_true", help="drive every failure branch on fixtures")
     args = ap.parse_args()
     if args.selftest:
@@ -614,14 +624,18 @@ def main() -> int:
     failures += declaration_arm(PICO_ROWS, decl)
 
     try:
-        version, switches = pico_switches(PICO_SOURCE)
-        failures += upstream_arm("zenoh-pico", PICO_ROWS, version, pinned["zenoh-pico"], switches)
         if args.zenoh_c:
             version, caps, derived = zenoh_c_switches(zenoh_c_source())
             for name, why in sorted(derived.items()):
                 print(f"    zenoh-c not a switch: {name} -- {why}")
             failures += upstream_arm("zenoh-c", ZENOH_C_ROWS, version, pinned["zenoh-c"], caps)
+            print(
+                "    -- zenoh-pico upstream arm DEFERRED: the default run grades it, in a lane "
+                "whose checkout carries the submodule's tags."
+            )
         else:
+            version, switches = pico_switches(PICO_SOURCE)
+            failures += upstream_arm("zenoh-pico", PICO_ROWS, version, pinned["zenoh-pico"], switches)
             print(
                 "    -- zenoh-c upstream arm DEFERRED: run with --zenoh-c where the pinned "
                 "zenoh-c checkout is provisioned. Without it, a switch zenoh-c GREW cannot be seen."
