@@ -126,6 +126,19 @@
       "conf_overlay": ["overlays/t2g_fixed.conf", "overlays/t2g_tx_pool.conf", "overlays/t2g_rx_pool.conf"],
       "verdict_steps": "HW.26 to HW.35",
       "note": "The onboard RMII image on the fixed-memory profile (CONFIG_WZ_FIXED_MEMORY) with both pools: the node of fixed_node.rs, whose sessions, sockets, listener lanes, observer and interfaces are statics the image declares, built with the Rust crate's default features off, so the Rust image links no allocator. Its listener reads only the datagrams of the peer each session was accepted from and drops and counts the rest, where the growable node's one accepting session takes the source of every datagram it reads as its peer. It is the same overlays' image as the two pool rows, on the slot profile. HARDWARE is the record's run of this image with the CM0+ launcher on a bench kit, the ten steps HW.26 to HW.35 of HARDWARE_VERDICT.md (the row's verdict_steps; HW.26 and HW.31 carry the onboard verdict for this image, HW.0 to HW.7, each step OK), the node built from the committed tree. The first run of the image found that its main function had a 69,040-byte stack frame on the 32,768-byte stack (the observer passed by value through its install), so that its loop ran below its stack and its first dial crashed it; the observer and the socket cell are built in place now, the stack is 64 KB because the node's own readings were 37,392 bytes after the first accepted session and 42,364 after the dial, and the record is the run after that. A load run (a held router session, IP fragments, UDP and ICMP floods) kept the router session to its end where the growable node lost it after a datagram from a stray address. What the record does not settle: a start after the board's power is removed completely, the stack peak as a bound (it is the onboard run's), and the frames that make it up, which are the next thing to shrink."
+    },
+    {
+      "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
+      "link": "zeth-sockets-client-fixed",
+      "app": "zephyr-admin-node",
+      "network": "zephyr-sockets",
+      "rust_target": "thumbv7em-none-eabi",
+      "grade": "BUILT",
+      "witness": {"lane": "Qzb"},
+      "requires": ["zephyr-cm0p-launcher"],
+      "conf_overlay": ["overlays/t2g_zeth.conf", "overlays/t2g_client.conf", "overlays/t2g_client_fixed.conf"],
+      "dtc_overlay": ["overlays/t2g_zeth.overlay"],
+      "note": "The client of a router on the onboard MAC behind Zephyr's own sockets, on the fixed-memory profile (CONFIG_WZ_FIXED_MEMORY): every session, table and text is a static the image declares, the Rust side links no allocator and the kernel's heap pool is 0. It is BUILT and not HARDWARE because the bench record of it (4000 GETs of its two documents answered, no bad answer) is a run of the T2G kit that no HARDWARE_VERDICT.md step grades. What this lane holds of it is the stack: the image's frames and its worst chain of direct calls against the 9216-byte main stack (scripts/lib/stack_frame_gate.py, the zephyr-client-fixed row)."
     }
   ],
   "companions": [

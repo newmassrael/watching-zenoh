@@ -26,6 +26,16 @@ takes half the stack leaves the rest for its whole call chain, which no
 measurement of the callees can make up. The entry function of the task must be
 found with a frame, so a renamed task is a finding and not a pass.
 
+## The worst chain (storage-policy D5)
+
+A frame bound does not see a deep chain of small frames. For an image that commits a `peak`
+this also reads the call graph of the same disassembly and takes the deepest chain of direct
+calls under the thread's entry, the polled tasks of the executor included ([`worst_chain`]).
+It fails when that chain is over the declared stack, and when it is further from the committed
+figure than [`PEAK_TOLERANCE`], so a change that moves the stack is a recorded change and not a
+number nobody looked at. It is not a bound: a call through a register is not followed (the count
+on the path is printed), and a path the graph has that no run takes is counted.
+
 ## How a frame is read
 
 The compiler lowers the stack pointer in a function's first few instructions, and
@@ -65,6 +75,21 @@ BUDGET_DEN = 2
 #: this reader did not understand, not one with small frames.
 MIN_FRAMED_FUNCTIONS = 50
 
+#: The committed worst chain may differ from the one an ELF yields by this much before the gate
+#: asks for the figure to be re-committed with its reason. A compiler's inlining moves a chain
+#: by a few frames' worth of spill; a change to the code moves it by more.
+PEAK_TOLERANCE = 128
+
+#: A function name that is the end of the program (a panic). A chain that runs into one
+#: is a path no run takes to its end, so what lies beneath it is not part of the peak.
+_COLD = re.compile(
+    r"panic|unwrap_failed|expect_failed|rust_begin_unwind|index_fail|slice_(?:start|end)_index"
+)
+
+#: The name of the functions an executor calls through a function pointer, one per task type: no
+#: `bl` names them, so each is a root of its own, called from the frame of the thread's entry.
+POLLED_TASK = "poll_erased"
+
 
 @dataclass(frozen=True)
 class Image:
@@ -74,6 +99,9 @@ class Image:
     pattern: str  # one capture group: the stack, in `unit` bytes
     unit: int
     entry: str  # a substring of the demangled name of the task's entry function
+    #: The worst chain of direct calls under the entry, in bytes, as last committed; None where
+    #: no figure is committed yet and the gate only reports it.
+    peak: int | None = None
 
 
 IMAGES = (
@@ -113,6 +141,13 @@ IMAGES = (
     ),
     # The Zephyr CLIENT on the fixed-memory profile: the same rule, over the overlay of its own.
     # Its `run` is inlined into the board's `wz_app_main`, which is the thread's entry symbol.
+    #
+    # `peak` is the worst chain of direct calls the reader follows (the handshake path:
+    # `wz_app_main`, the polled pump task, `dispatch_copied`, the observer's drain and
+    # `dispatch_network_message_at`), read from the image of 2026-10-22. The kit's own reading of
+    # the same image over a dial, a handshake and 2000 answered queries is 5,928 bytes of the
+    # main stack, so the chain is above what a run reaches: it counts a call no run makes in that
+    # order. It is the figure a change to the code moves, and is held for that.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -120,6 +155,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
+        peak=6808,
     ),
 )
 
@@ -173,6 +209,136 @@ def frames(disassembly: str) -> list[tuple[int, str]]:
             found.append((frame, head.group(2)))
         i = j
     return found
+
+
+_CALL = re.compile(r"\t(?:bl|b|b\.w)\t([0-9a-f]+) <")
+_INDIRECT = re.compile(r"\tblx\t(?:r\d+|ip)")
+
+
+@dataclass(frozen=True)
+class Chain:
+    """The deepest chain of direct calls the reader could follow."""
+
+    total: int  # bytes: the sum of the frames along it
+    path: tuple[tuple[int, str], ...]  # `(frame, name)` from the root down
+    indirect: int  # call sites through a register in the functions on the path
+
+
+def worst_chain(disassembly: str, entry: str) -> Chain | None:
+    """The deepest chain of direct calls under the thread's entry, in bytes.
+
+    The call graph is the one `objdump -d` prints: a `bl`, `b` or `b.w` to an address is an edge
+    to the function that holds it, and a `blx` through a register is an edge this cannot follow
+    (counted per path so the break is visible, not assumed away). A task the executor polls is
+    called through a function pointer, so every [`POLLED_TASK`] function is a root as well, below
+    the entry's own frame (the executor's loop is inlined into the entry). Edges into a function
+    that ends the program ([`_COLD`]) are not followed.
+
+    It is a statement about the code's direct calls, not a bound on the stack: a call through a
+    register, such as the closure a walk hands each record to, is not followed, and a path the
+    graph has that no run takes is counted. The figure is held where it was measured so a change
+    that moves it is seen; it is not a proof that the stack is enough.
+    """
+    import bisect
+
+    blocks: list[tuple[int, str, list[str]]] = []
+    for line in disassembly.splitlines():
+        head = _HEAD.match(line)
+        if head:
+            blocks.append((int(head.group(1), 16), head.group(2), [line]))
+        elif blocks:
+            blocks[-1][2].append(line)
+    starts = [b[0] for b in blocks]
+    frame_of: dict[int, int] = {}
+    edges: dict[int, set[int]] = {}
+    indirect: dict[int, int] = {}
+    for start, _name, lines in blocks:
+        found = frames("\n".join(lines))
+        frame_of[start] = found[0][0] if found else 0
+        targets: set[int] = set()
+        for line in lines[1:]:
+            call = _CALL.search(line)
+            if call:
+                at = bisect.bisect_right(starts, int(call.group(1), 16)) - 1
+                if at >= 0 and starts[at] != start:
+                    targets.add(starts[at])
+        edges[start] = targets
+        indirect[start] = sum(1 for line in lines[1:] if _INDIRECT.search(line))
+    name_of = {b[0]: b[1] for b in blocks}
+    cold = {s for s, n in name_of.items() if _COLD.search(n)}
+
+    memo: dict[int, tuple[int, tuple[int, ...]]] = {}
+    on_path: set[int] = set()
+
+    def deepest(s: int) -> tuple[int, tuple[int, ...]]:
+        if s in memo:
+            return memo[s]
+        if s in on_path:
+            return 0, ()
+        on_path.add(s)
+        best: tuple[int, tuple[int, ...]] = (0, ())
+        for t in edges[s]:
+            if t not in cold:
+                below = deepest(t)
+                if below[0] > best[0]:
+                    best = below
+        on_path.discard(s)
+        memo[s] = (frame_of[s] + best[0], (s, *best[1]))
+        return memo[s]
+
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
+    entries = [s for s, n in name_of.items() if entry in n and frame_of[s] > 0]
+    if not entries:
+        return None
+    root = max(entries, key=lambda s: frame_of[s])
+    total, path = deepest(root)
+    for s, n in name_of.items():
+        if POLLED_TASK in n and frame_of[s] > 0:
+            below_total, below_path = deepest(s)
+            if frame_of[root] + below_total > total:
+                total, path = frame_of[root] + below_total, (root, *below_path)
+    return Chain(
+        total=total,
+        path=tuple((frame_of[s], name_of[s]) for s in path),
+        indirect=sum(indirect[s] for s in path),
+    )
+
+
+def judge_chain(
+    key: str, stack: int, chain: Chain | None, committed: int | None
+) -> tuple[bool, list[str]]:
+    """The rule over a worst chain: it fits the declared stack, and it has not moved unseen."""
+    if chain is None:
+        return False, [f"stack-chain: FAIL {key}: no function with a frame names the task's entry"]
+    ok = True
+    lines: list[str] = []
+    if chain.total > stack:
+        lines.append(
+            f"stack-chain: FAIL {key}: the worst chain of direct calls is {chain.total} bytes, "
+            f"over the {stack}-byte stack"
+        )
+        ok = False
+    if committed is None:
+        lines.append(
+            f"stack-chain: {key}: no figure is committed for this image; the chain reads "
+            f"{chain.total} bytes (commit it as `peak` with the reason it is what it is)"
+        )
+    elif abs(chain.total - committed) > PEAK_TOLERANCE:
+        lines.append(
+            f"stack-chain: FAIL {key}: the worst chain of direct calls is {chain.total} bytes, "
+            f"the committed figure is {committed} (tolerance {PEAK_TOLERANCE}); a change moved "
+            f"the stack, so commit the new figure with the reason"
+        )
+        ok = False
+    lines.append(
+        f"stack-chain: {'OK' if ok else 'FAIL'} {key}: worst chain {chain.total} bytes over "
+        f"{len(chain.path)} frame(s) against a {stack}-byte stack"
+        + (f", committed {committed}" if committed is not None else "")
+        + f"; {chain.indirect} call(s) through a register on the path are not followed"
+    )
+    for frame, name in chain.path[:6]:
+        lines.append(f"stack-chain:   +{frame:5d} {name[:100]}")
+    return ok, lines
 
 
 def declared_stack(image: Image, root: Path) -> int:
@@ -255,9 +421,13 @@ def check(key: str, elf_arg: str | None, objdump_arg: str | None) -> int:
     )
     if proc.returncode != 0:
         raise SystemExit(f"stack-frame: {key}: objdump failed: {proc.stderr[-300:]}")
-    ok, report = judge(key, declared_stack(image, ROOT), image.entry, frames(proc.stdout))
-    print("\n".join(report))
-    return 0 if ok else 1
+    stack = declared_stack(image, ROOT)
+    ok, report = judge(key, stack, image.entry, frames(proc.stdout))
+    chain_ok, chain_report = judge_chain(
+        key, stack, worst_chain(proc.stdout, image.entry), image.peak
+    )
+    print("\n".join(report + chain_report))
+    return 0 if ok and chain_ok else 1
 
 
 def population() -> int:
@@ -292,6 +462,43 @@ _FIXTURE = """\
 """
 
 
+# A small program as `objdump -d -C` prints it: `entry` (frame 24) calls `mid` (frame 40, which
+# calls `leaf`, frame 16), calls `std::panicking::panic_fmt` (frame 520, the end of the
+# program) and makes one call through a register; `poll_erased::<task>` (frame 72) is called by
+# nothing and calls `leaf`.
+_CHAIN_FIXTURE = """\
+00001000 <entry>:
+    1000:\tb580      \tpush\t{r7, lr}
+    1002:\tb084      \tsub\tsp, #16
+    1004:\tf000 f8fc \tbl\t2000 <mid>
+    1008:\tf000 f8fc \tbl\t4000 <std::panicking::panic_fmt>
+    100c:\t4790      \tblx\tr2
+    100e:\tbd80      \tpop\t{r7, pc}
+
+00002000 <mid>:
+    2000:\tb580      \tpush\t{r7, lr}
+    2002:\tb08a      \tsub\tsp, #32
+    2004:\tf000 f8fc \tbl\t3000 <leaf>
+    2008:\tbd80      \tpop\t{r7, pc}
+
+00003000 <leaf>:
+    3000:\tb580      \tpush\t{r7, lr}
+    3002:\tb082      \tsub\tsp, #8
+    3004:\tbd80      \tpop\t{r7, pc}
+
+00004000 <std::panicking::panic_fmt>:
+    4000:\tb580      \tpush\t{r7, lr}
+    4002:\tf5ad 7d00 \tsub.w\tsp, sp, #512
+    4006:\tbd80      \tpop\t{r7, pc}
+
+00005000 <executor::poll_erased::<task>>:
+    5000:\tb580      \tpush\t{r7, lr}
+    5002:\tb090      \tsub\tsp, #64
+    5004:\tf000 f8fc \tbl\t3000 <leaf>
+    5008:\tbd80      \tpop\t{r7, pc}
+"""
+
+
 def selftest() -> int:
     failures: list[str] = []
 
@@ -322,6 +529,34 @@ def selftest() -> int:
     expect("an image with almost no frames is refused", ok, False)
     expect("and not read as small frames", any("not understood" in line for line in report), True)
 
+    chain = worst_chain(_CHAIN_FIXTURE, "entry")
+    expect("the fixture has a chain", chain is not None, True)
+    if chain is not None:
+        expect(
+            "the polled task below the entry's frame is the worst chain (24 + 72 + 16)",
+            chain.total,
+            112,
+        )
+        expect(
+            "and the path names the task, not the direct callee",
+            [name for _, name in chain.path],
+            ["entry", "executor::poll_erased::<task>", "leaf"],
+        )
+        expect("a call through a register on the path is counted", chain.indirect, 1)
+        ok, _ = judge_chain("t", 4096, chain, 112)
+        expect("a chain at its committed figure fits", ok, True)
+        ok, _ = judge_chain("t", 4096, chain, 112 + PEAK_TOLERANCE)
+        expect("a figure within the tolerance fits", ok, True)
+        ok, report = judge_chain("t", 4096, chain, 112 + PEAK_TOLERANCE + 1)
+        expect("a figure one byte past the tolerance is a finding", ok, False)
+        expect("and says to commit the new one", any("commit" in line for line in report), True)
+        ok, report = judge_chain("t", 111, chain, 112)
+        expect("a chain over the stack fails", ok, False)
+        ok, _ = judge_chain("t", 4096, chain, None)
+        expect("an image with no committed figure is reported and passes", ok, True)
+    ok, _ = judge_chain("t", 4096, worst_chain(_CHAIN_FIXTURE, "no_such_entry"), 112)
+    expect("an entry with no frame is refused", ok, False)
+
     if failures:
         for failure in failures:
             print(f"stack-frame: selftest FAIL -- {failure}")
@@ -331,7 +566,9 @@ def selftest() -> int:
         "movw/movt pair behind a register sub, a small sub, and a function with no frame; "
         "refuses the Round 3318 frame, a frame one byte over half, a task entry without a "
         "frame and an image with almost none, past two clean controls (4,816 bytes on "
-        "16 KiB, and exactly half)"
+        "16 KiB, and exactly half); follows a chain through a polled task past a panic, "
+        "counts a call through a register, and refuses a chain over the stack and a figure "
+        "past the tolerance"
     )
     return 0
 

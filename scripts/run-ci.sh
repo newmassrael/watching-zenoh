@@ -23357,10 +23357,10 @@ layer_qzb_zephyr_board_matrix() {
     [[ -n "$rows" ]] \
         || { echo "  Qzb FAIL — the table has no BUILT or HARDWARE row; a lane with no population is not a pass" >&2; return 1; }
 
-    local board app triple link starts overlay
+    local board app triple link starts overlay dtc
     # Every toolchain first: a lane that builds half the table and then SKIPs
     # has said nothing about the other half.
-    while IFS=$'\t' read -r board app triple link starts overlay; do
+    while IFS=$'\t' read -r board app triple link starts overlay dtc; do
         _qz_toolchain "$triple" && rc=0 || rc=$?
         [[ "$rc" -eq 10 ]] && return 0
         [[ "$rc" -ne 0 ]] && return 1
@@ -23368,12 +23368,15 @@ layer_qzb_zephyr_board_matrix() {
 
     local n=0 fail=0 build_dir west_log extra vectors zfx_nm
     local -A vector_of=()
-    while IFS=$'\t' read -r board app triple link starts overlay; do
+    while IFS=$'\t' read -r board app triple link starts overlay dtc; do
         n=$((n + 1))
         build_dir="$(mktemp -d)/zbuild"
         west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qzb-$n-west-build.log"
+        # The table's `-` is a field with nothing to say (the reader folds a run of tabs).
         extra=()
-        [[ -n "$overlay" ]] && extra=(-- "-DEXTRA_CONF_FILE=$overlay")
+        [[ -n "$overlay" && "$overlay" != "-" ]] && extra+=("-DEXTRA_CONF_FILE=$overlay")
+        [[ -n "$dtc" && "$dtc" != "-" ]] && extra+=("-DEXTRA_DTC_OVERLAY_FILE=$dtc")
+        (( ${#extra[@]} )) && extra=(-- "${extra[@]}")
         if ! _qz_west_build Qzb "deploy/$app" "$board" "$build_dir" "qzb-$n-west-build.log" "${extra[@]}"; then
             fail=1
         elif [[ "$triple" != "-" ]] && ! grep -qE "wz: Rust target ${triple}\$" "$west_log"; then
@@ -23403,6 +23406,16 @@ layer_qzb_zephyr_board_matrix() {
             if [[ "$overlay" == *t2g_fixed.conf* ]]; then
                 zfx_nm="$(grep -m1 '^CMAKE_NM:' "$build_dir/CMakeCache.txt" | cut -d= -f2)"
                 if ! python3 scripts/lib/stack_frame_gate.py --check zephyr-fixed \
+                    --elf "$build_dir/zephyr/zephyr.elf" --objdump "${zfx_nm%nm}objdump"; then
+                    fail=1
+                fi
+            fi
+            # The client on the fixed-memory profile: its frames and its worst chain of direct
+            # calls against its own main stack (storage-policy D5). The lane was not built
+            # anywhere before, so its stack was a number read by hand on the kit.
+            if [[ "$overlay" == *t2g_client_fixed.conf* ]]; then
+                zfx_nm="$(grep -m1 '^CMAKE_NM:' "$build_dir/CMakeCache.txt" | cut -d= -f2)"
+                if ! python3 scripts/lib/stack_frame_gate.py --check zephyr-client-fixed \
                     --elf "$build_dir/zephyr/zephyr.elf" --objdump "${zfx_nm%nm}objdump"; then
                     fail=1
                 fi

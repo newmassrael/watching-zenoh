@@ -547,6 +547,12 @@ def check(table: dict, root: Path = ROOT) -> list[str]:
                     f"{label}: conf_overlay {extra!r} is not a file under deploy/{row['app']}/"
                     f" -- Layer {BUILD_LANE} would build the row without it"
                 )
+        for extra in row.get("dtc_overlay", []):
+            if not (app_dir / extra).is_file():
+                out.append(
+                    f"{label}: dtc_overlay {extra!r} is not a file under deploy/{row['app']}/"
+                    f" -- Layer {BUILD_LANE} would build the row without it"
+                )
         out.extend(build_only_findings(label, row, app_dir))
         rows_by_conf.setdefault((row["app"], conf_name(row["board"])), []).append(row)
 
@@ -643,8 +649,16 @@ def check(table: dict, root: Path = ROOT) -> list[str]:
                             f"predictable cookie nonces and signing key on a board that "
                             f"claims support"
                         )
-            chosen = conf_backends(text)
+            board_chosen = conf_backends(text)
             for row in owners:
+                # A row's overlays are read after the board's settings, so the backend one of
+                # them selects replaces the board's: the T2G kit's Zephyr-sockets images are the
+                # board's lwIP-MAC settings with `t2g_zeth.conf` over them.
+                chosen = board_chosen
+                for extra in row.get("conf_overlay", []):
+                    extra_path = root / "deploy" / row["app"] / extra
+                    if extra_path.is_file():
+                        chosen = conf_backends(extra_path.read_text()) or chosen
                 if chosen and row["network"] not in chosen:
                     out.append(
                         f"deploy/{app}/boards/{conf.name}: selects {sorted(chosen)} but the "
@@ -710,7 +724,8 @@ def _good_table() -> dict:
                 "board": "real/board", "link": "rmii", "app": "adm",
                 "network": "lwip-mac", "rust_target": "thumbv7em-none-eabihf",
                 "grade": "BUILT", "witness": {"lane": "Qzb"},
-                "conf_overlay": ["extra.conf"], "requires": ["launch"],
+                "conf_overlay": ["extra.conf"], "dtc_overlay": ["x.overlay"],
+                "requires": ["launch"],
             },
             {
                 "board": "other/board", "link": "t1s", "app": "adm",
@@ -740,6 +755,10 @@ def _tree(tmp: Path, store_entries: dict | None = None) -> Path:
     )
     (app / "boards/real_board.conf").write_text("CONFIG_WZ_NET_BACKEND_LWIP_MAC=y\n")
     (app / "extra.conf").write_text("CONFIG_X=y\n")
+    (app / "sock.conf").write_text(
+        "CONFIG_WZ_NET_BACKEND_LWIP_MAC=n\nCONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS=y\n"
+    )
+    (app / "x.overlay").write_text("/ { };\n")
     (app / GRAMMAR_FILE).write_text(
         "```\nHW.0 the console says who\nHW.1 GET before the write\nHW.2 the stack\n```\n"
     )
@@ -797,6 +816,27 @@ def selftest() -> int:
         (root / "deploy/adm/extra.conf").unlink()
 
     expect("a conf_overlay that is not a file", _good_table(), "conf_overlay", lose_overlay)
+
+    def lose_dtc_overlay(root: Path) -> None:
+        (root / "deploy/adm/x.overlay").unlink()
+
+    expect("a dtc_overlay that is not a file", _good_table(), "dtc_overlay", lose_dtc_overlay)
+
+    def sockets_row(overlays: list[str]) -> dict:
+        t = _good_table()
+        row = {
+            "board": "real/board", "link": "sockets", "app": "adm",
+            "network": "zephyr-sockets", "rust_target": "thumbv7em-none-eabihf",
+            "grade": "BUILT", "witness": {"lane": "Qzb"}, "requires": ["launch"],
+        }
+        if overlays:
+            row["conf_overlay"] = overlays
+        t["rows"].append(row)
+        return t
+
+    expect("an overlay that switches the board to the sockets backend is clean",
+           sockets_row(["sock.conf"]), None)
+    expect("the same row without that overlay is a finding", sockets_row([]), "selects")
 
     def orphan_conf(root: Path) -> None:
         (root / "deploy/adm/boards/stray_board.conf").write_text("CONFIG_X=y\n")
@@ -1058,19 +1098,21 @@ def main(argv: list[str]) -> int:
             for line in findings:
                 print(f"zephyr-board-table: {line}", file=sys.stderr)
             return 1
-        # Six tab-separated fields: board, app, Rust target, link, the row board a
-        # companion starts, overlay. A field with nothing to say is `-`, because
-        # the reader's `read` folds a run of tabs into one separator and an empty
-        # middle field would shift the rest left; only the last may be empty.
+        # Seven tab-separated fields: board, app, Rust target, link, the row board a
+        # companion starts, overlay, devicetree overlay. A field with nothing to say is
+        # `-`, because the reader's `read` folds a run of tabs into one separator and an
+        # empty middle field would shift the rest left; only the last may be empty.
         for r in build_rows(table):
             print("\t".join([
                 r["board"], r["app"], r["rust_target"], r["link"], "-",
-                ";".join(r.get("conf_overlay", [])),
+                ";".join(r.get("conf_overlay", [])) or "-",
+                ";".join(r.get("dtc_overlay", [])),
             ]))
         for c in build_companions(table):
             print("\t".join([
                 c["board"], c["app"], "-", "companion", c["starts"],
-                ";".join(c.get("conf_overlay", [])),
+                ";".join(c.get("conf_overlay", [])) or "-",
+                ";".join(c.get("dtc_overlay", [])),
             ]))
         return 0
     if argv[1:]:
