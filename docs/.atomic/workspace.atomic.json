@@ -278364,6 +278364,54 @@
         "A request that arrives before the demo has begun to listen is kept (the event is manual-reset and the parent holds it), but the demo begins to listen when it first waits for a shutdown, so a startup that blocks before that point reads the request late."
       ]
     },
+    "Round 3430": {
+      "decision_summary": "The build configuration has one declaration, the first part of step 1 of docs/build-configuration.md, which the owner moved to this session. deploy/wz-config.toml now holds the capabilities of the C ABI builds and the limits an image states, with a schema and a catalogue version, and one generator, wz_config.py, replaces the capability and the limit generators. It generates both Kconfig files, whose bodies are unchanged, and a module holding the value of each limit; caps.rs keeps its documentation and binds each name to that value, and the check holds the bindings, the generated files and the three capi manifests to the declaration. The preset for the host comparison now names catalogue 1 and switches off the five capabilities added since it was written, so it still means a TCP client that queries. Found on the way: the raweth witness pushed with item 913 left an unused mut that clippy refuses.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: schema_version, catalog_version, the base features, thirty-one capabilities moved from deploy/capabilities.toml and twenty-three limits moved from the rows of caps.rs; the old file is removed.",
+        "scripts/lib/wz_config.py: the reader takes integers and multi-line literal strings; it emits Kconfig.capabilities, Kconfig.limits and caps_generated.rs, writes them, turns a .config or pico config.h into cargo arguments, and checks the generated files, the caps.rs bindings and the manifests; capability_config.py and limit_config.py are removed and every caller moved.",
+        "crates/wz-session-core: caps_generated.rs reads each limit from its WZ_LIMIT_* environment or the declared default; caps.rs binds each public limit to it.",
+        "configs/profiles/host-client-tcp-query.conf: catalogue 1, five more capabilities off.",
+        "The raweth scenario test drops an unused mut."
+      ],
+      "verification_bullets": [
+        "The bodies of both generated Kconfig files are line for line those of the files they replace; rustfmt accepts the generated module.",
+        "wz_config selftest 48 of 48, carrying every arm of the two tools it replaces; the check passes, and a changed default in the declaration makes it report both derived files stale.",
+        "On a build host: the caps tests of wz-session-core, the same with bounded-heapless, a build with WZ_LIMIT_MAX_SUBSCRIPTIONS set, and clippy of wz-session-core with all features and of wz-integration-tests: pass.",
+        "The derived preflight and Layer C0 pass after the rebase onto origin.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 1 continues: the limits' Kconfig help is still the developer text of caps.rs and is to be written for deployers; a generated Kconfig root and Zephyr CMake bridge that the images use, with their cargo command lines compared before and after; the axis-like symbols of the MCU images into the declaration; the extension header and its subset gate; kconfiglib pinned with its equivalence gate.",
+        "The images' Kconfig and CMake files are another session's; they are told before a change to them lands."
+      ],
+      "publishable_decision_summary": "The build configuration has one declaration, the first part of step 1 of docs/build-configuration.md, which the owner moved to this session. deploy/wz-config.toml now holds the capabilities of the C ABI builds and the limits an image states, with a schema and a catalogue version, and one generator, wz_config.py, replaces the capability and the limit generators. It generates both Kconfig files, whose bodies are unchanged, and a module holding the value of each limit; caps.rs keeps its documentation and binds each name to that value, and the check holds the bindings, the generated files and the three capi manifests to the declaration. The preset for the host comparison now names catalogue 1 and switches off the five capabilities added since it was written, so it still means a TCP client that queries. Found on the way: the raweth witness pushed with item 913 left an unused mut that clippy refuses.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: schema_version, catalog_version, the base features, thirty-one capabilities moved from deploy/capabilities.toml and twenty-three limits moved from the rows of caps.rs; the old file is removed.",
+        "scripts/lib/wz_config.py: the reader takes integers and multi-line literal strings; it emits Kconfig.capabilities, Kconfig.limits and caps_generated.rs, writes them, turns a .config or pico config.h into cargo arguments, and checks the generated files, the caps.rs bindings and the manifests; capability_config.py and limit_config.py are removed and every caller moved.",
+        "crates/wz-session-core: caps_generated.rs reads each limit from its WZ_LIMIT_* environment or the declared default; caps.rs binds each public limit to it.",
+        "configs/profiles/host-client-tcp-query.conf: catalogue 1, five more capabilities off.",
+        "The raweth scenario test drops an unused mut."
+      ],
+      "publishable_verification_bullets": [
+        "The bodies of both generated Kconfig files are line for line those of the files they replace; rustfmt accepts the generated module.",
+        "wz_config selftest 48 of 48, carrying every arm of the two tools it replaces; the check passes, and a changed default in the declaration makes it report both derived files stale.",
+        "On a build host: the caps tests of wz-session-core, the same with bounded-heapless, a build with WZ_LIMIT_MAX_SUBSCRIPTIONS set, and clippy of wz-session-core with all features and of wz-integration-tests: pass.",
+        "The derived preflight and Layer C0 pass after the rebase onto origin.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1 continues: the limits' Kconfig help is still the developer text of caps.rs and is to be written for deployers; a generated Kconfig root and Zephyr CMake bridge that the images use, with their cargo command lines compared before and after; the axis-like symbols of the MCU images into the declaration; the extension header and its subset gate; kconfiglib pinned with its equivalence gate.",
+        "The images' Kconfig and CMake files are another session's; they are told before a change to them lands."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
