@@ -277666,6 +277666,62 @@
         "Item 913 next: the group face in capi-core, then the pico door witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations."
       ]
     },
+    "Round 3415": {
+      "decision_summary": "A consumer that records what it knows about a replayed packet in a Custom Option of the packet's block asked to read it back. The reader had no Custom Option support, and read option lists with three copies of one loop. This round gives it one option iterator, graded against the three old loops on 60 000 generated lists in both byte orders, and a door: wz_dissect_pcap_custom_options_of_link_type (ABI 47), 32-byte records joined to the packets door by number. It returns the four codes the format reserves (2988, 2989, 19372, 19373), the organization number in the byte order of its section, and copyable and text derived from the code in one table. An option that cannot be read is counted in the answer, not dropped. The codes and the copy rule were read from the format's text and then confirmed by a second implementation: Wireshark editcap 4.2.2 copies 2988 and 2989 and drops 19372 and 19373.",
+      "changes_bullets": [
+        "wz-capture pcapng.rs: OptionList and OptionIter, the one reader of a block's options (stops at opt_endofopt, at the end of the list, or at an option running past it, and says which); if_tsresol, the Interface Statistics counters and epb_flags are its callers, and the three loops are gone. PacketRef carries its OptionList. CustomOptions iterates the four codes in list order, repeats included, with the organization number read in the section's byte order, and counts what it cannot read. custom_kind is the one classification of the codes; the four codes are public constants.",
+        "wz-capture pcapng.rs test writer: ByteOrder, PacketSpec, custom_option_value and write_with_options write any option list in either byte order; write and write_flagged are unchanged.",
+        "wz-capture lib.rs: CapturedFrame.options; captured_custom_options_of_link_type over captured_frames_of_link_type's walk, so the packet numbers are the same ones; malformed options counted across the packets.",
+        "wz-capi-dissect: wz_dissect_pcap_custom_options_of_link_type and WzDissectCustomOption (32 bytes, no padding; layout pinned in Rust, in the header and in the C consumer); the Door chain; ABI 47 in the header define, the Rust constant, the abi_version test, capi_abi_pin.py (symbol and EXPECTED_VERSION) and analysis_surface_parity.py.",
+        "Tests: the old loops kept as the reference and compared on 60 000 lists; a generated-list round trip (20 000); arbitrary bytes (60 000) with every range inside the list; the four codes pinned to the format's text; byte-level layout in both orders; a C consumer that assembles a little-endian and a big-endian pcapng byte by byte; a file written by editcap 4.2.2 embedded as 272 bytes."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture lib tests 1226 passed (default) and 1538 passed (dissect); clippy -D warnings clean in both; Layer C1bo passed (release cdylib, C consumer with -Wall -Wextra -Werror, header as C++, capi_abi_pin.py: ABI 47, 61 exported symbols, header define agrees).",
+        "The shared reader against the three old loops: 60 000 lists in both byte orders, among them lists that lie about their lengths, with a terminator in the middle, stray bytes after the end and cuts at any byte; every answer equal, and the counts of options found are well above zero so equal silence did not pass.",
+        "Two mutations, each reverted: ignoring the section's byte order for the organization number failed 4 new tests; ignoring the padding between options failed 5 new tests and none of the 55 other pcapng tests, which means no test before this round exercised a list of more than one option with an odd value length.",
+        "A second implementation: a pcapng built by a separate script was passed through Wireshark editcap 4.2.2 in both byte orders. It read the organization number as 0x01020304 in both, wrote little-endian, kept 2988 and 2989 and dropped 19372 and 19373. Its 272-byte output is embedded in a test and was compared byte for byte with the file before embedding.",
+        "The format's Custom Options text was read for the four codes and the copy rule, and the 16-bit option length counting the 4-byte organization number.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3407, sections 266."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of the push that carries this round. Nothing of Windows or macOS was run for it; the new code is the same on every host, and the Windows test repair of the previous push is still awaiting its own verdict.",
+        "The door returns the four Custom Option codes and no other option. The reader under it (OptionList) reads any option of any block, so a door for the defined options, or for the options of other blocks, can sit on the same iterator when a consumer asks.",
+        "wz writes a pcapng only in tests and fixtures, and no code path reads a container and writes another from it. The copy rule (a Custom Option of 19372 or 19373 should not be copied to a new file when an application rewrites a capture, 2988 and 2989 may be) therefore has no caller today, and the copyable field is what a future rewriting path reads.",
+        "The organization number of the consumer is being registered with IANA; its tests use a number of their own, and the door treats the number as data.",
+        "What the 12 bytes of the consumer's option mean is the consumer's adapter's; the door does not look at them."
+      ],
+      "publishable_decision_summary": "A consumer that records what it knows about a replayed packet in a Custom Option of the packet's block asked to read it back. The reader had no Custom Option support, and read option lists with three copies of one loop. This round gives it one option iterator, graded against the three old loops on 60 000 generated lists in both byte orders, and a door: wz_dissect_pcap_custom_options_of_link_type (ABI 47), 32-byte records joined to the packets door by number. It returns the four codes the format reserves (2988, 2989, 19372, 19373), the organization number in the byte order of its section, and copyable and text derived from the code in one table. An option that cannot be read is counted in the answer, not dropped. The codes and the copy rule were read from the format's text and then confirmed by a second implementation: Wireshark editcap 4.2.2 copies 2988 and 2989 and drops 19372 and 19373.",
+      "publishable_changes_bullets": [
+        "wz-capture pcapng.rs: OptionList and OptionIter, the one reader of a block's options (stops at opt_endofopt, at the end of the list, or at an option running past it, and says which); if_tsresol, the Interface Statistics counters and epb_flags are its callers, and the three loops are gone. PacketRef carries its OptionList. CustomOptions iterates the four codes in list order, repeats included, with the organization number read in the section's byte order, and counts what it cannot read. custom_kind is the one classification of the codes; the four codes are public constants.",
+        "wz-capture pcapng.rs test writer: ByteOrder, PacketSpec, custom_option_value and write_with_options write any option list in either byte order; write and write_flagged are unchanged.",
+        "wz-capture lib.rs: CapturedFrame.options; captured_custom_options_of_link_type over captured_frames_of_link_type's walk, so the packet numbers are the same ones; malformed options counted across the packets.",
+        "wz-capi-dissect: wz_dissect_pcap_custom_options_of_link_type and WzDissectCustomOption (32 bytes, no padding; layout pinned in Rust, in the header and in the C consumer); the Door chain; ABI 47 in the header define, the Rust constant, the abi_version test, capi_abi_pin.py (symbol and EXPECTED_VERSION) and analysis_surface_parity.py.",
+        "Tests: the old loops kept as the reference and compared on 60 000 lists; a generated-list round trip (20 000); arbitrary bytes (60 000) with every range inside the list; the four codes pinned to the format's text; byte-level layout in both orders; a C consumer that assembles a little-endian and a big-endian pcapng byte by byte; a file written by editcap 4.2.2 embedded as 272 bytes."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture lib tests 1226 passed (default) and 1538 passed (dissect); clippy -D warnings clean in both; Layer C1bo passed (release cdylib, C consumer with -Wall -Wextra -Werror, header as C++, capi_abi_pin.py: ABI 47, 61 exported symbols, header define agrees).",
+        "The shared reader against the three old loops: 60 000 lists in both byte orders, among them lists that lie about their lengths, with a terminator in the middle, stray bytes after the end and cuts at any byte; every answer equal, and the counts of options found are well above zero so equal silence did not pass.",
+        "Two mutations, each reverted: ignoring the section's byte order for the organization number failed 4 new tests; ignoring the padding between options failed 5 new tests and none of the 55 other pcapng tests, which means no test before this round exercised a list of more than one option with an odd value length.",
+        "A second implementation: a pcapng built by a separate script was passed through Wireshark editcap 4.2.2 in both byte orders. It read the organization number as 0x01020304 in both, wrote little-endian, kept 2988 and 2989 and dropped 19372 and 19373. Its 272-byte output is embedded in a test and was compared byte for byte with the file before embedding.",
+        "The format's Custom Options text was read for the four codes and the copy rule, and the 16-bit option length counting the 4-byte organization number.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3407, sections 266."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of the push that carries this round. Nothing of Windows or macOS was run for it; the new code is the same on every host, and the Windows test repair of the previous push is still awaiting its own verdict.",
+        "The door returns the four Custom Option codes and no other option. The reader under it (OptionList) reads any option of any block, so a door for the defined options, or for the options of other blocks, can sit on the same iterator when a consumer asks.",
+        "wz writes a pcapng only in tests and fixtures, and no code path reads a container and writes another from it. The copy rule (a Custom Option of 19372 or 19373 should not be copied to a new file when an application rewrites a capture, 2988 and 2989 may be) therefore has no caller today, and the copyable field is what a future rewriting path reads.",
+        "The organization number of the consumer is being registered with IANA; its tests use a number of their own, and the door treats the number as data.",
+        "What the 12 bytes of the consumer's option mean is the consumer's adapter's; the door does not look at them."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
