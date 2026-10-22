@@ -1825,8 +1825,12 @@ impl McastGroupMembership {
         }
     }
 
-    /// Replace the members of the live join. No-op while none is live.
-    fn set_members(&self, members: &[wz_session_core::multicast_dispatch::MulticastMember]) {
+    /// Replace the members of the live join. No-op while none is live. Crate-visible for the
+    /// session tests, which stand in for the drive loop that writes it.
+    pub(crate) fn set_members(
+        &self,
+        members: &[wz_session_core::multicast_dispatch::MulticastMember],
+    ) {
         self.with(|view| {
             if let Some(view) = view.as_mut() {
                 view.members.clear();
@@ -1838,6 +1842,12 @@ impl McastGroupMembership {
     /// The members of the live join, in peer-table order.
     pub fn members(&self) -> Vec<wz_session_core::multicast_dispatch::MulticastMember> {
         self.with(|view| view.as_ref().map(|v| v.members.clone()).unwrap_or_default())
+    }
+
+    /// How many members the live join holds: zero while none is live. What a query on the group
+    /// counts its remote finals from.
+    pub fn member_count(&self) -> usize {
+        self.with(|view| view.as_ref().map_or(0, |v| v.members.len()))
     }
 
     /// The live join's link as `(src, group)` locators, or `None` while no

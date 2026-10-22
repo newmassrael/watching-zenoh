@@ -826,6 +826,12 @@ impl ReplyHandle {
     pub fn rid(self) -> u64 {
         self.0
     }
+
+    /// The handle of query `rid` that ended before anything was registered for it: one that
+    /// reached no peer and no local queryable, whose final has already run.
+    pub fn ended(rid: u64) -> Self {
+        Self(rid)
+    }
 }
 
 struct Pending<C: ReplySink, P: Storage = Profile> {

@@ -288,7 +288,10 @@ use crate::query_sink::{QueryView, ReplyOut};
 // liveliness-get plane installs the same staging sink (it does NOT imply
 // `query-get`), so the import follows the `deferred_reply_sink` gate:
 // `any(query-get, liveliness-get)`.
-#[cfg(any(feature = "query-get", feature = "liveliness-get"))]
+#[cfg(all(
+    feature = "transport-unicast",
+    any(feature = "query-get", feature = "liveliness-get")
+))]
 use crate::reply::InboundReply;
 // R311mn (B2) — `ReplyHandle` is the success value of the
 // `transport-unicast`-gated `query{,_aliased,_aliased_auto}` methods (and is
@@ -2302,7 +2305,8 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// wire dispatch's Final passes ([`defer_final_to_holder`]), consulted
     /// after the handlers ran under either policy, so the get stays open until
     /// the last holder drops the query, as upstream's does.
-    #[cfg(feature = "query-get")]
+    /// Its one caller is the shared query body, which exists with `transport-unicast`.
+    #[cfg(all(feature = "transport-unicast", feature = "query-get"))]
     fn finalize_local_query(&self, rid: u64) {
         match self.local_delivery {
             LocalDeliveryDrain::Caller => {
@@ -2609,6 +2613,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 tx,
                 #[cfg(feature = "access-acl-multicast")]
                 link: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(feature = "query-get")]
+                request_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                #[cfg(feature = "query-get")]
+                membership: Arc::new(std::sync::OnceLock::new()),
             },
             observer,
             local_live,
@@ -2674,6 +2682,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     #[cfg(feature = "access-acl-multicast")]
     pub fn set_group_link_subject(&self, subject: wz_session_core::link::LinkSubject) -> bool {
         self.transport.link.set(subject).is_ok()
+    }
+
+    /// Tell this session the membership the drive loop keeps for its group, the one handed to
+    /// [`drive_multicast_session_with_membership`](crate::multicast_glue::drive_multicast_session_with_membership):
+    /// a [`Self::query`] that may go remote waits for one final per member it holds when the query
+    /// is sent. Set ONCE (a re-join keeps the same membership), so a second call is refused
+    /// (`false`). A session never told counts no member, and its remote-only query ends at once.
+    #[cfg(feature = "query-get")]
+    pub fn attach_group_membership(
+        &self,
+        membership: &crate::multicast_glue::McastGroupMembership,
+    ) -> bool {
+        self.transport.membership.set(membership.clone()).is_ok()
     }
 
     /// The admission gate over this group's INBOUND messages, to install on the dispatcher that
@@ -4069,7 +4090,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             false
         }
     }
+}
 
+// The query surface both transports share: one body that a unicast session and a multicast one
+// both send through, so the two cannot drift apart as two copies of it would (R3049 recorded
+// two copies of this body drifting twice). What differs per transport is asked of
+// `TransportState`: the request id, how many remote finals a query waits for, and whether its
+// value may travel as a shared-memory descriptor. Gated on `transport-unicast` because the
+// option, selector and error types it names live there; a build with only the multicast
+// transport has no query, as before.
+#[cfg(feature = "transport-unicast")]
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
     /// R311lg — build the deferred staging sink a reply-stream
     /// registration installs: the z_get `query*` path stores it in the
     /// [`crate::reply::ReplyRegistry`]; R311lk routes the liveliness-get
@@ -4147,12 +4178,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///   so the same callback fires regardless of wire vs loopback
     ///   origin — the R239 single-dispatch-path commitment.
     ///
-    /// The rid is allocated through
-    /// [`SessionLinkActions::alloc_next_request_id`] so wire and
-    /// loopback branches see the same id; the
-    /// [`crate::reply::ReplyRegistry`] pending entry registers with
-    /// `expected_finals = opts.allows_remote() as u32 +
-    /// opts.allows_local() as u32`, mirroring zenoh-pico's
+    /// The rid is allocated through the transport
+    /// ([`TransportState::alloc_request_id`]: the unicast link's counter, or a
+    /// group's own) so wire and loopback branches see the same id; the
+    /// [`crate::reply::ReplyRegistry`] pending entry registers with one final
+    /// per peer the transport reaches (one on unicast, each member on a group)
+    /// plus the loopback's, mirroring zenoh-pico's
     /// `_z_pending_query_t._remaining_finals` initialisation so
     /// `on_final` fires exactly once after every contributing branch
     /// has emitted its Final (loopback is synchronous so its Final
@@ -4294,10 +4325,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(feature = "query-get")]
         {
-            let rid = self.actions().alloc_next_request_id();
-            let expected_finals = opts.expected_finals();
-            let allows_remote = opts.allowed_destination.allows_remote();
+            let rid = Tp::alloc_request_id(&self.transport);
             let allows_local = opts.allowed_destination.allows_local();
+            // One final per peer the transport reaches, plus the loopback's: a unicast session
+            // reaches one peer, a group the members it holds now.
+            let remote_targets = Tp::remote_query_targets(&self.transport);
+            // A query with no peer to reach sends nothing: a group with no member, or one the
+            // session was never told the membership of.
+            let allows_remote = opts.allowed_destination.allows_remote() && remote_targets > 0;
+            let expected_finals = opts.expected_finals(remote_targets);
+            // And one that reaches nobody at all is over at once, on the caller's thread, as
+            // pico finishes it (`vendor/zenoh-pico/src/net/primitives.c` @
+            // `_z_drop_handler_execute(dropper, arg);`): nothing is registered, and the final
+            // runs before this returns.
+            if expected_finals == 0 {
+                let mut on_final = on_final;
+                drop(on_reply);
+                on_final(rid);
+                return Ok(ReplyHandle::ended(rid));
+            }
             // R262 — compute the absolute monotonic-ms deadline from
             // `self.clock.now_monotonic_ms()` + the effective timeout.
             // R311y326 — the effective timeout is `0` ONLY on a `query-timeout`-off
@@ -4411,7 +4457,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SHM can carry it as one. The bytes in `opts.payload` serve the rest.
             #[cfg(feature = "transport-shm")]
             let descriptor_value = shm_value
-                .filter(|value| allows_remote && self.actions().shm_admits(value.protocol()));
+                .filter(|value| allows_remote && Tp::shm_admits(&self.transport, value.protocol()));
             #[cfg(not(feature = "transport-shm"))]
             let descriptor_value = shm_value;
 
@@ -4642,7 +4688,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         Ok(())
     }
+}
 
+#[cfg(feature = "transport-unicast")]
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// R241 — aliased-keyexpr counterpart of [`Session::query`].
     /// Mirror of [`Session::publish_aliased`] on the z_get side:
     /// the wire branch encodes the `(mapping_id, inline_suffix)`
@@ -4669,7 +4718,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Routes both branches per `opts.allowed_destination`, allocates
     /// rid through [`SessionLinkActions::alloc_next_request_id`],
     /// registers the pending [`crate::reply::ReplyRegistry`] entry
-    /// with `expected_finals = opts.expected_finals()`. Same
+    /// with one final per branch (`QueryOptions::expected_finals`). Same
     /// lock-discipline as [`Self::query`]: observer locked during
     /// register + loopback fan, dropped before the wire dispatch.
     ///

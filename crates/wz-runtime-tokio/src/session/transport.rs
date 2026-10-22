@@ -225,6 +225,26 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     fn acl_group_link(_payload: &Self::Payload) -> Option<&wz_session_core::link::LinkSubject> {
         None
     }
+
+    /// A fresh request id for a query this session sends: the unicast link's counter, or the
+    /// multicast session's own. The one per-transport input to the shared query body besides
+    /// the two below.
+    #[cfg(feature = "query-get")]
+    fn alloc_request_id(payload: &Self::Payload) -> u64;
+
+    /// How many remote `ResponseFinal`s a query that may go remote waits for: one per peer the
+    /// transport reaches, as zenoh-pico counts them (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `size_t remote_targets = allow_remote ? _z_transport_get_peers_count(&zn->_tp) : 0;`). A
+    /// unicast session reaches its one peer; a multicast one the members the group holds when the
+    /// query is sent.
+    #[cfg(feature = "query-get")]
+    fn remote_query_targets(payload: &Self::Payload) -> u32;
+
+    /// Whether this transport carries a query value of the shared-memory `protocol` as a
+    /// descriptor. Only a unicast link negotiates shared memory; a group never does, so its
+    /// queries carry the bytes.
+    #[cfg(feature = "transport-shm")]
+    fn shm_admits(payload: &Self::Payload, protocol: u32) -> bool;
 }
 
 /// Typestate marker for a UNICAST session: the payload is the per-peer
@@ -252,6 +272,21 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     #[cfg(feature = "access-acl")]
     fn acl_subject_source(payload: &Self::Payload) -> Option<&Arc<SessionLinkActions<R, T>>> {
         Some(payload)
+    }
+
+    #[cfg(feature = "query-get")]
+    fn alloc_request_id(payload: &Self::Payload) -> u64 {
+        payload.alloc_next_request_id()
+    }
+
+    #[cfg(feature = "query-get")]
+    fn remote_query_targets(_payload: &Self::Payload) -> u32 {
+        1
+    }
+
+    #[cfg(feature = "transport-shm")]
+    fn shm_admits(payload: &Self::Payload, protocol: u32) -> bool {
+        payload.shm_admits(protocol)
     }
 
     fn send_network_message_qos(
@@ -363,6 +398,19 @@ pub struct MulticastPayload {
     /// [`LinkSubject::UNKNOWN`](wz_session_core::link::LinkSubject::UNKNOWN).
     #[cfg(feature = "access-acl-multicast")]
     pub(crate) link: std::sync::Arc<std::sync::OnceLock<wz_session_core::link::LinkSubject>>,
+    /// The request ids of the queries this session sends. A group has no handshake to seed one,
+    /// so the session counts from zero, as a unicast link does. Shared by the session's clones, as
+    /// `link` is, so two handles of one session never send two queries under one id.
+    #[cfg(feature = "query-get")]
+    pub(crate) request_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The members the drive loop holds for this group, which a query counts its remote finals
+    /// from: set once by
+    /// [`Session::attach_group_membership`](super::Session::attach_group_membership) with the
+    /// membership the host hands the drive. Unset reads as no member, so a query that may only go
+    /// remote is finished at once and nothing is sent, as zenoh-pico does with no peer.
+    #[cfg(feature = "query-get")]
+    pub(crate) membership:
+        std::sync::Arc<std::sync::OnceLock<crate::multicast_glue::McastGroupMembership>>,
 }
 
 /// What a group's link reads as before the session is told it: every axis indeterminate.
@@ -387,6 +435,26 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
         None
     }
 
+    #[cfg(feature = "query-get")]
+    fn alloc_request_id(payload: &Self::Payload) -> u64 {
+        payload
+            .request_ids
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "query-get")]
+    fn remote_query_targets(payload: &Self::Payload) -> u32 {
+        payload
+            .membership
+            .get()
+            .map_or(0, |membership| membership.member_count() as u32)
+    }
+
+    #[cfg(feature = "transport-shm")]
+    fn shm_admits(_payload: &Self::Payload, _protocol: u32) -> bool {
+        false
+    }
+
     fn send_network_message_qos(
         payload: &Self::Payload,
         msg: wz_session_core::network_message::NetworkMessage,
@@ -400,8 +468,8 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
         {
             use wz_session_core::network_message::NetworkMessage;
             match msg {
-                // A multicast Session originates only Push; any other variant
-                // is an honest transport-variant mismatch (the reply-plane
+                // A multicast Session originates Push and (under `codec-request`)
+                // Request; any other variant is an honest transport-variant mismatch (the reply-plane
                 // variants Response / ResponseFinal / Oam are emitted by the
                 // drive-loop MulticastReplySink, never routed here).
                 NetworkMessage::Push(push) => {
@@ -425,6 +493,14 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                         // QoS multicast group previously egressed at DEFAULT).
                         priority,
                     });
+                    Ok(())
+                }
+                // A query to the group: each peer answers it with its replies and one
+                // `ResponseFinal`. Pushed on the caller's thread as a Push is; its band rides in
+                // its own `ext_qos`, so `priority` is not read.
+                #[cfg(feature = "codec-request")]
+                NetworkMessage::Request(request) => {
+                    let _ = payload.tx.push(MulticastTxItem::Request { request });
                     Ok(())
                 }
                 _ => {

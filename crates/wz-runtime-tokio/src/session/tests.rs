@@ -2929,26 +2929,42 @@ fn query_options_with_setters_chain() {
 #[cfg(feature = "query-get")]
 #[test]
 fn query_options_expected_finals_matches_locality() {
+    // A unicast session reaches one peer.
     assert_eq!(
         QueryOptions::default()
             .with_allowed_destination(Locality::Any)
-            .expected_finals(),
+            .expected_finals(1),
         2,
         "Locality::Any expects loopback final + peer final"
     );
     assert_eq!(
         QueryOptions::default()
             .with_allowed_destination(Locality::Remote)
-            .expected_finals(),
+            .expected_finals(1),
         1,
         "Locality::Remote expects peer final only"
     );
     assert_eq!(
         QueryOptions::default()
             .with_allowed_destination(Locality::SessionLocal)
-            .expected_finals(),
+            .expected_finals(1),
         1,
         "Locality::SessionLocal expects loopback final only"
+    );
+    // A group reaches each of its members, and none when it has none.
+    assert_eq!(
+        QueryOptions::default()
+            .with_allowed_destination(Locality::Any)
+            .expected_finals(3),
+        4,
+        "a group of three members owes three peer finals and the loopback's"
+    );
+    assert_eq!(
+        QueryOptions::default()
+            .with_allowed_destination(Locality::Remote)
+            .expected_finals(0),
+        0,
+        "a remote-only query to an empty group owes nothing"
     );
 }
 
@@ -12046,6 +12062,147 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
         Priority::DEFAULT,
         "the base publish stays DEFAULT-band (byte-identical to the pre-QoS send)"
     );
+}
+
+/// A group membership holding `members` members, as the drive loop writes it once their JOINs
+/// are admitted. The join guard is returned because dropping it empties the membership.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-unicast",
+    feature = "codec-push",
+    feature = "query-get"
+))]
+fn group_membership(
+    members: u8,
+) -> (
+    crate::multicast_glue::McastGroupMembership,
+    crate::multicast_glue::McastGroupMembershipJoin,
+) {
+    use wz_session_core::multicast_dispatch::MulticastMember;
+    use wz_session_core::multicast_peer_lost::MulticastPeerId;
+    let membership = crate::multicast_glue::McastGroupMembership::new();
+    let join = membership.open(
+        "udp/10.0.0.1:7447".to_owned(),
+        "udp/224.0.0.224:7447".to_owned(),
+    );
+    let list: Vec<MulticastMember> = (1..=members)
+        .map(|i| MulticastMember {
+            peer: MulticastPeerId::from_wire(&[i]),
+            whatami: Some(wz_session_core::WhatAmI::Peer),
+            locator: std::net::SocketAddr::from(([10, 0, 0, i], 7447)),
+        })
+        .collect();
+    membership.set_members(&list);
+    (membership, join)
+}
+
+/// A query on a group goes to the group as one `Request` frame and waits for one
+/// `ResponseFinal` per member it held when it was sent, as zenoh-pico's does
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `size_t remote_targets = allow_remote ? _z_transport_get_peers_count(&zn->_tp) : 0;`).
+/// Open-debt item 913: a multicast session used to have no query at all.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-unicast",
+    feature = "codec-push",
+    feature = "query-get",
+    feature = "codec-response-final"
+))]
+#[test]
+fn a_group_query_waits_for_one_final_from_each_member() {
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    let (session, mut tap) = tapped_qos_group_session();
+    let (membership, _join) = group_membership(2);
+    assert!(session.attach_group_membership(&membership));
+    let finals = Arc::new(AtomicUsize::new(0));
+    let counted = finals.clone();
+    let handle = session
+        .query(
+            "demo/group/q",
+            QueryOptions::default().with_allowed_destination(Locality::Remote),
+            |_reply| {},
+            move |_rid| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("the group query is sent");
+
+    let datagram = tap.try_next().expect("the query pushed a datagram");
+    let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&datagram) else {
+        panic!("the pushed datagram is a Frame");
+    };
+    let messages = parse_frame_payload(&payload).expect("the frame decodes");
+    assert!(
+        matches!(&messages[..], [NetworkMessage::Request(request)] if request.rid == handle.rid()),
+        "the group received one Request carrying the query's rid: {messages:?}"
+    );
+
+    let final_from_a_member = || {
+        let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::ResponseFinal(
+                wz_session_core::response_final_build::build_response_final(
+                    handle.rid(),
+                    wz_session_core::sample::QosLevel::DEFAULT,
+                ),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        session.dispatch_multicast_iteration_event(
+            wz_session_core::driver_loop::IterationEvent::Poll(&outcome),
+        );
+    };
+    final_from_a_member();
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        0,
+        "one member's final of two does not end the query"
+    );
+    final_from_a_member();
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "the second member's final ends it"
+    );
+}
+
+/// A query on a group that holds no member sends nothing and is over before `query` returns,
+/// as zenoh-pico runs the query's dropper at once when it has no target
+/// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_drop_handler_execute(dropper, arg);`).
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-unicast",
+    feature = "codec-push",
+    feature = "query-get"
+))]
+#[test]
+fn a_group_query_that_reaches_no_member_ends_at_once_and_sends_nothing() {
+    let (session, mut tap) = tapped_qos_group_session();
+    let (membership, _join) = group_membership(0);
+    assert!(session.attach_group_membership(&membership));
+    let finals = Arc::new(AtomicUsize::new(0));
+    let counted = finals.clone();
+    session
+        .query(
+            "demo/group/q",
+            QueryOptions::default().with_allowed_destination(Locality::Remote),
+            |_reply| {},
+            move |_rid| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("a query to an empty group is not an error");
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "the final ran before query returned"
+    );
+    assert!(tap.try_next().is_none(), "nothing went to the group");
 }
 
 /// R311y-item3 — the COMPOSED unification proof: the base `publish` (NOT

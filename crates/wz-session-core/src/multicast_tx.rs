@@ -108,6 +108,22 @@ pub enum MulticastTxItem {
         /// `Priority::DEFAULT` (the [`multicast_put_literal`] default).
         priority: Priority,
     },
+    /// A query over multicast (`z_get` / `z_querier_get` on a group): the `Request(Query)` a
+    /// multicast session sends to every peer of the group, which each answers with its replies and
+    /// one `ResponseFinal` (zenoh-pico's `_z_query` sends it through `_z_send_n_msg`, whose
+    /// multicast branch writes it to the group, `vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `_z_transport_tx_send_n_msg(&zn->_tp._transport._multicast._common, z_msg, reliability, cong_ctrl, NULL);`).
+    /// Reliable, as the unicast query is: a dropped query leaves the querier waiting for finals no
+    /// peer owes.
+    ///
+    /// Gated on `codec-push` beside `codec-request` because a multicast session sends only
+    /// through the producer `codec-push` provides; a build with the query codec and no push codec
+    /// has no group to send it on.
+    #[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-request"))]
+    Request {
+        /// The built `Request(Query)`, boxed to bound the enum size.
+        request: Box<crate::wire::RequestOwned>,
+    },
     /// R311lq — a queryable `Response(Reply|Err)` over multicast: the
     /// reply a queryable's handler produced for a Query that arrived on
     /// the group. Staged by the observer during `dispatch_event` and
@@ -385,6 +401,8 @@ fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
     match item {
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Push { reliable, .. } => *reliable,
+        #[cfg(all(feature = "codec-push", feature = "codec-request"))]
+        MulticastTxItem::Request { .. } => true,
         #[cfg(feature = "codec-response")]
         MulticastTxItem::Response { .. } => true,
         #[cfg(feature = "codec-response-final")]
@@ -447,6 +465,18 @@ where
             meta,
             wz_codecs::push::Push::MAX_ENCODED_BYTES,
             crate::frame_encode::push_body(&push),
+            tx_sn,
+            params,
+            conf,
+            queue,
+        ),
+        // A query to the group. Reliable (`frame_meta`); a large one (a long selector, a
+        // value) re-frames as a fragment chain exactly like an oversize Push.
+        #[cfg(all(feature = "codec-push", feature = "codec-request"))]
+        MulticastTxItem::Request { request } => push_frame(
+            meta,
+            wz_codecs::request::Request::MAX_ENCODED_BYTES,
+            crate::frame_encode::request_body(&request),
             tx_sn,
             params,
             conf,
@@ -566,6 +596,19 @@ fn frame_meta(
                 ext_qos: frame_ext_qos(eff),
                 reliable: *reliable,
                 droppable: is_droppable(*reliable, congestion),
+            }
+        }
+        // A query's band comes off its own `ext_qos`, clamped as a Response's is; it rides the
+        // reliable ring, as the unicast query does.
+        #[cfg(all(feature = "codec-push", feature = "codec-request"))]
+        MulticastTxItem::Request { request } => {
+            let qos = crate::declare_ext_qos::read_request_qos(request);
+            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
+            FrameMeta {
+                priority: eff,
+                ext_qos: frame_ext_qos(eff),
+                reliable: true,
+                droppable: is_droppable(true, qos.congestion()),
             }
         }
         // R2594 — the band comes off the Response's own `ext_qos`, clamped
@@ -894,6 +937,11 @@ pub fn multicast_tx_stats_class(
         MulticastTxItem::Push { push, priority, .. } => (
             *priority,
             crate::network_message::push_stats_class(push, |_| None),
+        ),
+        #[cfg(all(feature = "codec-push", feature = "codec-request"))]
+        MulticastTxItem::Request { request } => (
+            crate::declare_ext_qos::read_request_qos(request).priority(),
+            crate::network_message::request_stats_class(request, |_| None),
         ),
         #[cfg(feature = "codec-response")]
         MulticastTxItem::Response { response } => (

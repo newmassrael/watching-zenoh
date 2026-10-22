@@ -522,19 +522,24 @@ impl QueryOptions {
     /// (`vendor/zenoh-pico/src/net/query.c`): one final per
     /// branch that will eventually emit a Final on this rid.
     ///
-    /// * `Locality::Remote` → 1 (peer Final only).
+    /// `remote_targets` is how many peers the transport reaches, each of which owes one Final
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `size_t remaining_finals = (allow_local ? 1 : 0) + remote_targets;`): one for a unicast
+    /// session, the group's members for a multicast one.
+    ///
+    /// * `Locality::Remote` → `remote_targets` (peer Finals only).
     /// * `Locality::SessionLocal` → 1 (loopback Final only).
-    /// * `Locality::Any` → 2 (loopback Final + peer Final).
+    /// * `Locality::Any` → `remote_targets` + 1.
     ///
     /// R311o — private helper, cfg-gated to its sole caller
     /// [`Session::query`] which already gates on `query-get`. Keeps
     /// the unconditional `impl QueryOptions` block free of dead-code
     /// warnings on `--no-default-features` builds.
     #[cfg(feature = "query-get")]
-    pub(super) fn expected_finals(&self) -> u32 {
+    pub(super) fn expected_finals(&self, remote_targets: u32) -> u32 {
         let mut n = 0u32;
         if self.allowed_destination.allows_remote() {
-            n += 1;
+            n += remote_targets;
         }
         if self.allowed_destination.allows_local() {
             n += 1;
