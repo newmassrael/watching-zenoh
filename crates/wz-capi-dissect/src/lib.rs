@@ -425,6 +425,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 45, for `wz_dissect_live_selected_packets`: the packet numbers that carried
     // the rows a selector picks, into a buffer the caller sized, with a summary
     // struct beside them and a flag that adds the context a reader needs.
+    // 46, for `wz_dissect_pcap_packets_of_link_type`: every packet of one link
+    // type in a container, as 48-byte records into a buffer the caller sized,
+    // each naming where its bytes are in the caller's own container.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -442,7 +445,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 45;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 46;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -701,6 +704,13 @@ enum Door {
     /// session question, and it takes a preset beside its bytes as the census
     /// doors do, so neither is the older shape of the other.
     SessionTable,
+    /// (ABI 46) — every packet of one link type, as records naming where each
+    /// packet's bytes are in the caller's container.
+    ///
+    /// In this walk because the population is derived from the header. It
+    /// joins nothing: `FrameBytes` hands out one packet by number, this one the
+    /// packets of a link type, and neither answers the other's question.
+    PacketsOfLinkType,
 }
 
 impl Door {
@@ -723,6 +733,7 @@ impl Door {
             Door::Replay => "wz_dissect_pcap_replay",
             Door::FrameBytes => "wz_dissect_pcap_frame_bytes",
             Door::SessionTable => "wz_dissect_pcap_session_table",
+            Door::PacketsOfLinkType => "wz_dissect_pcap_packets_of_link_type",
         }
     }
 
@@ -765,7 +776,8 @@ impl Door {
             | Door::Replay
             // Like `Replay`, it emits no document and joins nothing.
             | Door::FrameBytes
-            | Door::SessionTable => None,
+            | Door::SessionTable
+            | Door::PacketsOfLinkType => None,
         }
     }
 
@@ -784,7 +796,8 @@ impl Door {
             Door::FieldsWhereLimited => Some(Door::Replay),
             Door::Replay => Some(Door::FrameBytes),
             Door::FrameBytes => Some(Door::SessionTable),
-            Door::SessionTable => None,
+            Door::SessionTable => Some(Door::PacketsOfLinkType),
+            Door::PacketsOfLinkType => None,
         }
     }
 }
@@ -3843,6 +3856,139 @@ pub unsafe extern "C" fn wz_dissect_pcap_frame_bytes(
     // window of the caller's own `bytes`, so an `out` that overlapped it would
     // be the caller's mistake, and a memmove costs nothing to survive it.
     unsafe { core::ptr::copy(frame.data.as_ptr(), out, frame.data.len()) };
+    WZ_DISSECT_OK
+}
+
+/// (ABI 46) — one packet of a capture container, as
+/// [`wz_dissect_pcap_packets_of_link_type`] hands it out: where its bytes are
+/// in the CALLER's container, and what the container said about it.
+///
+/// 48 bytes, 8-aligned: three `uint64_t`, four `uint32_t`, one byte and seven
+/// reserved bytes that are always zero.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WzDissectRawPacket {
+    /// The packet's number in the container: the coordinate every other door
+    /// uses for it.
+    pub packet: u64,
+    /// The capture instant in epoch nanoseconds, or [`WZ_DISSECT_NO_TIMESTAMP`]
+    /// for a block that carried none.
+    pub ts_ns: u64,
+    /// Where the packet's stored bytes start in the container the caller
+    /// passed: they are `bytes[offset .. offset + len]`, not a copy.
+    pub offset: u64,
+    /// How many bytes the capture stored.
+    pub len: u32,
+    /// How long the packet was on the wire.
+    pub orig_len: u32,
+    /// The interface it arrived on, as the container numbers it (per section in
+    /// a pcapng; `0` in a classic pcap).
+    pub interface_id: u32,
+    /// The block's `epb_flags` word, `0` when [`Self::has_flags`] is `0`. Its
+    /// low two bits are the direction the capture tool recorded: `0` not
+    /// known, `1` inbound, `2` outbound.
+    pub flags: u32,
+    /// `1` when the block carried an `epb_flags` option, `0` when it carried
+    /// none (a classic pcap record never does), so a word of `0` that was
+    /// written is told from one that was not.
+    pub has_flags: u8,
+    /// Always zero.
+    pub reserved: [u8; 7],
+}
+
+/// (ABI 46) — EVERY PACKET OF ONE LINK TYPE IN A CAPTURE CONTAINER, as records
+/// into a buffer the caller sized.
+///
+/// # What a consumer writing its own records into a pcapng was missing
+///
+/// A writer that puts records of a link type it defined (a private
+/// `LINKTYPE_USER*` interface) into a pcapng beside captured traffic needs them
+/// back, in order, with the instant, interface and direction the file gave
+/// them. A dissection skips them as an unread link type (the health
+/// document's `skips.link_type_interfaces` names the interface and count), and
+/// [`wz_dissect_pcap_frame_bytes`] hands out one packet per call by walking the
+/// container up to it. Reading the blocks itself would put a second reader of
+/// the container in the consumer, which can number the packets differently
+/// from every door here.
+///
+/// This door walks the container once, with the reader every door here uses,
+/// and writes one [`WzDissectRawPacket`] per packet whose interface declared
+/// `link_type`, in container order. The bytes are not copied: each record says
+/// where they are in `bytes`.
+///
+/// # The buffer
+///
+/// [`wz_dissect_pcap_frame_bytes`]'s rule: `*needed` always receives the
+/// number of packets; when `cap` is at least that, `out` holds them, and when
+/// it is less NOTHING is written to `out`. `out` may be null with `cap` zero.
+///
+/// # A container still being written
+///
+/// `*partial` is `1` when the walk ended inside a block, which a longer prefix
+/// may complete, and `0` when it ended on a boundary; the packets before the
+/// cut are all written either way.
+///
+/// # Answers
+///
+/// [`WZ_DISSECT_OK`]; [`WZ_DISSECT_ERR_BAD_CAPTURE`] when the container does
+/// not read; [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer. `*needed` and
+/// `*partial` are zero on every failure, each when it is not null.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `needed` must be a
+/// writable `size_t` and `partial` a writable `int`, and `out` must point to at
+/// least `cap` writable [`WzDissectRawPacket`] or be null with `cap` zero.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_packets_of_link_type(
+    bytes: *const u8,
+    len: usize,
+    link_type: u32,
+    out: *mut WzDissectRawPacket,
+    cap: usize,
+    needed: *mut usize,
+    partial: *mut c_int,
+) -> c_int {
+    if !needed.is_null() {
+        // SAFETY: non-null, and writable by the caller contract.
+        unsafe { *needed = 0 };
+    }
+    if !partial.is_null() {
+        // SAFETY: non-null, and writable by the caller contract.
+        unsafe { *partial = 0 };
+    }
+    if bytes.is_null() || needed.is_null() || partial.is_null() || (out.is_null() && cap != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let Ok((frames, cut)) = wz_capture::captured_frames_of_link_type(input, link_type) else {
+        return WZ_DISSECT_ERR_BAD_CAPTURE;
+    };
+    // SAFETY: null-checked above.
+    unsafe {
+        *needed = frames.len();
+        *partial = c_int::from(cut);
+    }
+    if frames.is_empty() || cap < frames.len() {
+        return WZ_DISSECT_OK;
+    }
+    // SAFETY: `out` is writable for `cap >= frames.len()` records by the caller
+    // contract, and non-null because `cap` is non-zero here.
+    let records = unsafe { core::slice::from_raw_parts_mut(out, frames.len()) };
+    for (record, frame) in records.iter_mut().zip(&frames) {
+        *record = WzDissectRawPacket {
+            packet: frame.index as u64,
+            ts_ns: frame.ts_nanos.unwrap_or(WZ_DISSECT_NO_TIMESTAMP),
+            // Every frame borrows from `input`, so the offset always exists.
+            offset: frame.offset_in(input).unwrap_or_default() as u64,
+            len: frame.data.len() as u32,
+            orig_len: frame.orig_len,
+            interface_id: frame.interface_id,
+            flags: frame.flags.unwrap_or(0),
+            has_flags: u8::from(frame.flags.is_some()),
+            reserved: [0; 7],
+        };
+    }
     WZ_DISSECT_OK
 }
 
@@ -8592,7 +8738,9 @@ mod tests {
         // by `wz_dissect_string_free`; no input, no struct, no state.
         // 45, for `wz_dissect_live_selected_packets`: one symbol, a buffer of
         // `uint64_t` the caller sized and an 80-byte struct of counts it owns.
-        assert_eq!(wz_dissect_abi_version(), 45);
+        // 46, for `wz_dissect_pcap_packets_of_link_type`: one symbol, 48-byte
+        // records into a buffer the caller sized; nothing copied or retained.
+        assert_eq!(wz_dissect_abi_version(), 46);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -14028,6 +14176,128 @@ mod tests {
         );
         assert!(doc.contains("\"unsupported_link_type\":3"), "{doc}");
         assert!(doc.contains("\"link_types\":[147]"), "{doc}");
+    }
+
+    /// `wz_dissect_pcap_packets_of_link_type` the way C calls it: once to size,
+    /// once to read.
+    fn packets_of_link_type(
+        bytes: &[u8],
+        link_type: u32,
+    ) -> Result<(Vec<WzDissectRawPacket>, c_int), c_int> {
+        let mut needed = usize::MAX;
+        let mut partial: c_int = 7;
+        let rc = unsafe {
+            wz_dissect_pcap_packets_of_link_type(
+                bytes.as_ptr(),
+                bytes.len(),
+                link_type,
+                core::ptr::null_mut(),
+                0,
+                &mut needed,
+                &mut partial,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert_eq!((needed, partial), (0, 0), "a refusal leaves zeros");
+            return Err(rc);
+        }
+        let mut out = vec![WzDissectRawPacket::default(); needed];
+        let rc = unsafe {
+            wz_dissect_pcap_packets_of_link_type(
+                bytes.as_ptr(),
+                bytes.len(),
+                link_type,
+                out.as_mut_ptr(),
+                out.len(),
+                &mut needed,
+                &mut partial,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        assert_eq!(needed, out.len());
+        Ok((out, partial))
+    }
+
+    /// A writer's own records on `LINKTYPE_USER0`, interleaved with Ethernet,
+    /// come back with the file's packet numbers, their instants, their
+    /// direction words (an explicit word told from none), and their bytes found
+    /// in the caller's own container. A short buffer is not written, and a
+    /// container that does not read is refused with zeros.
+    #[test]
+    fn the_packets_of_a_link_type_come_back_with_flags_and_offsets() {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let records: [&[u8]; 3] = [b"first", b"second!!", b"3rd"];
+        let file = wz_capture::pcapng::write_flagged(
+            &[(LINKTYPE_ETHERNET, 6), (147, 6)],
+            &[
+                (0, 1_000, &packet, None),
+                (1, 2_000, records[0], Some(1)),
+                (1, 3_000, records[1], Some(2)),
+                (1, 4_000, records[2], None),
+            ],
+        );
+        let (rows, partial) = packets_of_link_type(&file, 147).expect("ok");
+        assert_eq!(partial, 0);
+        let seen: Vec<(u64, u64, u32, u32, u8)> = rows
+            .iter()
+            .map(|r| (r.packet, r.ts_ns, r.interface_id, r.flags, r.has_flags))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (1, 2_000_000, 1, 1, 1),
+                (2, 3_000_000, 1, 2, 1),
+                (3, 4_000_000, 1, 0, 0),
+            ]
+        );
+        for (row, bytes) in rows.iter().zip(records) {
+            let at = row.offset as usize;
+            assert_eq!(&file[at..at + row.len as usize], bytes);
+            assert_eq!(row.orig_len, row.len);
+            assert_eq!(row.reserved, [0; 7]);
+        }
+
+        // A buffer one short is not written, and still says how many.
+        let mut short = [WzDissectRawPacket {
+            packet: 99,
+            ..Default::default()
+        }; 2];
+        let (mut needed, mut partial) = (0usize, 0 as c_int);
+        let rc = unsafe {
+            wz_dissect_pcap_packets_of_link_type(
+                file.as_ptr(),
+                file.len(),
+                147,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut needed,
+                &mut partial,
+            )
+        };
+        assert_eq!((rc, needed, short[0].packet), (WZ_DISSECT_OK, 3, 99));
+
+        let (cut, partial) = packets_of_link_type(&file[..file.len() - 2], 147).expect("ok");
+        assert_eq!((cut.len(), partial), (2, 1), "a cut container says so");
+        // A whole classic header long, with a magic no container has: shorter
+        // input is a header not yet all there, which is `partial` and not this.
+        let mut garbage = vec![0u8; 32];
+        garbage[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            packets_of_link_type(&garbage, 147),
+            Err(WZ_DISSECT_ERR_BAD_CAPTURE)
+        );
+    }
+
+    /// The record's layout is the header's: 48 bytes, the three `uint64_t`
+    /// first.
+    #[test]
+    fn the_raw_packet_record_is_48_bytes_in_order() {
+        assert_eq!(core::mem::size_of::<WzDissectRawPacket>(), 48);
+        assert_eq!(core::mem::align_of::<WzDissectRawPacket>(), 8);
+        assert_eq!(core::mem::offset_of!(WzDissectRawPacket, offset), 16);
+        assert_eq!(core::mem::offset_of!(WzDissectRawPacket, len), 24);
+        assert_eq!(core::mem::offset_of!(WzDissectRawPacket, flags), 36);
+        assert_eq!(core::mem::offset_of!(WzDissectRawPacket, has_flags), 40);
     }
 
     /// The `health` key of a live handle's document is the summary's `health`

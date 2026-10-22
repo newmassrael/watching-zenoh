@@ -8064,6 +8064,7 @@ impl CaptureCursor {
                                 link_type: p.link_type,
                                 ts_millis: p.ts_millis,
                                 ts_nanos: p.ts_nanos,
+                                flags: p.flags,
                                 data: p.data,
                                 orig_len: p.orig_len,
                             }))
@@ -8098,6 +8099,8 @@ impl CaptureCursor {
                             link_type,
                             ts_millis: Some(p.ts_millis(unit)),
                             ts_nanos: Some(p.ts_nanos(unit)),
+                            // A classic record header has no flags word.
+                            flags: None,
                             data: p.data,
                             orig_len: p.orig_len,
                         }))
@@ -8136,6 +8139,10 @@ pub struct CapturedFrame<'a> {
     /// The same instant in epoch nanoseconds, every digit the container
     /// carried; [`Self::ts_millis`] is this divided by a million, rounded down.
     pub ts_nanos: Option<u64>,
+    /// The pcapng block's `epb_flags` word, whose low two bits are the
+    /// direction the capture tool recorded; `None` for a block that carried
+    /// none and for every classic pcap record. See [`pcapng::Packet::flags`].
+    pub flags: Option<u32>,
     /// The bytes the capture stored, LINK HEADER INCLUDED — the coordinate
     /// space a field row's `frame_offset` indexes. Shorter than `orig_len` when
     /// the capture ran with a snaplen.
@@ -8253,6 +8260,63 @@ pub fn captured_frame(bytes: &[u8], packet: usize) -> Result<CapturedFrame<'_>, 
         // after storing the frame.
         (None, CaptureWalk::Stopped) => unreachable!("the sink stops only on a frame it kept"),
     }
+}
+
+impl CapturedFrame<'_> {
+    /// Where [`Self::data`] starts in `container`, the bytes the frame was read
+    /// out of; `None` when `container` is not those bytes.
+    ///
+    /// The frame borrows its bytes from the container, so a caller holding the
+    /// container can be handed this offset instead of a copy.
+    pub fn offset_in(&self, container: &[u8]) -> Option<usize> {
+        let start = (self.data.as_ptr() as usize).checked_sub(container.as_ptr() as usize)?;
+        (start + self.data.len() <= container.len()).then_some(start)
+    }
+}
+
+/// Every packet of a capture container whose interface declared `link_type`,
+/// in container order, and whether the container was cut off inside a record.
+///
+/// # What it is for
+///
+/// A writer that puts records of its OWN link type into a pcapng beside the
+/// captured traffic reads them back here, with the coordinates every other door
+/// uses, instead of parsing the container a second time: a second reader of the
+/// block layout is a second opinion about which packet is number `n`. The walk
+/// is [`CaptureCursor::walk`], the one [`captured_frame`] and a dissection run,
+/// so the numbers agree with theirs by construction. A dissection skips such
+/// packets as an unread link type (see [`SkipCensus::unsupported_link_type_interfaces`]);
+/// this hands them out as they were stored.
+///
+/// # Cost
+///
+/// One pass over the container, copying nothing: each frame borrows its bytes.
+///
+/// # A container still being written
+///
+/// `partial` is `true` when the walk ended inside a record or block, which a
+/// longer prefix may complete; the packets before it are all here.
+pub fn captured_frames_of_link_type(
+    bytes: &[u8],
+    link_type: u32,
+) -> Result<(Vec<CapturedFrame<'_>>, bool), CaptureError> {
+    let mut cursor = CaptureCursor::new();
+    let mut frames: Vec<CapturedFrame<'_>> = Vec::new();
+    let walk = cursor.walk(bytes, |event| {
+        if let CaptureEvent::Frame(frame) = event {
+            if frame.link_type == link_type {
+                frames.push(frame);
+            }
+        }
+        core::ops::ControlFlow::Continue(())
+    })?;
+    let partial = match walk {
+        CaptureWalk::Halted { partial } => partial,
+        CaptureWalk::Undecided => true,
+        // The sink above never breaks.
+        CaptureWalk::Stopped => unreachable!("the sink never stops the walk"),
+    };
+    Ok((frames, partial))
 }
 
 // ── A packet out of a container, by number ──
@@ -8534,6 +8598,73 @@ mod captured_frame_tests {
                 partial: false
             })
         ));
+    }
+
+    /// The packets of ONE link type come out with the file's numbers, their
+    /// interface, instant and `epb_flags` word, and their bytes found in the
+    /// caller's container by offset.
+    ///
+    /// Interface 1 is on `LINKTYPE_USER0` (147), the link type a writer takes
+    /// for records of its own, interleaved with Ethernet on interface 0. The
+    /// flags word is asserted at the BYTE level first, from the writer's
+    /// layout, so the reader is not graded by a fixture it agrees with: the
+    /// second packet's block starts after the section header (28), two
+    /// interfaces (64) and the first packet's block (32 + 8 data), and its
+    /// option list after its own fixed part (28) and its four data bytes.
+    #[test]
+    fn the_packets_of_one_link_type_come_out_with_their_flags_and_offsets() {
+        let ethernet = [0xEEu8; 8];
+        let (a, b, c) = ([1u8, 2, 3, 4], [5u8, 6, 7, 8], [9u8, 10, 11, 12]);
+        let file = crate::pcapng::write_flagged(
+            &[(crate::link::LINKTYPE_ETHERNET, 6), (147, 6)],
+            &[
+                (0, 100, &ethernet, None),
+                (1, 1_000, &a, Some(1)),
+                (1, 2_000, &b, Some(0x0000_0002)),
+                (0, 300, &ethernet, None),
+                (1, 3_000, &c, None),
+            ],
+        );
+        let option = 28 + 64 + 40 + 28 + 4;
+        assert_eq!(&file[option..option + 8], &[2, 0, 4, 0, 1, 0, 0, 0]);
+
+        let (own, partial) = captured_frames_of_link_type(&file, 147).expect("the file reads");
+        assert!(!partial);
+        let seen: Vec<(usize, u32, Option<u64>, Option<u32>)> = own
+            .iter()
+            .map(|f| (f.index, f.interface_id, f.ts_nanos, f.flags))
+            .collect();
+        assert_eq!(
+            seen,
+            alloc::vec![
+                (1, 1, Some(1_000_000), Some(1)),
+                (2, 1, Some(2_000_000), Some(2)),
+                (4, 1, Some(3_000_000), None),
+            ]
+        );
+        for (frame, bytes) in own.iter().zip([a, b, c]) {
+            let at = frame.offset_in(&file).expect("the bytes are the file's");
+            assert_eq!(&file[at..at + frame.data.len()], &bytes);
+        }
+        // The control: the other link type's packets are the other two.
+        let (ether, _) = captured_frames_of_link_type(&file, 1).expect("the file reads");
+        let numbers: Vec<usize> = ether.iter().map(|f| f.index).collect();
+        assert_eq!(numbers, alloc::vec![0, 3]);
+        assert_eq!(
+            ether[0].flags, None,
+            "a block with no option list has no word"
+        );
+
+        // Cut inside the last block: the packets before it, and the cut said.
+        let (cut, partial) =
+            captured_frames_of_link_type(&file[..file.len() - 3], 147).expect("the prefix reads");
+        assert!(partial);
+        assert_eq!(cut.len(), 2);
+        assert_eq!(
+            own[0].offset_in(&ethernet),
+            None,
+            "not the container it came out of"
+        );
     }
 }
 

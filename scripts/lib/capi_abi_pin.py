@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 45
+EXPECTED_VERSION = 46
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -406,6 +406,12 @@ EXPECTED_SYMBOLS = {
     # the count always in `*needed`) and ten counts into an 80-byte struct the
     # caller owns. Nothing is allocated for the caller and nothing is retained.
     "wz_dissect_live_selected_packets",
+    # (ABI 46) -- every packet of one link type in a container, for a writer
+    # reading back records of a link type it defined. One symbol: 48-byte records
+    # into a buffer the CALLER sized, each naming where its bytes are in the
+    # caller's own container (nothing is copied), the count always in `*needed`
+    # and whether the container was cut off in `*partial`. Nothing is retained.
+    "wz_dissect_pcap_packets_of_link_type",
     # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
     # sets: how many one flow keeps, and how many the handle keeps in all. One
     # symbol: two integers in and the handle through a pointer the CALLER owns,

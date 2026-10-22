@@ -1571,7 +1571,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 45
+#define WZ_DISSECT_ABI_REVISION 46
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5350,6 +5350,71 @@ int wz_dissect_live_reassembled_bytes(const wz_dissect_live *h,
 int wz_dissect_pcap_frame_bytes(const unsigned char *bytes, size_t len,
                                 uint64_t packet, unsigned char *out,
                                 size_t cap, size_t *needed);
+
+/* (ABI 46) -- one packet of a capture container, as
+ * wz_dissect_pcap_packets_of_link_type hands it out. 48 bytes, 8-aligned. */
+typedef struct wz_dissect_raw_packet {
+    uint64_t packet;       /* its number in the container */
+    uint64_t ts_ns;        /* epoch ns; WZ_DISSECT_NO_TIMESTAMP when none */
+    uint64_t offset;       /* its bytes are bytes[offset .. offset + len] */
+    uint32_t len;          /* bytes the capture stored */
+    uint32_t orig_len;     /* bytes it had on the wire */
+    uint32_t interface_id; /* as the container numbers it; 0 in a pcap */
+    uint32_t flags;        /* epb_flags; bits 0-1: 0 unknown, 1 in, 2 out */
+    uint8_t has_flags;     /* 1 when the block carried epb_flags at all */
+    uint8_t reserved[7];   /* always zero */
+} wz_dissect_raw_packet;
+
+/* (ABI 46) -- EVERY PACKET OF ONE LINK TYPE IN A CAPTURE CONTAINER, as records
+ * into a buffer you sized.
+ *
+ * WHAT IT IS FOR. A writer that puts records of a link type it defined (a
+ * private LINKTYPE_USER0..15 interface, 147..162) into a pcapng beside captured
+ * traffic reads them back here: in container order, each with the number every
+ * other door uses for it, its instant, its interface and the block's epb_flags
+ * word, whose low two bits are the direction the writer recorded. A dissection
+ * skips such packets and names the interface under health.skips
+ * .link_type_interfaces; this hands them out as stored. Reading the blocks
+ * yourself would be a second reader of the container, free to number the
+ * packets differently from every door here.
+ *
+ * NOT A COPY. The bytes of a record are bytes[offset .. offset + len] of the
+ * container you passed, so they live as long as it does.
+ *
+ *     size_t n = 0;
+ *     int partial = 0;
+ *     wz_dissect_pcap_packets_of_link_type(file, file_len, 147, NULL, 0, &n,
+ *                                          &partial);                 // size
+ *     wz_dissect_raw_packet *rows = malloc(n * sizeof *rows);
+ *     wz_dissect_pcap_packets_of_link_type(file, file_len, 147, rows, n, &n,
+ *                                          &partial);                 // read
+ *     // rows[i].flags & 3: 1 inbound, 2 outbound, 0 not known
+ *
+ * THE BUFFER. *needed always receives the number of packets; when cap is at
+ * least that, out holds them, and when it is less NOTHING is written to out.
+ * out may be NULL with cap 0, to ask for the count alone. One pass over the
+ * container per call, copying nothing.
+ *
+ * A CONTAINER STILL BEING WRITTEN. *partial is 1 when the walk ended inside a
+ * block a longer prefix may complete, 0 when it ended on a boundary; the
+ * packets before the cut are written either way.
+ *
+ * flags is the word as the block carried it, 0 with has_flags 0 when the block
+ * carried none (a classic pcap record never does), so a writer's explicit 0
+ * ("direction not known") is told from silence.
+ *
+ * WZ_DISSECT_ERR_BAD_CAPTURE when the container does not read;
+ * WZ_DISSECT_ERR_INVALID_ARG for a NULL bytes, needed or partial, or out NULL
+ * with cap non-zero. *needed and *partial are 0 on every failure (when they
+ * are not NULL).
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
+ * no ceiling of its own on the list: a short `cap` writes nothing and *needed
+ * says how many to make room for. */
+int wz_dissect_pcap_packets_of_link_type(const unsigned char *bytes, size_t len,
+                                         uint32_t link_type,
+                                         wz_dissect_raw_packet *out, size_t cap,
+                                         size_t *needed, int *partial);
 
 /* ── R2453 (ABI 16) — THE ANALYSIS PLANES OVER A LIVE HANDLE ─────────────
  *

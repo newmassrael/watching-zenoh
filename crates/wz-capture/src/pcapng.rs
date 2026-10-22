@@ -88,6 +88,9 @@ const BT_NRB: u32 = 0x0000_0004;
 const BOM: u32 = 0x1A2B_3C4D;
 /// `if_tsresol`.
 const OPT_IF_TSRESOL: u16 = 9;
+/// `epb_flags` on an Enhanced Packet Block, and `pack_flags` on the obsolete
+/// Packet Block: the same 32-bit word under the same code.
+const OPT_EPB_FLAGS: u16 = 2;
 /// `isb_ifrecv` — packets the interface RECEIVED over the capture.
 const OPT_ISB_IFRECV: u16 = 4;
 /// `isb_ifdrop` — packets the capture tool DROPPED and nobody ever saw.
@@ -242,6 +245,15 @@ pub struct Packet {
     /// digits [`Self::ts_millis`] drops. That field is this one divided by a
     /// million, rounded down, and `None` exactly when this one is.
     pub ts_nanos: Option<u64>,
+    /// The block's `epb_flags` word (`pack_flags` on an obsolete Packet Block),
+    /// or `None` when it carried none; a Simple Packet Block never does.
+    ///
+    /// Bits 0-1 are the DIRECTION the capture tool recorded (`0` not known, `1`
+    /// inbound, `2` outbound), bits 2-4 the reception type, bits 5-8 the FCS
+    /// length, and the high half link-layer errors. Carried whole: which of them
+    /// a reader needs is the reader's, and the direction of a record a writer
+    /// defined for its own link type is that writer's statement.
+    pub flags: Option<u32>,
     /// Bytes actually stored.
     pub data: Vec<u8>,
     /// Length the packet had on the wire.
@@ -334,6 +346,8 @@ pub struct PacketRef<'a> {
     /// The same instant in nanoseconds; [`Self::ts_millis`] is this divided by
     /// a million, rounded down.
     pub ts_nanos: Option<u64>,
+    /// The block's `epb_flags` word; see [`Packet::flags`].
+    pub flags: Option<u32>,
     /// Bytes actually stored, link header included.
     pub data: &'a [u8],
     /// Length the packet had on the wire.
@@ -351,6 +365,7 @@ impl<'a> PacketRef<'a> {
         interface_id: u32,
         iface: &Interface,
         ts_ticks: Option<u64>,
+        flags: Option<u32>,
         data: &'a [u8],
         orig_len: u32,
     ) -> Self {
@@ -361,6 +376,7 @@ impl<'a> PacketRef<'a> {
             ts_ticks,
             ts_millis: ticks_to_millis(ts_ticks, iface),
             ts_nanos: ticks_to_nanos(ts_ticks, iface),
+            flags,
             data,
             orig_len,
         }
@@ -378,6 +394,7 @@ impl<'a> PacketRef<'a> {
             ts_ticks: self.ts_ticks,
             ts_millis: self.ts_millis,
             ts_nanos: self.ts_nanos,
+            flags: self.flags,
             data: self.data.to_vec(),
             orig_len: self.orig_len,
         }
@@ -599,6 +616,36 @@ fn scan_u64_option(body: &[u8], swapped: bool, want: u16) -> Option<u64> {
         off += (len + 3) & !3;
     }
     None
+}
+
+/// Read one u32 option out of an option list, on [`scan_u64_option`]'s rule:
+/// the length must be exactly the width, or the option is not read.
+fn scan_u32_option(body: &[u8], swapped: bool, want: u16) -> Option<u32> {
+    let mut off = 0usize;
+    while off + 4 <= body.len() {
+        let code = u16_at(body, off, swapped);
+        let len = u16_at(body, off + 2, swapped) as usize;
+        off += 4;
+        if code == 0 {
+            return None;
+        }
+        if off + len > body.len() {
+            return None;
+        }
+        if code == want && len == 4 {
+            return Some(u32_at(body, off, swapped));
+        }
+        off += (len + 3) & !3;
+    }
+    None
+}
+
+/// The `epb_flags` word of a packet block whose fixed part is `fixed` bytes and
+/// whose data is `captured` bytes: the options start past the data, padded to
+/// four.
+fn packet_flags(body: &[u8], fixed: usize, captured: usize, swapped: bool) -> Option<u32> {
+    let options = body.get(fixed + ((captured + 3) & !3)..)?;
+    scan_u32_option(options, swapped, OPT_EPB_FLAGS)
 }
 
 /// R311y607 — what the CAPTURE TOOL said about one interface, as opposed to
@@ -1158,6 +1205,7 @@ impl PcapngCursor {
                         // first. Reading them as a seconds/fraction pair — which
                         // the classic layout invites — is wrong by construction.
                         Some((ts_high << 32) | ts_low),
+                        packet_flags(body, 20, captured as usize, swapped),
                         &body[20..20 + captured as usize],
                         orig_len,
                     )))
@@ -1188,6 +1236,8 @@ impl PcapngCursor {
                         &iface,
                         // An SPB carries no timestamp at all, and the ABSENCE is
                         // what travels rather than a plausible zero (R311y625).
+                        None,
+                        // Nor any option: an SPB has no option list.
                         None,
                         &body[4..4 + stored],
                         orig_len,
@@ -1255,6 +1305,7 @@ impl PcapngCursor {
                         interface_id,
                         &iface,
                         Some((ts_high << 32) | ts_low),
+                        packet_flags(body, 20, captured as usize, swapped),
                         &body[20..20 + captured as usize],
                         orig_len,
                     )))
@@ -1423,6 +1474,20 @@ pub fn parse(bytes: &[u8]) -> Result<PcapngFile, PcapngError> {
 /// The tests pair this with byte-level assertions on what it emits, because a
 /// round trip through one author's belief proves only self-consistency.
 pub fn write(interfaces: &[(u32, u8)], packets: &[(u32, u64, &[u8])]) -> Vec<u8> {
+    let flagged: Vec<(u32, u64, &[u8], Option<u32>)> = packets
+        .iter()
+        .map(|&(iface, ticks, data)| (iface, ticks, data, None))
+        .collect();
+    write_flagged(interfaces, &flagged)
+}
+
+/// [`write`], with an `epb_flags` option (code 2, four bytes) on each packet
+/// whose fourth element is `Some`, then `opt_endofopt`. A packet with `None`
+/// has no option list, byte for byte what [`write`] emits.
+pub fn write_flagged(
+    interfaces: &[(u32, u8)],
+    packets: &[(u32, u64, &[u8], Option<u32>)],
+) -> Vec<u8> {
     let mut out = Vec::new();
     // SHB: type, length, BOM, major, minor, section length (-1 = unknown).
     out.extend_from_slice(&BT_SHB.to_le_bytes());
@@ -1449,9 +1514,11 @@ pub fn write(interfaces: &[(u32, u8)], packets: &[(u32, u64, &[u8])]) -> Vec<u8>
         out.extend_from_slice(&32u32.to_le_bytes());
     }
 
-    for (iface, ticks, data) in packets {
+    for (iface, ticks, data, flags) in packets {
         let pad = (4 - (data.len() % 4)) % 4;
-        let total = 32 + data.len() + pad;
+        // epb_flags (4 + 4) and opt_endofopt (4), when there is a flags word.
+        let options = if flags.is_some() { 12 } else { 0 };
+        let total = 32 + data.len() + pad + options;
         out.extend_from_slice(&BT_EPB.to_le_bytes());
         out.extend_from_slice(&(total as u32).to_le_bytes());
         out.extend_from_slice(&iface.to_le_bytes());
@@ -1461,6 +1528,13 @@ pub fn write(interfaces: &[(u32, u8)], packets: &[(u32, u64, &[u8])]) -> Vec<u8>
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
         out.extend_from_slice(data);
         out.extend_from_slice(&alloc::vec![0u8; pad]);
+        if let Some(word) = flags {
+            out.extend_from_slice(&OPT_EPB_FLAGS.to_le_bytes());
+            out.extend_from_slice(&4u16.to_le_bytes());
+            out.extend_from_slice(&word.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // opt_endofopt code
+            out.extend_from_slice(&0u16.to_le_bytes()); // opt_endofopt length
+        }
         out.extend_from_slice(&(total as u32).to_le_bytes());
     }
     out

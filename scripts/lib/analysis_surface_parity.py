@@ -558,6 +558,18 @@ ONLY_CAPI = {
         "own, decided apart from this door.",
         (),
     ),
+    # (ABI 46) -- filed in the round that added the symbol.
+    "every packet of one link type in a container, with its flags": (
+        "wz_dissect_pcap_packets_of_link_type",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "writes records of a link type it defined into a pcapng beside the "
+        "captured traffic, and must read them back without a second reader of "
+        "the container numbering the packets apart from every door here. The "
+        "command line dissects zenoh and reports the interfaces it could not "
+        "read under `skips`; it has no use for records of a format it does not "
+        "know, so it has nothing to print from them.",
+        (),
+    ),
     "how many bytes of a followed container were consumed": (
         "wz_dissect_live_followed",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

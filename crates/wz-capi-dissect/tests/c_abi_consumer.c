@@ -714,6 +714,41 @@ static int check_selected_packets_door(void) {
     return 0;
 }
 
+/* (ABI 46) -- THE PACKETS OF ONE LINK TYPE, driven from C: the record is the
+ * header's 48-byte struct, and the count and the cut cross as a size_t and an
+ * int the caller owns. Bytes that are not a container are refused with zeros.
+ * Records with flags need a pcapng to read, and that is built where the writer
+ * is (the Rust tests). */
+static int check_packets_of_link_type_door(void) {
+    /* A whole classic header long, with a magic no container has: shorter
+     * input is a header not yet all there, which is `partial` and not this. */
+    static const unsigned char not_a_container[32] = {0xde, 0xad, 0xbe, 0xef};
+    wz_dissect_raw_packet rows[2];
+    size_t needed = 99;
+    int partial = 99;
+    int rc;
+
+    CHECK(sizeof(wz_dissect_raw_packet) == 48, "record size %zu",
+          sizeof(wz_dissect_raw_packet));
+    CHECK(offsetof(wz_dissect_raw_packet, len) == 24, "len offset");
+    CHECK(offsetof(wz_dissect_raw_packet, flags) == 36, "flags offset");
+    CHECK(offsetof(wz_dissect_raw_packet, has_flags) == 40, "has_flags offset");
+
+    rc = wz_dissect_pcap_packets_of_link_type(not_a_container,
+                                              sizeof not_a_container, 147, rows, 2,
+                                              &needed, &partial);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE && needed == 0 && partial == 0,
+          "not a container rc=%d", rc);
+    rc = wz_dissect_pcap_packets_of_link_type(not_a_container,
+                                              sizeof not_a_container, 147, NULL, 2,
+                                              &needed, &partial);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a NULL buffer with capacity rc=%d", rc);
+    rc = wz_dissect_pcap_packets_of_link_type(NULL, 0, 147, NULL, 0, &needed,
+                                              &partial);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes rc=%d", rc);
+    return 0;
+}
+
 /* (ABI 43) -- THE BOUNDED OPEN, driven from C: the two ceilings on decoded
  * messages are the caller's. Twelve keepalives on ONE flow under a per-flow
  * ceiling of 4 and a total of 5 leave four held (the per-flow ceiling is the
@@ -4030,6 +4065,11 @@ int main(void) {
 
     /* (ABI 45) -- and the packets that carried the rows a selector picks. */
     if (check_selected_packets_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 46) -- and every packet of one link type in a container. */
+    if (check_packets_of_link_type_door() != 0) {
         return 1;
     }
 
