@@ -1869,7 +1869,7 @@ pub fn custom_option_value(order: ByteOrder, organization: u32, data: &[u8]) -> 
 /// list in either: the fixture for Custom Options, repeated options, odd value
 /// lengths that need padding, and a big-endian section. Laid out from the format
 /// and not through the reader under test, and the tests pair it with byte-level
-/// assertions for the same reason [`write`] is.
+/// assertions for the same reason [`write()`] is.
 pub fn write_with_options(
     order: ByteOrder,
     interfaces: &[(u32, u8)],
