@@ -278038,6 +278038,42 @@
         "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
       ]
     },
+    "Round 3423": {
+      "decision_summary": "A consumer asked whether the since doors still fold the whole handle on every call, as its measurement of 2026-10-20 showed (a step growing with the handle, a 300,000 row file taking 16.8 s and a 1,400,000 row one 6.5 min). Read from the code and its tests, two causes of that were fixed by two commits of the same evening: a field window that stopped inside a list began the walk again at the next window (fixed by 078917398), and a registered end-to-end profile began it again at every live step (fixed by 82143b928). The tests pin it by counters, not a clock: windows of several sizes begin the walk once, resume on every later window, and visit each message once. The header still said both were restart conditions, which is what a reader would act on, so its list of the states that restart the walk is corrected to what the code does. No code changed and the ABI did not move.",
+      "changes_bullets": [
+        "wz_dissect.h, WHAT A CALL COSTS of wz_dissect_live_fields_since: the restart list loses the two states the code no longer restarts for (a window that stopped before the end of a list, and a rule that binds a key to an end-to-end profile) and gains the conditions the code does check for an end-to-end rule (no slot judged from two lists, counters within four entries per held message and a thousand more) and for the container (no shorter than what the last call consumed, those bytes unchanged). The paragraph that said the end-to-end cells are not kept across a trim now says they are kept and can read differently from the whole-document door there."
+      ],
+      "verification_bullets": [
+        "The restart conditions were read from fields_json.rs where the walk decides to resume. On a build host the test windows_visit_each_message_once_and_write_the_whole_documents_rows passed (1 ran, 1 passed): windows of 3, 5, 8 and 13 over a stream capture and a datagram capture give the whole document's rows, begin the walk once, resume on every later window and visit each message at most once.",
+        "On this tree: Layer C1bo passed (ABI 48, 61 exported symbols, header subsumption markers none stale) after the header edit.",
+        "Not measured: the cost on a consumer's own capture; the figures in the header are this library's own test population.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3415, sections 266."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "If the consumer still measures a step that grows with the handle after moving to a pin that has both fixes, the next question is which restart condition its calls meet; the handle's field work counters say it (restarted, resumed, messages walked) but no door hands them out, so a door for them is the way to ask a live handle without a debugger.",
+        "wz_dissect_live_selection_since still folds the whole capture on every call by its own documentation; nothing here changed that."
+      ],
+      "publishable_decision_summary": "A consumer asked whether the since doors still fold the whole handle on every call, as its measurement of 2026-10-20 showed (a step growing with the handle, a 300,000 row file taking 16.8 s and a 1,400,000 row one 6.5 min). Read from the code and its tests, two causes of that were fixed by two commits of the same evening: a field window that stopped inside a list began the walk again at the next window (fixed by 078917398), and a registered end-to-end profile began it again at every live step (fixed by 82143b928). The tests pin it by counters, not a clock: windows of several sizes begin the walk once, resume on every later window, and visit each message once. The header still said both were restart conditions, which is what a reader would act on, so its list of the states that restart the walk is corrected to what the code does. No code changed and the ABI did not move.",
+      "publishable_changes_bullets": [
+        "wz_dissect.h, WHAT A CALL COSTS of wz_dissect_live_fields_since: the restart list loses the two states the code no longer restarts for (a window that stopped before the end of a list, and a rule that binds a key to an end-to-end profile) and gains the conditions the code does check for an end-to-end rule (no slot judged from two lists, counters within four entries per held message and a thousand more) and for the container (no shorter than what the last call consumed, those bytes unchanged). The paragraph that said the end-to-end cells are not kept across a trim now says they are kept and can read differently from the whole-document door there."
+      ],
+      "publishable_verification_bullets": [
+        "The restart conditions were read from fields_json.rs where the walk decides to resume. On a build host the test windows_visit_each_message_once_and_write_the_whole_documents_rows passed (1 ran, 1 passed): windows of 3, 5, 8 and 13 over a stream capture and a datagram capture give the whole document's rows, begin the walk once, resume on every later window and visit each message at most once.",
+        "On this tree: Layer C1bo passed (ABI 48, 61 exported symbols, header subsumption markers none stale) after the header edit.",
+        "Not measured: the cost on a consumer's own capture; the figures in the header are this library's own test population.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3415, sections 266."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "If the consumer still measures a step that grows with the handle after moving to a pin that has both fixes, the next question is which restart condition its calls meet; the handle's field work counters say it (restarted, resumed, messages walked) but no door hands them out, so a door for them is the way to ask a live handle without a debugger.",
+        "wz_dissect_live_selection_since still folds the whole capture on every call by its own documentation; nothing here changed that."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
