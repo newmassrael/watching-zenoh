@@ -12,10 +12,11 @@ WZ_LIMIT_MAX_LOCATOR_LEN = "32"
 WZ_LIMIT_MAX_STATIC_CONNECT = "1"
 WZ_LIMIT_MAX_QUERYABLES = "2"
 WZ_LIMIT_MAX_SUBSCRIPTIONS = "0"
-# Two rows, where the kit's client has none: a node built with `--features get` asks, and a table of
-# no rows refuses every query it is told to make (`GetError::Register(TableFull)`). One query is in
-# flight at a time; the second row is the one a late final of the last still holds.
-WZ_LIMIT_MAX_PENDING_QUERIES = "2"
+# Nine rows, where the kit's client has none: a node built with `--features get` asks, and a table of
+# no rows refuses every query it is told to make (`GetError::Register(TableFull)`). `--inflight`
+# keeps up to eight queries pending at once; the ninth is the row a late final of the last still
+# holds.
+WZ_LIMIT_MAX_PENDING_QUERIES = "9"
 WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS = "0"
 WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS = "0"
 WZ_LIMIT_MAX_REMOTE_DECLS = "0"

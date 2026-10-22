@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The node as a GETTER: it asks the same query again and again, one at a time, and keeps the
-//! round trip of each in a table this file declares.
+//! The node as a GETTER: it asks the same query again and again, keeping up to `--inflight`
+//! of them pending at once, and keeps the round trip of each in a table this file declares.
 //!
-//! A query is issued the moment the session is established and again the moment the last one
-//! ended (its final, or its deadline), so there is never more than one in flight. The time a query
-//! takes is read from the clock when it is issued and when its final arrives; both happen inside
-//! the session's own event, so the figure is what the application layer of this node sees, from
-//! the request being written to the final being delivered to its sink.
+//! A query is asked the moment the session is established and again each time one has ended (its
+//! final, or its deadline), so the number in flight stays at `--inflight` until the count is
+//! reached. Two ways of asking, to measure what the second costs:
 //!
-//! The sink is a unit type that writes into [`PLAN`]: the pending table keeps a copy of the sink,
-//! and the state a reply changes lives in the `static`. Nothing here allocates.
+//! - **in the event** (the default): the session's own application layer asks, inside its event,
+//!   the instant a place is free. The time of a query is read when it is asked and when its final
+//!   reaches the sink, both inside that event.
+//! - **through the mailbox** (`--mailbox`): the program's main loop, which is not the session's
+//!   event, leaves the query in a [`GetMailbox`] and wakes the session's loop; the layer takes it
+//!   on its next event. The time of a query starts when it is left, so it includes the wait for
+//!   that event.
+//!
+//! The sink is a small value naming the query's slot in [`PLAN`]: the pending table keeps a copy of
+//! the sink, and the state a reply changes lives in the `static`. Nothing here allocates.
 
 use core::cell::Cell;
 
@@ -20,11 +26,18 @@ use wz_session_core::reply_sink::{ReplyKind, ReplySink, ReplyView};
 use wz_session_core::sample::QosLevel;
 use wz_session_core::slot_observer::{ObserverSinks, Requesters};
 use wz_session_mcu::app_layer::{GetError, GetRequest, NoReplies, SessionEvents, SlotDispatch};
+use wz_session_mcu::get_mailbox::GetMailbox;
 
 use crate::Clock;
 
 /// The round trips the node keeps: more queries than this are asked but not timed.
 pub const SAMPLES: usize = 4096;
+
+/// The most queries in flight at once: the mailbox's rows and the plan's slots.
+pub const MAX_INFLIGHT: usize = 8;
+
+/// Where the program's main loop leaves the queries of `--mailbox`.
+pub static MAILBOX: GetMailbox<PlanSink, MAX_INFLIGHT> = GetMailbox::new();
 
 /// What the node was asked to do and what has happened, in one `static`.
 pub struct Plan {
@@ -32,6 +45,11 @@ pub struct Plan {
     count: Cell<u32>,
     timeout_ms: Cell<u32>,
     warmup: Cell<u32>,
+    inflight: Cell<u32>,
+    mailbox: Cell<bool>,
+    /// The slots of the queries not yet ended, as bits: a slot is the index the sink carries.
+    busy: Cell<u8>,
+    outstanding: Cell<u32>,
     issued: Cell<u32>,
     finished: Cell<u32>,
     replies: Cell<u32>,
@@ -39,14 +57,15 @@ pub struct Plan {
     refused: Cell<u32>,
     payload_bytes: Cell<u64>,
     timeouts: Cell<u32>,
-    started_us: Cell<u64>,
-    in_flight: Cell<bool>,
+    first_us: Cell<u64>,
+    last_us: Cell<u64>,
     last_refusal: Cell<Option<GetError>>,
+    started_us: [Cell<u64>; MAX_INFLIGHT],
     rtt_us: [Cell<u32>; SAMPLES],
 }
 
-// SAFETY: the profile's rule: one thread runs the program, and the sink and the events that write
-// the plan run inside its one loop.
+// SAFETY: the profile's rule: one thread runs the program, and the sink, the events and the main
+// loop that write the plan all run in its one loop.
 unsafe impl Sync for Plan {}
 
 pub static PLAN: Plan = Plan {
@@ -54,6 +73,10 @@ pub static PLAN: Plan = Plan {
     count: Cell::new(0),
     timeout_ms: Cell::new(0),
     warmup: Cell::new(0),
+    inflight: Cell::new(1),
+    mailbox: Cell::new(false),
+    busy: Cell::new(0),
+    outstanding: Cell::new(0),
     issued: Cell::new(0),
     finished: Cell::new(0),
     replies: Cell::new(0),
@@ -61,9 +84,10 @@ pub static PLAN: Plan = Plan {
     refused: Cell::new(0),
     payload_bytes: Cell::new(0),
     timeouts: Cell::new(0),
-    started_us: Cell::new(0),
-    in_flight: Cell::new(false),
+    first_us: Cell::new(0),
+    last_us: Cell::new(0),
     last_refusal: Cell::new(None),
+    started_us: [const { Cell::new(0) }; MAX_INFLIGHT],
     rtt_us: [const { Cell::new(0) }; SAMPLES],
 };
 
@@ -81,17 +105,30 @@ pub struct Summary {
     pub median_us: u32,
     pub p99_us: u32,
     pub max_us: u32,
+    /// From the first query being asked to the last one ending, warm-up included.
+    pub elapsed_us: u64,
+}
+
+/// What the node is told to do: the query, how many times, how it is asked.
+pub struct Ask {
+    pub key: &'static str,
+    pub count: u32,
+    pub timeout_ms: u32,
+    pub warmup: u32,
+    pub inflight: u32,
+    pub mailbox: bool,
 }
 
 impl Plan {
-    /// Ask for `count` queries of `key`, each pending at most `timeout_ms` (zero is the default).
-    /// The first `warmup` of them are asked and answered but not timed: they are the ones that
-    /// pay for the first touch of every page and the router's first route.
-    pub fn set(&self, key: &'static str, count: u32, timeout_ms: u32, warmup: u32) {
-        self.key.set(key);
-        self.count.set(count);
-        self.timeout_ms.set(timeout_ms);
-        self.warmup.set(warmup);
+    /// Set what the node is to ask.
+    pub fn set(&self, ask: &Ask) {
+        self.key.set(ask.key);
+        self.count.set(ask.count);
+        self.timeout_ms.set(ask.timeout_ms);
+        self.warmup.set(ask.warmup);
+        self.inflight
+            .set(ask.inflight.clamp(1, MAX_INFLIGHT as u32));
+        self.mailbox.set(ask.mailbox);
     }
 
     /// Whether the node was asked to get at all.
@@ -99,12 +136,79 @@ impl Plan {
         self.count.get() != 0
     }
 
+    /// Whether the queries go through the mailbox.
+    pub fn uses_mailbox(&self) -> bool {
+        self.mailbox.get()
+    }
+
     /// Whether every query asked for has ended.
     pub fn is_done(&self) -> bool {
         self.is_set() && self.finished.get() >= self.count.get()
     }
 
-    /// A reply arrived for the query in flight.
+    /// The lowest slot no query holds, if the node may have one more in flight.
+    fn free_slot(&self) -> Option<u8> {
+        if self.issued.get() >= self.count.get() || self.outstanding.get() >= self.inflight.get() {
+            return None;
+        }
+        (0..MAX_INFLIGHT as u8).find(|slot| self.busy.get() & (1 << slot) == 0)
+    }
+
+    /// A query takes `slot`: counted as asked, timed from now.
+    fn take(&self, slot: u8) {
+        let now_us = Clock::default().now_us();
+        if self.issued.get() == 0 {
+            self.first_us.set(now_us);
+        }
+        self.started_us[slot as usize].set(now_us);
+        self.busy.set(self.busy.get() | (1 << slot));
+        self.outstanding.set(self.outstanding.get() + 1);
+        self.issued.set(self.issued.get() + 1);
+    }
+
+    /// A query that was taken was not asked after all: nothing is pending and nothing was sent.
+    fn give_back(&self, slot: u8, why: GetError) {
+        self.busy.set(self.busy.get() & !(1 << slot));
+        self.outstanding.set(self.outstanding.get() - 1);
+        self.issued.set(self.issued.get() - 1);
+        self.refused.set(self.refused.get() + 1);
+        self.last_refusal.set(Some(why));
+    }
+
+    /// The request of the next query, in `slot`.
+    fn request(&self) -> GetRequest<'static> {
+        GetRequest {
+            keyexpr: self.key.get(),
+            parameters: b"",
+            // The peer's default, as `z_get` with its default options and pico's example ask: no
+            // consolidation flag on the wire.
+            consolidation: None,
+            target: None,
+            timeout_ms: self.timeout_ms.get(),
+            qos: QosLevel::DEFAULT,
+        }
+    }
+
+    /// Leave as many queries in the mailbox as there are places free, from the main loop. How many
+    /// were left: the caller wakes the session's loop when it is not none.
+    pub fn top_up(&self) -> u32 {
+        let mut left = 0;
+        while let Some(slot) = self.free_slot() {
+            self.take(slot);
+            if MAILBOX.post(&self.request(), PlanSink { slot }).is_err() {
+                // The mailbox has no room: a place is free in the plan and not in the mailbox,
+                // which the layer's next event makes right. Try again then.
+                self.busy.set(self.busy.get() & !(1 << slot));
+                self.outstanding.set(self.outstanding.get() - 1);
+                self.issued.set(self.issued.get() - 1);
+                break;
+            }
+            left += 1;
+        }
+        left
+    }
+
+    /// A reply arrived for a query in flight.
     fn reply(&self, view: &dyn ReplyView) {
         if view.kind() == ReplyKind::Err {
             self.errors.set(self.errors.get() + 1);
@@ -115,20 +219,23 @@ impl Plan {
         }
     }
 
-    /// The query in flight ended.
-    fn end(&self, timed_out: bool) {
+    /// The query in `slot` ended.
+    fn end(&self, slot: u8, timed_out: bool) {
         let now_us = Clock::default().now_us();
         if let Some(timed_at) = self.finished.get().checked_sub(self.warmup.get()) {
             if let Some(cell) = self.rtt_us.get(timed_at as usize) {
-                let elapsed = now_us.saturating_sub(self.started_us.get());
+                let elapsed = now_us.saturating_sub(self.started_us[slot as usize].get());
                 cell.set(u32::try_from(elapsed).unwrap_or(u32::MAX));
             }
         }
         if timed_out {
             self.timeouts.set(self.timeouts.get() + 1);
         }
+        self.last_us.set(now_us);
         self.finished.set(self.finished.get() + 1);
-        self.in_flight.set(false);
+        self.busy.set(self.busy.get() & !(1 << slot));
+        self.outstanding
+            .set(self.outstanding.get().saturating_sub(1));
     }
 
     /// Why the last attempt was refused, if one was.
@@ -169,20 +276,25 @@ impl Plan {
             replies: self.replies.get(),
             errors: self.errors.get(),
             timeouts: self.timeouts.get(),
-            refused: self.refused.get(),
+            // Counting what the mailbox refused for good, which the plan counts as in flight.
+            refused: self.refused.get() + MAILBOX.rejected(),
             payload_bytes: self.payload_bytes.get(),
             timed,
             min_us: at(0),
             median_us: at(500),
             p99_us: at(990),
             max_us: samples.last().copied().unwrap_or(0),
+            elapsed_us: self.last_us.get().saturating_sub(self.first_us.get()),
         }
     }
 }
 
-/// The sink of every query this node asks: a unit, because the state is [`PLAN`]'s.
+/// The sink of every query this node asks: the slot of the query in [`PLAN`], whose state is the
+/// `static`'s.
 #[derive(Clone, Copy, Default)]
-pub struct PlanSink;
+pub struct PlanSink {
+    slot: u8,
+}
 
 impl ReplySink for PlanSink {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
@@ -190,21 +302,21 @@ impl ReplySink for PlanSink {
     }
 
     fn on_final(&mut self, _rid: u64) {
-        PLAN.end(false);
+        PLAN.end(self.slot, false);
     }
 
     /// An expired query ends with a timeout, which is counted and not delivered as a reply: the
     /// default would hand the sink a synthetic error first.
     fn on_timeout(&mut self, _rid: u64) {
-        PLAN.end(true);
+        PLAN.end(self.slot, true);
     }
 }
 
 /// The requests a session of this node holds: the pending queries, and no liveliness get.
 pub type Requests = Requesters<PlanSink, NoReplies>;
 
-/// The application layer of a getter session: the node's dispatch, and the next query asked as
-/// soon as the last one ended.
+/// The application layer of a getter session: the node's dispatch, and the queries asked as soon as
+/// a place is free (in the event), or the mailbox taken (`--mailbox`).
 pub struct GetterEvents<K: ObserverSinks + 'static> {
     inner: SlotDispatch<Clock, PlanSink, NoReplies, K>,
 }
@@ -218,36 +330,28 @@ impl<K: ObserverSinks + 'static> GetterEvents<K> {
 impl<K: ObserverSinks + 'static> SessionEvents for GetterEvents<K> {
     fn on_event(&mut self, event: wz_session_core::driver_loop::IterationEvent<'_>) {
         self.inner.on_event(event);
-        // A query is asked when the session can send it and the last one is over.
         let plan = &PLAN;
-        if plan.in_flight.get()
-            || plan.issued.get() >= plan.count.get()
-            || !self.inner.is_established()
-        {
+        if plan.uses_mailbox() {
+            // What the main loop left; it also wakes the loop when it leaves something.
+            self.inner.drain_mailbox(&MAILBOX);
             return;
         }
-        let request = GetRequest {
-            keyexpr: plan.key.get(),
-            parameters: b"",
-            // The peer's default, as `z_get` with its default options and pico's example ask: no
-            // consolidation flag on the wire.
-            consolidation: None,
-            target: None,
-            timeout_ms: plan.timeout_ms.get(),
-            qos: QosLevel::DEFAULT,
-        };
-        plan.started_us.set(Clock::default().now_us());
-        plan.in_flight.set(true);
-        match self.inner.get(&request, PlanSink) {
-            Ok(_) => plan.issued.set(plan.issued.get() + 1),
-            Err(why) => {
-                // Refused: nothing is pending and nothing was sent. It is counted and the next
-                // event asks again, so a session that has just lost its transport does not end
-                // the run with a query that was never asked. The last reason is kept, because a
-                // count alone cannot tell a full table from a refused write.
-                plan.in_flight.set(false);
-                plan.refused.set(plan.refused.get() + 1);
-                plan.last_refusal.set(Some(why));
+        // A query is asked when the session can send it and a place is free.
+        while self.inner.is_established() {
+            let Some(slot) = plan.free_slot() else {
+                return;
+            };
+            plan.take(slot);
+            match self.inner.get(&plan.request(), PlanSink { slot }) {
+                Ok(_) => {}
+                Err(why) => {
+                    // Refused: nothing is pending and nothing was sent. It is counted and the
+                    // next event asks again, so a session that has just lost its transport does
+                    // not end the run with a query that was never asked. The last reason is
+                    // kept, because a count alone cannot tell a full table from a refused write.
+                    plan.give_back(slot, why);
+                    return;
+                }
             }
         }
     }

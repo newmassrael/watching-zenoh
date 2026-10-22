@@ -83,8 +83,10 @@ const TASKS: usize = SESSIONS;
 /// Bytes of one task cell: the pump's handle and the application layer's state. Wider than the
 /// kit's 384 because a pointer is eight bytes here, not four. A task the cell cannot hold is
 /// refused and counted, and the loop says so on the console rather than run a node that never
-/// starts a session.
-const TASK_BYTES: usize = 1024;
+/// starts a session. A node that asks (`get`) keeps the session's pending queries in that state,
+/// nine rows of the key text and the sink each, which is what the larger cell is for (the first run
+/// of the node with them said so on the console).
+const TASK_BYTES: usize = if cfg!(feature = "get") { 3072 } else { 1024 };
 /// Timers the runtime holds: the handshake and lease deadlines of the session.
 const TIMERS: usize = 4;
 /// The batch the node advertises: an Ethernet frame less the IPv4 and UDP headers, as the kit's.
@@ -289,7 +291,7 @@ struct Args {
     /// The key to ask, how many times, and how long a query may stay pending (zero is the
     /// default).
     #[cfg(feature = "get")]
-    get: Option<(&'static str, u32, u32, u32)>,
+    get: Option<getter::Ask>,
 }
 
 /// A NUL-terminated argument as text that lives as long as the process does: `argv` is not freed
@@ -322,13 +324,16 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
         "usage: host-slot-node <router a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...";
     #[cfg(feature = "get")]
     const USAGE: &str = "usage: host-slot-node <router a.b.c.d:port> [--local a.b.c.d] \
-                         [--doc KEY:BYTES]... [--get KEY --count N [--warmup N] [--timeout-ms MS]]";
+                         [--doc KEY:BYTES]... [--get KEY --count N [--warmup N] [--timeout-ms MS] \
+                         [--inflight K] [--mailbox]]";
     let mut router = None;
     let mut local = [0u8; 4];
     let mut docs = [None; DOCS];
     let mut taken = 0;
     #[cfg(feature = "get")]
     let (mut get_key, mut get_count, mut get_timeout, mut get_warmup) = (None, 0u32, 0u32, 0u32);
+    #[cfg(feature = "get")]
+    let (mut get_inflight, mut get_mailbox) = (1u32, false);
     let mut at = 1;
     while at < argc {
         let arg = argument(argv, at).ok_or(USAGE)?;
@@ -351,6 +356,17 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
                 let value = if at < argc { argument(argv, at) } else { None };
                 get_warmup = value.ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
             }
+            #[cfg(feature = "get")]
+            "--inflight" => {
+                at += 1;
+                let value = if at < argc { argument(argv, at) } else { None };
+                get_inflight = value.ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
+                if !(1..=getter::MAX_INFLIGHT as u32).contains(&get_inflight) {
+                    return Err("--inflight is from 1 to 8");
+                }
+            }
+            #[cfg(feature = "get")]
+            "--mailbox" => get_mailbox = true,
             #[cfg(feature = "get")]
             "--timeout-ms" => {
                 at += 1;
@@ -379,7 +395,14 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
     }
     #[cfg(feature = "get")]
     let get = match (get_key, get_count) {
-        (Some(key), count) if count > get_warmup => Some((key, count, get_timeout, get_warmup)),
+        (Some(key), count) if count > get_warmup => Some(getter::Ask {
+            key,
+            count,
+            timeout_ms: get_timeout,
+            warmup: get_warmup,
+            inflight: get_inflight,
+            mailbox: get_mailbox,
+        }),
         (None, 0) => None,
         _ => return Err(USAGE),
     };
@@ -432,7 +455,7 @@ fn report_gets() -> i32 {
     let s = getter::PLAN.summary();
     log_args(format_args!(
         "HOST-WZ-GET done issued={} finished={} replies={} errors={} timeouts={} refused={} \
-         bytes={} timed={} min_us={} median_us={} p99_us={} max_us={}",
+         bytes={} timed={} min_us={} median_us={} p99_us={} max_us={} elapsed_us={}",
         s.issued,
         s.finished,
         s.replies,
@@ -444,7 +467,8 @@ fn report_gets() -> i32 {
         s.min_us,
         s.median_us,
         s.p99_us,
-        s.max_us
+        s.max_us,
+        s.elapsed_us
     ));
     i32::from(s.errors != 0 || s.timeouts != 0 || s.replies < s.finished)
 }
@@ -493,8 +517,8 @@ fn run(args: Args) -> i32 {
         }
     };
     #[cfg(feature = "get")]
-    if let Some((key, count, timeout_ms, warmup)) = args.get {
-        getter::PLAN.set(key, count, timeout_ms, warmup);
+    if let Some(ask) = &args.get {
+        getter::PLAN.set(ask);
     }
     let stack = Stack::new(args.local, &NODE.rx, &NODE.tx).with_idle_wait_ms(IDLE_WAIT_MS);
     let host: Host = SessionHost::new(
@@ -548,6 +572,12 @@ fn run(args: Args) -> i32 {
         #[cfg(feature = "get")]
         if getter::PLAN.is_done() {
             return report_gets();
+        }
+        // `--mailbox`: this loop is not the session's event, so what it asks it leaves, and wakes
+        // the session's loop to take it.
+        #[cfg(feature = "get")]
+        if getter::PLAN.uses_mailbox() && node.is_established() && getter::PLAN.top_up() > 0 {
+            node.wake();
         }
         // A table the image sized too small refuses what it cannot hold and counts it; the
         // count moving is a node that is not doing what it was built to, so it is said.
