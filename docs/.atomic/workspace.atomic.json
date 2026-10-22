@@ -277238,6 +277238,56 @@
         "Comments in wz citing pico CMakeLists line numbers drifted by one line at 1.10.1; the map reads switches by name, not by line."
       ]
     },
+    "Round 3407": {
+      "decision_summary": "A consumer that writes picked messages and its own records into a pcapng asked for three things. The skip census names each unread interface with its link type and count (summary 8, health 5); a file with one unread interface says part of it was read. ABI 45 adds wz_dissect_live_selected_packets: the packet numbers that carried the rows a selector picks, into a caller-sized buffer, with ten counts (rows by word, rows the ceilings took, flows evicted, picked rows whose bytes are gone, context added and unplaced). A stream row names every packet of its framing unit: a frame records where its unit ends on the wire, and the WebSocket and TLS layers move that end into TCP space. The context flag adds Init, Open, Declare and chain fragment rows and the stream ahead of each direction's first message, and on TLS every record up to the last pick. ABI 46 adds wz_dissect_pcap_packets_of_link_type: one link type's packets with their epb_flags word, by offset.",
+      "changes_bullets": [
+        "wz-capture SkipCensus: unsupported_link_type_interfaces keyed by UnreadInterface (interface id, link type); a SkippedPacket carries its interface; skips JSON gains link_type_interfaces; the text names each interface and says whether the file was read in part.",
+        "doc_revision: SUMMARY_R8_KEYS and HEALTH_R5_KEYS; the C consumer and the header move with them.",
+        "wz-session-core PassiveFrame::wire_end, stamped by decode_framing_unit; WsDeframer::next_spanned_message hands the end of a message's last frame; remap_decrypted_offsets moves the end to the record holding the unit's last byte.",
+        "StreamAssembler::packets_in and FlowDissection::packets_carrying; selection_json rows carry their source; selected_packets module.",
+        "wz-capi-dissect: wz_dissect_live_selected_packets with WzDissectSelectedPackets and two flags (ABI 45); wz_dissect_pcap_packets_of_link_type with WzDissectRawPacket (ABI 46); pcapng packets carry epb_flags; captured_frames_of_link_type; pcapng::write_flagged.",
+        "capi_abi_pin, analysis_surface_parity: the two symbols, each DELIBERATE with its reason."
+      ],
+      "verification_bullets": [
+        "pc2: cargo test of wz-capture (default and all features), wz-capi-dissect, wz-session-core (all features) and wz-analyze; clippy of each with -D warnings, one crate per command.",
+        "pc2: run-ci Layer C1bo green at ABI 46 (C consumer, capi-abi-pin with 60 symbols, header subsumption, bound names, unknown-value policy).",
+        "New tests: a three-interface pcapng names each unread interface with its count; a TCP message split over two segments names both packets and the one-segment control names one; a split WebSocket frame and a fragmented message each name both packets; a TLS unit ends at its record's end; context adds the handshake and the Declare; a list a ceiling made short counts what it took; a link type's packets come back with flags and offsets, and a cut container says so.",
+        "Local: analysis_surface_parity, capi_unknown_value_policy, doc_revision_consumer_pin, rustfmt."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "A WebSocket message enters the observer through the datagram entry point, so its frames are labelled PacketIndex while their anchor is a TCP byte offset; capture order, records' anchor_space and message_bytes on a WebSocket flow may read that anchor wrongly. Unverified by a probe; the new door is not affected (it reads the anchor as bytes on every stream flow).",
+        "Context takes every Declare of a flow, not only the one a picked row resolves through; the summary's context_packets shows the cost.",
+        "The consumer's closing tests run on its own log files once these land."
+      ],
+      "publishable_decision_summary": "A consumer that writes picked messages and its own records into a pcapng asked for three things. The skip census names each unread interface with its link type and count (summary 8, health 5); a file with one unread interface says part of it was read. ABI 45 adds wz_dissect_live_selected_packets: the packet numbers that carried the rows a selector picks, into a caller-sized buffer, with ten counts (rows by word, rows the ceilings took, flows evicted, picked rows whose bytes are gone, context added and unplaced). A stream row names every packet of its framing unit: a frame records where its unit ends on the wire, and the WebSocket and TLS layers move that end into TCP space. The context flag adds Init, Open, Declare and chain fragment rows and the stream ahead of each direction's first message, and on TLS every record up to the last pick. ABI 46 adds wz_dissect_pcap_packets_of_link_type: one link type's packets with their epb_flags word, by offset.",
+      "publishable_changes_bullets": [
+        "wz-capture SkipCensus: unsupported_link_type_interfaces keyed by UnreadInterface (interface id, link type); a SkippedPacket carries its interface; skips JSON gains link_type_interfaces; the text names each interface and says whether the file was read in part.",
+        "doc_revision: SUMMARY_R8_KEYS and HEALTH_R5_KEYS; the C consumer and the header move with them.",
+        "wz-session-core PassiveFrame::wire_end, stamped by decode_framing_unit; WsDeframer::next_spanned_message hands the end of a message's last frame; remap_decrypted_offsets moves the end to the record holding the unit's last byte.",
+        "StreamAssembler::packets_in and FlowDissection::packets_carrying; selection_json rows carry their source; selected_packets module.",
+        "wz-capi-dissect: wz_dissect_live_selected_packets with WzDissectSelectedPackets and two flags (ABI 45); wz_dissect_pcap_packets_of_link_type with WzDissectRawPacket (ABI 46); pcapng packets carry epb_flags; captured_frames_of_link_type; pcapng::write_flagged.",
+        "capi_abi_pin, analysis_surface_parity: the two symbols, each DELIBERATE with its reason."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: cargo test of wz-capture (default and all features), wz-capi-dissect, wz-session-core (all features) and wz-analyze; clippy of each with -D warnings, one crate per command.",
+        "pc2: run-ci Layer C1bo green at ABI 46 (C consumer, capi-abi-pin with 60 symbols, header subsumption, bound names, unknown-value policy).",
+        "New tests: a three-interface pcapng names each unread interface with its count; a TCP message split over two segments names both packets and the one-segment control names one; a split WebSocket frame and a fragmented message each name both packets; a TLS unit ends at its record's end; context adds the handshake and the Declare; a list a ceiling made short counts what it took; a link type's packets come back with flags and offsets, and a cut container says so.",
+        "Local: analysis_surface_parity, capi_unknown_value_policy, doc_revision_consumer_pin, rustfmt."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A WebSocket message enters the observer through the datagram entry point, so its frames are labelled PacketIndex while their anchor is a TCP byte offset; capture order, records' anchor_space and message_bytes on a WebSocket flow may read that anchor wrongly. Unverified by a probe; the new door is not affected (it reads the anchor as bytes on every stream flow).",
+        "Context takes every Declare of a flow, not only the one a picked row resolves through; the summary's context_packets shows the cost.",
+        "The consumer's closing tests run on its own log files once these land."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
