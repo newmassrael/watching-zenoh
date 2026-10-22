@@ -242,6 +242,33 @@ pub fn canonize_keyexpr_as<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
 ) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
+    // A text with no `$` and no `*` has no wild chunk: there is no `$*` run to collapse and no wild
+    // run to reorder, so its canonical form is the text itself once every chunk has been judged.
+    // This is the shape of nearly every key a program names (`demo/doc`), and it is made in one
+    // copy where the two passes below make three. The refusals are the passes' own, in their order:
+    // the capacity of the first pass, then each chunk's verdict and the chunk count the second.
+    if !input.bytes().any(|b| b == b'$' || b == b'*') {
+        let mut out = BoundedString::default();
+        out.push_str(input)
+            .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+        for (n, chunk) in input.split('/').enumerate() {
+            analyze_chunk(chunk)?;
+            if P::ENFORCES_CAPACITY && n >= MAX_KEYEXPR_CHUNKS {
+                return Err(KeyexprCanonError::ExceedsCapacity);
+            }
+        }
+        return Ok(out);
+    }
+    canonize_in_two_passes::<P>(input, dialect)
+}
+
+/// The canonizer's two passes, for any text: collapse the `$*` runs, then walk the chunks. The
+/// fast path of [`canonize_keyexpr_as`] answers what these answer for a text with neither `$` nor
+/// `*`, and a test holds the two to each other.
+fn canonize_in_two_passes<P: Storage>(
+    input: &str,
+    dialect: KeyexprDialect,
+) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
     let collapsed = collapse_dsl_runs::<P>(input)?;
     canonize_chunks::<P>(&collapsed, dialect)
 }
@@ -985,6 +1012,95 @@ fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The fast path for a text with no `$` and no `*` answers what the two passes answer ──
+
+    #[cfg(feature = "alloc")]
+    use alloc::string::String;
+    #[cfg(feature = "alloc")]
+    use alloc::{borrow::ToOwned, format, vec, vec::Vec};
+
+    /// One corpus, both policies, both dialects: the answer of [`canonize_keyexpr_as`] is the
+    /// answer of the two passes, the refusal and its kind included. The corpus holds the texts the
+    /// fast path takes (literals, empty chunks, `?` and `#`, a text past the byte bound, and chunk
+    /// counts at, past and far past the chunk bound with a bad chunk behind the bound) and the ones
+    /// it leaves to the passes, so a text that moved between the two would show.
+    #[cfg(feature = "alloc")]
+    fn fast_path_corpus() -> Vec<String> {
+        let mut texts: Vec<String> = [
+            "demo/doc",
+            "a",
+            "home/temp",
+            "a/b/c/d/e/f",
+            "",
+            "/",
+            "a/",
+            "/a",
+            "a//b",
+            "a?b",
+            "a#b",
+            "a/b?/c",
+            "home/*/temp",
+            "home/**/temp",
+            "home/**/*/temp",
+            "a/$*/b",
+            "a$*$*b",
+            "a$b",
+            "$",
+            "a/**/**",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        texts.push("x".repeat(MAX_KEYEXPR_BYTES));
+        texts.push("x".repeat(MAX_KEYEXPR_BYTES + 1));
+        for chunks in [
+            MAX_KEYEXPR_CHUNKS - 1,
+            MAX_KEYEXPR_CHUNKS,
+            MAX_KEYEXPR_CHUNKS + 1,
+        ] {
+            texts.push(vec!["a"; chunks].join("/"));
+        }
+        // A bad chunk behind the chunk bound: the bound is reached first on a policy that
+        // enforces it, the bad chunk first where it does not.
+        let mut behind = vec!["a"; MAX_KEYEXPR_CHUNKS + 1];
+        behind.push("");
+        texts.push(behind.join("/"));
+        let mut behind_q = vec!["a"; MAX_KEYEXPR_CHUNKS + 1];
+        behind_q.push("b?");
+        texts.push(behind_q.join("/"));
+        texts
+    }
+
+    #[cfg(feature = "alloc")]
+    fn fast_path_agrees_with_the_passes<P: Storage>() {
+        for text in fast_path_corpus() {
+            for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+                let fast = canonize_keyexpr_as::<P>(&text, dialect).map(|o| o.as_str().to_owned());
+                let passes =
+                    canonize_in_two_passes::<P>(&text, dialect).map(|o| o.as_str().to_owned());
+                assert_eq!(
+                    format!("{fast:?}"),
+                    format!("{passes:?}"),
+                    "{} bytes, {} chunks, {dialect:?}",
+                    text.len(),
+                    text.split('/').count()
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_fast_path_agrees_with_the_passes_on_a_heap_policy() {
+        fast_path_agrees_with_the_passes::<crate::bounded::Heap>();
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_fast_path_agrees_with_the_passes_on_a_static_policy() {
+        fast_path_agrees_with_the_passes::<crate::bounded::Static>();
+    }
 
     // ── Identity (already-canonical input passes through) ──
 
