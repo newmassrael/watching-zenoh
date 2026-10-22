@@ -278074,6 +278074,62 @@
         "wz_dissect_live_selection_since still folds the whole capture on every call by its own documentation; nothing here changed that."
       ]
     },
+    "Round 3424": {
+      "decision_summary": "Let a node with no allocator ask, and measure it against zenoh-pico (4 commits). A get is now written from borrowed text (lent_request, byte-equal to the owned builder over 3,456 field combinations), sent into the lent slot (send_get_parts), and issued by SlotDispatch::get (feature query-get), which registers the pending query, sends it, and rolls the row back if the send fails; the dispatch also sweeps expired queries. host-slot-node --features get asks N queries in turn. Same host, one zenoh queryable answering 1 KiB behind a fresh router, getter order shuffled, 15 runs: GET median 76.0 us (wz), 80.4 (pico, one thread), 81.0 (pico, threads), 99.9 (zenoh, UDP), 96.3 (zenoh-c, TCP); CPU a query, lowest of 7 on a busier host: 9.4, 9.9, 15.8, 46.0, 45.5 us. wz and single-thread pico are one figure on CPU; no order is claimed. The no-allocator gate now classifies host-slot-node as gated, which the previous round left unclassified.",
+      "changes_bullets": [
+        "wz-session-core: lent_request (GetParts, RequestWriter, RequestRefusal) writes the borrowed Request(Query) for a literal keyexpr, selector parameters, consolidation, target, timeout and QoS; SessionLinkActions::send_get_parts sends it, and send_request_query uses it where there is no allocator (a request naming a mapping id is still refused there).",
+        "wz-session-mcu: feature query-get; app_layer SlotDispatch::get (register the pending query, send, unregister on a failed send), GetRequest, GetError, DEFAULT_GET_TIMEOUT_MS, is_established, pending_gets, next_get_deadline_ms; the dispatch sweeps expired queries on every event.",
+        "deploy/host-slot-node: feature get (--get KEY --count N [--warmup N] [--timeout-ms MS]), getter.rs with the plan, the sink and the events, a progress line each second and a summary line; WZ_LIMIT_MAX_PENDING_QUERIES is 2.",
+        "scripts/lib/no_allocator_link_gate.py: host-slot-node is a gated image (plain, and with get and batching) built on the host target; the source scan skips macro_rules bodies, whose cfg is a pattern. scripts/lib/feature_public_surface_census.py: query-get.",
+        "docs/storage-policy-and-link-layer.md: section 5.2 with the conditions and the table."
+      ],
+      "verification_bullets": [
+        "Build host, one pinned zenohd, one zenoh queryable answering 1 KiB over TCP, the getter asking over UDP (zenoh-c over TCP), 2,000 queries timed after 200 that are not, fresh router and responder each run, order shuffled, getters pinned to two cores. GET median over 15 runs: wz node 76.0 us, pico one thread 80.4, pico two threads 81.0, zenoh Rust 99.9, zenoh-c 96.3; p99 95.0, 336.3, 101.9, 160.9, 121.7 us. 200 of 200 replies of 1,024 bytes, no error and no timeout, in every run.",
+        "CPU time a query, lowest of 7 runs of 20,200 queries (start-up included), taken while the shared host's load was 2 to 5: wz 9.4 us, pico one thread 9.9, pico two threads 15.8, zenoh Rust 46.0, zenoh-c 45.5. The latencies of that run were higher than in the quiet one, so only the CPU figures are read from it.",
+        "Tests: the borrowed request equals the owned one over 3,456 combinations, with and without the parameters feature; the test fails under a mutation of the timeout extension's header. The no-allocator gate fails without the macro_rules skip (its self-test, mutated) and passes with it; host-slot-node reads clean, as gated, in both builds. clippy -D warnings of wz-session-core, wz-session-mcu (client-slot with query-get, and the default) and the node in three feature sets; wz-session-mcu lib tests 3 passed. Census check and self-test pass.",
+        "validate-workspace: T1 orphan 14, unchanged.",
+        "Not run here: the full local CI sweep, the kit image and its stack gate after the dispatch change (the Zephyr client does not select query-get), a node with more than one query in flight, other payload sizes, a real network, and TCP for the wz node. zenoh-c's column is TCP, the others UDP."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round. Layer C0 was red on the previous push for the missing no-allocator row, which this round repairs; C1bz, C1cf and C1cs belong to the multicast group work.",
+        "The pending-table wake: a link that sleeps while idle must wake no later than SlotDispatch::next_get_deadline_ms, or a query ends late by as much as the sleep; the image does not feed it to the link yet, so a query with a short timeout can end up to the idle wait late.",
+        "Next candidates, in order: idle wait and batching on the Zephyr socket (needs a kit run); one shared fixed-client application and a runtime axis in deploy/capabilities.toml and Kconfig; a node with several queries in flight, and a mailbox for an application that asks from outside the session's event.",
+        "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
+      ],
+      "publishable_decision_summary": "Let a node with no allocator ask, and measure it against zenoh-pico (4 commits). A get is now written from borrowed text (lent_request, byte-equal to the owned builder over 3,456 field combinations), sent into the lent slot (send_get_parts), and issued by SlotDispatch::get (feature query-get), which registers the pending query, sends it, and rolls the row back if the send fails; the dispatch also sweeps expired queries. host-slot-node --features get asks N queries in turn. Same host, one zenoh queryable answering 1 KiB behind a fresh router, getter order shuffled, 15 runs: GET median 76.0 us (wz), 80.4 (pico, one thread), 81.0 (pico, threads), 99.9 (zenoh, UDP), 96.3 (zenoh-c, TCP); CPU a query, lowest of 7 on a busier host: 9.4, 9.9, 15.8, 46.0, 45.5 us. wz and single-thread pico are one figure on CPU; no order is claimed. The no-allocator gate now classifies host-slot-node as gated, which the previous round left unclassified.",
+      "publishable_changes_bullets": [
+        "wz-session-core: lent_request (GetParts, RequestWriter, RequestRefusal) writes the borrowed Request(Query) for a literal keyexpr, selector parameters, consolidation, target, timeout and QoS; SessionLinkActions::send_get_parts sends it, and send_request_query uses it where there is no allocator (a request naming a mapping id is still refused there).",
+        "wz-session-mcu: feature query-get; app_layer SlotDispatch::get (register the pending query, send, unregister on a failed send), GetRequest, GetError, DEFAULT_GET_TIMEOUT_MS, is_established, pending_gets, next_get_deadline_ms; the dispatch sweeps expired queries on every event.",
+        "deploy/host-slot-node: feature get (--get KEY --count N [--warmup N] [--timeout-ms MS]), getter.rs with the plan, the sink and the events, a progress line each second and a summary line; WZ_LIMIT_MAX_PENDING_QUERIES is 2.",
+        "scripts/lib/no_allocator_link_gate.py: host-slot-node is a gated image (plain, and with get and batching) built on the host target; the source scan skips macro_rules bodies, whose cfg is a pattern. scripts/lib/feature_public_surface_census.py: query-get.",
+        "docs/storage-policy-and-link-layer.md: section 5.2 with the conditions and the table."
+      ],
+      "publishable_verification_bullets": [
+        "Build host, one pinned zenohd, one zenoh queryable answering 1 KiB over TCP, the getter asking over UDP (zenoh-c over TCP), 2,000 queries timed after 200 that are not, fresh router and responder each run, order shuffled, getters pinned to two cores. GET median over 15 runs: wz node 76.0 us, pico one thread 80.4, pico two threads 81.0, zenoh Rust 99.9, zenoh-c 96.3; p99 95.0, 336.3, 101.9, 160.9, 121.7 us. 200 of 200 replies of 1,024 bytes, no error and no timeout, in every run.",
+        "CPU time a query, lowest of 7 runs of 20,200 queries (start-up included), taken while the shared host's load was 2 to 5: wz 9.4 us, pico one thread 9.9, pico two threads 15.8, zenoh Rust 46.0, zenoh-c 45.5. The latencies of that run were higher than in the quiet one, so only the CPU figures are read from it.",
+        "Tests: the borrowed request equals the owned one over 3,456 combinations, with and without the parameters feature; the test fails under a mutation of the timeout extension's header. The no-allocator gate fails without the macro_rules skip (its self-test, mutated) and passes with it; host-slot-node reads clean, as gated, in both builds. clippy -D warnings of wz-session-core, wz-session-mcu (client-slot with query-get, and the default) and the node in three feature sets; wz-session-mcu lib tests 3 passed. Census check and self-test pass.",
+        "validate-workspace: T1 orphan 14, unchanged.",
+        "Not run here: the full local CI sweep, the kit image and its stack gate after the dispatch change (the Zephyr client does not select query-get), a node with more than one query in flight, other payload sizes, a real network, and TCP for the wz node. zenoh-c's column is TCP, the others UDP."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round. Layer C0 was red on the previous push for the missing no-allocator row, which this round repairs; C1bz, C1cf and C1cs belong to the multicast group work.",
+        "The pending-table wake: a link that sleeps while idle must wake no later than SlotDispatch::next_get_deadline_ms, or a query ends late by as much as the sleep; the image does not feed it to the link yet, so a query with a short timeout can end up to the idle wait late.",
+        "Next candidates, in order: idle wait and batching on the Zephyr socket (needs a kit run); one shared fixed-client application and a runtime axis in deploy/capabilities.toml and Kconfig; a node with several queries in flight, and a mailbox for an application that asks from outside the session's event.",
+        "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
