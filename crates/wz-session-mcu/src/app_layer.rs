@@ -377,7 +377,10 @@ mod tests {
                 put.payload_len = Some(4);
                 put.payload = Some(b"21.0");
             }
-            NetworkMessage::Push(Box::new(push.try_into_owned().unwrap()))
+            NetworkMessage::Push(Box::new(
+                push.try_into_owned_in::<wz_session_core::wire::WireStorage>()
+                    .unwrap(),
+            ))
         };
         let query = || {
             let request = Request {
@@ -386,7 +389,11 @@ mod tests {
                 body: RequestVariant::CodecZenohQuery(Query::default()),
                 ..Request::default()
             };
-            NetworkMessage::Request(Box::new(request.try_into_owned().unwrap()))
+            NetworkMessage::Request(Box::new(
+                request
+                    .try_into_owned_in::<wz_session_core::wire::WireStorage>()
+                    .unwrap(),
+            ))
         };
         // Whether any datagram the peer received carries the reply payload.
         let peer_saw_pong = || {
