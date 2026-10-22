@@ -5783,9 +5783,12 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *                                              kind (`request_seq` is `null` once
  *                                              the request's ROW is gone)
  *
- * and /carried[]/e2e, which this door does not keep across a trim at all: a rule
- * that binds a key to an end-to-end profile makes every call walk the whole
- * capture (see WHAT A CALL COSTS), so with such a rule the two doors agree.
+ * and /carried[]/e2e, whose counters this door keeps across a trim like the rest
+ * (see WHAT A CALL COSTS): a slot's verdict depends on the frames of its slot
+ * before it, this door judges the frames that arrived against the counters its
+ * last walk left, and the whole-document door counts the frames it holds, so
+ * after a trim a rule that binds a key to an end-to-end profile can make the two
+ * read differently there too.
  * The exchange pairing is dropped and begun again over what is held when its
  * tables outgrow the lists (past four entries per held message), once per that
  * many new messages; a final written in that call, and a row compared after it,
@@ -5858,11 +5861,18 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *   - the cursor is not below the one the last document gave
  *     (`window.through_seq`);
  *   - every row has a sequence number;
- *   - no declaration rule binds a key to an end-to-end profile;
  *   - no QUIC list holds a message;
- *   - the last document did not end inside a list (a window from
- *     wz_dissect_live_fields_since_window that stopped before the end);
- *   - the container you pass is the one the last call read.
+ *   - the container you pass is the one the last call read: it is no shorter
+ *     than what the last call consumed, and those bytes are unchanged;
+ *   - when a declaration rule binds a key to an end-to-end profile, no slot has
+ *     been judged from two lists and the counters have not outgrown what the
+ *     lists hold (four entries per held message, and a thousand more).
+ * A window that stops before the end of a list is NOT such a state: the walk is
+ * left where the window ended, and the next window, asked from the cursor this
+ * one gave, goes on from there, so the windows of a capture taken in order visit
+ * each message once. A rule that binds a key to an end-to-end profile is not one
+ * either: the counters the last walk left are kept, and the frames that arrived
+ * are judged against them.
  * These are the states that make a call walk the whole capture; a ceiling that
  * trims the front is not among them. The node census the grouping comes from is
  * kept the same way, across trims too, and begins again only when a message that
