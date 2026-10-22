@@ -153,6 +153,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 V7M = "thumbv7m-none-eabi"
 V6M = "thumbv6m-none-eabi"
 V7EMHF = "thumbv7em-none-eabihf"
+# The build host's own target: the images that run as a process here, not on a board.
+HOST = "x86_64-unknown-linux-gnu"
 
 
 @dataclass(frozen=True)
@@ -484,6 +486,21 @@ IMAGES: dict[str, Image] = {
         ),
         ci=False,
     ),
+    # The fixed-memory client as a Linux process (`wz-runtime-posix` under the slot profile): the
+    # kit's session code over the host's sockets, `#![no_std]`, with no `#[global_allocator]`, so
+    # a crate of its graph that names `alloc` is a link error. Built on the host target, as the
+    # process runs; the second build is the node with every option on (the getter and the batching
+    # window), the widest the image is made.
+    "host-slot-node": Image(
+        "deploy/host-slot-node/Cargo.toml",
+        "bin",
+        "host-slot-node",
+        "gated",
+        (
+            Build(HOST, label="linux-x86_64"),
+            Build(HOST, None, ("get", "batching"), label="linux-x86_64-get-batching"),
+        ),
+    ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet
     # driver and nothing else. It takes the heap form of the Zephyr profile (the crates that carry
     # the seams name a task pool of their own), and the allocator is the kernel's.
@@ -715,6 +732,34 @@ _ITEM_KEYWORD_RE = re.compile(
 )
 
 
+# `macro_rules! name` up to the bracket that opens its body.
+_MACRO_RULES_RE = re.compile(r"macro_rules\s*!\s*[A-Za-z_][A-Za-z0-9_]*\s*(?=[{(\[])")
+
+_CLOSERS = {"{": "}", "(": ")", "[": "]"}
+
+
+def _skip_balanced(text: str, start: int) -> int:
+    """The index just past the bracket group that opens at `start` (and past the `;` a
+    parenthesised or bracketed macro body is followed by). Strings are blanked by
+    `strip_comments`, so a bracket in a literal cannot unbalance it. An unterminated
+    group ends at the end of the text."""
+    stack: list[str] = []
+    i, n = start, len(text)
+    while i < n:
+        c = text[i]
+        if c in _CLOSERS:
+            stack.append(_CLOSERS[c])
+        elif stack and c == stack[-1]:
+            stack.pop()
+            if not stack:
+                i += 1
+                break
+        i += 1
+    while i < n and text[i] in " \t\r\n":
+        i += 1
+    return i + 1 if i < n and text[i] == ";" else i
+
+
 @dataclass
 class AllocDecl:
     file: str
@@ -803,6 +848,16 @@ class ModuleScan:
                     else:
                         self.warnings.append(f"{_rel(path, rel_base)}:{line_of(i)}: `mod {name};` has no file")
                 i = m_item.end()
+                pending_cfg, pending_path = [], None
+                continue
+            m_macro = _MACRO_RULES_RE.match(text, i)
+            if m_macro:
+                # A macro's definition is a pattern and a template, not a module tree: the
+                # `#[cfg($($meta:meta),*)]` in it (the `libc` crate has them) names no
+                # predicate, and a declaration written in a template exists only where the
+                # macro is invoked. The allocator's own symbols, which the other half of
+                # this gate reads, cover what an expansion declares.
+                i = _skip_balanced(text, m_macro.end())
                 pending_cfg, pending_path = [], None
                 continue
             if m_item or _ITEM_KEYWORD_RE.match(text, i):
@@ -1908,6 +1963,15 @@ def _selftest() -> int:
             "mod always;\n"
             '#[cfg(feature = "gated")]\nmod gated;\n'
             'mod inline {\n    #[cfg(test)]\n    extern crate alloc;\n}\n'
+            # a macro's pattern is not a predicate and its template is not a module: the
+            # `libc` crate writes `#[cfg($($meta:meta),*)]` in one, which no evaluator can
+            # judge, and an `extern crate alloc;` in a template is declared where it is used
+            "macro_rules! cfg_if {\n"
+            "    ($($meta:meta),*) => {\n"
+            "        #[cfg($($meta),*)]\n"
+            "        extern crate alloc;\n"
+            "    };\n"
+            "}\n"
         )
         (src / "tests.rs").write_text("extern crate alloc;\n")
         (src / "always.rs").write_text("mod deeper;\n")
