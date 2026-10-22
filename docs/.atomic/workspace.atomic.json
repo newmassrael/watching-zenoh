@@ -277458,6 +277458,72 @@
         "Item 912: bt and a board's USB CDC serial need hardware to witness."
       ]
     },
+    "Round 3411": {
+      "decision_summary": "Record the stack line of the storage-policy work (15 commits on top of a422fb80c): the fixed client's main-stack peak fell from 9,856 B to 5,928 B and its declared stack from 16,384 B to 9,216 B, by building objects where they live (a pump in its cell, the engine in its slot through the SCE pin c244f4e171), by out-of-line phases, and by reading a lent Request as a codec view. Measured on the T2G kit against zenoh-pico built the same way: pico uses 5,680 B across its two threads, wz 5,928 B on one; the two have different feature sets and kernel settings, so no order is claimed. Also repairs the C1bz doc-link budgets this work moved (the R3410 row had left them open) and acknowledges Platform run 39758930532.",
+      "changes_bullets": [
+        "wz-session-core: parse_init, parse_open and parse_close out of line; the handshake extension chain is decoded in place after its frame; dispatch_network_message_at, the observer drains and SlotClaim::open are separate frames; new_session_engine_in builds the engine in a given slot.",
+        "wz-runtime-coop: SessionPump::build_in writes the pump into its cell field by field; PumpSlots::claim uses it.",
+        "SCE pin c244f4e171 and regenerated out/**; every codec is generated with its view; ext_view, network_message, driver_loop, query/in_place and wireexpr_resolve read a lent Request through RequestView, with iterator-form extension readers.",
+        "deploy/zephyr-admin-node t2g_client_fixed.conf: main stack 16384 to 9216 B (rule: at least 1.5 times the measured peak); multicast-e2e footprint baselines moved by the pin (+1096 B and +768 B).",
+        "docs/storage-policy-and-link-layer.md: stack history, the view conversion and the pico comparison by the sum of its threads.",
+        "C1bz: full-path links in bounded.rs, byte_cells.rs, keyexpr_match.rs, wireexpr_resolve.rs, reply_stage.rs and the tokio session module; budgets wz-session-core 499 to 495 and wz 2 to 4; four links in wz-runtime-zephyr, wz-session-lwip and wz-session-mcu are code spans."
+      ],
+      "verification_bullets": [
+        "Kit, fixed client: main-stack peak 9,856 to 5,928 B; data plus bss about 118.0 KB to 110,826 B; text 154,896 to 157,088 B (the view code); stack_frame_gate passes (largest frame 2,408 B, budget 4,608 B).",
+        "Kit, same-condition pico (heap pool 16 KB, stacks 4 KB, the same two GET documents, 2000 GETs, no bad answers): stack used 5,680 B across two threads, 2 x 4,096 B reserved, heap used 9,416 B, data plus bss 154,649 B, text 164,396 B. No ordering is claimed.",
+        "Layer Q footprint passed after the pin and after the views, before the rebase onto a422fb80c; the pin alone accounts for +880 B and +896 B of multicast-e2e text, found by building the commit before it.",
+        "After the rebase onto a422fb80c: the whole Layer C1bz ran green on a build host, and the guarded-count gate over origin/main..HEAD judged 20 of 20 reached guards.",
+        "validate-workspace: T1 orphan 14, unchanged; ledger entries 3403 before this one.",
+        "Platform run 39758930532 and CI run 39733003983 were read per job from their own logs; the reds are another session's wz-capi-pico work and its gates, except C1bz, which this work caused and this push repairs.",
+        "Not run here: the full local CI sweep, host tests after the rebase, Layer Q after the rebase, and any measurement of zenoh or zenoh-c."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; a red is its own round.",
+        "The receive-side extension depth cap (max-depth 8, on-overflow reject) rejects a message that zenoh and zenoh-pico accept; it is a declared choice in the document, not yet a registered debt. SCE treats a counting skip as a feature request needing the exact behaviour wanted.",
+        "RequestView is invariant in its lifetime, so a view is decoded from a fresh short-lived cursor; SCE has taken the lendable-view fix as its next view change.",
+        "Other records still read as eager forms: lend_declare 2,064 B, lend_push 1,776 B, lend_response 1,280 B, network dispatch 2,104 B.",
+        "The Platform run 39758930532 is red in two wz-capi-pico jobs (Windows: Z_OK not imported in os/windows.rs; macOS: the admin_space_roundtrip target needs features the probe does not pass); both belong to another session's capi-pico work and are acknowledged, not repaired.",
+        "Not compared and not claimed: zenoh (Rust) and zenoh-c on the same kit and workload."
+      ],
+      "publishable_decision_summary": "Record the stack line of the storage-policy work (15 commits on top of a422fb80c): the fixed client's main-stack peak fell from 9,856 B to 5,928 B and its declared stack from 16,384 B to 9,216 B, by building objects where they live (a pump in its cell, the engine in its slot through the SCE pin c244f4e171), by out-of-line phases, and by reading a lent Request as a codec view. Measured on the T2G kit against zenoh-pico built the same way: pico uses 5,680 B across its two threads, wz 5,928 B on one; the two have different feature sets and kernel settings, so no order is claimed. Also repairs the C1bz doc-link budgets this work moved (the R3410 row had left them open) and acknowledges Platform run 39758930532.",
+      "publishable_changes_bullets": [
+        "wz-session-core: parse_init, parse_open and parse_close out of line; the handshake extension chain is decoded in place after its frame; dispatch_network_message_at, the observer drains and SlotClaim::open are separate frames; new_session_engine_in builds the engine in a given slot.",
+        "wz-runtime-coop: SessionPump::build_in writes the pump into its cell field by field; PumpSlots::claim uses it.",
+        "SCE pin c244f4e171 and regenerated out/**; every codec is generated with its view; ext_view, network_message, driver_loop, query/in_place and wireexpr_resolve read a lent Request through RequestView, with iterator-form extension readers.",
+        "deploy/zephyr-admin-node t2g_client_fixed.conf: main stack 16384 to 9216 B (rule: at least 1.5 times the measured peak); multicast-e2e footprint baselines moved by the pin (+1096 B and +768 B).",
+        "docs/storage-policy-and-link-layer.md: stack history, the view conversion and the pico comparison by the sum of its threads.",
+        "C1bz: full-path links in bounded.rs, byte_cells.rs, keyexpr_match.rs, wireexpr_resolve.rs, reply_stage.rs and the tokio session module; budgets wz-session-core 499 to 495 and wz 2 to 4; four links in wz-runtime-zephyr, wz-session-lwip and wz-session-mcu are code spans."
+      ],
+      "publishable_verification_bullets": [
+        "Kit, fixed client: main-stack peak 9,856 to 5,928 B; data plus bss about 118.0 KB to 110,826 B; text 154,896 to 157,088 B (the view code); stack_frame_gate passes (largest frame 2,408 B, budget 4,608 B).",
+        "Kit, same-condition pico (heap pool 16 KB, stacks 4 KB, the same two GET documents, 2000 GETs, no bad answers): stack used 5,680 B across two threads, 2 x 4,096 B reserved, heap used 9,416 B, data plus bss 154,649 B, text 164,396 B. No ordering is claimed.",
+        "Layer Q footprint passed after the pin and after the views, before the rebase onto a422fb80c; the pin alone accounts for +880 B and +896 B of multicast-e2e text, found by building the commit before it.",
+        "After the rebase onto a422fb80c: the whole Layer C1bz ran green on a build host, and the guarded-count gate over origin/main..HEAD judged 20 of 20 reached guards.",
+        "validate-workspace: T1 orphan 14, unchanged; ledger entries 3403 before this one.",
+        "Platform run 39758930532 and CI run 39733003983 were read per job from their own logs; the reds are another session's wz-capi-pico work and its gates, except C1bz, which this work caused and this push repairs.",
+        "Not run here: the full local CI sweep, host tests after the rebase, Layer Q after the rebase, and any measurement of zenoh or zenoh-c."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; a red is its own round.",
+        "The receive-side extension depth cap (max-depth 8, on-overflow reject) rejects a message that zenoh and zenoh-pico accept; it is a declared choice in the document, not yet a registered debt. SCE treats a counting skip as a feature request needing the exact behaviour wanted.",
+        "RequestView is invariant in its lifetime, so a view is decoded from a fresh short-lived cursor; SCE has taken the lendable-view fix as its next view change.",
+        "Other records still read as eager forms: lend_declare 2,064 B, lend_push 1,776 B, lend_response 1,280 B, network dispatch 2,104 B.",
+        "The Platform run 39758930532 is red in two wz-capi-pico jobs (Windows: Z_OK not imported in os/windows.rs; macOS: the admin_space_roundtrip target needs features the probe does not pass); both belong to another session's capi-pico work and are acknowledged, not repaired.",
+        "Not compared and not claimed: zenoh (Rust) and zenoh-c on the same kit and workload."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
