@@ -1843,6 +1843,20 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         &self,
         keyexpr: &str,
         payload: &[u8],
+        opts: PublishOptions,
+        priority: wz_session_core::qos::Priority,
+    ) -> Result<usize, PublishError> {
+        self.publish_named(keyexpr, GroupKey::literal(keyexpr), payload, opts, priority)
+    }
+
+    /// [`Self::publish_prioritized`] with the key named on the wire as `wire`: by its literal,
+    /// or by a declaration the far side holds and the rest of the key. `keyexpr` is the whole
+    /// key either way, which the loopback leg delivers on.
+    fn publish_named(
+        &self,
+        keyexpr: &str,
+        wire: GroupKey<'_>,
+        payload: &[u8],
         mut opts: PublishOptions,
         priority: wz_session_core::qos::Priority,
     ) -> Result<usize, PublishError> {
@@ -1850,10 +1864,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // this node's clock BEFORE either leg reads `opts`, so the wire Push
         // and the loopback Sample carry one value rather than two.
         self.resolve_publish_timestamp(&mut opts);
-        // `priority` is consumed only by the `codec-push` remote leg below; a
-        // build without it (loopback-only) never reads the band.
+        // `priority` and `wire` are consumed only by the `codec-push` remote leg below; a
+        // build without it (loopback-only) never reads the band or the wire name.
         #[cfg(not(feature = "codec-push"))]
-        let _ = priority;
+        let _ = (priority, wire);
         // W3 — the remote wire leg is `codec-push`-gated (symmetric with the
         // `pubsub-allow-loop` loopback gate below). On a build without
         // `codec-push` the Push codec is statically absent, so the remote leg
@@ -1888,8 +1902,8 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             {
                 match Tp::send_plain_put_qos(
                     &self.transport,
-                    0,
-                    Some(keyexpr),
+                    wire.mapping_id,
+                    wire.suffix,
                     payload,
                     meta.qos,
                     reliable,
@@ -1914,14 +1928,22 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 // to the owned transport. The builder's `CodecError` maps to
                 // `SendWireError::Codec` -> `ExceedsCapacity` via
                 // `From<SendWireError> for PublishError`.
-                let push = match opts.kind {
-                    SampleKind::Put => wz_session_core::push_build::build_push_literal_with_meta(
-                        keyexpr, payload, &meta,
+                use wz_session_core::push_build;
+                let push = match (opts.kind, wire.mapping_id) {
+                    (SampleKind::Put, 0) => {
+                        push_build::build_push_literal_with_meta(keyexpr, payload, &meta)
+                    }
+                    (SampleKind::Del, 0) => {
+                        push_build::build_push_del_literal_with_meta(keyexpr, &meta)
+                    }
+                    (SampleKind::Put, mapping_id) => push_build::build_push_aliased_with_meta(
+                        mapping_id,
+                        wire.suffix,
+                        payload,
+                        &meta,
                     ),
-                    SampleKind::Del => {
-                        wz_session_core::push_build::build_push_del_literal_with_meta(
-                            keyexpr, &meta,
-                        )
+                    (SampleKind::Del, mapping_id) => {
+                        push_build::build_push_del_aliased_with_meta(mapping_id, wire.suffix, &meta)
                     }
                 }
                 .map_err(SendWireError::Codec)?;
@@ -3046,6 +3068,23 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         self.send_declare_to_group(wz_session_core::declare_build::build_undeclare_kexpr(
             mapping_id,
         ))
+    }
+
+    /// Open-debt item 913 — [`Self::publish`] with the key named on the group as `key`: by a
+    /// keyexpr the session declared to the group ([`Self::announce_keyexpr`]) and the rest of
+    /// the key, as zenoh-pico names a put's key on its multicast transport when its multicast
+    /// declarations are on (`vendor/zenoh-pico/src/session/keyexpr.c` @
+    /// `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`). `keyexpr` is the whole key, which the
+    /// loopback leg delivers on.
+    pub fn publish_named_on_group(
+        &self,
+        keyexpr: &str,
+        key: GroupKey<'_>,
+        payload: &[u8],
+        opts: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        let band = opts.priority_band();
+        self.publish_named(keyexpr, key, payload, opts, band)
     }
 
     /// Open-debt item 913 — ask the group's members for their declarations of `kinds`, on `key`
