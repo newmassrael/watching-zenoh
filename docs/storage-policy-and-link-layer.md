@@ -194,12 +194,17 @@ Main stack peak was 9.8 KB of 16 KB; splitting the observer's planes into
 frames of their own did not move it, so what sets it is not the part that was
 split. What did: the handshake parse (`parse_unit`) out of line, so its
 temporaries leave with it (`dispatch_copied` frame 4,824 to 2,408 B), peak
-9,856 to 8,432 B, text 155,344 to 155,004 B. The declared stack of the fixed
-client is now 13,312 B (a third free at the peak), which takes 3,072 B out of
-bss: data and bss 118.0 KB to 114.9 KB, against 114 KB of zenoh-pico's. The
-peak of 8.4 KB is still about three times pico's 2.9 KB; the next frames are
-`SessionLinkActions`, `SessionPump` and the engine (2,024, 1,336 and 1,184 B),
-built on the stack and then moved into the static slot.
+9,856 to 8,432 B, text 155,344 to 155,004 B. Taking each handshake arm
+(`Init`, `Open`, `Close`) out of `parse_unit` into a function of its own took
+the peak to 7,828 B (text 155,256 B). The declared stack of the fixed client
+is now 12,288 B (a third free at the peak), which takes 4,096 B out of bss
+against the 16 KB of before: data and bss 118.0 KB to 113.9 KB, against 114 KB
+of zenoh-pico's. The peak of 7.8 KB is still about 2.7 times pico's 2.9 KB.
+The frames left are `SessionLinkActions`, `SessionPump` and the engine
+(2,024, 1,336 and 1,184 B), built on the stack and then moved into the static
+slot. The engine is a field of the pump, so the pump cannot be built in place
+until the engine can; `SessionLinkActions` (the session kernel, 1,904 B of
+it) is the part wz can build in the slot itself.
 
 ## 6. Open
 
