@@ -556,12 +556,13 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // `} else if (closure.drop != NULL) { closure.drop(closure.context); }`).
         // The bytes and the token were consumed above, as upstream's cleanup does.
         // pico checks the session first, then the write filter, and on either refusal runs
-        // the closure's `drop` (`z_querier_get_with_parameters_substr`, `should_proceed`).
+        // the closure's `drop` (`z_querier_get_with_parameters_substr`, `should_proceed`); a
+        // session on a multicast transport proceeds whatever the filter says.
         if state.shared.is_closed() {
             drop(closure);
             return Z_ERR_SESSION_CLOSED;
         }
-        if state.filter.active() {
+        if state.filter.holds_back() {
             drop(closure);
             return Z_OK;
         }

@@ -88,6 +88,14 @@ pub const Z_EINVAL: ZResult = -75;
 /// (`vendor/zenoh-pico/src/net/session.c` @ `ret = _Z_ERR_SCOUT_NO_RESULTS;`).
 pub const Z_ERR_SCOUT_NO_RESULTS: ZResult = -87;
 
+/// A `z_open` whose `listen` locator names a kind of link this build has none of. Matches
+/// pico `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` (`utils/result.h`), which its listen link
+/// answers when no link it carries takes the endpoint (`vendor/zenoh-pico/src/link/link.c` @
+/// `ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;`): a multicast group in a build without the
+/// multicast transport.
+#[cfg(not(feature = "multicast-transport"))]
+pub const Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN: ZResult = -92;
+
 /// An allocation failed. Matches pico `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 /// (`utils/result.h`).
 pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;

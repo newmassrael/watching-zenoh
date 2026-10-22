@@ -299,6 +299,17 @@ unsafe fn enumerate_peers(
                 let id = z_id_t::from_wire(&zid);
                 call(&id, taken.context);
             }
+            // Open-debt item 913 — a session on a multicast group is a peer, and pico lists
+            // every member of its group as a peer whatever role the member announced
+            // (`vendor/zenoh-pico/src/api/api.c` @ `_zp_multicast_fetch_zid(`), and none as a
+            // router, its routers being a client's alone.
+            #[cfg(feature = "multicast-transport")]
+            if !routers {
+                for zid in shared_of(state).group_member_zids() {
+                    let id = z_id_t::from_wire(&zid);
+                    call(&id, taken.context);
+                }
+            }
             Z_OK
         })();
         if let Some(dropfn) = taken.drop {

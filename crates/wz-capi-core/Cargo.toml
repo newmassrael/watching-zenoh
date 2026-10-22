@@ -57,6 +57,7 @@ default = [
     "link-udp",
     "timestamping",
     "peer",
+    "multicast-transport",
     "scout",
     "query",
     "queryable",

@@ -39,6 +39,16 @@ config WZ_CAP_PEER
 	  zenoh-pico's switch for it: Z_FEATURE_UNICAST_PEER.
 	  Exported by: pico, c.
 
+config WZ_CAP_MULTICAST_TRANSPORT
+	bool "multicast-transport"
+	default y
+	select WZ_CAP_LINK_UDP
+	select WZ_CAP_PEER
+	help
+	  A UDP multicast group a peer joins: one transport to every member of the group.
+	  zenoh-pico has it when all of these are on: Z_FEATURE_MULTICAST_TRANSPORT, Z_FEATURE_LINK_UDP_MULTICAST.
+	  Exported by: pico.
+
 config WZ_CAP_QUERY
 	bool "query"
 	default y

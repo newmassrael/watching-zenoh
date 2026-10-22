@@ -141,6 +141,14 @@ impl WriteFilter {
         self.shared.write_filter_active(self.id)
     }
 
+    /// Whether the filter keeps a put, a delete or a get from being sent: [`Self::active`],
+    /// unless the session holds a multicast group, where pico sends whatever the filter says
+    /// ([`SharedSession::write_filter_holds_back`]). A matching status still reads
+    /// [`Self::active`].
+    pub(crate) fn holds_back(&self) -> bool {
+        self.shared.write_filter_holds_back(self.id)
+    }
+
     /// [`Self::active`] followed by a plain put on a declared key, in one step of the
     /// registry ([`SharedSession::put_plain_filtered`]).
     pub(crate) fn put_plain(

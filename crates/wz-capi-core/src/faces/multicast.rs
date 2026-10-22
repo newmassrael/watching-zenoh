@@ -70,6 +70,8 @@ pub(super) struct McastFaceEntry {
     /// registers a pending query on the group wakes [`sweep_mcast_face`], so the
     /// sweep arms on the new deadline instead of the one it was parked on.
     pub(super) revised: Arc<Notify>,
+    /// Who is on the group, as the face's loop keeps it.
+    pub(super) membership: McastGroupMembership,
 }
 
 /// A group face as a sender takes it: the session and its re-arm signal, read
@@ -146,11 +148,17 @@ impl SharedSession {
 
     /// A group face came up: replay the session's subscribers and queryables onto
     /// `session` and register it as face `id`, with `revised` as its re-arm signal,
-    /// the one its [`sweep_mcast_face`] waits on.
+    /// the one its [`sweep_mcast_face`] waits on, and `membership` as who is on it.
     ///
     /// A face already registered under `id` is replaced, and its entities are
     /// dropped outside the registry lock, as a replaced unicast face's are.
-    pub fn mcast_face_up(&self, id: u64, session: &TokioMulticastSession, revised: &Arc<Notify>) {
+    pub fn mcast_face_up(
+        &self,
+        id: u64,
+        session: &TokioMulticastSession,
+        revised: &Arc<Notify>,
+        membership: &McastGroupMembership,
+    ) {
         let mut guard = self.lock();
         let subs = guard
             .subs
@@ -171,11 +179,32 @@ impl SharedSession {
                 #[cfg(feature = "queryable")]
                 qbls,
                 revised: revised.clone(),
+                membership: membership.clone(),
             },
         );
         guard.refresh_mcast_set();
         drop(guard);
         drop(replaced);
+    }
+
+    /// The zid of every member of every group the session joined, as each group's peer
+    /// table holds it: what pico's `z_info_peers_zid` reports for a multicast transport,
+    /// whatever role a member announced (`vendor/zenoh-pico/src/transport/multicast.c` @
+    /// `void _zp_multicast_fetch_zid(`).
+    pub fn group_member_zids(&self) -> Vec<Vec<u8>> {
+        // Cloned out of the registry lock: each membership has a lock of its own, which its
+        // face's loop takes to write.
+        let memberships: Vec<McastGroupMembership> = self
+            .lock()
+            .mcast_faces
+            .values()
+            .map(|face| face.membership.clone())
+            .collect();
+        memberships
+            .iter()
+            .flat_map(McastGroupMembership::members)
+            .map(|member| member.peer.as_slice().to_vec())
+            .collect()
     }
 
     /// A group face left: the group's link is gone for good, or the session is

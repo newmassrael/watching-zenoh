@@ -4446,9 +4446,23 @@ impl SharedSession {
         drop(dropped);
     }
 
+    /// Whether write filter `id` keeps a put, a delete or a get from being sent: it says
+    /// nothing matches ([`Self::write_filter_active`]) and the session holds no group.
+    ///
+    /// Open-debt item 913 — zenoh-pico sends on a multicast transport whatever its filter
+    /// says (`vendor/zenoh-pico/src/api/api.c` @
+    /// `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`): without its
+    /// `Z_FEATURE_MULTICAST_DECLARATIONS` a multicast session sends its group no Interest,
+    /// so the filter has no answer to wait for there. The filter's own answer, which a
+    /// matching status reports, is unchanged.
+    pub fn write_filter_holds_back(&self, id: FilterId) -> bool {
+        !self.fan_targets().has_groups() && self.write_filter_active(id)
+    }
+
     /// Whether the filter says NOTHING matches — zenoh-pico's
     /// `_z_write_filter_active`, and the reason a put, delete or get is not
-    /// sent. `true` until a peer has declared something the filter counts, which
+    /// sent, unless the session holds a group ([`Self::write_filter_holds_back`]).
+    /// `true` until a peer has declared something the filter counts, which
     /// is the state a filter is CREATED in (`ctx->state = WRITE_FILTER_ACTIVE`),
     /// so a publisher with no peer yet suppresses, as upstream's does.
     ///

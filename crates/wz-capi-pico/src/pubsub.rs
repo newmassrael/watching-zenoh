@@ -919,7 +919,8 @@ impl PlainPublisher {
         {
             FilteredPut::Suppressed | FilteredPut::Sent(Ok(_)) => Z_OK,
             FilteredPut::Sent(Err(_)) => Z_ERR_GENERIC,
-            // Nothing was sent, and the filter has already said the put is wanted.
+            // Nothing was sent, and the put is wanted: the filter said so, or the session holds
+            // a multicast group, which pico writes to whatever the filter says.
             FilteredPut::NotPlain => self.publish_filtered(payload, &put_options()),
         }
     }
@@ -929,7 +930,9 @@ impl PlainPublisher {
     /// nothing matches, in which case NOTHING is sent and the call still answers
     /// `Z_OK`, as `z_publisher_put` / `z_publisher_delete` do upstream
     /// (`vendor/zenoh-pico/src/api/api.c` @
-    /// `!_z_write_filter_active(&pub->_filter)`).
+    /// `!_z_write_filter_active(&pub->_filter)`). A session that holds a multicast group
+    /// sends whatever the filter says, as upstream's multicast transport does
+    /// ([`WriteFilter::holds_back`]).
     pub(crate) fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
@@ -937,7 +940,7 @@ impl PlainPublisher {
         if self.shared.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        if self.filter.active() {
+        if self.filter.holds_back() {
             return Z_OK;
         }
         self.publish_filtered(payload, opts)

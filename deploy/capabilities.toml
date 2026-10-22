@@ -62,6 +62,16 @@ pico_flag = "Z_FEATURE_UNICAST_PEER"
 implies = ["scout"]
 help = "A listener, a router or a peer: the roles beyond the client. Off, z_open refuses them."
 
+# Open-debt item 913 — a UDP multicast group a peer joins. pico has it where both its transport
+# switch and its UDP multicast link switch are on, so the capability names the two.
+[[capability]]
+id = "multicast-transport"
+kconfig = "WZ_CAP_MULTICAST_TRANSPORT"
+abis = ["core", "pico"]
+pico_flags_all = ["Z_FEATURE_MULTICAST_TRANSPORT", "Z_FEATURE_LINK_UDP_MULTICAST"]
+implies = ["link-udp", "peer"]
+help = "A UDP multicast group a peer joins: one transport to every member of the group."
+
 [[capability]]
 id = "query"
 kconfig = "WZ_CAP_QUERY"

@@ -3591,7 +3591,7 @@ async fn serve_group<D, B, Fut>(
         &mut stop,
         |joined: Result<(), &std::io::Error>| {
             match joined {
-                Ok(()) => shared.mcast_face_up(id, &session, &revised),
+                Ok(()) => shared.mcast_face_up(id, &session, &revised, &membership),
                 Err(e) => log_open_failure(&format!("join {endpoint}"), e),
             }
             let _ = up.send(joined.is_ok());
@@ -5085,6 +5085,11 @@ mod multicast_face_tests {
                 assert!(heard.load(Ordering::SeqCst) > 0, "A's put never reached B");
                 // Two beacons more, so A holds B as a member whatever the order of the two.
                 tokio::time::sleep(Duration::from_millis(250)).await;
+                assert_eq!(
+                    a.group_member_zids(),
+                    [b.zid().to_vec()],
+                    "A's group holds B"
+                );
 
                 let replies = Arc::new(Mutex::new(Vec::new()));
                 let ended = Arc::new(Notify::new());

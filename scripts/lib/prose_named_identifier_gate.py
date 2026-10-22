@@ -315,6 +315,10 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_SAMPLE_KIND_DEFAULT",
         "Z_SELECTOR_QUERY_MATCH",
         "Z_SELECTOR_TIME",
+        # Open-debt item 913 — pico's lease, which its multicast JOIN advertises. wz carries
+        # the value in the pico ABI's group profile and no constant of that name; the group
+        # beacon's interval and batch beside it in the same prose were already here.
+        "Z_TRANSPORT_LEASE",
         "Z_TRANSPORT_LEASE_EXPIRE_FACTOR",
         "Z_ZID_LENGTH",
     }

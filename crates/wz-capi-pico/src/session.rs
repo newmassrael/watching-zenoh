@@ -72,6 +72,31 @@ use wz_capi_core::drive::{
 };
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 
+/// Open-debt item 913 — whether a `listen` endpoint names a multicast group: a `udp/`
+/// locator whose metadata names an interface (`#iface=`). That is when pico's listen link
+/// for it is the multicast one (`vendor/zenoh-pico/src/link/multicast/udp.c` @
+/// `z_result_t _z_endpoint_udp_multicast_valid(`); pico's listen has no unicast UDP link
+/// (`vendor/zenoh-pico/src/link/link.c` @ `z_result_t _z_listen_link(`).
+fn is_group_endpoint(endpoint: &str) -> bool {
+    let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
+    locator.starts_with("udp/") && metadata.split(';').any(|pair| pair.starts_with("iface="))
+}
+
+/// What pico's JOIN advertises on a group (`vendor/zenoh-pico/src/protocol/definitions/transport.c`
+/// @ `_z_transport_message_t _z_t_msg_make_join(`): its `Z_TRANSPORT_LEASE` (10000 ms),
+/// beaconed every `Z_JOIN_INTERVAL` (2500 ms), its `Z_SN_RESOLUTION` and `Z_REQ_RESOLUTION`
+/// (0x02 each), its `Z_BATCH_MULTICAST_SIZE` (2048, `vendor/zenoh-pico/CMakeLists.txt` @
+/// `set(BATCH_MULTICAST_SIZE 2048`), and no per-priority conduits.
+#[cfg(feature = "multicast-transport")]
+const PICO_GROUP: wz_capi_core::drive::GroupProfile = wz_capi_core::drive::GroupProfile {
+    lease_ms: 10_000,
+    join_interval_ms: 2_500,
+    seq_num_res: 0x02,
+    req_id_res: 0x02,
+    batch_size: 2_048,
+    is_qos: false,
+};
+
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
 ///
 /// pico offers both forms for every TLS certificate value and they mean the same
@@ -364,6 +389,30 @@ pub unsafe extern "C" fn z_open(
         // `// First, try to open the optional listen locator.`).
         #[cfg(feature = "admin-space")]
         let transport_endpoint = listen.clone().or_else(|| connect.first().cloned());
+        // Open-debt item 913 — a listen endpoint that names a group is joined as the
+        // session's one transport, and a connect locator beside it opens nothing: pico adds a
+        // peer to a unicast transport only (`vendor/zenoh-pico/src/transport/manager.c` @
+        // `z_result_t _z_new_peer(`, whose other transports fall through). A build without
+        // the multicast transport has no link for it, and refuses it as pico's does.
+        let joins_a_group = listen.as_deref().is_some_and(is_group_endpoint);
+        #[cfg(not(feature = "multicast-transport"))]
+        if joins_a_group {
+            return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
+        }
+        #[cfg(feature = "multicast-transport")]
+        let (listen, connect, groups) = match listen {
+            Some(endpoint) if joins_a_group => (
+                None,
+                Vec::new(),
+                vec![wz_capi_core::drive::GroupJoin {
+                    endpoint,
+                    profile: PICO_GROUP,
+                }],
+            ),
+            listen => (listen, connect, Vec::new()),
+        };
+        #[cfg(not(feature = "multicast-transport"))]
+        let groups = Vec::new();
         match open_blocking(
             connect.into_iter().collect(),
             // pico's config carries ONE listen locator, so the set is that one or none.
@@ -436,8 +485,8 @@ pub unsafe extern "C" fn z_open(
                 // And no `access_control`, `low_pass_filter` or `downsampling` keys either: its
                 // node states no traffic policy, as it never has.
                 policy: wz_capi_core::node_policy::NodePolicy::default(),
-                // This ABI joins no multicast group yet (open-debt item 913).
-                groups: Vec::new(),
+                // The group its listen endpoint names, when it names one.
+                groups,
             },
         ) {
             Ok(state) => {
