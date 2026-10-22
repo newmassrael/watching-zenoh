@@ -277524,6 +277524,66 @@
         "Not compared and not claimed: zenoh (Rust) and zenoh-c on the same kit and workload."
       ]
     },
+    "Round 3412": {
+      "decision_summary": "Two consumer reports answered and two hosted reds repaired. (1) A streamed link writes a 2-byte length in front of every batch, and zenoh and zenoh-pico count it inside the negotiated batch size; wz counted it outside, so a value whose frame filled the batch left a batch two bytes past what the peer accepts and a device dropped it. The frame budget is now the batch less its envelope: the length, and the BatchHeader of a compressing session, and nothing on an established lowlatency link. (2) Selectors joined by `and` are judged per message, so a pipeline of filters needs no new door; a test pins it and no code changed. (3) The Platform C ABI probe failed in two jobs on two causes: a Windows test used Z_OK without importing it, and cargo refuses `--test '*'` for a target whose features are off. Both are repaired; the Windows one is checked against the hosted error text only.",
+      "changes_bullets": [
+        "wz-session-core link.rs: STREAM_BATCH_LENGTH_BYTES (2) and BoxedLinkDriver::batch_length_prefixed (default false; both swappable links forward it). passive.rs PREFIX_WIDTH_UNIVERSAL is now that constant.",
+        "wz-runtime-tokio stream_link.rs: StreamWriteDriver answers true, so the seven streamed pipelines (tcp, tls, quic, udp-reliable, unixpipe, unixsock, vsock) spend the length's two bytes of the batch; ws, udp, quic-datagram and serial are unchanged.",
+        "wz-session-core session_actions.rs: batch_envelope_bytes (length, plus compression::BATCH_HEADER_BYTES when the session compresses, zero once lowlatency is established); negotiated_tx_limits returns the batch less that, and TxLimitsCache keeps a value only once the session is established, because the envelope depends on outcomes the Init exchange settles after it writes the peer's capabilities.",
+        "Tests: negotiated_mtu_tests::a_streamed_link_keeps_the_length_inside_the_negotiated_batch (sweep across the batch, largest frame equals batch minus length); compression_e2e asserts the one-byte header comes out of the budget; the C ABI fragmentation_roundtrip now counts the length and sends values at BATCH-64..=BATCH.",
+        "wz-capture selected_packets.rs: selectors_joined_by_and_are_judged_message_by_message, the contrast of two intersected lists (keeps a frame no message of which passes both) with the joined selector (drops it).",
+        "wz-capi-pico os/windows.rs: the multi-thread join test imports Z_OK. .github/workflows/platform.yml: the C ABI probe runs `cargo test --tests`, with the reason in a comment. docs/hosted-red-acks.md: a row for the run that graded 7d22ada73."
+      ],
+      "verification_bullets": [
+        "Red first: with the subtraction of the envelope removed, the session sweep failed (a 104-byte value left a 127-byte frame, 129 with its length, past 128), compression_e2e failed, and the C ABI test failed with a 1450-byte frame on a 1450-byte batch; restored, all pass.",
+        "On the merged tree over origin/main at 7d22ada73, on a build host: tx_limits cache tests 3, runtime negotiated_mtu and swap-seam tests 5, compression_e2e 2, fragmentation_roundtrip 2, selected_packets 5 (with --features dissect; the same filter without it ran 0 tests and was discarded); clippy -D warnings on wz-session-core and wz-runtime-tokio clean.",
+        "Probe: the old `--test '*'` prints the hosted sentence on Linux (exit 101); `--tests` selects the library and 28 wz-capi-pico integration targets without admin_space_roundtrip (exit 0). cargo fmt, actionlint, platform_trigger_paths_gate and platform_surface_matrix pass.",
+        "Not verified: the Windows test build. The build host has no windows target and this machine has no cross C compiler for ring, so the Z_OK import is matched to the two E0425 lines of the hosted log (windows.rs 566 and 569), not compiled.",
+        "Static gates run directly before the first push: upstream citation anchors (1816 anchored, budgets unchanged), store reasons, prose features, hook region, count-guard lint, all rc 0. Both pushes went through the pre-push hook. Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3404, sections 266."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "reassembly-fsm--prose-sketch/3-tx-fragmentation-sibling-fsm"
+      ],
+      "carry_forward_bullets": [
+        "Read the Platform and CI runs of the push that carries the repairs. A Windows test that has not run since the Z_OK error began may show once the lib tests compile again.",
+        "The Windows repair is the one unverified claim. A cross C compiler for ring on a developer machine, or the windows target on a build host, would let a check run before a push.",
+        "The probe now runs the library's unit tests twice, once in the unit step and once under `--tests`. If the time matters, enumerate the integration targets whose features are on instead.",
+        "The mnemosyne MCP server reads the main checkout, which is behind origin and whose vendor/sce and vendor/freertos-kernel pointers differ from the recorded ones: its ledger tip reads 3406 while the store at origin is past 3411. Reads through the MCP are stale until that checkout is brought up to date; the CLI in a worktree of origin is current.",
+        "The two consumer reports have no reply posted on the tracker from this host; the answers went to the consumer session by message, with the pin and the five cautions for joining selectors (parenthesise each, drop an empty one, an ambiguous zid prefix voids the whole selector, exchange outcome terms read the whole capture, per-stage no and undecided counts differ)."
+      ],
+      "publishable_decision_summary": "Two consumer reports answered and two hosted reds repaired. (1) A streamed link writes a 2-byte length in front of every batch, and zenoh and zenoh-pico count it inside the negotiated batch size; wz counted it outside, so a value whose frame filled the batch left a batch two bytes past what the peer accepts and a device dropped it. The frame budget is now the batch less its envelope: the length, and the BatchHeader of a compressing session, and nothing on an established lowlatency link. (2) Selectors joined by `and` are judged per message, so a pipeline of filters needs no new door; a test pins it and no code changed. (3) The Platform C ABI probe failed in two jobs on two causes: a Windows test used Z_OK without importing it, and cargo refuses `--test '*'` for a target whose features are off. Both are repaired; the Windows one is checked against the hosted error text only.",
+      "publishable_changes_bullets": [
+        "wz-session-core link.rs: STREAM_BATCH_LENGTH_BYTES (2) and BoxedLinkDriver::batch_length_prefixed (default false; both swappable links forward it). passive.rs PREFIX_WIDTH_UNIVERSAL is now that constant.",
+        "wz-runtime-tokio stream_link.rs: StreamWriteDriver answers true, so the seven streamed pipelines (tcp, tls, quic, udp-reliable, unixpipe, unixsock, vsock) spend the length's two bytes of the batch; ws, udp, quic-datagram and serial are unchanged.",
+        "wz-session-core session_actions.rs: batch_envelope_bytes (length, plus compression::BATCH_HEADER_BYTES when the session compresses, zero once lowlatency is established); negotiated_tx_limits returns the batch less that, and TxLimitsCache keeps a value only once the session is established, because the envelope depends on outcomes the Init exchange settles after it writes the peer's capabilities.",
+        "Tests: negotiated_mtu_tests::a_streamed_link_keeps_the_length_inside_the_negotiated_batch (sweep across the batch, largest frame equals batch minus length); compression_e2e asserts the one-byte header comes out of the budget; the C ABI fragmentation_roundtrip now counts the length and sends values at BATCH-64..=BATCH.",
+        "wz-capture selected_packets.rs: selectors_joined_by_and_are_judged_message_by_message, the contrast of two intersected lists (keeps a frame no message of which passes both) with the joined selector (drops it).",
+        "wz-capi-pico os/windows.rs: the multi-thread join test imports Z_OK. .github/workflows/platform.yml: the C ABI probe runs `cargo test --tests`, with the reason in a comment. docs/hosted-red-acks.md: a row for the run that graded 7d22ada73."
+      ],
+      "publishable_verification_bullets": [
+        "Red first: with the subtraction of the envelope removed, the session sweep failed (a 104-byte value left a 127-byte frame, 129 with its length, past 128), compression_e2e failed, and the C ABI test failed with a 1450-byte frame on a 1450-byte batch; restored, all pass.",
+        "On the merged tree over origin/main at 7d22ada73, on a build host: tx_limits cache tests 3, runtime negotiated_mtu and swap-seam tests 5, compression_e2e 2, fragmentation_roundtrip 2, selected_packets 5 (with --features dissect; the same filter without it ran 0 tests and was discarded); clippy -D warnings on wz-session-core and wz-runtime-tokio clean.",
+        "Probe: the old `--test '*'` prints the hosted sentence on Linux (exit 101); `--tests` selects the library and 28 wz-capi-pico integration targets without admin_space_roundtrip (exit 0). cargo fmt, actionlint, platform_trigger_paths_gate and platform_surface_matrix pass.",
+        "Not verified: the Windows test build. The build host has no windows target and this machine has no cross C compiler for ring, so the Z_OK import is matched to the two E0425 lines of the hosted log (windows.rs 566 and 569), not compiled.",
+        "Static gates run directly before the first push: upstream citation anchors (1816 anchored, budgets unchanged), store reasons, prose features, hook region, count-guard lint, all rc 0. Both pushes went through the pre-push hook. Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3404, sections 266."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "reassembly-fsm--prose-sketch/3-tx-fragmentation-sibling-fsm"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the Platform and CI runs of the push that carries the repairs. A Windows test that has not run since the Z_OK error began may show once the lib tests compile again.",
+        "The Windows repair is the one unverified claim. A cross C compiler for ring on a developer machine, or the windows target on a build host, would let a check run before a push.",
+        "The probe now runs the library's unit tests twice, once in the unit step and once under `--tests`. If the time matters, enumerate the integration targets whose features are on instead.",
+        "The mnemosyne MCP server reads the main checkout, which is behind origin and whose vendor/sce and vendor/freertos-kernel pointers differ from the recorded ones: its ledger tip reads 3406 while the store at origin is past 3411. Reads through the MCP are stale until that checkout is brought up to date; the CLI in a worktree of origin is current.",
+        "The two consumer reports have no reply posted on the tracker from this host; the answers went to the consumer session by message, with the pin and the five cautions for joining selectors (parenthesise each, drop an empty one, an ambiguous zid prefix voids the whole selector, exchange outcome terms read the whole capture, per-stage no and undecided counts differ)."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
