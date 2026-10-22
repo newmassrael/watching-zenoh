@@ -17773,14 +17773,16 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test M 2 cargo test -p wz-integration-tests \
         --test wz_multicast_departure_witnessed_by_pico -- --ignored --quiet || return 1
 
-    # R2588 — `--multicast-locator ...#iface=lo;join=<extra>` installs kernel
+    # R2588 — `--multicast-locator ...#iface=<device>;join=<extra>` installs kernel
     # memberships for the locator's group AND the extra one, in both address
     # families, read from `/proc/net/igmp{,6}`. It is the process-level leg of
     # `#join=`, which only the ingress path carries, and the first leg to run an
     # IPv6 group through a demo process. Needs only the demo built above (with
-    # `locator-iface`); `lo` takes memberships of either family on any Linux
-    # runner. Count-guarded, because the fn name is filtered by nothing but a
-    # rename would still select zero.
+    # `locator-iface`). IPv4 runs on `lo`; IPv6 needs a non-loopback interface with
+    # `IFF_MULTICAST` and an IPv6 address (`lo` has no multicast route, so the
+    # router's group face loses its socket and the membership at its first write),
+    # and the test PANICS on a host with none. Count-guarded, because the fn name
+    # is filtered by nothing but a rename would still select zero.
     _runci_guarded_test "M multicast locator flag installs its memberships" 1 \
         cargo test -p wz-integration-tests \
         --test wz_multicast_locator_flag_installs_its_memberships -- --ignored || return 1
