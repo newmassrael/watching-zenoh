@@ -278464,6 +278464,42 @@
         "The hosted run that carries item 913 is still to be read job by job."
       ]
     },
+    "Round 3432": {
+      "decision_summary": "The macOS C ABI job of the previous push's Platform run failed one test of item 913, a group member that A still listed after B's Close, while the same job had passed one commit earlier. The test, and its sibling in the same module, ran on a paused clock, but each group face's datagrams are written by a task on the process-wide transmit runtime, which a paused clock does not wait for: while the test's runtime waited on that one, its clock jumped to the next timer, so a bound of 2.5 s could elapse before B's Close was written, and could as well reach the 10 s lease and pass for the wrong reason. The module now runs on the real clock, where the bound is time that passes and the lease stays out of reach. The red is acknowledged in its own row.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/drive.rs: the two group face tests run on the real clock; the module and both tests say why.",
+        "docs/hosted-red-acks.md: the row for the macOS C ABI job of run 39860923699."
+      ],
+      "verification_bullets": [
+        "On a build host: thirty repeated runs of the module pass, and clippy of wz-capi-core with all targets is clean.",
+        "Damage: with the departing Close not queued, the test fails at 2.6 s on the listing that still holds B; restored, it passes.",
+        "The failing job's log was read to its end; the job passed at the commit before, and no change between them reaches the group face."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "Read the Platform and CI runs of this push job by job; the CI run carrying item 913 was cancelled by it.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ],
+      "publishable_decision_summary": "The macOS C ABI job of the previous push's Platform run failed one test of item 913, a group member that A still listed after B's Close, while the same job had passed one commit earlier. The test, and its sibling in the same module, ran on a paused clock, but each group face's datagrams are written by a task on the process-wide transmit runtime, which a paused clock does not wait for: while the test's runtime waited on that one, its clock jumped to the next timer, so a bound of 2.5 s could elapse before B's Close was written, and could as well reach the 10 s lease and pass for the wrong reason. The module now runs on the real clock, where the bound is time that passes and the lease stays out of reach. The red is acknowledged in its own row.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/drive.rs: the two group face tests run on the real clock; the module and both tests say why.",
+        "docs/hosted-red-acks.md: the row for the macOS C ABI job of run 39860923699."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: thirty repeated runs of the module pass, and clippy of wz-capi-core with all targets is clean.",
+        "Damage: with the departing Close not queued, the test fails at 2.6 s on the listing that still holds B; restored, it passes.",
+        "The failing job's log was read to its end; the job passed at the commit before, and no change between them reaches the group face."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the Platform and CI runs of this push job by job; the CI run carrying item 913 was cancelled by it.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
