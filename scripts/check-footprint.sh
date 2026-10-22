@@ -961,8 +961,33 @@ declare -A BASELINE_MC_TEXT=(
     # Open debt item 904 turns them into an ingest outcome and lowers this
     # figure in the same commit. data is 4 and bss 270120 on both trees.
     # Old: 66296/66104.
+    #
+    # 2026-10-22 -- thumbv7em-hf 67044 -> 67352 (+308 B); thumbv7m is unchanged
+    # (67060, read 67064). Between the hosted run of `e08a10799` (67064 / 67080) and
+    # the hosted run of `5faf6df4e` (70956 / 71292) the image grew +3892 / +4212 B, and
+    # all but about 300 of that was one thing: the five `.expect("... is a constant
+    # Nmtoken")` on the state machines' `new_with_session_id`. `expect` formats the
+    # `SessionIdRefusal` it is handed, which carries a `char` printed with `{:?}`, so
+    # the image linked `<&char as Debug>::fmt` (+986), the Unicode tables behind it
+    # (`grapheme_extend` OFFSETS +767, `lookup_slow` +234, SHORT_OFFSET_RUNS +132), the
+    # refusal's own Debug and Display, and their anonymous strings (+1535, +844). They
+    # came in with the SCE pin that gave the machines a session id (`77304f1c1`). The
+    # call sites now go through `constant_session_id::built_under_constant_id`, which
+    # drops the refusal unformatted: -3892 B on thumbv7m, -3904 B on thumbv7em-hf by a
+    # per-symbol diff of the two images (arm-none-eabi-nm -S, hashes stripped, one host
+    # and toolchain, Layer Q's remap flags).
+    # What is left is a gap between the two targets that did not exist at `e08a10799`
+    # (16 B) and is 288 B in the images measured here: `__cortex_m_rt_main` is 268 B
+    # larger on thumbv7em-hf than on thumbv7m; every other difference is a pair of
+    # anonymous constants whose hashes differ per target. It was there before the fix
+    # (336 B in the hosted run of `e7e31951d`), so it came with the commits between
+    # `e08a10799` and `5faf6df4e`, and no commit of them was built on its own, so none
+    # is named. It is `main`'s inlining on the hard-float target, the same kind of
+    # growth the R3387 note above records for `main` on thumbv7m (+262). The hosted
+    # toolchain reads this target +36 B over the local one, inside the band.
+    # data is 4 and bss 270120 on both. Old: 67060/67044.
     ["thumbv7m-none-eabi"]=67060
-    ["thumbv7em-none-eabihf"]=67044
+    ["thumbv7em-none-eabihf"]=67352
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
