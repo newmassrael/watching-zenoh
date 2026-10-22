@@ -277584,6 +277584,50 @@
         "The two consumer reports have no reply posted on the tracker from this host; the answers went to the consumer session by message, with the pin and the five cautions for joining selectors (parenthesise each, drop an empty one, an ambiguous zid prefix voids the whole selector, exchange outcome terms read the whole capture, per-stage no and undecided counts differ)."
       ]
     },
+    "Round 3413": {
+      "decision_summary": "Item 913 (a multicast transport for the C ABI drop-ins) is under way and its runtime half lands here. A multicast session now issues queries and answers them through one query body, one deferred queryable and one held query shared with the unicast session; what differs per transport is asked of TransportState (the request id, the remote final count, the reply route). The C shims hold an escaped query through a holder that does not name its transport, so a group query can escape as a link's can. The group face in capi-core and the two ABIs' doors follow. The hosted run of the previous push was red in four jobs, all from that push; three are repaid here and the fourth, the job clock with its cold cache, is carried.",
+      "changes_bullets": [
+        "wz-session-core: MulticastTxItem::Request, framed and namespaced as the unicast query is (apply_egress_request is now the one rule); ReplyHandle::ended; observer flush_query_reply_bodies.",
+        "wz-runtime-tokio: query, query_via and the shm adoption are one body for both transports; TransportState gains alloc_request_id, remote_query_targets (one for a link, the group's members for a multicast session, read from its McastGroupMembership), shm_admits and the ReplyRoute (the link's actions, or the group's MulticastReplySink). A query reaching nobody sends nothing and ends on the caller's thread, as pico's does. The multicast session gains attach_group_membership and declare_queryable; its dispatch sends replies and stages each final behind the handler jobs. HeldQuery and the handler-job hold are generic over the transport; TokioQueryHolder and TokioHeldQuery erase it for the C shims.",
+        "wz-capi-core, wz-capi-pico, wz-capi-c: QueryableSink hands a TokioQueryHolder; both shims keep a TokioHeldQuery.",
+        "Gates: the A4 corpus parser takes an impl block as a helper of its type; C1bf covers wz-capi-pico; the static zenoh-c leg runs in C1cc and checks its demo (carried 217); three locality constants leave UPSTREAM_UNCARRIED."
+      ],
+      "verification_bullets": [
+        "On the branch rebased onto origin, on a build host: clippy of wz-session-core (multicast codecs), wz-runtime-tokio (default and transport-multicast), wz-capi-core, wz-capi-pico, wz-capi-c and wz-integration-tests; a multicast-only runtime check and wz-session-lwip check.",
+        "New tests pass: a_group_query_waits_for_one_final_from_each_member, a_group_query_that_reaches_no_member_ends_at_once_and_sends_nothing, a_group_queryable_answers_on_the_group_and_its_final_follows_the_reply, a_held_group_query_keeps_its_final_until_it_is_dropped; query_options_expected_finals_matches_locality with group cases. The runtime query, queryable and held-query tests, the multicast TX tests and the pico and zenoh-c query tests pass.",
+        "Layers A4 and C1bf pass; binary_freshness_lint (217), lane_feature_membership, lane_reach, test_discipline, barrier_needle, genuine_axis_witness and the prose gate pass with their selftests.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Item 913 next: the group face in capi-core (session, drive, membership; replay of subscribers and queryables; the group leg of the publish fan-out on the literal key and of the get fan-out; the plain put path not bypassing a group), then the pico door (a peer's udp listen with iface opens the group, clients refused as pico does, zp_send_join, z_link_group) witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations.",
+        "The validate + verify + test job sits at 97 percent of its clock: its cargo cache missed after item 919's lock change, and with cache-on-failure off a run that fails the clock step saves none, so the next one is cold again.",
+        "Item 910: the Rust API compatibility crate. Item 912: bt and USB CDC serial need hardware."
+      ],
+      "publishable_decision_summary": "Item 913 (a multicast transport for the C ABI drop-ins) is under way and its runtime half lands here. A multicast session now issues queries and answers them through one query body, one deferred queryable and one held query shared with the unicast session; what differs per transport is asked of TransportState (the request id, the remote final count, the reply route). The C shims hold an escaped query through a holder that does not name its transport, so a group query can escape as a link's can. The group face in capi-core and the two ABIs' doors follow. The hosted run of the previous push was red in four jobs, all from that push; three are repaid here and the fourth, the job clock with its cold cache, is carried.",
+      "publishable_changes_bullets": [
+        "wz-session-core: MulticastTxItem::Request, framed and namespaced as the unicast query is (apply_egress_request is now the one rule); ReplyHandle::ended; observer flush_query_reply_bodies.",
+        "wz-runtime-tokio: query, query_via and the shm adoption are one body for both transports; TransportState gains alloc_request_id, remote_query_targets (one for a link, the group's members for a multicast session, read from its McastGroupMembership), shm_admits and the ReplyRoute (the link's actions, or the group's MulticastReplySink). A query reaching nobody sends nothing and ends on the caller's thread, as pico's does. The multicast session gains attach_group_membership and declare_queryable; its dispatch sends replies and stages each final behind the handler jobs. HeldQuery and the handler-job hold are generic over the transport; TokioQueryHolder and TokioHeldQuery erase it for the C shims.",
+        "wz-capi-core, wz-capi-pico, wz-capi-c: QueryableSink hands a TokioQueryHolder; both shims keep a TokioHeldQuery.",
+        "Gates: the A4 corpus parser takes an impl block as a helper of its type; C1bf covers wz-capi-pico; the static zenoh-c leg runs in C1cc and checks its demo (carried 217); three locality constants leave UPSTREAM_UNCARRIED."
+      ],
+      "publishable_verification_bullets": [
+        "On the branch rebased onto origin, on a build host: clippy of wz-session-core (multicast codecs), wz-runtime-tokio (default and transport-multicast), wz-capi-core, wz-capi-pico, wz-capi-c and wz-integration-tests; a multicast-only runtime check and wz-session-lwip check.",
+        "New tests pass: a_group_query_waits_for_one_final_from_each_member, a_group_query_that_reaches_no_member_ends_at_once_and_sends_nothing, a_group_queryable_answers_on_the_group_and_its_final_follows_the_reply, a_held_group_query_keeps_its_final_until_it_is_dropped; query_options_expected_finals_matches_locality with group cases. The runtime query, queryable and held-query tests, the multicast TX tests and the pico and zenoh-c query tests pass.",
+        "Layers A4 and C1bf pass; binary_freshness_lint (217), lane_feature_membership, lane_reach, test_discipline, barrier_needle, genuine_axis_witness and the prose gate pass with their selftests.",
+        "Each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 913 next: the group face in capi-core (session, drive, membership; replay of subscribers and queryables; the group leg of the publish fan-out on the literal key and of the get fan-out; the plain put path not bypassing a group), then the pico door (a peer's udp listen with iface opens the group, clients refused as pico does, zp_send_join, z_link_group) witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations.",
+        "The validate + verify + test job sits at 97 percent of its clock: its cargo cache missed after item 919's lock change, and with cache-on-failure off a run that fails the clock step saves none, so the next one is cold again.",
+        "Item 910: the Rust API compatibility crate. Item 912: bt and USB CDC serial need hardware."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
