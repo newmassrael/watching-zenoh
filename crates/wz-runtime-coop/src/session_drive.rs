@@ -36,7 +36,6 @@
 use alloc::rc::Rc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
-#[cfg(feature = "session-slot")]
 use core::mem::MaybeUninit;
 #[cfg(feature = "session-slot")]
 use core::ops::{Deref, DerefMut};
@@ -529,7 +528,8 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         &self.reasm
     }
 
-    /// What `Self::new` and [`Self::with_reassembly_arena`] share.
+    /// What `Self::new` and [`Self::with_reassembly_arena`] share: the pump as a value, made by
+    /// [`Self::build_in`] in a place of its own.
     #[inline(always)]
     fn build(
         runtime: CoopRuntime<C>,
@@ -540,44 +540,85 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
         #[cfg(all(feature = "reassembly", feature = "rx-in-place"))] reasm: InPlaceReassembly,
     ) -> Self {
+        let mut place = MaybeUninit::<Self>::uninit();
+        Self::build_in(
+            &mut place,
+            runtime,
+            link,
+            actions,
+            clock,
+            config,
+            #[cfg(feature = "reassembly")]
+            reasm,
+        );
+        // SAFETY: `build_in` wrote every field of the pump into `place`.
+        unsafe { place.assume_init() }
+    }
+
+    /// Build the pump IN `place`: the engine is made in its field and initialised there, and
+    /// every other field is written where it lies, so no copy of the pump or of the engine
+    /// is ever on the stack. `place` is fully written on return.
+    ///
+    /// Never inlined, for the stack: the engine's initial transition runs in here, and what
+    /// the machine calls beneath (the transition sets, the actions, the hash of the initial
+    /// sequence number) is on the stack for as long as it runs. Inlined into the caller of a
+    /// slot, that caller's frame would be under all of it.
+    ///
+    /// A panic in the middle leaves `place` partly written, and it is not dropped: a leak, and
+    /// on the profiles that build this (`panic = "abort"` on a board) not even that.
+    #[inline(never)]
+    fn build_in(
+        place: &mut MaybeUninit<Self>,
+        runtime: CoopRuntime<C>,
+        link: L,
+        actions: SessionHandle<C>,
+        clock: CoopTime<C>,
+        config: SessionDriveConfig,
+        #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
+        #[cfg(all(feature = "reassembly", feature = "rx-in-place"))] reasm: InPlaceReassembly,
+    ) {
         let SessionDriveConfig {
             timeouts,
             role,
             max_iters,
         } = config;
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` (it is `place`), each field is written
+        // exactly once below through its own address, and the engine is used only after its
+        // field is written.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).engine).write(new_session_engine(&actions));
+            // `new_session_engine` returns an un-initialized engine (the AP
+            // convention — the caller runs the SCXML initial transition into the
+            // `Init` state). Without this the `role.activation()` below lands on
+            // an engine that never entered `Init`, so `inbound.start` /
+            // `outbound.start` does not transition into `AwaitingInitSyn` /
+            // `LinkOpening` and the whole handshake stalls.
+            let engine = &mut *core::ptr::addr_of_mut!((*at).engine);
+            engine.initialize();
+            // Under `session-slot` the activation waits for the first step (see
+            // `pending_role`); every other profile activates here, as it always did.
+            #[cfg(not(feature = "session-slot"))]
+            for event in role.activation() {
+                engine.process_event(*event);
+            }
 
-        let mut engine = new_session_engine(&actions);
-        // `new_session_engine` returns an un-initialized engine (the AP
-        // convention — the caller runs the SCXML initial transition into the
-        // `Init` state). Without this the `role.activation()` below lands on
-        // an engine that never entered `Init`, so `inbound.start` /
-        // `outbound.start` does not transition into `AwaitingInitSyn` /
-        // `LinkOpening` and the whole handshake stalls.
-        engine.initialize();
-        // Under `session-slot` the activation waits for the first step (see
-        // `pending_role`); every other profile activates here, as it always did.
-        #[cfg(not(feature = "session-slot"))]
-        for event in role.activation() {
-            engine.process_event(*event);
-        }
-
-        Self {
-            runtime,
-            link,
-            actions,
-            clock,
-            engine,
-            deadline_tracker: HandshakeDeadlineTracker::new(timeouts),
+            core::ptr::addr_of_mut!((*at).runtime).write(runtime);
+            core::ptr::addr_of_mut!((*at).link).write(link);
+            core::ptr::addr_of_mut!((*at).actions).write(actions);
+            core::ptr::addr_of_mut!((*at).clock).write(clock);
+            core::ptr::addr_of_mut!((*at).deadline_tracker)
+                .write(HandshakeDeadlineTracker::new(timeouts));
             #[cfg(feature = "reassembly")]
-            reasm,
+            core::ptr::addr_of_mut!((*at).reasm).write(reasm);
             #[cfg(feature = "rx-in-place")]
-            record: new_record_buf(),
+            core::ptr::addr_of_mut!((*at).record).write(new_record_buf());
             #[cfg(feature = "rx-in-place")]
-            rx_paths: RxPathCounts::default(),
+            core::ptr::addr_of_mut!((*at).rx_paths).write(RxPathCounts::default());
             #[cfg(feature = "session-slot")]
-            pending_role: Some(role),
-            iter: 0,
-            max_iters,
+            core::ptr::addr_of_mut!((*at).pending_role).write(Some(role));
+            core::ptr::addr_of_mut!((*at).iter).write(0);
+            core::ptr::addr_of_mut!((*at).max_iters).write(max_iters);
         }
     }
 
@@ -1053,25 +1094,28 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> PumpSlots
             return Err(PumpsFull);
         };
         #[cfg(feature = "reassembly")]
-        let pump = {
+        let arena = {
             // SAFETY: the cell is `taken` by this call alone, and its pool is only
             // ever reached through the pump built here.
             let place = unsafe { &mut *cell.pool.get() };
-            SessionPump::with_reassembly_arena(
+            ReassemblyArena::new(PoolStorage::zeroed_in(place))
+        };
+        // SAFETY: the cell is `taken` by this call alone, and its pump is
+        // uninitialised: either it was never written or its last pump was dropped
+        // in place by the `PumpRef` that freed the cell. The pump is built in the cell,
+        // not returned and written: no copy of it is on this stack.
+        unsafe {
+            SessionPump::build_in(
+                &mut *cell.pump.get(),
                 runtime,
                 link,
                 actions,
                 clock,
                 config,
-                ReassemblyArena::new(PoolStorage::zeroed_in(place)),
-            )
-        };
-        #[cfg(not(feature = "reassembly"))]
-        let pump = SessionPump::new(runtime, link, actions, clock, config);
-        // SAFETY: the cell is `taken` by this call alone, and its pump is
-        // uninitialised: either it was never written or its last pump was dropped
-        // in place by the `PumpRef` that freed the cell.
-        unsafe { (*cell.pump.get()).write(pump) };
+                #[cfg(feature = "reassembly")]
+                in_place_reassembly(arena),
+            );
+        }
         Ok(PumpRef { cell })
     }
 }

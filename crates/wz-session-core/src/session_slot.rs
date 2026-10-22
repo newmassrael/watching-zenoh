@@ -366,6 +366,11 @@ where
     /// The bundle is built by value and then moved into the slot, so it is on
     /// the stack once while it is built: the in-place build the Q lane's stack
     /// verdict is there to catch on a board.
+    ///
+    /// Never inlined, for the stack: the bundle (2 KB on the fixed client) is a temporary of
+    /// this function and is gone when it returns. Inlined into the dial, it stayed in the
+    /// dial's frame while the pump and the engine were built beneath it.
+    #[inline(never)]
     pub fn open(self, params: SessionInitParams, clock: T) -> SlotRef<R, T> {
         let cell = self.cell;
         // SAFETY: the claim holds the slot `Claimed`, so the driver and the
