@@ -1051,6 +1051,7 @@ name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "heapless",
  "portable-atomic",
  "portable-atomic-util",
  "wz-runtime-core",

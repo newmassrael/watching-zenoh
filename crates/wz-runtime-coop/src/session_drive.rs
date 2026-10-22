@@ -96,6 +96,32 @@ pub trait SessionDatagramLink {
     /// whose input runs on its own thread or ISR does nothing.
     fn service(&self);
 
+    /// [`Self::service`], told how long the loop can do without it: `max_wait_ms` is the time
+    /// until anything the session or its runtime has to do falls due (a handshake, lease or
+    /// keep-alive deadline, a registered timer), and `u64::MAX` when nothing does. A link that
+    /// can sleep until then (a socket that blocks) may wait up to that long for a datagram
+    /// instead of for one tick, and the loop wakes for no more than what is due.
+    ///
+    /// The provided form ignores it, which is right for a link that is pumped from here (lwIP
+    /// polls its stack on every pass) and for every link that has not said it can do better.
+    /// A link that waits longer than a tick is only right when it is the only thing the loop
+    /// waits on: another session's socket is not looked at while this one blocks, so a link
+    /// takes the permission to wait from its image (the stack's idle wait) and not from this
+    /// number alone.
+    fn service_within(&self, max_wait_ms: u64) {
+        let _ = max_wait_ms;
+        self.service();
+    }
+
+    /// Whether this link makes use of the time until something falls due
+    /// ([`Self::service_within`]). The loop works that time out only for a link that does: it is a
+    /// clock read and the session's deadlines every pass, which a link that waits the tick
+    /// regardless would spend for nothing. A link answers `false` until it has been given leave to
+    /// wait longer, so an image that has not asked runs the code it always ran.
+    fn uses_wake_budget(&self) -> bool {
+        false
+    }
+
     /// The next inbound datagram as a frame, or `None` when nothing is
     /// queued. Taking a datagram also RETARGETS the link's replies to that
     /// datagram's source — the acceptor learns its peer from the InitSyn,
@@ -148,6 +174,14 @@ pub trait SessionDatagramLink {
 impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     fn service(&self) {
         (**self).service()
+    }
+
+    fn service_within(&self, max_wait_ms: u64) {
+        (**self).service_within(max_wait_ms)
+    }
+
+    fn uses_wake_budget(&self) -> bool {
+        (**self).uses_wake_budget()
     }
 
     fn try_recv(&self) -> Option<RxFrame> {
@@ -640,6 +674,37 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         self.rx_paths
     }
 
+    /// How long the loop may wait for a datagram before something of this session's or this
+    /// runtime's falls due, in milliseconds, rounded UP so the wait never ends before the
+    /// deadline it was computed from: the earliest of the handshake deadline, the lease deadline,
+    /// the keep-alive deadline and the next registered timer, less now. A deadline already past
+    /// is 0, and `u64::MAX` is nothing due at all.
+    ///
+    /// The handshake deadline is armed here, as `step` arms it a moment later: a state the session
+    /// has just entered is armed from this instant, which is no later than it used to be.
+    fn wake_budget_ms(&mut self) -> u64 {
+        let now_ms = self.clock.now_monotonic_ms();
+        let mut due_ms = u64::MAX;
+        let handshake = self
+            .deadline_tracker
+            .poll(self.engine.get_current_state(), now_ms);
+        if let Some((deadline_ms, _event)) = handshake {
+            due_ms = due_ms.min(deadline_ms);
+        }
+        if let Some(deadline_ms) = lease_wake_deadline(&self.actions) {
+            due_ms = due_ms.min(deadline_ms);
+        }
+        #[cfg(feature = "transport-keepalive")]
+        if let Some(deadline_ms) = keepalive_wake_deadline(&self.actions) {
+            due_ms = due_ms.min(deadline_ms);
+        }
+        let mut wait_ms = due_ms.saturating_sub(now_ms);
+        if let Some(timer_us) = self.runtime.time_to_next_timer_us() {
+            wait_ms = wait_ms.min(timer_us.div_ceil(1000));
+        }
+        wait_ms
+    }
+
     /// Advance the session by one iteration. `Some(outcome)` means the
     /// session is finished (terminal FSM state, or the test iteration cap);
     /// `None` means call again.
@@ -678,7 +743,12 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             return None;
         }
 
-        self.link.service();
+        if self.link.uses_wake_budget() {
+            let wake_budget_ms = self.wake_budget_ms();
+            self.link.service_within(wake_budget_ms);
+        } else {
+            self.link.service();
+        }
 
         let now_ms = self.clock.now_monotonic_ms();
         // Sweep expired reassembly chains and surface the eviction count as
@@ -990,6 +1060,14 @@ pub struct DriverPump<D: 'static>(pub wz_session_core::session_slot::SlotDriver<
 impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
     fn service(&self) {
         self.0.service();
+    }
+
+    fn service_within(&self, max_wait_ms: u64) {
+        self.0.service_within(max_wait_ms);
+    }
+
+    fn uses_wake_budget(&self) -> bool {
+        self.0.uses_wake_budget()
     }
 
     #[cfg(feature = "alloc")]

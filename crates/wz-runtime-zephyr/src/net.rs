@@ -13,6 +13,12 @@
 //! the session core's [`BoxedLinkDriver`], its inbound half the cooperative
 //! drive loop's [`SessionDatagramLink`].
 //!
+//! The link itself is not written here. [`DatagramSocket`] is the seam a platform's socket
+//! implements, and the driver, its outbound storage and the slot profile's stack over a socket
+//! are `wz_runtime_coop::udp_link`, shared with every other stack that has BSD sockets under a
+//! cooperative loop. The names this module has always had ([`UdpDriver`], [`ZephyrUdpDriver`],
+//! [`FixedUdpDriver`], [`ZephyrStack`]) are that code at this socket.
+//!
 //! Zephyr's net stack runs its RX path on its own threads, so there is no
 //! input path for the drive loop to pump. What the loop's thread owes it is
 //! the CPU: [`SessionDatagramLink::service`] waits on the link's socket for up to
@@ -21,32 +27,18 @@
 //! the end of a sleep.
 
 #[cfg(feature = "alloc")]
-use alloc::vec;
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use core::cell::{Cell, OnceCell, RefCell};
+use core::cell::Cell;
 use core::ffi::{c_int, c_void};
-use core::fmt::Write;
 use core::mem::size_of;
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_runtime_coop::group_transport::GroupTransport;
-use wz_runtime_coop::session_drive::SessionDatagramLink;
-#[cfg(feature = "session-slot")]
-use wz_runtime_coop::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack, UdpPeer};
-use wz_session_core::byte_cells::ByteBuf;
-#[cfg(feature = "session-slot")]
-use wz_session_core::byte_cells::ByteSource;
-use wz_session_core::caps::MAX_LOCATOR_LEN;
 #[cfg(feature = "alloc")]
-use wz_session_core::link::RxFrame;
-use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
-    DEFAULT_LINK_MTU,
-};
-use wz_session_core::qos::Priority;
-use wz_session_core::reliability::Reliability;
+pub use wz_runtime_coop::udp_link::HeapTx;
+pub use wz_runtime_coop::udp_link::{DatagramSocket, TxStore, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
+use wz_session_core::byte_cells::ByteBuf;
 use zephyr_sys::socket::{
     bind, close, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
     SockaddrIn, AF_INET, IPPROTO_IP, IPPROTO_UDP, IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP, POLLIN,
@@ -87,12 +79,6 @@ pub const ZID_MAX: usize = 16;
 
 /// How often [`await_board_ipv4`] asks the board again.
 const ADDRESS_POLL_MS: u32 = 100;
-
-/// How long one pass of the drive loop waits for its link's socket to have a datagram. It bounds
-/// the loop's timers (the lease, the keep-alive, the retransmissions), which are looked at once
-/// per pass, so it is as long as the loop has always slept between passes: a quiet link costs
-/// the same, a datagram costs none of it.
-const SERVICE_WAIT_MS: c_int = 1;
 
 /// The board's IPv4 address, if its interface has one now.
 ///
@@ -142,10 +128,6 @@ pub fn await_board_ipv4(budget_ms: u32) -> Option<[u8; 4]> {
         waited += ADDRESS_POLL_MS;
     }
 }
-
-/// The largest UDP payload the session receives in one datagram — the
-/// transport's own ceiling, so a whole batch always fits.
-pub const UDP_RX_CAPACITY: usize = 65_535;
 
 /// Why a socket call failed. Zephyr reports the cause through `errno`, which
 /// is a thread-local the FFI cannot reach portably, so the error names the
@@ -442,141 +424,49 @@ impl Drop for ZephyrUdpSocket {
     }
 }
 
-/// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed text: the longest
-/// one, `udp/255.255.255.255:65535`, is 25 bytes of the [`MAX_LOCATOR_LEN`] the text has.
-fn udp_locator(addr: [u8; 4], port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
-    let [a, b, c, d] = addr;
-    let mut text = heapless::String::new();
-    // Cannot fail: the longest rendering is shorter than the text's capacity.
-    let _ = write!(text, "udp/{a}.{b}.{c}.{d}:{port}");
-    text
-}
+/// The session's link driver reaches this socket through the shared seam. Each method is the
+/// inherent one of the same name (an inherent method wins over a trait method of the same name,
+/// so none of these calls itself).
+impl DatagramSocket for ZephyrUdpSocket {
+    type Error = ZephyrNetError;
 
-/// Where a driver's outbound frames are built: memory of its own that it lends the session to
-/// encode a frame into ([`BoxedLinkDriver::tx_slot_acquire`]), so the frame is written once, where
-/// the socket reads it, and no buffer is allocated for it.
-///
-/// A driver whose storage is empty (a [`HeapTx`] of no bytes) lends nothing: the session builds
-/// each frame in a buffer of its own (the heap) and hands the bytes to `send_blocking`. A driver
-/// with storage lends it, and its link then also states the frames it
-/// carries ([`BoxedLinkDriver::link_mtu`], `link_rx_capacity`), because its buffers are the bound.
-/// The storage is a buffer of a table the image declares ([`ByteBuf`], the fixed-memory profile's,
-/// whose sessions have no heap to build a frame on) or buffers the link allocated once
-/// ([`HeapTx`]).
-///
-/// The storage is some number of slots of one length. A session that batches holds one slot open
-/// while it fills a batch and encodes the next message that does not join it into another, so a
-/// batching session needs two; one that does not batch needs one. The driver lends a slot at a
-/// time and takes it back at its send or abort.
-pub trait TxStore {
-    /// How many slots there are to lend, all of the length [`Self::slot_len`].
-    fn slots(&self) -> usize;
-
-    /// The length of every slot.
-    fn slot_len(&self) -> usize;
-
-    /// The first byte of slot `slot` (below [`Self::slots`]). The driver reads and writes it only
-    /// while it has lent the slot, and to one holder.
-    fn slot_base(&self, slot: usize) -> *mut u8;
-
-    /// Whether there is storage to lend.
-    fn lends(&self) -> bool {
-        self.slots() != 0 && self.slot_len() != 0
-    }
-}
-
-/// The fixed-memory profile's outbound storage: a buffer lent by a table the image declares, one
-/// slot. The socket writes a frame before the session builds the next, and a session that does not
-/// batch has no frame open beside it.
-impl TxStore for ByteBuf {
-    fn slots(&self) -> usize {
-        1
+    fn bind(addr: [u8; 4], port: u16) -> Result<Self, ZephyrNetError> {
+        ZephyrUdpSocket::bind(addr, port)
     }
 
-    fn slot_len(&self) -> usize {
-        self.raw().1
+    fn local(&self) -> ([u8; 4], u16) {
+        ZephyrUdpSocket::local(self)
     }
 
-    fn slot_base(&self, _slot: usize) -> *mut u8 {
-        self.raw().0
-    }
-}
-
-/// The heap profile's outbound storage: `slots` buffers of `slot_len` bytes, allocated together
-/// when the link is made and never again, so the frames of the link are encoded into them and a
-/// frame costs no allocation. Of no bytes it lends nothing, which is the link as it was before the
-/// profile lent.
-#[cfg(feature = "alloc")]
-pub struct HeapTx {
-    cells: Vec<core::cell::UnsafeCell<u8>>,
-    slot_len: usize,
-}
-
-#[cfg(feature = "alloc")]
-impl HeapTx {
-    /// `slots` slots of `slot_len` bytes each (none, with either 0).
-    pub fn new(slots: usize, slot_len: usize) -> Self {
-        let len = slots.saturating_mul(slot_len);
-        Self {
-            cells: (0..len).map(|_| core::cell::UnsafeCell::new(0)).collect(),
-            slot_len,
-        }
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl TxStore for HeapTx {
-    fn slots(&self) -> usize {
-        self.cells.len().checked_div(self.slot_len).unwrap_or(0)
+    fn send_to(&self, addr: [u8; 4], port: u16, bytes: &[u8]) -> Result<(), ZephyrNetError> {
+        ZephyrUdpSocket::send_to(self, addr, port, bytes)
     }
 
-    fn slot_len(&self) -> usize {
-        self.slot_len
+    fn wait_readable(&self, timeout_ms: c_int) {
+        ZephyrUdpSocket::wait_readable(self, timeout_ms);
     }
 
-    fn slot_base(&self, slot: usize) -> *mut u8 {
-        // `UnsafeCell<u8>` is a `u8`, and a pointer to a cell may be written through.
-        self.cells
-            .as_ptr()
-            .cast::<u8>()
-            .cast_mut()
-            .wrapping_add(slot * self.slot_len)
+    fn times_out(&self) -> bool {
+        ZephyrUdpSocket::times_out(self)
+    }
+
+    fn recv_waiting(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+        ZephyrUdpSocket::recv_waiting(self, buf)
+    }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
+        ZephyrUdpSocket::try_recv(self, buf)
     }
 }
 
 /// The session's link over one [`ZephyrUdpSocket`], with its receive buffer in `B` and its outbound
-/// frames built in `T`: a `Vec<u8>` and nothing on the heap profile ([`ZephyrUdpDriver`]), claims
-/// on the image's byte tables on the fixed one ([`FixedUdpDriver`]), where the driver is a few words
-/// in the session's slot and a datagram costs no allocation either way.
-///
-/// Outbound sends target the peer captured from the most recent inbound
-/// datagram: an acceptor is built with no peer and learns it from the
-/// InitSyn, and [`SessionDatagramLink::try_recv`] retargets on every datagram
-/// so replies go to whoever just spoke. UDP is connectionless, so
-/// `open_blocking` / `close_blocking` are no-ops — the zenoh handshake and
-/// Close frame are the session's open and close.
-pub struct UdpDriver<B: AsMut<[u8]>, T: TxStore> {
-    socket: ZephyrUdpSocket,
-    peer: Cell<Option<([u8; 4], u16)>>,
-    /// The link's two ends, `udp/<ip>:<port>` each, written once — when the
-    /// peer is first known.
-    endpoints: OnceCell<LinkEndpoints>,
-    rx_buf: RefCell<B>,
-    /// The length of `rx_buf`, the largest datagram the link receives whole.
-    rx_len: usize,
-    /// The memory the session encodes its frames into.
-    tx: T,
-    /// Which slots of `tx` are out with the session, bit by slot number, between a slot's grant and
-    /// its send or abort.
-    tx_lent: Cell<u8>,
-    /// A datagram [`SessionDatagramLink::service`] already read into `rx_buf` while it waited
-    /// (length and source), for the next receive to hand out without another call into the stack.
-    stash: Cell<Option<(usize, [u8; 4], u16)>>,
-    /// The last receive failure, kept for the deploy to report: the loop's
-    /// seam returns a frame or nothing, and a socket that fails must not
-    /// read as a quiet one.
-    rx_error: Cell<Option<ZephyrNetError>>,
-}
+/// frames built in `T`: a `Vec<u8>` and [`HeapTx`] on the heap profile ([`ZephyrUdpDriver`]),
+/// claims on the image's byte tables on the fixed one ([`FixedUdpDriver`]). The driver is
+/// `wz_runtime_coop::udp_link::UdpDriver`; its constructors and its behaviour are documented there.
+pub type UdpDriver<B, T> = wz_runtime_coop::udp_link::UdpDriver<ZephyrUdpSocket, B, T>;
 
 /// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
 /// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
@@ -591,363 +481,14 @@ pub type ZephyrUdpDriver = UdpDriver<Vec<u8>, HeapTx>;
 /// frame.
 pub type FixedUdpDriver = UdpDriver<ByteBuf, ByteBuf>;
 
-#[cfg(feature = "alloc")]
-impl UdpDriver<Vec<u8>, HeapTx> {
-    /// An acceptor's link: no peer until the first datagram names one.
-    pub fn acceptor(socket: ZephyrUdpSocket) -> Self {
-        Self::acceptor_with_capacity(socket, UDP_RX_CAPACITY)
-    }
-
-    /// An initiator's link: replies and first sends go to `peer`.
-    pub fn initiator(socket: ZephyrUdpSocket, peer: ([u8; 4], u16)) -> Self {
-        Self::initiator_with_capacity(socket, peer, UDP_RX_CAPACITY)
-    }
-
-    /// [`Self::acceptor_with_capacity`] that also lends the session the slots of `tx` to encode its
-    /// frames into.
-    pub fn acceptor_with_buffers(socket: ZephyrUdpSocket, rx_capacity: usize, tx: HeapTx) -> Self {
-        Self::acceptor_in(socket, vec![0u8; rx_capacity], tx)
-    }
-
-    /// [`Self::initiator_with_capacity`] that also lends the session the slots of `tx` to encode
-    /// its frames into.
-    pub fn initiator_with_buffers(
-        socket: ZephyrUdpSocket,
-        peer: ([u8; 4], u16),
-        rx_capacity: usize,
-        tx: HeapTx,
-    ) -> Self {
-        Self::initiator_in(socket, peer, vec![0u8; rx_capacity], tx)
-    }
-
-    /// An acceptor's link whose receive buffer holds `rx_capacity` bytes: what a
-    /// node that runs several links at once sizes to the batch it negotiates,
-    /// rather than to the largest datagram UDP can carry ([`UDP_RX_CAPACITY`]).
-    /// A datagram longer than that is truncated by the stack, which the session
-    /// reads as a bad frame.
-    pub fn acceptor_with_capacity(socket: ZephyrUdpSocket, rx_capacity: usize) -> Self {
-        Self::acceptor_in(socket, vec![0u8; rx_capacity], HeapTx::new(0, 0))
-    }
-
-    /// [`ZephyrUdpDriver::initiator`] with a receive buffer of `rx_capacity` bytes.
-    pub fn initiator_with_capacity(
-        socket: ZephyrUdpSocket,
-        peer: ([u8; 4], u16),
-        rx_capacity: usize,
-    ) -> Self {
-        Self::initiator_in(socket, peer, vec![0u8; rx_capacity], HeapTx::new(0, 0))
-    }
-}
-
-impl<B: AsMut<[u8]>, T: TxStore> UdpDriver<B, T> {
-    /// An acceptor's link over the receive buffer `rx_buf`, building its frames in `tx`: no peer
-    /// until the first datagram names one.
-    pub fn acceptor_in(socket: ZephyrUdpSocket, rx_buf: B, tx: T) -> Self {
-        Self::with_peer(socket, None, rx_buf, tx)
-    }
-
-    /// An initiator's link over the receive buffer `rx_buf`, building its frames in `tx`: replies
-    /// and first sends go to `peer`.
-    pub fn initiator_in(socket: ZephyrUdpSocket, peer: ([u8; 4], u16), rx_buf: B, tx: T) -> Self {
-        Self::with_peer(socket, Some(peer), rx_buf, tx)
-    }
-
-    fn with_peer(
-        socket: ZephyrUdpSocket,
-        peer: Option<([u8; 4], u16)>,
-        mut rx_buf: B,
-        tx: T,
-    ) -> Self {
-        let rx_len = rx_buf.as_mut().len();
-        let driver = Self {
-            socket,
-            peer: Cell::new(None),
-            endpoints: OnceCell::new(),
-            rx_buf: RefCell::new(rx_buf),
-            rx_len,
-            tx,
-            tx_lent: Cell::new(0),
-            stash: Cell::new(None),
-            rx_error: Cell::new(None),
-        };
-        if let Some(peer) = peer {
-            driver.set_peer(peer);
-        }
-        driver
-    }
-
-    /// The next datagram: the one `service` already read into `rx_buf`, if it did, else one the
-    /// stack has queued. `Ok(None)` when there is none.
-    fn next_datagram(
-        &self,
-        buf: &mut [u8],
-    ) -> Result<Option<(usize, [u8; 4], u16)>, ZephyrNetError> {
-        match self.stash.take() {
-            Some(held) => Ok(Some(held)),
-            None => self.socket.try_recv(buf),
-        }
-    }
-
-    fn set_peer(&self, peer: ([u8; 4], u16)) {
-        self.peer.set(Some(peer));
-        if self.endpoints.get().is_none() {
-            let (addr, port) = self.socket.local();
-            let _ = self.endpoints.set(LinkEndpoints::new(
-                udp_locator(addr, port).as_str(),
-                udp_locator(peer.0, peer.1).as_str(),
-            ));
-        }
-    }
-
-    /// The peer the next send goes to, once one is known.
-    pub fn peer(&self) -> Option<([u8; 4], u16)> {
-        self.peer.get()
-    }
-
-    /// The most recent receive failure, if the socket has failed.
-    pub fn rx_error(&self) -> Option<ZephyrNetError> {
-        self.rx_error.get()
-    }
-}
-
-impl<B: AsMut<[u8]> + 'static, T: TxStore + 'static> UdpDriver<B, T> {
-    /// The socket's send of `bytes` to the peer, as the outcome the session counts: a send with no
-    /// peer yet, or one the stack refuses, is REPORTED (R2371's rule for the lwIP driver), not
-    /// swallowed.
-    fn send_datagram(&self, bytes: &[u8]) -> LinkSendOutcome {
-        let Some((addr, port)) = self.peer.get() else {
-            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
-        };
-        match self.socket.send_to(addr, port, bytes) {
-            Ok(()) => LinkSendOutcome::Sent,
-            Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
-        }
-    }
-}
-
-impl<B: AsMut<[u8]> + 'static, T: TxStore + 'static> BoxedLinkDriver for UdpDriver<B, T> {
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
-        // UDP is unreliable; the session's reliable channel recovers a drop.
-        self.send_datagram(bytes)
-    }
-
-    // The session encodes a frame straight into the driver's own storage, and the socket reads it
-    // from there: the frame is written once and no buffer is allocated for it. The socket takes a
-    // datagram whole and synchronously, so a slot is back at its send; a session that batches
-    // holds one open beside the message it encodes next, which is why there can be two. An ask
-    // with every slot out is refused, which the lend-only profile counts rather than answering
-    // from the heap.
-    fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
-        let slots = self.tx.slots().min(u8::BITS as usize);
-        if self.tx.slot_len() == 0 {
-            return None;
-        }
-        let lent = self.tx_lent.get();
-        let free = (0..slots).find(|slot| lent & (1 << slot) == 0)?;
-        self.tx_lent.set(lent | (1 << free));
-        // The socket writes the datagram's own headers, so the frame starts at the slot's front.
-        Some(TxSlotGrant {
-            slot: TxSlot(free as u32),
-            headroom: 0,
-        })
-    }
-
-    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
-        (self.tx.slot_base(slot.0 as usize), self.tx.slot_len())
-    }
-
-    fn tx_slot_send(
-        &self,
-        slot: TxSlot,
-        start: usize,
-        len: usize,
-        _reliability: Reliability,
-        _priority: Priority,
-    ) -> LinkSendOutcome {
-        let (base, capacity) = self.tx_slot_storage(slot);
-        self.tx_slot_abort(slot);
-        if start.checked_add(len).map_or(true, |end| end > capacity) {
-            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
-        }
-        // SAFETY: `base` is the first byte of a slot of `self.tx`, `capacity` bytes long, and
-        // `start + len` is within it. The slot was granted to the session alone and has just been
-        // taken back by this call, so nothing else writes the bytes while the socket reads them.
-        let frame = unsafe { core::slice::from_raw_parts(base.add(start), len) };
-        self.send_datagram(frame)
-    }
-
-    fn tx_slot_abort(&self, slot: TxSlot) {
-        self.tx_lent.set(self.tx_lent.get() & !(1 << slot.0));
-    }
-
-    fn open_blocking(&self) {}
-
-    fn close_blocking(&self) {}
-
-    fn link_endpoints(&self) -> Option<&LinkEndpoints> {
-        self.endpoints.get()
-    }
-
-    // A driver whose buffers are declared is bounded by them: the frame it sends is at most the
-    // storage it lends, and the batch it advertises is at most the datagram it receives whole, as
-    // lwIP's session socket declares its slot (`link_mtu` bounds the session's send budget, so a
-    // message past it fragments instead of being encoded into a slot too short for it).
-    fn link_mtu(&self) -> usize {
-        if self.tx.lends() {
-            self.tx.slot_len()
-        } else {
-            DEFAULT_LINK_MTU
-        }
-    }
-
-    fn link_rx_capacity(&self) -> usize {
-        if self.tx.lends() {
-            self.rx_len
-        } else {
-            DEFAULT_LINK_MTU
-        }
-    }
-}
-
-impl<B: AsMut<[u8]> + 'static, T: TxStore + 'static> SessionDatagramLink for UdpDriver<B, T> {
-    fn service(&self) {
-        // Zephyr's net stack runs its own threads: all this thread owes it is the CPU. It gives
-        // it by waiting for the socket, so a datagram is taken the moment it is queued, and a
-        // quiet socket costs one millisecond, which is what bounds the loop's timers.
-        //
-        // On a socket whose reads time out, the wait is the read: the datagram is taken into
-        // `rx_buf` in the same call that waited for it and held for the receive that follows, so
-        // a datagram crosses the stack once, as it does for zenoh-pico. Otherwise `poll` waits and
-        // the receive reads.
-        if !self.socket.times_out() {
-            self.socket.wait_readable(SERVICE_WAIT_MS);
-            return;
-        }
-        if self.stash.get().is_some() {
-            return;
-        }
-        // The buffer is lent out while a receive callback runs; a wait asked for from inside one
-        // (the loop does not) falls back to `poll`, which needs no buffer.
-        let Ok(mut buf) = self.rx_buf.try_borrow_mut() else {
-            self.socket.wait_readable(SERVICE_WAIT_MS);
-            return;
-        };
-        match self.socket.recv_waiting(buf.as_mut()) {
-            Ok(held) => self.stash.set(held),
-            Err(e) => self.rx_error.set(Some(e)),
-        }
-    }
-
-    #[cfg(feature = "alloc")]
-    fn try_recv(&self) -> Option<RxFrame> {
-        let mut buf = self.rx_buf.borrow_mut();
-        let bytes: &mut [u8] = buf.as_mut();
-        match self.next_datagram(bytes) {
-            Ok(Some((len, addr, port))) => {
-                self.set_peer((addr, port));
-                Some(RxFrame::new(bytes[..len].to_vec()))
-            }
-            Ok(None) => None,
-            Err(e) => {
-                self.rx_error.set(Some(e));
-                None
-            }
-        }
-    }
-
-    // The datagram is lent out of the link's own receive buffer, which the
-    // stack has just written: no heap copy of it. The buffer stays borrowed
-    // while `f` runs; the session's sends go through the socket, not through
-    // it, and a receive from inside `f` would be refused by the `RefCell`.
-    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
-        let mut buf = self.rx_buf.borrow_mut();
-        let bytes: &mut [u8] = buf.as_mut();
-        match self.next_datagram(bytes) {
-            Ok(Some((len, addr, port))) => {
-                self.set_peer((addr, port));
-                f(&bytes[..len]);
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                self.rx_error.set(Some(e));
-                false
-            }
-        }
-    }
-}
-
 /// Zephyr's sockets as a stack of the slot profile's session host: the driver in the session's
-/// slot is a [`FixedUdpDriver`], and the drive loop pumps it through the driver itself
-/// ([`DriverPump`]), because the kernel's threads run the net stack and there is no input path
-/// of its own for the loop to advance. Each session's driver claims its receive buffer (as long as
-/// the batch the session advertises) and the buffer its frames are encoded into (the largest frame
-/// it sends) from two tables the image declares, so a dial moves a few words and no bytes, and the
-/// lengths are the tables' and not the type's.
-///
-/// Nothing is kept for a listener (`Lane` is `()`): the client node dials, and a node that
-/// accepts on Zephyr's sockets would bring a lane of its own. The sockets are the kernel's file
-/// descriptors, counted by `CONFIG_ZVFS_OPEN_MAX`, so no pool of them is declared here; a
-/// descriptor the kernel cannot give is the dial's [`LinkOpenError::Exhausted`], and the
-/// session host's tables bound how many are open at once.
+/// slot is a [`FixedUdpDriver`], and the drive loop pumps it through the driver itself, because
+/// the kernel's threads run the net stack and there is no input path of its own for the loop to
+/// advance. The stack is `wz_runtime_coop::udp_link::UdpStack` at this socket: the sockets are the
+/// kernel's file descriptors, counted by `CONFIG_ZVFS_OPEN_MAX`, so no pool of them is declared
+/// here, and a node that accepts on Zephyr's sockets would bring a lane of its own.
 #[cfg(feature = "session-slot")]
-#[derive(Clone, Copy)]
-pub struct ZephyrStack {
-    local: [u8; 4],
-    rx: &'static dyn ByteSource,
-    tx: &'static dyn ByteSource,
-}
-
-#[cfg(feature = "session-slot")]
-impl ZephyrStack {
-    /// The stack of a node whose own address is `local`, as its interface holds it, whose links
-    /// take their receive buffers from `rx` and their frame buffers from `tx`.
-    pub const fn new(
-        local: [u8; 4],
-        rx: &'static dyn ByteSource,
-        tx: &'static dyn ByteSource,
-    ) -> Self {
-        Self { local, rx, tx }
-    }
-
-    /// The link of a dial to `peer`: a socket on a port the stack picks, with replies and first
-    /// sends going to `peer`. What the session host's `dial` is given to open its socket. A table
-    /// with no buffer free, like a kernel with no descriptor, is [`LinkOpenError::Exhausted`], and
-    /// whatever was claimed before the refusal goes back with it.
-    pub fn bind_initiator(&self, peer: UdpPeer) -> Result<FixedUdpDriver, LinkOpenError> {
-        let rx = self.rx.claim().ok_or(LinkOpenError::Exhausted)?;
-        let tx = self.tx.claim().ok_or(LinkOpenError::Exhausted)?;
-        let socket = ZephyrUdpSocket::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
-        Ok(UdpDriver::initiator_in(
-            socket,
-            (peer.addr, peer.port),
-            rx,
-            tx,
-        ))
-    }
-}
-
-#[cfg(feature = "session-slot")]
-impl Bind<FixedUdpDriver> for ZephyrStack {
-    fn bind(&mut self, peer: UdpPeer) -> Result<FixedUdpDriver, LinkOpenError> {
-        self.bind_initiator(peer)
-    }
-}
-
-#[cfg(feature = "session-slot")]
-impl SlotStack for ZephyrStack {
-    type Driver = FixedUdpDriver;
-    type Pump = DriverPump<FixedUdpDriver>;
-    type Lane = ();
-
-    fn pump(
-        &self,
-        driver: wz_session_core::session_slot::SlotDriver<FixedUdpDriver>,
-        _lane: Option<()>,
-    ) -> Self::Pump {
-        DriverPump(driver)
-    }
-}
+pub type ZephyrStack = wz_runtime_coop::udp_link::UdpStack<ZephyrUdpSocket>;
 
 /// A multicast group session's I/O over Zephyr's own sockets: the
 /// [`GroupTransport`] the shared group drive loop (`wz-session-mcu`'s

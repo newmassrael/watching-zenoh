@@ -160,6 +160,7 @@ reassembly = [
 session-unicast = [
     "runtime",
     "dep:wz-session-core",
+    "dep:heapless",
     "wz-session-core/session-unicast",
     "wz-session-core/no_std",
 ]
@@ -287,6 +288,9 @@ wz-runtime-core = { path = "../wz-runtime-core", default-features = false, optio
 # registries bound to CoopRuntime), more capabilities flow across this
 # same edge.
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
+# The text of a UDP link's two locators, held in the driver (`udp_link::UdpDriver`): the same crate
+# and version `wz-session-core`'s bounded backing is made of.
+heapless = { version = "0.8", default-features = false, optional = true }
 
 [dev-dependencies]
 # critical-section's `std` feature provides a software-emulated impl

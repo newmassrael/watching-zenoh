@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-posix -- the HOST cooperative single-thread profile with no allocator.
+#
+# The shape of `wz-runtime-zephyr`, with a POSIX libc under it instead of a Zephyr kernel: the
+# audited `wz_runtime_coop::CoopRuntime` is the executor, and this crate supplies only the seams
+# (a clock, the entropy and the wall clock the session core asks for, a UDP socket, the glue of a
+# `#![no_std]` `#![no_main]` program). A process built from it links no allocator, which the
+# toolchain's refusal to link a program that allocates anywhere proves, as for the kit's image.
+#
+# Not the host profile of the C ABI (`wz-capi-c`, tokio, threads, a heap): that one is the drop-in
+# for zenoh-c. This one is the same session code the MCU images run, at a Linux socket.
+
+[package]
+name = "wz-runtime-posix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Host cooperative single-thread runtime profile with no allocator: a monotonic clock, entropy, wall clock and UDP socket over libc for the shared MCU session code."
+
+[lib]
+name = "wz_runtime_posix"
+path = "src/lib.rs"
+
+[dependencies]
+# The system calls (`clock_gettime`, `getrandom`, `socket`, `poll`, `recvfrom`, `write`). No `std`
+# feature: this crate is `#![no_std]`, and `libc` is the C library's own names.
+libc = { version = "0.2", default-features = false }
+# The cooperative executor SSOT (CoopRuntime + ClockSource) and the datagram link every stack with
+# BSD sockets shares (`udp_link`): this profile reuses both, parameterised by the clock and the
+# socket.
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
+# The traits the seams implement (`EntropySource`, `EpochSource`).
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
+
+[features]
+# `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually
+# exclusive selectors. The default is the heap form, as `wz-runtime-zephyr`'s is, so that a
+# workspace-wide build (which unifies features across every crate) finds this crate buildable and
+# does not hand the other crates a static executor. This crate has no heap code of its own; the
+# default only lets it compile beside the crates that do.
+default = ["alloc"]
+alloc = ["wz-runtime-coop/alloc", "wz-session-core/alloc"]
+# The per-session slot profile of the cooperative runtime, with no allocator: what a PROGRAM turns
+# on, with the defaults off (`--no-default-features --features session-slot`). Names
+# `wz-runtime-coop`'s selector, which is the instance the session code the program links uses; it
+# also builds `net::PosixStack`, the stack the slot profile's session host is given.
+session-slot = ["wz-runtime-coop/session-slot"]
+
+[lints]
+workspace = true

@@ -3137,6 +3137,7 @@ name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "heapless",
  "portable-atomic",
  "portable-atomic-util",
  "wz-runtime-core",
@@ -3152,6 +3153,15 @@ name = "wz-runtime-freertos"
 version = "0.1.0"
 dependencies = [
  "freertos-sys",
+ "wz-runtime-coop",
+ "wz-session-core",
+]
+
+[[package]]
+name = "wz-runtime-posix"
+version = "0.1.0"
+dependencies = [
+ "libc",
  "wz-runtime-coop",
  "wz-session-core",
 ]
@@ -3243,7 +3253,6 @@ dependencies = [
 name = "wz-runtime-zephyr"
 version = "0.1.0"
 dependencies = [
- "heapless",
  "wz-runtime-coop",
  "wz-session-core",
  "zephyr-sys",

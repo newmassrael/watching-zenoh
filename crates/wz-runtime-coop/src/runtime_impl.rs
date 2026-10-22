@@ -219,6 +219,18 @@ impl<C: ClockSource> CoopRuntime<C> {
         &self.inner.timers
     }
 
+    /// How long from now until the earliest registered timer is due, in microseconds: 0 for one
+    /// that already is, `None` when no timer is registered. A loop that wants to sleep until
+    /// something is due asks here, in the one unit and the one clock it needs, rather than
+    /// reading the queue's absolute deadline and a clock of its own.
+    pub fn time_to_next_timer_us(&self) -> Option<u64> {
+        let now = self.inner.clock.now_us();
+        self.inner
+            .timers
+            .next_deadline_us()
+            .map(|deadline| deadline.saturating_sub(now))
+    }
+
     /// Poll every currently-ready spawned task at most once.
     ///
     /// R311bc pass shape:

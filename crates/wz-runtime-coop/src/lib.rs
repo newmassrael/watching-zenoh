@@ -272,6 +272,12 @@ pub mod session_runtime;
 #[cfg(feature = "session-unicast")]
 pub mod session_drive;
 
+// The session's link over UDP datagrams, written once for every stack that has BSD-style sockets
+// under a cooperative loop: a platform crate supplies the socket (`udp_link::DatagramSocket`),
+// the driver and the slot profile's stack over it are here.
+#[cfg(feature = "session-unicast")]
+pub mod udp_link;
+
 // The multicast group session's seam to the network stack, the twin of
 // `session_drive::SessionDatagramLink`. The trait carries no dependency and no
 // allocator, so it is not feature-gated: a stack's crate names it to supply a

@@ -180,6 +180,10 @@ members = [
     "wz-runtime-freertos",
     "zephyr-sys",
     "wz-runtime-zephyr",
+    # The host cooperative single-thread profile with no allocator: the Zephyr profile's shape
+    # over a POSIX libc (a clock, entropy, the date, a UDP socket), for the shared MCU session
+    # code run as a Linux process.
+    "wz-runtime-posix",
     "wz-link-lwip",
     # The MCU session shell that is written once for every network stack (no_std
     # lib; the application layer, the admin node, the connection manager and the
