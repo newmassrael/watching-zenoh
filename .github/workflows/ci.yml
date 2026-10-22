@@ -366,11 +366,25 @@ jobs:
         # 60-830 MB held the repository at 10.8 GB against a 10 GB cap, and
         # eviction took the RocksDB engine with it. `shared-key: ci` spells the
         # key this job already used, so the move costs no cold run.
+        #
+        # SAVED ON FAILURE (R3414). rust-cache saves in its post step, and by
+        # default only for a job that succeeded. This job fails at its LAST
+        # step when its clock passes the alarm ("Budget margin"), after every
+        # build and test step has passed, and the clock is passed exactly when
+        # the cache missed: run 39758930599 restored the previous lock's entry
+        # after a lock change, built the new dependencies cold, took 97% of its
+        # clock, failed, and saved nothing, so the next run was cold again, and
+        # with it every reader above. A loop. The entry holds dependencies only
+        # (rust-cache drops the workspace crates before saving), so what a red
+        # run built is as valid as what a green one built. Every saver in this
+        # file saves the same way, for the same reason; the Platform workflow's
+        # savers already did.
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
           add-job-id-key: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
           workspaces: |
             crates -> target
             vendor/sce -> target
@@ -1138,6 +1152,8 @@ jobs:
           shared-key: codegen-verify
           add-job-id-key: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
           workspaces: |
             crates -> target
             vendor/sce -> target
@@ -1285,6 +1301,8 @@ jobs:
           workspaces: crates -> target
           key: verdict-legs
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
 
       - name: Layer C0mut — every verdict leg is load-bearing
         # R311y726 (N14) — severs each `VerdictReason` leg in turn and requires
@@ -2295,6 +2313,8 @@ jobs:
           shared-key: footprint
           add-job-id-key: "false"
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 0 }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
           workspaces: crates -> target
 
       - name: Layer F — codec-footprint catalog truthfulness gate
@@ -2450,6 +2470,8 @@ jobs:
             oracles -> target
           key: interop
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -3660,6 +3682,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
           workspaces: |
             deploy/zephyr-app/rust -> target
             deploy/zephyr-admin-node/rust -> target
@@ -3824,6 +3848,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
           workspaces: |
             deploy/zephyr-admin-node/rust -> target
 
@@ -5161,6 +5187,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
           workspaces: |
             crates -> target
             vendor/sce -> target
@@ -5499,6 +5527,8 @@ jobs:
           shared-key: capi-c-arms
           add-job-id-key: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved on failure, as every saver here is (see the `ci` job's).
+          cache-on-failure: true
           workspaces: |
             crates -> target
 

@@ -128,7 +128,7 @@
       "protect": false,
       "evict_priority": 30,
       "allow_run_scoped": false,
-      "note": "The one workspace dependency cache for the Linux feature-set jobs. The ci job saves it; the readers restore it and never save, so one manifest change writes one entry instead of eight. The old arrangement gave every job its own key because several parallel SAVERS thrash a shared key; a shared key with a single saver does not. Each reader's worst case is its own cold run, which the 18-run measurement puts at 13-26 minutes against budgets of 30-45."
+      "note": "The one workspace dependency cache for the Linux feature-set jobs. The ci job saves it, and saves it when the job is red too (cache-on-failure): the job turns red at its clock step exactly when the cache missed, so a save on success only kept every following run cold (run 39758930599). The readers restore it and never save, so one manifest change writes one entry instead of eight. The old arrangement gave every job its own key because several parallel SAVERS thrash a shared key; a shared key with a single saver does not. Each reader's worst case is its own cold run, which the 18-run measurement puts at 13-26 minutes against budgets of 30-45."
     },
     {
       "id": "rust-codegen-verify",
