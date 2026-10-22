@@ -623,39 +623,8 @@ jobs:
       # green; see that job's header for the measurement and for why a split
       # rather than a bigger `timeout-minutes`.
 
-      - name: Layer C1i — scouting-active glue unit tests
-        # R311ep — scouting-active is off by default, so Layer C1's
-        # `cargo test --workspace` never builds the scouting glue. This
-        # lane builds + runs the deterministic scouting unit tests
-        # (Scout framing / Hello-locator extraction / scout-timeout)
-        # under --features scouting-active + deny-warnings. The
-        # socket-bound multicast e2e is the opt-in Layer M (multicast
-        # routing is environment-dependent; not a default gate).
-        run: bash scripts/run-ci.sh --layer C1i
-
-      - name: Layer C2 — cargo clippy --deny warnings
-        run: bash scripts/run-ci.sh --layer C2
-
-      - name: Layer C4 — wz facade preset composability matrix
-        # R311eb — cargo-builds the wz facade under all 7 named presets
-        # (mcu-minimal/-extended, ap-client/-router/-full, zenoh-cpp,
-        # cortex-m4-default) so a preset feature-list drift or incoherent
-        # combo cannot pass CI invisibly. Facade-level analog of C1h;
-        # enforced here (unlike the local-only C3 lint-isolation lane)
-        # because it is a composability guard, not a redundant lint pass.
-        # no_std footing of the MCU presets stays Layer G's cross-compile.
-        run: bash scripts/run-ci.sh --layer C4
-
-      - name: Layer C4b — wz facade arbitrary-incomplete-subset matrix
-        # R311ek — cargo-builds the wz facade under deliberately-incomplete
-        # coherent consumer subsets (pubsub-only / queryable-only /
-        # zget-reply-only / declare-observer). The named-preset C4 lane
-        # only covers COMPLETE profiles, and C1h only covers the
-        # wz-session-core layer; this lane is the facade-level analog of
-        # C1h that locks the runtime-tokio glue's over-broad-gating
-        # regression class (observer / liveliness_subscriber / source_info
-        # ext encoder) the default-feature CI never exercises.
-        run: bash scripts/run-ci.sh --layer C4b
+      # Layers C1i, C2, C4 and C4b run in the `feature-gates` job (R3414): see
+      # this job's `Budget margin` step for the measurement that moved them.
 
       - name: Install python3-yaml (Layer D dep)
         # Layer D's run-ci.sh path no-ops gracefully when python3-yaml
@@ -756,6 +725,21 @@ jobs:
         # oracle steps + the pico CLI build to capi-c-arms; the eight demo lanes
         # and their build to e2e-demo), which lands this job near 68% and leaves
         # room the checkout can move inside.
+        #
+        # R3414 — IT CREPT BACK, AND A COLD CACHE IS WHAT CROSSED IT. Run
+        # 39733003983 took 1577s (87%) with a warm cache; run 39758930599 took
+        # 1748s (97%) after a lock change, its cache restored from the previous
+        # lock, and this step failed with every lane green. Layer C1 alone went
+        # 615s to 853s, and it was 176s at y865. A cold run follows every lock
+        # change, so the budget has to hold one: the margin is judged on it, not
+        # on the warm run. And the red it raised kept the next run cold too, since
+        # the cache saved only on success; the cache step above now saves on
+        # failure. This round peels C1i, C2, C4 and C4b (31s, 78s, 59s and 45s on
+        # the cold run) to `feature-gates`, which restores the same cache and
+        # engine and ended that run at 55% of its 2700s: about 75% warm and 85%
+        # cold here. The next peel is Layer C1 itself, the one step that keeps
+        # growing, and it is not a lane move: C1 is what builds the dependency
+        # set this job saves for every reader, so it moves only with the save.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30 '${{ job.status }}'
 
@@ -4421,6 +4405,46 @@ jobs:
 
       - name: Layer C1bh — storage host dir (R311y581 wiring)
         run: bash scripts/run-ci.sh --layer C1bh
+
+      # R3414 — the four lanes below were peeled from the `ci` job, whose
+      # clock went to 97% on a cold cache (see its `Budget margin` step). They
+      # build the workspace's own feature sets over the same `rust-ci` cache and
+      # the same RocksDB engine this job restores, and this job ended run
+      # 39758930599 at 55% of its clock with 66 GB free. C2's deploy arm SKIPs
+      # here exactly as it did there (no `arm-none-eabi-gcc` in either job).
+      - name: Layer C2 — cargo clippy --deny warnings
+        run: bash scripts/run-ci.sh --layer C2
+
+      - name: Layer C4 — wz facade preset composability matrix
+        # R311eb — cargo-builds the wz facade under all 7 named presets
+        # (mcu-minimal/-extended, ap-client/-router/-full, zenoh-cpp,
+        # cortex-m4-default) so a preset feature-list drift or incoherent
+        # combo cannot pass CI invisibly. Facade-level analog of C1h;
+        # enforced here (unlike the local-only C3 lint-isolation lane)
+        # because it is a composability guard, not a redundant lint pass.
+        # no_std footing of the MCU presets stays Layer G's cross-compile.
+        run: bash scripts/run-ci.sh --layer C4
+
+      - name: Layer C4b — wz facade arbitrary-incomplete-subset matrix
+        # R311ek — cargo-builds the wz facade under deliberately-incomplete
+        # coherent consumer subsets (pubsub-only / queryable-only /
+        # zget-reply-only / declare-observer). The named-preset C4 lane
+        # only covers COMPLETE profiles, and C1h only covers the
+        # wz-session-core layer; this lane is the facade-level analog of
+        # C1h that locks the runtime-tokio glue's over-broad-gating
+        # regression class (observer / liveliness_subscriber / source_info
+        # ext encoder) the default-feature CI never exercises.
+        run: bash scripts/run-ci.sh --layer C4b
+
+      - name: Layer C1i — scouting-active glue unit tests
+        # R311ep — scouting-active is off by default, so Layer C1's
+        # `cargo test --workspace` never builds the scouting glue. This
+        # lane builds + runs the deterministic scouting unit tests
+        # (Scout framing / Hello-locator extraction / scout-timeout)
+        # under --features scouting-active + deny-warnings. The
+        # socket-bound multicast e2e is the opt-in Layer M (multicast
+        # routing is environment-dependent; not a default gate).
+        run: bash scripts/run-ci.sh --layer C1i
 
       # The measurement this job's own header asks for and has never had: it
       # declares "THIS JOB HAS NO OTHER DISK HEADROOM" while recording that
