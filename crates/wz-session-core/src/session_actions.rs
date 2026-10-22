@@ -2523,9 +2523,9 @@ where
     )
 ))]
 #[inline(always)]
-fn as_encoder<'a, P>(
-    encode_body: &'a P,
-) -> &'a dyn Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+fn as_encoder<P>(
+    encode_body: &P,
+) -> &dyn Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
 where
     P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
 {
@@ -9308,7 +9308,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     crate::frame_encode::frame_flags(reliable),
                     worst_case_payload,
                     ext_qos,
-                    &encode_body,
+                    encode_body,
                 );
                 self.emit_frame_or_fragments(batch, &wire, frame_emit)
             }
