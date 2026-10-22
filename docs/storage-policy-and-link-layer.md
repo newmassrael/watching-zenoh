@@ -162,6 +162,27 @@ beyond its plan:
   counted egress (`transport-stats`, an egress reply gate, a namespace) still
   takes the owned reply, as the parts writer does not apply them.
 
+- **Step 6** (registries): the queryable table, the reply staging, the subscriber
+  and declaration tables (subscribers, remote subscribers, remote queryables,
+  peer tokens, local tokens), the peer tables of a session, the requester's
+  pending-query table and the pending liveliness gets are generic over the
+  policy, with the build's profile as the default so existing names mean the
+  same thing. Where the two policies differ in representation (a hash map of
+  aliases against a linear table) the policy picks it through an associated type
+  (`Ids`, `Epoch`, `peer_space`); no registry matches on the policy. One body of
+  each fill-to-N and refuse-at-N+1 test runs on `Static` and on `Heap` in one
+  build (`tests/storage_policy_tables.rs`, `query.rs`), and a mutation of the
+  refusal count fails the static case only. Left on the profile on purpose:
+  scratch buffers on the stack (`MAX_KEYEXPR_CHUNKS` views), the observer's own
+  staging, and the matching watches (a watch owns a `String`, so it needs the
+  allocator by its nature).
+  Image sizes against origin/main, built the same way on the kit: the fixed
+  client is +232 B in text (155,112 B to 155,344 B), the heap client is +132 B
+  (221,244 B to 221,376 B), data and bss are identical in both. The growth is
+  not new logic: in the fixed image `resolve_declared_keyexpr_view` is a 288 B
+  function of its own where the baseline inlined it. It is not explained further
+  and not removed.
+
 Measured on the kit with the same method for each image (wire turnaround,
 alternating order, 12 boots each): fixed client 0.203 ms, heap client before
 step 5 0.215 ms, heap client after step 5 0.210 ms, zenoh-pico 0.213 ms (the
