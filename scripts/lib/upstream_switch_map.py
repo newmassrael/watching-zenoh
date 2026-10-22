@@ -128,12 +128,11 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
      "the tcp/ link is part of every capi-core build"),
     ("Z_FEATURE_LINK_BLUETOOTH", "never", None,
      "no bt/ scheme in any wz build; open-debt item 912"),
-    ("Z_FEATURE_LINK_WS", "never", None,
-     "the wz runtime has the ws/ link and the pico ABI does not forward it; upstream allows "
-     "it only on emscripten; open-debt item 911"),
-    ("Z_FEATURE_LINK_SERIAL", "never", None,
-     "the wz runtime has the serial link and the pico ABI does not forward it; "
-     "open-debt item 911"),
+    ("Z_FEATURE_LINK_WS", "maps", "wz-capi-pico/transport-link-ws",
+     "the ws/ link, dial and accept; upstream allows it only on emscripten, wz on its host "
+     "runtime"),
+    ("Z_FEATURE_LINK_SERIAL", "maps", "wz-capi-pico/transport-link-serial",
+     "the serial/ link, dial and accept, one peer at a time on a listener"),
     ("Z_FEATURE_LINK_SERIAL_USB", "never", None,
      "the USB CDC serial link of one board family; absent from wz; open-debt item 912"),
     ("Z_FEATURE_LINK_TLS", "maps", "wz-capi-pico/transport-link-tls",
@@ -149,8 +148,9 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
     ("Z_FEATURE_UNICAST_TRANSPORT", "always", "crates/wz-capi-core/Cargo.toml",
      "the unicast transport"),
     ("Z_FEATURE_RAWETH_TRANSPORT", "never", None,
-     "the wz runtime has the raw-ethernet link and the pico ABI does not forward it; "
-     "open-debt item 911"),
+     "pico opens raw ethernet as a multicast-kind transport, which the C surface does not "
+     "establish; the wz runtime has its framing and socket but no reth/ locator or "
+     "session-open seam; open-debt item 911"),
     ("Z_FEATURE_TCP_NODELAY", "always", "crates/wz-runtime-tokio/src/lib.rs",
      "set on every TCP-backed link, as zenoh does; turning it off would be a policy"),
     ("Z_FEATURE_LOCAL_SUBSCRIBER", "never", None,

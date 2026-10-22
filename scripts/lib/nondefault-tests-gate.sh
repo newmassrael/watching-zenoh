@@ -266,7 +266,13 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # They are spelled out rather than `--all-features` for the reason in the
     # header: a named list is what makes the census a ratchet instead of a
     # tautology.
-    "wz-capi-pico|hook|transport-link-quic,transport-link-tls,transport-link-unixpipe|"
+    #
+    # `transport-link-serial` and `transport-link-ws` each add one test target
+    # (`serial_link_roundtrip`, `ws_link_roundtrip`): a sample across a loopback
+    # ws listener, and across two pty pairs this process pumps into each other.
+    # Neither leaves the host, which is what `hook` asks of a leg.
+    "wz-capi-pico|hook|transport-link-quic,transport-link-serial,transport-link-tls,\
+transport-link-unixpipe,transport-link-ws|"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the

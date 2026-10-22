@@ -141,6 +141,16 @@ transport-link-quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/tra
 # `tls/` scheme still parses but bind and dial return a feature-gated
 # `Unsupported`, so the keys are inert rather than misleading.
 transport-link-tls = ["wz-runtime-tokio/transport-link-tls", "wz-capi-core/transport-link-tls"]
+# The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
+# it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under
+# `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds; without it the scheme still
+# parses and the dial or bind fails the open with the runtime's typed `Unsupported`.
+transport-link-ws = ["wz-runtime-tokio/transport-link-ws", "wz-capi-core/transport-link-ws"]
+# The `serial/<device>#baudrate=<n>` link, dial and accept: zenoh-pico's
+# `Z_FEATURE_LINK_SERIAL` (default 0). The listener serves one peer at a time, as one line
+# carries one; the dial runs the serial-link handshake before the session's. Without it the
+# open fails the way a `ws/` one does without its feature.
+transport-link-serial = ["wz-runtime-tokio/transport-link-serial", "wz-capi-core/transport-link-serial"]
 
 # The tests of a capability exist only where the capability does: a build that leaves the
 # plane out has no symbol for them to call, so they are not compiled there (and not run).
@@ -236,6 +246,15 @@ required-features = ["peer"]
 
 [[test]]
 name = "unixpipe_listen_multiclient"
+required-features = ["peer"]
+
+# One sample across each forwarded link; each file is also `cfg`'d on its link feature.
+[[test]]
+name = "ws_link_roundtrip"
+required-features = ["peer"]
+
+[[test]]
+name = "serial_link_roundtrip"
 required-features = ["peer"]
 
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
