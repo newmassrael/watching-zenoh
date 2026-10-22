@@ -278130,6 +278130,46 @@
         "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
       ]
     },
+    "Round 3425": {
+      "decision_summary": "A consumer with no registered organization number cannot use a Custom Option, which needs one. The pcapng format reserves option codes with the top bit set for local use and asks for no registration, so the consumer records what it knows about a packet in one and must read it back. wz_dissect_pcap_local_options_of_link_type (ABI 49) returns, on the packets of a link type, every option with a code of 0x8000 or above, joined to the packets by number, as 32-byte records: packet, offset, len, index, code, big_endian. It is a door of its own and not a mode of the Custom Option door: the two sets cannot overlap (the four Custom codes are below 0x8000), and a local code has no organization number, no text flag and no copy flag. The format states a copy rule for the Custom Options and none for a local code, so a field for it would invent one. A local code is not unique among files by other applications, so the code alone names nothing; the value is the writer's and is carried unread.",
+      "changes_bullets": [
+        "wz-capture pcapng.rs: OPT_LOCAL_USE_MIN, is_local_use (the one place the top-bit rule is applied), LocalOption and LocalOptions over the shared OptionIter, with malformed counting a list that ended inside an option; OptionList::local. lib.rs: captured_local_options_of_link_type over captured_frames_of_link_type's walk, so packet numbers are the same ones.",
+        "wz-capi-dissect: wz_dissect_pcap_local_options_of_link_type and WzDissectLocalOption (32 bytes, layout pinned in Rust, in the header and in the C consumer); the Door chain; ABI 49 in the header define, the Rust constant, the abi_version test and capi_abi_pin.py (EXPECTED_VERSION and the new symbol); a row in analysis_surface_parity.py.",
+        "Tests: the rule pinned over every 16-bit code and disjoint from the four Custom codes; the reader against the plain walk on 60,000 lists in both byte orders, with lists that lie about their lengths; a written list read back in both orders with the options between taking their places and an odd-length value without its padding; a list cut inside an option counted, and a terminator ending the walk; two sections of different order in one file; a C consumer that assembles a little-endian and a big-endian pcapng byte by byte and reads a number in the value by the order the record gives."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture lib tests 1233 passed (default) and 1545 passed (dissect), wz-capi-dissect 225 passed; clippy -D warnings clean for both crates; Layer C1bo passed (ABI 49, 62 exported symbols, one new, the C consumer ran with its new checks); the analysis surface parity gate passed with the new row.",
+        "Two mutations, each reverted and the diff checked: treating 0x8000 itself as not local failed 2 tests; a malformed count that is always zero failed 3 tests.",
+        "The format's text was read for the rule: option types with the most significant bit one are reserved for local use, are not guaranteed unique among files by other applications and are not portable; the copy rule is stated only for the Custom Options.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3417, sections 266."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of the push that carries this round. The reds of the previous runs that belong to other work (the pico size budget, the reduced-features build of wz-capi-core, the runtime doc-link budget) are theirs to repay and not read here.",
+        "wz writes a pcapng only in tests and fixtures, so there is no rewriting path that would copy a local option to a new file; if one is added, the format gives no rule for a local code and that rule is to be chosen then, not assumed."
+      ],
+      "publishable_decision_summary": "A consumer with no registered organization number cannot use a Custom Option, which needs one. The pcapng format reserves option codes with the top bit set for local use and asks for no registration, so the consumer records what it knows about a packet in one and must read it back. wz_dissect_pcap_local_options_of_link_type (ABI 49) returns, on the packets of a link type, every option with a code of 0x8000 or above, joined to the packets by number, as 32-byte records: packet, offset, len, index, code, big_endian. It is a door of its own and not a mode of the Custom Option door: the two sets cannot overlap (the four Custom codes are below 0x8000), and a local code has no organization number, no text flag and no copy flag. The format states a copy rule for the Custom Options and none for a local code, so a field for it would invent one. A local code is not unique among files by other applications, so the code alone names nothing; the value is the writer's and is carried unread.",
+      "publishable_changes_bullets": [
+        "wz-capture pcapng.rs: OPT_LOCAL_USE_MIN, is_local_use (the one place the top-bit rule is applied), LocalOption and LocalOptions over the shared OptionIter, with malformed counting a list that ended inside an option; OptionList::local. lib.rs: captured_local_options_of_link_type over captured_frames_of_link_type's walk, so packet numbers are the same ones.",
+        "wz-capi-dissect: wz_dissect_pcap_local_options_of_link_type and WzDissectLocalOption (32 bytes, layout pinned in Rust, in the header and in the C consumer); the Door chain; ABI 49 in the header define, the Rust constant, the abi_version test and capi_abi_pin.py (EXPECTED_VERSION and the new symbol); a row in analysis_surface_parity.py.",
+        "Tests: the rule pinned over every 16-bit code and disjoint from the four Custom codes; the reader against the plain walk on 60,000 lists in both byte orders, with lists that lie about their lengths; a written list read back in both orders with the options between taking their places and an odd-length value without its padding; a list cut inside an option counted, and a terminator ending the walk; two sections of different order in one file; a C consumer that assembles a little-endian and a big-endian pcapng byte by byte and reads a number in the value by the order the record gives."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture lib tests 1233 passed (default) and 1545 passed (dissect), wz-capi-dissect 225 passed; clippy -D warnings clean for both crates; Layer C1bo passed (ABI 49, 62 exported symbols, one new, the C consumer ran with its new checks); the analysis surface parity gate passed with the new row.",
+        "Two mutations, each reverted and the diff checked: treating 0x8000 itself as not local failed 2 tests; a malformed count that is always zero failed 3 tests.",
+        "The format's text was read for the rule: option types with the most significant bit one are reserved for local use, are not guaranteed unique among files by other applications and are not portable; the copy rule is stated only for the Custom Options.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3417, sections 266."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of the push that carries this round. The reds of the previous runs that belong to other work (the pico size budget, the reduced-features build of wz-capi-core, the runtime doc-link budget) are theirs to repay and not read here.",
+        "wz writes a pcapng only in tests and fixtures, so there is no rewriting path that would copy a local option to a new file; if one is added, the format gives no rule for a local code and that rule is to be chosen then, not assumed."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
