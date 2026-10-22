@@ -17,7 +17,7 @@ pub fn log(msg: &str) {
     write_all(b"\n");
 }
 
-/// [`log`] of a formatted line, built in a buffer on the stack and cut at [`LINE`] bytes.
+/// [`log`] of a formatted line, built in a buffer on the stack and cut at 256 bytes.
 pub fn log_args(args: core::fmt::Arguments<'_>) {
     let mut line = LineBuf {
         bytes: [0; LINE],

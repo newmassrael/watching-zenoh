@@ -9,19 +9,21 @@
 //! profile used to reuse lwIP `NO_SYS` instead, which has no netif over
 //! Zephyr's device drivers: a wz image on real Zephyr hardware could only talk
 //! to its own loopback. [`ZephyrUdpSocket`] is the socket, and
-//! [`ZephyrUdpDriver`] is the session's link over it — its outbound half is
-//! the session core's [`BoxedLinkDriver`], its inbound half the cooperative
-//! drive loop's [`SessionDatagramLink`].
+//! `ZephyrUdpDriver` is the session's link over it — its outbound half is
+//! the session core's [`BoxedLinkDriver`](wz_session_core::link::BoxedLinkDriver), its inbound
+//! half the cooperative drive loop's
+//! [`SessionDatagramLink`](wz_runtime_coop::session_drive::SessionDatagramLink).
 //!
 //! The link itself is not written here. [`DatagramSocket`] is the seam a platform's socket
 //! implements, and the driver, its outbound storage and the slot profile's stack over a socket
 //! are `wz_runtime_coop::udp_link`, shared with every other stack that has BSD sockets under a
-//! cooperative loop. The names this module has always had ([`UdpDriver`], [`ZephyrUdpDriver`],
-//! [`FixedUdpDriver`], [`ZephyrStack`]) are that code at this socket.
+//! cooperative loop. The names this module has always had ([`UdpDriver`], `ZephyrUdpDriver`,
+//! [`FixedUdpDriver`], `ZephyrStack`) are that code at this socket.
 //!
 //! Zephyr's net stack runs its RX path on its own threads, so there is no
 //! input path for the drive loop to pump. What the loop's thread owes it is
-//! the CPU: [`SessionDatagramLink::service`] waits on the link's socket for up to
+//! the CPU: [`SessionDatagramLink::service`](wz_runtime_coop::session_drive::SessionDatagramLink::service)
+//! waits on the link's socket for up to
 //! one millisecond (`poll` with a timeout), so the net threads get to run between
 //! iterations and a datagram that arrives is taken the moment it is queued, not at
 //! the end of a sleep.
@@ -35,7 +37,7 @@ use core::mem::size_of;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_runtime_coop::group_transport::GroupTransport;
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub use wz_runtime_coop::udp_link::HeapTx;
 pub use wz_runtime_coop::udp_link::{DatagramSocket, TxStore, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
@@ -463,14 +465,14 @@ impl DatagramSocket for ZephyrUdpSocket {
 }
 
 /// The session's link over one [`ZephyrUdpSocket`], with its receive buffer in `B` and its outbound
-/// frames built in `T`: a `Vec<u8>` and [`HeapTx`] on the heap profile ([`ZephyrUdpDriver`]),
+/// frames built in `T`: a `Vec<u8>` and `HeapTx` on the heap profile (`ZephyrUdpDriver`),
 /// claims on the image's byte tables on the fixed one ([`FixedUdpDriver`]). The driver is
 /// `wz_runtime_coop::udp_link::UdpDriver`; its constructors and its behaviour are documented there.
 pub type UdpDriver<B, T> = wz_runtime_coop::udp_link::UdpDriver<ZephyrUdpSocket, B, T>;
 
 /// The heap profile's driver: its receive buffer is a `Vec<u8>` of the capacity the link was
 /// given, and its frames are encoded into a [`HeapTx`] of the capacity it was given, if any.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub type ZephyrUdpDriver = UdpDriver<Vec<u8>, HeapTx>;
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in

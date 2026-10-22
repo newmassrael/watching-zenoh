@@ -17,7 +17,7 @@
 //! `docs/storage-policy-and-link-layer.md` D2 rejects.
 //!
 //! The receive buffer and the buffer outbound frames are encoded into are the driver's type
-//! parameters: a `Vec<u8>` and [`HeapTx`] on the heap profile, claims on the image's byte tables on
+//! parameters: a `Vec<u8>` and `HeapTx` on the heap profile, claims on the image's byte tables on
 //! the fixed one ([`FixedUdpDriver`]), where the driver is a few words in the session's slot and a
 //! datagram costs no allocation either way.
 
@@ -25,9 +25,12 @@ use core::cell::{Cell, OnceCell, RefCell};
 use core::ffi::c_int;
 use core::fmt::{Debug, Write};
 
-#[cfg(feature = "alloc")]
+// The heap profile's forms (`Vec`, `HeapTx`) exist only in the heap profile: under `session-slot`
+// the crate does not link `alloc` at all, which `lib.rs` keeps so that a use creeping back into the
+// slot profile is a compile error and not a silent allocation.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec;
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec::Vec;
 
 #[cfg(feature = "session-slot")]
@@ -132,13 +135,13 @@ fn udp_locator(addr: [u8; 4], port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
 /// encode a frame into ([`BoxedLinkDriver::tx_slot_acquire`]), so the frame is written once, where
 /// the socket reads it, and no buffer is allocated for it.
 ///
-/// A driver whose storage is empty (a [`HeapTx`] of no bytes) lends nothing: the session builds
+/// A driver whose storage is empty (a `HeapTx` of no bytes) lends nothing: the session builds
 /// each frame in a buffer of its own (the heap) and hands the bytes to `send_blocking`. A driver
 /// with storage lends it, and its link then also states the frames it
 /// carries ([`BoxedLinkDriver::link_mtu`], `link_rx_capacity`), because its buffers are the bound.
 /// The storage is a buffer of a table the image declares ([`ByteBuf`], the fixed-memory profile's,
 /// whose sessions have no heap to build a frame on) or buffers the link allocated once
-/// ([`HeapTx`]).
+/// (`HeapTx`, the heap profile's).
 ///
 /// The storage is some number of slots of one length. A session that batches holds one slot open
 /// while it fills a batch and encodes the next message that does not join it into another, so a
@@ -182,13 +185,13 @@ impl TxStore for ByteBuf {
 /// when the link is made and never again, so the frames of the link are encoded into them and a
 /// frame costs no allocation. Of no bytes it lends nothing, which is the link as it was before the
 /// profile lent.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub struct HeapTx {
     cells: Vec<core::cell::UnsafeCell<u8>>,
     slot_len: usize,
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl HeapTx {
     /// `slots` slots of `slot_len` bytes each (none, with either 0).
     pub fn new(slots: usize, slot_len: usize) -> Self {
@@ -200,7 +203,7 @@ impl HeapTx {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl TxStore for HeapTx {
     fn slots(&self) -> usize {
         self.cells.len().checked_div(self.slot_len).unwrap_or(0)
@@ -221,7 +224,7 @@ impl TxStore for HeapTx {
 }
 
 /// The session's link over one socket `S`, with its receive buffer in `B` and its outbound frames
-/// built in `T`: a `Vec<u8>` and [`HeapTx`] on the heap profile, claims on the image's byte
+/// built in `T`: a `Vec<u8>` and `HeapTx` on the heap profile, claims on the image's byte
 /// tables on the fixed one ([`FixedUdpDriver`]).
 ///
 /// Outbound sends target the peer captured from the most recent inbound
@@ -268,7 +271,7 @@ pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
 /// frame.
 pub type FixedUdpDriver<S> = UdpDriver<S, ByteBuf, ByteBuf>;
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
     /// An acceptor's link: no peer until the first datagram names one.
     pub fn acceptor(socket: S) -> Self {
@@ -714,7 +717,7 @@ impl<S: DatagramSocket + 'static> SlotStack for UdpStack<S> {
     }
 }
 
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(test)]
 mod tests {
     extern crate std;
 
@@ -804,8 +807,25 @@ mod tests {
             .push_back((bytes.to_vec(), PEER.0, PEER.1));
     }
 
+    /// The driver the tests of the wait and of the link's behaviour are made over: the heap
+    /// profile's, with two outbound slots...
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn driver(socket: Loop) -> UdpDriver<Loop, Vec<u8>, HeapTx> {
         UdpDriver::acceptor_with_buffers(socket, 64, HeapTx::new(2, 32))
+    }
+
+    /// ...or the slot profile's, whose two buffers are claimed from tables the test declares
+    /// (more cells than tests run at once) and go back when the driver is dropped.
+    #[cfg(feature = "session-slot")]
+    fn driver(socket: Loop) -> UdpDriver<Loop, ByteBuf, ByteBuf> {
+        use wz_session_core::byte_cells::ByteCells;
+        static RX: ByteCells<64, 64> = ByteCells::new();
+        static TX: ByteCells<32, 64> = ByteCells::new();
+        UdpDriver::acceptor_in(
+            socket,
+            RX.claim().expect("a receive buffer"),
+            TX.claim().expect("a frame buffer"),
+        )
     }
 
     #[test]
@@ -840,6 +860,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn an_initiator_sends_to_its_peer_before_it_has_heard_from_it() {
         let link = UdpDriver::initiator_with_capacity(Loop::default(), PEER, 64);
@@ -850,6 +871,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn the_session_encodes_into_a_lent_slot_and_the_slot_returns_at_the_send() {
         let link = UdpDriver::initiator_with_buffers(Loop::default(), PEER, 64, HeapTx::new(2, 32));
@@ -887,6 +909,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_send_past_the_slot_is_dropped_oversize_and_gives_the_slot_back() {
         let link = UdpDriver::initiator_with_buffers(Loop::default(), PEER, 64, HeapTx::new(1, 8));
@@ -899,6 +922,7 @@ mod tests {
         assert!(link.tx_slot_acquire(4, Priority::Data).is_some());
     }
 
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_driver_with_no_storage_lends_nothing_and_states_the_default_bounds() {
         let link = UdpDriver::acceptor_with_capacity(Loop::default(), 64);
@@ -1112,6 +1136,47 @@ mod tests {
                     .is_ok(),
                 "the buffers go back with the driver"
             );
+        }
+
+        static LEND_RX: ByteCells<64, 1> = ByteCells::new();
+        static LEND_TX: ByteCells<32, 1> = ByteCells::new();
+
+        #[test]
+        fn the_fixed_driver_lends_its_one_slot_and_takes_it_back_at_the_send() {
+            let mut stack = UdpStack::<Loop>::new([10, 0, 0, 2], &LEND_RX, &LEND_TX);
+            let link = stack
+                .bind(UdpPeer {
+                    addr: PEER.0,
+                    port: PEER.1,
+                })
+                .expect("a dial");
+            let grant = link
+                .tx_slot_acquire(10, Priority::Data)
+                .expect("the one slot");
+            assert!(
+                link.tx_slot_acquire(10, Priority::Data).is_none(),
+                "a byte buffer is one slot, and it is out"
+            );
+            let (base, capacity) = link.tx_slot_storage(grant.slot);
+            assert_eq!(capacity, 32);
+            // SAFETY: the slot was granted to this test alone and is 32 bytes long.
+            unsafe { core::slice::from_raw_parts_mut(base, 3) }.copy_from_slice(b"abc");
+            assert_eq!(
+                link.tx_slot_send(grant.slot, 0, 3, Reliability::Reliable, Priority::Data),
+                LinkSendOutcome::Sent
+            );
+            assert_eq!(link.socket.sent.borrow()[0].2, b"abc");
+
+            let again = link
+                .tx_slot_acquire(10, Priority::Data)
+                .expect("the slot is back once it is sent");
+            assert_eq!(
+                link.tx_slot_send(again.slot, 30, 5, Reliability::Reliable, Priority::Data),
+                LinkSendOutcome::Dropped(LinkDropCause::Oversize),
+                "a frame past the slot is refused, not truncated"
+            );
+            assert_eq!(link.socket.sent.borrow().len(), 1, "and nothing was sent");
+            assert!(link.tx_slot_acquire(10, Priority::Data).is_some());
         }
     }
 }

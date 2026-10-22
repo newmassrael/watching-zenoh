@@ -4,7 +4,7 @@
 //! The host's sockets as a stack of the slot profile's session host.
 //!
 //! [`PosixStack`] is `wz_runtime_coop::udp_link`'s `UdpStack` at
-//! [`PosixUdpSocket`](crate::net::PosixUdpSocket), and [`PosixUdpDriver`] is the driver it opens
+//! [`PosixUdpSocket`], and [`PosixUdpDriver`] is the driver it opens
 //! in the session's slot. The driver claims its receive buffer and the buffer its frames are
 //! encoded into from two tables the image declares, so a dial moves a few words and no bytes.
 //!
