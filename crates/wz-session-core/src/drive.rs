@@ -2707,6 +2707,17 @@ pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
     Engine::new(PolicyConstructor::<BINDING_PERFORMS>.build(binding))
 }
 
+/// [`new_session_engine`] built inside `slot`: the same engine, written where it will live, so a
+/// caller that keeps it in a cell of a table never holds all of it (1 KB and more on the fixed
+/// client) on its own stack. The slot may be uninitialised; whatever it held is not dropped.
+pub fn new_session_engine_in<'s, R: SessionRuntime, T: TimeSource>(
+    slot: &'s mut core::mem::MaybeUninit<SessionEngine<R, T>>,
+    actions: &R::ActionsHandle<T>,
+) -> &'s mut SessionEngine<R, T> {
+    let binding = SessionActionsBinding::new(actions.clone());
+    Engine::new_in_place(slot, PolicyConstructor::<BINDING_PERFORMS>.build(binding))
+}
+
 /// [`SESSION_HOST_REALIZATION`] as the constructor choice it makes.
 const BINDING_PERFORMS: bool = SESSION_HOST_REALIZATION.is_performing();
 

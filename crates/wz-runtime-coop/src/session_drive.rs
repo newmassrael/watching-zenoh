@@ -52,7 +52,7 @@ use wz_session_core::drive::dispatch_pending;
 use wz_session_core::drive::SessionEngine;
 #[cfg(feature = "transport-keepalive")]
 use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
-use wz_session_core::drive::{check_lease_deadline, lease_wake_deadline, new_session_engine};
+use wz_session_core::drive::{check_lease_deadline, lease_wake_deadline, new_session_engine_in};
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::drive::{CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
@@ -272,7 +272,7 @@ pub struct SessionDriveConfig {
 
 /// Drive one logical session over `link` to a terminal FSM state (or the
 /// `config.max_iters` cap). Builds the FSM engine from `actions` via the
-/// shared [`new_session_engine`], activates `config.role`, then polls until
+/// shared [`new_session_engine_in`], activates `config.role`, then polls until
 /// `engine.is_in_final_state()`.
 ///
 /// Parameters:
@@ -587,14 +587,18 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         // exactly once below through its own address, and the engine is used only after its
         // field is written.
         unsafe {
-            core::ptr::addr_of_mut!((*at).engine).write(new_session_engine(&actions));
-            // `new_session_engine` returns an un-initialized engine (the AP
+            // The engine is made in its field (`MaybeUninit<T>` has the layout of `T`).
+            let engine = new_session_engine_in(
+                &mut *core::ptr::addr_of_mut!((*at).engine)
+                    .cast::<MaybeUninit<SessionEngine<CoopRuntime<C>, CoopTime<C>>>>(),
+                &actions,
+            );
+            // `new_session_engine_in` yields an un-initialized engine (the AP
             // convention — the caller runs the SCXML initial transition into the
             // `Init` state). Without this the `role.activation()` below lands on
             // an engine that never entered `Init`, so `inbound.start` /
             // `outbound.start` does not transition into `AwaitingInitSyn` /
             // `LinkOpening` and the whole handshake stalls.
-            let engine = &mut *core::ptr::addr_of_mut!((*at).engine);
             engine.initialize();
             // Under `session-slot` the activation waits for the first step (see
             // `pending_role`); every other profile activates here, as it always did.

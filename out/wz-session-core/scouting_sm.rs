@@ -64,6 +64,11 @@
 // Correctness-relevant clippy categories (`clippy::correctness`,
 // `clippy::suspicious`, `clippy::perf`) remain at warn so any genuine bug
 // the generator emits still surfaces.
+// `x ?? d` (docs/adr/0055) is a `match` whose `None` arm holds `d`, so `d` is
+// evaluated only when `x` is absent and a checked operation's `?` inside it
+// fails the statement. `unwrap_or_else(|| d)` would move that `?` into a
+// closure; this one suspicious-category lint reads the `match` of a constant
+// default as a hand-written `unwrap_or_default`.
 
 // SCE-MAP: scouting.scxml:103 :: _machine
 
