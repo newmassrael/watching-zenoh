@@ -432,6 +432,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // of those packets, as 32-byte records into a buffer the caller sized, each
     // joined to its packet by number and naming where its data is in the
     // caller's own container.
+    // 48, for the same door's record: it grows from 32 to 40 bytes to carry the
+    // byte order of the section each option was read in (`big_endian`), so a
+    // consumer reading numbers in the Custom Data does not have to assume one.
+    // No symbol moves; the memory rule of the record does.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -449,7 +453,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 47;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 48;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4011,8 +4015,9 @@ pub unsafe extern "C" fn wz_dissect_pcap_packets_of_link_type(
 /// [`wz_dissect_pcap_custom_options_of_link_type`] hands it out: which packet it
 /// is on, who defined it, and where its data is in the CALLER's container.
 ///
-/// 32 bytes, 8-aligned: two `uint64_t`, three `uint32_t`, a `uint16_t` and two
-/// bytes. There is no padding and no reserved byte to be told apart from data.
+/// 40 bytes, 8-aligned (ABI 48; ABI 47 had no `big_endian` and was 32): two
+/// `uint64_t`, three `uint32_t`, a `uint16_t`, three bytes and seven reserved
+/// bytes that are zero. There is no compiler padding to be told apart from data.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WzDissectCustomOption {
@@ -4044,6 +4049,15 @@ pub struct WzDissectCustomOption {
     /// `1` when the Custom Data is a UTF-8 string (`2988`, `19372`), `0` when it
     /// is binary octets (`2989`, `19373`).
     pub text: u8,
+    /// (ABI 48) `1` when the section the packet is in is written big-endian, `0`
+    /// when little-endian: the order the file's byte-order magic states, and the
+    /// one [`Self::organization`] was read in. The format gives the Custom Data no
+    /// order of its own, so a number the organization wrote in it is in this
+    /// order unless the organization's own definition says otherwise. Two sections
+    /// of one container may differ, so the value is per record and not per call.
+    pub big_endian: u8,
+    /// Zero.
+    pub reserved: [u8; 7],
 }
 
 /// (ABI 47) — THE CUSTOM OPTIONS OF THE PACKETS OF ONE LINK TYPE IN A CAPTURE
@@ -4168,6 +4182,8 @@ pub unsafe extern "C" fn wz_dissect_pcap_custom_options_of_link_type(
             code: option.code,
             copyable: u8::from(option.kind.copyable),
             text: u8::from(option.kind.text),
+            big_endian: u8::from(option.byte_order == wz_capture::pcapng::ByteOrder::Big),
+            reserved: [0; 7],
         };
     }
     WZ_DISSECT_OK
@@ -8924,7 +8940,9 @@ mod tests {
         // 47, for `wz_dissect_pcap_custom_options_of_link_type`: one symbol,
         // 32-byte records into a buffer the caller sized, joined to the packets
         // of the 46 door by number; nothing copied or retained.
-        assert_eq!(wz_dissect_abi_version(), 47);
+        // 48, for the 47 door's record: 40 bytes, with the byte order of the
+        // section each option was read in; no symbol moves.
+        assert_eq!(wz_dissect_abi_version(), 48);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -14531,8 +14549,9 @@ mod tests {
     }
 
     /// A writer's own facts in Custom Options of its packets come back joined to
-    /// the packets by number, with who defined each, what the format says of its
-    /// code, and its data found in the caller's own container. Both byte orders,
+    /// the packets by number, with who defined each, the byte order of its
+    /// section, what the format says of its code, and its data found in the
+    /// caller's own container. Both byte orders,
     /// the four codes, a repeat and a packet with none. A short buffer is not
     /// written, a cut container says so, and a container that does not read is
     /// refused with zeros.
@@ -14610,6 +14629,16 @@ mod tests {
                 ],
                 "{order:?}"
             );
+            // Every record names the byte order of the section it was read in,
+            // the one the writer was asked for, and not this machine's.
+            for row in &rows {
+                assert_eq!(
+                    row.big_endian,
+                    u8::from(order == ByteOrder::Big),
+                    "{order:?}"
+                );
+                assert_eq!(row.reserved, [0; 7]);
+            }
             // The data is in the caller's container, at the offset the record
             // names.
             for row in &rows {
@@ -14770,11 +14799,11 @@ mod tests {
         assert_eq!((rc, needed, malformed, partial), (WZ_DISSECT_OK, 0, 0, 0));
     }
 
-    /// The record's layout is the header's: 32 bytes, no padding, the two
-    /// `uint64_t` first.
+    /// The record's layout is the header's: 40 bytes, the two `uint64_t` first
+    /// and the byte order after the flags, with seven zero bytes to the end.
     #[test]
-    fn the_custom_option_record_is_32_bytes_in_order() {
-        assert_eq!(core::mem::size_of::<WzDissectCustomOption>(), 32);
+    fn the_custom_option_record_is_40_bytes_in_order() {
+        assert_eq!(core::mem::size_of::<WzDissectCustomOption>(), 40);
         assert_eq!(core::mem::align_of::<WzDissectCustomOption>(), 8);
         assert_eq!(core::mem::offset_of!(WzDissectCustomOption, packet), 0);
         assert_eq!(core::mem::offset_of!(WzDissectCustomOption, offset), 8);
@@ -14787,6 +14816,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(WzDissectCustomOption, code), 28);
         assert_eq!(core::mem::offset_of!(WzDissectCustomOption, copyable), 30);
         assert_eq!(core::mem::offset_of!(WzDissectCustomOption, text), 31);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, big_endian), 32);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, reserved), 33);
     }
 
     /// The `health` key of a live handle's document is the summary's `health`

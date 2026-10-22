@@ -1571,7 +1571,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 47
+#define WZ_DISSECT_ABI_REVISION 48
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5417,8 +5417,9 @@ int wz_dissect_pcap_packets_of_link_type(const unsigned char *bytes, size_t len,
                                          size_t *needed, int *partial);
 
 /* (ABI 47) -- one Custom Option of one packet, as
- * wz_dissect_pcap_custom_options_of_link_type hands it out. 32 bytes, 8-aligned,
- * no padding. */
+ * wz_dissect_pcap_custom_options_of_link_type hands it out. 40 bytes, 8-aligned
+ * (ABI 48; at ABI 47 the record had no big_endian and was 32 bytes), no compiler
+ * padding. */
 typedef struct wz_dissect_custom_option {
     uint64_t packet;       /* the packet's number: the same number
                             * wz_dissect_raw_packet.packet carries for it */
@@ -5433,6 +5434,15 @@ typedef struct wz_dissect_custom_option {
     uint8_t copyable;      /* 1 for 2988 and 2989, 0 for 19372 and 19373 */
     uint8_t text;          /* 1 for 2988 and 19372 (UTF-8 string), 0 for 2989
                             * and 19373 (binary octets) */
+    uint8_t big_endian;    /* (ABI 48) 1 when the section the packet is in is
+                            * big-endian, 0 when little-endian: the order its
+                            * byte-order magic states and `organization` was
+                            * read in. The format gives the Custom Data no order
+                            * of its own, so a number the organization wrote in
+                            * it is in this order unless the organization's own
+                            * definition says otherwise. Two sections of one
+                            * container may differ, so it is per record. */
+    uint8_t reserved[7];   /* zero */
 } wz_dissect_custom_option;
 
 /* (ABI 47) -- THE CUSTOM OPTIONS OF THE PACKETS OF ONE LINK TYPE IN A CAPTURE

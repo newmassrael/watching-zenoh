@@ -8855,6 +8855,8 @@ mod captured_frame_tests {
     /// Two sections in one file may differ in byte order, and the organization
     /// number is read in the byte order of the section its packet is in: the same
     /// number comes out of both, and neither is the other's byte-swapped value.
+    /// Each option also says which order that was, so a consumer reading the
+    /// numbers in the Custom Data does not have to assume one.
     #[test]
     fn the_organization_is_read_in_the_byte_order_of_its_own_section() {
         use crate::pcapng::{
@@ -8877,12 +8879,18 @@ mod captured_frame_tests {
         let mut file = section(ByteOrder::Little);
         file.extend_from_slice(&section(ByteOrder::Big));
         let found = captured_custom_options_of_link_type(&file, 147).expect("the file reads");
-        let seen: Vec<(usize, u32)> = found
+        let seen: Vec<(usize, u32, ByteOrder)> = found
             .options
             .iter()
-            .map(|o| (o.packet, o.option.organization))
+            .map(|o| (o.packet, o.option.organization, o.option.byte_order))
             .collect();
-        assert_eq!(seen, alloc::vec![(0, 0x0102_0304), (1, 0x0102_0304)]);
+        assert_eq!(
+            seen,
+            alloc::vec![
+                (0, 0x0102_0304, ByteOrder::Little),
+                (1, 0x0102_0304, ByteOrder::Big)
+            ]
+        );
     }
 
     /// Options that cannot be read are counted across the packets and do not hide

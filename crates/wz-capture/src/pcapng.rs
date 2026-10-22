@@ -656,6 +656,17 @@ impl<'a> OptionList<'a> {
         Self { bytes, swapped }
     }
 
+    /// The byte order of the section these options were written in: the order
+    /// every number in the list, and every number an organization put in its
+    /// data, is in unless the organization says otherwise.
+    pub const fn byte_order(&self) -> ByteOrder {
+        if self.swapped {
+            ByteOrder::Big
+        } else {
+            ByteOrder::Little
+        }
+    }
+
     /// Every option, in order. See [`OptionIter`] for where the walk stops.
     pub fn iter(&self) -> OptionIter<'a> {
         OptionIter {
@@ -807,6 +818,11 @@ pub struct CustomOption<'a> {
     /// The Private Enterprise Number of the organization that defined the
     /// option, as the section's byte order reads it.
     pub organization: u32,
+    /// The byte order of the section the option's block is in. The format gives
+    /// the Custom Data no order of its own, so a number the organization wrote
+    /// in it is in this order unless the organization's own definition says
+    /// otherwise; a reader that does not know the order has to guess.
+    pub byte_order: ByteOrder,
     /// The Custom Data: the option's value after the number, without the
     /// padding.
     pub data: &'a [u8],
@@ -839,7 +855,7 @@ impl<'a> Iterator for CustomOptions<'a> {
     type Item = CustomOption<'a>;
 
     fn next(&mut self) -> Option<CustomOption<'a>> {
-        let swapped = self.inner.list.swapped;
+        let byte_order = self.inner.list.byte_order();
         loop {
             let option = self.inner.next()?;
             let Some(kind) = custom_kind(option.code) else {
@@ -853,11 +869,11 @@ impl<'a> Iterator for CustomOptions<'a> {
                 index: option.index,
                 code: option.code,
                 kind,
-                organization: if swapped {
-                    u32::from_be_bytes(*number)
-                } else {
-                    u32::from_le_bytes(*number)
+                organization: match byte_order {
+                    ByteOrder::Big => u32::from_be_bytes(*number),
+                    ByteOrder::Little => u32::from_le_bytes(*number),
                 },
+                byte_order,
                 data,
             });
         }
@@ -3469,6 +3485,15 @@ mod custom_option_tests {
                     u32::from_le_bytes(number.try_into().unwrap())
                 };
                 assert_eq!(option.organization, expected);
+                assert_eq!(
+                    option.byte_order,
+                    if swapped {
+                        ByteOrder::Big
+                    } else {
+                        ByteOrder::Little
+                    },
+                    "the option says the order of the list it was read from"
+                );
             }
             let _ = custom.malformed();
             for (expected_index, option) in OptionList::new(&list, swapped).iter().enumerate() {
@@ -3562,18 +3587,24 @@ mod custom_option_tests {
             PcapngCursor::new()
                 .advance_with(&file, |y| {
                     if let PcapngYieldRef::Packet(p) = y {
-                        read.extend(
-                            p.options
-                                .custom()
-                                .map(|o| (o.index, o.code, o.organization, o.data.to_vec())),
-                        );
+                        read.extend(p.options.custom().map(|o| {
+                            (
+                                o.index,
+                                o.code,
+                                o.organization,
+                                o.byte_order,
+                                o.data.to_vec(),
+                            )
+                        }));
                     }
                     ControlFlow::Continue(())
                 })
                 .expect("the fixture reads");
+            // The order the option reports is the one the file's magic states,
+            // asserted above, and not the order of the machine that read it.
             assert_eq!(
                 read,
-                vec![(0, 19373, 0x0102_0304, data.to_vec())],
+                vec![(0, 19373, 0x0102_0304, order, data.to_vec())],
                 "{order:?}"
             );
         }
@@ -3761,6 +3792,7 @@ mod custom_option_tests {
                     flags = Some((p.link_type, p.data.len(), p.flags));
                     let mut custom = p.options.custom();
                     for o in custom.by_ref() {
+                        assert_eq!(o.byte_order, ByteOrder::Little, "editcap writes little");
                         seen.push((o.index, o.code, o.organization, o.data.to_vec()));
                     }
                     assert_eq!(custom.malformed(), 0);

@@ -792,7 +792,8 @@ static const unsigned char custom_option_be[] = {
 };
 
 static int check_custom_options_container(const unsigned char *file,
-                                         size_t file_len, const char *order) {
+                                         size_t file_len, const char *order,
+                                         unsigned char want_big_endian) {
     wz_dissect_custom_option rows[2];
     size_t needed = 99;
     size_t malformed = 99;
@@ -819,6 +820,12 @@ static int check_custom_options_container(const unsigned char *file,
     CHECK(rows[0].code == 2989 && rows[0].copyable == 1 && rows[0].text == 0,
           "%s: code %u copyable %u text %u", order, (unsigned)rows[0].code,
           (unsigned)rows[0].copyable, (unsigned)rows[0].text);
+    /* The record says the section's byte order, so a number in the data is read
+     * in it and not in a guess; the reserved bytes are zero. */
+    CHECK(rows[0].big_endian == want_big_endian, "%s: big_endian %u, expected %u",
+          order, (unsigned)rows[0].big_endian, (unsigned)want_big_endian);
+    CHECK(rows[0].reserved[0] == 0 && rows[0].reserved[6] == 0,
+          "%s: the reserved bytes are not zero", order);
     CHECK(rows[0].len == 12 && rows[0].offset + rows[0].len <= file_len,
           "%s: len %u offset %llu", order, (unsigned)rows[0].len,
           (unsigned long long)rows[0].offset);
@@ -857,7 +864,7 @@ static int check_custom_options_door(void) {
     int partial = 99;
     int rc;
 
-    CHECK(sizeof(wz_dissect_custom_option) == 32, "record size %zu",
+    CHECK(sizeof(wz_dissect_custom_option) == 40, "record size %zu",
           sizeof(wz_dissect_custom_option));
     CHECK(offsetof(wz_dissect_custom_option, offset) == 8, "offset offset");
     CHECK(offsetof(wz_dissect_custom_option, len) == 16, "len offset");
@@ -867,13 +874,16 @@ static int check_custom_options_door(void) {
     CHECK(offsetof(wz_dissect_custom_option, code) == 28, "code offset");
     CHECK(offsetof(wz_dissect_custom_option, copyable) == 30, "copyable offset");
     CHECK(offsetof(wz_dissect_custom_option, text) == 31, "text offset");
+    CHECK(offsetof(wz_dissect_custom_option, big_endian) == 32,
+          "big_endian offset");
+    CHECK(offsetof(wz_dissect_custom_option, reserved) == 33, "reserved offset");
 
     if (check_custom_options_container(custom_option_le, sizeof custom_option_le,
-                                       "little-endian") != 0) {
+                                       "little-endian", 0) != 0) {
         return 1;
     }
     if (check_custom_options_container(custom_option_be, sizeof custom_option_be,
-                                       "big-endian") != 0) {
+                                       "big-endian", 1) != 0) {
         return 1;
     }
 
