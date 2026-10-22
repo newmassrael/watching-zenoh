@@ -50,8 +50,9 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
-    compile_zenoh_c_example, compile_zenoh_c_example_static, wait_for_substring, wz_ap_demo_binary,
-    wz_capi_c_cdylib, wz_capi_c_staticlib, zenoh_c_oracle, ChildGuard, PortReservation,
+    assert_demo_binary_newer_than_sources, compile_zenoh_c_example, compile_zenoh_c_example_static,
+    wait_for_substring, wz_ap_demo_binary, wz_capi_c_cdylib, wz_capi_c_staticlib, zenoh_c_oracle,
+    ChildGuard, PortReservation,
 };
 
 /// The oracle, or `None` with a LOUD note naming what to do about it.
@@ -84,9 +85,13 @@ fn run_arm(program: &Path, libdir: &Path, keyexpr: &str, payload: &str, arm: &st
 
     let port = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port.port());
+    let demo = wz_ap_demo_binary();
+    // A stale demo receives through code that predates the round, which is the one way a leg
+    // could pass while measuring yesterday's build. Both legs of this file reach the demo here.
+    assert_demo_binary_newer_than_sources(&demo);
     let mut observer = ChildGuard::wrap(
         format!("wz-ap-demo --listen ({arm})"),
-        Command::new(wz_ap_demo_binary())
+        Command::new(&demo)
             .args(["--listen", &addr, "--key", "demo/example/**"])
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())

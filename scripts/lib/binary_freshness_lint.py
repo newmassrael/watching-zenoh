@@ -217,7 +217,12 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # call went into `spawn_plugin_host`, where every leg of that file resolves the
 # demo, so the new leg and the file's two older ones left the carried bucket
 # at once. 221 measured, 218 after.
-CARRIED_SUBJECT = 218
+# 219 -> 217 (R3413), the same placement. Item 920 added the statically linked
+# leg to `zenoh_c_examples_on_wz_capi_c_dropin.rs` and this number went 218 ->
+# 219; the call went into `run_arm`, where both legs of that file resolve the
+# demo, so the new leg and the older one left the carried bucket at once. 219
+# measured, 217 after.
+CARRIED_SUBJECT = 217
 # 24 -> 25 (item 900): `wz_client_and_multicast_peer_sessions_in_one_process_zenohd.rs`
 # reaches `wz-ap-demo` only through `spawn_zenohd*`, whose readiness probe execs
 # it; the sessions under test are in the test process, so the demo is the probe

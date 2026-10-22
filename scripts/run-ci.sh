@@ -12067,7 +12067,7 @@ layer_c1bf_cargo_clippy_all_features() {
     # `scouting` field that exists with `scout`, and `SessionResources` a `gossip` field that
     # exists with `peer`, so a struct literal of either names the fields of the build its author
     # made. The two ABI crates that build one say each field behind the feature that has it.
-    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core)
+    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
@@ -21774,7 +21774,8 @@ layer_c1cc_api_compat_c() {
     for leg in \
         the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation \
         upstream_option_defaults_on_wz_capi_c_match_real_libzenohc \
-        upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it; do
+        upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it \
+        upstream_z_put_linked_statically_against_wz_capi_c_reaches_a_real_wz_subscriber; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_examples_on_wz_capi_c_dropin -- --ignored --quiet --test-threads=1 \
